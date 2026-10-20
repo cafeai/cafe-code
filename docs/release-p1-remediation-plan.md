@@ -1,6 +1,7 @@
 # Cafe Code P1 Release Remediation Plan
 
 Date: 2026-10-14
+Last updated: 2026-10-20 14:17:11 JST (UTC+0900)
 
 Resolve the seven P1 findings from the October release review before publishing
 a stable release. Each change below has an implementation boundary, regression
@@ -358,7 +359,7 @@ the required repository checks on the pinned standalone Node and Corepack Yarn:
 corepack yarn install --immutable
 corepack yarn fmt
 corepack yarn lint
-corepack yarn typecheck --concurrency=1
+corepack yarn typecheck
 corepack yarn test
 ```
 

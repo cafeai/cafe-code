@@ -475,7 +475,15 @@ describe("Mermaid block", () => {
       await page.getByRole("button", { name: "Zoom in", exact: true }).click();
       expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("125%");
       await page.getByRole("button", { name: "Zoom out", exact: true }).click();
-      viewport.focus();
+      // Use ordinary native pointer activation as well as DOM focus, while
+      // retaining the single key action and the original scrolling assertion.
+      await page.getByRole("region", { name: "Expanded diagram; scroll or drag to pan" }).click();
+      if (retired) throw new Error("Mermaid keyboard fixture already retired");
+      await vi.waitFor(() => {
+        expect(document.activeElement).toBe(viewport);
+        expect(viewport.hasAttribute("data-dragging")).toBe(false);
+      });
+      if (retired) throw new Error("Mermaid keyboard fixture already retired");
       observingArrow = true;
       baseline = readKeyboardViewport("baseline");
       await userEvent.keyboard("{ArrowRight}");
@@ -532,13 +540,43 @@ describe("Mermaid block", () => {
     }
   });
 
-  it.each(REAL_CHARTS.map((chart) => ({ ...chart, theme: "dark" as const, scale: 100 })))(
+  it.for(REAL_CHARTS.map((chart) => ({ ...chart, theme: "dark" as const, scale: 100 })))(
     "retains real $name source, copy and expanded controls",
-    async ({ source, label, theme, scale }) => {
+    async ({ source, label, theme, scale }, { onTestFinished }) => {
+      let retired = false;
+      let ownedHost: HTMLDivElement | undefined;
+      let screen: Awaited<ReturnType<typeof render>> | undefined;
+      let pendingRender: ReturnType<typeof render> | undefined;
+      let cleanupPromise: Promise<void> | undefined;
+      let retireKeyboardObservation: (() => void) | undefined;
+      const requireActive = () => {
+        if (retired) throw new Error("Mermaid chart fixture already retired");
+      };
+      const cleanup = () => {
+        if (cleanupPromise) return cleanupPromise;
+        retired = true;
+        retireKeyboardObservation?.();
+        cleanupPromise = (async () => {
+          try {
+            // Join only this invocation's admitted render before unmounting.
+            // A hard deadline need not unwind the suspended async test body.
+            const ownedScreen = screen ?? (await pendingRender);
+            await ownedScreen?.unmount();
+          } finally {
+            ownedHost?.remove();
+          }
+        })();
+        return cleanupPromise;
+      };
+      // Capture this test's context and cleanup before the first yield. Late
+      // continuations must not register against a later test's global context.
+      onTestFinished(cleanup);
       await page.viewport(390, 700);
+      requireActive();
       applyInterfaceScalePercent(scale);
       document.documentElement.classList.toggle("dark", theme === "dark");
       const host = document.createElement("div");
+      ownedHost = host;
       host.className = "chat-markdown";
       host.style.width = "min(100%, 19rem)";
       document.body.append(host);
@@ -547,22 +585,30 @@ describe("Mermaid block", () => {
       // exercises parent admission and sanitized image publication; Mermaid
       // itself is never evaluated in this test document's application realm.
       mocks.render.mockImplementation(createMermaidRenderService(renderInMermaidSandbox));
-      const screen = await render(<MermaidBlock code={source} complete theme={theme} />, {
-        container: host,
-      });
       try {
+        requireActive();
+        pendingRender = render(<MermaidBlock code={source} complete theme={theme} />, {
+          container: host,
+        });
+        screen = await pendingRender;
+        requireActive();
         // Keep the established 30-second browser test deadline. As in the real
         // preview harness, bound cold bundle/sandbox readiness separately from
         // the remaining source, geometry and native-input checks.
         await vi.waitFor(() => expect(host.querySelector(".mermaid-preview img")).not.toBeNull(), {
           timeout: 20_000,
         });
+        requireActive();
         const image = host.querySelector<HTMLImageElement>(".mermaid-preview img")!;
         await image.decode();
+        requireActive();
         expect(image.naturalWidth).toBeGreaterThan(0);
         expect(image.naturalHeight).toBeGreaterThan(0);
         const imageUrl = image.src;
-        const svg = await (await fetch(imageUrl)).text();
+        const response = await fetch(imageUrl);
+        requireActive();
+        const svg = await response.text();
+        requireActive();
         const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
         expect(parsed.querySelector("foreignObject,script,image,a,use")).toBeNull();
         for (const style of parsed.querySelectorAll("style")) style.remove();
@@ -582,19 +628,26 @@ describe("Mermaid block", () => {
         await expect
           .element(page.getByRole("button", { name: "Diagram", exact: true }))
           .toHaveAttribute("aria-pressed", "true");
+        requireActive();
         await page.getByRole("button", { name: "Source", exact: true }).click();
+        requireActive();
         expect(host.querySelector(".mermaid-source code")?.textContent).toBe(source);
         expect(host.scrollWidth).toBeLessThanOrEqual(host.clientWidth + 1);
         await page.getByRole("button", { name: "Copy Mermaid source" }).click();
+        requireActive();
         expect(mocks.copy).toHaveBeenCalledExactlyOnceWith(source);
         await expect.element(page.getByText("Copied", { exact: true })).toBeVisible();
+        requireActive();
         await page.getByRole("button", { name: "Diagram", exact: true }).click();
+        requireActive();
         expect(host.querySelector<HTMLImageElement>(".mermaid-preview img")!.src).toBe(imageUrl);
 
         await page.getByRole("button", { name: "Expand diagram" }).click();
+        requireActive();
         await expect
           .element(page.getByRole("dialog", { name: "Expanded Mermaid diagram" }))
           .toBeVisible();
+        requireActive();
         const popup = document.querySelector<HTMLElement>(".mermaid-expanded-dialog")!;
         const viewport = document.querySelector<HTMLElement>(".mermaid-expanded-viewport")!;
         await vi.waitFor(() => {
@@ -602,23 +655,120 @@ describe("Mermaid block", () => {
           expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 1);
           expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.clientHeight + 1);
         });
+        requireActive();
         expect(popup.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth + 1);
         expect(popup.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight + 1);
         await page.getByRole("button", { name: "Reset", exact: true }).click();
+        requireActive();
         expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("100%");
         expect(viewport.scrollWidth).toBeGreaterThan(viewport.clientWidth);
         await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+        requireActive();
         expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("125%");
         await page.getByRole("button", { name: "Zoom out", exact: true }).click();
+        requireActive();
         expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("100%");
         // Real chart families are smaller than the large rectangle used
         // by the existing control fixture. Two zoom steps ensure scroll room
         // on both axes before exercising keyboard input and pointer capture.
         await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+        requireActive();
         await page.getByRole("button", { name: "Zoom in", exact: true }).click();
-        viewport.focus();
-        await userEvent.keyboard("{ArrowRight}");
-        await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(0));
+        requireActive();
+        // The zoom controls and dialog can still be committing content/focus
+        // after a provider-owned click returns. Observe the actual scroll
+        // target before the original single key; do not replay input or repair
+        // native scroll if the positive fails. This is a prerequisite check,
+        // not a claim about an earlier failure's unobserved cause.
+        let keyboardRetired = false;
+        let keyboardSucceeded = false;
+        const keyboardObservations: Array<Record<string, string | number | boolean>> = [];
+        const readKeyboardViewport = (phase: string) => ({
+          phase,
+          documentFocused: document.hasFocus(),
+          visible: document.visibilityState === "visible",
+          activeViewport: document.activeElement === viewport,
+          connected: viewport.isConnected,
+          inert: viewport.closest("[inert]") !== null,
+          scrollLeft: viewport.scrollLeft,
+          scrollTop: viewport.scrollTop,
+          scrollWidth: viewport.scrollWidth,
+          scrollHeight: viewport.scrollHeight,
+          clientWidth: viewport.clientWidth,
+          clientHeight: viewport.clientHeight,
+        });
+        const recordKeyboard = (event: KeyboardEvent) => {
+          if (keyboardRetired || event.key !== "ArrowRight" || keyboardObservations.length >= 16)
+            return;
+          const fields = () => ({
+            ...readKeyboardViewport(event.type),
+            trusted: event.isTrusted,
+            exactTarget: event.target === viewport,
+            defaultPrevented: event.defaultPrevented,
+            ctrl: event.ctrlKey,
+            meta: event.metaKey,
+            alt: event.altKey,
+            shift: event.shiftKey,
+          });
+          keyboardObservations.push(fields());
+          queueMicrotask(() => {
+            if (!keyboardRetired && keyboardObservations.length < 16)
+              keyboardObservations.push({ ...fields(), phase: `${event.type}-settled` });
+          });
+        };
+        const recordKeyboardFocus = (event: FocusEvent) => {
+          if (
+            !keyboardRetired &&
+            keyboardObservations.length < 16 &&
+            (event.target === viewport || event.target === window)
+          )
+            keyboardObservations.push(readKeyboardViewport(event.type));
+        };
+        retireKeyboardObservation = () => {
+          if (keyboardRetired) return;
+          keyboardRetired = true;
+          window.removeEventListener("keydown", recordKeyboard, true);
+          window.removeEventListener("keyup", recordKeyboard, true);
+          window.removeEventListener("focus", recordKeyboardFocus, true);
+          window.removeEventListener("blur", recordKeyboardFocus, true);
+          // Fixed, source-free and failure-only. Completion owns retirement
+          // even if the enclosing test reaches its original hard deadline.
+          if (!keyboardSucceeded)
+            console.info("mermaid-chart-keyboard-readiness", {
+              observations: keyboardObservations,
+              final: readKeyboardViewport("final"),
+            });
+        };
+        requireActive();
+        window.addEventListener("keydown", recordKeyboard, true);
+        window.addEventListener("keyup", recordKeyboard, true);
+        window.addEventListener("focus", recordKeyboardFocus, true);
+        window.addEventListener("blur", recordKeyboardFocus, true);
+        try {
+          await page
+            .getByRole("region", { name: "Expanded diagram; scroll or drag to pan" })
+            .click();
+          requireActive();
+          await vi.waitFor(() => {
+            expect(document.hasFocus()).toBe(true);
+            expect(document.activeElement).toBe(viewport);
+            expect(viewport.hasAttribute("data-dragging")).toBe(false);
+            expect(viewport.scrollWidth).toBeGreaterThan(viewport.clientWidth);
+            expect(viewport.scrollHeight).toBeGreaterThan(viewport.clientHeight);
+          });
+          requireActive();
+          if (keyboardRetired) throw new Error("Mermaid keyboard fixture already retired");
+          keyboardObservations.push(readKeyboardViewport("ready"));
+          await userEvent.keyboard("{ArrowRight}");
+          requireActive();
+          if (keyboardRetired) throw new Error("Mermaid keyboard fixture already retired");
+          await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(0));
+          requireActive();
+          if (keyboardRetired) throw new Error("Mermaid keyboard fixture already retired");
+          keyboardSucceeded = true;
+        } finally {
+          retireKeyboardObservation();
+        }
         viewport.scrollTo(50, 50);
         const rect = viewport.getBoundingClientRect();
         const start = browserPoint({
@@ -631,6 +781,7 @@ describe("Mermaid block", () => {
         });
         const input: CDPSession = cdp();
         await input.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...start });
+        requireActive();
         await input.send("Input.dispatchMouseEvent", {
           type: "mousePressed",
           ...start,
@@ -639,16 +790,21 @@ describe("Mermaid block", () => {
           clickCount: 1,
         });
         try {
+          // Keep the original release in finally if the admitted press returns
+          // only after this invocation's completion has retired it.
+          requireActive();
           await input.send("Input.dispatchMouseEvent", {
             type: "mouseMoved",
             ...end,
             button: "left",
             buttons: 1,
           });
+          requireActive();
           await vi.waitFor(() => {
             expect(viewport.scrollLeft).toBeGreaterThan(80);
             expect(viewport.scrollTop).toBeGreaterThan(65);
           });
+          requireActive();
         } finally {
           await input.send("Input.dispatchMouseEvent", {
             type: "mouseReleased",
@@ -658,18 +814,22 @@ describe("Mermaid block", () => {
             clickCount: 1,
           });
         }
+        requireActive();
         await page.getByRole("button", { name: "Fit", exact: true }).click();
+        requireActive();
         await vi.waitFor(() => {
           expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 1);
           expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.clientHeight + 1);
         });
+        requireActive();
         expect(viewport.scrollLeft).toBe(0);
         expect(viewport.scrollTop).toBe(0);
         await userEvent.keyboard("{Escape}");
+        requireActive();
         await expect.element(page.getByRole("button", { name: "Expand diagram" })).toHaveFocus();
+        requireActive();
       } finally {
-        await screen.unmount();
-        host.remove();
+        await cleanup();
       }
     },
   );

@@ -1,6 +1,10 @@
 import { DatabaseSync } from "node:sqlite";
+// SQLite fixture retains actual native descriptors, file identity and namespace cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+// SQLite fixture paths retain actual host drive and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 
 import * as Effect from "effect/Effect";
@@ -25,6 +29,9 @@ it("runMigrations retries transient cross-process writer contention", async () =
         const lockOwner = new DatabaseSync(filename);
         lockOwner.exec("PRAGMA journal_mode = WAL; BEGIN IMMEDIATE;");
         try {
+          // The native SQLite lock must be released by real host time even
+          // while synchronous busy waits occupy the test's Effect fiber.
+          // @effect-diagnostics-next-line globalTimersInEffect:off
           const releaseLock = setTimeout(() => {
             lockOwner.exec("COMMIT");
           }, 175);

@@ -1,5 +1,11 @@
+// Native filesystem boundary: preserve descriptor, no-follow and bigint identity operations.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { constants } from "node:fs";
+// Native filesystem boundary: preserve descriptor, no-follow and bigint identity operations.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 
 /** Deliberately content-free: startup errors must not disclose native homes,

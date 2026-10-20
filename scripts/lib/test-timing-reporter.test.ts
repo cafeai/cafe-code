@@ -1,6 +1,8 @@
 import { expect, it } from "vitest";
 import type { TestModule } from "vitest/node";
 import { moduleTiming, runTiming } from "./test-timing-reporter.ts";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { resolve } from "node:path";
 
 it("records bounded timing labels without arbitrary errors, values or the invalid browser prepare counter", () => {

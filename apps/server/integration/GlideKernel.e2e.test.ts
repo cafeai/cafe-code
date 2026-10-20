@@ -1,6 +1,12 @@
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtemp, rm } from "node:fs/promises";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { watch, type FSWatcher } from "node:fs";
 import { tmpdir } from "node:os";
+// Native fixture paths retain host drive, separator and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";

@@ -17,29 +17,49 @@ import {
   type OrchestrationThreadStreamItem,
 } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mockSubscribeThread = vi.fn();
-const mockThreadUnsubscribe = vi.fn();
-const mockCreateEnvironmentConnection = vi.fn();
-const mockCreateWsRpcClient = vi.fn();
-const mockWaitForSavedEnvironmentRegistryHydration = vi.fn();
-const mockListSavedEnvironmentRecords = vi.fn();
-const mockGetSavedEnvironmentRecord = vi.fn();
-const mockReadSavedEnvironmentBearerToken = vi.fn();
-const mockSavedEnvironmentRegistrySubscribe = vi.fn();
-const mockGetPrimaryKnownEnvironment = vi.hoisted(() => vi.fn());
-const mockFetchRemoteSessionState = vi.fn();
+import * as environmentService from "./service";
+
+// Collect the real service as a module dependency rather than spending a test
+// lifecycle hook on its import graph. Its mock factories run before ordinary
+// module initializers, so every factory-referenced identity must be hoisted.
+// Connection/subscription activation still belongs to each test after setup.
+const {
+  mockSubscribeThread,
+  mockThreadUnsubscribe,
+  mockCreateEnvironmentConnection,
+  mockCreateWsRpcClient,
+  mockWaitForSavedEnvironmentRegistryHydration,
+  mockListSavedEnvironmentRecords,
+  mockGetSavedEnvironmentRecord,
+  mockReadSavedEnvironmentBearerToken,
+  mockSavedEnvironmentRegistrySubscribe,
+  mockGetPrimaryKnownEnvironment,
+  mockFetchRemoteSessionState,
+  MockWsTransport,
+} = vi.hoisted(() => ({
+  mockSubscribeThread: vi.fn(),
+  mockThreadUnsubscribe: vi.fn(),
+  mockCreateEnvironmentConnection: vi.fn(),
+  mockCreateWsRpcClient: vi.fn(),
+  mockWaitForSavedEnvironmentRegistryHydration: vi.fn(),
+  mockListSavedEnvironmentRecords: vi.fn(),
+  mockGetSavedEnvironmentRecord: vi.fn(),
+  mockReadSavedEnvironmentBearerToken: vi.fn(),
+  mockSavedEnvironmentRegistrySubscribe: vi.fn(),
+  mockGetPrimaryKnownEnvironment: vi.fn(),
+  mockFetchRemoteSessionState: vi.fn(),
+  MockWsTransport: function MockWsTransport() {
+    return undefined;
+  },
+}));
 const mockConnectionReconnects: Array<ReturnType<typeof vi.fn>> = [];
 let savedEnvironmentRegistryListener: (() => void) | null = null;
 
 const encodeThreadDetailSnapshotJson = Schema.encodeSync(
   Schema.fromJsonString(OrchestrationThreadDetailSnapshot),
 );
-
-function MockWsTransport() {
-  return undefined;
-}
 
 vi.mock("../primary", () => ({
   getPrimaryKnownEnvironment: mockGetPrimaryKnownEnvironment,
@@ -285,10 +305,6 @@ async function makeThreadDetailSnapshotChunks(
 }
 
 describe("retainThreadDetailSubscription", () => {
-  beforeAll(async () => {
-    await import("./service");
-  });
-
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
@@ -361,9 +377,8 @@ describe("retainThreadDetailSubscription", () => {
   });
 
   afterEach(async () => {
-    const { resetEnvironmentServiceForTests } = await import("./service");
     const { useStore } = await import("../../store");
-    await resetEnvironmentServiceForTests();
+    await environmentService.resetEnvironmentServiceForTests();
     useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
     vi.unstubAllGlobals();
     vi.useRealTimers();

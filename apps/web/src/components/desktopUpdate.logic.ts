@@ -107,6 +107,18 @@ export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string
   return uiText("Up to date");
 }
 
+/** The About row must not describe an unchecked or unavailable updater as current. */
+export function getDesktopUpdateStatus(state: DesktopUpdateState | null): string {
+  if (!state) return uiText("Desktop update information is unavailable.");
+  if (!state.enabled || state.status === "disabled") {
+    return state.message ?? uiText("Update checks are unavailable for this installation.");
+  }
+  if (state.status === "idle") return uiText("Not checked yet.");
+  if (state.status === "checking") return uiText("Checking…");
+  if (state.status === "up-to-date") return uiText("Up to date.");
+  return getDesktopUpdateButtonTooltip(state);
+}
+
 export function getDesktopUpdateInstallConfirmationMessage(
   state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion">,
 ): string {

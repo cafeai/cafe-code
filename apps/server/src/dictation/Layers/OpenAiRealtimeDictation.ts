@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import {
   DICTATION_OPENAI_REQUEST_ID_MAX_CHARS,
   DICTATION_REWRITE_INPUT_MAX_CHARS,
@@ -34,6 +35,9 @@ import {
 } from "../Services/OpenAiRealtimeDictation.ts";
 
 const OPENAI_API_KEY_SECRET_NAME = "openai-realtime-api-key";
+// Encode only the already-validated user-data envelope; keep its exact JSON
+// field order and bytes beneath the existing fixed rewrite instructions.
+const encodeRewriteInput = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const OPENAI_CLIENT_SECRET_URL = "https://api.openai.com/v1/realtime/client_secrets";
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 // This fixed, non-reasoning text model supports Responses and is inexpensive
@@ -214,7 +218,7 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
 
   const admitIssuance = (safetyIdentifier: string): Effect.Effect<void, DictationError> =>
     Effect.sync(() => {
-      const now = Date.now();
+      const now = DateTime.toEpochMillis(DateTime.nowUnsafe());
       const active = (issuanceWindows.get(safetyIdentifier) ?? []).filter(
         (issuedAt) => now - issuedAt < ISSUANCE_WINDOW_MS,
       );
@@ -243,7 +247,7 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
 
   const admitRewrite = (safetyIdentifier: string): Effect.Effect<void, DictationError> =>
     Effect.sync(() => {
-      const now = Date.now();
+      const now = DateTime.toEpochMillis(DateTime.nowUnsafe());
       const recent = (rewriteWindows.get(safetyIdentifier) ?? []).filter(
         (issuedAt) => now - issuedAt < REWRITE_WINDOW_MS,
       );
@@ -393,7 +397,7 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
         ),
       ),
       Effect.flatMap((decoded) =>
-        decoded.expires_at > Math.floor(Date.now() / 1_000)
+        decoded.expires_at > Math.floor(DateTime.toEpochMillis(DateTime.nowUnsafe()) / 1_000)
           ? Effect.succeed({
               clientSecret: decoded.value,
               expiresAt: decoded.expires_at,
@@ -462,6 +466,9 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
         // Preserve deliberate size-limit failures. Transport/decode failures
         // from the body stream are availability failures instead; classifying
         // them as malformed provider data would incorrectly suppress retries.
+        // Only our nominal sanitized error may preserve its public category;
+        // structural/HMR branding must not authorize received provider prose.
+        // @effect-diagnostics-next-line instanceOfSchema:off
         if (error instanceof DictationError) return Effect.fail(error);
         return Effect.fail(
           sanitizedError(
@@ -520,7 +527,6 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
    */
   const responseReportsInsufficientQuota = (body: string): boolean => {
     try {
-      // @effect-diagnostics-next-line preferSchemaOverJson:off
       const decoded: unknown = JSON.parse(body);
       if (!isUnknownRecord(decoded) || !isUnknownRecord(decoded.error)) return false;
       return (
@@ -582,7 +588,7 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
       // Redirects are forbidden so the permanent credential can never follow
       // an upstream Location header. Tracing is disabled because transport
       // failures may retain the request object, including Authorization.
-      const requestStartedAt = Date.now();
+      const requestStartedAt = DateTime.toEpochMillis(DateTime.nowUnsafe());
       const responseOption = yield* httpClient.execute(request).pipe(
         Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
         Effect.provideService(References.TracerEnabled, false),
@@ -606,7 +612,9 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
       }
       return {
         response: responseOption.value,
-        requestDurationMs: normalizeDurationMs(Date.now() - requestStartedAt),
+        requestDurationMs: normalizeDurationMs(
+          DateTime.toEpochMillis(DateTime.nowUnsafe()) - requestStartedAt,
+        ),
       };
     });
 
@@ -775,7 +783,7 @@ export const makeOpenAiRealtimeDictation = Effect.gen(function* () {
               validated.style === "custom" ? CUSTOM_REWRITE_INSTRUCTIONS : REWRITE_INSTRUCTIONS,
             input:
               validated.style === "custom"
-                ? JSON.stringify({
+                ? encodeRewriteInput({
                     dictated_text: validated.text,
                     writing_style: validated.instructions,
                   })

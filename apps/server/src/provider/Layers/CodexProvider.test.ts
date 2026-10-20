@@ -28,6 +28,9 @@ import {
 } from "./CodexProvider.ts";
 import { terminateProbeChild } from "../providerSnapshot.ts";
 
+const decodeProviderJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 describe("private reset account identity", () => {
@@ -419,7 +422,7 @@ describe("Codex catalogue producer provenance", () => {
                     const lines = pending.split("\n");
                     pending = lines.pop() ?? "";
                     for (const line of lines) {
-                      const request = decodeRequest(JSON.parse(line));
+                      const request = decodeRequest(decodeProviderJsonString(line));
                       methods.push(request.method);
                       if (request.id === undefined) {
                         expect(request.method).toBe("initialized");
@@ -456,7 +459,7 @@ describe("Codex catalogue producer provenance", () => {
                       yield* Queue.offer(
                         output,
                         encoder.encode(
-                          `${JSON.stringify({
+                          `${encodeProviderJsonString({
                             id: request.id,
                             ...(failed && request.method === "model/list"
                               ? {

@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
+// Native packaged-runtime self-test retains the actual Node filesystem boundary it qualifies.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { existsSync } from "node:fs";
+// Native packaged-runtime self-test retains its exclusive Promise result-file write.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { writeFile } from "node:fs/promises";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 
 import * as Electron from "electron";
@@ -81,6 +87,8 @@ async function runPtyRoundTrip(): Promise<boolean> {
     const exitDisposable = terminal.onExit(({ exitCode }) => {
       finish(exitCode === 0 && output.includes(marker));
     });
+    // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+    // @effect-diagnostics-next-line globalTimers:off
     const timeout = setTimeout(() => {
       terminal.kill();
       finish(false);
@@ -212,10 +220,14 @@ export async function runDesktopRuntimeSelfTestAndExit(): Promise<void> {
     const observe =
       <T>(name: string, action: () => Promise<T>) =>
       async () => {
+        // Native probe output is a fixed stdout protocol; Effect logging would change its wire format.
+        // @effect-diagnostics-next-line globalConsole:off
         console.info(`CAFE_CODE_RUNTIME_SELF_TEST_PHASE=${name}:start`);
         try {
           return await action();
         } finally {
+          // Native probe output is a fixed stdout protocol; Effect logging would change its wire format.
+          // @effect-diagnostics-next-line globalConsole:off
           console.info(`CAFE_CODE_RUNTIME_SELF_TEST_PHASE=${name}:complete`);
         }
       };
@@ -259,6 +271,8 @@ export async function runDesktopRuntimeSelfTestAndExit(): Promise<void> {
     }
   }
 
+  // Native probe output is a fixed stdout protocol; Effect logging would change its wire format.
+  // @effect-diagnostics-next-line globalConsole:off
   console.info(`${DESKTOP_RUNTIME_SELF_TEST_OUTPUT_PREFIX}${JSON.stringify(result)}`);
   Electron.app.exit(result.ok ? 0 : 1);
 }

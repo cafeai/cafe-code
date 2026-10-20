@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { randomUUID } from "node:crypto";
 import type * as Electron from "electron";
@@ -28,7 +29,11 @@ function fixture() {
     stateDirectory: "unused-private-fixture",
     preloadPath: "unused-preload",
   });
-  const state = { leaseId: randomUUID(), state: "active" as const, expiresAtMs: Date.now() + 1000 };
+  const state = {
+    leaseId: randomUUID(),
+    state: "active" as const,
+    expiresAtMs: DateTime.toEpochMillis(DateTime.nowUnsafe()) + 1000,
+  };
   const open = vi.spyOn(host, "open").mockResolvedValue(state);
   const capture = vi.spyOn(host, "capture").mockResolvedValue(null);
   const retire = vi.spyOn(host, "retire").mockResolvedValue({ ...state, state: "retired" });

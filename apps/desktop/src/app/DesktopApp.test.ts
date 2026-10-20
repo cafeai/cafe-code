@@ -2,6 +2,8 @@ import type { ProviderDaemonClientConfig, ProviderDaemonLiveness } from "@cafeco
 import * as NetService from "@cafecode/shared/Net";
 import { SourceDebugBuildError } from "@cafecode/shared/sourceDebugBuild";
 import { assert, describe, it } from "@effect/vitest";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";

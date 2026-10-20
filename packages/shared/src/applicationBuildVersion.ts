@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+// Native filesystem boundary: preserve descriptor, no-follow and bigint identity operations.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import {
   closeSync,
   constants,
@@ -12,6 +14,8 @@ import {
   writeFileSync,
   type BigIntStats,
 } from "node:fs";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 

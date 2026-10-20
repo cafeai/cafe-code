@@ -18,7 +18,11 @@ import {
  * @module ClaudeAdapterLive
  */
 import { createHash, randomUUID } from "node:crypto";
+// Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { constants as fsConstants, lstatSync, realpathSync, unlinkSync } from "node:fs";
+// Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { lstat, open, opendir } from "node:fs/promises";
 
 import {
@@ -157,6 +161,7 @@ import * as Queue from "effect/Queue";
 import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Data from "effect/Data";
 import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -229,6 +234,14 @@ import { subagentCommandDetail, subagentFileDetail } from "../subagentActivityDe
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.UnknownFromJsonString);
+
+/** These phases previously emitted only a fixed native Error. Preserve the
+ * sanitized message/name and omit rejected document or native cleanup causes. */
+class ClaudeInternalOperationError extends Data.TaggedError("ClaudeInternalOperationError")<{
+  readonly message: string;
+}> {
+  override name = "Error";
+}
 
 const PROVIDER = ProviderDriverKind.make("claudeAgent");
 // SDK 0.3.259 caps merged first-reply/result correlation at 64 prompt UUIDs.
@@ -2398,7 +2411,7 @@ function claudeSubagentStartedAtFromUsage(createdAt: string, usage: unknown): st
   // malformed value so it cannot manufacture an ancient clock or overflow a
   // Date while still covering Cafe's multi-week session target comfortably.
   const boundedDurationMs = Math.min(durationMs, CLAUDE_SUBAGENT_MAX_INFERRED_DURATION_MS);
-  return new Date(Math.max(0, completedAtMs - boundedDurationMs)).toISOString();
+  return DateTime.formatIso(DateTime.makeUnsafe(Math.max(0, completedAtMs - boundedDurationMs)));
 }
 
 function claudeSubagentLabel(binding: ClaudeTaskBinding): string | undefined {
@@ -3038,6 +3051,8 @@ function claudeStreamFailureDetail(
   cause: Cause.Cause<{ readonly message: string }>,
 ): string | undefined {
   const failure = Cause.squash(cause);
+  // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+  // @effect-diagnostics-next-line instanceOfSchema:off
   if (!(failure instanceof ProviderAdapterProcessError)) return undefined;
   const detail = failure.detail.trim();
   return detail.length > 0 ? detail : undefined;
@@ -8962,11 +8977,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 nativeThreadId,
                 nativeTurnId: String(turnId),
                 turnId: asCanonicalTurnId(turnId),
-                occurredAt: new Date().toISOString(),
+                occurredAt: DateTime.formatIso(DateTime.nowUnsafe()),
                 actor: parent ? { type: "child", id: String(task!.taskId) } : { type: "root" },
               },
             ),
-          catch: () => new Error("Private visualization completion could not be admitted."),
+          catch: () =>
+            new ClaudeInternalOperationError({
+              message: "Private visualization completion could not be admitted.",
+            }),
         }).pipe(
           Effect.catch(() =>
             Effect.logWarning("Private visualization completion remains unavailable."),
@@ -10716,7 +10734,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           } else if (startedQuery) {
             yield* Effect.try({
               try: () => startedQuery?.close(),
-              catch: () => new Error("Claude startup cleanup failed."),
+              catch: () =>
+                new ClaudeInternalOperationError({ message: "Claude startup cleanup failed." }),
             }).pipe(Effect.ignore);
           }
         });

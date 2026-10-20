@@ -1,4 +1,10 @@
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { lstat, readdir, readFile, writeFile, mkdir } from "node:fs/promises";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -78,7 +84,9 @@ if (mode === "--migrate") {
       changed++;
     }
   }
-  console.log(`Migrated ${sites} direct display sites in ${changed} renderer files.`);
+  Effect.runSync(
+    Console.log(`Migrated ${sites} direct display sites in ${changed} renderer files.`),
+  );
 } else {
   const catalog = new Map<string, CatalogEntry>();
   const failures: string[] = [];
@@ -386,7 +394,7 @@ if (mode === "--migrate") {
     }
   }
   if (failures.length) {
-    console.error(failures.join("\n"));
+    Effect.runSync(Console.error(failures.join("\n")));
     process.exitCode = 1;
   } else {
     const publishOutput = async (
@@ -405,8 +413,10 @@ if (mode === "--migrate") {
       } catch (error) {
         // The owned publisher emits content-free reasons/temporary basenames;
         // do not print native exceptions, stacks, target JSON or private bytes.
-        console.error(
-          `${path.relative(root, output)}: ${error instanceof Error ? error.message : "generated output publication failed"}`,
+        Effect.runSync(
+          Console.error(
+            `${path.relative(root, output)}: ${error instanceof Error ? error.message : "generated output publication failed"}`,
+          ),
         );
         process.exitCode = 1;
         return false;
@@ -442,7 +452,9 @@ if (mode === "--migrate") {
         try {
           await mkdir(path.dirname(output), { recursive: true });
         } catch {
-          console.error(`${generated}: generated output directory cannot be created`);
+          Effect.runSync(
+            Console.error(`${generated}: generated output directory cannot be created`),
+          );
           process.exitCode = 1;
           break;
         }
@@ -450,13 +462,15 @@ if (mode === "--migrate") {
       } else {
         const actual = catalogSnapshots.get(name)?.contents ?? "";
         if (actual !== contents) {
-          console.error(`${generated}/${name} is stale; run yarn i18n:extract`);
+          Effect.runSync(Console.error(`${generated}/${name} is stale; run yarn i18n:extract`));
           process.exitCode = 1;
         }
       }
     }
-    console.log(
-      `${catalog.size} unique ICU messages across ${files.length} production modules; display-sink coverage ${process.exitCode ? "failed" : "passed"}.`,
+    Effect.runSync(
+      Console.log(
+        `${catalog.size} unique ICU messages across ${files.length} production modules; display-sink coverage ${process.exitCode ? "failed" : "passed"}.`,
+      ),
     );
   }
 }

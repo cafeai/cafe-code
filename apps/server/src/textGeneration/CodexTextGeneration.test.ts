@@ -27,6 +27,9 @@ import { ServerConfig } from "../config.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import { makeCodexTextGeneration } from "./CodexTextGeneration.ts";
 import { buildThreadTitlePrompt } from "./TextGenerationPrompts.ts";
+
+const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 const DEFAULT_TEST_MODEL_SELECTION = createModelSelection(
@@ -64,13 +67,13 @@ function makeFakeCodexBinary(
       // stdin, stderr, and output-file behavior is identical across shells.
       const fixturePath = path.join(binDir, "codex-fixture.cjs");
       const codexPath = path.join(binDir, "codex.cmd");
-      const fixtureConfig = Buffer.from(JSON.stringify(input), "utf8").toString("base64");
+      const fixtureConfig = Buffer.from(encodeJsonText(input), "utf8").toString("base64");
       yield* fs.writeFileString(
         fixturePath,
         [
           '"use strict";',
           'const fs = require("node:fs");',
-          `const config = JSON.parse(Buffer.from(${JSON.stringify(fixtureConfig)}, "base64").toString("utf8"));`,
+          `const config = JSON.parse(Buffer.from(${encodeJsonText(fixtureConfig)}, "base64").toString("utf8"));`,
           "const args = process.argv.slice(2);",
           'const outputFlag = args.indexOf("--output-last-message");',
           "const outputPath = outputFlag >= 0 ? args[outputFlag + 1] : undefined;",
@@ -514,7 +517,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
             binaryPath,
             homePath,
             environment,
-            output: JSON.stringify({ title: "Preserve structured metadata input" }),
+            output: encodeJsonText({ title: "Preserve structured metadata input" }),
             inspectCommand: (command, prompt) => {
               commandCount += 1;
               // Exercise the real text-generation builder with an in-memory
@@ -580,7 +583,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
             recorded.push(snapshot);
           }),
         );
-        const terminal = JSON.stringify({
+        const terminal = encodeJsonText({
           type: "turn.completed",
           usage: {
             input_tokens: 60,
@@ -592,8 +595,8 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
         });
         const result = yield* withFakeCodexSpawner(
           {
-            output: JSON.stringify({ title: "Helper title", branch: "helper-branch" }),
-            stdout: `${JSON.stringify({ type: "item.completed", item: { text: "private generated text" } })}\n${terminal}\n${terminal}\n`,
+            output: encodeJsonText({ title: "Helper title", branch: "helper-branch" }),
+            stdout: `${encodeJsonText({ type: "item.completed", item: { text: "private generated text" } })}\n${terminal}\n${terminal}\n`,
             exitCode,
           },
           (generation) =>
@@ -629,7 +632,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
       );
       const generated = yield* withFakeCodexSpawner(
         {
-          output: JSON.stringify({ title: "Helper title" }),
+          output: encodeJsonText({ title: "Helper title" }),
           stdout: '{"type":"turn.completed","usage":{"input_tokens":-10}}',
         },
         (generation) =>
@@ -752,7 +755,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
         };
         yield* withFakeCodexSpawner(
           {
-            output: JSON.stringify({ title: "Exact tier" }),
+            output: encodeJsonText({ title: "Exact tier" }),
             expectedServiceTier: "ultrafast",
             tierAuthority,
             inspectCommand: () => {
@@ -814,7 +817,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
         let requests = 0;
         yield* withFakeCodexSpawner(
           {
-            output: JSON.stringify({ title: "Helper title", branch: "helper-branch" }),
+            output: encodeJsonText({ title: "Helper title", branch: "helper-branch" }),
             requireReasoningEffort: "medium",
             expectedServiceTier: "omitted",
             inspectCommand: (command) => {
@@ -1223,7 +1226,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
             expect(Result.isFailure(result)).toBe(true);
             if (Result.isFailure(result)) {
               expect(result.failure.message).not.toContain("private-helper-sentinel");
-              expect(JSON.stringify(result.failure)).not.toContain("private-helper-sentinel");
+              expect(encodeJsonText(result.failure)).not.toContain("private-helper-sentinel");
             }
           }),
       ),

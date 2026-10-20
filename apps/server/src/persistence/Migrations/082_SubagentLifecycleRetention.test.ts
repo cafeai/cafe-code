@@ -1,9 +1,14 @@
 import { assert, it } from "@effect/vitest";
+import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
 import * as TestSqliteClient from "../TestSqliteClient.ts";
+
+// Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
+// this codec does not replace production admission or grant received-data authority.
+const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 interface CountRow {
   readonly count: number;
@@ -71,7 +76,7 @@ it.layer(TestSqliteClient.layerMemory())("082_SubagentLifecycleRetention", (it) 
           activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
         ) VALUES (
           'ambient-dual', 'thread-retention', 'turn-a', 'info', 'task.completed', 'hidden',
-          ${JSON.stringify({
+          ${encodeFixtureJson({
             visibility: "ambient",
             taskId: "ambient-task",
             subagent: { threadId: "presentation-child" },
@@ -148,7 +153,7 @@ it.layer(TestSqliteClient.layerMemory())("082_SubagentLifecycleRetention", (it) 
           ('visible-task-only', 'thread-retention', 'turn-a', 'info', 'task.progress', 'visible',
             '{"visibility":"visible","taskId":"not-a-fallback"}', '2026-10-04T00:00:06.000Z', 60),
           ('unsafe-control', 'thread-retention', 'turn-a', 'info', 'task.progress', 'unsafe',
-            ${JSON.stringify({ subagent: { threadId: "unsafe\nchild" } })},
+            ${encodeFixtureJson({ subagent: { threadId: "unsafe\nchild" } })},
             '2026-10-04T00:00:07.000Z', 70)
       `;
       assert.deepStrictEqual(
@@ -169,17 +174,17 @@ it.layer(TestSqliteClient.layerMemory())("082_SubagentLifecycleRetention", (it) 
         ) VALUES
           (
             'utf16-accepted-astral', 'thread-retention', 'turn-a', 'info', 'task.progress',
-            'accepted astral', ${JSON.stringify({ subagent: { threadId: acceptedAstralId } })},
+            'accepted astral', ${encodeFixtureJson({ subagent: { threadId: acceptedAstralId } })},
             '2026-10-04T00:00:08.000Z', 80
           ),
           (
             'utf16-rejected-astral', 'thread-retention', 'turn-a', 'info', 'task.progress',
-            'rejected astral', ${JSON.stringify({ subagent: { threadId: rejectedAstralId } })},
+            'rejected astral', ${encodeFixtureJson({ subagent: { threadId: rejectedAstralId } })},
             '2026-10-04T00:00:09.000Z', 90
           ),
           (
             'utf16-accepted-mixed', 'thread-retention', 'turn-a', 'info', 'task.progress',
-            'accepted mixed', ${JSON.stringify({ subagent: { threadId: acceptedMixedId } })},
+            'accepted mixed', ${encodeFixtureJson({ subagent: { threadId: acceptedMixedId } })},
             '2026-10-04T00:00:10.000Z', 100
           )
       `;

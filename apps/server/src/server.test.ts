@@ -175,6 +175,10 @@ import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts
 import * as RuntimeLayerDiagnostics from "./diagnostics/RuntimeLayerDiagnostics.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as Data from "effect/Data";
+import * as Schema from "effect/Schema";
+
+const decodeJsonText = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const defaultProjectId = ProjectId.make("project-default");
 const defaultThreadId = ThreadId.make("thread-default");
@@ -1378,6 +1382,18 @@ class AuthenticationGetterError extends Data.TaggedError("AuthenticationGetterEr
   readonly message: string;
 }> {}
 
+class WebSocketDisconnectObservationError extends Data.TaggedError(
+  "WebSocketDisconnectObservationError",
+)<{}> {
+  constructor() {
+    super();
+    this.name = "Error";
+  }
+  override get message() {
+    return "WebSocket session did not become disconnected";
+  }
+}
+
 const getAuthenticatedSessionCookieHeader = (credential = defaultDesktopBootstrapToken) =>
   Effect.gen(function* () {
     const { response, cookie } = yield* bootstrapBrowserSession(credential);
@@ -1955,7 +1971,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(serviceWorkerResponse.headers.get("cache-control"), "no-cache");
       assert.include(serviceWorkerResponse.headers.get("content-type") ?? "", "javascript");
       assert.equal(manifestResponse.status, 200, manifestBody);
-      assert.deepEqual(JSON.parse(manifestBody), {
+      assert.deepEqual(decodeJsonText(manifestBody), {
         name: "Cafe Code",
         start_url: "/",
         display: "standalone",
@@ -2194,18 +2210,18 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             body,
           }),
         );
-      assert.equal((yield* send({}, JSON.stringify({ event: "init", seq: 1 }))).status, 401);
+      assert.equal((yield* send({}, encodeJsonText({ event: "init", seq: 1 }))).status, 401);
       const { cookie } = yield* bootstrapBrowserSession();
       const headers = { cookie: cookie! };
       assert.equal(
         (yield* send(
           headers,
-          JSON.stringify({ event: "init", seq: 1, secret: "must-not-be-logged" }),
+          encodeJsonText({ event: "init", seq: 1, secret: "must-not-be-logged" }),
         )).status,
         204,
       );
       assert.equal(
-        (yield* send(headers, JSON.stringify({ event: "private-prompt", seq: 2 }))).status,
+        (yield* send(headers, encodeJsonText({ event: "private-prompt", seq: 2 }))).status,
         400,
       );
       assert.equal((yield* send(headers, "x".repeat(8193))).status, 413);
@@ -3054,7 +3070,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.deepStrictEqual(states.configured, { configured: true, canManage: true });
       assert.deepStrictEqual(states.reread, { configured: true, canManage: true });
       assert.deepStrictEqual(states.cleared, { configured: false, canManage: true });
-      assert.notInclude(JSON.stringify(states), permanentKey);
+      assert.notInclude(encodeJsonText(states), permanentKey);
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
@@ -3788,6 +3804,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             yield* Deferred.await(initial);
             // Let the synthetic websocket deliver any terminal frame. A denied
             // stream stays open, so a live client has no completion to retry.
+            // The synthetic WebSocket's native event loop owns delivery; keep
+            // this existing observation wait outside the virtual Effect clock.
+            // @effect-diagnostics-next-line globalTimers:off
             yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 50)));
             assert.equal(yield* Deferred.isDone(finished), false);
             assert.deepEqual(denied, [{ report: null }]);
@@ -4064,7 +4083,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             assert.equal(error.message, "Diagnostic details are unavailable for this activity.");
             assert.equal(error.cause, undefined);
             assert.notMatch(
-              JSON.stringify(error),
+              encodeJsonText(error),
               /private-reader-failure-sentinel|private-diagnostic-json-sentinel/u,
             );
           }),
@@ -4204,7 +4223,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           source: "synthetic.error",
           native: {},
           message: privateSentinel,
-          json: JSON.stringify({ error: { message: privateSentinel } }),
+          json: encodeJsonText({ error: { message: privateSentinel } }),
           redacted: false,
           truncated: false,
           omittedFields: false,
@@ -4245,7 +4264,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               );
               assert.equal(error.cause, undefined);
               assert.notMatch(
-                JSON.stringify(error),
+                encodeJsonText(error),
                 /synthetic-pending-private-diagnostic-do-not-release/u,
               );
               // The post-query check also leaves the pre-query fence intact for
@@ -4691,6 +4710,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.isNotNull(whileConnected?.lastConnectedAt ?? null);
 
       const waitForNetworkTurn = Effect.callback<void>((resume) => {
+        // Preserve actual native WebSocket close delivery and cancellation.
+        // @effect-diagnostics-next-line globalTimers:off
         const timeout = setTimeout(() => resume(Effect.void), 10);
         return Effect.sync(() => clearTimeout(timeout));
       });
@@ -4698,7 +4719,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         Effect.andThen(readCurrentClient),
         Effect.filterOrFail(
           (client) => client?.connected === false,
-          () => new Error("WebSocket session did not become disconnected"),
+          () => new WebSocketDisconnectObservationError(),
         ),
         Effect.retry({ times: 100 }),
       );
@@ -5648,7 +5669,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.strictEqual(change.payload.settings.providerInstances[id]?.debugStateSharing, true);
         assert.isUndefined(remove.payload.providerDataProfiles?.[id]);
         assert.isUndefined(remove.payload.settings.providerInstances[id]);
-        assert.notInclude(JSON.stringify(events), "private-setup-fixture-secret");
+        assert.notInclude(encodeJsonText(events), "private-setup-fixture-secret");
       }).pipe(Effect.provide(makeHttpServerTestLayer())),
   );
 
@@ -7656,7 +7677,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
               commands.map((command) => command.type),
               ["thread.create", "thread.turn.start"],
             );
-          }).pipe(Effect.provide(SqlitePersistenceTest), Effect.provide(makeHttpServerTestLayer())),
+          }).pipe(
+            Effect.provide(
+              SqlitePersistenceTest.pipe(Layer.provideMerge(makeHttpServerTestLayer())),
+            ),
+          ),
       );
     }
   }

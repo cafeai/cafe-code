@@ -1,6 +1,7 @@
 import type { ProviderInstanceId, ThreadId } from "@cafecode/contracts";
 import * as Clock from "effect/Clock";
 import * as Data from "effect/Data";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -65,7 +66,7 @@ export const makeCodexHistorySafetyStore = Effect.gen(function* () {
       Effect.gen(function* () {
         if (!validKey(key))
           return yield* Effect.fail(new CodexHistorySafetyStorageError({ operation: "mark" }));
-        const reportedAt = new Date(yield* Clock.currentTimeMillis).toISOString();
+        const reportedAt = DateTime.formatIso(DateTime.makeUnsafe(yield* Clock.currentTimeMillis));
         // Concurrent notifications retain the first observation. A later event
         // cannot clear the fence or replace the identity/reason/timestamp.
         yield* sql`

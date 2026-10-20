@@ -2,7 +2,7 @@
 import * as fs from "node:fs/promises";
 import type { BigIntStats } from "node:fs";
 import * as path from "node:path";
-import { CommandId, ThreadId } from "@cafecode/contracts";
+import { CommandId, ThreadId } from "@cafecode/contracts/baseSchemas";
 import { assert, it } from "@effect/vitest";
 import { vi } from "vitest";
 import * as Effect from "effect/Effect";
@@ -599,10 +599,12 @@ layer("standalone workspace ownership", (it) => {
       yield* Effect.promise(() => fs.mkdir(target, { mode: 0o755 }));
       const originalMode = (yield* Effect.promise(() => fs.lstat(target))).mode;
       yield* Effect.promise(() => fs.rename(cwd, saved));
-      const linked = yield* Effect.tryPromise({
-        try: () => fs.symlink(target, cwd, "dir"),
-        catch: (error) => error,
-      }).pipe(Effect.result);
+      // Keep the original native rejection as UnknownError.cause: Windows'
+      // exact EPERM privilege guard must inspect that same filesystem error,
+      // while the Effect failure channel remains a typed wrapper.
+      const linked = yield* Effect.tryPromise(() => fs.symlink(target, cwd, "dir")).pipe(
+        Effect.result,
+      );
       if (linked._tag === "Failure") {
         // Only this privilege-dependent assertion path is skipped; ordinary
         // directory identity/cleanup coverage remains enabled on every host.
@@ -610,9 +612,9 @@ layer("standalone workspace ownership", (it) => {
         yield* store.remove(thread);
         if (
           process.platform === "win32" &&
-          linked.failure instanceof Error &&
-          "code" in linked.failure &&
-          linked.failure.code === "EPERM"
+          linked.failure.cause instanceof Error &&
+          "code" in linked.failure.cause &&
+          linked.failure.cause.code === "EPERM"
         ) {
           context.skip("Windows does not permit this specific directory-symlink fixture.");
           return;

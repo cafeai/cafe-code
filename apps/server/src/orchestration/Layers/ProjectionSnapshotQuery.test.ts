@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import {
   CheckpointRef,
   EventId,
@@ -27,6 +28,9 @@ import {
 } from "./ProjectionSnapshotQuery.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { hydrateSubagentLifecycleForThread } from "../subagentLifecycleRetention.ts";
+
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
@@ -1700,7 +1704,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'intent-before-completion', 'thread', 'thread-message-before-completion', 100,
             'thread.turn-steer-requested', '2026-07-14T00:00:09.400Z',
             'client:intent-before-completion', NULL, NULL, 'client',
-            ${JSON.stringify({
+            ${encodeJsonString({
               threadId: "thread-message-before-completion",
               messageId: "message-before-completion",
               expectedTurnId: "turn-message-before-completion",
@@ -1742,7 +1746,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'info',
           'task.progress',
           'Reasoning update',
-          ${JSON.stringify(beforeCompletionProcessingPayload)},
+          ${encodeJsonString(beforeCompletionProcessingPayload)},
           NULL,
           '2026-07-14T00:00:09.250Z'
         )
@@ -1773,7 +1777,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           NULL,
           NULL,
           'provider',
-          ${JSON.stringify({
+          ${encodeJsonString({
             threadId: "thread-message-before-completion",
             activity: {
               id: "historical-processed-steer-before-completion",
@@ -1799,7 +1803,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'info',
           'provider.turn.steer.accepted',
           'Steer accepted',
-          ${JSON.stringify(beforeCompletionAcceptedPayload)},
+          ${encodeJsonString(beforeCompletionAcceptedPayload)},
           NULL,
           '2026-07-14T00:00:09.500Z'
         )
@@ -1842,7 +1846,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           NULL,
           'server:codex-steer-accepted:thread-message-before-completion:turn-message-before-completion:message-before-completion',
           'server',
-          ${JSON.stringify(beforeCompletionAcceptedEventPayload)},
+          ${encodeJsonString(beforeCompletionAcceptedEventPayload)},
           '{}'
         )
       `;
@@ -1868,7 +1872,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'info',
           'task.progress',
           'Reasoning update',
-          ${JSON.stringify(beforeCompletionProcessingPayload)},
+          ${encodeJsonString(beforeCompletionProcessingPayload)},
           NULL,
           '2026-07-14T00:00:09.800Z'
         )
@@ -1899,7 +1903,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           NULL,
           NULL,
           'provider',
-          ${JSON.stringify({
+          ${encodeJsonString({
             threadId: "thread-message-before-completion",
             activity: {
               id: "processed-steer-before-completion",
@@ -1998,7 +2002,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               'intent-retargeted-acceptance', 'thread', 'thread-historical-steer', 100,
               'thread.turn-steer-requested', '2026-08-30T12:00:03.000Z',
               'client:intent-retargeted-acceptance', NULL, NULL, 'client',
-              ${JSON.stringify({
+              ${encodeJsonString({
                 threadId: "thread-historical-steer",
                 messageId: "message-retargeted",
                 expectedTurnId: "turn-retargeted-acceptance",
@@ -2009,7 +2013,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               'intent-processed-acceptance', 'thread', 'thread-historical-steer', 101,
               'thread.turn-steer-requested', '2026-08-30T12:01:03.000Z',
               'client:intent-processed-acceptance', NULL, NULL, 'client',
-              ${JSON.stringify({
+              ${encodeJsonString({
                 threadId: "thread-historical-steer",
                 messageId: "message-processed",
                 expectedTurnId: "turn-processed-acceptance",
@@ -2142,7 +2146,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           (
             'accepted-retargeted', 'thread-historical-steer', 'turn-retargeted-acceptance',
             'info', 'provider.turn.steer.accepted', 'Steer accepted',
-            ${JSON.stringify({
+            ${encodeJsonString({
               provider: "codex",
               messageId: "message-retargeted",
               acceptedTurnId: "turn-retargeted-acceptance",
@@ -2154,7 +2158,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           (
             'accepted-processed', 'thread-historical-steer', 'turn-processed-acceptance',
             'info', 'provider.turn.steer.accepted', 'Steer accepted',
-            ${JSON.stringify({
+            ${encodeJsonString({
               provider: "codex",
               messageId: "message-processed",
               acceptedTurnId: "turn-processed-acceptance",
@@ -2171,7 +2175,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           (
             'processing-wrong-usage', 'thread-historical-steer', 'turn-retargeted-acceptance',
             'info', 'task.progress', 'Reasoning update',
-            ${JSON.stringify({
+            ${encodeJsonString({
               taskId: `codex-turn-steer-processing:${codexClientCorrelationId}`,
               usage: {
                 messageId: "another-message",
@@ -2183,7 +2187,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           (
             'processing-wrong-turn', 'thread-historical-steer', 'turn-newer-latest',
             'info', 'task.progress', 'Reasoning update',
-            ${JSON.stringify({
+            ${encodeJsonString({
               taskId: `codex-turn-steer-processing:${codexClientCorrelationId}`,
               usage: {
                 messageId: "message-retargeted",
@@ -2195,7 +2199,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           (
             'processing-wrong-token', 'thread-historical-steer', 'turn-retargeted-acceptance',
             'info', 'task.progress', 'Reasoning update',
-            ${JSON.stringify({
+            ${encodeJsonString({
               taskId: `codex-turn-steer-processing:cafe-steer-v1:${"b".repeat(64)}`,
               usage: {
                 messageId: "message-retargeted",
@@ -2255,7 +2259,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'event-accepted-retargeted', 'thread', 'thread-historical-steer', 0,
             'thread.activity-appended', '2026-08-30T12:00:03.100Z',
             'server:accepted-retargeted', NULL, 'server:accepted-retargeted', 'server',
-            ${JSON.stringify({
+            ${encodeJsonString({
               threadId: "thread-historical-steer",
               activity: {
                 id: "accepted-retargeted",
@@ -2279,7 +2283,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'event-accepted-processed', 'thread', 'thread-historical-steer', 1,
             'thread.activity-appended', '2026-08-30T12:01:03.100Z',
             'server:accepted-processed', NULL, 'server:accepted-processed', 'server',
-            ${JSON.stringify({
+            ${encodeJsonString({
               threadId: "thread-historical-steer",
               activity: {
                 id: "accepted-processed",
@@ -2476,7 +2480,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         VALUES (
           'recovered-retargeted', 'thread-historical-steer', 'turn-newer-latest',
           'info', 'provider.turn.steer.recovered', 'Steer recovered',
-          ${JSON.stringify(recoveredPayload)}, 1998, '2026-08-30T12:11:00.000Z'
+          ${encodeJsonString(recoveredPayload)}, 1998, '2026-08-30T12:11:00.000Z'
         )
       `;
         yield* sql`
@@ -2488,7 +2492,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'event-forged-recovered-retargeted', 'thread', 'thread-historical-steer', 5,
           'thread.activity-appended', '2026-08-30T12:11:00.000Z',
           'provider:forged-recovered', NULL, 'provider:forged-recovered', 'provider',
-          ${JSON.stringify(recoveredEventPayload)}, '{}'
+          ${encodeJsonString(recoveredEventPayload)}, '{}'
         )
       `;
 
@@ -2526,7 +2530,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           VALUES (
             'recovered-retargeted-old-generation', 'thread-historical-steer',
             'turn-newer-latest', 'info', 'provider.turn.steer.recovered', 'Steer recovered',
-            ${JSON.stringify(delayedOldRecoveredPayload)}, 1997, '2026-08-30T12:11:00.000Z'
+            ${encodeJsonString(delayedOldRecoveredPayload)}, 1997, '2026-08-30T12:11:00.000Z'
           )
         `;
         yield* sql`
@@ -2538,7 +2542,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'event-delayed-old-recovered-retargeted', 'thread', 'thread-historical-steer', 6,
             'thread.activity-appended', '2026-08-30T12:11:00.000Z',
             'server:delayed-old-recovered', NULL, 'server:delayed-old-recovered', 'server',
-            ${JSON.stringify(delayedOldRecoveredEventPayload)}, '{}'
+            ${encodeJsonString(delayedOldRecoveredEventPayload)}, '{}'
           )
         `;
         // Simulate a compact barrier written by an older generation. The
@@ -2578,7 +2582,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'event-trusted-recovered-retargeted', 'thread', 'thread-historical-steer', 7,
           'thread.activity-appended', '2026-08-30T12:11:00.000Z',
           'server:recovered-retargeted', NULL, 'server:trusted-recovered', 'server',
-          ${JSON.stringify(recoveredEventPayload)}, '{}'
+          ${encodeJsonString(recoveredEventPayload)}, '{}'
         )
       `;
         const trustedRecoveryEvidence = yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
@@ -2609,7 +2613,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'info',
           'task.progress',
           'Reasoning update',
-          ${JSON.stringify({
+          ${encodeJsonString({
             taskId: `codex-turn-steer-processing:${codexClientCorrelationId}`,
             // Restart-time provider observations deliberately carry only the
             // fixed opaque token. The trusted acceptance maps it back to the
@@ -2629,7 +2633,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'thread.activity-appended', '2026-08-30T12:00:04.250Z',
             'provider:codex:thread-historical-steer:processing-retargeted-exact:thread-activity-append:processing-retargeted-exact',
             NULL, NULL, 'provider',
-            ${JSON.stringify({
+            ${encodeJsonString({
               threadId: "thread-historical-steer",
               activity: {
                 id: "processing-retargeted-exact",
@@ -2730,7 +2734,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'intent-live-exact-steer-mature', 'thread', ${threadId}, 0,
             'thread.turn-steer-requested', ${intentCreatedAt},
             'client:intent-live-exact-steer-mature',
-            NULL, NULL, 'client', ${JSON.stringify({
+            NULL, NULL, 'client', ${encodeJsonString({
               threadId,
               messageId,
               expectedTurnId: turnId,
@@ -2747,7 +2751,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'session-stop-before-live-exact-steer-ack', 'thread', ${threadId}, 2,
             'thread.session-stop-requested', ${sessionStoppedAt},
             'client:session-stop-before-live-exact-steer-ack', NULL, NULL, 'client',
-            ${JSON.stringify({ threadId, createdAt: sessionStoppedAt })}, '{}'
+            ${encodeJsonString({ threadId, createdAt: sessionStoppedAt })}, '{}'
           )
         `;
         const [intent] = yield* sql<{ readonly sequence: number }>`
@@ -2769,7 +2773,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             'interrupt-before-live-exact-steer-ack', 'thread', ${threadId}, 1,
             'thread.turn-interrupt-requested', ${interruptedAt},
             'client:interrupt-before-live-exact-steer-ack', NULL, NULL, 'client',
-            ${JSON.stringify({ threadId, turnId, createdAt: interruptedAt })}, '{}'
+            ${encodeJsonString({ threadId, turnId, createdAt: interruptedAt })}, '{}'
           )
         `;
 
@@ -2786,7 +2790,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             payload_json, sequence, created_at
           ) VALUES (
             ${activityId}, ${threadId}, ${turnId}, 'info', 'provider.turn.steer.accepted',
-            'Steer accepted', ${JSON.stringify(acceptedPayload)}, NULL, ${acceptedAt}
+            'Steer accepted', ${encodeJsonString(acceptedPayload)}, NULL, ${acceptedAt}
           )
         `;
         yield* sql`
@@ -2797,7 +2801,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           ) VALUES (
             'event-live-exact-steer-mature', 'thread', ${threadId}, 3,
             'thread.activity-appended', ${acceptedAt}, 'server:accepted-live-exact-steer-mature',
-            NULL, NULL, 'server', ${JSON.stringify({
+            NULL, NULL, 'server', ${encodeJsonString({
               threadId,
               activity: {
                 id: activityId,
@@ -3127,7 +3131,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               ${input.occurredAt ?? createdAt},
               ${input.commandId ?? `${input.actorKind}:${input.eventId}`}, NULL,
               ${`${input.actorKind}:${input.eventId}`},
-              ${input.actorKind}, ${JSON.stringify(input.payload)}, '{}'
+              ${input.actorKind}, ${encodeJsonString(input.payload)}, '{}'
             )
           `;
         };
@@ -3182,7 +3186,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               )
               VALUES (
                 ${input.activityId}, ${recoveryThreadId}, ${turnId}, 'info', ${input.kind},
-                'Steer outcome', ${JSON.stringify(input.payload)}, NULL, ${createdAt}
+                'Steer outcome', ${encodeJsonString(input.payload)}, NULL, ${createdAt}
               )
             `;
             yield* insertEvent({
@@ -4558,7 +4562,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         const snapshotQuery = yield* ProjectionSnapshotQuery;
         const sql = yield* SqlClient.SqlClient;
         const threadId = ThreadId.make("thread-configuration-cap");
-        const configuration = JSON.stringify({
+        const configuration = encodeJsonString({
           turnConfiguration: {
             version: 1,
             provider: "codex",
@@ -4645,7 +4649,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             );
             assert.equal(retained.length, 1);
             assert.equal(retained[0]?.id, EventId.make("configuration-current"));
-            assert.deepEqual(retained[0]?.payload, JSON.parse(configuration));
+            assert.deepEqual(retained[0]?.payload, decodeJsonString(configuration));
           }
         }
         // A new turn with no snapshot cannot pull an old turn's settings into
@@ -4709,7 +4713,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         INSERT INTO projection_thread_activities (
           activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
         ) VALUES (${id}, ${threadId}, ${turnId}, 'info', 'runtime.warning', 'Recovery',
-          ${JSON.stringify(payload)}, ${sequence}, '2026-10-10T00:00:02.000Z')`;
+          ${encodeJsonString(payload)}, ${sequence}, '2026-10-10T00:00:02.000Z')`;
       yield* insertMarker("recovery-foreign-account", 50, {
         ...owner,
         providerInstanceId: "foreign",
@@ -5156,7 +5160,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         FROM child_numbers
       `;
       const restartCreatedAt = "2026-10-04T00:02:00.000Z";
-      const terminalPayload = JSON.stringify({
+      const terminalPayload = encodeJsonString({
         threadId,
         activity: {
           id: "same-ms-terminal",
@@ -5165,7 +5169,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           createdAt: restartCreatedAt,
         },
       });
-      const startPayload = JSON.stringify({
+      const startPayload = encodeJsonString({
         threadId,
         activity: {
           id: "same-ms-start",
@@ -5220,13 +5224,13 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           (
             'fallback-utf16-accepted', ${threadId}, 'turn-current', 'info', 'task.started',
             'Accepted exact identity',
-            ${JSON.stringify({ subagent: { threadId: "😀".repeat(256) } })},
+            ${encodeJsonString({ subagent: { threadId: "😀".repeat(256) } })},
             1000, '2026-10-04T00:02:01.000Z'
           ),
           (
             'fallback-utf16-rejected', ${threadId}, 'turn-current', 'info', 'task.started',
             'Rejected overlong identity',
-            ${JSON.stringify({ subagent: { threadId: "😀".repeat(300) } })},
+            ${encodeJsonString({ subagent: { threadId: "😀".repeat(300) } })},
             1001, '2026-10-04T00:02:02.000Z'
           )
       `;
@@ -5862,7 +5866,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
             VALUES
               (${`${turnId}-routine-${index}`}, ${threadId}, ${turnId}, 'info', ${activity.kind},
-               'Routine diagnostic', ${JSON.stringify(activity.payload)}, ${index + 1}, '2026-10-09T12:00:00.000Z')
+               'Routine diagnostic', ${encodeJsonString(activity.payload)}, ${index + 1}, '2026-10-09T12:00:00.000Z')
           `;
         }
       }
@@ -5872,7 +5876,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
           VALUES
             (${`visible-steering-${index}`}, ${threadId}, ${mixedTurn}, 'info', ${activity.kind},
-             'Useful activity', ${JSON.stringify(activity.payload)}, ${hidden.length + index + 1}, '2026-10-09T12:00:01.000Z')
+             'Useful activity', ${encodeJsonString(activity.payload)}, ${hidden.length + index + 1}, '2026-10-09T12:00:01.000Z')
         `;
       }
       for (const turnId of [receiptTurn, mixedTurn]) {
@@ -5888,7 +5892,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
             VALUES
               (${`${turnId}-receipt-${index}`}, ${threadId}, ${turnId}, 'info', ${activity.kind},
-               ${activity.summary}, ${JSON.stringify(payload)},
+               ${activity.summary}, ${encodeJsonString(payload)},
                ${hidden.length + visible.length + index + 1}, '2026-10-09T12:00:02.000Z')
           `;
         }
@@ -5988,7 +5992,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
         ) VALUES (
           ${id}, ${rowThreadId}, ${rowTurnId}, 'info', 'task.started',
-          'Approval review started', ${JSON.stringify(payload)}, ${sequence}, ${timestamp(sequence)}
+          'Approval review started', ${encodeJsonString(payload)}, ${sequence}, ${timestamp(sequence)}
         )
       `;
 
@@ -6161,7 +6165,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
         ) VALUES (
           ${id}, ${rowThreadId}, ${rowTurnId}, 'tool', ${kind}, 'Tool output',
-          ${JSON.stringify({ detail })}, ${sequence}, ${timestamp(sequence)}
+          ${encodeJsonString({ detail })}, ${sequence}, ${timestamp(sequence)}
         )
       `;
 
@@ -6695,7 +6699,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         for (const [index, row] of rows.entries())
           yield* sql`
         INSERT INTO projection_thread_activities (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
-        VALUES (${row.id},'thread-inspection-history',${row.turn},'info',${row.kind},'Fixture',${JSON.stringify(row.payload)},${index + 1},'2026-04-06T00:00:00.000Z')
+        VALUES (${row.id},'thread-inspection-history',${row.turn},'info',${row.kind},'Fixture',${encodeJsonString(row.payload)},${index + 1},'2026-04-06T00:00:00.000Z')
       `;
         const presence = yield* snapshotQuery.getThreadTurnWorkLogPresence({
           threadId: ThreadId.make("thread-inspection-history"),

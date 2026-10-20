@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -12,6 +13,9 @@ import * as Socket from "effect/unstable/socket/Socket";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+
+const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
 const runtimeUrl = import.meta.resolve("effect/unstable/rpc/RpcClient");
 const runtimePath = fileURLToPath(runtimeUrl);
@@ -99,8 +103,8 @@ function expectEmpty(registries: readonly CapturedRegistry[]): void {
   ]);
 }
 
-async function withClientFixture(
-  run: (fixture: ClientFixture) => Effect.Effect<void, unknown, Scope.Scope>,
+async function withClientFixture<E>(
+  run: (fixture: ClientFixture) => Effect.Effect<void, E, Scope.Scope>,
   options?: { readonly failBeforeClients?: boolean; readonly failWrites?: boolean },
 ): Promise<void> {
   const generations: SocketGeneration[] = [];
@@ -194,8 +198,7 @@ async function withClientFixture(
         }),
       ).pipe(
         Effect.provideService(Socket.Socket, socket),
-        Effect.provide(RpcSerialization.layerJson),
-        Effect.provide(TestClock.layer()),
+        Effect.provide(RpcSerialization.layerJson.pipe(Layer.provideMerge(TestClock.layer()))),
       ),
     );
     // Scope disposal independently retires requests that never receive Exit.
@@ -219,7 +222,7 @@ function startRequests(clients: ClientFixture["clients"], count: number) {
 
 function requests(generation: SocketGeneration) {
   return generation.sent.flatMap((encoded) => {
-    const message = JSON.parse(encoded) as { _tag: string; id: string; tag: string };
+    const message = decodeJson(encoded) as { _tag: string; id: string; tag: string };
     return message._tag === "Request" ? [message] : [];
   });
 }
@@ -237,7 +240,7 @@ function verifyFreshClients(
     const freshRequests = requests(generation).slice(countBefore);
     yield* Queue.offer(
       generation.inbox,
-      JSON.stringify({
+      encodeJson({
         _tag: "Exit",
         requestId: retiredId,
         exit: { _tag: "Success", value: "stale" },
@@ -245,7 +248,7 @@ function verifyFreshClients(
     );
     yield* Queue.offer(
       generation.inbox,
-      JSON.stringify({ _tag: "Chunk", requestId: retiredId, values: ["stale"] }),
+      encodeJson({ _tag: "Chunk", requestId: retiredId, values: ["stale"] }),
     );
     // Neither client may accept retired routing even with active fresh work.
     for (let turn = 0; turn < 10; turn += 1) yield* Effect.yieldNow;
@@ -254,7 +257,7 @@ function verifyFreshClients(
     for (const [index, request] of freshRequests.entries()) {
       yield* Queue.offer(
         generation.inbox,
-        JSON.stringify({
+        encodeJson({
           _tag: "Exit",
           requestId: request.id,
           exit: { _tag: "Success", value: `client-${index}` },
@@ -309,7 +312,7 @@ describe("pinned Effect typed RPC registry compatibility", () => {
             const message =
               kind === "malformed-json"
                 ? "{"
-                : JSON.stringify(
+                : encodeJson(
                     kind === "remote-defect"
                       ? { _tag: "Defect", defect: "controlled peer failure" }
                       : {
@@ -377,11 +380,13 @@ describe("pinned Effect typed RPC registry compatibility", () => {
           yield* eventually(() => expect(requests(generation)).toHaveLength(countBefore + 32));
           yield* TestClock.adjust("5 seconds");
           yield* eventually(() =>
-            expect(generation.sent.some((encoded) => JSON.parse(encoded)._tag === "Ping")).toBe(
-              true,
-            ),
+            expect(
+              generation.sent.some(
+                (encoded) => (decodeJson(encoded) as { _tag: string })._tag === "Ping",
+              ),
+            ).toBe(true),
           );
-          yield* Queue.offer(generation.inbox, JSON.stringify({ _tag: "Pong" }));
+          yield* Queue.offer(generation.inbox, encodeJson({ _tag: "Pong" }));
           for (let turn = 0; turn < 10; turn += 1) yield* Effect.yieldNow;
           yield* TestClock.adjust("5 seconds");
           expect(generations).toHaveLength(cycle + 1);
@@ -429,7 +434,7 @@ describe("pinned Effect typed RPC registry compatibility", () => {
           expect(streamRequest).toBeDefined();
           yield* Queue.offer(
             generation.inbox,
-            JSON.stringify({ _tag: "Chunk", requestId: streamRequest!.id, values: [42] }),
+            encodeJson({ _tag: "Chunk", requestId: streamRequest!.id, values: [42] }),
           );
           for (const fiber of fibers) expect(Exit.isFailure(yield* Fiber.join(fiber))).toBe(true);
           expectEmpty(registries);

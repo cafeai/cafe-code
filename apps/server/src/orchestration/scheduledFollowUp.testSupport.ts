@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import {
   CommandId,
   MessageId,
@@ -10,6 +11,8 @@ import * as Effect from "effect/Effect";
 import type * as SqlClient from "effect/unstable/sql/SqlClient";
 
 /** In-memory synthetic authority shared by engine/reactor integration tests. */
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
 export const seedScheduledFollowUp = (
   sql: SqlClient.SqlClient,
   input: {
@@ -62,7 +65,7 @@ export const seedScheduledFollowUp = (
     yield* sql`INSERT INTO scheduled_followups
       (id, thread_id, revision, state, definition_json, authorized_instance_id,
         permission_ceiling, next_run_at, created_at, updated_at, run_count)
-      VALUES (${scheduleId}, ${input.threadId}, 1, 'active', ${JSON.stringify(definition)},
+      VALUES (${scheduleId}, ${input.threadId}, 1, 'active', ${encodeJsonString(definition)},
         ${modelSelection.instanceId}, ${runtimeMode}, ${now}, ${now}, ${now}, 0)`;
     yield* sql`INSERT INTO scheduled_followup_runs
       (id, schedule_id, revision, thread_id, due_at, state, command_id, message_id,
@@ -70,6 +73,6 @@ export const seedScheduledFollowUp = (
         result, summary, error_code, attempt_at)
       VALUES (${runId}, ${scheduleId}, 1, ${input.threadId}, ${now}, 'waiting',
         ${command.commandId}, ${command.message.messageId}, NULL, NULL,
-        ${JSON.stringify(modelSelection)}, ${now}, NULL, NULL, NULL, NULL, NULL, NULL)`;
+        ${encodeJsonString(modelSelection)}, ${now}, NULL, NULL, NULL, NULL, NULL, NULL)`;
     return command;
   });

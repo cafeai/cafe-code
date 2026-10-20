@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import {
   ProviderInstanceId,
   SubagentRuntimeId,
@@ -20,6 +21,8 @@ import {
   readCodexFailedRootRetirementRefusal,
   type CodexFailedRootRetryIdentity,
 } from "./codexFailedRootRetry.ts";
+
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const now = "2026-10-19T01:00:00.000Z";
 const account = ProviderInstanceId.make("retry-account");
@@ -158,6 +161,17 @@ describe("failed-root pre-submission retry evidence", () => {
       Cause.fail(proxy),
       Cause.fail(revoked.proxy),
       Cause.fail(remoteGetter),
+      // A schema/HMR compatibility brand is copied data, not native ownership or
+      // evidence that no paid input crossed the failed-root retirement fence.
+      Cause.fail({
+        _tag: "ProviderAdapterRequestError",
+        "~effect/Schema/Class/ProviderAdapterRequestError":
+          "~effect/Schema/Class/ProviderAdapterRequestError",
+        provider: "codex",
+        method: "turn/start",
+        detail: "Fixed refusal.",
+        failedRootRetirementRefusal: "notifications-pending",
+      }),
       Cause.fail(
         Object.assign(new Error("notifications-pending"), {
           provider: "codex",
@@ -222,7 +236,7 @@ describe("failed-root pre-submission retry evidence", () => {
         const rows = yield* sql<{
           readonly sequence: number;
         }>`INSERT INTO orchestration_events(event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at, command_id, actor_kind, payload_json, metadata_json)
-        VALUES (${`retry-test-event-${id}`}, ${options?.aggregate ?? "thread"}, ${threadId}, ${id}, ${options?.eventType ?? "thread.activity-appended"}, ${now}, ${commandId}, ${options?.actor ?? "server"}, ${options?.rawPayload ?? JSON.stringify(payload)}, '{}') RETURNING sequence`;
+        VALUES (${`retry-test-event-${id}`}, ${options?.aggregate ?? "thread"}, ${threadId}, ${id}, ${options?.eventType ?? "thread.activity-appended"}, ${now}, ${commandId}, ${options?.actor ?? "server"}, ${options?.rawPayload ?? encodeJsonString(payload)}, '{}') RETURNING sequence`;
         return rows[0]!.sequence;
       });
     const create = () =>
@@ -432,7 +446,7 @@ describe("failed-root pre-submission retry evidence", () => {
           { actor: "provider" },
           { eventType: "thread.meta-updated" },
           { aggregate: "project" },
-          { rawPayload: JSON.stringify({ large: "x".repeat(16_385) }) },
+          { rawPayload: encodeJsonString({ large: "x".repeat(16_385) }) },
         ]) {
           const t = yield* f.create();
           const root = yield* t.root();

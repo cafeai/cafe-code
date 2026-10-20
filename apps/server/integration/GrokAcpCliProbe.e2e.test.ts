@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Data from "effect/Data";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as TestClock from "effect/testing/TestClock";
@@ -15,6 +16,14 @@ import {
 
 const runRealGrok = process.env.CAFE_CODE_GROK_E2E === "1";
 const traceRealGrok = process.env.CAFE_CODE_GROK_E2E_TRACE === "1";
+class GrokCanaryTimeoutError extends Data.TaggedError("GrokCanaryTimeoutError")<{
+  readonly message: string;
+}> {
+  constructor(message: string) {
+    super({ message });
+    this.name = "Error";
+  }
+}
 
 it.layer(NodeServices.layer)("real Grok ACP qualification", (it) => {
   it.effect.skipIf(!runRealGrok)(
@@ -62,7 +71,9 @@ it.layer(NodeServices.layer)("real Grok ACP qualification", (it) => {
         const startedOption = yield* runtime.start().pipe(Effect.timeoutOption("30 seconds"));
         if (Option.isNone(startedOption)) {
           return yield* Effect.fail(
-            new Error("Grok ACP canary timed out during initialize/authenticate/session setup."),
+            new GrokCanaryTimeoutError(
+              "Grok ACP canary timed out during initialize/authenticate/session setup.",
+            ),
           );
         }
         expect(startedOption.value.initializeResult.protocolVersion).toBe(1);
@@ -78,7 +89,7 @@ it.layer(NodeServices.layer)("real Grok ACP qualification", (it) => {
           .pipe(Effect.timeoutOption("90 seconds"));
         if (Option.isNone(resultOption)) {
           return yield* Effect.fail(
-            new Error("Grok ACP canary timed out waiting for prompt completion."),
+            new GrokCanaryTimeoutError("Grok ACP canary timed out waiting for prompt completion."),
           );
         }
         expect(resultOption.value.stopReason).not.toBe("cancelled");

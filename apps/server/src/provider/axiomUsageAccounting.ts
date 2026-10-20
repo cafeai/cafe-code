@@ -1,3 +1,4 @@
+import * as ProviderDateTime from "effect/DateTime";
 import { createHash } from "node:crypto";
 import {
   UsageAccountingSnapshot,
@@ -41,7 +42,7 @@ export function axiomUsageTimestamp(value: unknown): string | undefined {
   if (Option.isNone(decoded)) return;
   const millis = BigInt(decoded.value.finishedAtMs ?? decoded.value.startedAtMs);
   if (millis > 8_640_000_000_000_000n) return;
-  const timestamp = new Date(Number(millis)).toISOString();
+  const timestamp = ProviderDateTime.formatIso(ProviderDateTime.makeUnsafe(Number(millis)));
   return timestamp.length === 24 ? timestamp : undefined;
 }
 

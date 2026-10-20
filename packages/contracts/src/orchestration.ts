@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
@@ -760,7 +761,7 @@ const ThreadTurnSubagentDetailTimestamp = Schema.String.check(
   Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
   Schema.makeFilter((value) => {
     const time = Date.parse(value);
-    return Number.isFinite(time) && new Date(time).toISOString() === value;
+    return Number.isFinite(time) && DateTime.formatIso(DateTime.makeUnsafe(time)) === value;
   }),
 );
 

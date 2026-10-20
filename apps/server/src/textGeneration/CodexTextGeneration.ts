@@ -51,6 +51,9 @@ import { getModelSelectionStringOptionValue } from "@cafecode/shared/model";
 
 const CODEX_TIMEOUT_MS = 180_000;
 const encodeJsonString = Schema.encodeEffect(Schema.UnknownFromJsonString);
+// The service tier is already a finite server-admitted scalar. Preserve the
+// exact JSON string literal carried by the structured native Codex argv.
+const encodeServiceTier = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 /**
  * Build a Codex text-generation closure bound to a specific `CodexSettings`
  * payload. See `makeCodexAdapter` for the overall per-instance rationale.
@@ -229,7 +232,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           // silently incur the premium the Cafe selection turned off. Only an
           // absent selection delegates to upstream configuration.
           ...(tier.serviceTier !== undefined
-            ? ["--config", `service_tier=${JSON.stringify(tier.serviceTier)}`]
+            ? ["--config", `service_tier=${encodeServiceTier(tier.serviceTier)}`]
             : []),
           "--output-schema",
           schemaPath,

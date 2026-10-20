@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import { ProjectId, ThreadId } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -29,6 +30,8 @@ import {
   hardDeleteThreadLocalData,
   purgeHardDeletedThreadPersistence,
 } from "./threadHardDelete.ts";
+
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const checkpointDeleteCalls: Array<DeleteCheckpointRefsInput> = [];
 
@@ -690,7 +693,7 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
             NULL,
             'command-hard-delete-steer',
             'client',
-            ${JSON.stringify({
+            ${encodeJsonString({
               threadId: targetThreadId,
               messageId: "message-hard-delete-steer",
               expectedTurnId: "turn-hard-delete",
@@ -709,7 +712,7 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
             NULL,
             'command-hard-delete-steer',
             'server',
-            ${JSON.stringify({
+            ${encodeJsonString({
               threadId: targetThreadId,
               activity: {
                 id: "activity-hard-delete-accepted",
@@ -737,7 +740,7 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
             NULL,
             'command-survivor-steer',
             'client',
-            ${JSON.stringify({
+            ${encodeJsonString({
               threadId: survivorThreadId,
               messageId: "message-survivor-steer",
               expectedTurnId: "turn-survivor",
@@ -756,7 +759,7 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
             NULL,
             'command-survivor-steer',
             'server',
-            ${JSON.stringify({
+            ${encodeJsonString({
               threadId: survivorThreadId,
               activity: {
                 id: "activity-survivor-accepted",

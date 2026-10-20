@@ -70,6 +70,8 @@ import {
 import { isStaleProvisionalSessionReplay } from "../sessionLifecycle.ts";
 import { readFileAttachmentOwner } from "../../fileAttachmentStore.ts";
 
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
   threads: "projection.threads",
@@ -818,7 +820,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           DELETE FROM projection_thread_messages
           WHERE thread_id = ${input.targetThreadId}
           AND message_id NOT IN (
-            SELECT ${copyPrefix} || value FROM json_each(${JSON.stringify(input.retainedMessageIds ?? [])})
+            SELECT ${copyPrefix} || value FROM json_each(${encodeJsonString(input.retainedMessageIds ?? [])})
           )
         `;
         yield* sql`

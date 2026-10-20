@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
 import { CommandId, MessageId, ThreadId, TurnId, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -38,7 +39,10 @@ export const ScheduledFollowupTimestamp = Schema.String.check(
   Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
   Schema.makeFilter((value) => {
     const milliseconds = Date.parse(value);
-    return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+    return (
+      Number.isFinite(milliseconds) &&
+      DateTime.formatIso(DateTime.makeUnsafe(milliseconds)) === value
+    );
   }),
 );
 export type ScheduledFollowupTimestamp = typeof ScheduledFollowupTimestamp.Type;

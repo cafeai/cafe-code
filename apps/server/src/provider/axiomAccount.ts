@@ -46,6 +46,8 @@ export const AXIOM_LOGIN_ERRORS = {
 
 /** Only Cafe-authored finite messages may cross the public login error boundary. */
 export function axiomLoginFailureMessage(error: unknown): string {
+  // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+  // @effect-diagnostics-next-line instanceOfSchema:off
   return error instanceof ProviderAdapterValidationError &&
     error.provider === "axiom" &&
     error.operation === "login" &&

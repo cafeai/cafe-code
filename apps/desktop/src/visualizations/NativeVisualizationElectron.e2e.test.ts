@@ -1,9 +1,17 @@
+// Explicit native fixture retains exact Electron child argv, output and retirement.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { constants, type BigIntStats } from "node:fs";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { lstat, mkdtemp, open, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";

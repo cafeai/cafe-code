@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import {
   CommandId,
   CheckpointRef,
@@ -31,6 +32,9 @@ import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
 import { makeStandaloneWorkspaceStore } from "./standaloneWorkspace.ts";
 import { threadForkPrefix } from "./threadForkCutoff.ts";
+
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
 const sourceThreadId = ThreadId.make("thread-fork-source");
 const targetThreadId = ThreadId.make("thread-fork-target");
@@ -196,8 +200,8 @@ it.effect(
       // Simulate a persisted/reloaded partial fork: its deliberately interrupted
       // endpoint has no filesystem checkpoint, yet its exact native ordinal is
       // retained by the provider. A successive fork must still reach that adapter.
-      const partial = JSON.parse(
-        JSON.stringify(threadForkPrefix(claudeSource, expected, [messageId])),
+      const partial = decodeJsonString(
+        encodeJsonString(threadForkPrefix(claudeSource, expected, [messageId])),
       ) as OrchestrationThread;
       assert.equal(partial.checkpoints.length, 0);
       yield* run(partial);

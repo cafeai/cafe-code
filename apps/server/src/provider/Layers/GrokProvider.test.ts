@@ -1,4 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+// Native provider path boundary: retain host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import { describe, expect, it } from "@effect/vitest";
@@ -19,6 +21,8 @@ import {
   writeGrokAcpMockShim,
   writeGrokTestShim,
 } from "../testUtils/grokProcessFixture.ts";
+
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -68,7 +72,7 @@ const makeQualifiedFakeGrok = Effect.fn(function* (input?: {
     },
     versionResponse: { stdout: "grok 1.0.4\n" },
     inspectResponse: {
-      stdout: `${JSON.stringify({
+      stdout: `${encodeProviderJsonString({
         skills: [
           {
             name: "repository-review",
@@ -217,7 +221,7 @@ if (args.length === 1 && args[0] === "--version") {
             });
             expect(snapshot.message).toContain("socket is a symbolic link");
             expect(snapshot.message).toContain("has not disabled sandbox protection");
-            const diagnostics = JSON.stringify({ snapshot, logs });
+            const diagnostics = encodeProviderJsonString({ snapshot, logs });
             expect(diagnostics).toContain("container-socket-symlink");
             expect(diagnostics).not.toContain("secret-token");
             expect(diagnostics).not.toContain("/private/");
@@ -406,7 +410,9 @@ if (args.length === 1 && args[0] === "--version") {
           },
           checkedAt: snapshot.checkedAt,
         });
-        expect(JSON.stringify(snapshot.accountRateLimits)).not.toContain("prepaidBalance");
+        expect(encodeProviderJsonString(snapshot.accountRateLimits)).not.toContain(
+          "prepaidBalance",
+        );
       }),
     ),
   );

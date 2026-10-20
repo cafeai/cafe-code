@@ -80,7 +80,11 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
           (attempt) =>
             attempt as Effect.Effect<unknown, import("../Services/ServerAuth.ts").AuthError>,
         ))
-          expect((yield* attempt.pipe(Effect.flip)).status).toBe(401);
+          expect(
+            yield* attempt.pipe(
+              Effect.match({ onFailure: (error) => error.status, onSuccess: () => null }),
+            ),
+          ).toBe(401);
         expect((yield* auth.listPairingLinks()).map((entry) => entry.id)).toContain(pairing.id);
         yield* TestClock.adjust("30 seconds");
         const code = totpAtStep(
@@ -163,7 +167,11 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
           index % 2 === 0
             ? auth.exchangePasswordCredential(input, metadata)
             : auth.exchangePasswordCredentialForBearerSession(input, metadata);
-        expect((yield* attempt.pipe(Effect.flip)).status).toBe(401);
+        expect(
+          yield* attempt.pipe(
+            Effect.match({ onFailure: (error) => error.status, onSuccess: () => null }),
+          ),
+        ).toBe(401);
       }
       const pairing = yield* auth.issuePairingCredential();
       const blocked = yield* auth

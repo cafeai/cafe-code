@@ -1,4 +1,7 @@
+import * as ProviderDateTime from "effect/DateTime";
 import { createHash } from "node:crypto";
+// Native provider path boundary: retain host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { isAbsolute } from "node:path";
 import {
   AxiomSettings,
@@ -434,7 +437,7 @@ export const applyAxiomSelection = (
 export function validateAxiomEvidence(
   value: typeof AxiomVerification.Type,
   modelId: string,
-  nowSeconds = Math.floor(Date.now() / 1000),
+  nowSeconds = Math.floor(ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe()) / 1000),
 ) {
   const evidence = value.evidence;
   if (value.status.state !== "verified" && value.status.state !== "degraded") return null;

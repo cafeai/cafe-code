@@ -1,3 +1,5 @@
+// Native fixture retains actual host file/socket identity and exact owned cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { createServer, request, type Server } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { runPrivateGlideRequest } from "./privateDaemon.ts";

@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import {
   EventId,
   ProviderDriverKind,
@@ -16,6 +17,14 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { makeConversationRewindStore } from "./ConversationRewinds.ts";
 import { isPendingConversationRewind } from "../Services/ConversationRewinds.ts";
 import { makeSqlitePersistenceLive, SqlitePersistenceMemory } from "./Sqlite.ts";
+
+// Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
+// this codec does not replace production admission or grant received-data authority.
+const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeFixtureJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+const decodeRuntimePayload = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
 
 const timestamp = "2026-10-04T00:00:00.000Z";
 const identity = {
@@ -99,7 +108,7 @@ const writeEvent = (
        command_id,actor_kind,payload_json,metadata_json)
     VALUES (${input.sequence},${`event-${input.sequence}`},'thread',${streamId},${input.sequence},
       ${input.eventType ?? "thread.checkpoint-revert-requested"},${timestamp},${commandId},
-      ${input.actor ?? "server"},${JSON.stringify({ threadId: streamId, turnCount: input.turnCount ?? 1 })},'{}')
+      ${input.actor ?? "server"},${encodeFixtureJson({ threadId: streamId, turnCount: input.turnCount ?? 1 })},'{}')
   `;
 };
 const seedRuntime = (sql: SqlClient.SqlClient) => sql`
@@ -107,8 +116,8 @@ const seedRuntime = (sql: SqlClient.SqlClient) => sql`
     (thread_id,provider_name,provider_instance_id,adapter_key,runtime_mode,status,last_seen_at,
       resume_cursor_json,runtime_payload_json)
   VALUES (${identity.threadId},${original.provider},${original.providerInstanceId!},'adapter',
-    ${original.runtimeMode},'ready',${timestamp},${JSON.stringify(original.resumeCursor)},
-    ${JSON.stringify({ subagentRuntimeId: original.subagentRuntimeId, activeTurnId: null, retainedTag: "preserved" })})
+    ${original.runtimeMode},'ready',${timestamp},${encodeFixtureJson(original.resumeCursor)},
+    ${encodeFixtureJson({ subagentRuntimeId: original.subagentRuntimeId, activeTurnId: null, retainedTag: "preserved" })})
 `;
 const fixture = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -193,8 +202,8 @@ describe("ConversationRewinds", () => {
           ])
             assert.notInclude(json, marker);
         }
-        assert.deepEqual(JSON.parse(rows[0]!.original), durableOriginal);
-        assert.deepEqual(JSON.parse(rows[0]!.candidate), durableCandidate);
+        assert.deepEqual(decodeFixtureJson(rows[0]!.original), durableOriginal);
+        assert.deepEqual(decodeFixtureJson(rows[0]!.candidate), durableCandidate);
         const restored = yield* store.read(identity.threadId);
         assert.deepEqual(restored?.original, durableOriginal);
         assert.deepEqual(restored?.candidate, durableCandidate);
@@ -217,15 +226,18 @@ describe("ConversationRewinds", () => {
           commandCatalogConfigurationKey: "legacy-private-configuration-marker",
         };
         yield* sql`UPDATE provider_conversation_rewinds
-        SET original_session_json=${JSON.stringify({ ...original, ...legacyVolatile })},
-          candidate_session_json=${JSON.stringify({ ...candidate, ...legacyVolatile })}
+        SET original_session_json=${encodeFixtureJson({ ...original, ...legacyVolatile })},
+          candidate_session_json=${encodeFixtureJson({ ...candidate, ...legacyVolatile })}
         WHERE thread_id=${identity.threadId}`;
         const restored = yield* store.read(identity.threadId);
         assert.equal(restored?.phase, "prepared");
         assert.deepEqual(restored?.original, original);
         assert.deepEqual(restored?.candidate, candidate);
         assert.isTrue(yield* store.commit(identity));
-        assert.deepEqual(JSON.parse((yield* runtimeRows(sql))[0]!.cursor), candidate.resumeCursor);
+        assert.deepEqual(
+          decodeFixtureJson((yield* runtimeRows(sql))[0]!.cursor),
+          candidate.resumeCursor,
+        );
       }).pipe(Effect.provide(SqlitePersistenceMemory)),
   );
 
@@ -300,8 +312,8 @@ describe("ConversationRewinds", () => {
         assert.isTrue(yield* store.commit(identity));
         const rows = yield* runtimeRows(sql);
         assert.equal(rows[0]?.status, "stopped");
-        assert.deepEqual(JSON.parse(rows[0]!.cursor), candidate.resumeCursor);
-        const payload = JSON.parse(rows[0]!.payload);
+        assert.deepEqual(decodeFixtureJson(rows[0]!.cursor), candidate.resumeCursor);
+        const payload = decodeRuntimePayload(rows[0]!.payload);
         assert.equal(payload.retainedTag, "preserved");
         assert.isUndefined(payload.subagentRuntimeId);
         assert.isUndefined(payload.activeTurnId);
@@ -321,7 +333,10 @@ describe("ConversationRewinds", () => {
         yield* writeEvent(sql, { sequence: 2, eventType: "thread.runtime-mode-set" });
         assert.isFalse(yield* store.commit(identity));
         assert.equal((yield* store.read(identity.threadId))?.phase, "prepared");
-        assert.deepEqual(JSON.parse((yield* runtimeRows(sql))[0]!.cursor), original.resumeCursor);
+        assert.deepEqual(
+          decodeFixtureJson((yield* runtimeRows(sql))[0]!.cursor),
+          original.resumeCursor,
+        );
         assert.isTrue(yield* store.finish({ ...identity, outcome: "aborted" }));
       }).pipe(Effect.provide(SqlitePersistenceMemory)),
   );
@@ -512,7 +527,7 @@ describe("ConversationRewinds", () => {
           }),
         );
         const current = "0ce6c0e7-dcdc-4d89-aacb-110610fca13c";
-        yield* sql`UPDATE provider_session_runtime SET runtime_payload_json=${JSON.stringify({ subagentRuntimeId: current })}
+        yield* sql`UPDATE provider_session_runtime SET runtime_payload_json=${encodeFixtureJson({ subagentRuntimeId: current })}
         WHERE thread_id=${identity.threadId}`;
         const before = yield* store.read(identity.threadId);
         assert.isFalse(yield* store.acceptsEvent(eventFor()));
@@ -570,7 +585,7 @@ describe("ConversationRewinds", () => {
           const store = makeConversationRewindStore(sql);
           assert.equal((yield* store.read(identity.threadId))?.phase, "committed");
           assert.deepEqual(
-            JSON.parse((yield* runtimeRows(sql))[0]!.cursor),
+            decodeFixtureJson((yield* runtimeRows(sql))[0]!.cursor),
             candidate.resumeCursor,
           );
           assert.isFalse(yield* store.finish({ ...identity, outcome: "committed" }));

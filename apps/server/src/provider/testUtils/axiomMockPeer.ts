@@ -1,8 +1,13 @@
+import * as ProviderDateTime from "effect/DateTime";
 // Test-only ACP peer. Desktop state stays in its fixture-owned temporary root;
 // it never reads provider configuration, credentials or user files.
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
+// Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+// Native provider path boundary: retain host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 
 const frontend = process.argv[2] ?? "cli";
@@ -70,7 +75,7 @@ const activity = (event: unknown) =>
     runtimeInstanceId,
     sessionId,
     sequence: ++sequence,
-    occurredAt: new Date().toISOString(),
+    occurredAt: ProviderDateTime.formatIso(ProviderDateTime.nowUnsafe()),
     event,
   });
 const configs = () => [
@@ -118,8 +123,11 @@ const evidence = () => ({
   e2eeProtocol: "tinfoil-ehbp-v1",
   e2eeEncryptionVersion: 1,
   trustPolicyVersion: "fixture-policy",
-  verifiedAtUnixSeconds: Math.floor(Date.now() / 1000),
-  hardExpiresAtUnixSeconds: Math.floor(Date.now() / 1000) + 240,
+  verifiedAtUnixSeconds: Math.floor(
+    ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe()) / 1000,
+  ),
+  hardExpiresAtUnixSeconds:
+    Math.floor(ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe()) / 1000) + 240,
   modelKeyFingerprint: "a".repeat(64),
   tlsSpkiFingerprint: "b".repeat(64),
   checks: [{ name: "SNP router", passed: true, detail: "Synthetic fixture evidence" }],
@@ -145,8 +153,8 @@ const finish = (authenticated: boolean) => {
         outputTokens: "30",
         reasoningTokens: "5",
         costMicrousd: "123456",
-        startedAtMs: String(Date.now() - 10),
-        finishedAtMs: String(Date.now()),
+        startedAtMs: String(ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe()) - 10),
+        finishedAtMs: String(ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe())),
       },
     });
   activity({
@@ -166,8 +174,8 @@ const finish = (authenticated: boolean) => {
       outputTokens: "30",
       reasoningTokens: "5",
       costMicrousd: "123456",
-      startedAtMs: String(Date.now() - 10),
-      finishedAtMs: String(Date.now()),
+      startedAtMs: String(ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe()) - 10),
+      finishedAtMs: String(ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe())),
     },
   });
   activity({ kind: "active_turn_changed", turnId: null });

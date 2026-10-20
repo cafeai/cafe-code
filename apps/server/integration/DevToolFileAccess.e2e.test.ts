@@ -1,7 +1,13 @@
+// Native fixture owns exact child argv, stdio handles and retirement; keep that process boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawnSync } from "node:child_process";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
+// Native fixture paths retain host drive, separator and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { expect, it } from "vitest";
@@ -13,9 +19,15 @@ import { expect, it } from "vitest";
 // installed tools' public entry points and never starts a test or browser.
 const qualificationSource = String.raw`
 import assert from "node:assert/strict";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+// Native fixture retains exact loopback socket/response lifetime and bounded streaming controls.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { createServer as createHttpServer } from "node:http";
 import { homedir } from "node:os";
+// Native fixture paths retain host drive, separator and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join, posix } from "node:path";
 
 const entries = JSON.parse(process.argv[2]);

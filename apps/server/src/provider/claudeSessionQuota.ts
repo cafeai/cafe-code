@@ -1,3 +1,4 @@
+import * as ProviderDateTime from "effect/DateTime";
 import {
   ProviderSessionQuotaReport,
   ProviderSessionQuotaTimestamp,
@@ -65,6 +66,8 @@ function reset(value: unknown): string | null {
   const month = Number(parts[2]);
   const day = Number(parts[3]);
   // setUTCFullYear avoids Date.UTC's special interpretation of years 0..99.
+  // The parser deliberately mutates a native UTC calendar to validate years 0–99 without Date.UTC rebinding them.
+  // @effect-diagnostics-next-line globalDate:off
   const calendar = new Date(0);
   calendar.setUTCFullYear(year, month - 1, day);
   if (
@@ -82,7 +85,9 @@ function reset(value: unknown): string | null {
   )
     return invalid();
   const milliseconds = Date.parse(value);
-  return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : invalid();
+  return Number.isFinite(milliseconds)
+    ? ProviderDateTime.formatIso(ProviderDateTime.makeUnsafe(milliseconds))
+    : invalid();
 }
 
 function meter(value: unknown): ProviderSessionQuotaMeter {

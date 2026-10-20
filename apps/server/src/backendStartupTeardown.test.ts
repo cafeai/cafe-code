@@ -43,6 +43,8 @@ describe("completed backend startup teardown", () => {
     expect(combinedRefusals.reasons).toHaveLength(2);
     const exits: ReadonlyArray<Exit.Exit<unknown, unknown>> = [
       Exit.succeed(undefined),
+      // The actual untagged Error is the negative under test: it must not gain profile-refusal authority.
+      // @effect-diagnostics-next-line globalErrorInEffectFailure:off
       Exit.fail(new Error("Synthetic ordinary failure.")),
       Exit.fail(custom),
       Exit.fail({ _tag: "BackendProfileGuardError", message: known.message }),
@@ -51,6 +53,7 @@ describe("completed backend startup teardown", () => {
       Exit.die(known),
       Exit.interrupt(123),
       Exit.failCause(Cause.empty),
+      // Keep an actual ordinary defect beside the typed refusal to verify the mixed-cause veto.
       Exit.failCause(Cause.combine(Cause.fail(known), Cause.die(new Error("Unrelated defect.")))),
       Exit.failCause(Cause.combine(Cause.fail(known), Cause.interrupt(123))),
       Exit.failCause(combinedRefusals),

@@ -1,3 +1,4 @@
+import * as ProviderJsonSchema from "effect/Schema";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -13,6 +14,10 @@ import {
 import { makeProviderUsageReset, type ProviderUsageResetOperation } from "./ProviderUsageReset.ts";
 import type { ProviderInstance } from "./ProviderDriver.ts";
 import { ProviderInstanceRegistry } from "./Services/ProviderInstanceRegistry.ts";
+
+const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
 
 const instanceId = ProviderInstanceId.make("codex-personal");
 const limits: ServerProviderAccountRateLimits = {
@@ -135,7 +140,7 @@ describe("usage reset confirmations (no live provider)", () => {
             identity: "private-account-comparison-key",
           }),
         ]);
-        expect(JSON.stringify(responses)).not.toContain("private-account-comparison-key");
+        expect(encodeProviderJsonString(responses)).not.toContain("private-account-comparison-key");
       }).pipe(Effect.provideService(ProviderInstanceRegistry, f.registry), Effect.scoped);
     },
   );

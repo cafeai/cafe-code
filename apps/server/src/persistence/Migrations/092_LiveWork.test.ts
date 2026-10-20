@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { describe } from "vitest";
@@ -6,6 +7,10 @@ import { describe } from "vitest";
 import { runMigrations } from "../Migrations.ts";
 import * as TestSqliteClient from "../TestSqliteClient.ts";
 import liveWork from "./092_LiveWork.ts";
+
+// Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
+// this codec does not replace production admission or grant received-data authority.
+const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const at = "2026-10-10T00:00:00.000Z";
 const runtimeId = "10000000-0000-4000-8000-000000000001";
@@ -22,7 +27,7 @@ const assertWorkflowRetention = (sql: SqlClient.SqlClient) =>
         activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
       ) VALUES (
         'workflow-092-start', 'workflow-092', 'turn-092', 'info', 'task.started', 'Workflow',
-        ${JSON.stringify({
+        ${encodeFixtureJson({
           taskId: "native-root",
           workflow: { runtimeId, providerInstanceId: "claude-account" },
           workflowRetentionId: workflowIdentity,

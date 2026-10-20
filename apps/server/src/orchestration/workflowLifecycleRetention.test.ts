@@ -1,6 +1,8 @@
+import * as Schema from "effect/Schema";
+import * as DateTime from "effect/DateTime";
 import { createHash } from "node:crypto";
 
-import { ThreadId } from "@cafecode/contracts";
+import { ThreadId } from "@cafecode/contracts/baseSchemas";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -13,13 +15,15 @@ import {
   SUBAGENT_LIFECYCLE_HYDRATION_PAGE_SIZE,
 } from "./subagentLifecycleRetention.ts";
 
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
 const turnId = "workflow-hydration-turn";
 const taskId = "native-root";
 const account = "claude-account-a";
 const runtimeId = "10000000-0000-4000-8000-000000000001";
 const workflowIdentity = (runtime: string) =>
   `sha256:workflow:${createHash("sha256")
-    .update(JSON.stringify([turnId, taskId, account, runtime]), "utf8")
+    .update(encodeJsonString([turnId, taskId, account, runtime]), "utf8")
     .digest("hex")}`;
 const payload = (runtime = runtimeId) => ({
   taskId,
@@ -83,15 +87,15 @@ it.layer(TestSqliteClient.layerMemory())("workflowLifecycleRetention", (it) => {
                 subagent: { threadId: "ordinary-child" },
               }
             : value;
-        const createdAt = new Date(
-          Date.parse("2026-10-09T00:00:00.000Z") + index * 1_000,
-        ).toISOString();
+        const createdAt = DateTime.formatIso(
+          DateTime.makeUnsafe(Date.parse("2026-10-09T00:00:00.000Z") + index * 1_000),
+        );
         yield* sql`
           INSERT INTO projection_thread_activities(
             activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
           ) VALUES (
             ${`legacy-workflow-${index.toString().padStart(3, "0")}`}, ${threadId}, ${turnId},
-            'info', 'task.started', 'Legacy workflow', ${JSON.stringify(withOrdinaryIdentities)},
+            'info', 'task.started', 'Legacy workflow', ${encodeJsonString(withOrdinaryIdentities)},
             ${createdAt}, ${index}
           )
         `;
@@ -101,7 +105,7 @@ it.layer(TestSqliteClient.layerMemory())("workflowLifecycleRetention", (it) => {
           activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
         ) VALUES (
           'other-thread-legacy-workflow', ${otherThreadId}, ${turnId}, 'info', 'task.started',
-          'Unrequested workflow', ${JSON.stringify(valid)}, '2026-10-09T00:00:00.000Z', 1
+          'Unrequested workflow', ${encodeJsonString(valid)}, '2026-10-09T00:00:00.000Z', 1
         )
       `;
       yield* runMigrations({ toMigrationInclusive: 90 });

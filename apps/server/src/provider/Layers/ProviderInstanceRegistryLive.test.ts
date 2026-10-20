@@ -749,7 +749,8 @@ describe("ProviderInstanceRegistryLive — owner retirement", () => {
                   Effect.andThen(Effect.die(new Error("Synthetic exact-owner cleanup failure"))),
                 ),
               );
-              if (phase === "provisional") yield* Effect.die(new Error("Synthetic create failure"));
+              if (phase === "provisional")
+                return yield* Effect.die(new Error("Synthetic create failure"));
               return instance;
             }),
         };

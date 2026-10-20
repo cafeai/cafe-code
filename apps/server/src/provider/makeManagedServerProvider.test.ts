@@ -1,3 +1,4 @@
+import * as ProviderDateTime from "effect/DateTime";
 import { describe, it, assert } from "@effect/vitest";
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@cafecode/contracts";
 import { createModelCapabilities } from "@cafecode/shared/model";
@@ -357,7 +358,9 @@ describe("makeManagedServerProvider", () => {
         assert.strictEqual(yield* Ref.get(checkCalls), 2);
         assert.strictEqual(
           (yield* provider.getSnapshot).probeDiagnostics?.nextScheduledAt,
-          new Date(firstScheduledAtMs + intervalMs * 2).toISOString(),
+          ProviderDateTime.formatIso(
+            ProviderDateTime.makeUnsafe(firstScheduledAtMs + intervalMs * 2),
+          ),
         );
 
         yield* TestClock.adjust("499 millis");

@@ -1,3 +1,5 @@
+import * as Schema from "effect/Schema";
+import * as DateTime from "effect/DateTime";
 import {
   EventId,
   ThreadId,
@@ -17,9 +19,12 @@ import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryI
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
 const threadId = ThreadId.make("cursor-thread");
 const turnId = TurnId.make("cursor-current-turn");
-const timestamp = (index: number) => new Date(Date.UTC(2026, 9, 11, 0, 0, index)).toISOString();
+const timestamp = (index: number) =>
+  DateTime.formatIso(DateTime.makeUnsafe(Date.UTC(2026, 9, 11, 0, 0, index)));
 const cursor = (sequence: number | null, activityId: string, createdAt = timestamp(0)) =>
   ({
     sequence,
@@ -102,7 +107,7 @@ it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
           yield* sql`DELETE FROM projection_thread_activities`;
           yield* sql`INSERT INTO projection_thread_activities
           (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
-          VALUES ('older-receipt',${threadId},${turnId},'tool',${kind},'Saved work',${JSON.stringify(payload)},1,${timestamp(1)})`;
+          VALUES ('older-receipt',${threadId},${turnId},'tool',${kind},'Saved work',${encodeJsonString(payload)},1,${timestamp(1)})`;
           const before = cursor(500, "inline-floor");
           const excludeOperations: WorkLogOperationIdentity[] = [
             { kind: operationKind, id: "inline-id" },
@@ -139,8 +144,8 @@ it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
 
           yield* sql`INSERT INTO projection_thread_activities
           (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
-          VALUES ('independent-work',${threadId},${turnId},'tool','tool.completed','Saved work',${JSON.stringify({ itemId: "other-operation", itemType: "command_execution" })},2,${timestamp(2)}),
-            ('same-id-warning',${threadId},${turnId},'info','runtime.warning','Visible warning',${JSON.stringify({ itemId: "inline-id" })},3,${timestamp(3)}),
+          VALUES ('independent-work',${threadId},${turnId},'tool','tool.completed','Saved work',${encodeJsonString({ itemId: "other-operation", itemType: "command_execution" })},2,${timestamp(2)}),
+            ('same-id-warning',${threadId},${turnId},'info','runtime.warning','Visible warning',${encodeJsonString({ itemId: "inline-id" })},3,${timestamp(3)}),
             ('foreign-turn',${threadId},'other-turn','tool','tool.completed','Foreign work','{}',4,${timestamp(4)}),
             ('foreign-thread','other-thread',${turnId},'tool','tool.completed','Foreign work','{}',4,${timestamp(4)})`;
           assert.deepStrictEqual((yield* presence()).turnIdsWithWorkLog, [turnId], provider);
@@ -173,7 +178,7 @@ it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
         for (const [index, [id, payload]] of payloads.entries()) {
           yield* sql`INSERT INTO projection_thread_activities
           (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
-          VALUES (${id},${threadId},${turnId},'tool','tool.updated','Tool',${JSON.stringify(payload)},${index + 1},${timestamp(index + 1)})`;
+          VALUES (${id},${threadId},${turnId},'tool','tool.updated','Tool',${encodeJsonString(payload)},${index + 1},${timestamp(index + 1)})`;
         }
         const page = yield* query.getThreadTurnActivityPage({
           threadId,
@@ -216,7 +221,7 @@ it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
       for (const [index, [kind, payload]] of hidden.entries()) {
         yield* sql`INSERT INTO projection_thread_activities
           (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
-          VALUES (${`hidden-${index}`},${threadId},${turnId},'info',${kind},'Task',${JSON.stringify(payload)},${index + 1},${timestamp(index + 1)})`;
+          VALUES (${`hidden-${index}`},${threadId},${turnId},'info',${kind},'Task',${encodeJsonString(payload)},${index + 1},${timestamp(index + 1)})`;
       }
       const before = cursor(500, "live-floor", timestamp(500));
       for (const range of [{}, { before }]) {
@@ -239,7 +244,7 @@ it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
       // Ordinary task progress remains visible, including the same summary.
       yield* sql`INSERT INTO projection_thread_activities
         (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
-        VALUES ('visible-task',${threadId},${turnId},'info','task.progress','Task',${JSON.stringify({ taskId: "visible", visibility: "visible" })},10,${timestamp(10)})`;
+        VALUES ('visible-task',${threadId},${turnId},'info','task.progress','Task',${encodeJsonString({ taskId: "visible", visibility: "visible" })},10,${timestamp(10)})`;
       assert.deepStrictEqual(
         (yield* query.getThreadTurnWorkLogPresence({ threadId, turnIds: [turnId], before }))
           .turnIdsWithWorkLog,
@@ -269,7 +274,7 @@ it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
         yield* sql`DELETE FROM projection_thread_activities`;
         yield* sql`INSERT INTO projection_thread_activities
         (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
-        VALUES ('saved-start-ack',${threadId},${turnId},'info','task.progress','Turn accepted',${JSON.stringify({ taskId: `codex-turn-start:${turnId}` })},1,${timestamp(1)})`;
+        VALUES ('saved-start-ack',${threadId},${turnId},'info','task.progress','Turn accepted',${encodeJsonString({ taskId: `codex-turn-start:${turnId}` })},1,${timestamp(1)})`;
         const before = cursor(500, "live-floor", timestamp(500));
         for (const excludeTurnStartAck of [undefined, false, true]) {
           const filters = {
@@ -304,7 +309,7 @@ it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
         ] as const) {
           yield* sql`INSERT INTO projection_thread_activities
           (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
-          VALUES (${id},${threadId},${turnId},'info','task.progress','Turn accepted',${JSON.stringify(payload)},2,${timestamp(2)})`;
+          VALUES (${id},${threadId},${turnId},'info','task.progress','Turn accepted',${encodeJsonString(payload)},2,${timestamp(2)})`;
         }
         const visible = yield* query.getThreadTurnActivityPage({
           threadId,
@@ -514,7 +519,7 @@ it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
           (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
           VALUES (${`work-${sequence}`},${threadId},${turnId},'tool','tool.completed','Work','{}',${sequence},${timestamp(sequence)})`;
         }
-        const summaryPayload = JSON.stringify({
+        const summaryPayload = encodeJsonString({
           summaryVersion: 1,
           provider: "claudeAgent",
           streamKind: "reasoning_summary_text",
@@ -601,7 +606,7 @@ it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
         for (const [index, row] of hidden.entries()) {
           yield* sql`INSERT INTO projection_thread_activities
           (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
-          VALUES (${`hidden-${index}`},${threadId},${turnId},'info',${row.kind},'Hidden',${JSON.stringify(row.payload)},${index + 1},${timestamp(0)})`;
+          VALUES (${`hidden-${index}`},${threadId},${turnId},'info',${row.kind},'Hidden',${encodeJsonString(row.payload)},${index + 1},${timestamp(0)})`;
         }
         yield* sql`INSERT INTO projection_thread_activities
         (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)

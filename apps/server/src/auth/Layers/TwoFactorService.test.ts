@@ -1,4 +1,5 @@
 import { AuthSessionId } from "@cafecode/contracts/auth";
+import * as Schema from "effect/Schema";
 import { expect, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -8,6 +9,10 @@ import * as TestClock from "effect/testing/TestClock";
 import { ServerSecretStore, SecretStoreError } from "../Services/ServerSecretStore.ts";
 import { makeTwoFactorService } from "./TwoFactorService.ts";
 import { totpAtStep } from "../totp.ts";
+
+// Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
+// this codec does not replace production admission or grant received-data authority.
+const decodeFixtureJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const owner = AuthSessionId.make("owner-test");
 const fixture = Effect.gen(function* () {
@@ -170,7 +175,9 @@ it.effect("caps cooldown at one hour and locks short codes after 100 failures un
     const setup = yield* f.enroll;
     for (let index = 0; index < 100; index++) {
       expect(yield* failureStatus(f.service.verify("wrong-code"))).toBe(401);
-      const snapshot = JSON.parse(new TextDecoder().decode(f.secrets.get("remote-two-factor"))) as {
+      const snapshot = decodeFixtureJson(
+        new TextDecoder().decode(f.secrets.get("remote-two-factor")),
+      ) as {
         blockedUntil: number;
       };
       const remaining = snapshot.blockedUntil - (yield* Clock.currentTimeMillis);

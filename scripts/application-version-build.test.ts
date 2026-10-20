@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { runInNewContext } from "node:vm";

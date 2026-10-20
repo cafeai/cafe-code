@@ -1,7 +1,7 @@
 # Reactor fixture readiness
 
 Created: 2026-10-14 15:05:10 JST (UTC+0900)
-Last updated: 2026-10-18 20:11:21 JST (UTC+0900)
+Last updated: 2026-10-20 16:25:50 JST (UTC+0900)
 
 An orchestration dispatch receipt proves durable intent acceptance, not provider
 session opening, turn acceptance or completion of the later projection writes.
@@ -16,6 +16,27 @@ assertions. A mock invocation alone is not the successful opening/acceptance edg
 Before manufacturing a terminal ready edge, observe that exact accepted turn's
 committed running marker; a late bookkeeping write must not reopen fake idle state.
 Negative admission cases still observe their exact failure activity and no calls.
+
+An external observation fiber needs its own retirement boundary even when the
+provider effect belongs to the harness. Register the exact fixture scope's
+cleanup before dispatch; abort and join only its tracked observation promises
+before teardown. Refuse late admission and retired continuations. Retirement
+must never succeed a pending Deferred, invent provider acceptance or cancel
+provider work as a substitute for observer cleanup. A refusal test closes the
+real fixture scope with an uncompleted receipt, checks that the observer rejects
+without completing it, and proves a later observation cannot execute its payload.
+
+Explicit-recipient steering may fork after the outer worker drains. Positive
+fixtures therefore await the original exact steer effect's successful receipt,
+including thread/message/priority/native-session/turn identity, before checking
+counts. Replaced-recipient negatives keep their held preparation gate and zero
+provider calls; an outer drain is not proof of detached positive completion.
+
+The same boundary applies to accepted direct steer, start-routed steer and
+failed-start fallback cases. Observe the successful fake steer with its exact
+thread, message, turn and numeric-policy process tuple before starting the
+unchanged acceptance-activity poll. Refusal branches never await a successful
+receipt; their original errors, zero/once counts and no-recovery checks remain.
 
 When a particular refusal path requires a successful selected-account capability
 read before deciding policy, its fixture may install a one-use receipt around
@@ -55,9 +76,14 @@ forced desktop build remains last after all tests on unchanged source:
 
 ```sh
 nice -n 15 corepack yarn workspace @cafeai/cafe-code test src/orchestration/Layers/ProviderCommandReactor.test.ts --maxWorkers=2
-nice -n 15 corepack yarn test --force --concurrency=1
-nice -n 15 corepack yarn build:desktop --force
+nice -n 15 corepack yarn verify:local
 ```
+
+The complete local command defaults to three typecheck workspaces and two Node
+test workspaces. It preserves the isolated POSIX Codex test tail, complete
+native browser groups and the forced desktop build last; do not build it again
+as redundant fixture preparation. Reduce the explicit concurrency options on a
+pressured host. See [local verification](test-performance.md) for resource limits.
 
 The complete local qualification sequence is maintained in
 [visualization CI qualification](visualization-ci-qualification.md). Local macOS

@@ -1,8 +1,14 @@
 import { EventEmitter } from "node:events";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
+// Model the actual native helper handle/events, not an Effect process service.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import type { ChildProcess } from "node:child_process";
 
 import { assert, describe, it } from "@effect/vitest";

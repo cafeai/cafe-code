@@ -1,3 +1,4 @@
+import * as ProviderDateTime from "effect/DateTime";
 // @effect-diagnostics nodeBuiltinImport:off
 import { isUtf8 } from "node:buffer";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -60,6 +61,8 @@ async function acquireParser(): Promise<boolean> {
       clearTimeout(deadline);
       resolve(true);
     };
+    // Native lifecycle timer: preserve the exact callback, cancellation and wall-clock child/queue deadline.
+    // @effect-diagnostics-next-line globalTimers:off
     const deadline = setTimeout(() => {
       const index = parserWaiters.indexOf(admitted);
       if (index >= 0) parserWaiters.splice(index, 1);
@@ -219,7 +222,7 @@ async function prepareTextView(input: {
   const textPath = providerCopyPath(input.attachmentsDir, input.attachmentId, `.${input.kind}.txt`);
   const cached = extractionCache.get(key);
   let outcome: ExtractionOutcome;
-  if (cached && cached.expiresAt > Date.now()) {
+  if (cached && cached.expiresAt > ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe())) {
     extractionCache.delete(key);
     extractionCache.set(key, cached);
     outcome = cached.outcome;
@@ -252,7 +255,9 @@ async function prepareTextView(input: {
           }
           extractionCache.set(key, {
             outcome: result,
-            expiresAt: result.textView ? Number.POSITIVE_INFINITY : Date.now() + 60_000,
+            expiresAt: result.textView
+              ? Number.POSITIVE_INFINITY
+              : ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe()) + 60_000,
           });
           while (extractionCache.size > 128)
             extractionCache.delete(extractionCache.keys().next().value!);

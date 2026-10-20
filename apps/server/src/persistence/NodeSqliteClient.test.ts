@@ -1,7 +1,12 @@
 import { assert, it as effectIt } from "@effect/vitest";
+import * as Schema from "effect/Schema";
 import { DatabaseSync } from "node:sqlite";
+// SQLite fixture retains actual native descriptors, file identity and namespace cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+// SQLite fixture paths retain actual host drive and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -11,6 +16,13 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { vi } from "vitest";
 
 import * as SqliteClient from "./NodeSqliteClient.ts";
+
+// Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
+// this codec does not replace production admission or grant received-data authority.
+const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeFixtureJson = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
 
 effectIt("NodeSqliteClient statement diagnostics stay redacted and opt-in", () =>
   Effect.sync(() => {
@@ -28,7 +40,7 @@ effectIt("NodeSqliteClient statement diagnostics stay redacted and opt-in", () =
     const result = enabled(sqlText, 1, () => secretParameter.length);
     assert.equal(result, secretParameter.length);
     assert.equal(records.length, 2);
-    const serialized = JSON.stringify(records);
+    const serialized = encodeFixtureJson(records);
     assert.equal(serialized.includes(sqlText), false);
     assert.equal(serialized.includes("private_entries"), false);
     assert.equal(serialized.includes(secretParameter), false);
@@ -90,7 +102,7 @@ effectIt(
         durationMs: 30,
         outcome: "failure",
       });
-      const serialized = JSON.stringify(records);
+      const serialized = encodeFixtureJson(records);
       assert.equal(serialized.includes(sqlText), false);
       assert.equal(serialized.includes("private_entries"), false);
       assert.equal(serialized.includes(nativeFailure.message), false);
@@ -133,7 +145,7 @@ effectIt.effect("NodeSqliteClient diagnoses native writes in every execution mod
       const lines = stderrWrite.mock.calls.flatMap(([chunk]) =>
         typeof chunk === "string" && chunk.startsWith(diagnosticPrefix) ? [chunk] : [],
       );
-      const records = lines.map((line) => JSON.parse(line.slice(diagnosticPrefix.length)));
+      const records = lines.map((line) => decodeFixtureJson(line.slice(diagnosticPrefix.length)));
       const starts = records.filter((record) => record.phase === "start");
       assert.deepStrictEqual(
         starts.map(({ operation, parameterCount }) => ({ operation, parameterCount })),
@@ -145,7 +157,7 @@ effectIt.effect("NodeSqliteClient diagnoses native writes in every execution mod
           { operation: "select", parameterCount: 0 },
         ],
       );
-      const serialized = JSON.stringify(records);
+      const serialized = encodeFixtureJson(records);
       assert.equal(serialized.includes("private_writes"), false);
       assert.equal(serialized.includes("sk-never-log-this-write"), false);
       assert.equal(serialized.includes("changed-private-value"), false);

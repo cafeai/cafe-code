@@ -1,3 +1,4 @@
+import * as ProviderJsonSchema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Exit from "effect/Exit";
@@ -20,6 +21,10 @@ import {
   markProcessShutdownRequested,
   resetProcessShutdownObservationForTests,
 } from "../../processShutdownObservation.ts";
+
+const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
 
 it.effect.each([
   { binaryPath: "C:\\Program Files\\Cafe & Codex\\codex.exe", windowsShell: false },
@@ -212,7 +217,7 @@ it.effect("publishes an unrequested zero exit as a visible error before session/
 
       // The public diagnostic is deliberately finite and content-free. A
       // process exit must not surface stdio, request data, or command paths.
-      const visibleDiagnostic = JSON.stringify(events);
+      const visibleDiagnostic = encodeProviderJsonString(events);
       assert.equal(visibleDiagnostic.includes("/test-only/codex"), false);
       assert.equal(visibleDiagnostic.includes("/test-only/workspace"), false);
       assert.equal(visibleDiagnostic.includes("stdout"), false);

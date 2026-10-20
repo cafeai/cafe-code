@@ -1,3 +1,5 @@
+// Native namespace boundary retains host drive, separator and canonical path semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import * as os from "node:os";
 import { CafeMcpError, type CafeMcpStatus } from "@cafecode/contracts";

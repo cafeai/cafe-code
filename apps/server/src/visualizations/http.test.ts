@@ -1,3 +1,5 @@
+// The fixture qualifies real native finish/close and socket-buffering behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as http from "node:http";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { describe, expect, it, vi } from "vitest";

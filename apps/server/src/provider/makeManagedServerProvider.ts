@@ -1,3 +1,4 @@
+import * as ProviderDateTime from "effect/DateTime";
 import type {
   ServerProvider,
   ServerProviderAccountRateLimits,
@@ -57,7 +58,7 @@ export interface ManagedProviderProbePolicy {
 }
 
 const toIsoDateTime = (epochMs: number): ServerProvider["checkedAt"] =>
-  new Date(epochMs).toISOString();
+  ProviderDateTime.formatIso(ProviderDateTime.makeUnsafe(epochMs));
 
 const advancePeriodicTargetPast = (
   scheduledAtMs: number,

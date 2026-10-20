@@ -19,6 +19,7 @@ let reservedBytes = 0;
 const MAX_RESERVED_BYTES = 32 * 1024 * 1024;
 export const CONTROL_BODY_BYTES = 64 * 1024;
 export const MCP_BODY_BYTES = 1024 * 1024;
+const decodeJsonBody = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
 const collect = (chunks: readonly Uint8Array[], size: number) => {
   const bytes = new Uint8Array(size);
@@ -45,6 +46,8 @@ const retireNativeBody = (
     response.off("close", close);
     native.destroy();
   };
+  // Native callback deadline keeps exact socket/process lifetime, cancellation and ref/unref behavior.
+  // @effect-diagnostics-next-line globalTimers:off
   const timer = setTimeout(close, 1000);
   timer.unref();
   response.once("finish", close);
@@ -164,7 +167,7 @@ export const readHttpJson = (
   readHttpBody(request, maxBytes).pipe(
     Effect.flatMap((bytes) =>
       Effect.try({
-        try: (): unknown => JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
+        try: (): unknown => decodeJsonBody(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
         // No parser message or cause: engines may include secret-bearing input.
         catch: () => new HttpBodyError({ status: 400 }),
       }),

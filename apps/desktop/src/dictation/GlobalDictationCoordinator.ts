@@ -1,4 +1,7 @@
+import * as DateTime from "effect/DateTime";
 import { randomUUID } from "node:crypto";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join } from "node:path";
 import { getUiLocale, subscribeUiLocale, uiText } from "@cafecode/shared/i18n";
 
@@ -280,14 +283,14 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
         outcome: DesktopDebugServer.GlobalDictationShortcutDebugSnapshot["registrationOutcome"],
       ): void => {
         registrationOutcome = outcome;
-        registrationCheckedAt = new Date().toISOString();
+        registrationCheckedAt = DateTime.formatIso(DateTime.nowUnsafe());
         publishShortcutDebug();
       };
       const noteToggle = (
         outcome: DesktopDebugServer.GlobalDictationShortcutDebugSnapshot["lastToggleOutcome"],
       ): void => {
         lastToggleOutcome = outcome;
-        lastToggleAt = new Date().toISOString();
+        lastToggleAt = DateTime.formatIso(DateTime.nowUnsafe());
         publishShortcutDebug();
       };
       const markPanelLoaded = (): void => {
@@ -385,7 +388,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
         try {
           return globalShortcut.register(shortcut, () => {
             invocationCount += 1;
-            lastInvokedAt = new Date().toISOString();
+            lastInvokedAt = DateTime.formatIso(DateTime.nowUnsafe());
             publishShortcutDebug();
             void toggleGlobal();
           });
@@ -587,10 +590,12 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
           if (active !== session || session.ready || !isMainFrame) return;
           markPanelNavigationFailed();
         });
+        // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+        // @effect-diagnostics-next-line globalTimers:off
         session.readyTimer = setTimeout(() => {
           if (active !== session || session.ready) return;
           lastPanelReadyOutcome = "timeout";
-          lastPanelReadyAt = new Date().toISOString();
+          lastPanelReadyAt = DateTime.formatIso(DateTime.nowUnsafe());
           noteToggle("open_failed");
           closePanel(session);
           notifyPanelFailure();
@@ -700,7 +705,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
             return;
           }
           lastCaptureOutcome = captured.ok ? "succeeded" : captured.reason;
-          lastCaptureAt = new Date().toISOString();
+          lastCaptureAt = DateTime.formatIso(DateTime.nowUnsafe());
           lastCaptureDurationMs = Math.round(performance.now() - captureStarted);
           lastInsertOutcome = "not_attempted";
           lastInsertAt = null;
@@ -753,7 +758,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
         if (action.action === "ready") {
           if (panel.ready) {
             lastPanelReadyOutcome = "reload_rejected";
-            lastPanelReadyAt = new Date().toISOString();
+            lastPanelReadyAt = DateTime.formatIso(DateTime.nowUnsafe());
             publishShortcutDebug();
             closePanel(panel); // A reload lost the private unsaved draft authority.
             return { ok: false, reason: "unavailable" };
@@ -764,7 +769,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
             panel.readyTimer = null;
           }
           lastPanelReadyOutcome = "accepted";
-          lastPanelReadyAt = new Date().toISOString();
+          lastPanelReadyAt = DateTime.formatIso(DateTime.nowUnsafe());
           panel.window.showInactive();
           noteToggle("opened");
           panel.resolveReadiness(true);
@@ -881,7 +886,7 @@ export const installGlobalDictationCoordinator = Effect.gen(function* () {
               // old panel's completion to a newer recording's diagnostics.
               if (latestCaptureId === panel.id) {
                 lastInsertOutcome = outcome;
-                lastInsertAt = new Date().toISOString();
+                lastInsertAt = DateTime.formatIso(DateTime.nowUnsafe());
                 lastInsertDurationMs = Math.round(performance.now() - insertStarted);
                 publishShortcutDebug();
               }

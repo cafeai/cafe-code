@@ -115,6 +115,12 @@ import {
 import { ProviderRuntimeInventory } from "./ProviderRuntimeInventory.ts";
 import { purgeProviderDaemonThreadPersistence } from "./ProviderDaemonThreadPurge.ts";
 
+class ProviderDaemonProcessIdentityError extends Data.TaggedError(
+  "ProviderDaemonProcessIdentityError",
+)<{ readonly message: string }> {
+  override name = "Error";
+}
+
 const decodeSchedulingSessionAuthorization = Schema.decodeUnknownSync(
   SchedulingSessionAuthorizationRequest,
 );
@@ -883,18 +889,26 @@ function toRpcError(
   // diagnostics, while carrying only the two codes the reactor can safely use
   // to retain an unchanged, still-owned process. Never infer this from prose,
   // copy native payload fields, invoke an accessor, or promote another adapter.
+  // Only the exact local error class may authorize a native retirement witness; Schema decoding must not mint provenance.
+  // @effect-diagnostics-next-line instanceOfSchema:off
   const refusalDescriptor =
     error instanceof ProviderAdapterRequestError
       ? Object.getOwnPropertyDescriptor(error, "remoteErrorTag")
       : undefined;
+  // Only the exact local error class may authorize a native retirement witness; Schema decoding must not mint provenance.
+  // @effect-diagnostics-next-line instanceOfSchema:off
   const providerDescriptor =
     error instanceof ProviderAdapterRequestError
       ? Object.getOwnPropertyDescriptor(error, "provider")
       : undefined;
+  // Only the exact local error class may authorize a native retirement witness; Schema decoding must not mint provenance.
+  // @effect-diagnostics-next-line instanceOfSchema:off
   const methodDescriptor =
     error instanceof ProviderAdapterRequestError
       ? Object.getOwnPropertyDescriptor(error, "method")
       : undefined;
+  // Only the exact local error class may authorize a native retirement witness; Schema decoding must not mint provenance.
+  // @effect-diagnostics-next-line instanceOfSchema:off
   const refusal =
     error instanceof ProviderAdapterRequestError &&
     providerDescriptor !== undefined &&
@@ -908,6 +922,8 @@ function toRpcError(
     Schema.is(ProviderDaemonSessionReconfigurationRefusal)(refusalDescriptor.value)
       ? refusalDescriptor.value
       : undefined;
+  // Only the exact local error class may authorize a native retirement witness; Schema decoding must not mint provenance.
+  // @effect-diagnostics-next-line instanceOfSchema:off
   const retirementDescriptor =
     error instanceof ProviderAdapterRequestError
       ? Object.getOwnPropertyDescriptor(error, "failedRootRetirementRefusal")
@@ -918,6 +934,8 @@ function toRpcError(
   // cold-send request, not another method, native error class or diagnostic tag.
   // The command ledger binds its receipt to the complete canonical request in
   // both directions; the finite diagnostic copy itself grants no authority.
+  // Only the exact local error class may authorize a native retirement witness; Schema decoding must not mint provenance.
+  // @effect-diagnostics-next-line instanceOfSchema:off
   const failedRootRetirementRefusal =
     request?.method === "sendTurn" &&
     expected?.restartSession === true &&
@@ -1433,7 +1451,10 @@ export const runProviderDaemonServer = (
     const processIdentity = yield* Effect.tryPromise({
       try: () =>
         captureProviderDaemonProcessIdentity(options.windowsOwnershipId, identityDependencies),
-      catch: () => new Error("Windows provider runtime could not verify its own process identity."),
+      catch: () =>
+        new ProviderDaemonProcessIdentityError({
+          message: "Windows provider runtime could not verify its own process identity.",
+        }),
     }).pipe(Effect.orDie);
     const config = yield* Effect.serviceOption(ServerConfig);
     // Mint profile proof only from the actual admitted runtime configuration,

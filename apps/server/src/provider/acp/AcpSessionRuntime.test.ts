@@ -1,3 +1,4 @@
+import * as ProviderJsonSchema from "effect/Schema";
 import { describe, expect, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
@@ -11,6 +12,13 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import * as AcpErrors from "effect-acp/errors";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
+
+const decodeProviderJsonString = ProviderJsonSchema.decodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
+const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
 
 const warningPrefix = "warning: sandbox could not be applied:";
 const privateDiagnostic = " /private/provider-secret-path: endpoint is a symlink";
@@ -92,7 +100,7 @@ describe("AcpSessionRuntime startup stderr", () => {
         yield* TestClock.adjust("20 millis");
         const failure = yield* Fiber.join(startup);
         expect(failure).toBe(specificFailure);
-        expect(JSON.stringify(failure)).not.toContain("provider-secret-path");
+        expect(encodeProviderJsonString(failure)).not.toContain("provider-secret-path");
       }),
     ),
   );
@@ -136,7 +144,7 @@ describe("AcpSessionRuntime startup stderr", () => {
 
           expect(failure).toBe(originalFailure);
           expect(failure).toMatchObject({ _tag: "AcpTransportError", operation: "call-rpc" });
-          expect(JSON.stringify(failure)).not.toContain("private provider diagnostic");
+          expect(encodeProviderJsonString(failure)).not.toContain("private provider diagnostic");
         }),
       ),
   );
@@ -206,7 +214,7 @@ describe("AcpSessionRuntime startup stderr", () => {
               stdin: Sink.forEach((chunk: Uint8Array) =>
                 Effect.gen(function* () {
                   for (const line of decoder.decode(chunk).trim().split("\n")) {
-                    const request = JSON.parse(line) as {
+                    const request = decodeProviderJsonString(line) as {
                       readonly id: number;
                       readonly method: string;
                     };
@@ -219,7 +227,7 @@ describe("AcpSessionRuntime startup stderr", () => {
                     yield* Queue.offer(
                       replies,
                       encoder.encode(
-                        `${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`,
+                        `${encodeProviderJsonString({ jsonrpc: "2.0", id: request.id, result })}\n`,
                       ),
                     );
                   }

@@ -1,12 +1,22 @@
 import { boundedWebRequest, respondToHttpBodyError } from "../httpBody.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { registerSessionSchedulingTools } from "./mcp.ts";
 import { ScheduledFollowups } from "./service.ts";
 import { makeSchedulingSessionService } from "./sessionRuntime.ts";
+
+/** This internal transport failure has fixed copy only. Never retain a request,
+ * capability, SDK exception or SQL error as its cause. */
+class SchedulingRequestError extends Data.TaggedError("SchedulingRequestError")<{}> {
+  override readonly name = "Error";
+  override get message() {
+    return "Scheduling request failed.";
+  }
+}
 
 /** Separate audience from owner-management MCP. No installer, owner session or
  * broad MCP toggle grants this authority. Only a locally connected, live
@@ -56,7 +66,7 @@ export const handleSchedulingMcpRequest = Effect.gen(function* () {
       }
     },
     // Never expose request bodies, capabilities, SQL or provider errors.
-    catch: () => new Error("Scheduling request failed."),
+    catch: () => new SchedulingRequestError(),
   }).pipe(
     Effect.catch(() =>
       Effect.succeed(

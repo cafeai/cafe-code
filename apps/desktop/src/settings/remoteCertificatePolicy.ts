@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import { X509Certificate } from "node:crypto";
 import { isIP } from "node:net";
 import * as tls from "node:tls";
@@ -21,7 +22,7 @@ export function remoteCertificateOrigin(value: string): string | null {
 export function eligibleRemoteCertificate(
   certificate: X509Certificate,
   origin: string,
-  now = Date.now(),
+  now = DateTime.toEpochMillis(DateTime.nowUnsafe()),
 ): boolean {
   const hostname = new URL(origin).hostname.replace(/^\[|\]$/g, "");
   return (
@@ -39,7 +40,7 @@ export function acceptsPinnedRemoteCertificate(
   url: string,
   error: string,
   certificatePem: string,
-  now = Date.now(),
+  now = DateTime.toEpochMillis(DateTime.nowUnsafe()),
 ): boolean {
   // Only an unrecognized authority is overridable. Name, expiry and other
   // Chromium failures retain their normal rejection behavior.
@@ -107,6 +108,8 @@ export function probeRemoteCertificate(origin: string): Promise<RemoteCertificat
       socket.destroy();
       resolve(result);
     };
+    // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+    // @effect-diagnostics-next-line globalTimers:off
     const timer = setTimeout(() => finish({ status: "unreachable" }), 6_000);
     socket.once("error", () => finish({ status: "unreachable" }));
     socket.once("secureConnect", () => {

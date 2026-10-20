@@ -1,3 +1,4 @@
+import * as ProviderJsonSchema from "effect/Schema";
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
@@ -14,6 +15,10 @@ import {
   CODEX_HISTORY_DIAGNOSIS_UNCERTAIN_MESSAGE,
 } from "../codexHistorySafety.ts";
 import { makeCodexSessionRuntime, type CodexSessionRuntimeOptions } from "./CodexSessionRuntime.ts";
+
+const decodeProviderJsonString = ProviderJsonSchema.decodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
 
 const nativeThreadId = "synthetic-native-thread";
 const nativeTurnId = "synthetic-native-turn";
@@ -86,7 +91,10 @@ const fixture = (
               const lines = pending.split("\n");
               pending = lines.pop() ?? "";
               for (const line of lines) {
-                const request = JSON.parse(line) as { id?: string | number; method: string };
+                const request = decodeProviderJsonString(line) as {
+                  id?: string | number;
+                  method: string;
+                };
                 if (request.id === undefined) continue;
                 calls.push(request.method);
                 if (request.method === "turn/start" && options.holdTurnAck) {

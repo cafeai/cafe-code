@@ -192,6 +192,8 @@ function requireAuthorizedDaemonResponse(statusCode: number): void {
 
 function remoteAuthenticationStatus(cause: unknown): 401 | 403 | undefined {
   if (cause instanceof ProviderDaemonAuthenticationError) return cause.statusCode;
+  // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+  // @effect-diagnostics-next-line instanceOfSchema:off
   if (
     cause instanceof ProviderAdapterRequestError &&
     cause.cause instanceof ProviderDaemonAuthenticationError
@@ -517,6 +519,8 @@ export const guardRemoteProviderThreadOperation = <A, E, R>(input: {
         );
   });
 
+// Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+// @effect-diagnostics-next-line instanceOfSchema:off
 const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
   daemonConfig: ProviderDaemonClientConfig,
   request: Extract<ProviderDaemonRpcRequest, { readonly method: M }>,

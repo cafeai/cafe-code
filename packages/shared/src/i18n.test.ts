@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import IntlMessageFormat from "intl-messageformat";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -119,7 +120,7 @@ describe("released interface messages", () => {
         missing: undefined,
       }),
     ).toBe("true/false//");
-    const instant = new Date("2026-10-11T12:00:00Z");
+    const instant = DateTime.toDateUtc(DateTime.makeUnsafe(Date.parse("2026-10-11T12:00:00Z")));
     const formatter = new Intl.DateTimeFormat("en", { dateStyle: "short" });
     expect(uiText("Date: {at, date, short}", { at: instant })).toBe(
       `Date: ${formatter.format(instant)}`,
@@ -156,7 +157,7 @@ describe("released interface messages", () => {
     expect(uiText("Processed {count, number}", { count: 1234.5 })).toBe(
       `Processed ${new Intl.NumberFormat("en").format(1234.5)}`,
     );
-    const instant = new Date("2026-10-11T12:34:56Z");
+    const instant = DateTime.toDateUtc(DateTime.makeUnsafe(Date.parse("2026-10-11T12:34:56Z")));
     expect(uiText("Time: {at, time, short}", { at: instant })).toBe(
       `Time: ${new Intl.DateTimeFormat("en", { hour: "numeric", minute: "numeric" }).format(instant)}`,
     );
@@ -167,6 +168,9 @@ describe("released interface messages", () => {
     const warn = vi.spyOn(console, "warn");
     expect(uiText("Malformed {")).toBe("Malformed {");
     expect(uiText("Hello {missing}", { unrelated: "private-name" })).toBe("Hello {missing}");
+    // An actually invalid native Date is the adversarial Intl input under test;
+    // DateTime constructors correctly refuse to manufacture this value.
+    // @effect-diagnostics-next-line globalDate:off
     expect(uiText("Date {at, date}", { at: new Date(Number.NaN) })).toBe("Date {at, date}");
     expect(error).not.toHaveBeenCalled();
     expect(warn).not.toHaveBeenCalled();
@@ -201,7 +205,7 @@ describe("released interface messages", () => {
   });
 
   it("does not invoke an overridden Date valueOf or toString", () => {
-    const instant = new Date("2026-10-11T12:00:00Z");
+    const instant = DateTime.toDateUtc(DateTime.makeUnsafe(Date.parse("2026-10-11T12:00:00Z")));
     const valueOf = vi.spyOn(instant, "valueOf").mockImplementation(() => {
       throw new Error("Must not execute");
     });
@@ -519,7 +523,7 @@ describe("bounded formatting work", () => {
   it("preserves native numeric/date formatting when no locale is supplied", () => {
     expect(uiFormatNumber(12345.67)).toBe(new Intl.NumberFormat().format(12345.67));
     expect(uiFormatNumber(12345n)).toBe(new Intl.NumberFormat().format(12345n));
-    const instant = new Date("2026-10-11T12:34:56Z");
+    const instant = DateTime.toDateUtc(DateTime.makeUnsafe(Date.parse("2026-10-11T12:34:56Z")));
     const options = { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" } as const;
     expect(uiFormatDateTime(instant, options)).toBe(
       new Intl.DateTimeFormat(undefined, options).format(instant),
@@ -532,7 +536,7 @@ describe("bounded formatting work", () => {
     expect(uiFormatNumber(1234.5, options, "de-DE")).toBe(
       new Intl.NumberFormat("de-DE", options).format(1234.5),
     );
-    const instant = new Date("2026-10-11T12:34:56Z");
+    const instant = DateTime.toDateUtc(DateTime.makeUnsafe(Date.parse("2026-10-11T12:34:56Z")));
     const dateOptions = { dateStyle: "short", timeZone: "UTC" } as const;
     expect(uiFormatDateTime(instant, dateOptions, "de-DE")).toBe(
       new Intl.DateTimeFormat("de-DE", dateOptions).format(instant),
@@ -541,10 +545,11 @@ describe("bounded formatting work", () => {
 
   it("falls back to native formatting for invalid locales and neutral invalid dates", () => {
     expect(uiFormatNumber(2, undefined, "bad_locale")).toBe(new Intl.NumberFormat().format(2));
-    const instant = new Date("2026-10-11T12:00:00Z");
+    const instant = DateTime.toDateUtc(DateTime.makeUnsafe(Date.parse("2026-10-11T12:00:00Z")));
     expect(uiFormatDateTime(instant, undefined, "bad_locale")).toBe(
       new Intl.DateTimeFormat().format(instant),
     );
+    // @effect-diagnostics-next-line globalDate:off
     expect(uiFormatDateTime(new Date(Number.NaN))).toBe("—");
   });
 });

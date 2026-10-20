@@ -1,5 +1,10 @@
 import { uiText } from "@cafecode/shared/i18n";
-import { type KeybindingCommand, type FilesystemBrowseEntry } from "@cafecode/contracts";
+import {
+  SourceControlRepositoryError,
+  type KeybindingCommand,
+  type FilesystemBrowseEntry,
+} from "@cafecode/contracts";
+import * as Schema from "effect/Schema";
 import type { SidebarThreadSortOrder } from "@cafecode/contracts/settings";
 import { type ReactNode } from "react";
 import { sortThreads } from "../lib/threadSort";
@@ -9,6 +14,17 @@ import { type Project, type SidebarThreadSummary, type Thread } from "../types";
 export const RECENT_THREAD_LIMIT = 12;
 export const ITEM_ICON_CLASS = "size-4 text-muted-foreground";
 export const ADDON_ICON_CLASS = "size-4";
+const isRepositoryError = Schema.is(SourceControlRepositoryError);
+
+/** Prefer the typed operation's original detail, then the native Error message.
+ * This is presentation only; matching an error never authorizes an operation. */
+export function commandPaletteErrorDescription(error: unknown): { description?: string } {
+  if (isRepositoryError(error) && error.detail.trim().length > 0)
+    return { description: error.detail };
+  if (error instanceof Error && error.message.trim().length > 0)
+    return { description: error.message };
+  return {};
+}
 
 export interface CommandPaletteItem {
   readonly kind: "action" | "submenu";

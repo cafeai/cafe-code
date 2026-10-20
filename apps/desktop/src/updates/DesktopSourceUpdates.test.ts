@@ -194,44 +194,45 @@ describe("DesktopSourceUpdates", () => {
     }),
   );
 
-  it.effect(
-    "reports a newer remote hash for a tracked dev branch without reading dirty files",
-    () =>
-      Effect.gen(function* () {
-        const commands: string[] = [];
-        const localHash = "1111111111111111111111111111111111111111";
-        const remoteHash = "2222222222222222222222222222222222222222";
-        const runtimeHash = "0000000000000000000000000000000000000000";
-        const spawner = makeGitSpawner({
-          commands,
-          responses: new Map([
-            ["git rev-parse --show-toplevel", { stdout: "/repo\n" }],
-            ["git rev-parse --abbrev-ref HEAD", { stdout: "dev\n" }],
-            ["git rev-parse HEAD", { stdout: `${localHash}\n` }],
-            ["git status --porcelain=v1", { stdout: "" }],
-            [
-              "git fetch --quiet --no-tags origin refs/heads/dev:refs/remotes/origin/dev",
-              { stdout: "" },
-            ],
-            ["git rev-parse origin/dev", { stdout: `${remoteHash}\n` }],
-            ["git merge-base HEAD origin/dev", { stdout: `${localHash}\n` }],
-            ["git merge-base --is-ancestor HEAD origin/dev", { stdout: "" }],
-          ]),
-        });
+  for (const branch of ["main", "dev"] as const)
+    it.effect(
+      `reports a newer remote hash for a tracked ${branch} branch without reading dirty files`,
+      () =>
+        Effect.gen(function* () {
+          const commands: string[] = [];
+          const localHash = "1111111111111111111111111111111111111111";
+          const remoteHash = "2222222222222222222222222222222222222222";
+          const runtimeHash = "0000000000000000000000000000000000000000";
+          const spawner = makeGitSpawner({
+            commands,
+            responses: new Map([
+              ["git rev-parse --show-toplevel", { stdout: "/repo\n" }],
+              ["git rev-parse --abbrev-ref HEAD", { stdout: `${branch}\n` }],
+              ["git rev-parse HEAD", { stdout: `${localHash}\n` }],
+              ["git status --porcelain=v1", { stdout: "" }],
+              [
+                `git fetch --quiet --no-tags origin refs/heads/${branch}:refs/remotes/origin/${branch}`,
+                { stdout: "" },
+              ],
+              [`git rev-parse origin/${branch}`, { stdout: `${remoteHash}\n` }],
+              [`git merge-base HEAD origin/${branch}`, { stdout: `${localHash}\n` }],
+              [`git merge-base --is-ancestor HEAD origin/${branch}`, { stdout: "" }],
+            ]),
+          });
 
-        const state = yield* checkSourceUpdateForTests(spawner, "/repo", runtimeHash);
+          const state = yield* checkSourceUpdateForTests(spawner, "/repo", runtimeHash);
 
-        assert.equal(state.status, "behind");
-        assert.equal(state.trackedBranch, "dev");
-        assert.equal(state.runtimeHash, runtimeHash);
-        assert.equal(state.localHash, localHash);
-        assert.equal(state.remoteHash, remoteHash);
-        assert.equal(state.dirty, false);
-        assert.ok(
-          commands.includes(
-            "git fetch --quiet --no-tags origin refs/heads/dev:refs/remotes/origin/dev",
-          ),
-        );
-      }),
-  );
+          assert.equal(state.status, "behind");
+          assert.equal(state.trackedBranch, branch);
+          assert.equal(state.runtimeHash, runtimeHash);
+          assert.equal(state.localHash, localHash);
+          assert.equal(state.remoteHash, remoteHash);
+          assert.equal(state.dirty, false);
+          assert.ok(
+            commands.includes(
+              `git fetch --quiet --no-tags origin refs/heads/${branch}:refs/remotes/origin/${branch}`,
+            ),
+          );
+        }),
+    );
 });

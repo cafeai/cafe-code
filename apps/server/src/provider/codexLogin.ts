@@ -39,6 +39,8 @@ export function codexLoginUrl(value: string): string | null {
 }
 
 export function codexLoginFailureMessage(error: unknown): string {
+  // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+  // @effect-diagnostics-next-line instanceOfSchema:off
   return error instanceof ProviderAdapterValidationError &&
     error.provider === "codex" &&
     error.operation === "login" &&
@@ -53,18 +55,23 @@ export function codexLoginFailureMessage(error: unknown): string {
  * thread, inference, token extraction or automatic login retry is involved.
  * The driver supplies its admitted auth source home, not its copied auth overlay.
  */
-export const makeCodexLogin = Effect.fn("makeCodexLogin")(function* (options: {
-  readonly withClient: (
-    use: (client: CodexClient.CodexAppServerClientShape) => Effect.Effect<void, unknown>,
+export const makeCodexLogin = Effect.fn("makeCodexLogin")(function* <
+  ClientError,
+  BrowserError,
+>(options: {
+  readonly withClient: <OperationError>(
+    use: (client: CodexClient.CodexAppServerClientShape) => Effect.Effect<void, OperationError>,
     onTermination: Effect.Effect<void>,
-  ) => Effect.Effect<void, unknown, Scope.Scope>;
+  ) => Effect.Effect<void, OperationError | ClientError, Scope.Scope>;
   readonly hasSessions: Effect.Effect<boolean>;
   readonly refresh: Effect.Effect<unknown>;
-  readonly openUrl: (url: string) => Effect.Effect<void, unknown>;
+  readonly openUrl: (url: string) => Effect.Effect<void, BrowserError>;
 }) {
   const instanceScope = yield* Effect.scope;
   let pending = false;
-  return (hasOwnedSessions: Effect.Effect<boolean, unknown> = Effect.succeed(false)) =>
+  return <SessionError>(
+    hasOwnedSessions: Effect.Effect<boolean, SessionError> = Effect.succeed(false),
+  ) =>
     Effect.uninterruptibleMask((restore) =>
       Effect.gen(function* () {
         if (pending) return yield* invalid(CODEX_LOGIN_ERRORS.pending);
@@ -170,6 +177,8 @@ export const makeCodexLogin = Effect.fn("makeCodexLogin")(function* (options: {
             ),
           );
         const fiber = yield* Effect.forkIn(worker, instanceScope);
+        // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+        // @effect-diagnostics-next-line instanceOfSchema:off
         return yield* restore(Deferred.await(acknowledged).pipe(Effect.timeout(60_000))).pipe(
           Effect.mapError((error) =>
             error instanceof ProviderAdapterValidationError

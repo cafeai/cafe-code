@@ -7,6 +7,9 @@ const fixtureRoot = process.env.CAFE_CODE_MOCK_PEER_ROOT;
 // A command-launch fixture must never wait indefinitely for EOF. This deadline
 // is a backstop for a broken parent/test cleanup path, not a provider timeout.
 if (fixtureRoot) {
+  // A native child-process backstop must keep its real unref'ed wall timer,
+  // independent of the parent's injected Effect clock and scope finalizers.
+  // @effect-diagnostics-next-line globalTimers:off
   setTimeout(() => process.exit(1), 30_000).unref();
 }
 

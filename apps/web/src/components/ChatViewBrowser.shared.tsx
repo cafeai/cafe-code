@@ -245,15 +245,18 @@ function createSnapshotForTargetUser(options: {
   sessionStatus?: OrchestrationSessionStatus;
   provider?: "codex" | "claudeAgent";
   runtimeMode?: RuntimeMode;
+  /** Policy-only journeys retain the exact target and tail pairs, not filler history. */
+  history?: "full" | "essential";
 }): OrchestrationReadModel {
   const provider = ProviderDriverKind.make(options.provider ?? "codex");
   const instanceId = ProviderInstanceId.make(options.provider ?? "codex");
   const model = provider === "claudeAgent" ? "claude-opus-4-8" : "gpt-5";
   const runtimeMode = options.runtimeMode ?? "full-access";
+  const targetPairIndex = 3;
   const messages: Array<OrchestrationReadModel["threads"][number]["messages"][number]> = [];
 
   for (let index = 0; index < 22; index += 1) {
-    const isTarget = index === 3;
+    const isTarget = index === targetPairIndex;
     const userId = `msg-user-${index}` as MessageId;
     const assistantId = `msg-assistant-${index}` as MessageId;
     const attachments =
@@ -284,6 +287,18 @@ function createSnapshotForTargetUser(options: {
       }),
     );
   }
+
+  // Keep the original message objects, identities, chronological order and
+  // timestamps. Filtering also deduplicates naturally if target and tail meet.
+  // Full history remains the default for layout, scrolling and history tests.
+  const retainedMessages =
+    options.history === "essential"
+      ? messages.filter(
+          (_message, index) =>
+            (index >= targetPairIndex * 2 && index < targetPairIndex * 2 + 2) ||
+            index >= messages.length - 2,
+        )
+      : messages;
 
   return {
     snapshotSequence: 1,
@@ -321,7 +336,7 @@ function createSnapshotForTargetUser(options: {
         updatedAt: NOW_ISO,
         archivedAt: null,
         deletedAt: null,
-        messages,
+        messages: retainedMessages,
         activities: [],
         proposedPlans: [],
         checkpoints: [],

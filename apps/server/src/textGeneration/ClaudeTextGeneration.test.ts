@@ -22,6 +22,9 @@ import { type TextGenerationShape } from "./TextGeneration.ts";
 import { sanitizeThreadTitle } from "./TextGenerationUtils.ts";
 import { makeClaudeTextGeneration } from "./ClaudeTextGeneration.ts";
 import { AuxiliaryUsage, AuxiliaryUsageLive } from "../usageStats/Services/AuxiliaryUsage.ts";
+
+const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const ClaudeTextGenerationTestLayer = ServerConfig.layerTest(process.cwd(), {
@@ -55,7 +58,7 @@ function makeFakeClaudeBinary(dir: string, output: string) {
           "  settled = true;",
           "  clearTimeout(deadline);",
           "  process.stdin.pause();",
-          `  process.stdout.write(${JSON.stringify(output)}, () => process.exit(0));`,
+          `  process.stdout.write(${encodeJsonText(output)}, () => process.exit(0));`,
           "});",
           "",
         ].join("\n"),
@@ -274,7 +277,7 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
           expect(Result.isFailure(result)).toBe(true);
           if (Result.isFailure(result)) {
             expect(result.failure.message).not.toContain("private-helper-sentinel");
-            expect(JSON.stringify(result.failure)).not.toContain("private-helper-sentinel");
+            expect(encodeJsonText(result.failure)).not.toContain("private-helper-sentinel");
           }
         }),
       ),
@@ -294,7 +297,7 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
         );
         const result = yield* withFakeClaudeEnv(
           {
-            output: JSON.stringify({
+            output: encodeJsonText({
               type: "result",
               structured_output: { title: "Helper title", branch: "helper-branch" },
               modelUsage: {
@@ -337,7 +340,7 @@ it.layer(ClaudeTextGenerationTestLayer)("ClaudeTextGeneration", (it) => {
       yield* service.installSink(() => Effect.die("private ledger error"));
       const generated = yield* withFakeClaudeEnv(
         {
-          output: JSON.stringify({
+          output: encodeJsonText({
             type: "result",
             structured_output: { title: "Helper title" },
             modelUsage: {

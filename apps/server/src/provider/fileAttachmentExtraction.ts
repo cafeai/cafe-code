@@ -248,6 +248,8 @@ export async function extractFileAttachmentText(
       clearTimeout(deadline);
       resolve(value);
     };
+    // Native lifecycle timer: preserve the exact callback, cancellation and wall-clock child/queue deadline.
+    // @effect-diagnostics-next-line globalTimers:off
     const deadline = setTimeout(() => {
       // This child never launches subprocesses. A hard kill is the bounded
       // backstop for a native/parser stall; wait for close before settling.

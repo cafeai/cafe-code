@@ -1,9 +1,6 @@
-import {
-  ProviderInstanceId,
-  ThreadId,
-  TurnId,
-  type OrchestrationSession,
-} from "@cafecode/contracts";
+import type { OrchestrationSession } from "@cafecode/contracts";
+import { ThreadId, TurnId } from "@cafecode/contracts/baseSchemas";
+import { ProviderInstanceId } from "@cafecode/contracts/providerInstance";
 import { describe, expect, it } from "vitest";
 
 import { sessionLifecycleSnapshot } from "./sessionLifecycle.ts";

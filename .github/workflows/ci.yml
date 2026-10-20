@@ -120,13 +120,25 @@ jobs:
         if: runner.os == 'Linux'
         run: corepack yarn lint
 
+      - name: Prepare intended Effect compiler
+        # Yarn does not run prepare as an install lifecycle. Keep dependency
+        # scripts disabled and invoke only this reviewed patch --force command.
+        run: corepack yarn prepare
+
+      - name: Qualify actual Effect compiler diagnostics
+        # This fresh API/CLI probe owns sequential 4 GiB/30-second children;
+        # a same-version marker or successful plain tsc is not qualification.
+        run: corepack yarn exec node scripts/qualify-effect-compiler.ts
+
       - name: Typecheck
         # A cold server compile exceeds macOS's default ~2 GiB V8 heap.
-        # Run one compiler at a time so several 4 GiB heaps cannot compete
-        # on a 7 GiB runner. Turbo passes NODE_OPTIONS through strict env mode.
+        # The canonical command caps admission at three workspace compilers.
+        # Each 4 GiB heap ceiling excludes native/OS memory; it is not an
+        # aggregate memory guarantee. Keep the full graph and this step-only
+        # setting. Turbo passes NODE_OPTIONS through strict env mode.
         env:
           NODE_OPTIONS: "--max-old-space-size=4096"
-        run: corepack yarn typecheck --concurrency=1
+        run: corepack yarn typecheck
 
       - name: Node tests
         run: corepack yarn test:ci:node

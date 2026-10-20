@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ThreadId, ProviderInstanceId } from "@cafecode/contracts";
+import { ThreadId } from "@cafecode/contracts/baseSchemas";
+import { ProviderInstanceId } from "@cafecode/contracts/providerInstance";
 import { materializedSubagentLimitFields } from "./sessionSubagentLimits.ts";
 
 describe("materialized native subagent generation", () => {

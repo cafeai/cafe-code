@@ -99,6 +99,8 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { isSupersededSessionLifecycle, sessionLifecycleSnapshot } from "../sessionLifecycle.ts";
 import { buildCodexTransientFailureMarkerPayload } from "../providerRuntimeRecovery.ts";
 
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerRuntimeEventKey = (event: ProviderRuntimeEvent) =>
   `${event.provider}:${event.threadId}:${event.eventId}`;
@@ -170,6 +172,9 @@ function yieldProviderRuntimeIngestionEventLoop(): Effect.Effect<void> {
   return Effect.promise(
     () =>
       new Promise<void>((resolve) =>
+        // This deliberately yields Node's actual poll/timer phases around
+        // synchronous SQLite work; an Effect scheduler turn is not equivalent.
+        // @effect-diagnostics-next-line globalTimers:off
         setTimeout(resolve, PROVIDER_RUNTIME_INGESTION_FAIRNESS_DELAY_MS),
       ),
   );
@@ -625,7 +630,7 @@ function runtimeEventToActivities(
   const workflowRetentionId = workflow
     ? `sha256:workflow:${Crypto.createHash("sha256")
         .update(
-          JSON.stringify([
+          encodeJsonString([
             event.turnId ?? null,
             event.type === "task.started" ||
             event.type === "task.progress" ||
@@ -671,7 +676,7 @@ function runtimeEventToActivities(
       {
         id: EventId.make(
           `claude-summary:${Crypto.createHash("sha256")
-            .update(JSON.stringify([event.turnId, event.itemId]), "utf8")
+            .update(encodeJsonString([event.turnId, event.itemId]), "utf8")
             .digest("hex")}`,
         ),
         createdAt: event.createdAt,
@@ -1282,7 +1287,7 @@ function codexAsyncQuestionsActivity(
   // question text: a changed duplicate must never reopen the same item.
   const digest = Crypto.createHash("sha256")
     .update(
-      JSON.stringify([
+      encodeJsonString([
         "cafecode.codex-async-questions.v1",
         event.providerInstanceId ?? event.provider,
         event.threadId,
@@ -3461,7 +3466,7 @@ const make = Effect.gen(function* () {
               // required by the append-time authority index and barrier.
               const markerIdentity = Crypto.createHash("sha256")
                 .update(
-                  JSON.stringify([
+                  encodeJsonString([
                     "cafe-codex-transient-failure-v1",
                     thread.id,
                     event.providerInstanceId,
@@ -4054,7 +4059,7 @@ const make = Effect.gen(function* () {
                         // diagnostics or any permission/retry/lifecycle authority.
                         providerErrorOwnerHash: Crypto.createHash("sha256")
                           .update(
-                            JSON.stringify([
+                            encodeJsonString([
                               thread.id,
                               diagnosticTurnId,
                               event.providerInstanceId,

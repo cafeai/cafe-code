@@ -1,4 +1,8 @@
+// Native staged-artifact audit retains its existing Promise IO and actual directory entries.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { readdir, readFile } from "node:fs/promises";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { basename, extname, join, relative } from "node:path";
 
 const RETIRED_TOOL_TOKEN = String.fromCharCode(98, 117, 110);

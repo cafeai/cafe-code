@@ -49,6 +49,8 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
 const TEST_LEASE_TOKEN = "provider-daemon-lease-token-000000000000000000000000";
+// Observation-only JSON snapshots retain native JSON field/value semantics.
+const encodeDiagnosticJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 type TestProcessSpawner = Context.Service.Shape<typeof ChildProcessSpawner.ChildProcessSpawner>;
 const encodeProviderDaemonHealthJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonHealth),
@@ -927,8 +929,8 @@ describe("DesktopProviderDaemonManager", () => {
         failHealth = false;
         assert.isTrue(Option.isSome(yield* manager.refreshHealth));
         assert.notEqual(publishedSnapshot.lastHealthObservedAt, adoptedHealthObservedAt);
-        assert.isFalse(JSON.stringify(publishedSnapshot).includes(TEST_TOKEN));
-        assert.isFalse(JSON.stringify(publishedSnapshot).includes(TEST_LEASE_TOKEN));
+        assert.isFalse(encodeDiagnosticJson(publishedSnapshot).includes(TEST_TOKEN));
+        assert.isFalse(encodeDiagnosticJson(publishedSnapshot).includes(TEST_LEASE_TOKEN));
       }).pipe(Effect.provide(makeManagerLayer(baseDir, markerPath, backendEntryPath)));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );

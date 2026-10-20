@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 // @effect-diagnostics nodeBuiltinImport:off
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { win32 as windowsPath } from "node:path";
@@ -411,6 +412,8 @@ export function createWindowsProviderRuntime(
   const leaseRequest = options.issueLease ?? defaultLease(options.role);
   const now = options.now ?? Date.now;
   const monotonicNow = options.monotonicNow ?? options.now ?? performance.now.bind(performance);
+  // Native process deadline: preserve hard wall-clock expiry and exact handle cleanup.
+  // @effect-diagnostics-next-line globalTimers:off
   const sleep = options.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const readinessTimeoutMs = Math.min(Math.max(options.readinessTimeoutMs ?? 30_000, 1), 45_000);
   let active: { readonly result: WindowsProviderRuntimeResult; readonly revision: string } | null =
@@ -861,7 +864,7 @@ export function createWindowsProviderRuntime(
         pid: identity.pid,
         windowsProcessIdentity: identity,
         windowsOwnershipState: "committed",
-        updatedAt: new Date(now()).toISOString(),
+        updatedAt: DateTime.formatIso(DateTime.makeUnsafe(now())),
       });
     } else {
       if (!authMatches(record, health)) return fail("endpoint-conflict");
@@ -881,7 +884,7 @@ export function createWindowsProviderRuntime(
         record = await publish(session, record, {
           ...marker,
           windowsProcessIdentity: before.identity,
-          updatedAt: new Date(now()).toISOString(),
+          updatedAt: DateTime.formatIso(DateTime.makeUnsafe(now())),
         });
       }
     }
@@ -956,7 +959,7 @@ export function createWindowsProviderRuntime(
     } catch {
       return fail("credential-unavailable");
     }
-    const timestamp = new Date(now()).toISOString();
+    const timestamp = DateTime.formatIso(DateTime.makeUnsafe(now()));
     const cafeMcpPort = options.cafeMcpPort?.();
     const marker: ProviderDaemonMarker = {
       version: 2,

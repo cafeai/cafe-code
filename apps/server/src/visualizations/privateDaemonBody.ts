@@ -1,3 +1,5 @@
+// Native request/response events own body retirement and actual output drain.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import type * as http from "node:http";
 import {
   MCP_APP_JSON_MAX_TRANSPORT_BYTES,
@@ -87,6 +89,9 @@ export function readPrivateVisualizationDaemonBody(
     const onClose = () => {
       if (!request.complete) onFailure();
     };
+    // The native incoming stream retains an absolute real-time upload budget,
+    // independently of an Effect caller's possibly virtual clock/lifetime.
+    // @effect-diagnostics-next-line globalTimers:off
     const deadline = setTimeout(onFailure, PRIVATE_VISUALIZATION_DAEMON_BODY_MS);
     request.on("data", onData);
     request.on("end", onEnd);
@@ -118,6 +123,9 @@ function awaitPrivateResponseCompletion(response: http.ServerResponse): Promise<
       response.destroy();
       complete();
     };
+    // Only this native outgoing response is retired on the unchanged deadline;
+    // the lease must survive upstream operation completion until finish/close.
+    // @effect-diagnostics-next-line globalTimers:off
     const deadline = setTimeout(retire, PRIVATE_VISUALIZATION_DAEMON_RESPONSE_MS);
     response.once("finish", complete);
     response.once("close", complete);

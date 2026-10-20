@@ -32,6 +32,18 @@ class CafeKillallError extends Data.TaggedError("CafeKillallError")<{
   readonly cause?: unknown;
 }> {}
 
+class CafeKillallShutdownIncompleteError extends Data.TaggedError(
+  "CafeKillallShutdownIncompleteError",
+)<{}> {
+  constructor() {
+    super();
+    this.name = "Error";
+  }
+  override get message() {
+    return "Cafe Code did not finish shutting down; restart was not launched.";
+  }
+}
+
 const PROCESS_LIST_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const DEFAULT_TERMINATE_GRACE_MS = 1_500;
 const DEFAULT_KILL_GRACE_MS = 1_500;
@@ -566,9 +578,7 @@ export const runKillallCommand = (flags: {
         );
     yield* Console.log(formatKillallOutput({ dryRun: flags.dryRun, targets, results }));
     if (flags.graceful && results.some((result) => result.error !== null || result.stillAlive)) {
-      return yield* Effect.fail(
-        new Error("Cafe Code did not finish shutting down; restart was not launched."),
-      );
+      return yield* Effect.fail(new CafeKillallShutdownIncompleteError());
     }
   });
 

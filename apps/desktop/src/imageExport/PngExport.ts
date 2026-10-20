@@ -1,15 +1,26 @@
 import { MAX_PNG_BYTES, MAX_PNG_DIMENSION, MAX_PNG_PIXELS } from "@cafecode/contracts";
 import type { SavePngResult } from "@cafecode/contracts";
 import { randomUUID } from "node:crypto";
+import * as Data from "effect/Data";
+// Native filesystem boundary: preserve descriptor, no-follow and bigint identity operations.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { constants, type BigIntStats } from "node:fs";
+// Native filesystem boundary: preserve descriptor, no-follow and bigint identity operations.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { basename, dirname, isAbsolute, join } from "node:path";
 
 /** Fixed, content-free failures never reveal native decoder errors or paths. */
-export class PngExportError extends Error {
+export class PngExportError extends Data.TaggedError("PngExportError")<{}> {
   constructor() {
-    super("The image could not be exported.");
+    super();
     this.name = "PngExportError";
+  }
+
+  override get message() {
+    return "The image could not be exported.";
   }
 }
 

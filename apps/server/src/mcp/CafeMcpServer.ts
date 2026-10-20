@@ -1,3 +1,6 @@
+import * as DateTime from "effect/DateTime";
+// Native namespace boundary retains host drive, separator and canonical path semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as NodePath from "node:path";
 
 import {
@@ -23,6 +26,7 @@ import {
 } from "@cafecode/contracts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as Cause from "effect/Cause";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -152,14 +156,26 @@ export interface CafeMcpServerOptions {
    * Schedule a provider restart after its tool acknowledgement is returned.
    * Tests inject a deterministic scheduler; production uses an unref'd timer.
    */
-  readonly scheduleRestart?: (job: Effect.Effect<void, never, unknown>) => void;
+  readonly scheduleRestart?: (job: Effect.Effect<void>) => void;
 }
 
-function defaultScheduleRestart(job: Effect.Effect<void, never, unknown>): void {
+function defaultScheduleRestart(job: Effect.Effect<void>): void {
+  // Native callback deadline keeps exact socket/process lifetime, cancellation and ref/unref behavior.
+  // @effect-diagnostics-next-line globalTimers:off
   const timer = setTimeout(() => {
-    Effect.runFork(job as Effect.Effect<void, never>);
+    Effect.runFork(job);
   }, CAFE_MCP_RESTART_DELAY_MS);
   timer.unref();
+}
+
+/** Only existing configured-selection messages enter this private typed channel. */
+class CafeMcpSelectionError extends Data.TaggedError("CafeMcpSelectionError")<{
+  readonly message: string;
+}> {
+  constructor(message: string) {
+    super({ message });
+    this.name = "Error";
+  }
 }
 
 function toolResult<T extends Record<string, unknown>>(structuredContent: T, text: string) {
@@ -183,7 +199,7 @@ async function runEffect<A, E>(effect: Effect.Effect<A, E>, fallback: string): P
 }
 
 function nowIso(): string {
-  return new Date().toISOString();
+  return DateTime.formatIso(DateTime.nowUnsafe());
 }
 
 function decodeModelSelection(input: z.infer<typeof modelSelection>): ModelSelection {
@@ -314,17 +330,21 @@ function resolveModelSelection(
         "",
     );
     if (selectedInstanceId.length === 0) {
-      return yield* Effect.fail(new Error("No usable provider instance is configured."));
+      return yield* Effect.fail(
+        new CafeMcpSelectionError("No usable provider instance is configured."),
+      );
     }
     const provider = providers.find((candidate) => candidate.instanceId === selectedInstanceId);
     if (!provider) {
       return yield* Effect.fail(
-        new Error(`Provider instance '${selectedInstanceId}' is not configured.`),
+        new CafeMcpSelectionError(`Provider instance '${selectedInstanceId}' is not configured.`),
       );
     }
     if (!provider.enabled || provider.availability === "unavailable") {
       return yield* Effect.fail(
-        new Error(`Provider instance '${selectedInstanceId}' is unavailable or disabled.`),
+        new CafeMcpSelectionError(
+          `Provider instance '${selectedInstanceId}' is unavailable or disabled.`,
+        ),
       );
     }
 
@@ -339,7 +359,9 @@ function resolveModelSelection(
       provider.models[0]?.slug;
     if (!selectedModel) {
       return yield* Effect.fail(
-        new Error(`Provider instance '${selectedInstanceId}' has no selectable model.`),
+        new CafeMcpSelectionError(
+          `Provider instance '${selectedInstanceId}' has no selectable model.`,
+        ),
       );
     }
     const options =

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -7,7 +9,7 @@ import {
   runEffectCompilerApiWorker,
 } from "./lib/effect-compiler-qualification.ts";
 
-// This explicit local preflight is not imported as an ambient compiler job by
+// This explicit verification preflight is not imported as an ambient compiler job by
 // default unit tests. It neither patches dependencies nor alters saved caches.
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const controller = new AbortController();

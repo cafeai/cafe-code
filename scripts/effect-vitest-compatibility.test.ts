@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it, layer } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
@@ -10,6 +11,10 @@ import * as TestClock from "effect/testing/TestClock";
 // 5. Exercise the adapter's real public APIs instead of mocking the runner, so
 // registration, effect scope ownership, shared layers and errors remain covered.
 let scopedFinalizations = 0;
+
+class CompatibilityFixtureFailure extends Data.TaggedError("CompatibilityFixtureFailure")<{
+  readonly message: string;
+}> {}
 
 it.effect("runs scoped effects and drains their finalizers", () =>
   Effect.gen(function* () {
@@ -59,7 +64,9 @@ layer(Layer.effect(SharedTestValue, Ref.make(0)))("adapter shared layer lifetime
 
 describe("adapter failure propagation", () => {
   it.effect.fails("does not convert an Effect failure into success", () =>
-    Effect.fail(new Error("isolated compatibility fixture failure")),
+    Effect.fail(
+      new CompatibilityFixtureFailure({ message: "isolated compatibility fixture failure" }),
+    ),
   );
 });
 

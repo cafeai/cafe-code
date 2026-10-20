@@ -1,3 +1,5 @@
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as nodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
@@ -37,9 +39,12 @@ const resolvePng = (input: {
     const assets = yield* Effect.gen(function* () {
       return yield* DesktopAssets.DesktopAssets;
     }).pipe(
-      Effect.provide(DesktopAssets.layer),
       Effect.provide(
-        FileSystem.layerNoop({ exists: (file) => Effect.succeed(available.has(file)) }),
+        DesktopAssets.layer.pipe(
+          Layer.provideMerge(
+            FileSystem.layerNoop({ exists: (file) => Effect.succeed(available.has(file)) }),
+          ),
+        ),
       ),
     );
     return { png: (yield* assets.iconPaths).png, resource, environment };

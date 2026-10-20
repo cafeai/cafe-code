@@ -12,6 +12,8 @@ import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
+// Native watch registration is synchronous: retain observation-before-initial-read ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { watch } from "node:fs";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
@@ -60,7 +62,11 @@ export const makeDesktopUiLocale = Effect.fn("desktop.uiLocale.make")(function* 
       Stream.runForEach(() => refresh),
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
-          ? Effect.failCause(cause)
+          ? // Retain the exact interrupt reasons (including annotations/IDs),
+            // without claiming an unknown stream failure can escape this branch.
+            Effect.failCause(
+              Cause.fromReasons<never>(cause.reasons.filter(Cause.isInterruptReason)),
+            )
           : Effect.sync(() => input.onWatchError?.()),
       ),
       Effect.forkIn(scope, { startImmediately: true }),

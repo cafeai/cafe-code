@@ -33,6 +33,7 @@ import {
 import { PngBytesSchema } from "@cafecode/contracts";
 import { VisualizationHostAsset } from "@cafecode/contracts/visualizationHost";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -79,12 +80,24 @@ const failure = () =>
   new VisualizationApiError({
     message: "Visualization could not be completed. Inspect its work-log entry.",
   });
+const decodeJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+/** JSON encoding is part of the immutable private commitment. Keep the codec's
+ * standard JSON byte order/escaping, but never retain received private input in
+ * a schema encoding exception that can reach operational diagnostics. */
+const encodePrivateJson = (value: unknown): string => {
+  try {
+    return encodeJson(value);
+  } catch {
+    throw failure();
+  }
+};
 const bytes = (value: string) => Buffer.byteLength(value, "utf8");
 /** Corrupt private storage must not turn JSON parser messages into diagnostic
  * payloads containing source. Only a fixed classification crosses this fence. */
 const parsePrivateJson = (value: string): unknown => {
   try {
-    return JSON.parse(value);
+    return decodeJson(value);
   } catch {
     throw failure();
   }
@@ -107,7 +120,14 @@ const contentDigest = (
 ) =>
   sha(
     "cafe-visual-private-content-v1",
-    JSON.stringify([source, assetsJson, referenceJson, diagnosticsJson, privateJson, posterSha256]),
+    encodePrivateJson([
+      source,
+      assetsJson,
+      referenceJson,
+      diagnosticsJson,
+      privateJson,
+      posterSha256,
+    ]),
   );
 const parseReference = (text: string): Reference => {
   if (bytes(text) > 8192) throw failure();
@@ -124,7 +144,7 @@ export function computeGeneratedVisualizationInputSha256(input: unknown): string
   const value = admitted.success;
   return sha(
     "cafe-visual-input-v1",
-    JSON.stringify({
+    encodePrivateJson({
       version: value.version,
       purpose: value.purpose,
       requestId: value.requestId,
@@ -317,12 +337,12 @@ export const claimVisualizationCompletion = (
     FROM visualization_invocations WHERE proof_digest = ${proofDigest(proof)} AND thread_id = ${authority.threadId}
       AND provider_instance_id = ${authority.providerInstanceId} AND session_generation = ${authority.sessionGeneration}
       AND runtime_generation = ${authority.runtimeGeneration} AND server_name = ${witness.serverName}
-      AND tool_name = ${witness.toolName} AND input_sha256 = ${witness.inputSha256} AND expires_at >= ${Date.now()}`;
+      AND tool_name = ${witness.toolName} AND input_sha256 = ${witness.inputSha256} AND expires_at >= ${DateTime.toEpochMillis(DateTime.nowUnsafe())}`;
       const call = calls[0];
       if (!call) return undefined;
       const key = sha(
         "cafe-visual-native-call-v1",
-        JSON.stringify([
+        encodePrivateJson([
           witness.provider,
           witness.providerInstanceId,
           witness.sessionGeneration,
@@ -370,7 +390,7 @@ export const claimVisualizationCompletion = (
       };
       yield* sql`UPDATE visualization_invocations SET native_call_key = ${key} WHERE invocation_id = ${call.invocationId} AND native_call_key IS NULL`;
       yield* sql`INSERT INTO visualization_history(id,thread_id,turn_id,message_id,origin_item_id,occurred_at,actor_json,reference_json,revision_id,native_call_key,byte_length)
-    VALUES(${randomUUID()},${authority.threadId},${entry.turnId},${entry.messageId},${entry.originItemId},${entry.occurredAt},${JSON.stringify(entry.actor)},${JSON.stringify(entry.reference)},${call.revisionId},${key},${4096 + bytes(JSON.stringify(entry))})`;
+    VALUES(${randomUUID()},${authority.threadId},${entry.turnId},${entry.messageId},${entry.originItemId},${entry.occurredAt},${encodePrivateJson(entry.actor)},${encodePrivateJson(entry.reference)},${call.revisionId},${key},${4096 + bytes(encodePrivateJson(entry))})`;
       return entry;
     }).pipe(Effect.mapError(() => failure())),
   );
@@ -413,7 +433,7 @@ export const makeVisualizationArtifactService = () =>
     const inlineFrames = new Map<string, InlineFrame>();
     const inlineFrameTicketDigest = (ticket: string) => sha("cafe-inline-frame-ticket-v1", ticket);
     const sweepInlineFrames = () => {
-      const now = Date.now();
+      const now = DateTime.toEpochMillis(DateTime.nowUnsafe());
       for (const [id, frame] of inlineFrames) if (frame.expiresAtMs <= now) inlineFrames.delete(id);
     };
     const findInlineFrame = (input: InlineFrameLookup) => {
@@ -435,7 +455,7 @@ export const makeVisualizationArtifactService = () =>
         )
       )
         return undefined;
-      if (frame.expiresAtMs <= Date.now()) {
+      if (frame.expiresAtMs <= DateTime.toEpochMillis(DateTime.nowUnsafe())) {
         inlineFrames.delete(frame.frameId);
         return undefined;
       }
@@ -540,7 +560,7 @@ export const makeVisualizationArtifactService = () =>
           const inputSha256 = app
             ? sha(
                 "cafe-visual-native-app-input-v1",
-                JSON.stringify({ input: app.input, witness: app.witness }),
+                encodePrivateJson({ input: app.input, witness: app.witness }),
               )
             : computeGeneratedVisualizationInputSha256(value);
           if (Result.isFailure(admitted) || !inputSha256) return yield* failure();
@@ -568,8 +588,8 @@ export const makeVisualizationArtifactService = () =>
             revisionId = previous.revisionId;
           } else {
             const assets = yield* snapshotAssets(authority, input);
-            const assetsJson = JSON.stringify(assets);
-            const privateJson = JSON.stringify(
+            const assetsJson = encodePrivateJson(assets);
+            const privateJson = encodePrivateJson(
               app ? { input: app.input, witness: app.witness } : input,
             );
             if (bytes(privateJson) > VISUALIZATION_MAX_INPUT_JSON_BYTES) return yield* failure();
@@ -613,14 +633,14 @@ export const makeVisualizationArtifactService = () =>
               bytes(input.source) +
               bytes(assetsJson) +
               bytes(privateJson) +
-              bytes(JSON.stringify(initialReference)) +
-              bytes(JSON.stringify(diagnostics));
+              bytes(encodePrivateJson(initialReference)) +
+              bytes(encodePrivateJson(diagnostics));
             yield* sql.withTransaction(
               Effect.gen(function* () {
                 yield* requireVisualizationSessionAuthority(sql, authority);
                 yield* ensureQuota(authority.threadId, reservedBytes, true);
                 yield* sql`INSERT INTO visualization_artifacts(revision_id,artifact_id,kind,thread_id,provider_instance_id,session_generation,request_id,input_sha256,manifest_sha256,content_sha256,source,assets_json,reference_json,diagnostics_json,private_json,byte_length,state,created_at)
-          VALUES(${revision},${artifactId},${app ? "mcp-app" : "generated-visualization"},${authority.threadId},${authority.providerInstanceId},${authority.sessionGeneration},${input.requestId},${inputSha256},${sha("cafe-visual-manifest-v1", assetsJson)},${contentDigest(input.source, assetsJson, JSON.stringify(initialReference), JSON.stringify(diagnostics), privateJson, null)},${input.source},${assetsJson},${JSON.stringify(initialReference)},${JSON.stringify(diagnostics)},${privateJson},${reservedBytes},'pending',${new Date().toISOString()})`;
+          VALUES(${revision},${artifactId},${app ? "mcp-app" : "generated-visualization"},${authority.threadId},${authority.providerInstanceId},${authority.sessionGeneration},${input.requestId},${inputSha256},${sha("cafe-visual-manifest-v1", assetsJson)},${contentDigest(input.source, assetsJson, encodePrivateJson(initialReference), encodePrivateJson(diagnostics), privateJson, null)},${input.source},${assetsJson},${encodePrivateJson(initialReference)},${encodePrivateJson(diagnostics)},${privateJson},${reservedBytes},'pending',${DateTime.formatIso(DateTime.nowUnsafe())})`;
               }),
             );
             // Publishing source is deliberately inert: no native
@@ -643,7 +663,7 @@ export const makeVisualizationArtifactService = () =>
             const witness = app.witness;
             const key = sha(
               "cafe-visual-native-app-v1",
-              JSON.stringify([
+              encodePrivateJson([
                 witness.provider,
                 witness.providerInstanceId,
                 witness.sessionGeneration,
@@ -665,7 +685,7 @@ export const makeVisualizationArtifactService = () =>
             yield* sql.withTransaction(
               Effect.gen(function* () {
                 yield* requireVisualizationSessionAuthority(sql, authority);
-                yield* sql`INSERT INTO visualization_history(id,thread_id,turn_id,message_id,origin_item_id,occurred_at,actor_json,reference_json,revision_id,native_call_key,byte_length) VALUES(${randomUUID()},${authority.threadId},${entry.turnId},${entry.messageId},${entry.originItemId},${entry.occurredAt},${JSON.stringify(entry.actor)},${JSON.stringify(entry.reference)},${revisionId},${key},${4096 + bytes(JSON.stringify(entry))}) ON CONFLICT(thread_id,native_call_key) DO NOTHING`;
+                yield* sql`INSERT INTO visualization_history(id,thread_id,turn_id,message_id,origin_item_id,occurred_at,actor_json,reference_json,revision_id,native_call_key,byte_length) VALUES(${randomUUID()},${authority.threadId},${entry.turnId},${entry.messageId},${entry.originItemId},${entry.occurredAt},${encodePrivateJson(entry.actor)},${encodePrivateJson(entry.reference)},${revisionId},${key},${4096 + bytes(encodePrivateJson(entry))}) ON CONFLICT(thread_id,native_call_key) DO NOTHING`;
               }),
             );
             return { kind: "mcp-app" as const, entry };
@@ -682,7 +702,7 @@ export const makeVisualizationArtifactService = () =>
               }>`SELECT COUNT(*) AS count FROM visualization_invocations WHERE thread_id = ${authority.threadId} AND native_call_key IS NULL`;
               if ((count[0]?.count ?? 0) >= 256) return yield* failure();
               yield* sql`INSERT INTO visualization_invocations(invocation_id,proof_digest,thread_id,provider_instance_id,session_generation,runtime_generation,server_name,tool_name,input_sha256,revision_id,expires_at)
-        VALUES(${invocationId},${proofDigest(proof)},${authority.threadId},${authority.providerInstanceId},${authority.sessionGeneration},${authority.runtimeGeneration},${authority.serverName},'publish_visualization',${inputSha256},${revisionId},${Date.now() + VISUALIZATION_INVOCATION_LIFETIME_MS})`;
+        VALUES(${invocationId},${proofDigest(proof)},${authority.threadId},${authority.providerInstanceId},${authority.sessionGeneration},${authority.runtimeGeneration},${authority.serverName},'publish_visualization',${inputSha256},${revisionId},${DateTime.toEpochMillis(DateTime.nowUnsafe()) + VISUALIZATION_INVOCATION_LIFETIME_MS})`;
             }),
           );
           return {
@@ -727,7 +747,7 @@ export const makeVisualizationArtifactService = () =>
         return Effect.fail(failure());
       const hash = sha(
         "cafe-visual-app-operation-v1",
-        JSON.stringify([witness.sessionGeneration, witness.nativeItemId, input.resourceUri]),
+        encodePrivateJson([witness.sessionGeneration, witness.nativeItemId, input.resourceUri]),
       );
       const requestId = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
       return publishInternal(
@@ -776,7 +796,9 @@ export const makeVisualizationArtifactService = () =>
           return result.success;
         }),
       );
-    const list = (input: VisualizationListInput): Effect.Effect<VisualizationListResult, unknown> =>
+    const list = (
+      input: VisualizationListInput,
+    ): Effect.Effect<VisualizationListResult, VisualizationApiError> =>
       Effect.gen(function* () {
         const retired =
           yield* sql`SELECT 1 FROM hard_deleted_threads WHERE thread_id = ${input.threadId}`;
@@ -899,7 +921,7 @@ export const makeVisualizationArtifactService = () =>
             return yield* failure();
           const frameId = randomUUID();
           const ticket = randomBytes(32).toString("hex");
-          const expiresAtMs = Date.now() + 30_000;
+          const expiresAtMs = DateTime.toEpochMillis(DateTime.nowUnsafe()) + 30_000;
           const result = decodeInline({
             ...input,
             purpose: row.kind,
@@ -950,7 +972,7 @@ export const makeVisualizationArtifactService = () =>
             }),
           );
           if (findInlineFrame(lookup) !== frame) return yield* failure();
-          frame.expiresAtMs = Date.now() + 30_000;
+          frame.expiresAtMs = DateTime.toEpochMillis(DateTime.nowUnsafe()) + 30_000;
           return {
             threadId: owned.threadId,
             artifactId: owned.artifactId,
@@ -1005,9 +1027,9 @@ export const makeVisualizationArtifactService = () =>
       );
     const sweep = sql.withTransaction(
       Effect.gen(function* () {
-        yield* sql`DELETE FROM visualization_invocations WHERE invocation_id IN (SELECT invocation_id FROM visualization_invocations WHERE expires_at < ${Date.now()} ORDER BY expires_at,invocation_id LIMIT 16)`;
-        yield* sql`DELETE FROM visualization_viewer_tickets WHERE ticket_digest IN (SELECT ticket_digest FROM visualization_viewer_tickets WHERE expires_at < ${Date.now()} ORDER BY expires_at,ticket_digest LIMIT 16)`;
-        yield* sql`DELETE FROM visualization_artifacts WHERE revision_id IN (SELECT a.revision_id FROM visualization_artifacts a WHERE NOT EXISTS(SELECT 1 FROM visualization_history h WHERE h.revision_id = a.revision_id) AND NOT EXISTS(SELECT 1 FROM visualization_invocations i WHERE i.revision_id = a.revision_id) AND (a.state = 'retired' OR a.created_at < ${new Date(Date.now() - VISUALIZATION_INVOCATION_LIFETIME_MS).toISOString()}) ORDER BY a.created_at,a.revision_id LIMIT 16)`;
+        yield* sql`DELETE FROM visualization_invocations WHERE invocation_id IN (SELECT invocation_id FROM visualization_invocations WHERE expires_at < ${DateTime.toEpochMillis(DateTime.nowUnsafe())} ORDER BY expires_at,invocation_id LIMIT 16)`;
+        yield* sql`DELETE FROM visualization_viewer_tickets WHERE ticket_digest IN (SELECT ticket_digest FROM visualization_viewer_tickets WHERE expires_at < ${DateTime.toEpochMillis(DateTime.nowUnsafe())} ORDER BY expires_at,ticket_digest LIMIT 16)`;
+        yield* sql`DELETE FROM visualization_artifacts WHERE revision_id IN (SELECT a.revision_id FROM visualization_artifacts a WHERE NOT EXISTS(SELECT 1 FROM visualization_history h WHERE h.revision_id = a.revision_id) AND NOT EXISTS(SELECT 1 FROM visualization_invocations i WHERE i.revision_id = a.revision_id) AND (a.state = 'retired' OR a.created_at < ${DateTime.formatIso(DateTime.makeUnsafe(DateTime.toEpochMillis(DateTime.nowUnsafe()) - VISUALIZATION_INVOCATION_LIFETIME_MS))}) ORDER BY a.created_at,a.revision_id LIMIT 16)`;
       }),
     );
     const debug = (threadId: string) =>

@@ -1,5 +1,9 @@
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";

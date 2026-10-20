@@ -1,6 +1,12 @@
+// Native fixture owns exact child argv, stdio handles and retirement; keep that process boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn, spawnSync } from "node:child_process";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// Native fixture paths retain host drive, separator and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it, onTestFinished } from "vitest";
@@ -50,6 +56,8 @@ it.skipIf(process.platform !== "darwin")(
         }
         await Promise.all(
           peers.map(async (peer) => {
+            // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+            // @effect-diagnostics-next-line globalTimers:off
             const force = setTimeout(() => peer.child.kill("SIGKILL"), 1500);
             try {
               await peer.exit;
@@ -76,6 +84,8 @@ it.skipIf(process.platform !== "darwin")(
         return await Promise.race([
           promise,
           new Promise<never>((_resolve, reject) => {
+            // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+            // @effect-diagnostics-next-line globalTimers:off
             timer = setTimeout(
               () => reject(new Error("Owned native event receipt deadline.")),
               10_000,
@@ -234,6 +244,8 @@ it.skipIf(process.platform !== "darwin")(
           { mode: 0o600 },
         );
       }
+      // Explicit native qualification output retains the existing stdout/stderr receipt protocol.
+      // @effect-diagnostics-next-line globalConsole:off
       console.info(
         JSON.stringify({
           qualification: "glide-native-key-rescue-transport",
@@ -247,6 +259,8 @@ it.skipIf(process.platform !== "darwin")(
         }),
       );
     } catch (error) {
+      // Explicit native qualification output retains the existing stdout/stderr receipt protocol.
+      // @effect-diagnostics-next-line globalConsole:off
       console.error(
         "Native key rescue transport failed",
         JSON.stringify(peers.map((peer) => peer.records)),

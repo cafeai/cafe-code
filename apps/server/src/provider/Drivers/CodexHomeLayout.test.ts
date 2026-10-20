@@ -15,6 +15,8 @@ import {
   shouldShareCodexShadowEntryName,
   withCodexHomeLayoutEnvironment,
 } from "./CodexHomeLayout.ts";
+
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const decodeCodexSettingsValue = Schema.decodeSync(CodexSettings);
 
 const decodeCodexSettings = (input: {
@@ -175,7 +177,7 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
           const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
           const shadowHome = path.join(shadowRoot, "shadow");
           const configuredSqliteHome = path.join(sharedHome, "configured-sqlite");
-          const sharedConfig = `model = "gpt-5-codex"\nsqlite_home = ${JSON.stringify(configuredSqliteHome)}\n`;
+          const sharedConfig = `model = "gpt-5-codex"\nsqlite_home = ${encodeProviderJsonString(configuredSqliteHome)}\n`;
 
           yield* fileSystem.makeDirectory(path.join(sharedHome, "sessions"));
           yield* writeTextFile(path.join(sharedHome, "config.toml"), sharedConfig);

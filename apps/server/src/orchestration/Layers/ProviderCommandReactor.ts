@@ -33,6 +33,7 @@ import {
 } from "@cafecode/shared/git";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
+import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -136,6 +137,13 @@ import {
   providerTurnConfigurationCommand,
   snapshotProviderTurnConfiguration,
 } from "../providerTurnConfiguration.ts";
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+class ManualCompactionUnavailableError extends Data.TaggedError(
+  "ManualCompactionUnavailableError",
+)<{
+  readonly message: string;
+}> {}
+
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
@@ -734,7 +742,10 @@ const make = Effect.gen(function* () {
       const durableActiveTurnId =
         durableBinding === undefined
           ? undefined
-          : activeTurnIdFromDurableBinding(durableBinding, Date.now());
+          : activeTurnIdFromDurableBinding(
+              durableBinding,
+              DateTime.toEpochMillis(DateTime.nowUnsafe()),
+            );
       const durablePayload =
         typeof durableBinding?.runtimePayload === "object" &&
         durableBinding.runtimePayload !== null &&
@@ -754,7 +765,8 @@ const make = Effect.gen(function* () {
       const localRunningTurnUnresolved =
         localSession?.status === "running" && localActiveTurnId === undefined;
       const durableOwnerIsLive =
-        durablePayload !== undefined && hasLiveProviderRuntimeOwner(durablePayload, Date.now());
+        durablePayload !== undefined &&
+        hasLiveProviderRuntimeOwner(durablePayload, DateTime.toEpochMillis(DateTime.nowUnsafe()));
       const durableHasExplicitActiveTurn =
         durablePayload !== undefined &&
         Object.prototype.hasOwnProperty.call(durablePayload, "activeTurnId");
@@ -1249,7 +1261,7 @@ const make = Effect.gen(function* () {
     );
     const activeProviderSessions = observedProviderSessions.sessions;
     const durableProviderBindings = yield* providerSessionDirectory.listBindings();
-    const observedRuntimeAt = Date.now();
+    const observedRuntimeAt = DateTime.toEpochMillis(DateTime.nowUnsafe());
     const generationThreads = new Map(shellSnapshot.threads.map((thread) => [thread.id, thread]));
     const bindingsByThread = new Map(
       durableProviderBindings.map((binding) => [binding.threadId, binding]),
@@ -1385,7 +1397,7 @@ const make = Effect.gen(function* () {
     // also have a fresh heartbeat and a live PID, otherwise a crashed daemon
     // could preserve a phantom turn forever.
     const liveProviderTurnByThreadId = new Map<string, TurnId>();
-    const recoveryObservedAtMs = Date.now();
+    const recoveryObservedAtMs = DateTime.toEpochMillis(DateTime.nowUnsafe());
     for (const binding of durableProviderBindings) {
       const activeTurnId = activeTurnIdFromDurableBinding(binding, recoveryObservedAtMs);
       if (activeTurnId !== undefined) {
@@ -2545,7 +2557,7 @@ const make = Effect.gen(function* () {
     if (prepared.copiedContextBootstrap && !steeredExistingTurn) {
       const acceptedAt = DateTime.formatIso(yield* DateTime.now);
       const identity = createHash("sha256")
-        .update(JSON.stringify([prepared.request.threadId, turn.turnId]))
+        .update(encodeJsonString([prepared.request.threadId, turn.turnId]))
         .digest("hex");
       // Completion can precede the start ACK, so a running projection alone
       // cannot prove this delivery. Record a replayable, content-free fact
@@ -4447,7 +4459,7 @@ const make = Effect.gen(function* () {
               binding.providerInstanceId === recoveryLiveness.localSession?.providerInstanceId &&
               durableCursor?.threadId === rootCompletion?.providerThreadId &&
               payload?.activeTurnId === expectedTurnId &&
-              hasLiveProviderRuntimeOwner(payload, Date.now()));
+              hasLiveProviderRuntimeOwner(payload, DateTime.toEpochMillis(DateTime.nowUnsafe())));
           if (rootCompletion?.turnId !== expectedTurnId || !matchingDurableOwner) {
             // Do not call the SAME active root a newer turn. This distinct
             // barrier also prevents a legacy false-conflict queue retry from
@@ -5485,7 +5497,9 @@ const make = Effect.gen(function* () {
         thread.session?.providerInstanceId !== event.payload.providerInstanceId
       ) {
         return yield* Effect.fail(
-          new Error("Manual compaction is unavailable for this conversation."),
+          new ManualCompactionUnavailableError({
+            message: "Manual compaction is unavailable for this conversation.",
+          }),
         );
       }
       yield* providerService.compactThread({
@@ -5728,7 +5742,7 @@ const make = Effect.gen(function* () {
     transientRecoveryWaits.set(event.sequence, entry);
     const delayMs = codexTransientRecoveryDelayMs(attempt, yield* Random.next);
     const now = DateTime.formatIso(yield* DateTime.now);
-    const retryAt = new Date(Date.parse(now) + delayMs).toISOString();
+    const retryAt = DateTime.formatIso(DateTime.makeUnsafe(Date.parse(now) + delayMs));
     const statusId = `server:codex-transient-wait:${event.sequence}:${crypto.randomUUID()}`;
     // Operational progress is not authority: neither this timestamp nor its
     // displayed countdown can admit provider work. All wakeups reauthenticate

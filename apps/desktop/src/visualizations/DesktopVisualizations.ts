@@ -1,6 +1,8 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join } from "node:path";
 
 import { DesktopEnvironment } from "../app/DesktopEnvironment.ts";

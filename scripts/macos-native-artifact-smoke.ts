@@ -1,7 +1,17 @@
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
+// This boundary retains exact native child handles and close/signal ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { execFile, spawn } from "node:child_process";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { existsSync } from "node:fs";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -22,6 +32,9 @@ async function runProcess(
       windowsHide: true,
     });
     child.once("error", reject);
+    // This native wait owns an external child/stream lifetime; a virtual
+    // Effect clock must not replace its existing deadline or cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     const timeout = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
     child.once("exit", (exitCode) => {
       clearTimeout(timeout);
@@ -137,7 +150,7 @@ export async function runMacosNativeArtifactSmoke(releaseDir = resolve("release"
       });
     };
     await qualify();
-    console.info("macOS DMG and ZIP runtime/updater/artifact smoke passed.");
+    Effect.runSync(Console.info("macOS DMG and ZIP runtime/updater/artifact smoke passed."));
   } finally {
     if (mounted) {
       await runProcess("hdiutil", ["detach", mountPoint, "-force"], 60_000).catch(() => undefined);

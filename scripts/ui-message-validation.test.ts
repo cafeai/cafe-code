@@ -1,6 +1,12 @@
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtemp, readFile, readdir, rm, symlink, writeFile, mkdir } from "node:fs/promises";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fsPromises from "node:fs/promises";
 import os from "node:os";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import ts from "typescript";

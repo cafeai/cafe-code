@@ -1,5 +1,11 @@
+// This boundary retains exact native child handles and close/signal ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawnSync } from "node:child_process";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { existsSync, readdirSync } from "node:fs";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 
 // Only copied source runtimes consume this identity. Production's signed

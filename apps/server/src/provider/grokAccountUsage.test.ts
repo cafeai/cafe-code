@@ -1,3 +1,4 @@
+import * as ProviderJsonSchema from "effect/Schema";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -9,6 +10,10 @@ import {
   parseGrokAccountRateLimitsPayload,
   readGrokAccountRateLimits,
 } from "./grokAccountUsage.ts";
+
+const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
 
 const CHECKED_AT = "2026-08-16T12:00:00.000Z";
 const PERIOD_START = "2026-08-14T08:49:34.446428+00:00";
@@ -147,8 +152,8 @@ it.layer(NodeServices.layer)("readGrokAccountRateLimits", (it) => {
 
         expect(fetchMock).toHaveBeenCalledOnce();
         expect(result?.rateLimits.primary?.usedPercent).toBe(1);
-        expect(JSON.stringify(result)).not.toContain("private-access-token");
-        expect(JSON.stringify(result)).not.toContain("user-123");
+        expect(encodeProviderJsonString(result)).not.toContain("private-access-token");
+        expect(encodeProviderJsonString(result)).not.toContain("user-123");
       }),
     ),
   );

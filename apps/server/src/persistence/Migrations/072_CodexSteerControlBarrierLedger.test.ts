@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -6,6 +7,10 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { runMigrations } from "../Migrations.ts";
 import * as TestSqliteClient from "../TestSqliteClient.ts";
 import Migration0072 from "./072_CodexSteerControlBarrierLedger.ts";
+
+// Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
+// this codec does not replace production admission or grant received-data authority.
+const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const layer = it.layer(Layer.mergeAll(TestSqliteClient.layerMemory()));
 
@@ -25,7 +30,7 @@ layer("072_CodexSteerControlBarrierLedger", (it) => {
         ) VALUES (
           'historical-control-before-ledger', 'thread', ${threadId}, 0,
           'thread.turn-interrupt-requested', ${historicalAt}, 'client:historical-control',
-          NULL, NULL, 'client', ${JSON.stringify({
+          NULL, NULL, 'client', ${encodeFixtureJson({
             threadId,
             turnId: "turn-historical",
             createdAt: historicalAt,
@@ -69,7 +74,7 @@ layer("072_CodexSteerControlBarrierLedger", (it) => {
         ) VALUES (
           ${input.eventId}, 'thread', ${threadId}, ${input.streamVersion}, ${input.eventType},
           ${input.occurredAt}, ${`${input.actorKind}:${input.eventId}`}, NULL, NULL,
-          ${input.actorKind}, ${JSON.stringify(input.payload)}, '{}'
+          ${input.actorKind}, ${encodeFixtureJson(input.payload)}, '{}'
         )
       `;
       const interruptAt = "2026-09-01T01:00:01.000Z";

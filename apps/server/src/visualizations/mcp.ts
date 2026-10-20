@@ -34,7 +34,7 @@ const inputSchema = z
       .optional(),
   })
   .strict();
-const run = async <A>(effect: Effect.Effect<A, unknown>) => {
+const run = async <A, E>(effect: Effect.Effect<A, E>) => {
   try {
     return await Effect.runPromise(effect);
   } catch {

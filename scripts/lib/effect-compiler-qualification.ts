@@ -1,9 +1,16 @@
+// This boundary retains exact native child handles and close/signal ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn } from "node:child_process";
-import type { Stats } from "node:fs";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import { constants, type Stats } from "node:fs";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   realpath,
   rename,
@@ -12,6 +19,9 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readYarnCatalog } from "./resolve-catalog.ts";
@@ -20,7 +30,16 @@ const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
 const entryPoint = fileURLToPath(new URL("../qualify-effect-compiler.ts", import.meta.url));
 const require = createRequire(new URL("../../package.json", import.meta.url));
 const reviewedTypeScriptVersion = "5.9.3";
+// Full injected bytes were independently rebuilt by the original/indexed
+// qualifier, compared to the installed entries, and behavior-qualified through
+// both API and CLI. A same-version marker or a still-working diagnostic alone
+// cannot attest adoption of the reviewed FIFO implementation.
+const reviewedCompilerHashes = {
+  api: "87c212c214acfe9e416c12b6682d12c373c43272ec26f108db3bfae344d54f50",
+  cli: "f0f0580b611dbbd93a31a07dc97cce7f9cec87a064e53358ff5d9c814528fc6a",
+} as const;
 const maximumOutputBytes = 64 * 1024;
+const maximumInstalledCompilerBytes = 24 * 1024 * 1024;
 const compilerDeadlineMs = 30_000;
 const fixturePrefix = "effect-compiler-";
 const fixturePattern = /^effect-compiler-[A-Za-z0-9]{6}$/u;
@@ -40,6 +59,91 @@ export class EffectCompilerQualificationError extends Error {
     );
     this.name = "EffectCompilerQualificationError";
     this.phase = phase;
+  }
+}
+
+export function validateInstalledEffectCompilerHashes(api: string, cli: string): void {
+  if (api !== reviewedCompilerHashes.api || cli !== reviewedCompilerHashes.cli)
+    throw new EffectCompilerQualificationError("installation");
+}
+
+/** Hash only one bounded, regular, single-link installed compiler at a time.
+ * A hash mismatch must not first allocate an attacker-sized Buffer or wait on
+ * a named pipe. POSIX nonblocking open also prevents a regular-to-FIFO leaf
+ * race from blocking before the held-descriptor type/identity check. Windows
+ * retains native file identity admission without POSIX flags or chmod.
+ *
+ * This is an observation of source-owned installed bytes, not protection from
+ * a malicious same-UID process which can replace the source or observer too.
+ * Every native/namespace refusal is reduced to the same fixed installation
+ * error; native paths and file contents never become a received error cause.
+ */
+export async function readInstalledEffectCompilerHash(path: string): Promise<string> {
+  try {
+    const before = await lstat(path, { bigint: true });
+    if (
+      !before.isFile() ||
+      before.isSymbolicLink() ||
+      before.nlink !== 1n ||
+      before.size < 0n ||
+      before.size > BigInt(maximumInstalledCompilerBytes)
+    )
+      throw new EffectCompilerQualificationError("installation");
+    const file = await open(
+      path,
+      constants.O_RDONLY |
+        (process.platform === "win32" ? 0 : constants.O_NOFOLLOW | constants.O_NONBLOCK),
+    );
+    try {
+      const held = await file.stat({ bigint: true });
+      if (
+        !held.isFile() ||
+        held.nlink !== 1n ||
+        held.dev !== before.dev ||
+        held.ino !== before.ino ||
+        held.size !== before.size ||
+        held.mtimeNs !== before.mtimeNs ||
+        held.ctimeNs !== before.ctimeNs
+      )
+        throw new EffectCompilerQualificationError("installation");
+      const hash = createHash("sha256");
+      const bytes = Buffer.alloc(64 * 1024);
+      const size = Number(before.size);
+      let position = 0;
+      while (position < size) {
+        const received = await file.read(
+          bytes,
+          0,
+          Math.min(bytes.length, size - position),
+          position,
+        );
+        if (received.bytesRead === 0) throw new EffectCompilerQualificationError("installation");
+        hash.update(bytes.subarray(0, received.bytesRead));
+        position += received.bytesRead;
+      }
+      if ((await file.read(bytes, 0, 1, position)).bytesRead !== 0)
+        throw new EffectCompilerQualificationError("installation");
+      const heldAfter = await file.stat({ bigint: true });
+      const namedAfter = await lstat(path, { bigint: true });
+      for (const after of [heldAfter, namedAfter]) {
+        if (
+          !after.isFile() ||
+          after.isSymbolicLink() ||
+          after.nlink !== 1n ||
+          after.dev !== before.dev ||
+          after.ino !== before.ino ||
+          after.size !== before.size ||
+          after.mtimeNs !== before.mtimeNs ||
+          after.ctimeNs !== before.ctimeNs
+        )
+          throw new EffectCompilerQualificationError("installation");
+      }
+      return hash.digest("hex");
+    } finally {
+      await file.close();
+    }
+  } catch {
+    throw new EffectCompilerQualificationError("installation");
   }
 }
 
@@ -313,7 +417,7 @@ export async function runEffectCompilerApiWorker(
   };
 }
 
-async function runCompiler(
+export async function runEffectCompilerQualificationProcess(
   args: readonly string[],
   fixture: string,
   signal?: AbortSignal,
@@ -350,6 +454,9 @@ async function runCompiler(
     });
     const cancel = () => retire("cancelled");
     signal?.addEventListener("abort", cancel, { once: true });
+    // This hard deadline owns the actual disposable native child's lifetime,
+    // independently of any Effect test clock supplied by the compiler fixture.
+    // @effect-diagnostics-next-line globalTimers:off
     const timer = setTimeout(() => retire("deadline"), compilerDeadlineMs);
     child.once("close", (code, childSignal) => {
       clearTimeout(timer);
@@ -417,6 +524,10 @@ export async function qualifyInstalledEffectCompiler(signal?: AbortSignal): Prom
     )
       throw new EffectCompilerQualificationError(phase);
     const cli = join(dirname(tsPackage), "bin", "tsc");
+    validateInstalledEffectCompilerHashes(
+      await readInstalledEffectCompilerHash(join(dirname(tsPackage), "lib/typescript.js")),
+      await readInstalledEffectCompilerHash(join(dirname(tsPackage), "lib/_tsc.js")),
+    );
     phase = "fixture";
     const logsPath = join(repositoryRoot, ".logs");
     await mkdir(logsPath, { recursive: true });
@@ -438,7 +549,11 @@ export async function qualifyInstalledEffectCompiler(signal?: AbortSignal): Prom
     for (const [name, data] of Object.entries(fixtureFiles()))
       await writeFile(join(path, name), data, { flag: "wx", mode: 0o600 });
     phase = "api";
-    const api = await runCompiler([entryPoint, "--api-worker", path], path, signal);
+    const api = await runEffectCompilerQualificationProcess(
+      [entryPoint, "--api-worker", path],
+      path,
+      signal,
+    );
     await saveResult(path, "api", api);
     if (api.code !== 0 || api.signal !== null || api.failure !== null || api.stderr !== "")
       throw new EffectCompilerQualificationError(phase);
@@ -454,7 +569,7 @@ export async function qualifyInstalledEffectCompiler(signal?: AbortSignal): Prom
         },
       );
       if (existing !== null) throw new EffectCompilerQualificationError(phase);
-      const result = await runCompiler(
+      const result = await runEffectCompilerQualificationProcess(
         [cli, "--project", `${role}.json`, "--pretty", "false"],
         path,
         signal,

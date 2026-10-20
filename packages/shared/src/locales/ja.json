@@ -1,4 +1,8 @@
 {
+  "Desktop update information is unavailable.": "デスクトップアプリの更新情報を取得できません。",
+  "Update checks are unavailable for this installation.": "このインストールでは更新を確認できません。",
+  "installed app": "インストール済みアプリ",
+  "runtime unavailable": "実行環境を確認できません",
   "Cafe Code data profile could not start": "Cafe Codeのデータプロファイルを起動できませんでした",
   "This data profile is already in use, unavailable or unsafe. No other profile was selected and automatic restart has stopped. Close the other Cafe Code instance using this profile, or check permissions, free space and startup recovery files. After resolving the problem, quit and reopen this Cafe Code instance. Do not delete ownership files to bypass this refusal.": "このデータプロファイルは使用中か、利用できないか、安全性を確認できません。別のプロファイルへの切り替えは行っておらず、自動再起動は停止しました。このプロファイルを使用している別のCafe Codeを終了するか、アクセス権、空き容量、起動時の復旧ファイルを確認してください。問題を解決してから、このCafe Codeを終了して開き直してください。この制限を回避するために所有権ファイルを削除しないでください。",
   "Source Debug build is missing, outdated or inconsistent. Rebuild using yarn build:desktop before starting Cafe Code. No application or provider was started.": "ソース版のDebugビルドが存在しないか、古いか、整合していません。Cafe Codeを起動する前にyarn build:desktopで再ビルドしてください。アプリとプロバイダーは起動していません。",

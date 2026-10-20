@@ -1,4 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 
 import { parseJsonText } from "./json-file.ts";

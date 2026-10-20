@@ -1,5 +1,8 @@
+// These scoped native fixture operations qualify exact path/argv construction.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import browserPolicy from "../../apps/web/browser-test-policy.json" with { type: "json" };

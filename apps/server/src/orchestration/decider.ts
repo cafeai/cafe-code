@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import { isDeepStrictEqual } from "node:util";
 
 import type {
@@ -23,6 +24,8 @@ import {
 import { projectEvent } from "./projector.ts";
 import { resolveThreadForkMessageCutoff } from "./threadForkCutoff.ts";
 import { SESSION_LIFECYCLE_SUPERSEDED, sessionLifecycleSnapshot } from "./sessionLifecycle.ts";
+
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -383,7 +386,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             }),
         });
         if (
-          JSON.stringify(boundary) !== JSON.stringify(command.messageCutoff) ||
+          encodeJsonString(boundary) !== encodeJsonString(command.messageCutoff) ||
           !command.retainedMessageIds ||
           !command.retainedMessageIds.includes(command.messageCutoff.sourceMessageId) ||
           new Set(command.retainedMessageIds).size !== command.retainedMessageIds.length ||

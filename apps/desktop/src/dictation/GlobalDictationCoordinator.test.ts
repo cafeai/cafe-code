@@ -4,6 +4,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import type * as Electron from "electron";
 import { vi } from "vitest";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { resolve } from "node:path";
 import type { MacDictationTargetResult } from "./MacDictationTarget.ts";
 

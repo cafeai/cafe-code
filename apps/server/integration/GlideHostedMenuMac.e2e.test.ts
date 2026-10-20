@@ -1,7 +1,16 @@
+// Native fixture owns exact child argv, stdio handles and retirement; keep that process boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn, spawnSync } from "node:child_process";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { watch, type FSWatcher } from "node:fs";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import * as DateTime from "effect/DateTime";
+// Native fixture paths retain host drive, separator and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it, onTestFinished } from "vitest";
@@ -115,6 +124,8 @@ it
         await runtime?.close();
         if (owner && ownerExit) {
           owner.stdin?.end();
+          // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+          // @effect-diagnostics-next-line globalTimers:off
           const force = setTimeout(() => owner?.kill("SIGKILL"), 1500);
           try {
             await ownerExit;
@@ -131,6 +142,8 @@ it
         return await Promise.race([
           promise,
           new Promise<never>((_resolve, reject) => {
+            // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+            // @effect-diagnostics-next-line globalTimers:off
             timer = setTimeout(() => reject(new Error(label)), 10_000);
           }),
         ]);
@@ -401,7 +414,7 @@ it
         const panelStarted = until((values) =>
           values.some((value) => value.kind === "panel started"),
         );
-        const panelStart = Date.now();
+        const panelStart = DateTime.toEpochMillis(DateTime.nowUnsafe());
         const panelPhaseStart = nativePhases.length;
         const openedPanel = await runtime.execute({
           code: `await app.click(${panelButton.index});`,
@@ -536,6 +549,8 @@ it
       await readReceipts();
       preserved(receipts);
       await artifact("passed");
+      // Explicit native qualification output retains the existing stdout/stderr receipt protocol.
+      // @effect-diagnostics-next-line globalConsole:off
       console.info(
         JSON.stringify({
           qualification: "glide-owned-menu-native",
@@ -549,6 +564,8 @@ it
       );
     } catch (error) {
       await artifact("failed");
+      // Explicit native qualification output retains the existing stdout/stderr receipt protocol.
+      // @effect-diagnostics-next-line globalConsole:off
       console.error(
         "Owned Glide menu qualification failed",
         JSON.stringify({ phase, receipts, lastObservation }),

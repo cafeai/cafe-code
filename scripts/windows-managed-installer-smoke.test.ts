@@ -1,5 +1,9 @@
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {

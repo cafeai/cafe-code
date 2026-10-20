@@ -1,3 +1,5 @@
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
 // @effect-diagnostics nodeBuiltinImport:off
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -74,5 +76,7 @@ export async function buildMacIcons(): Promise<void> {
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   await buildMacIcons();
-  console.log("Updated the Mac PNG, Dock resource, and complete Retina ICNS icon set.");
+  Effect.runSync(
+    Console.log("Updated the Mac PNG, Dock resource, and complete Retina ICNS icon set."),
+  );
 }

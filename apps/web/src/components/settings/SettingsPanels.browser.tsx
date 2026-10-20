@@ -536,8 +536,13 @@ const createDesktopBridgeStub = (overrides?: {
   readonly setUpdateChannel?: DesktopBridge["setUpdateChannel"];
   readonly sourceUpdateState?: DesktopSourceUpdateState;
   readonly checkSourceUpdate?: DesktopBridge["checkSourceUpdate"];
+  readonly updateState?: DesktopUpdateState;
+  readonly checkForUpdate?: DesktopBridge["checkForUpdate"];
+  readonly downloadUpdate?: DesktopBridge["downloadUpdate"];
+  readonly onUpdateState?: DesktopBridge["onUpdateState"];
 }): DesktopBridge => {
   const idleUpdateState: DesktopUpdateState = {
+    runtimeKind: "source",
     enabled: false,
     status: "idle",
     channel: "latest",
@@ -553,6 +558,7 @@ const createDesktopBridgeStub = (overrides?: {
     message: null,
     errorContext: null,
     canRetry: false,
+    ...overrides?.updateState,
   };
   const sourceUpdateState: DesktopSourceUpdateState = overrides?.sourceUpdateState ?? {
     status: "ignored",
@@ -650,14 +656,16 @@ const createDesktopBridgeStub = (overrides?: {
         ...idleUpdateState,
         channel,
       })),
-    checkForUpdate: vi.fn().mockResolvedValue({ checked: false, state: idleUpdateState }),
-    downloadUpdate: vi
-      .fn()
-      .mockResolvedValue({ accepted: false, completed: false, state: idleUpdateState }),
+    checkForUpdate:
+      overrides?.checkForUpdate ??
+      vi.fn().mockResolvedValue({ checked: false, state: idleUpdateState }),
+    downloadUpdate:
+      overrides?.downloadUpdate ??
+      vi.fn().mockResolvedValue({ accepted: false, completed: false, state: idleUpdateState }),
     installUpdate: vi
       .fn()
       .mockResolvedValue({ accepted: false, completed: false, state: idleUpdateState }),
-    onUpdateState: () => () => {},
+    onUpdateState: overrides?.onUpdateState ?? (() => () => {}),
     getSourceUpdateState: vi.fn().mockResolvedValue(sourceUpdateState),
     checkSourceUpdate: overrides?.checkSourceUpdate ?? vi.fn().mockResolvedValue(sourceUpdateState),
     onSourceUpdateState: () => () => {},
@@ -1139,6 +1147,436 @@ describe("settings panels", () => {
     await vi.waitFor(() => {
       expect(checkSourceUpdate).toHaveBeenCalledTimes(1);
     });
+    expect(window.desktopBridge?.checkForUpdate).not.toHaveBeenCalled();
+  });
+
+  it("checks packaged releases rather than Git and reports an up-to-date result", async () => {
+    const updateState = {
+      ...(await createDesktopBridgeStub().getUpdateState()),
+      runtimeKind: "packaged",
+      enabled: true,
+      status: "idle",
+    } satisfies DesktopUpdateState;
+    const checkForUpdate = vi.fn<DesktopBridge["checkForUpdate"]>().mockResolvedValue({
+      checked: true,
+      state: { ...updateState, status: "up-to-date" },
+    });
+    const bridge = createDesktopBridgeStub({ updateState, checkForUpdate });
+    window.desktopBridge = bridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <SystemSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    await expect.element(page.getByText("(installed app)", { exact: false })).toBeInTheDocument();
+    await expect.element(page.getByText("Not checked yet.")).toBeInTheDocument();
+    await page.getByRole("button", { name: "Check for updates", exact: true }).click();
+    await expect.element(page.getByText("Up to date.", { exact: true })).toBeInTheDocument();
+    expect(checkForUpdate).toHaveBeenCalledTimes(1);
+    expect(bridge.checkSourceUpdate).not.toHaveBeenCalled();
+    expect(bridge.downloadUpdate).not.toHaveBeenCalled();
+    expect(bridge.installUpdate).not.toHaveBeenCalled();
+  });
+
+  it("retains a newer native release event over a delayed check result and offers the manual Mac download", async ({
+    onTestFinished,
+  }) => {
+    let retired = false;
+    let releaseHeldCheck: (() => void) | null = null;
+    let pendingRender: ReturnType<typeof renderWithTestRouter> | null = null;
+    let ownedMount: Awaited<ReturnType<typeof renderWithTestRouter>> | null = null;
+    let pendingUnmount: Promise<void> | null = null;
+    const unmountOwned = () =>
+      (pendingUnmount ??= (async () => {
+        const view = ownedMount ?? (pendingRender ? await pendingRender.catch(() => null) : null);
+        if (view) await view.unmount();
+        if (mounted === view) mounted = null;
+        ownedMount = null;
+        pendingRender = null;
+      })());
+    onTestFinished(async () => {
+      retired = true;
+      try {
+        await unmountOwned();
+      } finally {
+        // Retire the exact component before releasing an IPC return that can
+        // otherwise resume after a hard test timeout into the next case.
+        releaseHeldCheck?.();
+      }
+    });
+    const updateState = {
+      ...(await createDesktopBridgeStub().getUpdateState()),
+      runtimeKind: "packaged",
+      enabled: true,
+      status: "idle",
+      installMode: "manual",
+    } satisfies DesktopUpdateState;
+    if (retired) return;
+    const available = {
+      ...updateState,
+      status: "available",
+      availableVersion: "9.8.7",
+    } satisfies DesktopUpdateState;
+    const listeners = new Set<(state: DesktopUpdateState) => void>();
+    let finishCheck:
+      | ((result: Awaited<ReturnType<DesktopBridge["checkForUpdate"]>>) => void)
+      | undefined;
+    const result = new Promise<Awaited<ReturnType<DesktopBridge["checkForUpdate"]>>>((resolve) => {
+      finishCheck = resolve;
+    });
+    let checkReleased = false;
+    const releaseCheck = (state: DesktopUpdateState) => {
+      if (checkReleased) return;
+      checkReleased = true;
+      finishCheck?.({ checked: true, state });
+    };
+    releaseHeldCheck = () => releaseCheck(updateState);
+    const checkForUpdate = vi.fn<DesktopBridge["checkForUpdate"]>().mockReturnValue(result);
+    const bridge = createDesktopBridgeStub({
+      updateState,
+      checkForUpdate,
+      onUpdateState: (listener) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+    });
+    window.desktopBridge = bridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+    pendingRender = renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <SystemSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    ownedMount = await pendingRender;
+    if (retired) return;
+    mounted = ownedMount;
+    try {
+      await expect.element(page.getByText("Not checked yet.")).toBeInTheDocument();
+      if (retired) return;
+      await page.getByRole("button", { name: "Check for updates", exact: true }).click();
+      if (retired) return;
+      await vi.waitFor(() => {
+        expect(checkForUpdate).toHaveBeenCalledTimes(1);
+      });
+      if (retired) return;
+      for (const listener of listeners) listener(available);
+      await expect
+        .element(
+          page.getByText("Update 9.8.7 can be installed from its GitHub release", { exact: true }),
+        )
+        .toBeInTheDocument();
+      if (retired) return;
+      releaseCheck({ ...updateState, status: "up-to-date" });
+      await vi.waitFor(() => {
+        expect(listeners.size).toBe(1);
+      });
+      if (retired) return;
+      await expect
+        .element(
+          page.getByText("Update 9.8.7 can be installed from its GitHub release", { exact: true }),
+        )
+        .toBeInTheDocument();
+      if (retired) return;
+      await expect
+        .element(page.getByRole("button", { name: "Dismiss update", exact: true }))
+        .not.toBeInTheDocument();
+      if (retired) return;
+      await page
+        .getByRole("button", {
+          name: "Update 9.8.7 can be installed from its GitHub release",
+          exact: true,
+        })
+        .click();
+      if (retired) return;
+      expect(bridge.openExternal).toHaveBeenCalledExactlyOnceWith(
+        "https://github.com/cafeai/cafe-code/releases/tag/v9.8.7",
+      );
+      expect(bridge.downloadUpdate).not.toHaveBeenCalled();
+      expect(bridge.installUpdate).not.toHaveBeenCalled();
+      expect(bridge.checkSourceUpdate).not.toHaveBeenCalled();
+    } finally {
+      if (!retired) releaseHeldCheck();
+    }
+  });
+
+  it("retires each exact subscription once when About unmounts during a held release check", async ({
+    onTestFinished,
+  }) => {
+    let retired = false;
+    let releaseHeldCheck: (() => void) | null = null;
+    let pendingRender: ReturnType<typeof renderWithTestRouter> | null = null;
+    let ownedMount: Awaited<ReturnType<typeof renderWithTestRouter>> | null = null;
+    let pendingUnmount: Promise<void> | null = null;
+    const unmountOwned = () =>
+      (pendingUnmount ??= (async () => {
+        const view = ownedMount ?? (pendingRender ? await pendingRender.catch(() => null) : null);
+        if (view) await view.unmount();
+        if (mounted === view) mounted = null;
+        ownedMount = null;
+        pendingRender = null;
+      })());
+    onTestFinished(async () => {
+      retired = true;
+      try {
+        await unmountOwned();
+      } finally {
+        releaseHeldCheck?.();
+      }
+    });
+    const updateState = {
+      ...(await createDesktopBridgeStub().getUpdateState()),
+      runtimeKind: "packaged",
+      enabled: true,
+      status: "idle",
+    } satisfies DesktopUpdateState;
+    if (retired) return;
+    const listeners = new Set<(state: DesktopUpdateState) => void>();
+    const unsubscribes: ReturnType<typeof vi.fn>[] = [];
+    let finishCheck:
+      | ((result: Awaited<ReturnType<DesktopBridge["checkForUpdate"]>>) => void)
+      | undefined;
+    const result = new Promise<Awaited<ReturnType<DesktopBridge["checkForUpdate"]>>>((resolve) => {
+      finishCheck = resolve;
+    });
+    let checkReleased = false;
+    releaseHeldCheck = () => {
+      if (checkReleased) return;
+      checkReleased = true;
+      finishCheck?.({
+        checked: true,
+        state: { ...updateState, status: "available", availableVersion: "9.8.7" },
+      });
+    };
+    const checkForUpdate = vi.fn<DesktopBridge["checkForUpdate"]>().mockReturnValue(result);
+    const bridge = createDesktopBridgeStub({
+      updateState,
+      checkForUpdate,
+      onUpdateState: (listener) => {
+        listeners.add(listener);
+        const unsubscribe = vi.fn(() => {
+          listeners.delete(listener);
+        });
+        unsubscribes.push(unsubscribe);
+        return unsubscribe;
+      },
+    });
+    window.desktopBridge = bridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+    pendingRender = renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <SystemSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    ownedMount = await pendingRender;
+    if (retired) return;
+    mounted = ownedMount;
+    await expect.element(page.getByText("Not checked yet.")).toBeInTheDocument();
+    if (retired) return;
+    await page.getByRole("button", { name: "Check for updates", exact: true }).click();
+    if (retired) return;
+    await vi.waitFor(() => {
+      expect(checkForUpdate).toHaveBeenCalledTimes(1);
+      expect(listeners.size).toBe(2);
+    });
+    if (retired) return;
+    await unmountOwned();
+    if (retired) return;
+    expect(listeners.size).toBe(0);
+    expect(unsubscribes).toHaveLength(2);
+    for (const unsubscribe of unsubscribes) expect(unsubscribe).toHaveBeenCalledTimes(1);
+    releaseHeldCheck();
+    await result;
+    if (retired) return;
+    expect(listeners.size).toBe(0);
+    for (const unsubscribe of unsubscribes) expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).not.toContain("9.8.7");
+    expect(bridge.downloadUpdate).not.toHaveBeenCalled();
+    expect(bridge.installUpdate).not.toHaveBeenCalled();
+    expect(bridge.checkSourceUpdate).not.toHaveBeenCalled();
+  });
+
+  it("uses the existing in-app download action without installing automatically", async () => {
+    const updateState = {
+      ...(await createDesktopBridgeStub().getUpdateState()),
+      runtimeKind: "packaged",
+      enabled: true,
+      status: "idle",
+    } satisfies DesktopUpdateState;
+    const available = {
+      ...updateState,
+      status: "available",
+      availableVersion: "9.8.7",
+    } satisfies DesktopUpdateState;
+    const downloadUpdate = vi.fn<DesktopBridge["downloadUpdate"]>().mockResolvedValue({
+      accepted: true,
+      completed: true,
+      state: { ...available, status: "downloaded", downloadedVersion: "9.8.7" },
+    });
+    const bridge = createDesktopBridgeStub({
+      updateState,
+      downloadUpdate,
+      checkForUpdate: vi.fn().mockResolvedValue({ checked: true, state: available }),
+    });
+    window.desktopBridge = bridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <SystemSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    await expect.element(page.getByText("Not checked yet.")).toBeInTheDocument();
+    await page.getByRole("button", { name: "Check for updates", exact: true }).click();
+    await page.getByRole("button", { name: "Update 9.8.7 ready to download", exact: true }).click();
+    await expect
+      .element(
+        page.getByRole("button", {
+          name: "Update 9.8.7 downloaded. Click to restart and install.",
+          exact: true,
+        }),
+      )
+      .toBeInTheDocument();
+    expect(downloadUpdate).toHaveBeenCalledTimes(1);
+    expect(bridge.installUpdate).not.toHaveBeenCalled();
+    expect(bridge.openExternal).not.toHaveBeenCalled();
+    expect(bridge.checkSourceUpdate).not.toHaveBeenCalled();
+  });
+
+  it("shows a native release-check failure and leaves retry available", async () => {
+    const updateState = {
+      ...(await createDesktopBridgeStub().getUpdateState()),
+      runtimeKind: "packaged",
+      enabled: true,
+      status: "idle",
+    } satisfies DesktopUpdateState;
+    const bridge = createDesktopBridgeStub({
+      updateState,
+      checkForUpdate: vi.fn().mockResolvedValue({
+        checked: true,
+        state: {
+          ...updateState,
+          status: "error",
+          errorContext: "check",
+          message: "Release feed unavailable",
+          canRetry: true,
+        },
+      }),
+    });
+    window.desktopBridge = bridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <SystemSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    await expect.element(page.getByText("Not checked yet.")).toBeInTheDocument();
+    await page.getByRole("button", { name: "Check for updates", exact: true }).click();
+    await expect
+      .element(page.getByText("Release feed unavailable", { exact: true }))
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Check for updates", exact: true }))
+      .toBeEnabled();
+    expect(bridge.checkSourceUpdate).not.toHaveBeenCalled();
+    expect(bridge.downloadUpdate).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to a Git check for a known packaged but disabled updater", async () => {
+    const updateState = {
+      ...(await createDesktopBridgeStub().getUpdateState()),
+      runtimeKind: "packaged",
+      enabled: false,
+      status: "disabled",
+      message: "Updates are disabled for this installation.",
+    } satisfies DesktopUpdateState;
+    const bridge = createDesktopBridgeStub({ updateState });
+    window.desktopBridge = bridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <SystemSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    await expect
+      .element(page.getByText("Updates are disabled for this installation.", { exact: true }))
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Check for updates", exact: true }))
+      .toBeDisabled();
+    expect(bridge.checkForUpdate).not.toHaveBeenCalled();
+    expect(bridge.checkSourceUpdate).not.toHaveBeenCalled();
+    expect(bridge.downloadUpdate).not.toHaveBeenCalled();
+    expect(bridge.installUpdate).not.toHaveBeenCalled();
+  });
+
+  it("keeps a rejected update IPC cause opaque while reporting a useful failure", async () => {
+    const updateState = {
+      ...(await createDesktopBridgeStub().getUpdateState()),
+      runtimeKind: "packaged",
+      enabled: true,
+      status: "idle",
+    } satisfies DesktopUpdateState;
+    const bridge = createDesktopBridgeStub({
+      updateState,
+      checkForUpdate: vi.fn().mockRejectedValue({ message: "private received cause sentinel" }),
+    });
+    window.desktopBridge = bridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <SystemSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    await expect.element(page.getByText("Not checked yet.")).toBeInTheDocument();
+    await page.getByRole("button", { name: "Check for updates", exact: true }).click();
+    await expect
+      .element(page.getByText("Could not check for updates.", { exact: true }))
+      .toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("private received cause sentinel");
+    await expect
+      .element(page.getByRole("button", { name: "Check for updates", exact: true }))
+      .toBeEnabled();
+    expect(bridge.checkSourceUpdate).not.toHaveBeenCalled();
+  });
+
+  it("does not infer legacy runtime identity from source metadata or updater eligibility", async () => {
+    const { runtimeKind: _runtimeKind, ...legacyState } =
+      await createDesktopBridgeStub().getUpdateState();
+    const bridge = createDesktopBridgeStub({
+      updateState: { ...legacyState, enabled: true },
+      sourceUpdateState: {
+        status: "current",
+        branch: "dev",
+        trackedBranch: "dev",
+        runtimeHash: "abc123",
+        localHash: "abc123",
+        remoteHash: "abc123",
+        mergeBaseHash: "abc123",
+        dirty: false,
+        checkedAt: null,
+        message: "This checkout is current with origin.",
+      },
+    });
+    // Override the helper's explicit source default to model the old wire shape.
+    bridge.getUpdateState = vi.fn().mockResolvedValue({ ...legacyState, enabled: true });
+    window.desktopBridge = bridge;
+    setServerConfigSnapshot(createBaseServerConfig());
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <SystemSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    await expect
+      .element(page.getByText("Desktop update information is unavailable.", { exact: true }))
+      .toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Check for updates", exact: true }))
+      .toBeDisabled();
+    expect(bridge.checkForUpdate).not.toHaveBeenCalled();
+    expect(bridge.checkSourceUpdate).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain("dev branch");
   });
 
   it("shows rebuild-required source status when the running build hash is stale", async () => {

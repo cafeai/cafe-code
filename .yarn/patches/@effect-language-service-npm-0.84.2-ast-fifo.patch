@@ -1,0 +1,2272 @@
+diff --git a/cli.js b/cli.js
+index dd80bd28eb553559cdcd7c37b872d728123288e4..4729454d2c759247c719e3e6da3c88d60cbd5d47 100755
+--- a/cli.js
++++ b/cli.js
+@@ -28493,8 +28493,9 @@ function makeTypeCheckerUtils(ts, typeChecker, tsUtils) {
+       nodeToVisit.push(node);
+       return void 0;
+     };
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isVariableDeclaration(node) && node.initializer) {
+         const expectedType = typeChecker.getTypeAtLocation(node.name);
+         const realType = typeChecker.getTypeAtLocation(node.initializer);
+@@ -33579,8 +33580,9 @@ var classSelfMismatch = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const result3 = yield* pipe(
+           typeParser.extendsEffectService(node),
+@@ -33739,8 +33741,9 @@ var deterministicKeys = createDiagnostic({
+           nodeToVisit2.push(node);
+           return void 0;
+         };
+-        while (nodeToVisit2.length > 0) {
+-          const node = nodeToVisit2.shift();
++        for (let nodeToVisit2Index = 0; nodeToVisit2Index < nodeToVisit2.length; nodeToVisit2Index++) {
++          const node = nodeToVisit2[nodeToVisit2Index];
++          nodeToVisit2[nodeToVisit2Index] = void 0;
+           if (ts.isCallExpression(node)) {
+             for (let i = 0; i < node.arguments.length; i++) {
+               const arg = node.arguments[i];
+@@ -33774,8 +33777,9 @@ var deterministicKeys = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const result3 = yield* pipe(
+           pipe(
+@@ -33879,8 +33883,9 @@ var effectFnIife = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isCallExpression(node)) continue;
+       const innerCall = node.expression;
+@@ -34301,8 +34306,9 @@ var effectFnOpportunity = createDiagnostic({
+         return declarations.some((decl) => decl.pos >= paramsStart && decl.end <= paramsEnd);
+       };
+       const nodesToVisit = [...nodes2];
+-      while (nodesToVisit.length > 0) {
+-        const node = nodesToVisit.shift();
++      for (let nodesToVisitIndex = 0; nodesToVisitIndex < nodesToVisit.length; nodesToVisitIndex++) {
++        const node = nodesToVisit[nodesToVisitIndex];
++        nodesToVisit[nodesToVisitIndex] = void 0;
+         if (ts.isIdentifier(node)) {
+           const symbol4 = typeChecker.getSymbolAtLocation(node);
+           if (symbol4 && isSymbolDeclaredInParams(symbol4)) {
+@@ -34505,8 +34511,9 @@ var effectFnOpportunity = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       const test = parseEffectFnOpportunityTarget(node);
+       if (!test) continue;
+@@ -34659,8 +34666,9 @@ var effectGenUsesAdapter = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -34820,8 +34828,9 @@ var effectMapVoid = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isMapCall = yield* pipe(
+@@ -34887,8 +34896,9 @@ var effectSucceedWithVoid = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isSucceedCall = yield* pipe(
+@@ -34942,8 +34952,9 @@ var extendsNativeError = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.heritageClauses) {
+         for (const clause of node.heritageClauses) {
+           if (clause.token === ts.SyntaxKind.ExtendsKeyword && clause.types.length > 0) {
+@@ -35002,8 +35013,9 @@ var floatingEffect = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!isFloatingExpression(node)) continue;
+       const type = typeCheckerUtils.getTypeAtLocation(node.expression);
+@@ -35048,8 +35060,9 @@ var genericEffectServices = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const typesToCheck = [];
+       if (ts.isClassDeclaration(node) && node.name && node.typeParameters && node.heritageClauses) {
+         const classSym = typeChecker.getSymbolAtLocation(node.name);
+@@ -35101,8 +35114,9 @@ var makeGlobalConsoleApply = (checkInEffect) => fn3(`globalConsole${checkInEffec
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) continue;
+     const method = ts.idText(node.expression.name);
+@@ -35157,8 +35171,9 @@ var makeGlobalDateApply = (checkInEffect) => fn3(`globalDate${checkInEffect ? "I
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     let messageText;
+     let objectNode;
+@@ -35221,8 +35236,9 @@ var globalErrorInEffectCatch = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isEffectWithCatch = yield* pipe(
+@@ -35283,8 +35299,9 @@ var globalErrorInEffectFailure = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isNewExpression(node)) {
+         const newExpressionType = typeCheckerUtils.getTypeAtLocation(node);
+@@ -35337,8 +35354,9 @@ var makeGlobalFetchApply = (checkInEffect) => fn3(`globalFetch${checkInEffect ?
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     if (ts.isCallExpression(node)) {
+       const symbol4 = typeChecker.getSymbolAtLocation(node.expression);
+       if (symbol4 && typeCheckerUtils.resolveToGlobalSymbol(symbol4) === fetchSymbol) {
+@@ -35392,8 +35410,9 @@ var makeGlobalRandomApply = (checkInEffect) => fn3(`globalRandom${checkInEffect
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression) || ts.idText(node.expression.name) !== "random") continue;
+     const symbol4 = typeChecker.getSymbolAtLocation(node.expression.expression);
+@@ -35459,8 +35478,9 @@ var makeGlobalTimersApply = (checkInEffect) => fn3(`globalTimers${checkInEffect
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     if (!ts.isCallExpression(node)) continue;
+     const symbol4 = typeChecker.getSymbolAtLocation(node.expression);
+@@ -35585,8 +35605,9 @@ var importFromBarrel = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const parent = node.parent;
+       if (!(ts.isImportSpecifier(node) && ts.isNamedImports(parent))) {
+         ts.forEachChild(node, appendNodeToVisit);
+@@ -35664,8 +35685,9 @@ var instanceOfSchema = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) {
+         const leftExpr = node.left;
+         const rightExpr = node.right;
+@@ -35737,8 +35759,9 @@ var layerMergeAllWithDependencies = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isCallExpression(node)) {
+         const checkLayerMergeAll = yield* pipe(
+           typeParser.isNodeReferenceToEffectLayerModuleApi("mergeAll")(node.expression),
+@@ -35967,8 +35990,9 @@ More info and examples at https://effect.website/docs/requirements-management/la
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const typesToCheck = [];
+       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.name) && ts.idText(node.expression.name) === "GenericTag") {
+         const nodeType = typeCheckerUtils.getTypeAtLocation(node);
+@@ -36406,8 +36430,9 @@ var missingEffectServiceDependency = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const serviceResult = yield* pipe(
+           typeParser.extendsEffectService(node),
+@@ -36554,8 +36579,9 @@ var missingReturnYieldStar = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isExpressionStatement(node)) continue;
+       const unwrapped = tsUtils.skipOuterExpressions(node.expression);
+@@ -36608,8 +36634,9 @@ var missingStarInYieldEffectGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isYieldExpression(node) && node.expression && node.asteriskToken === void 0) {
+         const functionStarNode = ts.findAncestor(
+@@ -36866,8 +36893,9 @@ var nonObjectEffectServiceType = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const serviceResult = yield* pipe(
+           typeParser.extendsEffectService(node),
+@@ -37673,8 +37701,9 @@ var outdatedApi = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       const checkEffectMigration = checkPropertyAccessMigration(
+         node,
+@@ -37783,8 +37812,9 @@ var overriddenSchemaConstructor = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.heritageClauses) {
+         let extendsSchema = false;
+         for (const heritageClause of node.heritageClauses) {
+@@ -38012,8 +38042,9 @@ var redundantSchemaTagIdentifier = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const result3 = yield* pipe(
+           typeParser.extendsSchemaTaggedClass(node),
+@@ -38066,8 +38097,9 @@ var returnEffectInGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isReturnStatement(node) && node.expression) {
+         if (ts.isYieldExpression(node.expression)) continue;
+@@ -38143,8 +38175,9 @@ var runEffectInsideEffect = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isCallExpression(node)) continue;
+       if (node.arguments.length === 0) continue;
+@@ -38303,8 +38336,9 @@ var schemaStructWithTag = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isCallExpression(node)) {
+         const isSchemaStructCall = yield* pipe(
+           typeParser.isNodeReferenceToEffectSchemaModuleApi("Struct")(node.expression),
+@@ -38404,8 +38438,9 @@ var schemaSyncInEffect = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isCallExpression(node)) continue;
+       const isSchemaSyncCall = yield* pipe(
+@@ -38450,8 +38485,9 @@ var schemaUnionOfLiterals = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isCallExpression(node)) {
+         const isSchemaUnionCall = yield* pipe(
+           typeParser.isNodeReferenceToEffectSchemaModuleApi("Union")(node.expression),
+@@ -38572,8 +38608,9 @@ Consider using "scoped" instead to get rid of the scope in the requirements.`,
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const layerEffectApiCall = parseLayerEffectApiCall(node);
+       if (layerEffectApiCall) {
+         const type = typeCheckerUtils.getTypeAtLocation(node);
+@@ -38626,8 +38663,9 @@ var serviceNotAsClass = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isVariableDeclaration(node)) continue;
+       if (!node.initializer || !ts.isCallExpression(node.initializer)) continue;
+@@ -38705,8 +38743,9 @@ var strictBooleanExpressions = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       const nodes2 = [];
+       if (ts.isIfStatement(node)) {
+@@ -38796,8 +38835,9 @@ var strictEffectProvide = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const layerCheck = yield* pipe(parseEffectProvideWithLayer(node), option4);
+@@ -38842,8 +38882,9 @@ var tryCatchInEffectGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isTryStatement(node) && node.catchClause) {
+         const generatorOrRegularFunction = ts.findAncestor(
+@@ -38893,8 +38934,9 @@ var unknownInEffectCatch = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isEffectWithCatch = yield* pipe(
+@@ -38955,8 +38997,9 @@ var unnecessaryEffectGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -39003,8 +39046,9 @@ var unnecessaryFailYieldableError = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isYieldExpression(node) && node.asteriskToken && node.expression && ts.isCallExpression(node.expression)) {
+         const callExpression = node.expression;
+@@ -39064,8 +39108,9 @@ var unnecessaryPipe = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -39113,8 +39158,9 @@ var unnecessaryPipeChain = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -39190,8 +39236,9 @@ var unsupportedServiceAccessors = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isClassDeclaration(node)) {
+         const parseResult = yield* pipe(
+diff --git a/effect-lsp-patch-utils.js b/effect-lsp-patch-utils.js
+index 30f28fa2d10babce35f23b539f127eeb69a352dc..0057b30276e3b1c876f3da45242f7f274e92769e 100644
+--- a/effect-lsp-patch-utils.js
++++ b/effect-lsp-patch-utils.js
+@@ -2950,8 +2950,9 @@ function makeTypeCheckerUtils(ts, typeChecker, tsUtils) {
+       nodeToVisit.push(node);
+       return void 0;
+     };
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isVariableDeclaration(node) && node.initializer) {
+         const expectedType = typeChecker.getTypeAtLocation(node.name);
+         const realType = typeChecker.getTypeAtLocation(node.initializer);
+@@ -5581,8 +5582,9 @@ var classSelfMismatch = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const result = yield* pipe(
+           typeParser.extendsEffectService(node),
+@@ -5741,8 +5743,9 @@ var deterministicKeys = createDiagnostic({
+           nodeToVisit2.push(node);
+           return void 0;
+         };
+-        while (nodeToVisit2.length > 0) {
+-          const node = nodeToVisit2.shift();
++        for (let nodeToVisit2Index = 0; nodeToVisit2Index < nodeToVisit2.length; nodeToVisit2Index++) {
++          const node = nodeToVisit2[nodeToVisit2Index];
++          nodeToVisit2[nodeToVisit2Index] = void 0;
+           if (ts.isCallExpression(node)) {
+             for (let i = 0; i < node.arguments.length; i++) {
+               const arg = node.arguments[i];
+@@ -5776,8 +5779,9 @@ var deterministicKeys = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const result = yield* pipe(
+           pipe(
+@@ -5881,8 +5885,9 @@ var effectFnIife = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isCallExpression(node)) continue;
+       const innerCall = node.expression;
+@@ -6303,8 +6308,9 @@ var effectFnOpportunity = createDiagnostic({
+         return declarations.some((decl) => decl.pos >= paramsStart && decl.end <= paramsEnd);
+       };
+       const nodesToVisit = [...nodes];
+-      while (nodesToVisit.length > 0) {
+-        const node = nodesToVisit.shift();
++      for (let nodesToVisitIndex = 0; nodesToVisitIndex < nodesToVisit.length; nodesToVisitIndex++) {
++        const node = nodesToVisit[nodesToVisitIndex];
++        nodesToVisit[nodesToVisitIndex] = void 0;
+         if (ts.isIdentifier(node)) {
+           const symbol3 = typeChecker.getSymbolAtLocation(node);
+           if (symbol3 && isSymbolDeclaredInParams(symbol3)) {
+@@ -6507,8 +6513,9 @@ var effectFnOpportunity = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       const test = parseEffectFnOpportunityTarget(node);
+       if (!test) continue;
+@@ -6661,8 +6668,9 @@ var effectGenUsesAdapter = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -6822,8 +6830,9 @@ var effectMapVoid = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isMapCall = yield* pipe(
+@@ -6889,8 +6898,9 @@ var effectSucceedWithVoid = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isSucceedCall = yield* pipe(
+@@ -6944,8 +6954,9 @@ var extendsNativeError = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.heritageClauses) {
+         for (const clause of node.heritageClauses) {
+           if (clause.token === ts.SyntaxKind.ExtendsKeyword && clause.types.length > 0) {
+@@ -7004,8 +7015,9 @@ var floatingEffect = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!isFloatingExpression(node)) continue;
+       const type = typeCheckerUtils.getTypeAtLocation(node.expression);
+@@ -7050,8 +7062,9 @@ var genericEffectServices = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const typesToCheck = [];
+       if (ts.isClassDeclaration(node) && node.name && node.typeParameters && node.heritageClauses) {
+         const classSym = typeChecker.getSymbolAtLocation(node.name);
+@@ -7103,8 +7116,9 @@ var makeGlobalConsoleApply = (checkInEffect) => fn(`globalConsole${checkInEffect
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) continue;
+     const method = ts.idText(node.expression.name);
+@@ -7159,8 +7173,9 @@ var makeGlobalDateApply = (checkInEffect) => fn(`globalDate${checkInEffect ? "In
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     let messageText;
+     let objectNode;
+@@ -7223,8 +7238,9 @@ var globalErrorInEffectCatch = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isEffectWithCatch = yield* pipe(
+@@ -7285,8 +7301,9 @@ var globalErrorInEffectFailure = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isNewExpression(node)) {
+         const newExpressionType = typeCheckerUtils.getTypeAtLocation(node);
+@@ -7339,8 +7356,9 @@ var makeGlobalFetchApply = (checkInEffect) => fn(`globalFetch${checkInEffect ? "
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     if (ts.isCallExpression(node)) {
+       const symbol3 = typeChecker.getSymbolAtLocation(node.expression);
+       if (symbol3 && typeCheckerUtils.resolveToGlobalSymbol(symbol3) === fetchSymbol) {
+@@ -7394,8 +7412,9 @@ var makeGlobalRandomApply = (checkInEffect) => fn(`globalRandom${checkInEffect ?
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression) || ts.idText(node.expression.name) !== "random") continue;
+     const symbol3 = typeChecker.getSymbolAtLocation(node.expression.expression);
+@@ -7461,8 +7480,9 @@ var makeGlobalTimersApply = (checkInEffect) => fn(`globalTimers${checkInEffect ?
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     if (!ts.isCallExpression(node)) continue;
+     const symbol3 = typeChecker.getSymbolAtLocation(node.expression);
+@@ -7587,8 +7607,9 @@ var importFromBarrel = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const parent = node.parent;
+       if (!(ts.isImportSpecifier(node) && ts.isNamedImports(parent))) {
+         ts.forEachChild(node, appendNodeToVisit);
+@@ -7666,8 +7687,9 @@ var instanceOfSchema = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) {
+         const leftExpr = node.left;
+         const rightExpr = node.right;
+@@ -7739,8 +7761,9 @@ var layerMergeAllWithDependencies = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isCallExpression(node)) {
+         const checkLayerMergeAll = yield* pipe(
+           typeParser.isNodeReferenceToEffectLayerModuleApi("mergeAll")(node.expression),
+@@ -7969,8 +7992,9 @@ More info and examples at https://effect.website/docs/requirements-management/la
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const typesToCheck = [];
+       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.name) && ts.idText(node.expression.name) === "GenericTag") {
+         const nodeType = typeCheckerUtils.getTypeAtLocation(node);
+@@ -8408,8 +8432,9 @@ var missingEffectServiceDependency = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const serviceResult = yield* pipe(
+           typeParser.extendsEffectService(node),
+@@ -8556,8 +8581,9 @@ var missingReturnYieldStar = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isExpressionStatement(node)) continue;
+       const unwrapped = tsUtils.skipOuterExpressions(node.expression);
+@@ -8610,8 +8636,9 @@ var missingStarInYieldEffectGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isYieldExpression(node) && node.expression && node.asteriskToken === void 0) {
+         const functionStarNode = ts.findAncestor(
+@@ -8868,8 +8895,9 @@ var nonObjectEffectServiceType = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const serviceResult = yield* pipe(
+           typeParser.extendsEffectService(node),
+@@ -9675,8 +9703,9 @@ var outdatedApi = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       const checkEffectMigration = checkPropertyAccessMigration(
+         node,
+@@ -10854,8 +10883,9 @@ var overriddenSchemaConstructor = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.heritageClauses) {
+         let extendsSchema = false;
+         for (const heritageClause of node.heritageClauses) {
+@@ -11083,8 +11113,9 @@ var redundantSchemaTagIdentifier = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const result = yield* pipe(
+           typeParser.extendsSchemaTaggedClass(node),
+@@ -11137,8 +11168,9 @@ var returnEffectInGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isReturnStatement(node) && node.expression) {
+         if (ts.isYieldExpression(node.expression)) continue;
+@@ -11214,8 +11246,9 @@ var runEffectInsideEffect = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isCallExpression(node)) continue;
+       if (node.arguments.length === 0) continue;
+@@ -11374,8 +11407,9 @@ var schemaStructWithTag = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isCallExpression(node)) {
+         const isSchemaStructCall = yield* pipe(
+           typeParser.isNodeReferenceToEffectSchemaModuleApi("Struct")(node.expression),
+@@ -11475,8 +11509,9 @@ var schemaSyncInEffect = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isCallExpression(node)) continue;
+       const isSchemaSyncCall = yield* pipe(
+@@ -11521,8 +11556,9 @@ var schemaUnionOfLiterals = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isCallExpression(node)) {
+         const isSchemaUnionCall = yield* pipe(
+           typeParser.isNodeReferenceToEffectSchemaModuleApi("Union")(node.expression),
+@@ -11643,8 +11679,9 @@ Consider using "scoped" instead to get rid of the scope in the requirements.`,
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const layerEffectApiCall = parseLayerEffectApiCall(node);
+       if (layerEffectApiCall) {
+         const type = typeCheckerUtils.getTypeAtLocation(node);
+@@ -11697,8 +11734,9 @@ var serviceNotAsClass = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isVariableDeclaration(node)) continue;
+       if (!node.initializer || !ts.isCallExpression(node.initializer)) continue;
+@@ -11776,8 +11814,9 @@ var strictBooleanExpressions = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       const nodes = [];
+       if (ts.isIfStatement(node)) {
+@@ -11867,8 +11906,9 @@ var strictEffectProvide = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const layerCheck = yield* pipe(parseEffectProvideWithLayer(node), option);
+@@ -11913,8 +11953,9 @@ var tryCatchInEffectGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isTryStatement(node) && node.catchClause) {
+         const generatorOrRegularFunction = ts.findAncestor(
+@@ -11964,8 +12005,9 @@ var unknownInEffectCatch = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isEffectWithCatch = yield* pipe(
+@@ -12026,8 +12068,9 @@ var unnecessaryEffectGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -12074,8 +12117,9 @@ var unnecessaryFailYieldableError = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isYieldExpression(node) && node.asteriskToken && node.expression && ts.isCallExpression(node.expression)) {
+         const callExpression = node.expression;
+@@ -12135,8 +12179,9 @@ var unnecessaryPipe = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -12184,8 +12229,9 @@ var unnecessaryPipeChain = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -12261,8 +12307,9 @@ var unsupportedServiceAccessors = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isClassDeclaration(node)) {
+         const parseResult = yield* pipe(
+diff --git a/index.js b/index.js
+index 2cab6030e031f4c49f97e2b8b9b3c9e17fda4526..89f2c7571e5814e17135eb5659a388c87b2999f6 100644
+--- a/index.js
++++ b/index.js
+@@ -3599,8 +3599,9 @@ function makeTypeCheckerUtils(ts, typeChecker, tsUtils) {
+       nodeToVisit.push(node);
+       return void 0;
+     };
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isVariableDeclaration(node) && node.initializer) {
+         const expectedType = typeChecker.getTypeAtLocation(node.name);
+         const realType = typeChecker.getTypeAtLocation(node.initializer);
+@@ -7461,8 +7462,9 @@ var classSelfMismatch = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const result = yield* pipe(
+           typeParser.extendsEffectService(node),
+@@ -7555,8 +7557,9 @@ var deterministicKeys = createDiagnostic({
+           nodeToVisit2.push(node);
+           return void 0;
+         };
+-        while (nodeToVisit2.length > 0) {
+-          const node = nodeToVisit2.shift();
++        for (let nodeToVisit2Index = 0; nodeToVisit2Index < nodeToVisit2.length; nodeToVisit2Index++) {
++          const node = nodeToVisit2[nodeToVisit2Index];
++          nodeToVisit2[nodeToVisit2Index] = void 0;
+           if (ts.isCallExpression(node)) {
+             for (let i = 0; i < node.arguments.length; i++) {
+               const arg = node.arguments[i];
+@@ -7590,8 +7593,9 @@ var deterministicKeys = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const result = yield* pipe(
+           pipe(
+@@ -7695,8 +7699,9 @@ var effectFnIife = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isCallExpression(node)) continue;
+       const innerCall = node.expression;
+@@ -8117,8 +8122,9 @@ var effectFnOpportunity = createDiagnostic({
+         return declarations.some((decl) => decl.pos >= paramsStart && decl.end <= paramsEnd);
+       };
+       const nodesToVisit = [...nodes2];
+-      while (nodesToVisit.length > 0) {
+-        const node = nodesToVisit.shift();
++      for (let nodesToVisitIndex = 0; nodesToVisitIndex < nodesToVisit.length; nodesToVisitIndex++) {
++        const node = nodesToVisit[nodesToVisitIndex];
++        nodesToVisit[nodesToVisitIndex] = void 0;
+         if (ts.isIdentifier(node)) {
+           const symbol3 = typeChecker.getSymbolAtLocation(node);
+           if (symbol3 && isSymbolDeclaredInParams(symbol3)) {
+@@ -8321,8 +8327,9 @@ var effectFnOpportunity = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       const test = parseEffectFnOpportunityTarget(node);
+       if (!test) continue;
+@@ -8475,8 +8482,9 @@ var effectGenUsesAdapter = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -8636,8 +8644,9 @@ var effectMapVoid = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isMapCall = yield* pipe(
+@@ -8703,8 +8712,9 @@ var effectSucceedWithVoid = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isSucceedCall = yield* pipe(
+@@ -8758,8 +8768,9 @@ var extendsNativeError = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.heritageClauses) {
+         for (const clause of node.heritageClauses) {
+           if (clause.token === ts.SyntaxKind.ExtendsKeyword && clause.types.length > 0) {
+@@ -8818,8 +8829,9 @@ var floatingEffect = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!isFloatingExpression(node)) continue;
+       const type = typeCheckerUtils.getTypeAtLocation(node.expression);
+@@ -8864,8 +8876,9 @@ var genericEffectServices = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const typesToCheck = [];
+       if (ts.isClassDeclaration(node) && node.name && node.typeParameters && node.heritageClauses) {
+         const classSym = typeChecker.getSymbolAtLocation(node.name);
+@@ -8917,8 +8930,9 @@ var makeGlobalConsoleApply = (checkInEffect) => fn(`globalConsole${checkInEffect
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) continue;
+     const method = ts.idText(node.expression.name);
+@@ -8973,8 +8987,9 @@ var makeGlobalDateApply = (checkInEffect) => fn(`globalDate${checkInEffect ? "In
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     let messageText;
+     let objectNode;
+@@ -9037,8 +9052,9 @@ var globalErrorInEffectCatch = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isEffectWithCatch = yield* pipe(
+@@ -9099,8 +9115,9 @@ var globalErrorInEffectFailure = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isNewExpression(node)) {
+         const newExpressionType = typeCheckerUtils.getTypeAtLocation(node);
+@@ -9153,8 +9170,9 @@ var makeGlobalFetchApply = (checkInEffect) => fn(`globalFetch${checkInEffect ? "
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     if (ts.isCallExpression(node)) {
+       const symbol3 = typeChecker.getSymbolAtLocation(node.expression);
+       if (symbol3 && typeCheckerUtils.resolveToGlobalSymbol(symbol3) === fetchSymbol) {
+@@ -9208,8 +9226,9 @@ var makeGlobalRandomApply = (checkInEffect) => fn(`globalRandom${checkInEffect ?
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression) || ts.idText(node.expression.name) !== "random") continue;
+     const symbol3 = typeChecker.getSymbolAtLocation(node.expression.expression);
+@@ -9275,8 +9294,9 @@ var makeGlobalTimersApply = (checkInEffect) => fn(`globalTimers${checkInEffect ?
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     if (!ts.isCallExpression(node)) continue;
+     const symbol3 = typeChecker.getSymbolAtLocation(node.expression);
+@@ -9401,8 +9421,9 @@ var importFromBarrel = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const parent = node.parent;
+       if (!(ts.isImportSpecifier(node) && ts.isNamedImports(parent))) {
+         ts.forEachChild(node, appendNodeToVisit);
+@@ -9480,8 +9501,9 @@ var instanceOfSchema = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) {
+         const leftExpr = node.left;
+         const rightExpr = node.right;
+@@ -9553,8 +9575,9 @@ var layerMergeAllWithDependencies = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isCallExpression(node)) {
+         const checkLayerMergeAll = yield* pipe(
+           typeParser.isNodeReferenceToEffectLayerModuleApi("mergeAll")(node.expression),
+@@ -9783,8 +9806,9 @@ More info and examples at https://effect.website/docs/requirements-management/la
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const typesToCheck = [];
+       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.name) && ts.idText(node.expression.name) === "GenericTag") {
+         const nodeType = typeCheckerUtils.getTypeAtLocation(node);
+@@ -10222,8 +10246,9 @@ var missingEffectServiceDependency = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const serviceResult = yield* pipe(
+           typeParser.extendsEffectService(node),
+@@ -10370,8 +10395,9 @@ var missingReturnYieldStar = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isExpressionStatement(node)) continue;
+       const unwrapped = tsUtils.skipOuterExpressions(node.expression);
+@@ -10424,8 +10450,9 @@ var missingStarInYieldEffectGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isYieldExpression(node) && node.expression && node.asteriskToken === void 0) {
+         const functionStarNode = ts.findAncestor(
+@@ -10682,8 +10709,9 @@ var nonObjectEffectServiceType = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const serviceResult = yield* pipe(
+           typeParser.extendsEffectService(node),
+@@ -11489,8 +11517,9 @@ var outdatedApi = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       const checkEffectMigration = checkPropertyAccessMigration(
+         node,
+@@ -11599,8 +11628,9 @@ var overriddenSchemaConstructor = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.heritageClauses) {
+         let extendsSchema = false;
+         for (const heritageClause of node.heritageClauses) {
+@@ -11828,8 +11858,9 @@ var redundantSchemaTagIdentifier = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const result = yield* pipe(
+           typeParser.extendsSchemaTaggedClass(node),
+@@ -11882,8 +11913,9 @@ var returnEffectInGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isReturnStatement(node) && node.expression) {
+         if (ts.isYieldExpression(node.expression)) continue;
+@@ -11959,8 +11991,9 @@ var runEffectInsideEffect = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isCallExpression(node)) continue;
+       if (node.arguments.length === 0) continue;
+@@ -12119,8 +12152,9 @@ var schemaStructWithTag = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isCallExpression(node)) {
+         const isSchemaStructCall = yield* pipe(
+           typeParser.isNodeReferenceToEffectSchemaModuleApi("Struct")(node.expression),
+@@ -12220,8 +12254,9 @@ var schemaSyncInEffect = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isCallExpression(node)) continue;
+       const isSchemaSyncCall = yield* pipe(
+@@ -12266,8 +12301,9 @@ var schemaUnionOfLiterals = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isCallExpression(node)) {
+         const isSchemaUnionCall = yield* pipe(
+           typeParser.isNodeReferenceToEffectSchemaModuleApi("Union")(node.expression),
+@@ -12388,8 +12424,9 @@ Consider using "scoped" instead to get rid of the scope in the requirements.`,
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const layerEffectApiCall = parseLayerEffectApiCall(node);
+       if (layerEffectApiCall) {
+         const type = typeCheckerUtils.getTypeAtLocation(node);
+@@ -12442,8 +12479,9 @@ var serviceNotAsClass = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isVariableDeclaration(node)) continue;
+       if (!node.initializer || !ts.isCallExpression(node.initializer)) continue;
+@@ -12521,8 +12559,9 @@ var strictBooleanExpressions = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       const nodes2 = [];
+       if (ts.isIfStatement(node)) {
+@@ -12612,8 +12651,9 @@ var strictEffectProvide = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const layerCheck = yield* pipe(parseEffectProvideWithLayer(node), option);
+@@ -12658,8 +12698,9 @@ var tryCatchInEffectGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isTryStatement(node) && node.catchClause) {
+         const generatorOrRegularFunction = ts.findAncestor(
+@@ -12709,8 +12750,9 @@ var unknownInEffectCatch = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isEffectWithCatch = yield* pipe(
+@@ -12771,8 +12813,9 @@ var unnecessaryEffectGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -12819,8 +12862,9 @@ var unnecessaryFailYieldableError = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isYieldExpression(node) && node.asteriskToken && node.expression && ts.isCallExpression(node.expression)) {
+         const callExpression = node.expression;
+@@ -12880,8 +12924,9 @@ var unnecessaryPipe = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -12929,8 +12974,9 @@ var unnecessaryPipeChain = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -13006,8 +13052,9 @@ var unsupportedServiceAccessors = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isClassDeclaration(node)) {
+         const parseResult = yield* pipe(
+diff --git a/transform.js b/transform.js
+index ba556d8ef07d9d7c578c448196eba8f67542882d..7e613c7be6ec3e645ec530c309476df32fdc63fc 100644
+--- a/transform.js
++++ b/transform.js
+@@ -2946,8 +2946,9 @@ function makeTypeCheckerUtils(ts, typeChecker, tsUtils) {
+       nodeToVisit.push(node);
+       return void 0;
+     };
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isVariableDeclaration(node) && node.initializer) {
+         const expectedType = typeChecker.getTypeAtLocation(node.name);
+         const realType = typeChecker.getTypeAtLocation(node.initializer);
+@@ -5577,8 +5578,9 @@ var classSelfMismatch = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const result = yield* pipe(
+           typeParser.extendsEffectService(node),
+@@ -5737,8 +5739,9 @@ var deterministicKeys = createDiagnostic({
+           nodeToVisit2.push(node);
+           return void 0;
+         };
+-        while (nodeToVisit2.length > 0) {
+-          const node = nodeToVisit2.shift();
++        for (let nodeToVisit2Index = 0; nodeToVisit2Index < nodeToVisit2.length; nodeToVisit2Index++) {
++          const node = nodeToVisit2[nodeToVisit2Index];
++          nodeToVisit2[nodeToVisit2Index] = void 0;
+           if (ts.isCallExpression(node)) {
+             for (let i = 0; i < node.arguments.length; i++) {
+               const arg = node.arguments[i];
+@@ -5772,8 +5775,9 @@ var deterministicKeys = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const result = yield* pipe(
+           pipe(
+@@ -5877,8 +5881,9 @@ var effectFnIife = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isCallExpression(node)) continue;
+       const innerCall = node.expression;
+@@ -6299,8 +6304,9 @@ var effectFnOpportunity = createDiagnostic({
+         return declarations.some((decl) => decl.pos >= paramsStart && decl.end <= paramsEnd);
+       };
+       const nodesToVisit = [...nodes];
+-      while (nodesToVisit.length > 0) {
+-        const node = nodesToVisit.shift();
++      for (let nodesToVisitIndex = 0; nodesToVisitIndex < nodesToVisit.length; nodesToVisitIndex++) {
++        const node = nodesToVisit[nodesToVisitIndex];
++        nodesToVisit[nodesToVisitIndex] = void 0;
+         if (ts.isIdentifier(node)) {
+           const symbol3 = typeChecker.getSymbolAtLocation(node);
+           if (symbol3 && isSymbolDeclaredInParams(symbol3)) {
+@@ -6503,8 +6509,9 @@ var effectFnOpportunity = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       const test = parseEffectFnOpportunityTarget(node);
+       if (!test) continue;
+@@ -6657,8 +6664,9 @@ var effectGenUsesAdapter = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -6818,8 +6826,9 @@ var effectMapVoid = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isMapCall = yield* pipe(
+@@ -6885,8 +6894,9 @@ var effectSucceedWithVoid = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isSucceedCall = yield* pipe(
+@@ -6940,8 +6950,9 @@ var extendsNativeError = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.heritageClauses) {
+         for (const clause of node.heritageClauses) {
+           if (clause.token === ts.SyntaxKind.ExtendsKeyword && clause.types.length > 0) {
+@@ -7000,8 +7011,9 @@ var floatingEffect = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!isFloatingExpression(node)) continue;
+       const type = typeCheckerUtils.getTypeAtLocation(node.expression);
+@@ -7046,8 +7058,9 @@ var genericEffectServices = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const typesToCheck = [];
+       if (ts.isClassDeclaration(node) && node.name && node.typeParameters && node.heritageClauses) {
+         const classSym = typeChecker.getSymbolAtLocation(node.name);
+@@ -7099,8 +7112,9 @@ var makeGlobalConsoleApply = (checkInEffect) => fn(`globalConsole${checkInEffect
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) continue;
+     const method = ts.idText(node.expression.name);
+@@ -7155,8 +7169,9 @@ var makeGlobalDateApply = (checkInEffect) => fn(`globalDate${checkInEffect ? "In
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     let messageText;
+     let objectNode;
+@@ -7219,8 +7234,9 @@ var globalErrorInEffectCatch = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isEffectWithCatch = yield* pipe(
+@@ -7281,8 +7297,9 @@ var globalErrorInEffectFailure = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isNewExpression(node)) {
+         const newExpressionType = typeCheckerUtils.getTypeAtLocation(node);
+@@ -7335,8 +7352,9 @@ var makeGlobalFetchApply = (checkInEffect) => fn(`globalFetch${checkInEffect ? "
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     if (ts.isCallExpression(node)) {
+       const symbol3 = typeChecker.getSymbolAtLocation(node.expression);
+       if (symbol3 && typeCheckerUtils.resolveToGlobalSymbol(symbol3) === fetchSymbol) {
+@@ -7390,8 +7408,9 @@ var makeGlobalRandomApply = (checkInEffect) => fn(`globalRandom${checkInEffect ?
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression) || ts.idText(node.expression.name) !== "random") continue;
+     const symbol3 = typeChecker.getSymbolAtLocation(node.expression.expression);
+@@ -7457,8 +7476,9 @@ var makeGlobalTimersApply = (checkInEffect) => fn(`globalTimers${checkInEffect ?
+     return void 0;
+   };
+   ts.forEachChild(sourceFile, appendNodeToVisit);
+-  while (nodeToVisit.length > 0) {
+-    const node = nodeToVisit.shift();
++  for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++    const node = nodeToVisit[nodeToVisitIndex];
++    nodeToVisit[nodeToVisitIndex] = void 0;
+     ts.forEachChild(node, appendNodeToVisit);
+     if (!ts.isCallExpression(node)) continue;
+     const symbol3 = typeChecker.getSymbolAtLocation(node.expression);
+@@ -7583,8 +7603,9 @@ var importFromBarrel = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const parent = node.parent;
+       if (!(ts.isImportSpecifier(node) && ts.isNamedImports(parent))) {
+         ts.forEachChild(node, appendNodeToVisit);
+@@ -7662,8 +7683,9 @@ var instanceOfSchema = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword) {
+         const leftExpr = node.left;
+         const rightExpr = node.right;
+@@ -7735,8 +7757,9 @@ var layerMergeAllWithDependencies = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isCallExpression(node)) {
+         const checkLayerMergeAll = yield* pipe(
+           typeParser.isNodeReferenceToEffectLayerModuleApi("mergeAll")(node.expression),
+@@ -7965,8 +7988,9 @@ More info and examples at https://effect.website/docs/requirements-management/la
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const typesToCheck = [];
+       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.name) && ts.idText(node.expression.name) === "GenericTag") {
+         const nodeType = typeCheckerUtils.getTypeAtLocation(node);
+@@ -8404,8 +8428,9 @@ var missingEffectServiceDependency = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const serviceResult = yield* pipe(
+           typeParser.extendsEffectService(node),
+@@ -8552,8 +8577,9 @@ var missingReturnYieldStar = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isExpressionStatement(node)) continue;
+       const unwrapped = tsUtils.skipOuterExpressions(node.expression);
+@@ -8606,8 +8632,9 @@ var missingStarInYieldEffectGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isYieldExpression(node) && node.expression && node.asteriskToken === void 0) {
+         const functionStarNode = ts.findAncestor(
+@@ -8864,8 +8891,9 @@ var nonObjectEffectServiceType = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const serviceResult = yield* pipe(
+           typeParser.extendsEffectService(node),
+@@ -9671,8 +9699,9 @@ var outdatedApi = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       const checkEffectMigration = checkPropertyAccessMigration(
+         node,
+@@ -10850,8 +10879,9 @@ var overriddenSchemaConstructor = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.heritageClauses) {
+         let extendsSchema = false;
+         for (const heritageClause of node.heritageClauses) {
+@@ -11079,8 +11109,9 @@ var redundantSchemaTagIdentifier = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isClassDeclaration(node) && node.name && node.heritageClauses) {
+         const result = yield* pipe(
+           typeParser.extendsSchemaTaggedClass(node),
+@@ -11133,8 +11164,9 @@ var returnEffectInGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isReturnStatement(node) && node.expression) {
+         if (ts.isYieldExpression(node.expression)) continue;
+@@ -11210,8 +11242,9 @@ var runEffectInsideEffect = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isCallExpression(node)) continue;
+       if (node.arguments.length === 0) continue;
+@@ -11370,8 +11403,9 @@ var schemaStructWithTag = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isCallExpression(node)) {
+         const isSchemaStructCall = yield* pipe(
+           typeParser.isNodeReferenceToEffectSchemaModuleApi("Struct")(node.expression),
+@@ -11471,8 +11505,9 @@ var schemaSyncInEffect = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isCallExpression(node)) continue;
+       const isSchemaSyncCall = yield* pipe(
+@@ -11517,8 +11552,9 @@ var schemaUnionOfLiterals = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       if (ts.isCallExpression(node)) {
+         const isSchemaUnionCall = yield* pipe(
+           typeParser.isNodeReferenceToEffectSchemaModuleApi("Union")(node.expression),
+@@ -11639,8 +11675,9 @@ Consider using "scoped" instead to get rid of the scope in the requirements.`,
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       const layerEffectApiCall = parseLayerEffectApiCall(node);
+       if (layerEffectApiCall) {
+         const type = typeCheckerUtils.getTypeAtLocation(node);
+@@ -11693,8 +11730,9 @@ var serviceNotAsClass = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (!ts.isVariableDeclaration(node)) continue;
+       if (!node.initializer || !ts.isCallExpression(node.initializer)) continue;
+@@ -11772,8 +11810,9 @@ var strictBooleanExpressions = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       const nodes = [];
+       if (ts.isIfStatement(node)) {
+@@ -11863,8 +11902,9 @@ var strictEffectProvide = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const layerCheck = yield* pipe(parseEffectProvideWithLayer(node), option);
+@@ -11909,8 +11949,9 @@ var tryCatchInEffectGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isTryStatement(node) && node.catchClause) {
+         const generatorOrRegularFunction = ts.findAncestor(
+@@ -11960,8 +12001,9 @@ var unknownInEffectCatch = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         const isEffectWithCatch = yield* pipe(
+@@ -12022,8 +12064,9 @@ var unnecessaryEffectGen = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -12070,8 +12113,9 @@ var unnecessaryFailYieldableError = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isYieldExpression(node) && node.asteriskToken && node.expression && ts.isCallExpression(node.expression)) {
+         const callExpression = node.expression;
+@@ -12131,8 +12175,9 @@ var unnecessaryPipe = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -12180,8 +12225,9 @@ var unnecessaryPipeChain = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isCallExpression(node)) {
+         yield* pipe(
+@@ -12257,8 +12303,9 @@ var unsupportedServiceAccessors = createDiagnostic({
+       return void 0;
+     };
+     ts.forEachChild(sourceFile, appendNodeToVisit);
+-    while (nodeToVisit.length > 0) {
+-      const node = nodeToVisit.shift();
++    for (let nodeToVisitIndex = 0; nodeToVisitIndex < nodeToVisit.length; nodeToVisitIndex++) {
++      const node = nodeToVisit[nodeToVisitIndex];
++      nodeToVisit[nodeToVisitIndex] = void 0;
+       ts.forEachChild(node, appendNodeToVisit);
+       if (ts.isClassDeclaration(node)) {
+         const parseResult = yield* pipe(

@@ -37,7 +37,7 @@ function validateRecurrence(recurrence: ScheduledFollowupRecurrence): ScheduledF
 
 function iso(milliseconds: number): string {
   try {
-    return decodeTimestamp(new Date(milliseconds).toISOString());
+    return decodeTimestamp(DateTime.formatIso(DateTime.makeUnsafe(milliseconds)));
   } catch {
     throw new ScheduledFollowupRecurrenceError();
   }
@@ -70,7 +70,9 @@ function calendarOccurrence(
   }
   const zone = DateTime.zoneMakeNamedUnsafe(recurrence.timeZone);
   const localBoundary = DateTime.toParts(DateTime.makeZonedUnsafe(boundary, { timeZone: zone }));
-  const civilBoundary = new Date(0);
+  // Start from an epoch Date, then set its full UTC year explicitly. Date.UTC
+  // would reinterpret civil years 0–99 as 1900–1999 and change recurrence policy.
+  const civilBoundary = DateTime.toDateUtc(DateTime.makeUnsafe(0));
   civilBoundary.setUTCFullYear(localBoundary.year, localBoundary.month - 1, localBoundary.day);
   civilBoundary.setUTCHours(0, 0, 0, 0);
   let cursor =

@@ -1,5 +1,11 @@
+// Native helper protocol owns exact stdio handles, one-shot dispatch and child retirement.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn, type ChildProcess } from "node:child_process";
+// Native filesystem boundary: preserve descriptor, no-follow and bigint identity operations.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { lstatSync } from "node:fs";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { isAbsolute } from "node:path";
 
 /**
@@ -311,6 +317,8 @@ class MacDictationTargetClientImpl implements MacDictationTargetClient {
     if (Buffer.byteLength(line, "utf8") > maximumRequestBytes) return null;
     const child = this.child;
     return new Promise<HelperResponse | null>((resolve) => {
+      // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+      // @effect-diagnostics-next-line globalTimers:off
       const timeout = setTimeout(() => {
         // Timeout after dispatch is ambiguous for insertion. Terminating the
         // helper is essential: it must not later write to a different app.

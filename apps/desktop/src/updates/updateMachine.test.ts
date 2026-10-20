@@ -1,4 +1,6 @@
+import { DesktopUpdateStateSchema } from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
+import * as Schema from "effect/Schema";
 
 import {
   createInitialDesktopUpdateState,
@@ -20,6 +22,26 @@ const runtimeInfo = {
 } as const;
 
 describe("updateMachine", () => {
+  it("keeps legacy runtime identity unknown and admits only explicit finite packaging metadata", () => {
+    const decodeState = Schema.decodeUnknownSync(DesktopUpdateStateSchema);
+    const isState = Schema.is(DesktopUpdateStateSchema);
+    const legacyState = createInitialDesktopUpdateState("1.0.0", runtimeInfo, "latest");
+    expect(Object.hasOwn(decodeState(legacyState), "runtimeKind")).toBe(false);
+    for (const runtimeKind of ["source", "packaged"] as const) {
+      const state = decodeState({ ...legacyState, runtimeKind });
+      expect(state.runtimeKind).toBe(runtimeKind);
+      expect(
+        reduceDesktopUpdateStateOnNoUpdate(
+          reduceDesktopUpdateStateOnCheckStart(state, "2026-10-20T00:00:00.000Z"),
+          "2026-10-20T00:00:00.000Z",
+        ).runtimeKind,
+      ).toBe(runtimeKind);
+    }
+    for (const runtimeKind of [null, "", "development", "release", true, 1, {}]) {
+      expect(isState({ ...legacyState, runtimeKind })).toBe(false);
+    }
+  });
+
   it("records the platform install mode in initial state", () => {
     expect(createInitialDesktopUpdateState("1.0.0", runtimeInfo, "latest").installMode).toBe(
       "in-app",

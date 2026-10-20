@@ -7,6 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Random from "effect/Random";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -30,6 +31,18 @@ export class DesktopRemoteCertificates extends Context.Service<
 >()("cafecode/desktop/RemoteCertificates") {}
 
 const { logWarning } = DesktopObservability.makeComponentLogger("desktop-remote-certificates");
+// The existing on-disk wire shape remains unchanged; encoding is typed before
+// the exclusive temporary write and never introduces certificate payload data.
+const encodePinsDocument = Schema.encodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      version: Schema.Literal(1),
+      records: Schema.Array(
+        Schema.Struct({ origin: Schema.String, fingerprint256: Schema.String }),
+      ),
+    }),
+  ),
+);
 
 export const layer = Layer.effect(
   DesktopRemoteCertificates,
@@ -92,7 +105,7 @@ export const layer = Layer.effect(
         yield* fileSystem.makeDirectory(path.dirname(registryPath), { recursive: true });
         yield* fileSystem.writeFileString(
           tempPath,
-          JSON.stringify({
+          yield* encodePinsDocument({
             version: 1,
             records: [...nextPins].map(([origin, fingerprint256]) => ({ origin, fingerprint256 })),
           }),

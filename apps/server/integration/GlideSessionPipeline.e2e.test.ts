@@ -1,7 +1,13 @@
+// Native fixture retains exact loopback socket/response lifetime and bounded streaming controls.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// Native fixture paths retain host drive, separator and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";

@@ -10,6 +10,9 @@ import {
 } from "./visualizations/http.ts";
 import { schedulingMcpRouteLayer } from "./scheduledFollowups/http.ts";
 import { startSchedulingLoopbackServer } from "./scheduledFollowups/loopbackServer.ts";
+// The HTTP/WebSocket owner shares this exact native server and its close event;
+// replacing the constructor would alter upgrade and runtime teardown ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";

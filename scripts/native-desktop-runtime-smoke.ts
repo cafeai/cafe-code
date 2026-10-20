@@ -1,7 +1,16 @@
+import * as DateTime from "effect/DateTime";
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
+// This boundary retains exact native child handles and close/signal ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join, posix, resolve, win32 } from "node:path";
 
 import { readJsonFile } from "./json-file.ts";
@@ -224,6 +233,9 @@ async function runProcess(
       stderr = appendBounded(stderr, chunk);
     });
     child.once("error", reject);
+    // This native wait owns an external child/stream lifetime; a virtual
+    // Effect clock must not replace its existing deadline or cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     const timeout = setTimeout(() => {
       timedOut = true;
       child.kill("SIGKILL");
@@ -262,6 +274,9 @@ async function reserveTcpPort(): Promise<number> {
 async function waitForExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<boolean> {
   if (child.exitCode !== null || child.signalCode !== null) return true;
   return await new Promise<boolean>((resolveExit) => {
+    // This native wait owns an external child/stream lifetime; a virtual
+    // Effect clock must not replace its existing deadline or cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     const timeout = setTimeout(() => resolveExit(false), timeoutMs);
     child.once("exit", () => {
       clearTimeout(timeout);
@@ -275,10 +290,13 @@ async function waitFor<T>(
   action: () => Promise<T | undefined>,
   timeoutMs: number,
 ): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  const deadline = DateTime.toEpochMillis(DateTime.nowUnsafe()) + timeoutMs;
+  while (DateTime.toEpochMillis(DateTime.nowUnsafe()) < deadline) {
     const result = await action().catch(() => undefined);
     if (result !== undefined) return result;
+    // This native wait owns an external child/stream lifetime; a virtual
+    // Effect clock must not replace its existing deadline or cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   }
   throw new Error(`Timed out waiting for ${description}.`);
@@ -476,17 +494,19 @@ export async function runNativeDesktopRuntimeSmoke(options: RuntimeSmokeOptions)
     const qualify = async () => {
       const runtime = await runPackagedRuntimeSelfTest(options.appPath, environment, root);
       await runPackagedApplicationSmoke(options.appPath, resourcesPath, environment);
-      console.info(
-        JSON.stringify({
-          ok: true,
-          platform: runtime.platform,
-          arch: runtime.arch,
-          checks: runtime.checks,
-          backendHealth: true,
-          providerDaemonHealth: true,
-          rendererWebSocketHydration: true,
-          cleanShutdown: true,
-        }),
+      Effect.runSync(
+        Console.info(
+          JSON.stringify({
+            ok: true,
+            platform: runtime.platform,
+            arch: runtime.arch,
+            checks: runtime.checks,
+            backendHealth: true,
+            providerDaemonHealth: true,
+            rendererWebSocketHydration: true,
+            cleanShutdown: true,
+          }),
+        ),
       );
     };
     if (

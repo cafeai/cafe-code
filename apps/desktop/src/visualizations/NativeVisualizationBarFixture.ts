@@ -1,6 +1,10 @@
 import * as Electron from "electron";
 import { randomUUID } from "node:crypto";
+// Opt-in native fixture keeps its existing Electron-owned screenshot/result-file Promise lifecycle.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { readFile, writeFile } from "node:fs/promises";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import type {
   VisualizationHostBounds,
@@ -40,6 +44,8 @@ async function observe(
     const value = await Promise.race([
       contents.executeJavaScript(expression),
       new Promise<symbol>((resolve) => {
+        // Native-host fixture: preserve its existing wall-clock budget and callback cleanup.
+        // @effect-diagnostics-next-line globalTimers:off
         timer = setTimeout(() => resolve(timedOut), Math.max(0, deadline - performance.now()));
       }),
     ]).finally(() => {
@@ -62,6 +68,8 @@ async function observe(
       }
       throw new NativeBarFailure(`Native bar fixture ${label} unavailable.`);
     }
+    // Native-host fixture: preserve its existing wall-clock budget and callback cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
 }
@@ -276,6 +284,8 @@ async function qualify(): Promise<void> {
           !candidate.constrained
         )
           return candidate;
+        // Native-host fixture: preserve its existing wall-clock budget and callback cleanup.
+        // @effect-diagnostics-next-line globalTimers:off
         await new Promise<void>((resolve) => setTimeout(resolve, 10));
       }
       throw new NativeBarFailure("Native bar fixture natural extent unavailable.");

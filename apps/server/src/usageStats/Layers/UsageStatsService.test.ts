@@ -15,6 +15,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -47,6 +48,9 @@ import { UsageStatsService, type UsageStatsServiceShape } from "../Services/Usag
 import { UsageStatsServiceLive } from "./UsageStatsService.ts";
 import { AuxiliaryUsage, AuxiliaryUsageLive } from "../Services/AuxiliaryUsage.ts";
 import { makeCodexChildUsageAccounting } from "../../provider/codexChildUsageAccounting.ts";
+import * as Schema from "effect/Schema";
+
+const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const THREAD_1 = ThreadId.make("thread-1");
 const THREAD_2 = ThreadId.make("thread-2");
@@ -369,7 +373,7 @@ function accountingEvent(
 ) {
   return {
     ...providerEventBase(THREAD_1, `accounting-${scopeId}-${revision}`, CLAUDE),
-    createdAt: new Date(0).toISOString(),
+    createdAt: DateTime.formatIso(DateTime.makeUnsafe(0)),
     type: "thread.usage-accounting.updated",
     payload: { scopeId, revision, models, completeness: "complete" },
   };
@@ -510,7 +514,7 @@ describe("UsageStatsService", () => {
             { day: localDayKey(0), provider: CODEX, model: "unknown", generatingMs: 1000 },
           ]);
           for (const privateValue of [CODEX_PERSONAL, "synthetic-private-prompt", oversizedModel])
-            assert.notInclude(JSON.stringify(ledger), privateValue);
+            assert.notInclude(encodeJsonText(ledger), privateValue);
         }),
       ),
   );
@@ -685,6 +689,9 @@ describe("UsageStatsService", () => {
   it.effect(
     "overlays all live local-day spans before a tick without counting reads as new work",
     () => {
+      // This test deliberately follows the native host's civil day, including
+      // local-zone/DST construction semantics, rather than a UTC reinterpretation.
+      // @effect-diagnostics-next-line globalDate:off
       const beforeMidnight = new Date(2026, 9, 2, 23, 59, 59, 0).getTime();
       return withHarness(
         (harness) =>
@@ -1102,7 +1109,7 @@ describe("UsageStatsService", () => {
           const observedDay = localDayKey(originalAt);
           const event = {
             ...accountingEvent(1, [accountingModel(201000, 1234)]),
-            createdAt: new Date(originalAt).toISOString(),
+            createdAt: DateTime.formatIso(DateTime.makeUnsafe(originalAt)),
           };
           // Receiver time is later; attribution remains on the event's canonical
           // original observation day even after a daemon reconnect.
@@ -1497,8 +1504,8 @@ describe("UsageStatsService", () => {
         assert.deepEqual(detail.modelGeneratingTime?.totals, [
           { provider: CODEX, model: "unknown", generatingMs: 20_000 },
         ]);
-        assert.notInclude(JSON.stringify(detail.modelGeneratingTime), CODEX_PERSONAL);
-        assert.notInclude(JSON.stringify(detail.modelGeneratingTime), CODEX_WORK);
+        assert.notInclude(encodeJsonText(detail.modelGeneratingTime), CODEX_PERSONAL);
+        assert.notInclude(encodeJsonText(detail.modelGeneratingTime), CODEX_WORK);
       }),
     ),
   );

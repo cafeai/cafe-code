@@ -1,3 +1,4 @@
+import * as ProviderDateTime from "effect/DateTime";
 import { describe, expect, it } from "@effect/vitest";
 import {
   ProviderAttestationEvidence,
@@ -18,7 +19,9 @@ import {
 } from "./AxiomAcpSupport.ts";
 import { AxiomSettings, ProviderInstanceId } from "@cafecode/contracts";
 
-export const evidenceFixture = (now = Math.floor(Date.now() / 1000)): Evidence => ({
+export const evidenceFixture = (
+  now = Math.floor(ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe()) / 1000),
+): Evidence => ({
   status: { state: "verified" },
   providerId: "tinfoil",
   modelId: "test-model",

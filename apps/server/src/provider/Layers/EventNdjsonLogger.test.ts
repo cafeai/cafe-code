@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { ThreadId } from "@cafecode/contracts";
+import { ThreadId } from "@cafecode/contracts/baseSchemas";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 

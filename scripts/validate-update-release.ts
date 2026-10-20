@@ -1,7 +1,13 @@
 #!/usr/bin/env node
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
 
 import { createHash } from "node:crypto";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { basename, join, resolve } from "node:path";
 
 import { parseUpdateManifest, type UpdateManifest } from "./lib/update-manifest.ts";
@@ -210,5 +216,5 @@ if (import.meta.main) {
     version: readFlag("--version"),
     channel,
   });
-  console.info(JSON.stringify(result));
+  Effect.runSync(Console.info(JSON.stringify(result)));
 }

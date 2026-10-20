@@ -402,6 +402,8 @@ async function claudeProbe(probe: Probe): Promise<ProviderReceipt> {
       // Only the exact child obtained from the supported SDK spawn hook.
       const child = ownedChild;
       if (child.exitCode === null && !child.signalCode) child.kill("SIGTERM");
+      // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+      // @effect-diagnostics-next-line globalTimers:off
       const force = setTimeout(() => {
         if (child.exitCode === null && !child.signalCode) child.kill("SIGKILL");
       }, 1500);
@@ -610,6 +612,8 @@ it
         if (failures) throw new Error("Owned live-provider fixture cleanup did not complete.");
       })());
     onTestFinished(cleanup);
+    // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     const deadline = setTimeout(() => controller.abort(), 130_000);
     try {
       const helperPath = await resolveGlideHelper();

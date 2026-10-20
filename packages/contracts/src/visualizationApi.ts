@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
 import { MessageId, ThreadId, TurnId } from "./baseSchemas.ts";
@@ -56,7 +57,7 @@ export const VisualizationListInput = Schema.Struct({
     timestamp.check(
       Schema.makeFilter((value) => {
         const millis = Date.parse(value);
-        return Number.isFinite(millis) && new Date(millis).toISOString() === value;
+        return Number.isFinite(millis) && DateTime.formatIso(DateTime.makeUnsafe(millis)) === value;
       }),
     ),
   ),

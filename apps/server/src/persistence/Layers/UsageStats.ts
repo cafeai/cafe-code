@@ -29,6 +29,7 @@ const decodeAccountingSnapshot = Schema.decodeEffect(UsageAccountingSnapshot);
 const accountingCheckpointJson = Schema.fromJsonString(UsageAccountingSnapshot);
 const decodeAccountingCheckpoint = Schema.decodeEffect(accountingCheckpointJson);
 const encodeAccountingCheckpoint = Schema.encodeEffect(accountingCheckpointJson);
+const encodeReportedCost = Schema.encodeSync(Schema.fromJsonString(UsageStatsReportedCost));
 
 function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
   return (cause: unknown) =>
@@ -387,7 +388,7 @@ const makeUsageStatsRepository = Effect.gen(function* () {
               }).pipe(
                 Effect.mapError(toPersistenceDecodeCauseError("UsageStatsRepository:reportedCost")),
               );
-              yield* sql`UPDATE usage_stats_token_breakdown_days SET reported_cost_json = ${JSON.stringify(cost)} WHERE day = ${delta.day} AND provider_driver = ${delta.provider} AND model = ${delta.model}`;
+              yield* sql`UPDATE usage_stats_token_breakdown_days SET reported_cost_json = ${encodeReportedCost(cost)} WHERE day = ${delta.day} AND provider_driver = ${delta.provider} AND model = ${delta.model}`;
             }
           }
           return accepted;

@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Stream from "effect/Stream";
 import * as Effect from "effect/Effect";
@@ -118,7 +119,9 @@ export const makeAxiomTextGeneration = Effect.fn("makeAxiomTextGeneration")(func
             yield* auxiliaryUsage.value.record(
               ProviderDriverKind.make("axiom"),
               snapshot,
-              Date.parse(axiomUsageTimestamp(event.event.usage) ?? new Date().toISOString()),
+              Date.parse(
+                axiomUsageTimestamp(event.event.usage) ?? DateTime.formatIso(DateTime.nowUnsafe()),
+              ),
             );
         }),
       );

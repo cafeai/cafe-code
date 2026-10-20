@@ -1,6 +1,20 @@
+// Native bridge keeps exact socket/response identity, stream lifetime and resource limits.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import type { ServerResponse } from "node:http";
 import * as Effect from "effect/Effect";
+import * as Data from "effect/Data";
 import * as Stream from "effect/Stream";
+
+// Typed internal failure preserves existing Error name, fixed text and optional cause.
+class GlideResponseBoundaryError extends Data.TaggedError("GlideResponseBoundaryError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {
+  constructor(message: string, options?: { readonly cause?: unknown }) {
+    super({ message, ...options });
+    this.name = "Error";
+  }
+}
 
 /** Control replies retain a separate allowance so four occupied JS response
  * lanes cannot prevent reset, discovery or human Stop in the owner daemon. */
@@ -9,7 +23,7 @@ function budget(maxBytes: number) {
   return {
     acquire(response: ServerResponse) {
       if (active >= 4 || response.destroyed || response.writableFinished)
-        throw new Error("Glide response capacity is full.");
+        throw new GlideResponseBoundaryError("Glide response capacity is full.");
       active++;
       let handedOff = false,
         released = false;
@@ -35,6 +49,8 @@ function budget(maxBytes: number) {
         beginOutput: () => {
           if (handedOff || released) return;
           handedOff = true;
+          // Native callback deadline keeps exact socket/process lifetime, cancellation and ref/unref behavior.
+          // @effect-diagnostics-next-line globalTimers:off
           timer = setTimeout(retire, 10_000);
           if (response.destroyed || response.writableFinished) release();
         },
@@ -50,10 +66,12 @@ function budget(maxBytes: number) {
         Stream.mapEffect((chunk) => {
           bytes += chunk.byteLength;
           return ++chunks > 2048 || bytes > maxBytes
-            ? Effect.fail(new Error("Glide response exceeded its limit."))
+            ? Effect.fail(new GlideResponseBoundaryError("Glide response exceeded its limit."))
             : Effect.succeed(chunk);
         }),
-        Stream.mapError(() => new Error("Glide response could not be delivered.")),
+        Stream.mapError(
+          () => new GlideResponseBoundaryError("Glide response could not be delivered."),
+        ),
       );
     },
   };

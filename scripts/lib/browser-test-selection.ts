@@ -1,4 +1,6 @@
 import { createRequire } from "node:module";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { resolve, sep } from "node:path";
 import { configDefaults } from "vitest/config";
 import browserPolicy from "../../apps/web/browser-test-policy.json" with { type: "json" };

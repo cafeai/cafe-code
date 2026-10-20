@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import * as Schema from "effect/Schema";
 
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -8,13 +9,17 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { runMigrations } from "../Migrations.ts";
 import * as TestSqliteClient from "../TestSqliteClient.ts";
 
+// Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
+// this codec does not replace production admission or grant received-data authority.
+const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
 const at = "2026-10-09T00:00:00.000Z";
 const runtimeId = "10000000-0000-4000-8000-000000000001";
 const secondRuntimeId = "20000000-0000-4000-8000-000000000001";
 const account = "claude-account-a";
 const workflowIdentity = (runtime = runtimeId, instance = account) =>
   `sha256:workflow:${createHash("sha256")
-    .update(JSON.stringify(["turn-workflow", "native-root", instance, runtime]), "utf8")
+    .update(encodeFixtureJson(["turn-workflow", "native-root", instance, runtime]), "utf8")
     .digest("hex")}`;
 const payload = (runtime = runtimeId, instance = account) => ({
   taskId: "native-root",
@@ -42,7 +47,7 @@ function insertActivity(
       activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
     ) VALUES (
       ${activityId}, ${threadId}, ${turnId}, 'info', ${kind}, 'Received workflow metadata',
-      ${JSON.stringify(value)}, ${at}, ${sequence}
+      ${encodeFixtureJson(value)}, ${at}, ${sequence}
     )
   `;
 }
@@ -314,7 +319,7 @@ it.layer(TestSqliteClient.layerMemory())("090_WorkflowLifecycleRetention", (it) 
           (yield* latest()).find((row) => row.kind === "task.progress")?.activityId,
           "workflow-progress-old",
         );
-        yield* sql`UPDATE projection_thread_activities SET payload_json = ${JSON.stringify(payload(secondRuntimeId))}
+        yield* sql`UPDATE projection_thread_activities SET payload_json = ${encodeFixtureJson(payload(secondRuntimeId))}
         WHERE activity_id = 'workflow-progress-new'`;
         assert.deepStrictEqual(
           yield* sql<{ readonly childId: string }>`

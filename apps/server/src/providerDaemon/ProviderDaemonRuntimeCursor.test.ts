@@ -3,12 +3,9 @@ import {
   readProviderDaemonRuntimeEventCursor,
   rewindProviderDaemonCursorForReplay,
 } from "./ProviderDaemonRuntimeCursor.ts";
-import {
-  EventId,
-  ProviderDriverKind,
-  ThreadId,
-  type ProviderRuntimeEvent,
-} from "@cafecode/contracts";
+import type { ProviderRuntimeEvent } from "@cafecode/contracts";
+import { EventId, ThreadId } from "@cafecode/contracts/baseSchemas";
+import { ProviderDriverKind } from "@cafecode/contracts/providerInstance";
 import { describe, expect, it } from "vitest";
 
 function runtimeEvent(): ProviderRuntimeEvent {

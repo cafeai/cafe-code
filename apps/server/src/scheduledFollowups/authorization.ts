@@ -3,12 +3,15 @@ import { isDeepStrictEqual } from "node:util";
 import type { OrchestrationEvent, OrchestrationCommand } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { OrchestrationCommandInvariantError } from "../orchestration/Errors.ts";
 
 type StartEvent = Extract<OrchestrationEvent, { type: "thread.turn-start-requested" }>;
 type StartCommand = Extract<OrchestrationCommand, { type: "thread.turn.start" }>;
+const decodeJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeSync(Schema.UnknownFromJsonString);
 
 /**
  * Called INSIDE the engine's event/receipt transaction, before decision. The
@@ -45,7 +48,7 @@ export const verifyScheduledFollowUpAdmission = (command: StartCommand) =>
       settingsMatch =
         settings !== undefined &&
         isDeepStrictEqual(
-          JSON.parse(settings.model_selection_json),
+          decodeJson(settings.model_selection_json),
           guard.expectedModelSelection,
         ) &&
         settings.interaction_mode === guard.expectedInteractionMode;
@@ -113,8 +116,15 @@ export const markScheduledFollowUpAdmitted = (event: StartEvent) =>
     const guard = event.payload.scheduledFollowUp;
     if (!guard) return;
     const sql = yield* SqlClient.SqlClient;
+    // Preserve omission as the original undefined SQL binding. When present,
+    // the unknown JSON codec retains ordinary JSON bytes and does not normalize
+    // the persisted selection into a different authorization shape.
+    const modelJson =
+      event.payload.modelSelection === undefined
+        ? undefined
+        : encodeJson(event.payload.modelSelection);
     yield* sql`UPDATE scheduled_followup_runs SET intent_sequence = ${event.sequence},
-      model_json = ${JSON.stringify(event.payload.modelSelection)}
+      model_json = ${modelJson}
       WHERE id = ${guard.runId} AND schedule_id = ${guard.scheduleId}
         AND revision = ${guard.revision} AND state = 'dispatching'
         AND message_id = ${event.payload.messageId} AND attempt_at IS NULL`;

@@ -74,6 +74,14 @@ const decodeAccountingSnapshot = Schema.decodeEffect(UsageAccountingSnapshotSche
 const decodeModelGeneratingTimeStartedAt = Schema.decodeUnknownEffect(
   UsageStatsModelGeneratingTimeStartedAt,
 );
+// Durable-write classification requires nominal provenance. A forgeable schema
+// HMR brand must not turn an unrelated received value into retry authority.
+// @effect-diagnostics-next-line instanceOfSchema:off
+const isNominalDecodeError = (error: unknown): error is PersistenceDecodeError =>
+  error instanceof PersistenceDecodeError;
+// @effect-diagnostics-next-line instanceOfSchema:off
+const isNominalSqlError = (error: unknown): error is PersistenceSqlError =>
+  error instanceof PersistenceSqlError;
 
 type TokenCounts = Record<UsageTokenField, number> & {
   reportedCost?: { microusd: string; tokens: number } | undefined;
@@ -655,9 +663,9 @@ const makeUsageStatsService = Effect.gen(function* () {
         classify: (cause) => {
           const error = singleDurableWriteError(cause);
           return Effect.succeed(
-            error instanceof PersistenceDecodeError
+            isNominalDecodeError(error)
               ? "reject"
-              : error instanceof PersistenceSqlError && isSqliteLockTimeoutError(error.cause)
+              : isNominalSqlError(error) && isSqliteLockTimeoutError(error.cause)
                 ? "retry"
                 : "block",
           );

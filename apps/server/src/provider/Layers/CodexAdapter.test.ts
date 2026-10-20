@@ -96,6 +96,17 @@ import {
   type CodexThreadSnapshot,
   type CodexTransientSubagentHistoryReadOptions,
 } from "./CodexSessionRuntime.ts";
+
+const decodeProviderJsonString = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
+const decodeDiagnosticMessageJsonString = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ error: Schema.Struct({ message: Schema.String }) })),
+);
+const decodeTerminalErrorJsonString = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ turn: Schema.Struct({ error: Schema.Unknown }) })),
+);
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const decodeMessageId = Schema.decodeUnknownSync(MessageId);
 const decodeNativeNotification = Schema.decodeUnknownSync(EffectCodexSchema.ServerNotification);
@@ -685,6 +696,8 @@ for (const scenario of [
       assert.equal(Exit.isFailure(outcome), true);
       assert.ok(Exit.isFailure(outcome));
       const failure = outcome.cause.reasons.find(Cause.isFailReason)?.error;
+      // This fixture requires the exact local error class; structural lookalikes must not satisfy its provenance assertion.
+      // @effect-diagnostics-next-line instanceOfSchema:off
       assert.ok(failure instanceof ProviderAdapterRequestError);
       assert.equal(
         failure.failedRootRetirementRefusal,
@@ -730,6 +743,8 @@ for (const reason of [
           .pipe(Effect.exit);
         assert.ok(Exit.isFailure(outcome));
         const failure = outcome.cause.reasons.find(Cause.isFailReason)?.error;
+        // This fixture requires the exact local error class; structural lookalikes must not satisfy its provenance assertion.
+        // @effect-diagnostics-next-line instanceOfSchema:off
         assert.ok(failure instanceof ProviderAdapterRequestError);
         assert.equal(failure.provider, "codex");
         assert.equal(failure.method, "turn/start");
@@ -827,6 +842,8 @@ for (const scenario of [
           .pipe(Effect.exit);
         assert.ok(Exit.isFailure(outcome));
         const failure = outcome.cause.reasons.find(Cause.isFailReason)?.error;
+        // This fixture requires the exact local error class; structural lookalikes must not satisfy its provenance assertion.
+        // @effect-diagnostics-next-line instanceOfSchema:off
         assert.ok(failure instanceof ProviderAdapterRequestError);
         assert.equal(failure.failedRootRetirementRefusal, undefined);
         assert.equal(accessor.mock.calls.length, 0);
@@ -994,6 +1011,8 @@ for (const mismatch of [
         assert.equal(Exit.isFailure(outcome), true);
         assert.ok(Exit.isFailure(outcome));
         const failure = outcome.cause.reasons.find(Cause.isFailReason)?.error;
+        // This fixture requires the exact local error class; structural lookalikes must not satisfy its provenance assertion.
+        // @effect-diagnostics-next-line instanceOfSchema:off
         assert.ok(failure instanceof ProviderAdapterRequestError);
         assert.equal(failure.failedRootRetirementRefusal, undefined);
         assert.equal(fixture.factory.runtimes.length, 2);
@@ -1046,8 +1065,12 @@ for (const phase of ["opening", "send"] as const) {
           .pipe(Effect.exit);
         assert.ok(Exit.isFailure(outcome));
         const failure = outcome.cause.reasons.find(Cause.isFailReason)?.error;
+        // This fixture requires the exact local error class; structural lookalikes must not satisfy its provenance assertion.
+        // @effect-diagnostics-next-line instanceOfSchema:off
         if (phase === "opening") assert.ok(failure instanceof ProviderAdapterProcessError);
         else assert.ok(failure instanceof ProviderAdapterRequestError);
+        // This fixture requires the exact local error class; structural lookalikes must not satisfy its provenance assertion.
+        // @effect-diagnostics-next-line instanceOfSchema:off
         assert.ok(
           failure instanceof ProviderAdapterProcessError ||
             failure instanceof ProviderAdapterRequestError,
@@ -1105,11 +1128,16 @@ it.effect(
       yield* adapter.stopSession(threadId);
       assert.equal(disposed, true);
     }).pipe(
-      Effect.provide(SqlitePersistenceTest),
-      Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "cafe-management-codex-" })),
-      Effect.provide(ServerSettingsService.layerTest()),
-      Effect.provide(providerSessionDirectoryTestLayer),
-      Effect.provide(NodeServices.layer),
+      Effect.provide(
+        SqlitePersistenceTest.pipe(
+          Layer.provideMerge(
+            ServerConfig.layerTest(process.cwd(), { prefix: "cafe-management-codex-" }),
+          ),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
     );
   },
 );
@@ -1135,13 +1163,16 @@ it.effect(
       assert.equal(factory.lastRuntime?.options.customInstructions, "Use metric units.");
       assert.equal(Object.hasOwn(factory.lastRuntime!.options, "requireExactResume"), false);
     }).pipe(
-      Effect.provide(SqlitePersistenceTest),
       Effect.provide(
-        ServerConfig.layerTest(process.cwd(), { prefix: "cafe-custom-instructions-" }),
+        SqlitePersistenceTest.pipe(
+          Layer.provideMerge(
+            ServerConfig.layerTest(process.cwd(), { prefix: "cafe-custom-instructions-" }),
+          ),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        ),
       ),
-      Effect.provide(ServerSettingsService.layerTest()),
-      Effect.provide(providerSessionDirectoryTestLayer),
-      Effect.provide(NodeServices.layer),
     );
   },
 );
@@ -1194,16 +1225,19 @@ it.effect(
       assert.equal(readError.message, "Could not verify Codex conversation history safety.");
       assert.equal(writeError.message, "Could not persist Codex conversation history safety.");
       assert.doesNotMatch(
-        JSON.stringify([readError, writeError]),
+        encodeProviderJsonString([readError, writeError]),
         /native-history|history-chat|history-account|SELECT|INSERT|no such table/,
       );
     }).pipe(
       Effect.scoped,
-      Effect.provide(SqlitePersistenceTest),
-      Effect.provide(ServerConfig.layerTest(process.cwd(), process.cwd())),
-      Effect.provide(ServerSettingsService.layerTest()),
-      Effect.provide(providerSessionDirectoryTestLayer),
-      Effect.provide(NodeServices.layer),
+      Effect.provide(
+        SqlitePersistenceTest.pipe(
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(ServerSettingsService.layerTest()),
+          Layer.provideMerge(providerSessionDirectoryTestLayer),
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
     );
   },
 );
@@ -1282,9 +1316,9 @@ it.effect(
         events.map((event) => event.type),
         ["runtime.error", "turn.completed"],
       );
-      assert.doesNotMatch(JSON.stringify(events), /private-native-id|private body/);
+      assert.doesNotMatch(encodeProviderJsonString(events), /private-native-id|private body/);
       for (const event of events) {
-        assert.match(JSON.stringify(event.payload), /Codex/);
+        assert.match(encodeProviderJsonString(event.payload), /Codex/);
         assert.deepEqual(event.raw?.payload, { reason: "codex_history_tool_arguments_too_large" });
       }
     }).pipe(Effect.provide(makeConcurrencyTestLayer(factory)));
@@ -2279,7 +2313,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       assert.equal(result.failure.reason, "provider-transport-unavailable");
       assert.equal(result.failure.stack, undefined);
 
-      const serialized = JSON.stringify({
+      const serialized = encodeProviderJsonString({
         error: result.failure,
         message: result.failure.message,
         stack: result.failure.stack,
@@ -2527,7 +2561,9 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         clientCorrelationId: buildCodexSteerClientCorrelationId(messageId),
         input: "keep going but narrow the scope",
       });
-      const serializedRuntimeInput = JSON.stringify(runtime.steerTurnImpl.mock.calls[0]?.[0]);
+      const serializedRuntimeInput = encodeProviderJsonString(
+        runtime.steerTurnImpl.mock.calls[0]?.[0],
+      );
       assert.equal(serializedRuntimeInput.includes('"messageId"'), false);
       assert.equal(serializedRuntimeInput.includes("provider-state-canary"), false);
       assert.equal(result.clientCorrelationId, buildCodexSteerClientCorrelationId(messageId));
@@ -2934,7 +2970,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
               true,
             );
             inputs.push(event);
-            originals.push(JSON.stringify(event));
+            originals.push(encodeProviderJsonString(event));
             yield* runtime.emit(event);
           }
         // Observe this exact real mapped FIFO sentinel, not Queue.offer or a
@@ -3368,7 +3404,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         events.map((event) => event.type),
         ["turn.started", "thread.started"],
       );
-      assert.doesNotMatch(JSON.stringify(events), /private-startup-error-sentinel/);
+      assert.doesNotMatch(encodeProviderJsonString(events), /private-startup-error-sentinel/);
       assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
       assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
     }),
@@ -3440,11 +3476,11 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         // explicitly owned private diagnostic. The original canonical fields
         // retain the same content-free policy and never acquire recovery proof.
         assert.doesNotMatch(
-          JSON.stringify(events.map(({ diagnostic: _private, ...ordinary }) => ordinary)),
+          encodeProviderJsonString(events.map(({ diagnostic: _private, ...ordinary }) => ordinary)),
           /private-error-(?:inner|outer)-sentinel/,
         );
         assert.doesNotMatch(
-          JSON.stringify(events.map((event) => event.diagnostic?.summary)),
+          encodeProviderJsonString(events.map((event) => event.diagnostic?.summary)),
           /private-error-(?:inner|outer)-sentinel/,
         );
         assert.match(events[2]!.diagnostic!.snapshot.json, /private-error-inner-sentinel/);
@@ -4670,7 +4706,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         terminalInputPresent: true,
       });
       assert.doesNotMatch(
-        JSON.stringify(firstEvent.value.raw),
+        encodeProviderJsonString(firstEvent.value.raw),
         /literal terminal input|private\/terminal|process-secret|stdin-approval-secret/,
       );
     }),
@@ -5156,10 +5192,10 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         assert.equal(event.payload.description, "Posted an update");
         assert.equal(event.payload.subagent?.status, "active");
         assert.doesNotMatch(
-          JSON.stringify(event),
+          encodeProviderJsonString(event),
           /public-message-not-for-lifecycle-storage|private-native-turn/,
         );
-        assert.doesNotMatch(JSON.stringify(event.raw?.payload), /private-item/);
+        assert.doesNotMatch(encodeProviderJsonString(event.raw?.payload), /private-item/);
       }
     }),
   );
@@ -5426,7 +5462,10 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         }
         assert.equal(presentations[8]?.status, "completed");
         assert.equal(presentations[9]?.status, "completed");
-        assert.doesNotMatch(JSON.stringify(events), /titleSource|titleRuntimeId|fallbackLabel/u);
+        assert.doesNotMatch(
+          encodeProviderJsonString(events),
+          /titleSource|titleRuntimeId|fallbackLabel/u,
+        );
       }),
   );
 
@@ -5511,7 +5550,10 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         presentations.map((value) => value?.threadId),
         ["fresh-child-0", "fresh-child-0", "fresh-child-1", "fresh-child-1"],
       );
-      assert.doesNotMatch(JSON.stringify(events), /titleSource|titleRuntimeId|fallbackLabel/u);
+      assert.doesNotMatch(
+        encodeProviderJsonString(events),
+        /titleSource|titleRuntimeId|fallbackLabel/u,
+      );
     }),
   );
 
@@ -5685,7 +5727,10 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         ),
         ["Native title", "Native title", "Native title", "Native title", "Native title", "Rose"],
       );
-      assert.doesNotMatch(JSON.stringify(events), /titleSource|titleRuntimeId|fallbackLabel/u);
+      assert.doesNotMatch(
+        encodeProviderJsonString(events),
+        /titleSource|titleRuntimeId|fallbackLabel/u,
+      );
     }),
   );
 
@@ -5828,7 +5873,10 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         assert.equal(presentations[8]?.runtimeId, currentId);
         assert.equal(presentations[10]?.runtimeId, undefined);
         assert.equal(presentations[11]?.runtimeId, currentId);
-        assert.doesNotMatch(JSON.stringify(events), /titleSource|titleRuntimeId|fallbackLabel/u);
+        assert.doesNotMatch(
+          encodeProviderJsonString(events),
+          /titleSource|titleRuntimeId|fallbackLabel/u,
+        );
       }),
   );
 
@@ -6170,7 +6218,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         assert.deepEqual(account.raw?.payload, expectedAccount);
         assert.deepEqual(quota.payload.rateLimits, expectedQuota);
         assert.deepEqual(quota.raw?.payload, expectedQuota);
-        assert.doesNotMatch(JSON.stringify(events), /SENTINEL|future_plan/);
+        assert.doesNotMatch(encodeProviderJsonString(events), /SENTINEL|future_plan/);
       }),
   );
 
@@ -6434,7 +6482,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         detail: { willRetry: true },
         nativeRetry: { observedCount: 1, timing: "unknown" },
       });
-      assert.match(JSON.stringify(firstEvent.value.raw), /Reconnecting\.\.\. 2\/5/);
+      assert.match(encodeProviderJsonString(firstEvent.value.raw), /Reconnecting\.\.\. 2\/5/);
       assert.deepEqual(firstEvent.value.diagnostic?.summary, {
         version: 1,
         status: "retry",
@@ -6444,7 +6492,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       assert.equal(firstEvent.value.diagnostic?.snapshot.native.threadId, "provider-thread-1");
       assert.equal(firstEvent.value.diagnostic?.snapshot.native.turnId, "turn-1");
       assert.equal(
-        JSON.parse(firstEvent.value.diagnostic!.snapshot.json).error.message,
+        decodeDiagnosticMessageJsonString(firstEvent.value.diagnostic!.snapshot.json).error.message,
         "Reconnecting... 2/5",
       );
     }),
@@ -6481,8 +6529,11 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             detail: { willRetry: true },
             nativeRetry: { observedCount: index + 1, timing: "unknown" },
           });
-          assert.doesNotMatch(JSON.stringify(event.payload), /Reconnecting|1\/5|2\/5|1\/2/);
-          assert.match(JSON.stringify(event.raw), /Reconnecting/);
+          assert.doesNotMatch(
+            encodeProviderJsonString(event.payload),
+            /Reconnecting|1\/5|2\/5|1\/2/,
+          );
+          assert.match(encodeProviderJsonString(event.raw), /Reconnecting/);
         }
         assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
         assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
@@ -6659,8 +6710,8 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         assert.equal(snapshot.native.turnId, "turn-1");
         assert.equal(snapshot.native.subagentRuntimeId, retryTestRuntimeId);
       }
-      assert.deepEqual(JSON.parse(notification.json).error, error);
-      assert.deepEqual(JSON.parse(terminal.json).turn.error, error);
+      assert.deepEqual(decodeProviderJsonString(notification.json).error, error);
+      assert.deepEqual(decodeTerminalErrorJsonString(terminal.json).turn.error, error);
       assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
       assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
     }),
@@ -7165,7 +7216,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         semantics:
           "turn/steer appends input to the active turn and does not emit a new turn/started notification.",
       });
-      const serializedEvent = JSON.stringify(firstEvent.value);
+      const serializedEvent = encodeProviderJsonString(firstEvent.value);
       assert.equal(serializedEvent.includes('"messageId"'), false);
       assert.equal(serializedEvent.includes("x".repeat(600)), false);
     }),
@@ -7216,7 +7267,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         providerThreadId: "provider-thread-1",
         elapsedDelay: "60 seconds",
       });
-      assert.equal(JSON.stringify(firstEvent.value).includes('"messageId"'), false);
+      assert.equal(encodeProviderJsonString(firstEvent.value).includes('"messageId"'), false);
     }),
   );
 
@@ -7268,7 +7319,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         providerThreadId: "provider-thread-1",
         ackToProviderItemMs: 167_000,
       });
-      assert.equal(JSON.stringify(firstEvent.value).includes('"messageId"'), false);
+      assert.equal(encodeProviderJsonString(firstEvent.value).includes('"messageId"'), false);
     }),
   );
 
@@ -7487,7 +7538,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         reasonPresent: true,
       });
       assert.doesNotMatch(
-        JSON.stringify(firstEvent.value.raw),
+        encodeProviderJsonString(firstEvent.value.raw),
         /secret-running-command|private\/terminal|token hidden/,
       );
     }),
@@ -7973,7 +8024,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       assert.equal(events[0]?.providerRefs, undefined);
       assert.equal(events[1]?.providerRefs, undefined);
       assert.doesNotMatch(
-        JSON.stringify(events),
+        encodeProviderJsonString(events),
         /provider-(?:account|authored|thread|turn)-secret/,
       );
     }),
@@ -8023,7 +8074,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         status: "stopped",
       });
       assert.equal(terminal.value.providerRefs, undefined);
-      assert.doesNotMatch(JSON.stringify(terminal.value), /provider-adapter-stop-/u);
+      assert.doesNotMatch(encodeProviderJsonString(terminal.value), /provider-adapter-stop-/u);
     }),
   );
 
@@ -8081,7 +8132,10 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         ),
         [firstTaskId, firstTaskId, secondTaskId, secondTaskId],
       );
-      assert.doesNotMatch(JSON.stringify(events), /provider-(?:child|reused|account|message)/u);
+      assert.doesNotMatch(
+        encodeProviderJsonString(events),
+        /provider-(?:child|reused|account|message)/u,
+      );
     }),
   );
 
@@ -8145,7 +8199,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         terminal: "turn-error",
         status: "failed",
       });
-      assert.doesNotMatch(JSON.stringify(taskTerminal), /provider-(?:error|terminal)-/u);
+      assert.doesNotMatch(encodeProviderJsonString(taskTerminal), /provider-(?:error|terminal)-/u);
     }),
   );
 
@@ -8206,7 +8260,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         terminal: "turn-terminal",
         status: "stopped",
       });
-      assert.doesNotMatch(JSON.stringify(events[1]), /provider-complete-/u);
+      assert.doesNotMatch(encodeProviderJsonString(events[1]), /provider-complete-/u);
     }),
   );
 
@@ -9285,7 +9339,7 @@ type SchedulingBindingFixture = SchedulingSessionBinding & {
   disposed: boolean;
 };
 
-function schedulingCase(
+function schedulingCase<FixtureError>(
   run: (fixture: {
     bindings: SchedulingBindingFixture[];
     bind: ReturnType<typeof vi.fn<SchedulingSessionBroker["bind"]>>;
@@ -9293,7 +9347,7 @@ function schedulingCase(
       instanceId: ProviderInstanceId,
       makeRuntime: NonNullable<CodexAdapterLiveOptions["makeRuntime"]>,
     ) => ReturnType<typeof makeCodexAdapter>;
-  }) => Effect.Effect<void, unknown, Effect.Services<ReturnType<typeof makeCodexAdapter>>>,
+  }) => Effect.Effect<void, FixtureError, Effect.Services<ReturnType<typeof makeCodexAdapter>>>,
 ) {
   const bindings: SchedulingBindingFixture[] = [];
   return Effect.scoped(
@@ -9609,7 +9663,7 @@ for (const phase of ["bind", "construction", "handshake", "activation"] as const
         assert.equal(outcome._tag, "Failure");
         if (outcome._tag !== "Failure") return;
         assert.equal(outcome.failure._tag, "ProviderAdapterProcessError");
-        assert.doesNotMatch(JSON.stringify(outcome.failure), /private capability/u);
+        assert.doesNotMatch(encodeProviderJsonString(outcome.failure), /private capability/u);
         assert.equal(yield* adapter.hasSession(failedId), false);
         assert.equal(bindings[0]!.active, true);
         assert.equal(factory.runtimes[0]!.closeImpl.mock.calls.length, 0);

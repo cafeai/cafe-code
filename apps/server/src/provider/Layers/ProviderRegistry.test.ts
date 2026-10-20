@@ -78,6 +78,8 @@ import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import { parseCodexRateLimitUpdate } from "../codexRateLimits.ts";
 import { supportsSubagentConcurrency } from "../Drivers/SubagentConcurrency.ts";
+
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const decodeServerSettings = Schema.decodeSync(ServerSettings);
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
@@ -3179,6 +3181,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                   // observe ENOENT. Advancing TestClock cannot advance libuv's
                   // Windows process callback, so give that callback a bounded
                   // slice of wall time under the fully parallel CI workload.
+                  // Native lifecycle timer: preserve the exact callback, cancellation and wall-clock child/queue deadline.
+                  // @effect-diagnostics-next-line globalTimers:off
                   yield* Effect.promise(
                     () => new Promise<void>((resolve) => setTimeout(resolve, 25)),
                   );
@@ -3316,7 +3320,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 commands.map((command) => command.args),
                 [["--version"]],
               );
-              const serialized = JSON.stringify(status);
+              const serialized = encodeProviderJsonString(status);
               for (const privateDetail of [
                 "/private/user",
                 "untrusted-provider-command",
@@ -3348,7 +3352,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               status.message,
               "Codex CLI is installed but failed to run. Check its installation and the binary selected in provider settings.",
             );
-            assert.notInclude(JSON.stringify(status), detail);
+            assert.notInclude(encodeProviderJsonString(status), detail);
           }
         }),
       );
@@ -3381,8 +3385,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             status.message,
             "Failed to execute the Codex CLI health check. Check the binary selected in provider settings.",
           );
-          assert.notInclude(JSON.stringify(status), "private-secret-sentinel");
-          assert.notInclude(JSON.stringify(status), "/private/user");
+          assert.notInclude(encodeProviderJsonString(status), "private-secret-sentinel");
+          assert.notInclude(encodeProviderJsonString(status), "/private/user");
         }),
       );
 
@@ -4272,7 +4276,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             status.message,
             "Claude Agent CLI is installed but failed to run. Check its installation and the binary selected in provider settings.",
           );
-          assert.notInclude(JSON.stringify(status), "synthetic-private-");
+          assert.notInclude(encodeProviderJsonString(status), "synthetic-private-");
           assert.strictEqual(status.version, null);
           assert.strictEqual(supportsSubagentConcurrency("claudeAgent", status.version), false);
         }),

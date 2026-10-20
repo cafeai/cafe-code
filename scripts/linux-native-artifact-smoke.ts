@@ -1,6 +1,14 @@
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
+// This boundary retains exact native child handles and close/signal ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn } from "node:child_process";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { lstat, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { isAbsolute, join, resolve } from "node:path";
 
 import { runNativeDesktopRuntimeSmoke } from "./native-desktop-runtime-smoke.ts";
@@ -135,7 +143,7 @@ export async function runLinuxNativeArtifactSmoke(releaseDir = resolve("release"
       });
     if (prepareSandbox) await withLinuxArtifactKeyring(smokeRoot, qualify);
     else await qualify();
-    console.info("Linux AppImage metadata/runtime/artifact smoke passed.");
+    Effect.runSync(Console.info("Linux AppImage metadata/runtime/artifact smoke passed."));
   } finally {
     await rm(smokeRoot, { recursive: true, force: true });
   }

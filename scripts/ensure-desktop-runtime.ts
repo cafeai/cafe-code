@@ -1,7 +1,11 @@
 #!/usr/bin/env node
 
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { closeSync, constants, existsSync, fchmodSync, fstatSync, openSync } from "node:fs";
 import { createRequire } from "node:module";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join } from "node:path";
 
 // Resolve native packages from the runtime workspace that owns this

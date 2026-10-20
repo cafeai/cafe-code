@@ -88,6 +88,8 @@ export function observeVisualizationLayout(
     send({ nonce, contextEpoch: current.epoch, sequence: ++sequence, ...layout });
   };
   const schedule = () => {
+    // Browser observer callback: retain the native measure/cancel lifecycle.
+    // @effect-diagnostics-next-line globalTimers:off
     if (!disposed && !timer && layoutIsVisible()) timer = setTimeout(() => measure(), 250);
   };
   const visibility = () => {

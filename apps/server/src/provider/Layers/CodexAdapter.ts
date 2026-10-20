@@ -162,6 +162,14 @@ import { isCodexRootAgentPath, normalizeCodexAgentPath } from "./CodexSubagentPa
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import type { CodexShadowHomeError } from "../Drivers/CodexHomeLayout.ts";
 import { resolveConfiguredSubagentLimit } from "../Drivers/SubagentConcurrency.ts";
+
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
+class CodexVisualizationCompletionError extends Data.TaggedError(
+  "CodexVisualizationCompletionError",
+)<{ readonly message: string }> {
+  override name = "Error";
+}
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const CODEX_SUBAGENT_HISTORY_READ_TIMEOUT_MS = 15_000;
 // The native handshake consists of initialize/initialized and thread/start or
@@ -775,7 +783,7 @@ export function canonicalizeCodexSubagentDetail(
         Number.isSafeInteger(milliseconds) &&
         milliseconds >= 0 &&
         milliseconds <= 253_402_300_799_999
-          ? new Date(milliseconds).toISOString()
+          ? DateTime.formatIso(DateTime.makeUnsafe(milliseconds))
           : undefined;
       publicMessages.push({
         role: message.role,
@@ -1312,8 +1320,8 @@ function isoFromUnixTimestamp(
     return undefined;
   }
   const milliseconds = unit === "seconds" ? value * 1_000 : value;
-  const date = new Date(milliseconds);
-  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  const date = DateTime.make(milliseconds);
+  return Option.isNone(date) ? undefined : DateTime.formatIso(date.value);
 }
 
 function runtimeSubagentStatus(
@@ -2311,8 +2319,8 @@ function codexGoalTimestampToIso(value: number): string | undefined {
     return undefined;
   }
   const timestamp = value * 1_000;
-  const date = new Date(timestamp);
-  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+  const date = DateTime.make(timestamp);
+  return Option.isSome(date) ? DateTime.formatIso(date.value) : undefined;
 }
 
 const isProviderThreadGoal = Schema.is(ProviderThreadGoal);
@@ -5914,7 +5922,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                         appsOwner?.observe(item, witness);
                       },
                       catch: () =>
-                        new Error("Private visualization completion could not be admitted."),
+                        new CodexVisualizationCompletionError({
+                          message: "Private visualization completion could not be admitted.",
+                        }),
                     }).pipe(
                       Effect.catch(() =>
                         Effect.logWarning("Private visualization completion remains unavailable."),
@@ -6963,7 +6973,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     }
     const createdAt = DateTime.formatIso(yield* DateTime.now);
     const stopIdentity = hashTextSha256(
-      JSON.stringify([
+      encodeProviderJsonString([
         String(session.threadId),
         Array.from(session.activeAuthRecoveryTasksById.keys()).toSorted(),
       ]),

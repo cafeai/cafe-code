@@ -1,4 +1,5 @@
 import { ProviderInstanceId, ThreadId } from "@cafecode/contracts";
+import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -8,6 +9,10 @@ import { describe, expect, it } from "vitest";
 import { makeSqlitePersistenceLive, SqlitePersistenceMemory } from "./Layers/Sqlite.ts";
 import { makeCodexHistorySafetyStore } from "./CodexHistorySafety.ts";
 import { purgeProviderDaemonThreadPersistence } from "../providerDaemon/ProviderDaemonThreadPurge.ts";
+
+// Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
+// this codec does not replace production admission or grant received-data authority.
+const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const key = {
   threadId: ThreadId.make("cafe-chat"),
@@ -146,10 +151,10 @@ describe("Codex history safety persistence", () => {
         yield* sql`DROP TABLE provider_codex_history_safety`;
         const read = yield* store.isBlocked(key).pipe(Effect.flip);
         const mark = yield* store.markBlocked(key).pipe(Effect.flip);
-        expect(JSON.stringify(read)).toBe(
+        expect(encodeFixtureJson(read)).toBe(
           '{"operation":"read","_tag":"CodexHistorySafetyStorageError"}',
         );
-        expect(JSON.stringify(mark)).toBe(
+        expect(encodeFixtureJson(mark)).toBe(
           '{"operation":"mark","_tag":"CodexHistorySafetyStorageError"}',
         );
       }).pipe(Effect.provide(SqlitePersistenceMemory), Effect.scoped),

@@ -32,7 +32,7 @@ import * as Stream from "effect/Stream";
 import * as AcpErrors from "effect-acp/errors";
 import * as AcpSchema from "effect-acp/schema";
 import { ServerConfig } from "../../config.ts";
-import { launchBrowser } from "../../process/externalLauncher.ts";
+import { launchBrowser, type ExternalLauncherError } from "../../process/externalLauncher.ts";
 import { AXIOM_LOGIN_ERRORS, axiomLoginUrl } from "../axiomAccount.ts";
 import { readStoredFileAttachment } from "../../fileAttachmentStore.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -298,19 +298,19 @@ export function axiomQuestionOptions(
   return [];
 }
 
-export interface AxiomAdapterOptions {
+export interface AxiomAdapterOptions<BrowserError = never> {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
   readonly makeRuntime?: typeof makeAxiomRuntime;
   readonly makeControl?: typeof makeAxiomControl;
   readonly onAccountChanged?: Effect.Effect<void>;
-  readonly openLoginUrl?: (url: string) => Effect.Effect<void, unknown>;
+  readonly openLoginUrl?: (url: string) => Effect.Effect<void, BrowserError>;
   readonly configurationKey?: string;
 }
 
-export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
+export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* <BrowserError>(
   settings: AxiomSettings,
-  options: AxiomAdapterOptions = {},
+  options: AxiomAdapterOptions<BrowserError> = {},
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const instanceScope = yield* Scope.Scope;
@@ -596,7 +596,9 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
 
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider: PROVIDER,
-    login: (hasOwnedSessions = Effect.succeed(false)) =>
+    login: <SessionError>(
+      hasOwnedSessions: Effect.Effect<boolean, SessionError> = Effect.succeed(false),
+    ): Effect.Effect<"authenticated" | "started", ProviderAdapterError> =>
       Effect.gen(function* () {
         if (loginPending) return yield* invalid("login", AXIOM_LOGIN_ERRORS.pending);
         loginPending = true;
@@ -683,13 +685,16 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* (
           }
           // Desktop-chat deliberately leaves browser opening to its host.
           // Keep the checked URL private to this owner-triggered connection.
-          yield* (
+          // Widen the alternative effects before piping: a union of Effect
+          // instances otherwise makes the generic catch infer an impossible
+          // intersection of their independent error channels.
+          const openLogin: Effect.Effect<void, BrowserError | ExternalLauncherError> =
             options.openLoginUrl
               ? options.openLoginUrl(url)
               : launchBrowser(url).pipe(
                   Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-                )
-          ).pipe(
+                );
+          yield* openLogin.pipe(
             Effect.catch(() =>
               cancelLogin.pipe(
                 Effect.andThen(Effect.fail(invalid("login", AXIOM_LOGIN_ERRORS.browser))),

@@ -25,6 +25,15 @@ const interval: ScheduledFollowupRecurrence = {
 };
 
 describe("scheduled follow-up occurrence calculation", () => {
+  it.each(["0099", "9999"])(
+    "keeps the full civil year %s when preparing a UTC calendar cursor",
+    (year) => {
+      expect(nextScheduleOccurrences(daily("UTC", 9), `${year}-06-01T00:00:00.000Z`, 1)).toEqual([
+        `${year}-06-01T09:00:00.000Z`,
+      ]);
+    },
+  );
+
   it("returns a once-only instant strictly after the boundary and never repeats it", () => {
     const recurrence = {
       kind: "once",
@@ -185,6 +194,8 @@ describe("scheduled follow-up occurrence calculation", () => {
     for (const work of [
       () => nextScheduleOccurrences(daily(sensitive, 9), interval.anchorAt),
       () => nextScheduleOccurrences(interval, sensitive),
+      // Invalid native Date input must retain the same fixed public rejection.
+      // @effect-diagnostics-next-line globalDate:off
       () => nextScheduleOccurrences(interval, new Date(Number.NaN)),
     ]) {
       expect(work).toThrow(

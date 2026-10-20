@@ -44,13 +44,28 @@ function harness(
   response: (method: string, payload: unknown, call: number) => unknown,
   rawResponse: unknown = metadata("legacy"),
 ) {
+  return effectHarness(
+    (method, payload, call) => Effect.succeed(response(method, payload, call)),
+    rawResponse,
+  );
+}
+
+/** The timed/failing peer owns its concrete error and no service requirements;
+ * do not turn an Effect.isEffect<any,any,any> check into fixture authority. */
+function effectHarness(
+  response: (
+    method: string,
+    payload: unknown,
+    call: number,
+  ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>,
+  rawResponse: unknown = metadata("legacy"),
+) {
   const calls: Array<{ method: string; payload: unknown }> = [];
   const client = {
     request: ((method: string, payload: unknown) =>
       Effect.suspend(() => {
         calls.push({ method, payload });
-        const result = response(method, payload, calls.length);
-        return Effect.isEffect(result) ? result : Effect.succeed(result);
+        return response(method, payload, calls.length);
       })) as CodexThreadRewindClient["request"],
     raw: {
       request: (method: string, payload: unknown) =>
@@ -163,11 +178,13 @@ describe("Codex native rewind compatibility", () => {
       detail: "disconnected",
       cause: "synthetic test failure",
     });
-    const test = harness((method) => {
-      if (method === "thread/revert") return Effect.fail(failure);
-      if (method === "thread/turns/list") return { data: [turn("cutoff")], nextCursor: null };
-      return ordinaryResponse(method);
-    });
+    const test = effectHarness((method) =>
+      Effect.gen(function* () {
+        if (method === "thread/revert") return yield* Effect.fail(failure);
+        if (method === "thread/turns/list") return { data: [turn("cutoff")], nextCursor: null };
+        return ordinaryResponse(method);
+      }),
+    );
     const result = await Effect.runPromise(Effect.flip(test.run(1)));
     assert.equal(result._tag, "ProviderAdapterRewindOutcomeUnknownError");
     assert.equal(test.calls.filter(({ method }) => method === "thread/revert").length, 1);
@@ -185,32 +202,36 @@ describe("Codex native rewind compatibility", () => {
   }) {
     let mutated = false;
     const original = ["latest", "cutoff", "retained", "older"];
-    return harness((method, payload) => {
-      if (method === "thread/revert") {
-        mutated = true;
-        return Effect.fail(
-          input.failure ?? CodexErrors.CodexAppServerRequestError.internalError("reload failed"),
-        );
-      }
-      if (mutated && method === "thread/read") {
-        if (input.reconciliationRead === "fail") {
-          return Effect.fail(CodexErrors.CodexAppServerRequestError.internalError("read failed"));
+    return effectHarness((method, payload) =>
+      Effect.gen(function* () {
+        if (method === "thread/revert") {
+          mutated = true;
+          return yield* Effect.fail(
+            input.failure ?? CodexErrors.CodexAppServerRequestError.internalError("reload failed"),
+          );
         }
-        if (input.reconciliationRead === "hang") return Effect.never;
-        if (input.reconciliationRead === "wrong-thread") {
-          return { thread: { ...metadata().thread, id: "other-thread" } };
+        if (mutated && method === "thread/read") {
+          if (input.reconciliationRead === "fail") {
+            return yield* Effect.fail(
+              CodexErrors.CodexAppServerRequestError.internalError("read failed"),
+            );
+          }
+          if (input.reconciliationRead === "hang") return yield* Effect.never;
+          if (input.reconciliationRead === "wrong-thread") {
+            return { thread: { ...metadata().thread, id: "other-thread" } };
+          }
         }
-      }
-      if (method !== "thread/turns/list") return ordinaryResponse(method);
-      const params = payload as { cursor?: string; limit: number };
-      const history = mutated ? input.after : original;
-      const start = params.cursor ? Number(params.cursor) : 0;
-      const end = Math.min(start + params.limit, history.length);
-      return {
-        data: history.slice(start, end).map((id) => turn(id)),
-        nextCursor: end < history.length ? String(end) : null,
-      };
-    });
+        if (method !== "thread/turns/list") return ordinaryResponse(method);
+        const params = payload as { cursor?: string; limit: number };
+        const history = mutated ? input.after : original;
+        const start = params.cursor ? Number(params.cursor) : 0;
+        const end = Math.min(start + params.limit, history.length);
+        return {
+          data: history.slice(start, end).map((id) => turn(id)),
+          nextCursor: end < history.length ? String(end) : null,
+        };
+      }),
+    );
   }
 
   it("accepts an exact retained prefix after native commit followed by a reload error", async () => {
@@ -404,8 +425,8 @@ describe("Codex native rewind compatibility", () => {
 
   effectIt.effect("bounds a stalled history preflight without issuing a mutation", () =>
     Effect.gen(function* () {
-      const test = harness((method) =>
-        method === "thread/turns/list" ? Effect.never : ordinaryResponse(method),
+      const test = effectHarness((method) =>
+        method === "thread/turns/list" ? Effect.never : Effect.succeed(ordinaryResponse(method)),
       );
       const fiber = yield* test.run(1).pipe(Effect.flip, Effect.forkChild);
       yield* TestClock.adjust("30 seconds");
@@ -421,11 +442,13 @@ describe("Codex native rewind compatibility", () => {
   for (const stalledCall of [1, 2, 4, 5, 6]) {
     effectIt.effect(`bounds stalled preflight read ${stalledCall} before any mutation`, () =>
       Effect.gen(function* () {
-        const test = harness((method, _payload, call) => {
-          if (call === stalledCall) return Effect.never;
-          if (method === "thread/turns/list") return { data: [turn("cutoff")], nextCursor: null };
-          return ordinaryResponse(method);
-        });
+        const test = effectHarness((method, _payload, call) =>
+          Effect.gen(function* () {
+            if (call === stalledCall) return yield* Effect.never;
+            if (method === "thread/turns/list") return { data: [turn("cutoff")], nextCursor: null };
+            return ordinaryResponse(method);
+          }),
+        );
         const fiber = yield* test.run(1).pipe(Effect.flip, Effect.forkChild);
         yield* TestClock.adjust("30 seconds");
         const error = yield* Fiber.join(fiber);
@@ -441,13 +464,15 @@ describe("Codex native rewind compatibility", () => {
 
   effectIt.effect("shares one deadline across initial and final preflight reads", () =>
     Effect.gen(function* () {
-      const test = harness((method, _payload, call) => {
-        if (method === "thread/turns/list") return { data: [turn("cutoff")], nextCursor: null };
-        const response = ordinaryResponse(method);
-        return call === 1 || call === 4
-          ? Effect.sleep("20 seconds").pipe(Effect.as(response))
-          : response;
-      });
+      const test = effectHarness((method, _payload, call) =>
+        Effect.gen(function* () {
+          if (method === "thread/turns/list") return { data: [turn("cutoff")], nextCursor: null };
+          const response = ordinaryResponse(method);
+          return yield* call === 1 || call === 4
+            ? Effect.sleep("20 seconds").pipe(Effect.as(response))
+            : Effect.succeed(response);
+        }),
+      );
       const fiber = yield* test.run(1).pipe(Effect.flip, Effect.forkChild);
       yield* TestClock.adjust("30 seconds");
       const error = yield* Fiber.join(fiber);

@@ -1,3 +1,5 @@
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
 // @effect-diagnostics nodeBuiltinImport:off
 import { createServer } from "node:http";
 import { createReadStream } from "node:fs";
@@ -73,6 +75,9 @@ try {
     };
     child.stdout.on("data", record);
     child.stderr.on("data", record);
+    // This native wait owns an external child/stream lifetime; a virtual
+    // Effect clock must not replace its existing deadline or cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     const timer = setTimeout(() => {
       if (child.pid)
         try {
@@ -96,7 +101,7 @@ try {
   };
   if (!result.ok || !result.updateAvailable || result.availableVersion !== version)
     throw new Error("Candidate update feed did not identify the exact release version.");
-  console.info("Exact candidate update feed qualified before publication.");
+  Effect.runSync(Console.info("Exact candidate update feed qualified before publication."));
 } finally {
   server.closeAllConnections();
   await new Promise<void>((accept) => server.close(() => accept()));

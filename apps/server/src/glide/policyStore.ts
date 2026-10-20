@@ -1,11 +1,15 @@
 import { GlideError } from "@cafecode/contracts";
 import { z } from "zod";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 const unavailable = () =>
   new GlideError({ message: "Glide permissions are unavailable for this chat." });
 const appsSchema = z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9.-]{1,254}$/)).max(16);
+// The original finite app admission remains authoritative; encode its already
+// validated strings without changing list order or the durable SQL wire shape.
+const encodeApps = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 export const makeGlidePolicyStore = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   return {
@@ -64,7 +68,7 @@ export const makeGlidePolicyStore = Effect.gen(function* () {
         const rows = yield* sql<{
           thread_id: string;
         }>`INSERT INTO glide_thread_preferences (thread_id,enabled,apps_json,desktop)
-        SELECT ${threadId},${policy.enabled ? 1 : 0},${JSON.stringify(apps)},${policy.enabled && policy.desktop === true ? 1 : 0}
+        SELECT ${threadId},${policy.enabled ? 1 : 0},${encodeApps(apps)},${policy.enabled && policy.desktop === true ? 1 : 0}
         WHERE EXISTS(SELECT 1 FROM projection_threads WHERE thread_id = ${threadId} AND deleted_at IS NULL
           AND (${policy.enabled ? 1 : 0} = 0 OR runtime_mode = 'full-access'))
         AND NOT EXISTS(SELECT 1 FROM hard_deleted_threads WHERE thread_id = ${threadId})

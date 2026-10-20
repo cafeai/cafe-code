@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
 /**
@@ -36,7 +37,7 @@ export function installProcessShutdownObservation(): void {
 
 export function markProcessShutdownRequested(): void {
   if (shutdownRequestedAtMs !== null) return;
-  shutdownRequestedAtMs = Date.now();
+  shutdownRequestedAtMs = DateTime.toEpochMillis(DateTime.nowUnsafe());
   // Each waiter removes only itself; Set iteration tolerates that deletion.
   for (const waiter of waiters) waiter();
 }
@@ -72,6 +73,8 @@ export const awaitProcessShutdownEvidence: Effect.Effect<boolean> = Effect.callb
       resume(Effect.succeed(shutdownRequestedAtMs !== null));
     };
     waiters.add(settle);
+    // Native callback deadline keeps exact socket/process lifetime, cancellation and ref/unref behavior.
+    // @effect-diagnostics-next-line globalTimers:off
     timer = setTimeout(settle, PROCESS_SHUTDOWN_EXIT_GRACE_MS);
     return Effect.sync(() => {
       if (timer !== undefined) clearTimeout(timer);

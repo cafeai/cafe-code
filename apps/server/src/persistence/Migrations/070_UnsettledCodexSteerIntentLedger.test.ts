@@ -1,4 +1,5 @@
-import { MessageId, ThreadId, TurnId } from "@cafecode/contracts";
+import { MessageId, ThreadId, TurnId } from "@cafecode/contracts/baseSchemas";
+import * as Schema from "effect/Schema";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -16,6 +17,10 @@ import {
 import { runMigrations } from "../Migrations.ts";
 import * as TestSqliteClient from "../TestSqliteClient.ts";
 import Migration0070 from "./070_UnsettledCodexSteerIntentLedger.ts";
+
+// Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
+// this codec does not replace production admission or grant received-data authority.
+const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const layer = it.layer(Layer.mergeAll(TestSqliteClient.layerMemory()));
 
@@ -71,7 +76,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             NULL,
             'legacy-command',
             'client',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId,
               messageId: "message-legacy-steer",
               expectedTurnId: "turn-legacy-steer",
@@ -90,7 +95,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             NULL,
             'legacy-command',
             'server',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId,
               activity: {
                 id: "activity-legacy-accepted",
@@ -118,7 +123,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             NULL,
             'legacy-command',
             'server',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId,
               activity: {
                 id: "activity-legacy-accepted-processed",
@@ -146,7 +151,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             NULL,
             'legacy-command',
             'server',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId,
               activity: {
                 id: "activity-legacy-processing",
@@ -172,7 +177,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             NULL,
             'legacy-command',
             'server',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId,
               activity: {
                 id: "activity-legacy-accepted-recovered",
@@ -200,7 +205,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             NULL,
             'legacy-command',
             'server',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId,
               activity: {
                 id: "activity-legacy-recovered",
@@ -280,7 +285,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
           NULL,
           'post-migration-command',
           'client',
-          ${JSON.stringify({
+          ${encodeFixtureJson({
             threadId,
             messageId: "message-post-migration",
             expectedTurnId: "turn-post-migration",
@@ -333,7 +338,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
           NULL,
           'forged-provider-command',
           'provider',
-          ${JSON.stringify({
+          ${encodeFixtureJson({
             threadId,
             messageId: "message-post-migration",
             createdAt: postMigrationCreatedAt,
@@ -369,7 +374,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
           NULL,
           'post-migration-command',
           'server',
-          ${JSON.stringify({
+          ${encodeFixtureJson({
             threadId,
             activity: {
               id: "activity-post-migration-attempted",
@@ -405,7 +410,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             'post-migration-processing-intent', 'thread', ${threadId}, 9,
             'thread.turn-steer-requested', ${postMigrationCreatedAt},
             'post-migration-processing-intent-command', NULL, NULL, 'client',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId,
               messageId: "message-post-migration-processed",
               expectedTurnId: "turn-post-migration-processed",
@@ -417,7 +422,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             'post-migration-recovered-intent', 'thread', ${threadId}, 10,
             'thread.turn-steer-requested', ${postMigrationCreatedAt},
             'post-migration-recovered-intent-command', NULL, NULL, 'client',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId,
               messageId: "message-post-migration-recovered",
               expectedTurnId: "turn-post-migration-accepted-before-recovery",
@@ -456,7 +461,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             'post-migration-accepted-processed', 'thread', ${threadId}, 11,
             'thread.activity-appended', ${postMigrationCreatedAt},
             'post-migration-accepted-processed-command', NULL, NULL, 'server',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId,
               activity: {
                 id: "activity-post-migration-accepted-processed",
@@ -478,7 +483,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             'post-migration-processing', 'thread', ${threadId}, 12,
             'thread.activity-appended', ${postMigrationCreatedAt},
             'provider:post-migration-processing-command', NULL, NULL, 'provider',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId,
               activity: {
                 id: "activity-post-migration-processing",
@@ -500,7 +505,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             'post-migration-accepted-recovered', 'thread', ${threadId}, 13,
             'thread.activity-appended', ${postMigrationCreatedAt},
             'post-migration-accepted-recovered-command', NULL, NULL, 'server',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId,
               activity: {
                 id: "activity-post-migration-accepted-recovered",
@@ -522,7 +527,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             'post-migration-recovered', 'thread', ${threadId}, 14,
             'thread.activity-appended', ${postMigrationCreatedAt},
             'post-migration-recovered-command', NULL, NULL, 'server',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId,
               activity: {
                 id: "activity-post-migration-recovered",
@@ -591,7 +596,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             'hydrated-unrelated-start', 'thread', ${threadId}, 15,
             'thread.turn-start-requested', ${postMigrationCreatedAt},
             'hydrated-unrelated-start-command', NULL, NULL, 'client',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId,
               messageId: "message-hydrated-unrelated",
               createdAt: postMigrationCreatedAt,
@@ -601,7 +606,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             'non-codex-unrelated-start', 'thread', ${nonCodexThreadId}, 0,
             'thread.turn-start-requested', ${postMigrationCreatedAt},
             'non-codex-unrelated-start-command', NULL, NULL, 'client',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId: nonCodexThreadId,
               messageId: "message-non-codex-unrelated",
               createdAt: postMigrationCreatedAt,
@@ -611,7 +616,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             'new-codex-unrelated-start', 'thread', ${newCodexThreadId}, 0,
             'thread.turn-start-requested', ${postMigrationCreatedAt},
             'new-codex-unrelated-start-command', NULL, NULL, 'client',
-            ${JSON.stringify({
+            ${encodeFixtureJson({
               threadId: newCodexThreadId,
               messageId: "message-new-codex-unrelated",
               createdAt: postMigrationCreatedAt,
@@ -676,7 +681,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
             ) VALUES (
               ${input.eventId}, 'thread', ${threadId}, ${streamVersion}, ${input.eventType},
               ${input.occurredAt}, ${`command:${input.eventId}`}, NULL, NULL,
-              ${input.actorKind}, ${JSON.stringify(input.payload)}, '{}'
+              ${input.actorKind}, ${encodeFixtureJson(input.payload)}, '{}'
             )
           `;
             streamVersion += 1;
@@ -960,7 +965,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
           NULL,
           'too-old-command',
           'client',
-          ${JSON.stringify({
+          ${encodeFixtureJson({
             threadId: oldThreadId,
             messageId: "message-too-old",
             expectedTurnId: "turn-too-old",
@@ -1070,7 +1075,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
           NULL,
           'recent-tail-command',
           'client',
-          ${JSON.stringify({
+          ${encodeFixtureJson({
             threadId: recentThreadId,
             messageId: "message-recent-tail",
             expectedTurnId: null,
@@ -1176,7 +1181,7 @@ layer("070_UnsettledCodexSteerIntentLedger", (it) => {
           NULL,
           'corrupt-ledger-command',
           'client',
-          ${JSON.stringify({
+          ${encodeFixtureJson({
             threadId,
             messageId: "message-corrupt-ledger",
             expectedTurnId: null,

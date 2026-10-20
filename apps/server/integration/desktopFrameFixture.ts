@@ -1,4 +1,6 @@
 import { inflateSync } from "node:zlib";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
 
 /** Decode only the RGB8 PNGs produced by the native fixture's libpng encoder.

@@ -1,5 +1,11 @@
+// Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { constants } from "node:fs";
+// Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
+// Native provider path boundary: retain host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import { decodeClaudeCumulativeUsage, type ClaudeUsageBaseline } from "./claudeUsageAccounting.ts";
 

@@ -1,5 +1,9 @@
+// This engine fixture qualifies real repository/SQLite paths and exact cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import fs from "node:fs";
 import os from "node:os";
+// Native Git/cwd ownership must use the same actual host path grammar.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import path from "node:path";
 
 import {

@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import { assert, describe, it, vi } from "@effect/vitest";
 import { DICTATION_REWRITE_INSTRUCTIONS_MAX_CHARS } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
@@ -12,6 +13,9 @@ import {
 } from "../../auth/Services/ServerSecretStore.ts";
 import { OpenAiRealtimeDictation } from "../Services/OpenAiRealtimeDictation.ts";
 import { OpenAiRealtimeDictationLive } from "./OpenAiRealtimeDictation.ts";
+import * as Schema from "effect/Schema";
+
+const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -21,7 +25,7 @@ function makeTestLayer(
     Response.json(
       {
         value: "ek_test_ephemeral_credential",
-        expires_at: Math.floor(Date.now() / 1_000) + 60,
+        expires_at: Math.floor(DateTime.toEpochMillis(DateTime.nowUnsafe()) / 1_000) + 60,
         session: {
           type: "transcription",
           audio: {
@@ -113,7 +117,7 @@ describe("OpenAiRealtimeDictationLive", () => {
           safetyIdentifier: "a".repeat(64),
         });
         assert.deepStrictEqual(result, { text: "Please review the attached document." });
-        assert.notInclude(JSON.stringify(result), "sk-test-permanent");
+        assert.notInclude(encodeJsonText(result), "sk-test-permanent");
 
         const request = execute.mock.calls[0]?.[0];
         assert.isDefined(request);
@@ -136,7 +140,7 @@ describe("OpenAiRealtimeDictationLive", () => {
           metadata: { prompt_version: "formal-dictation-v1" },
         });
         assert.isString(body.instructions);
-        assert.notInclude(JSON.stringify(body), "sk-test-permanent");
+        assert.notInclude(encodeJsonText(body), "sk-test-permanent");
         assert.notProperty(body, "previous_response_id");
         assert.notProperty(body, "conversation");
       }).pipe(Effect.provide(layer));
@@ -189,7 +193,7 @@ describe("OpenAiRealtimeDictationLive", () => {
         assert.notInclude(String(body.instructions), text);
         assert.strictEqual(
           body.input,
-          JSON.stringify({ dictated_text: text, writing_style: instructions }),
+          encodeJsonText({ dictated_text: text, writing_style: instructions }),
         );
         assert.deepStrictEqual(body.metadata, { prompt_version: "custom-dictation-v1" });
         assert.notProperty(body, "conversation");
@@ -218,7 +222,7 @@ describe("OpenAiRealtimeDictationLive", () => {
         ]) {
           const error = yield* Effect.flip(dictation.rewriteText({ ...input, instructions }));
           assert.strictEqual(error.code, "invalid_input");
-          assert.notInclude(JSON.stringify(error), input.text);
+          assert.notInclude(encodeJsonText(error), input.text);
         }
         const denied = yield* Effect.flip(
           dictation.rewriteText({
@@ -228,7 +232,7 @@ describe("OpenAiRealtimeDictationLive", () => {
           }),
         );
         assert.strictEqual(denied.code, "invalid_input");
-        assert.notInclude(JSON.stringify(denied), "private-style");
+        assert.notInclude(encodeJsonText(denied), "private-style");
         assert.strictEqual(execute.mock.calls.length, 0);
       }).pipe(Effect.provide(layer));
     },
@@ -282,9 +286,9 @@ describe("OpenAiRealtimeDictationLive", () => {
             ),
           );
           assert.strictEqual(error.code, "upstream_unavailable");
-          assert.notInclude(JSON.stringify(error), providerSecret);
-          assert.notInclude(JSON.stringify(error), "sk-secret-must-not-surface");
-          assert.notInclude(JSON.stringify(error), "private-style");
+          assert.notInclude(encodeJsonText(error), providerSecret);
+          assert.notInclude(encodeJsonText(error), "sk-secret-must-not-surface");
+          assert.notInclude(encodeJsonText(error), "private-style");
         }
         const rateError = yield* Effect.flip(dictation.rewriteText(input));
         assert.strictEqual(rateError.code, "rate_limited");
@@ -314,8 +318,8 @@ describe("OpenAiRealtimeDictationLive", () => {
         }),
       );
       assert.strictEqual(error.code, "upstream_quota_exhausted");
-      assert.notInclude(JSON.stringify(error), "provider-account-private-detail");
-      assert.notInclude(JSON.stringify(error), "sk-secret-must-not-surface");
+      assert.notInclude(encodeJsonText(error), "provider-account-private-detail");
+      assert.notInclude(encodeJsonText(error), "sk-secret-must-not-surface");
     }).pipe(Effect.provide(layer));
   });
 
@@ -403,7 +407,10 @@ describe("OpenAiRealtimeDictationLive", () => {
       assert.isAtLeast(result.clientSecretRequestDurationMs ?? -1, 0);
       assert.strictEqual(result.clientSecretOpenAiProcessingMs, 12);
       assert.strictEqual(result.clientSecretEffectiveProfile, "matches");
-      assert.isAbove(result.expiresAt, Math.floor(Date.now() / 1_000));
+      assert.isAbove(
+        result.expiresAt,
+        Math.floor(DateTime.toEpochMillis(DateTime.nowUnsafe()) / 1_000),
+      );
 
       const request = execute.mock.calls[0]?.[0];
       assert.isDefined(request);
@@ -434,7 +441,7 @@ describe("OpenAiRealtimeDictationLive", () => {
     const { execute, layer } = makeTestLayer(() =>
       Response.json({
         value: "ek_test_fallback_credential",
-        expires_at: Math.floor(Date.now() / 1_000) + 60,
+        expires_at: Math.floor(DateTime.toEpochMillis(DateTime.nowUnsafe()) / 1_000) + 60,
         session: {
           type: "transcription",
           audio: {
@@ -499,8 +506,8 @@ describe("OpenAiRealtimeDictationLive", () => {
         dictation.createClientSecret({ safetyIdentifier: "quota-session" }),
       );
       assert.strictEqual(quotaError.code, "upstream_quota_exhausted");
-      assert.notInclude(JSON.stringify(quotaError), "provider account details");
-      assert.notInclude(JSON.stringify(quotaError), "sk-quota-secret");
+      assert.notInclude(encodeJsonText(quotaError), "provider account details");
+      assert.notInclude(encodeJsonText(quotaError), "sk-quota-secret");
 
       const transientError = yield* Effect.flip(
         dictation.createClientSecret({ safetyIdentifier: "rate-session" }),
@@ -533,9 +540,9 @@ describe("OpenAiRealtimeDictationLive", () => {
       assert.isDefined(fiber.pollUnsafe());
       const error = yield* Fiber.join(fiber);
       assert.strictEqual(error.code, "upstream_quota_exhausted");
-      assert.notInclude(JSON.stringify(error), "sk-stalled-secret");
+      assert.notInclude(encodeJsonText(error), "sk-stalled-secret");
       yield* Effect.sync(() => closeBody?.());
-    }).pipe(Effect.provide(stalled.layer), Effect.provide(TestClock.layer()));
+    }).pipe(Effect.provide(stalled.layer.pipe(Layer.provideMerge(TestClock.layer()))));
   });
 
   it.effect("keeps stalled, failed, and oversized 429 bodies rate limited", () => {
@@ -587,14 +594,14 @@ describe("OpenAiRealtimeDictationLive", () => {
         dictation.createClientSecret({ safetyIdentifier: "failed-429-session" }),
       );
       assert.strictEqual(failedError.code, "upstream_rate_limited");
-      assert.notInclude(JSON.stringify(failedError), leakedDetail);
+      assert.notInclude(encodeJsonText(failedError), leakedDetail);
 
       const oversizedError = yield* Effect.flip(
         dictation.createClientSecret({ safetyIdentifier: "oversized-429-session" }),
       );
       assert.strictEqual(oversizedError.code, "upstream_rate_limited");
-      assert.notInclude(JSON.stringify(oversizedError), "sk-429-secret");
-    }).pipe(Effect.provide(responses.layer), Effect.provide(TestClock.layer()));
+      assert.notInclude(encodeJsonText(oversizedError), "sk-429-secret");
+    }).pipe(Effect.provide(responses.layer.pipe(Layer.provideMerge(TestClock.layer()))));
   });
 
   it.effect("maps body-stream transport failures to availability errors", () => {
@@ -617,8 +624,8 @@ describe("OpenAiRealtimeDictationLive", () => {
         dictation.createClientSecret({ safetyIdentifier: "stream-failure-session" }),
       );
       assert.strictEqual(error.code, "upstream_unavailable");
-      assert.notInclude(JSON.stringify(error), leakedDetail);
-      assert.notInclude(JSON.stringify(error), "sk-stream-secret");
+      assert.notInclude(encodeJsonText(error), leakedDetail);
+      assert.notInclude(encodeJsonText(error), "sk-stream-secret");
     }).pipe(Effect.provide(failed.layer));
   });
 
@@ -653,8 +660,8 @@ describe("OpenAiRealtimeDictationLive", () => {
         dictation.createClientSecret({ safetyIdentifier: "server-error-session" }),
       );
       assert.strictEqual(error.code, "upstream_unavailable");
-      assert.notInclude(JSON.stringify(error), leakedDetail);
-      assert.notInclude(JSON.stringify(error), "sk-500-secret-must-not-surface");
+      assert.notInclude(encodeJsonText(error), leakedDetail);
+      assert.notInclude(encodeJsonText(error), "sk-500-secret-must-not-surface");
     }).pipe(Effect.provide(layer));
   });
 
@@ -687,8 +694,8 @@ describe("OpenAiRealtimeDictationLive", () => {
         if (expectedCode === "upstream_invalid_response") {
           assert.strictEqual(error.message, "OpenAI rejected Cafe's dictation configuration.");
         }
-        assert.notInclude(JSON.stringify(error), leakedDetail);
-        assert.notInclude(JSON.stringify(error), "sk-classification-secret");
+        assert.notInclude(encodeJsonText(error), leakedDetail);
+        assert.notInclude(encodeJsonText(error), "sk-classification-secret");
       }
     }).pipe(Effect.provide(layer));
   });
@@ -697,7 +704,7 @@ describe("OpenAiRealtimeDictationLive", () => {
     const malformed = makeTestLayer(() =>
       Response.json({
         value: "ek_test_ephemeral_credential",
-        expires_at: Math.floor(Date.now() / 1_000) - 1,
+        expires_at: Math.floor(DateTime.toEpochMillis(DateTime.nowUnsafe()) / 1_000) - 1,
         session: { type: "transcription" },
       }),
     );
@@ -715,7 +722,7 @@ describe("OpenAiRealtimeDictationLive", () => {
     const mismatched = makeTestLayer(() =>
       Response.json({
         value: "ek_test_ephemeral_credential",
-        expires_at: Math.floor(Date.now() / 1_000) + 60,
+        expires_at: Math.floor(DateTime.toEpochMillis(DateTime.nowUnsafe()) / 1_000) + 60,
         session: {
           type: "transcription",
           audio: {
@@ -735,7 +742,7 @@ describe("OpenAiRealtimeDictationLive", () => {
         safetyIdentifier: "session-digest",
       });
       assert.strictEqual(result.clientSecretEffectiveProfile, "model_mismatch");
-      assert.notInclude(JSON.stringify(result), "unexpected-provider-model");
+      assert.notInclude(encodeJsonText(result), "unexpected-provider-model");
     }).pipe(Effect.provide(mismatched.layer));
   });
 
@@ -744,7 +751,7 @@ describe("OpenAiRealtimeDictationLive", () => {
       Response.json(
         {
           value: "ek_test_ephemeral_credential",
-          expires_at: Math.floor(Date.now() / 1_000) + 60,
+          expires_at: Math.floor(DateTime.toEpochMillis(DateTime.nowUnsafe()) / 1_000) + 60,
           session: { type: "transcription" },
         },
         { headers: { "x-request-id": "syntactically_safe_but_not_openai" } },

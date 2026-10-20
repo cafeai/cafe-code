@@ -38,7 +38,7 @@ const recurrence = z.discriminatedUnion("kind", [
 const result = (value: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value) }],
 });
-const run = async <A>(effect: Effect.Effect<A, unknown>) => {
+const run = async <A, E>(effect: Effect.Effect<A, E>) => {
   // Schema failures can include complete prompt values. Never forward decode
   // causes, provider exceptions or raw SQL errors to MCP clients or logging.
   try {

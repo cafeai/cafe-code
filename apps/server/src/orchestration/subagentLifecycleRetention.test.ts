@@ -1,5 +1,7 @@
+import * as Schema from "effect/Schema";
+import * as DateTime from "effect/DateTime";
 import { assert, it } from "@effect/vitest";
-import { ThreadId } from "@cafecode/contracts";
+import { ThreadId } from "@cafecode/contracts/baseSchemas";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -10,6 +12,8 @@ import {
   isSubagentLifecycleHydrationComplete,
   SUBAGENT_LIFECYCLE_HYDRATION_PAGE_SIZE,
 } from "./subagentLifecycleRetention.ts";
+
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 interface CountRow {
   readonly count: number;
@@ -41,23 +45,23 @@ it.layer(TestSqliteClient.layerMemory())("subagentLifecycleRetention", (it) => {
         Array.from({ length: SUBAGENT_LIFECYCLE_HYDRATION_PAGE_SIZE + 1 }, (_, index) => index),
         (index) => {
           const activityId = `legacy-start-${index.toString().padStart(3, "0")}`;
-          const createdAt = new Date(
-            Date.parse("2026-10-04T00:00:00.000Z") + index * 1_000,
-          ).toISOString();
+          const createdAt = DateTime.formatIso(
+            DateTime.makeUnsafe(Date.parse("2026-10-04T00:00:00.000Z") + index * 1_000),
+          );
           const payload =
             index === 10
               ? "{malformed"
               : index === 11
-                ? JSON.stringify({ subagent: { threadId: "😀".repeat(300) } })
+                ? encodeJsonString({ subagent: { threadId: "😀".repeat(300) } })
                 : index === 12
-                  ? JSON.stringify({ subagent: { threadId: "😀".repeat(256) } })
+                  ? encodeJsonString({ subagent: { threadId: "😀".repeat(256) } })
                   : index === 64
-                    ? JSON.stringify({
+                    ? encodeJsonString({
                         visibility: "ambient",
                         taskId: "ambient-task",
                         subagent: { threadId: "ambient-presentation" },
                       })
-                    : JSON.stringify({ subagent: { threadId: `child-${index}` } });
+                    : encodeJsonString({ subagent: { threadId: `child-${index}` } });
           return sql`
             INSERT INTO projection_thread_activities(
               activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
@@ -81,7 +85,7 @@ it.layer(TestSqliteClient.layerMemory())("subagentLifecycleRetention", (it) => {
             ${`legacy-null-turn-${index.toString().padStart(3, "0")}`},
             ${threadId}, NULL, 'info', 'task.started', 'no visible turn',
             '{"subagent":{"threadId":"null-turn-child"}}',
-            ${new Date(Date.parse("2026-10-04T00:02:00.000Z") + index * 1_000).toISOString()},
+            ${DateTime.formatIso(DateTime.makeUnsafe(Date.parse("2026-10-04T00:02:00.000Z") + index * 1_000))},
             ${200 + index}
           )
         `,
@@ -186,8 +190,8 @@ it.layer(TestSqliteClient.layerMemory())("subagentLifecycleRetention", (it) => {
             activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at, sequence
           ) VALUES (
             ${`retired-${index}`}, ${threadId}, 'turn-old', 'info', 'task.started', 'legacy',
-            ${JSON.stringify({ subagent: { threadId: `retired-child-${index}` } })},
-            ${new Date(Date.parse("2026-10-04T00:00:00.000Z") + index * 1_000).toISOString()},
+            ${encodeJsonString({ subagent: { threadId: `retired-child-${index}` } })},
+            ${DateTime.formatIso(DateTime.makeUnsafe(Date.parse("2026-10-04T00:00:00.000Z") + index * 1_000))},
             ${index}
           )
         `,

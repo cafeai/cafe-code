@@ -154,7 +154,7 @@ For example:
 ```bash
 nice -n 10 corepack yarn fmt
 nice -n 10 corepack yarn lint
-NODE_OPTIONS=--max-old-space-size=4096 nice -n 10 corepack yarn typecheck --concurrency=1
+NODE_OPTIONS=--max-old-space-size=4096 nice -n 10 corepack yarn typecheck
 nice -n 10 corepack yarn test
 nice -n 10 corepack yarn build:desktop --force
 ```
@@ -163,6 +163,8 @@ Keep the typecheck heap option scoped to that command, as in CI. Windows uses
 the same Yarn tasks and existing bounded-worker policy without `nice`; set
 `NODE_OPTIONS` only for its typecheck invocation. See the
 [verification resource budget](../CONTRIBUTING.md#verification-resource-budget).
+The canonical typecheck and complete-local coordinator default to three workspace
+compilers; this does not increase Node/browser test workers or build concurrency.
 
 The forced desktop build is the final verification after tests. Live-provider
 and native artifact checks are separate opt-in or CI commands; passing isolated

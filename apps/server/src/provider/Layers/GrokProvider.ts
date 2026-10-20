@@ -315,6 +315,8 @@ const discoverViaAcp = (
     );
     const started = yield* runtime.start();
     observePhase("capabilities");
+    // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+    // @effect-diagnostics-next-line instanceOfSchema:off
     const [liveSteer, accountRateLimits] = yield* Effect.all(
       [
         runtime
@@ -470,9 +472,15 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
   }).pipe(Effect.timeoutOption(GROK_ACP_PROBE_TIMEOUT_MS), Effect.exit);
   if (Exit.isFailure(acpExit)) {
     const error = Cause.squash(acpExit.cause);
+    // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+    // @effect-diagnostics-next-line instanceOfSchema:off
     const unauthenticated =
       error instanceof EffectAcpErrors.AcpRequestError && error.code === -32000;
+    // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+    // @effect-diagnostics-next-line instanceOfSchema:off
     const sandboxFailure = error instanceof GrokSandboxStartupError ? error : undefined;
+    // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+    // @effect-diagnostics-next-line instanceOfSchema:off
     yield* Effect.logWarning("Grok ACP qualification probe failed.", {
       errorTag: causeTag(acpExit.cause),
       unauthenticated,

@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import { randomUUID } from "node:crypto";
 import { assert, it } from "@effect/vitest";
 import { vi } from "vitest";
@@ -19,6 +20,19 @@ import { OrchestrationEngineService } from "../orchestration/Services/Orchestrat
 import { VisualizationArtifacts } from "../visualizations/service.ts";
 import * as TestSqliteClient from "../persistence/TestSqliteClient.ts";
 import { makeMcpAppsService } from "./service.ts";
+import * as Schema from "effect/Schema";
+
+const decodeJsonText = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
+const decodeToolReply = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      result: Schema.Struct({ content: Schema.Array(Schema.Struct({ text: Schema.String })) }),
+    }),
+  ),
+);
+const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 // Controlled browser-frame grants qualify exact broker decisions. They do not
 // claim that Full-access same-origin pages are contained or trustworthy.
@@ -28,6 +42,7 @@ const peer = vi.hoisted(() => ({
   leaseId: "00000000-0000-4000-8000-000000000005",
   frameIds: undefined as Set<string> | undefined,
   snapshotHook: undefined as ((input: McpAppPrepareInput) => void | Promise<void>) | undefined,
+  privateJson: undefined as string | undefined,
   expiresAtMs: 0 as number | null,
   active: true,
   toolCalls: 0,
@@ -117,7 +132,8 @@ const makeFixture = (useDaemon = false) =>
     peer.leaseId = base.leaseId;
     peer.frameIds = undefined;
     peer.snapshotHook = undefined;
-    peer.expiresAtMs = Date.now() + 60_000;
+    peer.privateJson = undefined;
+    peer.expiresAtMs = DateTime.toEpochMillis(DateTime.nowUnsafe()) + 60_000;
     peer.active = true;
     peer.toolCalls = 0;
     peer.contextCalls = 0;
@@ -140,8 +156,11 @@ const makeFixture = (useDaemon = false) =>
             peer.generation !== "00000000-0000-4000-8000-000000000003" ||
             !peer.active ||
             peer.expiresAtMs === null ||
-            peer.expiresAtMs <= Date.now()
+            peer.expiresAtMs <= DateTime.toEpochMillis(DateTime.nowUnsafe())
           )
+            // Deliberately untyped received failures must still be sanitized by
+            // the broker rather than admitted as a nominal public refusal.
+            // @effect-diagnostics-next-line globalErrorInEffectFailure:off
             return Effect.fail(new Error("Synthetic frame grant refused."));
           return Effect.succeed({
             documentGeneration: peer.frameIds ? input.leaseId : peer.documentGeneration,
@@ -160,21 +179,23 @@ const makeFixture = (useDaemon = false) =>
           await peer.snapshotHook?.(input);
           return {
             kind: "mcp-app",
-            privateJson: JSON.stringify({
-              input: {
-                originalInputJson: '{"count":1}',
-                originalResultJson: '{"content":[]}',
-                serverName: "fixture-server",
-                originCallId: "call",
-              },
-              witness: {
-                provider: "codex",
-                threadId: base.threadId,
-                providerInstanceId: "codex_fixture",
-                sessionGeneration: "00000000-0000-4000-8000-000000000006",
-                nativeThreadId: "native",
-              },
-            }),
+            privateJson:
+              peer.privateJson ??
+              JSON.stringify({
+                input: {
+                  originalInputJson: '{"count":1}',
+                  originalResultJson: '{"content":[]}',
+                  serverName: "fixture-server",
+                  originCallId: "call",
+                },
+                witness: {
+                  provider: "codex",
+                  threadId: base.threadId,
+                  providerInstanceId: "codex_fixture",
+                  sessionGeneration: "00000000-0000-4000-8000-000000000006",
+                  nativeThreadId: "native",
+                },
+              }),
           };
         }).pipe(Effect.tap(() => Effect.yieldNow)),
     } as unknown as VisualizationArtifacts["Service"];
@@ -223,6 +244,31 @@ const fixture = makeFixture();
 
 it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) => {
   it.effect(
+    "sanitizes malformed private JSON without retaining a protocol or exposing its input",
+    () =>
+      Effect.gen(function* () {
+        const { service, initialize } = yield* fixture;
+        peer.privateJson = '{"private-marker-that-must-not-escape":';
+        const error = yield* initialize().pipe(
+          Effect.match({
+            onFailure: (error) => error,
+            onSuccess: () => assert.fail("Malformed private JSON must refuse initialization."),
+          }),
+        );
+        assert.equal(error._tag, "VisualizationApiError");
+        assert.equal(Object.hasOwn(error, "cause"), false);
+        assert.notMatch(String(error), /private-marker-that-must-not-escape|SchemaError/);
+        assert.equal(peer.ownerOperations.length, 0);
+        // A failed decoder cannot leave partial protocol state or poison the
+        // preparation permit; the same owned frame can initialize once repaired.
+        peer.privateJson = undefined;
+        const fresh = yield* initialize();
+        assert.equal(fresh.kind, "reply");
+        if (fresh.kind !== "reply") assert.fail("Expected repaired initialization.");
+        assert.equal(decodeJsonText(fresh.json).method, "ui/notifications/tool-input");
+      }),
+  );
+  it.effect(
     "refuses revoked or replaced frames after snapshot I/O without retaining initialized protocol state",
     () =>
       Effect.gen(function* () {
@@ -257,7 +303,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
           assert.deepStrictEqual(premature, { kind: "reply", json: "" });
           const fresh = yield* initialize();
           if (fresh.kind !== "reply") throw new Error("Expected exact fresh replay.");
-          assert.equal(JSON.parse(fresh.json).method, "ui/notifications/tool-input");
+          assert.equal(decodeJsonText(fresh.json).method, "ui/notifications/tool-input");
           assert.equal(fresh.messages?.length, 1);
         }
       }),
@@ -314,7 +360,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
           request("ui/notifications/initialized", {}, null, admittedFrame),
         );
         if (replay.kind !== "reply") throw new Error("Expected retained exact protocol.");
-        assert.equal(JSON.parse(replay.json).method, "ui/notifications/tool-input");
+        assert.equal(decodeJsonText(replay.json).method, "ui/notifications/tool-input");
         assert.equal(
           (yield* Effect.exit(service.prepare(request("ping", {}, 2, refusedFrame))))._tag,
           "Failure",
@@ -343,7 +389,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
         );
         assert.equal(initialized.kind, "reply");
         if (initialized.kind === "reply") {
-          assert.equal(JSON.parse(initialized.json).method, "ui/notifications/tool-input");
+          assert.equal(decodeJsonText(initialized.json).method, "ui/notifications/tool-input");
           assert.equal(initialized.messages?.length, 1);
         }
         assert.deepStrictEqual(
@@ -356,7 +402,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
     "returns the immutable consent deadline and refuses spending it after catalogue I/O despite a renewed frame grant",
     () =>
       Effect.gen(function* () {
-        let clock = Date.now();
+        let clock = DateTime.toEpochMillis(DateTime.nowUnsafe());
         const observe = vi.spyOn(Date, "now").mockImplementation(() => clock);
         try {
           const { service, initialize } = yield* fixture;
@@ -392,7 +438,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
         for (const useDaemon of [false, true]) {
           const { service, initialize } = yield* makeFixture(useDaemon);
           yield* initialize();
-          peer.expiresAtMs = Date.now() + 12_000;
+          peer.expiresAtMs = DateTime.toEpochMillis(DateTime.nowUnsafe()) + 12_000;
           for (const [method, params, ownerMethod] of [
             ["tools/call", { name: "act", arguments: { count: 1 } }, "tool"],
             ["resources/read", { uri: "ui://owned" }, "resource"],
@@ -401,7 +447,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
             if (consent.kind !== "consent") throw new Error("Expected fixture consent.");
             // Healthy frame renewal must not grant additional spending time to
             // consent already shown to the user, including across a daemon hop.
-            peer.expiresAtMs = Date.now() + 60_000;
+            peer.expiresAtMs = DateTime.toEpochMillis(DateTime.nowUnsafe()) + 60_000;
             yield* service.resolve({ ...consent, decision: "approve" });
             const dispatched = peer.ownerOperations.filter((input) => input.method === ownerMethod);
             assert.equal(dispatched.length, 1);
@@ -486,7 +532,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
         yield* initialize();
         peer.textSchema = true;
         const text = '"'.repeat(50_000);
-        peer.result = JSON.stringify({ content: [{ type: "text", text }] });
+        peer.result = encodeJsonText({ content: [{ type: "text", text }] });
         const consent = yield* service.prepare(
           request("tools/call", {
             name: "act",
@@ -495,7 +541,9 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
         );
         if (consent.kind !== "consent") throw new Error("Expected fixture consent.");
         const reply = yield* service.resolve({ ...consent, decision: "approve" });
-        assert.equal(JSON.parse(reply.json).result.content[0].text, text);
+        const content = decodeToolReply(reply.json).result.content;
+        assert.ok(content[0]);
+        assert.equal(content[0].text, text);
         assert.equal(peer.toolCalls, 1);
         assert.ok(
           peer.httpBodies.some(
@@ -514,7 +562,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
     Effect.gen(function* () {
       const { service, initialize } = yield* fixture;
       assert.match(
-        JSON.stringify(
+        encodeJsonText(
           yield* service.prepare(request("tools/call", { name: "act", arguments: { count: 1 } })),
         ),
         /Operation unavailable/,
@@ -522,8 +570,8 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
       const original = yield* initialize();
       assert.equal(original.kind, "reply");
       if (original.kind !== "reply") return;
-      assert.equal(JSON.parse(original.json).method, "ui/notifications/tool-input");
-      assert.equal(JSON.parse(original.messages![0]!).method, "ui/notifications/tool-result");
+      assert.equal(decodeJsonText(original.json).method, "ui/notifications/tool-input");
+      assert.equal(decodeJsonText(original.messages![0]!).method, "ui/notifications/tool-result");
       const duplicate = yield* service.prepare(request("ui/notifications/initialized", {}, null));
       assert.deepStrictEqual(duplicate, { kind: "reply", json: "" });
       assert.equal(peer.toolCalls, 0);
@@ -545,14 +593,14 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
       yield* initialize();
       for (const args of [{}, { count: 0 }, { count: 2, extra: true }])
         assert.match(
-          JSON.stringify(
+          encodeJsonText(
             yield* service.prepare(request("tools/call", { name: "act", arguments: args })),
           ),
           /Operation unavailable/,
         );
       peer.visibility = ["model"];
       assert.match(
-        JSON.stringify(
+        encodeJsonText(
           yield* service.prepare(request("tools/call", { name: "act", arguments: { count: 1 } })),
         ),
         /Operation unavailable/,
@@ -566,7 +614,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
       const detail = yield* service.details(consent);
       assert.match(detail.json, /"count":1/);
       const reply = yield* service.resolve({ ...consent, decision: "approve" });
-      assert.equal(JSON.parse(reply.json).id, 1);
+      assert.equal(decodeJsonText(reply.json).id, 1);
       assert.equal(peer.toolCalls, 1);
       assert.equal(
         (yield* Effect.exit(service.resolve({ ...consent, decision: "approve" })))._tag,
@@ -621,7 +669,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
       const { service, initialize } = yield* fixture;
       yield* initialize();
       assert.match(
-        JSON.stringify(yield* service.prepare(request("resources/read", { uri: "ui://foreign" }))),
+        encodeJsonText(yield* service.prepare(request("resources/read", { uri: "ui://foreign" }))),
         /Operation unavailable/,
       );
       const consent = yield* service.prepare(
@@ -634,7 +682,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
         "Failure",
       );
       assert.equal(peer.toolCalls, 0);
-      peer.expiresAtMs = Date.now() - 1;
+      peer.expiresAtMs = DateTime.toEpochMillis(DateTime.nowUnsafe()) - 1;
       assert.equal((yield* Effect.exit(service.prepare(request("ping", {}))))._tag, "Failure");
       peer.expiresAtMs = null;
       assert.equal((yield* Effect.exit(service.prepare(request("ping", {}))))._tag, "Failure");
@@ -647,7 +695,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
       // A scoped SQLite projection fixture, not the user's database or providers.
       yield* sql`CREATE TABLE IF NOT EXISTS projection_threads(thread_id TEXT PRIMARY KEY,runtime_mode TEXT,interaction_mode TEXT,model_selection_json TEXT,deleted_at TEXT)`;
       yield* sql`DELETE FROM projection_threads`;
-      yield* sql`INSERT INTO projection_threads VALUES(${base.threadId},'full-access','default',${JSON.stringify({ instanceId: "foreign", model: "fixture" })},NULL)`;
+      yield* sql`INSERT INTO projection_threads VALUES(${base.threadId},'full-access','default',${encodeJsonText({ instanceId: "foreign", model: "fixture" })},NULL)`;
       const message = request("ui/message", {
         role: "user",
         content: [{ type: "text", text: "Explicit approved fixture message" }],
@@ -659,7 +707,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
         "Failure",
       );
       assert.equal(dispatched.length, 0);
-      yield* sql`UPDATE projection_threads SET model_selection_json=${JSON.stringify({ instanceId: "codex_fixture", model: "fixture" })}`;
+      yield* sql`UPDATE projection_threads SET model_selection_json=${encodeJsonText({ instanceId: "codex_fixture", model: "fixture" })}`;
       const current = yield* service.prepare({
         ...message,
         requestJson: message.requestJson.replace('"id":1', '"id":2'),
@@ -668,7 +716,7 @@ it.layer(TestSqliteClient.layerMemory())("exact MCP App consent broker", (it) =>
       yield* service.resolve({ ...current, decision: "approve" });
       assert.equal(dispatched.length, 1);
       assert.deepStrictEqual(dispatched[0]!.type, "thread.turn.start");
-      assert.match(JSON.stringify(dispatched[0]), /codex_fixture/);
+      assert.match(encodeJsonText(dispatched[0]), /codex_fixture/);
     }),
   );
 });

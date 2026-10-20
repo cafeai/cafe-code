@@ -1,5 +1,7 @@
 # Desktop Releases And Updates
 
+Last updated: 2026-10-20 15:35:22 JST (UTC+0900)
+
 Cafe Code publishes desktop artifacts from version tags. macOS apps are Developer ID signed and
 notarized; Windows and Linux artifacts remain unsigned. Stable tags use
 `vX.Y.Z`; nightly tags use `vX.Y.Z-nightly.YYYYMMDD.N` with `N >= 1`. The release workflow builds
@@ -147,6 +149,29 @@ Packaged apps check 15 seconds after launch and every four minutes afterward. Us
 from the application menu. Cafe Code does not automatically download an update and does not install
 one merely because the app exits.
 
+Settings → About must use the main process's explicit packaging identity to
+choose its check. Packaged installs check the release updater and report its
+checking, up-to-date, available or failed state; source builds retain the Git
+branch diagnostic. A missing Git checkout, a version string or disabled update
+eligibility is not evidence of which runtime is installed. Legacy update-state
+messages without explicit runtime identity remain unknown rather than silently
+selecting the wrong check. This presentation metadata grants no download or
+installation permission: those operations retain the native eligibility gates
+and explicit user confirmation described below.
+
+Both source and packaged status queries preserve a newer native event over an
+older initial read at the actual cache-write boundary. Read receipts stay private
+to the renderer and bind the exact bridge, query, revision and cancellation
+signal; retired listeners and replies cannot publish into the current view.
+These display-ordering guards do not trigger another update check or grant
+download, installation or provider authority.
+
+The same update action as the sidebar remains available in About even when that
+sidebar is hidden or its notification was dismissed. Checking alone never
+downloads or installs a release. This renderer repair cannot update an older
+installed binary: an affected app may need its existing native application-menu
+check or a manual download of a separately published newer release first.
+
 - Windows x64: the user downloads from Cafe Code and confirms restart. The unsigned NSIS installer
   runs for the current user with Electron Updater's `--updated /S --force-run` arguments. The update
   path does not rerun the fresh-install managed-provider bootstrap. Windows may show Unknown
@@ -164,7 +189,19 @@ one merely because the app exits.
   writable. If replacement fails, download the newer AppImage from GitHub and run it manually.
 
 Source checkouts use the separate Git branch update diagnostic. They compare commits on `main` or
-`dev`; they do not consume GitHub Release manifests and cannot install packaged updates.
+`dev`; other branches are ignored without fetching. They do not consume GitHub Release manifests
+and cannot install packaged updates. Packaging identity, not the diagnostic logging flag,
+selects between these two paths.
+
+Required updater tests cover both source branches, ignored branches, packaged eligibility,
+the startup/poll schedule, Settings routing, completed initial-read/event ordering,
+retired bridge/unmount refusal and explicit user actions. An isolated HTTP integration
+fixture also runs the installed Electron Updater metadata engine against an owned loopback server:
+actual GitHub feed parsing, platform manifest selection, stable/nightly version decisions and
+recovery after a failed manifest check. It refuses artifact requests and asserts zero automatic
+download or installation. This exercises metadata discovery, not live GitHub/TLS reachability,
+Electron networking, downloaded payload integrity, native signatures or a real installer upgrade;
+those remain separate release/native qualification.
 
 macOS packages opt in through the bundled `package.json` field `cafeCodeMacInAppUpdates: true`,
 which the signed packaging path writes alongside its required signing/notarization configuration.

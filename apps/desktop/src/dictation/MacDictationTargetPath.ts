@@ -1,3 +1,5 @@
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 
 import type { DesktopEnvironmentShape } from "../app/DesktopEnvironment.ts";

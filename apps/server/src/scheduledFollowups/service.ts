@@ -29,6 +29,7 @@ import {
 } from "@cafecode/shared/scheduledFollowups";
 import { parseScheduledFollowupResult } from "@cafecode/shared/scheduledFollowupResult";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -115,16 +116,26 @@ interface RunRow {
   inspected_at: string;
 }
 const failure = (message: string) => new ScheduledFollowupError({ message });
-const nowIso = Clock.currentTimeMillis.pipe(Effect.map((ms) => new Date(ms).toISOString()));
+const nowIso = Clock.currentTimeMillis.pipe(
+  Effect.map((ms) => DateTime.formatIso(DateTime.makeUnsafe(ms))),
+);
+// Only nominal owner-created errors may cross the public sanitizing boundary;
+// structural/HMR branding is not trusted error provenance.
+// @effect-diagnostics-next-line instanceOfSchema:off
+const isNominalScheduledFailure = (error: unknown): error is ScheduledFollowupError =>
+  error instanceof ScheduledFollowupError;
 const publicBoundary = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.mapError((error) =>
-      error instanceof ScheduledFollowupError
+      isNominalScheduledFailure(error)
         ? error
         : failure("Scheduled follow-up could not be updated. Refresh and try again."),
     ),
   );
 const decodeDraft = Schema.decodeUnknownEffect(Schema.fromJsonString(ScheduledFollowupDraft));
+// The SQL commitment stores the complete already-admitted command/draft, in its
+// original key order. Do not re-decode through a shape that could strip fields.
+const encodeStoredJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const decodeRun = (row: RunRow) =>
   Effect.gen(function* () {
     const modelSelection =
@@ -307,7 +318,7 @@ export const makeScheduledFollowups = Effect.gen(function* () {
                 }
                 const rows = yield* sql<{
                   id: string;
-                }>`UPDATE scheduled_followups SET definition_json = ${JSON.stringify(draft)},
+                }>`UPDATE scheduled_followups SET definition_json = ${encodeStoredJson(draft)},
           revision = revision + 1,state = ${state},next_run_at = ${source === "owner" ? next : null},
           authorized_instance_id = ${thread.modelSelection.instanceId},permission_ceiling = ${thread.runtimeMode},updated_at = ${timestamp}
           WHERE id = ${id} AND thread_id = ${threadId} AND revision = ${expectedRevision ?? -1} AND state <> 'deleted' RETURNING id`;
@@ -323,7 +334,7 @@ export const makeScheduledFollowups = Effect.gen(function* () {
                     "This chat has reached its schedule limit. Remove an old schedule first.",
                   );
                 yield* sql`INSERT INTO scheduled_followups (id,thread_id,revision,state,definition_json,authorized_instance_id,permission_ceiling,next_run_at,created_at,updated_at,run_count)
-          VALUES (${selectedId},${threadId},1,${state},${JSON.stringify(draft)},${thread.modelSelection.instanceId},${thread.runtimeMode},${source === "owner" ? next : null},${timestamp},${timestamp},0)`;
+          VALUES (${selectedId},${threadId},1,${state},${encodeStoredJson(draft)},${thread.modelSelection.instanceId},${thread.runtimeMode},${source === "owner" ? next : null},${timestamp},${timestamp},0)`;
               }
             }),
           );
@@ -572,7 +583,7 @@ export const makeScheduledFollowups = Effect.gen(function* () {
       // Save the complete command before enqueueing. After a lost local ACK,
       // retry only these exact bytes/identity, never a reconstruction using new
       // timestamps, changed model defaults, or a replacement user instruction.
-      yield* sql`UPDATE scheduled_followup_runs SET command_json = ${JSON.stringify(command)} WHERE id = ${run.id} AND command_json IS NULL AND state = 'waiting'`;
+      yield* sql`UPDATE scheduled_followup_runs SET command_json = ${encodeStoredJson(command)} WHERE id = ${run.id} AND command_json IS NULL AND state = 'waiting'`;
       const [persisted] = yield* sql<{
         command_json: string | null;
       }>`SELECT command_json FROM scheduled_followup_runs WHERE id = ${run.id}`;

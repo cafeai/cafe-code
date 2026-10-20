@@ -6,6 +6,7 @@ import * as Http from "node:http";
 import * as Https from "node:https";
 
 import * as Effect from "effect/Effect";
+import * as Data from "effect/Data";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -14,6 +15,17 @@ import { HttpServer } from "effect/unstable/http";
 
 import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "./config.ts";
 import { resolveHttpsProxyTarget, startHttpsSiblingServer } from "./httpsSiblingServer.ts";
+
+// Typed internal failure preserves existing Error name, fixed text and optional cause.
+class HttpsSiblingFixtureError extends Data.TaggedError("HttpsSiblingFixtureError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {
+  constructor(message: string, options?: { readonly cause?: unknown }) {
+    super({ message, ...options });
+    this.name = "Error";
+  }
+}
 
 const EVENT_TIMEOUT_MS = 2_000;
 
@@ -79,7 +91,7 @@ const makeTestBackend = Effect.acquireRelease(
           server.off("error", onError);
           const address = server.address();
           if (typeof address !== "object" || address === null) {
-            reject(new Error("Test backend did not bind a TCP address"));
+            reject(new HttpsSiblingFixtureError("Test backend did not bind a TCP address"));
             return;
           }
           resolve({ server, webSocketServer, port: address.port, upgradeHeaders });
@@ -88,7 +100,7 @@ const makeTestBackend = Effect.acquireRelease(
         server.once("listening", onListening);
         server.listen({ host: "127.0.0.1", port: 0 });
       }),
-    catch: (cause) => new Error("Failed to start test backend", { cause }),
+    catch: (cause) => new HttpsSiblingFixtureError("Failed to start test backend", { cause }),
   }),
   ({ server, webSocketServer }) =>
     Effect.promise(async () => {
@@ -152,7 +164,7 @@ const makeHttpServerService = (port: number) =>
 const listenPort = (server: Https.Server): number => {
   const address = server.address();
   if (typeof address !== "object" || address === null) {
-    throw new Error("HTTPS sibling did not bind a TCP address");
+    throw new HttpsSiblingFixtureError("HTTPS sibling did not bind a TCP address");
   }
   return address.port;
 };
@@ -167,9 +179,11 @@ const openWebSocket = (url: string, certificate: string) =>
             headers: { cookie: "cafe_session=test-session" },
             perMessageDeflate: true,
           });
+          // Native callback deadline keeps exact socket/process lifetime, cancellation and ref/unref behavior.
+          // @effect-diagnostics-next-line globalTimers:off
           const timeout = setTimeout(() => {
             socket.terminate();
-            reject(new Error("Timed out opening WSS connection"));
+            reject(new HttpsSiblingFixtureError("Timed out opening WSS connection"));
           }, EVENT_TIMEOUT_MS);
           const cleanup = () => {
             clearTimeout(timeout);
@@ -188,13 +202,13 @@ const openWebSocket = (url: string, certificate: string) =>
           };
           const onClose = () => {
             cleanup();
-            reject(new Error("WSS connection closed before opening"));
+            reject(new HttpsSiblingFixtureError("WSS connection closed before opening"));
           };
           socket.once("open", onOpen);
           socket.once("error", onError);
           socket.once("close", onClose);
         }),
-      catch: (cause) => new Error("Failed to open WSS connection", { cause }),
+      catch: (cause) => new HttpsSiblingFixtureError("Failed to open WSS connection", { cause }),
     }),
     (socket) =>
       Effect.promise(
@@ -204,6 +218,8 @@ const openWebSocket = (url: string, certificate: string) =>
               resolve();
               return;
             }
+            // Native callback deadline keeps exact socket/process lifetime, cancellation and ref/unref behavior.
+            // @effect-diagnostics-next-line globalTimers:off
             const timeout = setTimeout(() => {
               socket.terminate();
               resolve();
@@ -221,9 +237,11 @@ const sendAndWaitForMessage = (socket: NodeSocket.NodeWS.WebSocket, payload: str
   Effect.tryPromise({
     try: () =>
       new Promise<string>((resolve, reject) => {
+        // Native callback deadline keeps exact socket/process lifetime, cancellation and ref/unref behavior.
+        // @effect-diagnostics-next-line globalTimers:off
         const timeout = setTimeout(() => {
           cleanup();
-          reject(new Error("Timed out waiting for WSS message"));
+          reject(new HttpsSiblingFixtureError("Timed out waiting for WSS message"));
         }, EVENT_TIMEOUT_MS);
         const cleanup = () => {
           clearTimeout(timeout);
@@ -241,7 +259,7 @@ const sendAndWaitForMessage = (socket: NodeSocket.NodeWS.WebSocket, payload: str
         };
         const onClose = () => {
           cleanup();
-          reject(new Error("WSS connection closed before receiving a message"));
+          reject(new HttpsSiblingFixtureError("WSS connection closed before receiving a message"));
         };
         socket.once("message", onMessage);
         socket.once("error", onError);
@@ -253,7 +271,8 @@ const sendAndWaitForMessage = (socket: NodeSocket.NodeWS.WebSocket, payload: str
           }
         });
       }),
-    catch: (cause) => new Error("Failed while waiting for WSS message", { cause }),
+    catch: (cause) =>
+      new HttpsSiblingFixtureError("Failed while waiting for WSS message", { cause }),
   });
 
 const reserveClosedPort = Effect.tryPromise({
@@ -264,7 +283,7 @@ const reserveClosedPort = Effect.tryPromise({
       server.listen({ host: "127.0.0.1", port: 0 }, () => {
         const address = server.address();
         if (typeof address !== "object" || address === null) {
-          reject(new Error("Port reservation did not bind a TCP address"));
+          reject(new HttpsSiblingFixtureError("Port reservation did not bind a TCP address"));
           return;
         }
         const port = address.port;
@@ -274,7 +293,7 @@ const reserveClosedPort = Effect.tryPromise({
         });
       });
     }),
-  catch: (cause) => new Error("Failed to reserve a closed test port", { cause }),
+  catch: (cause) => new HttpsSiblingFixtureError("Failed to reserve a closed test port", { cause }),
 });
 
 it.layer(NodeServices.layer)("HTTPS sibling WebSocket proxy", (it) => {

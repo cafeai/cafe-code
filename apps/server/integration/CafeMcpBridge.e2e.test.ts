@@ -1,6 +1,12 @@
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
+// Native fixture paths retain host drive, separator and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import * as os from "node:os";
+// Native fixture retains exact loopback socket/response lifetime and bounded streaming controls.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";

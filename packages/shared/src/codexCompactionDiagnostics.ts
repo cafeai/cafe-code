@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import {
   CODEX_COMPACTION_DIAGNOSTIC_ITEM_LIMIT,
   CODEX_COMPACTION_DIAGNOSTIC_SOURCE_LIMIT,
@@ -40,7 +41,9 @@ function time(value: unknown): value is string {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value))
     return false;
   const milliseconds = Date.parse(value);
-  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+  return (
+    Number.isFinite(milliseconds) && DateTime.formatIso(DateTime.makeUnsafe(milliseconds)) === value
+  );
 }
 
 function owner(value: unknown): ProviderTaskOwner | null {

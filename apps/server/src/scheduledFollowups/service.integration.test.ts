@@ -1,5 +1,9 @@
+// The fixture owns real temporary SQLite roots and closes connections before native removal.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+// Native paths must use the same host semantics as the real SQLite persistence layer.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 
 import {
@@ -16,6 +20,7 @@ import {
 } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
@@ -182,9 +187,9 @@ async function harness(persistence?: { readonly dbPath: string; readonly baseDir
           runtimeMode: "approval-required",
           activeTurnId: turnId,
           lastError: status === "error" ? "Synthetic failure" : null,
-          updatedAt: new Date(milliseconds).toISOString(),
+          updatedAt: DateTime.formatIso(DateTime.makeUnsafe(milliseconds)),
         },
-        createdAt: new Date(milliseconds).toISOString(),
+        createdAt: DateTime.formatIso(DateTime.makeUnsafe(milliseconds)),
       }),
     );
   };
@@ -223,7 +228,7 @@ async function harness(persistence?: { readonly dbPath: string; readonly baseDir
         messageId,
         turnId,
         finalText: text,
-        createdAt: new Date(milliseconds).toISOString(),
+        createdAt: DateTime.formatIso(DateTime.makeUnsafe(milliseconds)),
       }),
     );
     await session(schedule.threadId, null, status);
@@ -517,6 +522,8 @@ async function waitForBarrier(promise: Promise<void>) {
     await Promise.race([
       promise,
       new Promise<never>((_resolve, reject) => {
+        // This hard native bound observes the test-owned callback barrier independently of its injected Clock.
+        // @effect-diagnostics-next-line globalTimers:off
         timer = setTimeout(
           () => reject(new Error("Synthetic notification barrier was not reached")),
           2_000,
@@ -835,7 +842,7 @@ describe("scheduled follow-up real-SQL service", () => {
       );
       if (index < 20) await h.session(threadId, TurnId.make(`busy-${index}`));
       else later = schedule;
-      h.setTime(new Date(Date.parse(INITIAL) + index + 1).toISOString());
+      h.setTime(DateTime.formatIso(DateTime.makeUnsafe(Date.parse(INITIAL) + index + 1)));
     }
     await h.run(h.service.tick);
     h.setTime("2026-10-04T00:01:00.000Z");
@@ -1044,7 +1051,7 @@ describe("scheduled follow-up real-SQL service", () => {
     const schedule = await h.run(h.service.save({ ...draft, threadId }));
     const ids: string[] = [];
     for (let index = 0; index < 3; index += 1) {
-      h.setTime(new Date(Date.parse(INITIAL) + index + 1).toISOString());
+      h.setTime(DateTime.formatIso(DateTime.makeUnsafe(Date.parse(INITIAL) + index + 1)));
       const run = await h.run(
         h.service.runNow({ threadId, id: schedule.id, expectedRevision: schedule.revision }),
       );

@@ -1,4 +1,6 @@
 import NodeOS from "node:os";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { openSync } from "node:fs";
 
 import { assert, expect, it } from "@effect/vitest";
@@ -19,6 +21,10 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { deriveServerPaths } from "../config.ts";
 import { resolveBaseDir } from "../os-jank.ts";
 import { resolveServerConfig, type CliServerFlags } from "./config.ts";
+
+// Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
+// this codec does not replace production admission or grant received-data authority.
+const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const encodeDesktopBootstrap = Schema.encodeEffect(Schema.fromJsonString(DesktopBackendBootstrap));
 
@@ -148,7 +154,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         const baseDir = path.join(parent, "must-remain-unopened");
         const privateValue = "malformed-private-readiness-value";
         const fd = yield* openBootstrapTextFd(
-          JSON.stringify(
+          encodeFixtureJson(
             makeDesktopBootstrap({ cafeCodeHome: baseDir, desktopReadinessToken: privateValue }),
           ),
         );
@@ -167,8 +173,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         expect(error.message).toBe(
           "Desktop backend private bootstrap is invalid or unavailable. No profile was opened.",
         );
-        expect(JSON.stringify(error)).not.toContain(privateValue);
-        expect(JSON.stringify(error)).not.toContain("desktop-bootstrap-token");
+        expect(encodeFixtureJson(error)).not.toContain(privateValue);
+        expect(encodeFixtureJson(error)).not.toContain("desktop-bootstrap-token");
         expect(yield* fs.exists(baseDir)).toBe(false);
       }),
   );
@@ -669,8 +675,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       yield* fs.makeDirectory(path.dirname(derivedPaths.settingsPath), { recursive: true });
       yield* fs.writeFileString(
         derivedPaths.settingsPath,
-        // @effect-diagnostics-next-line preferSchemaOverJson:off
-        `${JSON.stringify({
+        `${encodeFixtureJson({
           observability: {
             otlpTracesUrl: "http://localhost:4318/v1/traces",
             otlpMetricsUrl: "http://localhost:4318/v1/metrics",

@@ -283,6 +283,9 @@ async function probeWindowsGeneration(generation: string) {
       child.stdout.on("data", (chunk: Buffer) => {
         output = (output + chunk.toString("utf8")).slice(0, 4096);
       });
+      // This native wait owns an external child/stream lifetime; a virtual
+      // Effect clock must not replace its existing deadline or cleanup.
+      // @effect-diagnostics-next-line globalTimers:off
       const timer = setTimeout(() => {
         child.kill();
         reject(new Error("Managed runtime version probe timed out."));

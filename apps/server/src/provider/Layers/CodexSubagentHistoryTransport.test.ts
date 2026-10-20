@@ -1,3 +1,4 @@
+import * as ProviderJsonSchema from "effect/Schema";
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import { spanToTraceRecord, type EffectTraceRecord } from "@cafecode/shared/observability";
@@ -20,6 +21,13 @@ import {
   readCodexSubagentThreadTransient,
   type CodexSubagentHistoryDiagnostic,
 } from "./CodexSessionRuntime.ts";
+
+const decodeProviderJsonString = ProviderJsonSchema.decodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
+const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
 
 const MIB = 1024 * 1024;
 const rootId = "synthetic-history-root";
@@ -156,7 +164,7 @@ const makeTransportFixture = (
               const lines = pending.split("\n");
               pending = lines.pop() ?? "";
               for (const line of lines) {
-                const request = { ...(JSON.parse(line) as Request), peer };
+                const request = { ...(decodeProviderJsonString(line) as Request), peer };
                 calls.push(request);
                 if (request.id === undefined) {
                   assert.equal(request.method, "initialized");
@@ -187,7 +195,7 @@ const makeTransportFixture = (
                   reply = respond(request);
                 }
                 const encoded = new TextEncoder().encode(
-                  `${JSON.stringify({ id: request.id, ...reply })}\n`,
+                  `${encodeProviderJsonString({ id: request.id, ...reply })}\n`,
                 );
                 peerWireBytes[peer] = (peerWireBytes[peer] ?? 0) + encoded.byteLength;
                 // Split around the first UTF-8 character as well as arbitrary
@@ -286,7 +294,10 @@ it.effect("reads public neighbors around one private item larger than the former
     assert.equal(snapshot.historyIncomplete, false);
     assert.equal(snapshot.activityHistoryIncomplete, false);
     assert.ok((fixture.peerWireBytes[0] ?? 0) > MIB);
-    assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_HISTORY_OUTPUT|FORGED_PUBLIC|forged/);
+    assert.doesNotMatch(
+      encodeProviderJsonString(snapshot),
+      /PRIVATE_HISTORY_OUTPUT|FORGED_PUBLIC|forged/,
+    );
     fixture.assertRetired(1);
   }),
 );
@@ -321,7 +332,10 @@ it.effect(
         fixture.calls.filter((call) => call.peer === 1).map((call) => call.method),
         ["initialize", "initialized", "thread/read", "thread/read", "thread/turns/list"],
       );
-      assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_HISTORY_OUTPUT|FORGED_PUBLIC/);
+      assert.doesNotMatch(
+        encodeProviderJsonString(snapshot),
+        /PRIVATE_HISTORY_OUTPUT|FORGED_PUBLIC/,
+      );
       fixture.assertRetired(2);
     }),
 );
@@ -356,7 +370,7 @@ it.effect("retains already projected public history when a later item page excee
     );
     assert.equal(snapshot.historyIncomplete, true);
     assert.equal(snapshot.activityHistoryIncomplete, true);
-    assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_HISTORY_OUTPUT|FORGED_PUBLIC/);
+    assert.doesNotMatch(encodeProviderJsonString(snapshot), /PRIVATE_HISTORY_OUTPUT|FORGED_PUBLIC/);
     fixture.assertRetired(1);
   }),
 );
@@ -392,7 +406,10 @@ it.effect(
       assert.equal(snapshot.publicActivities?.length, 2);
       assert.equal(snapshot.historyIncomplete, true);
       assert.equal(snapshot.activityHistoryIncomplete, true);
-      assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_HISTORY_OUTPUT|FORGED_PUBLIC/);
+      assert.doesNotMatch(
+        encodeProviderJsonString(snapshot),
+        /PRIVATE_HISTORY_OUTPUT|FORGED_PUBLIC/,
+      );
       fixture.assertRetired(1);
     }),
 );
@@ -476,7 +493,7 @@ for (const failureMode of ["request", "schema"] as const) {
           assert.ok(
             fixture.traces.some((trace) => trace.name === "CodexAdapter.readSubagentHistorySafely"),
           );
-          assert.doesNotMatch(JSON.stringify(fixture.traces), /PRIVATE_HISTORY_OUTPUT/);
+          assert.doesNotMatch(encodeProviderJsonString(fixture.traces), /PRIVATE_HISTORY_OUTPUT/);
           assert.deepEqual(
             fixture.traces.map((trace) => trace.name),
             ["CodexAdapter.readSubagentHistorySafely"],
@@ -519,7 +536,7 @@ it.effect(
         );
         assert.equal(traces[0]?.exit?._tag, "Failure");
         assert.doesNotMatch(
-          JSON.stringify(traces),
+          encodeProviderJsonString(traces),
           /PRIVATE_HISTORY_OUTPUT|syntheticPrivateHistoryOperation/,
         );
       }
@@ -553,7 +570,7 @@ it.effect("preserves external cancellation and finishes private scoped cleanup",
     if (Exit.isFailure(exit)) assert.equal(Cause.hasInterruptsOnly(exit.cause), true);
     assert.equal(cleaned, true);
     assert.equal(traces[0]?.exit?._tag, "Interrupted");
-    assert.doesNotMatch(JSON.stringify(traces), /PRIVATE_HISTORY_OUTPUT/);
+    assert.doesNotMatch(encodeProviderJsonString(traces), /PRIVATE_HISTORY_OUTPUT/);
   }),
 );
 
@@ -577,7 +594,7 @@ it.effect("preserves named and anonymous cancellation without private cause anno
         assert.equal(Cause.isInterruptReason(reason), true);
         if (Cause.isInterruptReason(reason)) assert.equal(reason.fiberId, fiberId);
       }
-      assert.doesNotMatch(JSON.stringify(traces), /PRIVATE_HISTORY_OUTPUT/);
+      assert.doesNotMatch(encodeProviderJsonString(traces), /PRIVATE_HISTORY_OUTPUT/);
       assert.equal(traces[0]?.exit?._tag, "Interrupted");
     }
   }),
@@ -606,7 +623,7 @@ it.effect("keeps only content-free cutoff diagnostics on the sanitized outer his
       historyReadOutcome: "partial",
     });
     assert.doesNotMatch(
-      JSON.stringify(fixture.traces),
+      encodeProviderJsonString(fixture.traces),
       /PRIVATE_HISTORY_OUTPUT|synthetic-history-root|synthetic-history-child|Verified summary/,
     );
     fixture.assertRetired(2);
@@ -734,7 +751,10 @@ it.effect(
       assert.deepEqual(snapshot.publicActivities, []);
       assert.equal(snapshot.historyIncomplete, true);
       assert.equal(snapshot.activityHistoryIncomplete, true);
-      assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_HISTORY_OUTPUT|FORGED_PUBLIC/);
+      assert.doesNotMatch(
+        encodeProviderJsonString(snapshot),
+        /PRIVATE_HISTORY_OUTPUT|FORGED_PUBLIC/,
+      );
       fixture.assertRetired(2);
     }),
 );

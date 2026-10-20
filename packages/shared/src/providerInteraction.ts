@@ -6,6 +6,7 @@ import {
   type ProviderElicitation,
   type ProviderInteractionResponse,
 } from "@cafecode/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 const isInteraction = Schema.is(InteractionSchema);
 const isInteractionResponse = Schema.is(ResponseSchema);
@@ -279,12 +280,14 @@ function validValue(field: ProviderInteractionField, value: unknown): boolean {
       return false;
     }
   }
-  if (field.format === "date")
+  if (field.format === "date") {
+    if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
+    const milliseconds = Date.parse(value);
     return (
-      /^\d{4}-\d{2}-\d{2}$/u.test(value) &&
-      !Number.isNaN(Date.parse(value)) &&
-      new Date(value).toISOString().slice(0, 10) === value
+      !Number.isNaN(milliseconds) &&
+      DateTime.formatIso(DateTime.makeUnsafe(milliseconds)).slice(0, 10) === value
     );
+  }
   if (field.format === "date-time")
     return /^\d{4}-\d{2}-\d{2}T/u.test(value) && !Number.isNaN(Date.parse(value));
   return true;

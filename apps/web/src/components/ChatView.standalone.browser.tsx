@@ -284,6 +284,7 @@ describe("ChatView full app (standalone)", () => {
       const base = createSnapshotForTargetUser({
         targetMessageId: MessageId.make("live-account-policy"),
         targetText: "Existing chat uses account policy",
+        history: "essential",
       });
       return {
         ...base,
@@ -957,6 +958,7 @@ describe("ChatView full app (standalone)", () => {
       const original = createSnapshotForTargetUser({
         targetMessageId: MessageId.make("live-steer-policy"),
         targetText: "Active steer policy fixture",
+        history: "essential",
         sessionStatus: "running",
       });
       const activeTurnId = "live-steer-policy-active-turn" as TurnId;
@@ -1092,6 +1094,7 @@ describe("ChatView full app (standalone)", () => {
       const original = createSnapshotForTargetUser({
         targetMessageId: MessageId.make("legacy-steer-owner"),
         targetText: "Legacy session owner fixture",
+        history: "essential",
         sessionStatus: "running",
       });
       const activeTurnId = "legacy-steer-owner-active-turn" as TurnId;
@@ -1381,6 +1384,7 @@ describe("ChatView full app (standalone)", () => {
       const base = createSnapshotForTargetUser({
         targetMessageId: MessageId.make("context-ownership"),
         targetText: "Synthetic context history",
+        history: "essential",
       });
       return {
         ...base,
@@ -2064,6 +2068,7 @@ describe("ChatView full app (standalone)", () => {
     const base = createSnapshotForTargetUser({
       targetMessageId: MessageId.make("limit-integration"),
       targetText: "History",
+      history: "essential",
     });
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
@@ -2143,6 +2148,7 @@ describe("ChatView full app (standalone)", () => {
       const base = createSnapshotForTargetUser({
         targetMessageId: MessageId.make("limit-ownership"),
         targetText: "Synthetic policy history",
+        history: "essential",
       });
       return {
         ...base,
@@ -3007,6 +3013,7 @@ describe("ChatView full app (standalone)", () => {
     const base = createSnapshotForTargetUser({
       targetMessageId: MessageId.make("standalone-defaults"),
       targetText: "Unrelated project",
+      history: "essential",
     });
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,

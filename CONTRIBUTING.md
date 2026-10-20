@@ -56,13 +56,17 @@ Use the repository-pinned Node and Corepack Yarn versions described in
 [Run From Source](README.md#run-from-source). All quality gates remain required.
 
 CI and release verification set `NODE_OPTIONS=--max-old-space-size=4096` only
-for their Typecheck step and run `corepack yarn typecheck --concurrency=1`.
-This checks the entire package graph, one compiler at a time. A cold server
-compile exceeds the approximately 2 GiB default V8 heap on hosted macOS;
-sequential scheduling leaves room for native memory overhead on smaller runners.
-The heap ceiling is not a total process memory limit.
+for their Typecheck step and run `corepack yarn typecheck`. The canonical script
+caps Turbo at three concurrent tasks while retaining the entire package graph.
+A cold server compile exceeds the approximately 2 GiB default V8 heap on hosted
+macOS. Each compiler retains a 4 GiB heap ceiling; three ceilings can reach
+12 GiB plus native/OS allocations, not a total memory guarantee on smaller runners.
 
 Use that same environment setting and command when reproducing CI typechecks.
+Do not append another `--concurrency` to the canonical script: Turbo rejects
+duplicate options. For a smaller constrained-host run, use the complete local
+coordinator with `corepack yarn verify:local --typecheck-concurrency=1` or invoke
+`corepack yarn exec turbo run typecheck --concurrency=1` with the same scoped heap.
 A warm TypeScript build-info cache can hide the cold compiler's memory demand,
 so a warm local pass alone does not qualify a resource-budget change. Keep heap
 options scoped to verification rather than tests, builds, or shipped processes.

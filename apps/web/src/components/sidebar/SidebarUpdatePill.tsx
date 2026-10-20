@@ -4,6 +4,7 @@ import { UiMessage } from "~/i18n";
 import { DownloadIcon, RotateCwIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
+import type { DesktopUpdateState } from "@cafecode/contracts";
 import { isElectron } from "../../env";
 import {
   setDesktopUpdateStateQueryData,
@@ -26,20 +27,31 @@ import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 export function SidebarUpdatePill() {
+  const state = useDesktopUpdateState().data ?? null;
+  return isElectron ? <DesktopUpdateActions state={state} /> : null;
+}
+
+/** One native update workflow, shared by the sidebar and the explicit About check. */
+export function DesktopUpdateActions({
+  state,
+  dismissible = true,
+}: {
+  readonly state: DesktopUpdateState | null;
+  readonly dismissible?: boolean;
+}) {
   const uiLocale = useUiLocale();
 
   const queryClient = useQueryClient();
-  const state = useDesktopUpdateState().data ?? null;
   const [dismissed, setDismissed] = useState(false);
 
-  const visible = isElectron && shouldShowDesktopUpdateButton(state) && !dismissed;
+  const visible = shouldShowDesktopUpdateButton(state) && (!dismissible || !dismissed);
   const tooltip = state
     ? getDesktopUpdateButtonTooltip(state)
     : uiText("Update available", undefined, undefined, uiLocale);
   const disabled = isDesktopUpdateButtonDisabled(state);
   const action = state ? resolveDesktopUpdateButtonAction(state) : "none";
 
-  const showArm64Warning = isElectron && shouldShowArm64IntelBuildWarning(state);
+  const showArm64Warning = shouldShowArm64IntelBuildWarning(state);
   const arm64Description =
     state && showArm64Warning ? getArm64IntelBuildWarningDescription(state) : null;
 
@@ -212,7 +224,7 @@ export function SidebarUpdatePill() {
             />
             <TooltipPopup side="top">{tooltip}</TooltipPopup>
           </Tooltip>
-          {(action === "download" || action === "manual") && (
+          {dismissible && (action === "download" || action === "manual") && (
             <Tooltip>
               <TooltipTrigger
                 render={

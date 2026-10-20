@@ -1,3 +1,5 @@
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {

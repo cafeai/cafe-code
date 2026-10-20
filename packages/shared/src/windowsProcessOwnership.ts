@@ -317,6 +317,8 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
     child.stdin.destroy();
     child.kill();
   };
+  // Native process deadline: preserve hard wall-clock expiry and exact handle cleanup.
+  // @effect-diagnostics-next-line globalTimers:off
   const lifetime = setTimeout(
     () => abort("helper-timeout"),
     dependencies.sessionTimeoutMs ?? WINDOWS_OWNERSHIP_LIMITS.sessionTimeoutMs,
@@ -413,6 +415,8 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
               reject(new WindowsOwnershipError("invalid-request"));
               return;
             }
+            // Native process deadline: preserve hard wall-clock expiry and exact handle cleanup.
+            // @effect-diagnostics-next-line globalTimers:off
             const timer = setTimeout(
               () => abort("helper-timeout"),
               dependencies.operationTimeoutMs ?? WINDOWS_OWNERSHIP_LIMITS.operationTimeoutMs,
@@ -434,6 +438,8 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
           clearTimeout(timer);
           resolve();
         };
+        // Native process deadline: preserve hard wall-clock expiry and exact handle cleanup.
+        // @effect-diagnostics-next-line globalTimers:off
         const timer = setTimeout(() => {
           exitWaiters.delete(notify);
           reject(new WindowsOwnershipError("helper-exit-unconfirmed"));

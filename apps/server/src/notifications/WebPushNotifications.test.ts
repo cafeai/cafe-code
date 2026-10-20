@@ -1,4 +1,5 @@
 import { withSessionAdmission } from "../auth/sessionAdmission.ts";
+import assert from "node:assert/strict";
 // @effect-diagnostics nodeBuiltinImport:off
 import { mkdtemp, mkdir, readFile, writeFile, chmod, stat, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,6 +31,21 @@ import {
   type WebPushNotificationsShape,
   type WebPushNotificationsError,
 } from "./WebPushNotifications.ts";
+import * as Schema from "effect/Schema";
+
+const decodeJsonText = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      subscriptions: Schema.Array(
+        Schema.Struct({
+          owner: Schema.Struct({ sessionId: Schema.String }),
+          uiLocale: Schema.optional(Schema.String),
+        }),
+      ),
+    }),
+  ),
+);
+const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const send = vi.hoisted(() => vi.fn(async () => ({ statusCode: 201 })));
 const generateVAPIDKeys = vi.hoisted(() =>
@@ -53,7 +69,7 @@ const owner = {
   expiresAt: DateTime.makeUnsafe("2099-01-01T00:00:00Z"),
 };
 
-async function fixture(
+async function fixture<E>(
   task: (input: {
     root: string;
     service: WebPushNotificationsShape;
@@ -63,7 +79,7 @@ async function fixture(
     complete: () => Effect.Effect<void>;
     revoke: () => Effect.Effect<void>;
     reactorStarts: () => { sessions: number; provider: number };
-  }) => Effect.Effect<void, unknown, Scope.Scope>,
+  }) => Effect.Effect<void, E, Scope.Scope>,
 ) {
   send.mockClear();
   generateVAPIDKeys.mockClear();
@@ -163,7 +179,14 @@ const assertUnavailable = (
           service.updateSubscriptionLocale({ ...subscription, uiLocale: "ja" }, owner),
         ];
         for (const operation of operations) {
-          expect(yield* Effect.flip(operation)).toMatchObject({
+          expect(
+            yield* operation.pipe(
+              Effect.match({
+                onFailure: (error) => error,
+                onSuccess: () => assert.fail("Expected the unavailable operation to fail"),
+              }),
+            ),
+          ).toMatchObject({
             _tag: "WebPushNotificationsError",
             detail: "Web Push is unavailable until its private state can be safely loaded.",
             message: "Web Push is unavailable until its private state can be safely loaded.",
@@ -194,7 +217,7 @@ describe("session-owned Web Push", () => {
         const publicKey = yield* service.getPublicKey();
         const state = join(root, "web-push.json");
         const previous = yield* Effect.promise(() => readFile(state, "utf8"));
-        const oversized = JSON.stringify({
+        const oversized = encodeJsonText({
           vapid: { publicKey, privateKey: "é".repeat(512 * 1024) },
           subscriptions: [],
         });
@@ -262,7 +285,7 @@ describe("session-owned Web Push", () => {
     await fixture(({ root, restart, complete, revoke, reactorStarts }) =>
       Effect.gen(function* () {
         const state = join(root, "web-push.json");
-        const oversized = JSON.stringify({
+        const oversized = encodeJsonText({
           vapid: { publicKey: "old-public", privateKey: "é".repeat(512 * 1024) },
           subscriptions: [],
         });
@@ -311,7 +334,7 @@ describe("session-owned Web Push", () => {
                 "Web Push private-state directories must be owner-controlled, unlinked and not group/other-writable.",
             },
           ]);
-          const diagnostic = JSON.stringify(messages);
+          const diagnostic = encodeJsonText(messages);
           for (const privateValue of [
             root,
             state,
@@ -338,7 +361,7 @@ describe("session-owned Web Push", () => {
     await fixture(({ root, restart, complete, revoke, reactorStarts }) =>
       Effect.gen(function* () {
         const state = join(root, "web-push.json");
-        const previous = JSON.stringify({
+        const previous = encodeJsonText({
           vapid: { publicKey: "old-public", privateKey: "old-private" },
           subscriptions: [{ ...subscription, createdAt: "2026-01-01" }],
         });
@@ -374,10 +397,11 @@ describe("session-owned Web Push", () => {
         yield* service.removeSubscription(subscription.endpoint, foreign);
         const restarted = yield* restart();
         yield* restarted.updateSubscriptionLocale({ ...subscription, uiLocale: "ko" }, owner);
-        const stored = JSON.parse(
+        const stored = decodeJsonText(
           yield* Effect.promise(() => readFile(join(root, "web-push.json"), "utf8")),
         );
         expect(stored.subscriptions).toHaveLength(1);
+        assert.ok(stored.subscriptions[0]);
         expect(stored.subscriptions[0].owner.sessionId).toBe(owner.sessionId);
         expect(stored.subscriptions[0].uiLocale).toBe("ko");
         if (process.platform !== "win32") {
@@ -405,7 +429,7 @@ describe("session-owned Web Push", () => {
         if (process.platform !== "win32") yield* Effect.promise(() => chmod(state, 0o644));
         const migrated = yield* restart();
         expect(yield* migrated.getPublicKey()).toBe("old-public");
-        const stored = JSON.parse(yield* Effect.promise(() => readFile(state, "utf8")));
+        const stored = decodeJsonText(yield* Effect.promise(() => readFile(state, "utf8")));
         expect(stored.subscriptions).toEqual([]);
       }),
     );

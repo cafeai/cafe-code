@@ -1,3 +1,6 @@
+// The copied-executable fixture retires its actual private native namespace;
+// keep the OS operation that its handle/launch assertions qualify.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { rm } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import * as Cause from "effect/Cause";
@@ -33,6 +36,13 @@ const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonS
 const encoder = new TextEncoder();
 const encodeJsonl = (value: unknown) => encoder.encode(`${encodeUnknownJsonString(value)}\n`);
 const decodeJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+// Negative transport cases return the original typed failure as a value.
+// Flipping a raw request also turns its unknown successful payload into an
+// unknown error channel; explicitly reject that unexpected success instead.
+const expectRequestFailure = Effect.match({
+  onSuccess: () => assert.fail("Expected the fixture request to fail"),
+  onFailure: (error: CodexError.CodexAppServerError) => error,
+});
 
 for (const loggerStage of ["raw", "decoded"] as const) {
   for (const shape of ["multiline", "multi-chunk"] as const) {
@@ -948,7 +958,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
         assert.equal(
           result.value.userAgent,
           echo
-            ? JSON.stringify({
+            ? encodeUnknownJsonString({
                 argv: literalCommandArgs,
                 environment: {
                   home: true,
@@ -1066,9 +1076,9 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       yield* Queue.take(output);
       yield* Queue.offer(input, encoder.encode(" \n"));
       yield* Queue.offer(input, encoder.encode("PRIVATE_TOO_LARGE"));
-      const error = yield* Fiber.join(pending).pipe(Effect.flip);
+      const error = yield* Fiber.join(pending).pipe(expectRequestFailure);
       assert.instanceOf(error, CodexError.CodexAppServerIncomingBudgetExceededError);
-      assert.equal(JSON.stringify(error).includes("PRIVATE_TOO_LARGE"), false);
+      assert.equal(encodeUnknownJsonString(error).includes("PRIVATE_TOO_LARGE"), false);
     }),
   );
 
@@ -1107,7 +1117,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
             tag: "CodexAppServerIncomingMessageTooLargeError",
             maxBytes: 32,
           });
-          assert.equal(JSON.stringify(diagnostic).includes(privateWireSentinel), false);
+          assert.equal(encodeUnknownJsonString(diagnostic).includes(privateWireSentinel), false);
         }),
       );
     }),

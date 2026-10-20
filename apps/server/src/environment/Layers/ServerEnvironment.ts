@@ -1,4 +1,5 @@
-import { EnvironmentId, type ExecutionEnvironmentDescriptor } from "@cafecode/contracts";
+import type { ExecutionEnvironmentDescriptor } from "@cafecode/contracts";
+import { EnvironmentId } from "@cafecode/contracts/baseSchemas";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";

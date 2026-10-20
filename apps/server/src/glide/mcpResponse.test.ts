@@ -1,3 +1,5 @@
+// Native fixture retains actual host file/socket identity and exact owned cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { createServer } from "node:http";
 import { expect, it } from "vitest";
 import * as Effect from "effect/Effect";

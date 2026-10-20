@@ -1,3 +1,4 @@
+import * as ProviderDateTime from "effect/DateTime";
 import {
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGE_BYTES,
   THREAD_TURN_SUBAGENT_DETAIL_MAX_MESSAGES,
@@ -69,7 +70,7 @@ function isCanonicalPublicTimestamp(value: string | undefined): value is string 
     value !== undefined &&
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) &&
     Number.isFinite(Date.parse(value)) &&
-    new Date(value).toISOString() === value
+    ProviderDateTime.formatIso(ProviderDateTime.makeUnsafe(Date.parse(value))) === value
   );
 }
 

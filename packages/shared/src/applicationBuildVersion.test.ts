@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import {
   existsSync,
   linkSync,
@@ -14,6 +16,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join } from "node:path";
 import { brotliCompressSync, brotliDecompressSync, gzipSync, gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";

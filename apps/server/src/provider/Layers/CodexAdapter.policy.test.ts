@@ -1,3 +1,4 @@
+import * as ProviderDateTime from "effect/DateTime";
 import {
   CodexSettings,
   EventId,
@@ -433,7 +434,10 @@ it("fails closed on malformed or executable retry metadata without reading gette
     Object.create(valid.payload as object),
     accessor,
     { ...(valid.payload as object), error: nestedAccessor },
-    { ...(valid.payload as object), future: new Date() },
+    {
+      ...(valid.payload as object),
+      future: ProviderDateTime.toDateUtc(ProviderDateTime.nowUnsafe()),
+    },
     {
       ...(valid.payload as object),
       future: new Proxy(
@@ -667,19 +671,19 @@ it("bounds activity summaries independently from public text and preserves legac
     publicHistory: [],
     publicActivities: Array.from({ length: 129 }, (_, index) => ({
       kind: "tool" as const,
-      timestamp: new Date(index).toISOString(),
+      timestamp: ProviderDateTime.formatIso(ProviderDateTime.makeUnsafe(index)),
     })),
   });
   assert.equal(detail.activities?.length, 128);
   assert.deepEqual(detail.activities?.[0], {
     key: "a1",
     kind: "tool",
-    timestamp: new Date(1).toISOString(),
+    timestamp: ProviderDateTime.formatIso(ProviderDateTime.makeUnsafe(1)),
   });
   assert.deepEqual(detail.activities?.at(-1), {
     key: `a${(128).toString(36)}`,
     kind: "tool",
-    timestamp: new Date(128).toISOString(),
+    timestamp: ProviderDateTime.formatIso(ProviderDateTime.makeUnsafe(128)),
   });
   assert.equal(detail.activityHistoryIncomplete, true);
   assert.equal(detail.truncated, false);

@@ -1,6 +1,13 @@
+// This boundary owns native child handles through close, rather than inferring
+// completion from a wrapper exit or launching arguments through a shell.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn } from "node:child_process";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { existsSync } from "node:fs";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { resolve } from "node:path";
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
 import { testRepositoryRoot, type TestStep } from "./test-run-plan.ts";
 
 /** Use Corepack's JS entry through the pinned Node, including on Windows;
@@ -15,7 +22,7 @@ export function corepackTestCommand(root: string | undefined, args: readonly str
 
 export async function runTestPlan(steps: readonly TestStep[]) {
   for (const step of steps) {
-    console.log(`\n${step.name}`);
+    Effect.runSync(Console.log(`\n${step.name}`));
     const { command, args } = corepackTestCommand(process.env.COREPACK_ROOT, step.args);
     const started = performance.now();
     await new Promise<void>((resolve, reject) => {
@@ -48,7 +55,9 @@ export async function runTestPlan(steps: readonly TestStep[]) {
       });
       child.once("close", (code, signal) => {
         cleanup();
-        console.log(`${step.name}: ${((performance.now() - started) / 1000).toFixed(2)}s`);
+        Effect.runSync(
+          Console.log(`${step.name}: ${((performance.now() - started) / 1000).toFixed(2)}s`),
+        );
         if (code === 0 && !cancelled && !processError) resolve();
         else if (processError) reject(processError);
         else

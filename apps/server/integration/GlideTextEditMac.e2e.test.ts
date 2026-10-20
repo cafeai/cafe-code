@@ -1,7 +1,15 @@
+// Native fixture owns exact child argv, stdio handles and retirement; keep that process boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn, spawnSync } from "node:child_process";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { watch, type FSWatcher } from "node:fs";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// Native fixture paths retain host drive, separator and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it, onTestFinished } from "vitest";
@@ -51,6 +59,8 @@ it.skipIf(process.platform !== "darwin")(
         await runtime?.close();
         if (owner && ownerExit) {
           owner.stdin?.end();
+          // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+          // @effect-diagnostics-next-line globalTimers:off
           const force = setTimeout(() => owner?.kill("SIGKILL"), 1500);
           try {
             await ownerExit;
@@ -67,6 +77,8 @@ it.skipIf(process.platform !== "darwin")(
         return await Promise.race([
           promise,
           new Promise<never>((_resolve, reject) => {
+            // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+            // @effect-diagnostics-next-line globalTimers:off
             timer = setTimeout(() => reject(new Error(label)), 10_000);
           }),
         ]);

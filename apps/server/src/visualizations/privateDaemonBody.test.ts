@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events";
+// Synthetic emitters implement the exact native HTTP response event contract.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import type * as http from "node:http";
 import { MCP_APP_JSON_MAX_TRANSPORT_BYTES } from "@cafecode/shared/mcpAppJson";
 import { afterEach, describe, expect, it, vi } from "vitest";

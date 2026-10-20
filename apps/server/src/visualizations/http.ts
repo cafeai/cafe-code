@@ -1,5 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+// Admission binds the actual outgoing Node response and its finish/close events.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { ServerResponse } from "node:http";
 import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import {
@@ -25,6 +27,7 @@ import { VisualizationArtifacts } from "./service.ts";
 import { makeVisualizationSessionService } from "./sessionRuntime.ts";
 import { readMcpAppOwnerDiagnostics } from "../mcpApps/owner.ts";
 import { acquireVisualizationMcpResponse, boundVisualizationMcpResponse } from "./mcpResponse.ts";
+import { VisualizationTransportError } from "./transportError.ts";
 
 const decodeTuple = Schema.decodeUnknownResult(VisualizationDetailsInput);
 const decodeThread = Schema.decodeUnknownResult(ThreadId.check(Schema.isMaxLength(200)));
@@ -61,7 +64,9 @@ export const readVisualizationMcpBody = <E, R>(stream: Stream.Stream<Uint8Array,
       (state, chunk) =>
         state.length + chunk.byteLength > VISUALIZATION_MAX_INPUT_JSON_BYTES ||
         state.chunks.length >= 2048
-          ? Effect.fail(new Error("Invalid visualization request body."))
+          ? Effect.fail(
+              new VisualizationTransportError({ message: "Invalid visualization request body." }),
+            )
           : Effect.sync(() => {
               state.chunks.push(chunk);
               state.length += chunk.byteLength;
@@ -79,16 +84,24 @@ export const readVisualizationMcpBody = <E, R>(stream: Stream.Stream<Uint8Array,
           }
           const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
           if (decodeGeneratedVisualizationTransportJson(text).status !== "decoded")
-            throw new Error("Invalid visualization request body.");
+            throw new VisualizationTransportError({
+              message: "Invalid visualization request body.",
+            });
           return text;
         },
-        catch: () => new Error("Invalid visualization request body."),
+        catch: () =>
+          new VisualizationTransportError({ message: "Invalid visualization request body." }),
       }),
     ),
-    Effect.mapError(() => new Error("Invalid visualization request body.")),
+    Effect.mapError(
+      () => new VisualizationTransportError({ message: "Invalid visualization request body." }),
+    ),
     Effect.timeoutOrElse({
       duration: "10 seconds",
-      orElse: () => Effect.fail(new Error("Invalid visualization request body.")),
+      orElse: () =>
+        Effect.fail(
+          new VisualizationTransportError({ message: "Invalid visualization request body." }),
+        ),
     }),
   );
 
@@ -112,12 +125,13 @@ export const handleVisualizationMcpRequest = Effect.gen(function* () {
           // Production uses the native Node HTTP interpreter. A Web-only peer
           // cannot fabricate its outgoing response lifecycle or reserve a lane.
           if (!(nativeResponse instanceof ServerResponse))
-            throw new Error("Visualization request failed.");
+            throw new VisualizationTransportError({ message: "Visualization request failed." });
           const lease = acquireVisualizationMcpResponse(nativeResponse);
-          if (!lease) throw new Error("Visualization request failed.");
+          if (!lease)
+            throw new VisualizationTransportError({ message: "Visualization request failed." });
           return lease;
         },
-        catch: () => new Error("Visualization request failed."),
+        catch: () => new VisualizationTransportError({ message: "Visualization request failed." }),
       }),
     ),
     (lease) =>
@@ -147,7 +161,10 @@ export const handleVisualizationMcpRequest = Effect.gen(function* () {
                     boundVisualizationMcpResponse(
                       Stream.fromReadableStream({
                         evaluate: () => response.body!,
-                        onError: () => new Error("Visualization response could not be delivered."),
+                        onError: () =>
+                          new VisualizationTransportError({
+                            message: "Visualization response could not be delivered.",
+                          }),
                       }),
                     ),
                     {
@@ -163,7 +180,8 @@ export const handleVisualizationMcpRequest = Effect.gen(function* () {
               await transport.close().catch(() => undefined);
             }
           },
-          catch: () => new Error("Visualization request failed."),
+          catch: () =>
+            new VisualizationTransportError({ message: "Visualization request failed." }),
         });
       }).pipe(
         Effect.catch(() => {

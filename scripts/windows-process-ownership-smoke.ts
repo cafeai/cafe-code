@@ -1,3 +1,6 @@
+import * as DateTime from "effect/DateTime";
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
 /**
  * Explicit, isolated native Windows qualification. Never run from default unit
  * discovery: this exercises Win32 handles and helper death using only children
@@ -5,8 +8,12 @@
  * profile, provider binary, account credentials, or inference calls.
  */
 import assert from "node:assert/strict";
+// This boundary retains exact native child handles and close/signal ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import {
   mkdir,
   mkdtemp,
@@ -19,6 +26,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir, release } from "node:os";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join } from "node:path";
 import { PassThrough, Transform } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -36,6 +45,9 @@ import {
 
 const FIXTURE_SWITCH = "--ownership-fixture-child";
 const TEST_TOKEN = "synthetic-native-ownership-token-000000000000000000";
+// This native wait owns an external child/stream lifetime; a virtual
+// Effect clock must not replace its existing deadline or cleanup.
+// @effect-diagnostics-next-line globalTimers:off
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 async function readPowerShellEnvironment(): Promise<{ version: string; languageMode: string }> {
@@ -61,6 +73,9 @@ async function readPowerShellEnvironment(): Promise<{ version: string; languageM
       },
     );
     let output = "";
+    // This native wait owns an external child/stream lifetime; a virtual
+    // Effect clock must not replace its existing deadline or cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     const timeout = setTimeout(() => {
       child.kill();
       reject(new Error("PowerShell environment probe timed out."));
@@ -94,8 +109,12 @@ async function readPowerShellEnvironment(): Promise<{ version: string; languageM
 }
 
 async function waitForExit(child: ChildProcessWithoutNullStreams): Promise<void> {
-  const deadline = Date.now() + 10_000;
-  while (child.exitCode === null && child.signalCode === null && Date.now() < deadline) {
+  const deadline = DateTime.toEpochMillis(DateTime.nowUnsafe()) + 10_000;
+  while (
+    child.exitCode === null &&
+    child.signalCode === null &&
+    DateTime.toEpochMillis(DateTime.nowUnsafe()) < deadline
+  ) {
     await sleep(25);
   }
   assert.ok(child.exitCode !== null || child.signalCode !== null, "fixture child must exit");
@@ -118,6 +137,9 @@ async function startFixture(): Promise<ChildProcessWithoutNullStreams> {
   child.stderr.on("data", () => {});
   child.on("error", () => {});
   await new Promise<void>((resolve, reject) => {
+    // This native wait owns an external child/stream lifetime; a virtual
+    // Effect clock must not replace its existing deadline or cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     const timeout = setTimeout(
       () => reject(new Error("Native fixture did not become ready.")),
       10_000,
@@ -236,40 +258,46 @@ export async function runWindowsProcessOwnershipSmoke(): Promise<void> {
   };
   try {
     const powershell = await readPowerShellEnvironment();
-    console.info(
-      JSON.stringify({
-        phase: "native-environment",
-        powershell,
-        node: process.version,
-        windowsBuild: release(),
-        runnerImageVersion: process.env.ImageVersion ?? null,
-      }),
+    Effect.runSync(
+      Console.info(
+        JSON.stringify({
+          phase: "native-environment",
+          powershell,
+          node: process.version,
+          windowsBuild: release(),
+          runnerImageVersion: process.env.ImageVersion ?? null,
+        }),
+      ),
     );
     child = await startFixture();
     assert.ok(child.pid);
     let started = performance.now();
     const captured = await captureWindowsProcessIdentity(child.pid, {
       onStartupPhase: (phase) =>
-        console.info(
-          JSON.stringify({
-            phase: "native-helper-startup",
-            helperPhase: phase,
-            durationMs: Math.round(performance.now() - started),
-          }),
+        Effect.runSync(
+          Console.info(
+            JSON.stringify({
+              phase: "native-helper-startup",
+              helperPhase: phase,
+              durationMs: Math.round(performance.now() - started),
+            }),
+          ),
         ),
     });
     timing.coldCaptureMs = Math.round(performance.now() - started);
     // Fixed native outcomes diagnose setup/policy failures without printing the
     // helper's raw stdout/stderr, target command line, PID or filesystem paths.
-    console.info(
-      JSON.stringify({
-        phase: "native-capture",
-        status: captured.status,
-        ...(captured.status === "present" || captured.reason === undefined
-          ? {}
-          : { reason: captured.reason }),
-        durationMs: timing.coldCaptureMs,
-      }),
+    Effect.runSync(
+      Console.info(
+        JSON.stringify({
+          phase: "native-capture",
+          status: captured.status,
+          ...(captured.status === "present" || captured.reason === undefined
+            ? {}
+            : { reason: captured.reason }),
+          durationMs: timing.coldCaptureMs,
+        }),
+      ),
     );
     assert.equal(
       captured.status,
@@ -605,20 +633,22 @@ export async function runWindowsProcessOwnershipSmoke(): Promise<void> {
       new URL("../packages/shared/src/windowsProcessOwnershipScript.ts", import.meta.url),
     );
     const lockfile = await readFile(new URL("../yarn.lock", import.meta.url));
-    console.info(
-      JSON.stringify({
-        ok: true,
-        platform: process.platform,
-        windowsBuild: release(),
-        architecture: process.arch,
-        node: process.version,
-        powershell,
-        runnerImageVersion: process.env.ImageVersion ?? null,
-        helperSourceSha256: createHash("sha256").update(helperSource).digest("hex"),
-        lockfileSha256: createHash("sha256").update(lockfile).digest("hex"),
-        checks: results,
-        timingMs: timing,
-      }),
+    Effect.runSync(
+      Console.info(
+        JSON.stringify({
+          ok: true,
+          platform: process.platform,
+          windowsBuild: release(),
+          architecture: process.arch,
+          node: process.version,
+          powershell,
+          runnerImageVersion: process.env.ImageVersion ?? null,
+          helperSourceSha256: createHash("sha256").update(helperSource).digest("hex"),
+          lockfileSha256: createHash("sha256").update(lockfile).digest("hex"),
+          checks: results,
+          timingMs: timing,
+        }),
+      ),
     );
   } finally {
     for (const session of sessions) await close(session);
@@ -638,6 +668,9 @@ if (import.meta.main) {
     process.stdin.resume();
     process.stdin.once("end", () => process.exit(0));
     // Independent backstop if the parent loses its streams during a test crash.
+    // This native wait owns an external child/stream lifetime; a virtual
+    // Effect clock must not replace its existing deadline or cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     setTimeout(() => process.exit(0), 180_000);
   } else {
     await runWindowsProcessOwnershipSmoke();

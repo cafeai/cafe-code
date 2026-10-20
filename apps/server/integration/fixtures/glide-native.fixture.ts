@@ -1,4 +1,6 @@
 // Synthetic peer only: no application, provider, credentials or native input.
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { writeFile } from "node:fs/promises";
 import { readGlideFrames, writeGlideFrame } from "../../src/glide/framing.ts";
 import {

@@ -16,6 +16,14 @@
       "types": "./src/auth.ts",
       "import": "./src/auth.ts"
     },
+    "./baseSchemas": {
+      "types": "./src/baseSchemas.ts",
+      "import": "./src/baseSchemas.ts"
+    },
+    "./providerInstance": {
+      "types": "./src/providerInstance.ts",
+      "import": "./src/providerInstance.ts"
+    },
     "./settings": {
       "types": "./src/settings.ts",
       "import": "./src/settings.ts"

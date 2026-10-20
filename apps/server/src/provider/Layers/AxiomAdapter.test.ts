@@ -1,3 +1,4 @@
+import * as ProviderDateTime from "effect/DateTime";
 // @effect-diagnostics nodeBuiltinImport:off
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
@@ -16,12 +17,24 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Data from "effect/Data";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { ServerConfig } from "../../config.ts";
 import { makeAxiomControl, makeAxiomRuntime } from "../acp/AxiomAcpSupport.ts";
 import { AXIOM_LOGIN_ERRORS } from "../axiomAccount.ts";
 import { makeAxiomAdapter, selectAxiomPermissionOption } from "./AxiomAdapter.ts";
+
+const decodeProviderJsonString = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
+
+class AxiomBrowserFixtureFailure extends Data.TaggedError("AxiomBrowserFixtureFailure")<{
+  readonly message: string;
+}> {
+  override name = "Error";
+}
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const fixturePath = fileURLToPath(new URL("../testUtils/axiomMockPeer.ts", import.meta.url));
 const layer = ServerConfig.layerTest(process.cwd(), { prefix: "cafe-axiom-test-" }).pipe(
@@ -65,7 +78,7 @@ const loginFixture = (scenario: string, browserFailure = false, withSession = fa
         ),
       openLoginUrl: (url) =>
         browserFailure
-          ? Effect.fail(new Error("fixture browser failure"))
+          ? Effect.fail(new AxiomBrowserFixtureFailure({ message: "fixture browser failure" }))
           : Effect.sync(() => {
               opened.push(url);
             }),
@@ -301,7 +314,9 @@ describe("Axiom scoped ACP adapter", () => {
         const first = events.find((event) => event.type === "thread.usage-accounting.updated");
         if (first?.type !== "thread.usage-accounting.updated")
           return yield* Effect.die("Missing recovered native cost");
-        expect(first.createdAt).toBe(new Date(1791849601000).toISOString());
+        expect(first.createdAt).toBe(
+          ProviderDateTime.formatIso(ProviderDateTime.makeUnsafe(1791849601000)),
+        );
         expect(first.payload.models[0]?.reportedCostMicrousd).toBe("99");
         yield* adapter.readThread(threadId);
         expect(
@@ -352,8 +367,8 @@ describe("Axiom scoped ACP adapter", () => {
           },
         });
         expect(saved.state?.revision).toBe(1);
-        expect(JSON.stringify(saved)).not.toContain("secret-value");
-        expect(JSON.stringify(saved)).not.toContain("private-native-credential");
+        expect(encodeProviderJsonString(saved)).not.toContain("secret-value");
+        expect(encodeProviderJsonString(saved)).not.toContain("private-native-credential");
         expect(
           (yield* adapter.manageMcp!({
             ...input,
@@ -389,7 +404,9 @@ describe("Axiom scoped ACP adapter", () => {
         yield* Deferred.await(complete);
         const delta = events.find((event) => event.type === "content.delta");
         expect(
-          delta?.type === "content.delta" ? JSON.parse(delta.payload.delta).mcpRevision : null,
+          delta?.type === "content.delta"
+            ? decodeProviderJsonString(delta.payload.delta).mcpRevision
+            : null,
         ).toBe(3);
         expect(
           (yield* adapter.manageMcp!({
@@ -414,7 +431,7 @@ describe("Axiom scoped ACP adapter", () => {
         const delta = events.find((event) => event.type === "content.delta");
         if (delta?.type !== "content.delta")
           return yield* Effect.die("Missing native consent observation");
-        expect(JSON.parse(delta.payload.delta)).toMatchObject({
+        expect(decodeProviderJsonString(delta.payload.delta)).toMatchObject({
           webEnabled: true,
           agentRevision: 1,
         });
@@ -444,7 +461,7 @@ describe("Axiom scoped ACP adapter", () => {
         const nextDelta = yield* Deferred.await(nextContent);
         if (nextDelta.type !== "content.delta")
           return yield* Effect.die("Missing next native consent observation");
-        expect(JSON.parse(nextDelta.payload.delta)).toMatchObject({
+        expect(decodeProviderJsonString(nextDelta.payload.delta)).toMatchObject({
           webEnabled: false,
           agentRevision: 1,
         });
@@ -468,7 +485,7 @@ describe("Axiom scoped ACP adapter", () => {
         expect(
           billing?.type === "thread.usage-accounting.updated" ? billing.payload.models[0] : null,
         ).toMatchObject({ inputTokens: 100, outputTokens: 30, reportedCostMicrousd: "123456" });
-        expect(JSON.parse(delta.payload.delta)).toMatchObject({
+        expect(decodeProviderJsonString(delta.payload.delta)).toMatchObject({
           frontend: "desktop-chat",
           agent: {
             enabled: true,
@@ -495,7 +512,7 @@ describe("Axiom scoped ACP adapter", () => {
       const delta = events.find((event) => event.type === "content.delta");
       if (delta?.type !== "content.delta")
         return yield* Effect.die("Missing configuration observation");
-      expect(JSON.parse(delta.payload.delta)).toMatchObject({
+      expect(decodeProviderJsonString(delta.payload.delta)).toMatchObject({
         agent: { enabled: false, permission: "full_access", revision: 1 },
         webEnabled: false,
       });
@@ -525,7 +542,7 @@ describe("Axiom scoped ACP adapter", () => {
       const delta = events.find((event) => event.type === "content.delta");
       if (delta?.type !== "content.delta")
         return yield* Effect.die("Missing configuration observation");
-      expect(JSON.parse(delta.payload.delta)).toMatchObject({
+      expect(decodeProviderJsonString(delta.payload.delta)).toMatchObject({
         agent: { enabled: true, permission: "full_access", revision: 1 },
       });
       const steered = yield* adapter.steerTurn({
@@ -605,7 +622,7 @@ describe("Axiom scoped ACP adapter", () => {
         ),
       ).toBe(true);
       expect(events.filter((event) => event.type === "turn.completed")).toHaveLength(1);
-      expect(JSON.stringify(events)).not.toContain("fixture-account");
+      expect(encodeProviderJsonString(events)).not.toContain("fixture-account");
     }).pipe(Effect.provide(layer), Effect.scoped),
   );
   it.effect("accepts native authentication after an earlier completed accounting snapshot", () =>
@@ -661,7 +678,7 @@ describe("Axiom scoped ACP adapter", () => {
         .filter((event) => event.type === "content.delta")
         .map((event) => event.payload.delta)
         .join("");
-      expect(JSON.parse(reply).thinking).toBe("medium");
+      expect(decodeProviderJsonString(reply).thinking).toBe("medium");
     }).pipe(Effect.provide(layer), Effect.scoped),
   );
   it.effect("never promotes unauthenticated completion to a verified reply", () =>

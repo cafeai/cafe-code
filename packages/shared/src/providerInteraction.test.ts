@@ -13,6 +13,26 @@ const form = (properties: Record<string, unknown>, required: string[] = []) =>
     requestedSchema: { type: "object", properties, required },
   });
 describe("bounded provider interactions", () => {
+  it("keeps civil-date years and leap-day validation exact without interpreting a date as local time", () => {
+    const interaction = form({ date: { type: "string", format: "date" } }, ["date"]);
+    expect(interaction).not.toBeNull();
+    const accept = (date: string) =>
+      validateInteractionResponse(interaction!, {
+        __cafeInteraction: { action: "accept", content: { date } },
+      });
+    for (const date of ["0000-02-29", "0099-01-01", "2000-02-29", "9999-12-31"])
+      expect(accept(date)).toEqual({ action: "accept", content: { date } });
+    for (const date of [
+      "0001-02-29",
+      "1900-02-29",
+      "2026-02-30",
+      "2026-13-01",
+      "2026-01-01T00:00:00Z",
+      "invalid",
+    ])
+      expect(accept(date)).toBeNull();
+  });
+
   it("keeps authorization tokens transient and never repeats them in durable message text", () => {
     const url = "https://example.com/authorize?token=private-secret";
     const request = normalizeElicitationRequest({

@@ -18,6 +18,8 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+// Native provider path boundary: retain host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import nodePath from "node:path";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
 
@@ -41,6 +43,8 @@ import { ProviderDaemonLocalRuntimeLive } from "./ProviderDaemonRuntime.ts";
 import { runProviderDaemonServer } from "./ProviderDaemonServer.ts";
 import { ProviderRuntimeInventory } from "./ProviderRuntimeInventory.ts";
 import { requestProviderDaemonCapabilities } from "./RemoteProviderService.ts";
+
+const decodeProviderJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
 const SyntheticConfig = Schema.Struct({
   version: Schema.NullOr(Schema.String),
@@ -447,7 +451,9 @@ describe("ProviderDaemonLocalRuntimeLive", () => {
             requestProviderDaemonJson(endpoint, PROVIDER_DAEMON_HEALTH_PATH),
           );
           assert.strictEqual(pendingHealthResponse.statusCode, 200);
-          const pendingHealth = decodeProviderDaemonHealth(JSON.parse(pendingHealthResponse.body));
+          const pendingHealth = decodeProviderDaemonHealth(
+            decodeProviderJsonString(pendingHealthResponse.body),
+          );
           assert.deepStrictEqual(pendingHealth.providerQualification, {
             versionKnownCount: 0,
             versionUnknownCount: entries.length,
@@ -496,7 +502,7 @@ describe("ProviderDaemonLocalRuntimeLive", () => {
             requestProviderDaemonJson(endpoint, PROVIDER_DAEMON_HEALTH_PATH),
           );
           const qualifiedHealth = decodeProviderDaemonHealth(
-            JSON.parse(qualifiedHealthResponse.body),
+            decodeProviderJsonString(qualifiedHealthResponse.body),
           );
           assert.deepStrictEqual(qualifiedHealth.providerQualification, {
             versionKnownCount: 4,
@@ -640,7 +646,7 @@ describe("ProviderDaemonLocalRuntimeLive", () => {
             );
             assert.strictEqual(response.statusCode, 200);
             assert.notInclude(response.body, "synthetic-private-setup-defect-marker");
-            return decodeProviderDaemonHealth(JSON.parse(response.body));
+            return decodeProviderDaemonHealth(decodeProviderJsonString(response.body));
           }).pipe(Effect.provideContext(runtime));
           assert.deepStrictEqual(health.providerQualification, {
             versionKnownCount: 0,

@@ -1,3 +1,5 @@
+// Native argv construction must use the same host path semantics as Corepack.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { resolve } from "node:path";
 import browserPolicy from "../../apps/web/browser-test-policy.json" with { type: "json" };
 import type { BrowserArtifactDirectory } from "./browser-test-artifacts.ts";
@@ -12,13 +14,45 @@ export const testRepositoryRoot = resolve(import.meta.dirname, "../..");
 const reporter = resolve(import.meta.dirname, "test-timing-reporter.ts");
 const reporters = ["--reporter=default", `--reporter=${reporter}`];
 
-export function nodeTestPlan(platform: NodeJS.Platform): readonly TestStep[] {
+export function nodeTestPlan(
+  platform: NodeJS.Platform,
+  localLimits?: { readonly concurrency: 1 | 2 | 3 },
+): readonly TestStep[] {
+  if (localLimits && ![1, 2, 3].includes(localLimits.concurrency))
+    throw new Error("Local test concurrency must be exactly 1, 2 or 3.");
+  const localConcurrency = localLimits ? [`--concurrency=${localLimits.concurrency}`] : [];
+  const localWorkers = localLimits ? ["--maxWorkers=2"] : [];
+  // Preserve the established POSIX copied-native-executable ownership boundary:
+  // the client runs only after every other workspace owner has closed. Local
+  // parallelism belongs inside the first phase, never across this boundary.
   const plans =
     platform === "win32"
-      ? [["test", "--concurrency=2", "--", "--maxWorkers=2", ...reporters]]
+      ? [
+          [
+            "test",
+            `--concurrency=${localLimits?.concurrency ?? 2}`,
+            "--",
+            "--maxWorkers=2",
+            ...reporters,
+          ],
+        ]
       : [
-          ["test", "--filter=!effect-codex-app-server", "--", ...reporters],
-          ["test", "--filter=effect-codex-app-server", "--", ...reporters],
+          [
+            "test",
+            "--filter=!effect-codex-app-server",
+            ...localConcurrency,
+            "--",
+            ...localWorkers,
+            ...reporters,
+          ],
+          [
+            "test",
+            "--filter=effect-codex-app-server",
+            ...(localLimits ? ["--concurrency=1"] : []),
+            "--",
+            ...localWorkers,
+            ...reporters,
+          ],
         ];
   return plans.map((args, index) => ({ name: `Node tests ${index + 1}`, args }));
 }

@@ -18,6 +18,8 @@ import {
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import { makeOpenCodeTextGeneration } from "./OpenCodeTextGeneration.ts";
 
+const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
 const runtimeMock = {
   state: {
     startCalls: [] as string[],
@@ -175,7 +177,7 @@ it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
             parts: [
               {
                 type: "text",
-                text: JSON.stringify({ title: "Inspect report", branch: "docs/report" }),
+                text: encodeJsonText({ title: "Inspect report", branch: "docs/report" }),
               },
             ],
           },
@@ -205,7 +207,7 @@ it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
         const fileParts = request.parts.filter((part) => part.type === "file");
         expect(fileParts).toHaveLength(1);
         expect(fileParts[0]?.url).toContain("image-handle");
-        expect(JSON.stringify(request)).not.toContain("unread-document-handle");
+        expect(encodeJsonText(request)).not.toContain("unread-document-handle");
         expect(request.parts.find((part) => part.type === "text")?.text).toContain("report.pdf");
       }),
     ),
@@ -219,7 +221,7 @@ it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
             parts: [
               {
                 type: "text",
-                text: JSON.stringify({
+                text: encodeJsonText({
                   title: '  "Safer reconnect"  ',
                   branch: "  Feat/Reconnect  ",
                 }),

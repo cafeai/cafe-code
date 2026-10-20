@@ -1,5 +1,6 @@
+import * as ProviderJsonSchema from "effect/Schema";
 import { assert, describe, it } from "@effect/vitest";
-import { ProviderDriverKind } from "@cafecode/contracts";
+import { ProviderDriverKind } from "@cafecode/contracts/providerInstance";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
@@ -11,6 +12,10 @@ import {
   prepareCodexProviderUpdate,
 } from "./codexUpdatePreflight.ts";
 import type { ProviderMaintenanceCommandAction } from "./providerMaintenance.ts";
+
+const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
 
 const codex = ProviderDriverKind.make("codex");
 const latestUrl = "https://registry.npmjs.org/%40openai%2Fcodex/latest";
@@ -149,7 +154,7 @@ describe("Codex update preflight", () => {
       assert.match(error.message, /not fully published/);
       assert.strictEqual(requests.length, 2);
       assert.strictEqual("cause" in error, false);
-      assert.notMatch(JSON.stringify(error), /private registry response/);
+      assert.notMatch(encodeProviderJsonString(error), /private registry response/);
       assert.strictEqual(action.args[2], "@openai/codex@latest");
     }).pipe(
       Effect.provideService(
@@ -264,7 +269,7 @@ describe("Codex update preflight", () => {
       const error = yield* prepareCodexProviderUpdate(codex, action, host).pipe(Effect.flip);
       assert.strictEqual(error.reason, "registry_unavailable");
       assert.strictEqual("cause" in error, false);
-      assert.notMatch(JSON.stringify(error), /private-transport-detail/);
+      assert.notMatch(encodeProviderJsonString(error), /private-transport-detail/);
     }).pipe(
       Effect.provideService(
         HttpClient.HttpClient,

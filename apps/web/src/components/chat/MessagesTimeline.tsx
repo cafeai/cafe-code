@@ -19,7 +19,7 @@ import {
   type ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import {
   createContext,
   memo,

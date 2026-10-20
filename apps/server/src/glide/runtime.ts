@@ -1,6 +1,14 @@
+// Private native helper keeps exact stdio/child ownership and bounded retirement.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+// Private native filesystem boundary retains no-follow descriptors and bigint namespace identity.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { constants } from "node:fs";
+// Private native filesystem boundary retains no-follow descriptors and bigint namespace identity.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { lstat, realpath } from "node:fs/promises";
+// Native namespace boundary retains host drive, separator and canonical path semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -175,6 +183,8 @@ export class GlideChild {
       // A graceful helper exit releases held input. Escalation acts only on this
       // exact, non-detached ChildProcess; there is no PID lookup or tree reaper.
       this.child.kill("SIGTERM");
+      // Native callback deadline keeps exact socket/process lifetime, cancellation and ref/unref behavior.
+      // @effect-diagnostics-next-line globalTimers:off
       const force = setTimeout(() => this.child.kill("SIGKILL"), 1500);
       try {
         await this.exited;
@@ -503,6 +513,8 @@ export class GlideRuntime {
       expire("Glide execution cancelled. Already-dispatched events may have taken effect.");
     // Queue time is part of the same nonrenewable deadline. Expiring a queued
     // cell never interrupts a different cell which currently owns the kernel.
+    // Native callback deadline keeps exact socket/process lifetime, cancellation and ref/unref behavior.
+    // @effect-diagnostics-next-line globalTimers:off
     const timer = setTimeout(
       () => expire("Glide execution timed out. Inspect app state before repeating an action."),
       Math.max(1, deadline - performance.now()),

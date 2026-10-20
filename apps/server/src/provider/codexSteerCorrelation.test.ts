@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 
-import { MessageId } from "@cafecode/contracts";
+import { MessageId } from "@cafecode/contracts/baseSchemas";
 import * as Schema from "effect/Schema";
 import { describe, it } from "vitest";
 

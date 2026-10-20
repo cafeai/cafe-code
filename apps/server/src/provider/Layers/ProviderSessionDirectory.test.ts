@@ -1,3 +1,5 @@
+import * as ProviderJsonSchema from "effect/Schema";
+import * as ProviderDateTime from "effect/DateTime";
 // @effect-diagnostics nodeBuiltinImport:off
 import fs from "node:fs";
 import os from "node:os";
@@ -21,6 +23,10 @@ import {
 import { ProviderSessionRuntimeRepository } from "../../persistence/Services/ProviderSessionRuntime.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
+
+const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
 
 function makeDirectoryLayer<E, R>(persistenceLayer: Layer.Layer<SqlClient.SqlClient, E, R>) {
   const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
@@ -543,7 +549,7 @@ it.layer(makeDirectoryLayer(SqlitePersistenceTest))("ProviderSessionDirectoryLiv
           thread_id, turn_id, provider_name, provider_instance_id,
           resume_cursor_json, cwd, created_at, updated_at
         ) VALUES (${threadId}, ${turnId}, 'claudeAgent', ${instanceId},
-          ${JSON.stringify(legacyCursor)}, ${cwd}, ${timestamp}, ${timestamp})
+          ${encodeProviderJsonString(legacyCursor)}, ${cwd}, ${timestamp}, ${timestamp})
       `;
       const base = {
         threadId,
@@ -617,7 +623,7 @@ it.layer(makeDirectoryLayer(SqlitePersistenceTest))("ProviderSessionDirectoryLiv
         SELECT resume_cursor_json AS "resumeCursor" FROM provider_subagent_history_roots
         WHERE thread_id = ${threadId} AND turn_id = ${turnId}
       `;
-      assert.deepEqual(rawRoot, [{ resumeCursor: JSON.stringify(legacyCursor) }]);
+      assert.deepEqual(rawRoot, [{ resumeCursor: encodeProviderJsonString(legacyCursor) }]);
     }));
 
   it("never upgrades incomplete Claude roots or weakens other providers' cursor equality", () =>
@@ -717,7 +723,9 @@ it.layer(makeDirectoryLayer(SqlitePersistenceTest))("ProviderSessionDirectoryLiv
       `;
 
       for (let index = 0; index < rootCountToWrite; index += 1) {
-        const timestamp = new Date(Date.UTC(2026, 7, 25, 2, 0, 0) + index * 1_000).toISOString();
+        const timestamp = ProviderDateTime.formatIso(
+          ProviderDateTime.makeUnsafe(Date.UTC(2026, 7, 25, 2, 0, 0) + index * 1_000),
+        );
         yield* directory.upsertSubagentHistoryBinding({
           threadId,
           turnId: TurnId.make(`turn-bounded-subagent-history-${index}`),

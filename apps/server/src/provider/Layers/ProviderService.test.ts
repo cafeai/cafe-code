@@ -1,3 +1,4 @@
+import * as ProviderJsonSchema from "effect/Schema";
 // @effect-diagnostics nodeBuiltinImport:off
 import fs from "node:fs";
 import os from "node:os";
@@ -80,6 +81,15 @@ import { makeSqlitePersistenceLive } from "../../persistence/Layers/Sqlite.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 import { normalizeClaudeSubagentHistoryRoot } from "../claudeSubagentHistoryRoot.ts";
+
+const decodeProviderJsonString = ProviderJsonSchema.decodeUnknownSync(
+  ProviderJsonSchema.fromJsonString(
+    ProviderJsonSchema.Record(ProviderJsonSchema.String, ProviderJsonSchema.Unknown),
+  ),
+);
+const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
 
 const defaultServerSettingsLayer = ServerSettingsService.layerTest();
 
@@ -546,7 +556,7 @@ for (const baseline of [false, true])
         yield* sql`INSERT INTO orchestration_events
       (sequence,event_id,aggregate_kind,stream_id,stream_version,event_type,occurred_at,command_id,actor_kind,payload_json,metadata_json)
       VALUES (1,'synthetic-revert-event','thread',${fixture.threadId},1,'thread.reverted',${completedAt},'synthetic-completion','server',
-        ${JSON.stringify({ threadId: fixture.threadId, turnCount: fixture.input.retainedTurnCount })},'{}')`;
+        ${encodeProviderJsonString({ threadId: fixture.threadId, turnCount: fixture.input.retainedTurnCount })},'{}')`;
         yield* sql`INSERT INTO orchestration_command_receipts
       (command_id,aggregate_kind,aggregate_id,accepted_at,result_sequence,status)
       VALUES ('synthetic-completion','thread',${fixture.threadId},${completedAt},1,'accepted')`;
@@ -565,8 +575,8 @@ for (const baseline of [false, true])
             SELECT r.runtime_payload_json,w.candidate_session_json FROM provider_session_runtime r
             JOIN provider_conversation_rewinds w ON w.thread_id=r.thread_id WHERE r.thread_id=${fixture.threadId}`;
           assert.isDefined(saved);
-          const payload = JSON.parse(saved!.runtime_payload_json);
-          const candidate = JSON.parse(saved!.candidate_session_json);
+          const payload = decodeProviderJsonString(saved!.runtime_payload_json);
+          const candidate = decodeProviderJsonString(saved!.candidate_session_json);
           // These mutations simulate unrelated or stale durable state. None
           // may turn an absent cursor into permission for a fresh conversation.
           for (const changed of [
@@ -592,10 +602,10 @@ for (const baseline of [false, true])
               payload: { ...payload, lastRuntimeEvent: "provider.runtime.restart" },
             },
           ]) {
-            yield* sql`UPDATE provider_session_runtime SET runtime_payload_json=${JSON.stringify(changed.payload ?? payload)}
+            yield* sql`UPDATE provider_session_runtime SET runtime_payload_json=${encodeProviderJsonString(changed.payload ?? payload)}
               WHERE thread_id=${fixture.threadId}`;
             yield* sql`UPDATE provider_conversation_rewinds
-              SET phase=${changed.phase ?? "finished"},candidate_session_json=${JSON.stringify(changed.candidate ?? candidate)}
+              SET phase=${changed.phase ?? "finished"},candidate_session_json=${encodeProviderJsonString(changed.candidate ?? candidate)}
               WHERE thread_id=${fixture.threadId}`;
             const refused = yield* provider
               .sendTurn({ threadId: fixture.threadId, input: "must stay unsent", attachments: [] })
@@ -803,7 +813,7 @@ it.effect("ProviderService refreshes stale restart inventory after a rewind full
     yield* sql`INSERT INTO orchestration_events
       (sequence,event_id,aggregate_kind,stream_id,stream_version,event_type,occurred_at,command_id,actor_kind,payload_json,metadata_json)
       VALUES (1,'restart-revert-event','thread',${fixture.threadId},1,'thread.reverted',${completedAt},'restart-completion','server',
-        ${JSON.stringify({ threadId: fixture.threadId, turnCount: 1 })},'{}')`;
+        ${encodeProviderJsonString({ threadId: fixture.threadId, turnCount: 1 })},'{}')`;
     yield* sql`INSERT INTO orchestration_command_receipts
       (command_id,aggregate_kind,aggregate_id,accepted_at,result_sequence,status)
       VALUES ('restart-completion','thread',${fixture.threadId},${completedAt},1,'accepted')`;
@@ -2938,7 +2948,7 @@ it.effect("ProviderServiceLive writes canonical events to the emitting thread se
     assert.deepEqual(canonicalThreadIds, ["thread-canonical-thread-segment"]);
     assert.equal(canonicalEvents[0]?.diagnostic, undefined);
     assert.notMatch(
-      JSON.stringify(canonicalEvents),
+      encodeProviderJsonString(canonicalEvents),
       /private-native-diagnostic|private-diagnostic-sentinel|Private received error detail/,
     );
   }).pipe(Effect.provide(NodeServices.layer)),
@@ -3157,7 +3167,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
           response: { action: "accept", content: { credential: "changed-private-secret" } },
         }).pipe(Effect.exit);
         assert.equal(changed._tag, "Failure");
-        assert.equal(JSON.stringify(changed).includes("changed-private-secret"), false);
+        assert.equal(encodeProviderJsonString(changed).includes("changed-private-secret"), false);
         assert.equal(routing.codex.respondToUserInput.mock.calls.length, 1);
       }),
   );
@@ -3196,7 +3206,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         };
         const failed = yield* provider.respondToInteraction!(input).pipe(Effect.exit);
         assert.equal(failed._tag, "Failure");
-        assert.equal(JSON.stringify(failed).includes("private-upstream-secret"), false);
+        assert.equal(encodeProviderJsonString(failed).includes("private-upstream-secret"), false);
         yield* provider.respondToInteraction!(input);
         assert.equal(routing.codex.respondToUserInput.mock.calls.length, 2);
       }),
@@ -3999,7 +4009,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
       assert.deepEqual(detail.gaps, []);
       assert.equal(detail.truncated, true);
       assert.equal(detail.historyIncomplete, true);
-      const serializedDetail = JSON.stringify(detail);
+      const serializedDetail = encodeProviderJsonString(detail);
       assert.notInclude(serializedDetail, rootToJsonSentinel);
       assert.notInclude(serializedDetail, nestedToJsonSentinel);
       assert.notInclude(serializedDetail, privateFieldSentinel);
@@ -4038,7 +4048,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
       if (invalidDetailError._tag === "ProviderSubagentDetailReadError") {
         assert.equal(invalidDetailError.reason, "provider-response-invalid");
       }
-      assert.notInclude(JSON.stringify(invalidDetailError), invalidDetailSentinel);
+      assert.notInclude(encodeProviderJsonString(invalidDetailError), invalidDetailSentinel);
       assert.deepEqual(yield* runtimeRepository.getByThreadId({ threadId }), persistedBeforeRead);
     }),
   );

@@ -1,3 +1,4 @@
+import * as ProviderJsonSchema from "effect/Schema";
 import { describe, expect, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -8,6 +9,13 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { makeClaudeAccountQuotaReader, readClaudeAccountQuota } from "./claudeAccountQuota.ts";
+
+const decodeProviderJsonString = ProviderJsonSchema.decodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
+const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
 
 const native = {
   rate_limits_available: true,
@@ -30,13 +38,13 @@ function fixture(output?: (requestId: string) => Stream.Stream<Uint8Array>) {
       if (command._tag !== "StandardCommand" || !Stream.isStream(command.options.stdin))
         throw new Error("Expected a control stream");
       commands.push(command);
-      const request = JSON.parse(
+      const request = decodeProviderJsonString(
         new TextDecoder().decode(Option.getOrThrow(yield* Stream.runHead(command.options.stdin))),
       ) as { request_id: string };
       requests.push(request);
       let running = true;
       const reply =
-        JSON.stringify({
+        encodeProviderJsonString({
           type: "control_response",
           response: {
             subtype: "success",

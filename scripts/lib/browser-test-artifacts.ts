@@ -1,6 +1,12 @@
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { lstat, mkdtemp, realpath, rename, rm, rmdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { basename, dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 // Resolve through the workspace that declares tsdown, not accidental root hoisting.
@@ -115,7 +121,7 @@ export async function withBrowserArtifactDirectory<T>(
     inode: stat.ino.toString(),
   });
   await assertBrowserArtifactDirectory(directory);
-  console.log(`Browser fixture artifacts (retained on failure): ${path}`);
+  Effect.runSync(Console.log(`Browser fixture artifacts (retained on failure): ${path}`));
   const value = await use(directory);
   await retireBrowserArtifactDirectory(directory);
   return value;

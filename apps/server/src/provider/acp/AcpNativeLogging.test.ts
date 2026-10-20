@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { ProviderDriverKind, ThreadId } from "@cafecode/contracts";
+import { ThreadId } from "@cafecode/contracts/baseSchemas";
+import { ProviderDriverKind } from "@cafecode/contracts/providerInstance";
 import { assert, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";

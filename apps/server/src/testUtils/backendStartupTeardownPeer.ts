@@ -33,8 +33,11 @@ const failure = (() => {
     case "profile":
       return Effect.fail(new DataProfileSelectionError({ message: "Synthetic profile refusal." }));
     case "ordinary":
+      // A real untagged Error must remain outside the profile-refusal teardown policy.
+      // @effect-diagnostics-next-line globalErrorInEffectFailure:off
       return Effect.fail(new Error("Synthetic ordinary failure."));
     case "mixed":
+      // Preserve the actual ordinary defect beside the typed refusal: the mixed cause must veto it.
       return Effect.failCause(
         Cause.combine(
           Cause.fail(new BackendProfileGuardError()),

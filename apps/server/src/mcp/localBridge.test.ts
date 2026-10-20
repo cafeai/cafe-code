@@ -1,5 +1,9 @@
+// Native fixture retains actual host file/socket identity and exact owned cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+// Native fixture retains actual host file/socket identity and exact owned cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";

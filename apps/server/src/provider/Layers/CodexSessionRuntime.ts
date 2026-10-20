@@ -126,6 +126,8 @@ import {
   sanitizeProcessCommand,
   type ProcessRow,
 } from "../../diagnostics/ProcessDiagnostics.ts";
+
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 const decodeV2TurnSteerParams = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnSteerParams);
 const decodeV2TurnSteerResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnSteerResponse);
@@ -6234,7 +6236,7 @@ const readCodexSubagentPublicHistoryWithClient = Effect.fn(
       // newest exact native item once, with bounded digests rather than keeping
       // native IDs. UTF-16 preserves even malformed opaque string identities.
       const identity = createHash("sha256")
-        .update(JSON.stringify([entry.turnId, item.id]), "utf16le")
+        .update(encodeProviderJsonString([entry.turnId, item.id]), "utf16le")
         .digest("hex");
       if (seenItems.has(identity)) continue;
       seenItems.add(identity);
@@ -6247,7 +6249,7 @@ const readCodexSubagentPublicHistoryWithClient = Effect.fn(
             ...(detail !== undefined ? { detail } : {}),
             identityDigest: identity,
             ...(timestampMs !== undefined && timestampMs <= 253_402_300_799_999
-              ? { timestamp: new Date(timestampMs).toISOString() }
+              ? { timestamp: DateTime.formatIso(DateTime.makeUnsafe(timestampMs)) }
               : {}),
           });
         } else {
@@ -6422,7 +6424,7 @@ export const readCodexSubagentSummaryWithInitializedClient = Effect.fn(
         const item = turn.items[index]!;
         if (item.type !== "userMessage" && item.type !== "agentMessage") continue;
         const identity = createHash("sha256")
-          .update(JSON.stringify([turn.id, item.id]), "utf16le")
+          .update(encodeProviderJsonString([turn.id, item.id]), "utf16le")
           .digest("hex");
         if (seenItems.has(identity)) continue;
         seenItems.add(identity);

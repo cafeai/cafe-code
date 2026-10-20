@@ -111,6 +111,8 @@ import {
   isPendingConversationRewind,
   type ConversationRewindError,
 } from "../../persistence/Services/ConversationRewinds.ts";
+
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const isModelSelection = Schema.is(ModelSelection);
 const isTurnId = Schema.is(TurnId);
 const isProviderAdapterProcessError = Schema.is(ProviderAdapterProcessError);
@@ -2102,12 +2104,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           existingTarget.runtimePayload !== null
             ? (Reflect.get(existingTarget.runtimePayload, "forkSourceVersion") ?? null)
             : null) !== (input.sourceVersion ?? null) ||
-          JSON.stringify(
+          encodeProviderJsonString(
             typeof existingTarget.runtimePayload === "object" &&
               existingTarget.runtimePayload !== null
               ? (Reflect.get(existingTarget.runtimePayload, "forkMessageCutoff") ?? null)
               : null,
-          ) !== JSON.stringify(input.messageCutoff ?? null) ||
+          ) !== encodeProviderJsonString(input.messageCutoff ?? null) ||
           (input.messageCutoff !== undefined &&
             !readPersistedForkMessageIds(existingTarget.runtimePayload).includes(
               input.messageCutoff.sourceMessageId,
@@ -2242,8 +2244,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       if (
         adapterFork.operationId !== input.operationId ||
         adapterFork.sourceThreadId !== input.sourceThreadId ||
-        JSON.stringify(adapterFork.messageCutoff ?? null) !==
-          JSON.stringify(input.messageCutoff ?? null) ||
+        encodeProviderJsonString(adapterFork.messageCutoff ?? null) !==
+          encodeProviderJsonString(input.messageCutoff ?? null) ||
         (input.messageCutoff !== undefined &&
           (!adapterFork.retainedMessageIds ||
             !adapterFork.retainedMessageIds.includes(input.messageCutoff.sourceMessageId) ||
@@ -2323,7 +2325,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       readPersistedString(binding.runtimePayload, "forkOperationId") !== input.fork.operationId ||
       readPersistedString(binding.runtimePayload, "forkedFromThreadId") !==
         input.fork.sourceThreadId ||
-      JSON.stringify(binding.resumeCursor) !== JSON.stringify(input.fork.resumeCursor) ||
+      encodeProviderJsonString(binding.resumeCursor) !==
+        encodeProviderJsonString(input.fork.resumeCursor) ||
       readPersistedCwd(binding.runtimePayload) !== input.fork.cwd
     ) {
       return yield* toValidationError(
@@ -3055,10 +3058,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           Effect.mapError(privateInteractionFailure),
         );
         // Sorting object keys makes transport serialization order irrelevant.
-        const serialized = JSON.stringify(canonicalInteractionResponse(input.response));
+        const serialized = encodeProviderJsonString(canonicalInteractionResponse(input.response));
         if (Buffer.byteLength(serialized, "utf8") > 64 * 1024)
           return yield* privateInteractionFailure();
-        const key = JSON.stringify([input.threadId, input.requestId]);
+        const key = encodeProviderJsonString([input.threadId, input.requestId]);
         const digest = createHmac("sha256", interactionReceiptKey).update(serialized).digest("hex");
         const prior = interactionReceipts.get(key);
         if (prior !== undefined) {

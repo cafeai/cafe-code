@@ -65,6 +65,8 @@ if (process.isMainFrame === true) {
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   const startHeartbeat = (): void => {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
+    // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+    // @effect-diagnostics-next-line globalTimers:off
     heartbeatTimer = setInterval(
       () => ipcRenderer.send("cafe-visualization:heartbeat", ++heartbeat),
       250,

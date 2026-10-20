@@ -1,4 +1,8 @@
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { access, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {

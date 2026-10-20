@@ -36,6 +36,7 @@ import {
   defaultInstanceIdForDriver,
   DEFAULT_PROVIDER_INSTANCES,
   type DesktopSourceUpdateState,
+  type DesktopUpdateState,
   isRetiredProviderDriverKind,
   PROVIDER_DISPLAY_NAMES,
   ProviderDriverKind,
@@ -79,6 +80,13 @@ import {
   setDesktopSourceUpdateStateQueryData,
   useDesktopSourceUpdateState,
 } from "../../lib/desktopSourceUpdateReactQuery";
+import {
+  desktopUpdateQueryKeys,
+  setDesktopUpdateStateQueryData,
+  useDesktopUpdateState,
+} from "../../lib/desktopUpdateReactQuery";
+import { canCheckForUpdate, getDesktopUpdateStatus } from "../desktopUpdate.logic";
+import { DesktopUpdateActions } from "../sidebar/SidebarUpdatePill";
 import {
   getCustomModelOptionsByInstance,
   resolveAppModelSelectionState,
@@ -379,7 +387,13 @@ function getSourceUpdateHashLines(state: DesktopSourceUpdateState | null): strin
   ];
 }
 
-function AboutVersionTitle({ state }: { readonly state: DesktopSourceUpdateState | null }) {
+function AboutVersionTitle({
+  state,
+  updateState,
+}: {
+  readonly state: DesktopSourceUpdateState | null;
+  readonly updateState: DesktopUpdateState | null;
+}) {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
@@ -387,7 +401,13 @@ function AboutVersionTitle({ state }: { readonly state: DesktopSourceUpdateState
     <span className="inline-flex items-center gap-2">
       <span>{uiText("Version", undefined, undefined, uiLocale)}</span>
       <code className="text-2xs font-medium text-muted-foreground">
-        {APP_VERSION} ({uiPresentation.getSourceUpdateBranchLabel(state)})
+        {APP_VERSION} (
+        {updateState?.runtimeKind === "source"
+          ? uiPresentation.getSourceUpdateBranchLabel(state)
+          : updateState?.runtimeKind === "packaged"
+            ? uiText("installed app", undefined, undefined, uiLocale)
+            : uiText("runtime unavailable", undefined, undefined, uiLocale)}
+        )
       </code>
     </span>
   );
@@ -399,32 +419,107 @@ function AboutVersionSection() {
 
   const queryClient = useQueryClient();
   const sourceUpdateStateQuery = useDesktopSourceUpdateState();
+  const desktopUpdateStateQuery = useDesktopUpdateState();
+  const [checkPending, setCheckPending] = useState(false);
+  const [checkFailed, setCheckFailed] = useState(false);
+  const requestRef = useRef<{
+    retired: boolean;
+    unsubscribe: (() => void) | null;
+  } | null>(null);
+
+  useEffect(
+    () => () => {
+      const request = requestRef.current;
+      requestRef.current = null;
+      if (!request) return;
+      request.retired = true;
+      const unsubscribe = request.unsubscribe;
+      request.unsubscribe = null;
+      unsubscribe?.();
+    },
+    [],
+  );
 
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
   const sourceUpdateState = sourceUpdateStateQuery.data ?? null;
+  const desktopUpdateState = desktopUpdateStateQuery.data ?? null;
+  const runtimeKind = desktopUpdateState?.runtimeKind;
 
   const handleButtonClick = useCallback(() => {
     const bridge = window.desktopBridge;
-    if (!bridge || typeof bridge.checkSourceUpdate !== "function") return;
-    void bridge
-      .checkSourceUpdate()
-      .then((state) => {
-        setDesktopSourceUpdateStateQueryData(queryClient, state);
-      })
-      .catch((error: unknown) => {
-        console.warn("Source update check failed", error);
-      });
-  }, [queryClient]);
+    if (!bridge || requestRef.current || (runtimeKind !== "source" && runtimeKind !== "packaged"))
+      return;
+    const request = { retired: false, unsubscribe: null as (() => void) | null };
+    requestRef.current = request;
+    setCheckPending(true);
+    setCheckFailed(false);
+    const isCurrent = () =>
+      requestRef.current === request && !request.retired && window.desktopBridge === bridge;
 
-  const isChecking = sourceUpdateState?.status === "checking";
-  const buttonDisabled = !hasDesktopBridge || isChecking;
-  const status = uiPresentation.getSourceUpdateStatus(sourceUpdateState, hasDesktopBridge);
-  const hashLines = uiPresentation.getSourceUpdateHashLines(sourceUpdateState);
+    void (async () => {
+      try {
+        if (runtimeKind === "packaged") {
+          // Cancel an older initial read, then observe the native event stream
+          // before checking. A delayed IPC return cannot replace a newer event.
+          await queryClient.cancelQueries({ queryKey: desktopUpdateQueryKeys.state() });
+          if (!isCurrent()) return;
+          let receivedSubscriptionUpdate = false;
+          request.unsubscribe = bridge.onUpdateState((state) => {
+            if (!isCurrent()) return;
+            receivedSubscriptionUpdate = true;
+            setDesktopUpdateStateQueryData(queryClient, state);
+          });
+          const result = await bridge.checkForUpdate();
+          if (isCurrent() && !receivedSubscriptionUpdate) {
+            setDesktopUpdateStateQueryData(queryClient, result.state);
+          }
+        } else {
+          const state = await bridge.checkSourceUpdate();
+          if (isCurrent()) setDesktopSourceUpdateStateQueryData(queryClient, state);
+        }
+      } catch {
+        // Received exceptions are opaque; only a fixed, localized failure is UI.
+        if (isCurrent()) setCheckFailed(true);
+      } finally {
+        request.retired = true;
+        const unsubscribe = request.unsubscribe;
+        request.unsubscribe = null;
+        unsubscribe?.();
+        if (requestRef.current === request) {
+          requestRef.current = null;
+          setCheckPending(false);
+        }
+      }
+    })();
+  }, [queryClient, runtimeKind]);
+
+  const isChecking =
+    checkPending ||
+    (runtimeKind === "source"
+      ? sourceUpdateState?.status === "checking"
+      : desktopUpdateState?.status === "checking");
+  const buttonDisabled =
+    !hasDesktopBridge ||
+    isChecking ||
+    (runtimeKind === "packaged"
+      ? !canCheckForUpdate(desktopUpdateState)
+      : runtimeKind !== "source");
+  const status = checkFailed
+    ? uiText("Could not check for updates.", undefined, undefined, uiLocale)
+    : !hasDesktopBridge
+      ? uiText("Update checks need the desktop app.", undefined, undefined, uiLocale)
+      : runtimeKind === "source"
+        ? uiPresentation.getSourceUpdateStatus(sourceUpdateState, true)
+        : runtimeKind === "packaged"
+          ? uiPresentation.getDesktopUpdateStatus(desktopUpdateState)
+          : uiText("Desktop update information is unavailable.", undefined, undefined, uiLocale);
+  const hashLines =
+    runtimeKind === "source" ? uiPresentation.getSourceUpdateHashLines(sourceUpdateState) : null;
 
   return (
     <SettingsRow
       searchId="general.version"
-      title={<AboutVersionTitle state={sourceUpdateState} />}
+      title={<AboutVersionTitle state={sourceUpdateState} updateState={desktopUpdateState} />}
       description={
         <span className="inline-flex items-center gap-1.5">
           <span>{status}</span>
@@ -434,6 +529,11 @@ function AboutVersionSection() {
             </InfoTip>
           ) : null}
         </span>
+      }
+      status={
+        runtimeKind === "packaged" ? (
+          <DesktopUpdateActions state={desktopUpdateState} dismissible={false} />
+        ) : null
       }
       control={
         <Tooltip>
@@ -3087,6 +3187,7 @@ const UI_PRESENTATION_SOURCES = {
   getSourceUpdateBranchLabel,
   getSourceUpdateHashLines,
   getSourceUpdateStatus,
+  getDesktopUpdateStatus,
   resolveAppModelSelectionState,
   resolveEditorOpenOptions,
 };

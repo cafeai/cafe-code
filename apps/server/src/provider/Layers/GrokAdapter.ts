@@ -207,7 +207,7 @@ interface GrokSessionContext {
 
 function normalizedGoalTimestamp(value: unknown, fallback: string): string {
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return fallback;
-  return new Date(value).toISOString();
+  return DateTime.formatIso(DateTime.makeUnsafe(Date.parse(value)));
 }
 
 function grokGoalStatus(value: unknown): ProviderThreadGoal["status"] | undefined {
@@ -286,7 +286,7 @@ async function readGrokGoalStateFile(
       if (!objective || !status) {
         throw new Error("Grok goal state is missing required fields.");
       }
-      const now = new Date().toISOString();
+      const now = DateTime.formatIso(DateTime.nowUnsafe());
       const createdAt = normalizedGoalTimestamp(parsed.created_at, now);
       const updatedAt = normalizedGoalTimestamp(parsed.updated_at, createdAt);
       const tokenBudget = nonNegativeFinite(parsed.token_budget);
@@ -1024,6 +1024,8 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         // so feature-detect both and fall back only on method-not-found.
         const usageParams = { sessionId: ctx.acpSessionId };
         const response = yield* Effect.gen(function* () {
+          // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+          // @effect-diagnostics-next-line instanceOfSchema:off
           const raw = yield* ctx.acp
             .request("_x.ai/session/usage", usageParams)
             .pipe(
@@ -2766,6 +2768,8 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             });
           }
 
+          // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+          // @effect-diagnostics-next-line instanceOfSchema:off
           const requestWithPrefixFallback = (method: string, params: unknown) =>
             ctx.acp
               .request(`_x.ai/${method}`, params)

@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 // @effect-diagnostics nodeBuiltinImport:off
 import { createHash } from "node:crypto";
 import * as path from "node:path";
@@ -19,6 +20,7 @@ import {
   type WindowsProviderRuntimeOptions,
   type WindowsProviderRuntimeResult,
 } from "@cafecode/shared/windowsProviderRuntime";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -37,6 +39,19 @@ import type {
 
 const unavailable =
   "Windows provider daemon ownership could not be verified; existing processes and recovery evidence were preserved. Retry connection.";
+/** Preserve the existing sanitized native message, never the received cause. */
+class WindowsDesktopProviderDaemonError extends Data.TaggedError(
+  "WindowsDesktopProviderDaemonError",
+)<{
+  readonly message: string;
+}> {
+  constructor(input: { readonly message: string }) {
+    super(input);
+    // The finite tag gives Effect a typed channel without changing existing
+    // native error-name presentation or the sanitized message.
+    this.name = "Error";
+  }
+}
 const decodeHealth = Schema.decodeUnknownSync(ProviderDaemonHealth);
 const decodeLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
 
@@ -261,10 +276,12 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
     });
   });
   const failure = (error: unknown) =>
-    new Error(error instanceof WindowsProviderRuntimeError ? error.message : unavailable);
+    new WindowsDesktopProviderDaemonError({
+      message: error instanceof WindowsProviderRuntimeError ? error.message : unavailable,
+    });
   const admit = (result: WindowsProviderRuntimeResult, elapsed: number) =>
     Effect.gen(function* () {
-      lastHealthObservedAt = new Date().toISOString();
+      lastHealthObservedAt = DateTime.formatIso(DateTime.nowUnsafe());
       yield* Ref.update(state, (current) => ({
         ...current,
         status: "running" as const,
@@ -349,14 +366,16 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
             signal: AbortSignal.timeout(5_000),
             maxResponseBytes: 1_048_576,
           });
-          if (response.statusCode !== 200) throw new Error(unavailable);
+          if (response.statusCode !== 200)
+            throw new WindowsDesktopProviderDaemonError({ message: unavailable });
           const health = decodeHealth(JSON.parse(response.body));
-          if (!matches(current, health, profile)) throw new Error(unavailable);
+          if (!matches(current, health, profile))
+            throw new WindowsDesktopProviderDaemonError({ message: unavailable });
           return health;
         },
         catch: failure,
       }).pipe(Effect.option);
-      if (Option.isSome(result)) lastHealthObservedAt = new Date().toISOString();
+      if (Option.isSome(result)) lastHealthObservedAt = DateTime.formatIso(DateTime.nowUnsafe());
       yield* Ref.update(state, (latest) => ({
         ...latest,
         lastHealth: Option.isSome(result) ? result : latest.lastHealth,
@@ -380,7 +399,7 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
         Ref.update(state, (current) => ({
           ...current,
           recoveryCount: current.recoveryCount + 1,
-          lastRecoveryAt: Option.some(new Date().toISOString()),
+          lastRecoveryAt: Option.some(DateTime.formatIso(DateTime.nowUnsafe())),
           lastRecoveryReason: Option.some("verified Windows ownership recovery"),
         })),
       );

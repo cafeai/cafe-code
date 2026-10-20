@@ -4,6 +4,7 @@ import type { DesktopUpdateState } from "@cafecode/contracts";
 
 import {
   getDesktopUpdateButtonTooltip,
+  getDesktopUpdateStatus,
   getDesktopUpdateReleaseUrl,
   resolveDesktopUpdateButtonAction,
 } from "./desktopUpdate.logic";
@@ -30,6 +31,26 @@ function makeState(overrides: Partial<DesktopUpdateState> = {}): DesktopUpdateSt
 }
 
 describe("desktop update presentation", () => {
+  it("does not present unchecked or unavailable releases as current", () => {
+    expect(getDesktopUpdateStatus(null)).toBe("Desktop update information is unavailable.");
+    expect(getDesktopUpdateStatus(makeState({ status: "idle" }))).toBe("Not checked yet.");
+    expect(getDesktopUpdateStatus(makeState({ status: "checking" }))).toBe("Checking…");
+    expect(getDesktopUpdateStatus(makeState({ status: "up-to-date" }))).toBe("Up to date.");
+    expect(getDesktopUpdateStatus(makeState({ enabled: false, status: "disabled" }))).toBe(
+      "Update checks are unavailable for this installation.",
+    );
+  });
+
+  it("retains the native check error and manual release recommendation", () => {
+    expect(
+      getDesktopUpdateStatus(
+        makeState({ status: "error", errorContext: "check", message: "Release feed unavailable" }),
+      ),
+    ).toBe("Release feed unavailable");
+    expect(getDesktopUpdateStatus(makeState({ installMode: "manual" }))).toBe(
+      "Update 1.1.0 can be installed from its GitHub release",
+    );
+  });
   it("keeps supported updates on the in-app download path", () => {
     expect(resolveDesktopUpdateButtonAction(makeState())).toBe("download");
   });

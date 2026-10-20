@@ -1,3 +1,6 @@
+import * as ProviderJsonSchema from "effect/Schema";
+import * as Data from "effect/Data";
+import * as ProviderDateTime from "effect/DateTime";
 import { randomUUID } from "node:crypto";
 import type { ProviderSessionQuotaReport } from "@cafecode/contracts";
 import * as Cache from "effect/Cache";
@@ -8,6 +11,21 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { mapClaudeAccountQuotaReport } from "./claudeSessionQuota.ts";
 import { terminateProbeChild } from "./providerSnapshot.ts";
+
+const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
+const decodeProviderJsonString = ProviderJsonSchema.decodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
+
+/** Fixed control-stream failures retain the old public Error name/message,
+ * without putting raw provider bytes into the typed error channel. */
+class ClaudeQuotaResponseError extends Data.TaggedError("ClaudeQuotaResponseError")<{
+  readonly message: string;
+}> {
+  override name = "Error";
+}
 
 const MAX_RESPONSE_BYTES = 262_144;
 const MAX_RESPONSE_FRAMES = 128;
@@ -30,7 +48,7 @@ const readClaudeAccountQuotaFromEnvironment = (
     const environment = yield* resolveEnvironment;
     const requestId = randomUUID();
     const input = new TextEncoder().encode(
-      `${JSON.stringify({
+      `${encodeProviderJsonString({
         type: "control_request",
         request_id: requestId,
         request: { subtype: "get_usage", skip_behaviors: true },
@@ -76,7 +94,11 @@ const readClaudeAccountQuotaFromEnvironment = (
         bytes += chunk.byteLength;
         return bytes <= MAX_RESPONSE_BYTES
           ? Effect.succeed(chunk)
-          : Effect.fail(new Error("Claude quota response exceeded its bound."));
+          : Effect.fail(
+              new ClaudeQuotaResponseError({
+                message: "Claude quota response exceeded its bound.",
+              }),
+            );
       }),
       Stream.decodeText(),
       Stream.splitLines,
@@ -84,10 +106,11 @@ const readClaudeAccountQuotaFromEnvironment = (
       Stream.mapEffect((line) =>
         Effect.try({
           try: () => {
-            if (++frames > MAX_RESPONSE_FRAMES) throw new Error("Too many Claude quota frames.");
-            return JSON.parse(line) as unknown;
+            if (++frames > MAX_RESPONSE_FRAMES)
+              throw new ClaudeQuotaResponseError({ message: "Too many Claude quota frames." });
+            return decodeProviderJsonString(line);
           },
-          catch: () => new Error("Invalid Claude quota frame."),
+          catch: () => new ClaudeQuotaResponseError({ message: "Invalid Claude quota frame." }),
         }),
       ),
       Stream.map((frame) => {
@@ -114,7 +137,10 @@ const readClaudeAccountQuotaFromEnvironment = (
         if (Option.isNone(reply)) return null;
         const response = reply.value;
         return "subtype" in response && response.subtype === "success" && "response" in response
-          ? mapClaudeAccountQuotaReport(response.response, new Date().toISOString())
+          ? mapClaudeAccountQuotaReport(
+              response.response,
+              ProviderDateTime.formatIso(ProviderDateTime.nowUnsafe()),
+            )
           : null;
       }),
     );

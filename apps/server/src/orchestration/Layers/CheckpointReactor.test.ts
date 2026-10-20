@@ -1,3 +1,5 @@
+import * as Schema from "effect/Schema";
+import * as DateTime from "effect/DateTime";
 import type { OrchestrationEvent } from "@cafecode/contracts";
 import * as Queue from "effect/Queue";
 // @effect-diagnostics nodeBuiltinImport:off
@@ -22,6 +24,7 @@ import {
 } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
+import type * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -42,7 +45,7 @@ import { ServerConfig } from "../../config.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
-import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
+import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
 import {
   ProviderAdapterRequestError,
   ProviderAdapterRewindOutcomeUnknownError,
@@ -70,6 +73,16 @@ import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { RuntimeReceiptBusLive } from "./RuntimeReceiptBus.ts";
+
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
+// Remote identity decoration is not checkpoint capture/revert authority.
+// Keep these snapshot reads independent of unrelated Git remote discovery;
+// every real checkpoint/ref/worktree/restore operation below stays native.
+// RepositoryIdentityResolver.test.ts retains the real resolver qualification.
+const RepositoryIdentityResolverTest = Layer.succeed(RepositoryIdentityResolver, {
+  resolve: () => Effect.succeed(null),
+});
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
@@ -252,7 +265,7 @@ async function waitForThread(
 
 const checkpointEvents = new WeakMap<
   OrchestrationEngineShape,
-  Effect.Effect<OrchestrationEvent, unknown>
+  Effect.Effect<OrchestrationEvent, Cause.Done>
 >();
 async function waitForEvent(
   engine: OrchestrationEngineShape,
@@ -395,11 +408,11 @@ describe("CheckpointReactor", () => {
       Layer.provide(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
-      Layer.provide(RepositoryIdentityResolverLive),
+      Layer.provide(RepositoryIdentityResolverTest),
       Layer.provide(SqlitePersistenceTest),
     );
     const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
-      Layer.provide(RepositoryIdentityResolverLive),
+      Layer.provide(RepositoryIdentityResolverTest),
       Layer.provide(SqlitePersistenceTest),
     );
 
@@ -765,7 +778,7 @@ describe("CheckpointReactor", () => {
       provider: ProviderDriverKind.make("codex"),
       threadId,
       turnId: asTurnId("new-turn"),
-      createdAt: new Date(Date.parse(afterMove) + 1_000).toISOString(),
+      createdAt: DateTime.formatIso(DateTime.makeUnsafe(Date.parse(afterMove) + 1_000)),
       payload: { state: "completed" },
     });
     await waitForGitRefExists(
@@ -2247,14 +2260,14 @@ describe("CheckpointReactor", () => {
       INSERT INTO provider_session_runtime
         (thread_id,provider_name,provider_instance_id,adapter_key,runtime_mode,status,last_seen_at,runtime_payload_json)
       VALUES (${threadId},'claudeAgent',${instanceId},'fixture','full-access','ready',
-        '2026-01-01T00:00:00.000Z',${JSON.stringify({ subagentRuntimeId: "fresh-generation" })})
+        '2026-01-01T00:00:00.000Z',${encodeJsonString({ subagentRuntimeId: "fresh-generation" })})
     `);
     await Effect.runPromise(harness.sql`
       INSERT INTO provider_conversation_rewinds
         (thread_id,operation_id,phase,provider_instance_id,runtime_id,expected_control_sequence,
           retained_turn_count,removed_turn_count,first_removed_turn_id,original_session_json,candidate_session_json)
       VALUES (${threadId},${crypto.randomUUID()},'finished',${instanceId},'retired-generation',0,
-        1,1,'native-turn-2',${JSON.stringify(original)},NULL)
+        1,1,'native-turn-2',${encodeJsonString(original)},NULL)
     `);
     const capture = vi.spyOn(harness.checkpointStore, "captureCheckpoint");
     const prune = vi.spyOn(harness.checkpointStore, "deleteCheckpointRefs");

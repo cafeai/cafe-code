@@ -1,7 +1,17 @@
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
+// This boundary retains exact native child handles and close/signal ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn } from "node:child_process";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { existsSync } from "node:fs";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtemp, readFile, readdir, rm, stat, statfs } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join, resolve } from "node:path";
 
 import { runNativeDesktopRuntimeSmoke } from "./native-desktop-runtime-smoke.ts";
@@ -59,6 +69,9 @@ async function runProcess(
       stderr += chunk.toString();
     });
     child.once("error", reject);
+    // This native wait owns an external child/stream lifetime; a virtual
+    // Effect clock must not replace its existing deadline or cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     const timeout = setTimeout(
       () => child.kill("SIGKILL"),
       options.timeoutMs ?? PROCESS_TIMEOUT_MS,
@@ -91,6 +104,9 @@ function isRetryableWindowsCleanupError(error: unknown): boolean {
 }
 
 async function sleep(ms: number): Promise<void> {
+  // This native wait owns an external child/stream lifetime; a virtual
+  // Effect clock must not replace its existing deadline or cleanup.
+  // @effect-diagnostics-next-line globalTimers:off
   await new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
 
@@ -391,7 +407,9 @@ export async function runWindowsNativeArtifactSmoke(
     if (!(await waitForPathToDisappear(appPath)))
       throw new Error("NSIS uninstall left the application executable behind.");
     uninstallerPath = undefined;
-    console.info("Windows NSIS install/runtime/managed-provider/uninstall smoke passed.");
+    Effect.runSync(
+      Console.info("Windows NSIS install/runtime/managed-provider/uninstall smoke passed."),
+    );
   } finally {
     if (uninstallerPath && existsSync(uninstallerPath)) {
       await runProcess(uninstallerPath, ["/S"], { timeoutMs: 5 * 60_000 }).catch(() => undefined);

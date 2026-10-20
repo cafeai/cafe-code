@@ -1,4 +1,11 @@
+import * as DateTime from "effect/DateTime";
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdir, writeFile } from "node:fs/promises";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { relative, resolve } from "node:path";
 import type { Reporter, TestModule, TestRunEndReason, Vitest } from "vitest/node";
 
@@ -65,12 +72,12 @@ export default class TestTimingReporter implements Reporter {
       files,
     };
     await mkdir(output, { recursive: true });
-    const name = `${report.workspace.replaceAll("/", "-") || "root"}-${process.pid}-${Date.now()}.json`;
+    const name = `${report.workspace.replaceAll("/", "-") || "root"}-${process.pid}-${DateTime.toEpochMillis(DateTime.nowUnsafe())}.json`;
     // Timings and source test labels only: no errors, received values, snapshots,
     // environment, credentials, console output or arbitrary test metadata.
     await writeFile(resolve(output, name), JSON.stringify(report, null, 2));
-    console.log("Slowest test files:");
+    Effect.runSync(Console.log("Slowest test files:"));
     for (const file of [...files].sort((a, b) => b.executionMs - a.executionMs).slice(0, 10))
-      console.log(`  ${(file.executionMs / 1000).toFixed(2)}s ${file.file}`);
+      Effect.runSync(Console.log(`  ${(file.executionMs / 1000).toFixed(2)}s ${file.file}`));
   }
 }

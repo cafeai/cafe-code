@@ -1,3 +1,4 @@
+import * as ProviderDateTime from "effect/DateTime";
 /**
  * Grok account-usage discovery.
  *
@@ -262,7 +263,10 @@ export const readGrokAccountRateLimits = Effect.fn("readGrokAccountRateLimits")(
 
   const authJson = yield* fileSystem.readFileString(authPath).pipe(Effect.option);
   if (Option.isNone(authJson)) return undefined;
-  const credentials = extractGrokUsageCredentials(authJson.value, options.nowMs ?? Date.now());
+  const credentials = extractGrokUsageCredentials(
+    authJson.value,
+    options.nowMs ?? ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe()),
+  );
   if (!credentials) return undefined;
 
   return yield* Effect.promise(() =>

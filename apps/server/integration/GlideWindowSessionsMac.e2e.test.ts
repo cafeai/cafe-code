@@ -1,8 +1,16 @@
+// Native fixture owns exact child argv, stdio handles and retirement; keep that process boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { watch, type FSWatcher } from "node:fs";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// Native fixture paths retain host drive, separator and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it, onTestFinished } from "vitest";
@@ -27,6 +35,8 @@ const bounded = async <A>(promise: Promise<A>, label: string): Promise<A> => {
     return await Promise.race([
       promise,
       new Promise<never>((_resolve, reject) => {
+        // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+        // @effect-diagnostics-next-line globalTimers:off
         timer = setTimeout(() => reject(new Error(label)), 10_000);
       }),
     ]);
@@ -60,6 +70,8 @@ async function qualifyWindowSessions(metadataOnly = false) {
       watcher?.close();
       if (helper && helperExit) {
         helper.stdin?.end();
+        // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+        // @effect-diagnostics-next-line globalTimers:off
         const force = setTimeout(() => helper?.kill("SIGKILL"), 1500);
         try {
           await helperExit;
@@ -71,6 +83,8 @@ async function qualifyWindowSessions(metadataOnly = false) {
       }
       if (owner && ownerExit) {
         owner.stdin?.end();
+        // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+        // @effect-diagnostics-next-line globalTimers:off
         const force = setTimeout(() => owner?.kill("SIGKILL"), 1500);
         try {
           await ownerExit;
@@ -80,6 +94,8 @@ async function qualifyWindowSessions(metadataOnly = false) {
       }
       if (secondOwner && secondOwnerExit) {
         secondOwner.stdin?.end();
+        // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+        // @effect-diagnostics-next-line globalTimers:off
         const force = setTimeout(() => secondOwner?.kill("SIGKILL"), 1500);
         try {
           await secondOwnerExit;

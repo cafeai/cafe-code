@@ -1,3 +1,4 @@
+import * as ProviderJsonSchema from "effect/Schema";
 import { describe, expect, it } from "vitest";
 import { ApprovalRequestId, TurnId, type ProviderUserInputAnswers } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
@@ -5,6 +6,7 @@ import * as Deferred from "effect/Deferred";
 import * as Ref from "effect/Ref";
 import * as Fiber from "effect/Fiber";
 import type * as Codex from "effect-codex-app-server/schema";
+import type * as CodexErrors from "effect-codex-app-server/errors";
 import {
   buildCodexPermissionResponse,
   normalizeCodexPermissionRequest,
@@ -12,6 +14,10 @@ import {
   settleCodexInteractionBoundary,
   type CodexPendingInteraction,
 } from "./CodexInteractions.ts";
+
+const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
 
 const request: Codex.PermissionsRequestApprovalParams = {
   cwd: "/workspace",
@@ -112,7 +118,7 @@ describe("Codex private interactions", () => {
             (
               payload: unknown,
               context: { requestId: string | number },
-            ) => Effect.Effect<unknown, unknown>
+            ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>
           >();
           const pending = yield* Ref.make(new Map<ApprovalRequestId, CodexPendingInteraction>());
           const requested = yield* Deferred.make<void>();
@@ -159,7 +165,7 @@ describe("Codex private interactions", () => {
           const row = [...(yield* Ref.get(pending)).values()][0]!;
           expect(row.url).toContain("token=private");
           expect(row.nativeRequestId).toBe("native-request");
-          expect(JSON.stringify(events)).not.toContain("token=private");
+          expect(encodeProviderJsonString(events)).not.toContain("token=private");
           if (outcome === "answer") {
             yield* Deferred.succeed(row.answers, {
               __cafeInteraction: { action: "accept", content: null },
@@ -169,7 +175,7 @@ describe("Codex private interactions", () => {
             yield* Fiber.interrupt(fiber);
           }
           expect((yield* Ref.get(pending)).size).toBe(0);
-          expect(JSON.stringify(events)).not.toContain("token=private");
+          expect(encodeProviderJsonString(events)).not.toContain("token=private");
           expect(events).toHaveLength(2);
         }).pipe(Effect.scoped),
       );

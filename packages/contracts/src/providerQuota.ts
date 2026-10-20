@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import { SubagentRuntimeId, ThreadId } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
@@ -32,7 +33,10 @@ export const ProviderSessionQuotaTimestamp = Schema.String.check(
   Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
   Schema.makeFilter((value) => {
     const milliseconds = Date.parse(value);
-    return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+    return (
+      Number.isFinite(milliseconds) &&
+      DateTime.formatIso(DateTime.makeUnsafe(milliseconds)) === value
+    );
   }),
 );
 

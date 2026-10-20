@@ -9,7 +9,7 @@ security admission, worker/deadline limits and feature assertions still apply.
 
 Status: Qualification procedure for the current Full-access browser path
 Created: 2026-10-13 18:22:30 JST (UTC+0900)
-Last updated: 2026-10-15 12:49:47 JST (UTC+0900)
+Last updated: 2026-10-20 14:17:11 JST (UTC+0900)
 
 The current feature executes ordinary same-origin browser frames, not a separate
 native source host. CI selects real browser input/layout/lifecycle/App protocol
@@ -31,7 +31,7 @@ corepack yarn i18n:extract
 corepack yarn fmt:check
 corepack yarn lint
 corepack yarn audit:repository
-NODE_OPTIONS=--max-old-space-size=4096 corepack yarn typecheck --force --concurrency=1 --continue=always
+NODE_OPTIONS=--max-old-space-size=4096 corepack yarn typecheck --force --continue=always
 corepack yarn test --force
 corepack yarn workspace @cafecode/web test:browser
 corepack yarn workspace @cafeai/cafe-code build:bundle
@@ -50,7 +50,7 @@ are required; a missing file, shared relative chunk, unsupported module or dynam
 import fails the build. There is no visualization preload in the current inline
 design. Removing that retired artifact does not relax these application checks.
 
-The serial uncached typecheck uses the pinned Turbo diagnostic policy to finish
+The uncached typecheck uses the canonical three-task cap and pinned Turbo diagnostic policy to finish
 every package after a failure; it still exits unsuccessfully if any package
 fails. This is not a retry or permission to proceed to publication with errors.
 

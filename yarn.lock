@@ -955,6 +955,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@effect/language-service@patch:@effect/language-service@npm%3A0.84.2#./.yarn/patches/@effect-language-service-npm-0.84.2-ast-fifo.patch::locator=%40cafecode%2Fmonorepo%40workspace%3A.":
+  version: 0.84.2
+  resolution: "@effect/language-service@patch:@effect/language-service@npm%3A0.84.2#./.yarn/patches/@effect-language-service-npm-0.84.2-ast-fifo.patch::version=0.84.2&hash=563766&locator=%40cafecode%2Fmonorepo%40workspace%3A."
+  bin:
+    effect-language-service: cli.js
+  checksum: 10c0/c2ab94742a3d7f8de4d26e2b8f0f4ca350b2ae28770bdff8d0fc0b5b14fa397f87086ca32ccb2fb1fb76ec02ae034938aa0e22d761156ef121fbfc92814a8df4
+  languageName: node
+  linkType: hard
+
 "@effect/openapi-generator@npm:4.0.0-beta.59":
   version: 4.0.0-beta.59
   resolution: "@effect/openapi-generator@npm:4.0.0-beta.59"

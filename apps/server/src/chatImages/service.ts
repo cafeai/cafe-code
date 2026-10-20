@@ -5,13 +5,19 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeStandaloneWorkspaceStore } from "../orchestration/standaloneWorkspace.ts";
 import { markdownImageSources, readWorkspaceImage } from "./source.ts";
 
 const decodeMetadata = Schema.decodeUnknownSync(ChatImageMetadata);
-const decodeRoots = Schema.decodeUnknownSync(Schema.Array(Schema.String));
+// Assets omit only the message-specific Markdown source. The existing public
+// metadata bounds still qualify every stored field before source is attached.
+const storedMetadata = ChatImageMetadata.mapFields(Struct.omit(["source"]));
+const decodeStoredMetadata = Schema.decodeUnknownSync(Schema.fromJsonString(storedMetadata));
+const encodeStoredMetadata = Schema.encodeSync(Schema.fromJsonString(storedMetadata));
+const decodeRoots = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 export const makeChatImages = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const permits = yield* Semaphore.make(2);
@@ -24,7 +30,9 @@ export const makeChatImages = Effect.gen(function* () {
         AND EXISTS (SELECT 1 FROM projection_threads WHERE thread_id = ${threadId} AND deleted_at IS NULL)
         AND NOT EXISTS (SELECT 1 FROM hard_deleted_threads WHERE thread_id = ${threadId})
     `;
-      return rows.map((row) => decodeMetadata({ ...JSON.parse(row.metadata), source: row.source }));
+      return rows.map((row) =>
+        decodeMetadata({ ...decodeStoredMetadata(row.metadata), source: row.source }),
+      );
     });
   const publish = (threadId: string, messageId: string) =>
     permits
@@ -59,7 +67,7 @@ export const makeChatImages = Effect.gen(function* () {
             const root = yield* standalone.readExisting(ThreadId.make(threadId));
             if (root) roots = [root];
           } else if (row.additional) {
-            const additional = decodeRoots(JSON.parse(row.additional));
+            const additional = decodeRoots(row.additional);
             roots.push(...additional);
           }
           for (const { source, path } of sources) {
@@ -76,7 +84,7 @@ export const makeChatImages = Effect.gen(function* () {
             yield* sql.withTransaction(
               Effect.gen(function* () {
                 yield* sql`INSERT INTO chat_image_assets (digest, bytes, metadata_json)
-          VALUES (${digest}, ${bytes}, ${JSON.stringify(metadata)}) ON CONFLICT(digest) DO NOTHING`;
+          VALUES (${digest}, ${bytes}, ${encodeStoredMetadata(metadata)}) ON CONFLICT(digest) DO NOTHING`;
                 // Publication must still own the same completed message after I/O.
                 // Deletion, rewind and repair win over an in-flight file read.
                 yield* sql`INSERT INTO chat_message_images (thread_id, message_id, source, digest)
@@ -109,7 +117,7 @@ export const makeChatImages = Effect.gen(function* () {
       if (!row || createHash("sha256").update(row.bytes).digest("hex") !== row.digest) return null;
       return {
         bytes: row.bytes,
-        metadata: decodeMetadata({ ...JSON.parse(row.metadata), source }),
+        metadata: decodeMetadata({ ...decodeStoredMetadata(row.metadata), source }),
       };
     });
   return { publish, manifest, read };

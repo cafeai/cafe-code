@@ -1,14 +1,45 @@
 import { describe, expect, it, vi } from "vitest";
-import { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@cafecode/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ProviderInstanceId,
+  SourceControlRepositoryError,
+  ThreadId,
+} from "@cafecode/contracts";
 import type { Thread } from "../types";
 import {
   buildThreadActionItems,
+  commandPaletteErrorDescription,
   filterCommandPaletteGroups,
   type CommandPaletteGroup,
 } from "./CommandPalette.logic";
 
 const LOCAL_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const PROJECT_ID = ProjectId.make("project-1");
+
+describe("command palette failure descriptions", () => {
+  it("preserves typed operation details without trimming their display bytes", () => {
+    const error = new SourceControlRepositoryError({
+      provider: "github",
+      operation: "clone",
+      detail: "  Original detail  ",
+    });
+    expect(commandPaletteErrorDescription(error)).toEqual({ description: error.detail });
+  });
+  it("retains native messages and omits absent or blank descriptions", () => {
+    expect(commandPaletteErrorDescription(new Error("  native message  "))).toEqual({
+      description: "  native message  ",
+    });
+    for (const value of [undefined, null, {}, "received string", new Error("  ")])
+      expect(commandPaletteErrorDescription(value)).toEqual({});
+    const error = new SourceControlRepositoryError({
+      provider: "gitlab",
+      operation: "fetch",
+      detail: " ",
+    });
+    expect(commandPaletteErrorDescription(error)).toEqual({ description: error.message });
+  });
+});
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {
   return {

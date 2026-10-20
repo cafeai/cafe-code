@@ -1,4 +1,6 @@
 import { MAX_PNG_BYTES, MAX_PNG_DIMENSION, MAX_PNG_PIXELS } from "@cafecode/contracts";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import {
   lstat,
   mkdir,
@@ -14,6 +16,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { basename, dirname, join } from "node:path";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";

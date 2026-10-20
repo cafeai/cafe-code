@@ -162,6 +162,8 @@ import {
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 const decodeQuotaClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 const isWorkspacePathOutsideRootError = Schema.is(WorkspacePathOutsideRootError);
+const isServerProviderLoginError = Schema.is(ServerProviderLoginError);
+const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 function isStreamingAssistantMessageEvent(event: OrchestrationEvent): boolean {
@@ -289,24 +291,24 @@ const makeWsRpcLayer = (
             Effect.provideService(VisualizationArtifacts, visualizations.value),
           )
         : undefined;
-      const withVisualizations = <A>(
-        operation: (service: VisualizationArtifacts["Service"]) => Effect.Effect<A, unknown>,
+      const withVisualizations = <A, E>(
+        operation: (service: VisualizationArtifacts["Service"]) => Effect.Effect<A, E>,
       ) =>
         Option.isSome(visualizations)
           ? operation(visualizations.value)
           : Effect.fail(
               new VisualizationApiError({ message: "Visualization capability is unavailable." }),
             );
-      const withMcpApps = <A>(
-        operation: (service: NonNullable<typeof mcpApps>) => Effect.Effect<A, unknown>,
+      const withMcpApps = <A, E>(
+        operation: (service: NonNullable<typeof mcpApps>) => Effect.Effect<A, E>,
       ) =>
         mcpApps
           ? operation(mcpApps)
           : Effect.fail(
               new VisualizationApiError({ message: "Visualization capability is unavailable." }),
             );
-      const privateVisualizationRead = <A>(
-        operation: Effect.Effect<A, unknown>,
+      const privateVisualizationRead = <A, E>(
+        operation: Effect.Effect<A, E>,
         nativeViewer = false,
       ) =>
         Effect.gen(function* () {
@@ -890,11 +892,7 @@ const makeWsRpcLayer = (
           // This comparison commitment remains private, including configured environment
           // values. It is never logged, serialized as report data or given to the UI.
           return {
-            key: JSON.stringify([
-              instance,
-              thread.session.subagentRuntimeId,
-              thread.modelSelection,
-            ]),
+            key: encodeJson([instance, thread.session.subagentRuntimeId, thread.modelSelection]),
             configuration: axiomConfigurationKey(instance.config ?? {}, instance.environment ?? []),
           };
         }).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
@@ -1906,7 +1904,7 @@ const makeWsRpcLayer = (
                 );
             }).pipe(
               Effect.mapError((error) =>
-                error instanceof ServerProviderLoginError
+                isServerProviderLoginError(error)
                   ? error
                   : new ServerProviderLoginError({
                       instanceId: input.instanceId,

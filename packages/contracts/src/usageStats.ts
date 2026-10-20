@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -86,7 +87,7 @@ export const UsageStatsModelGeneratingTimeStartedAt = Schema.String.check(
     // rollover of impossible dates (e.g. February 30).
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
     const millis = Date.parse(value);
-    return Number.isFinite(millis) && new Date(millis).toISOString() === value;
+    return Number.isFinite(millis) && DateTime.formatIso(DateTime.makeUnsafe(millis)) === value;
   }),
 );
 

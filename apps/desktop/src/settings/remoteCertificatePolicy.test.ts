@@ -1,4 +1,6 @@
 import { X509Certificate } from "node:crypto";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { readFileSync } from "node:fs";
 import * as tls from "node:tls";
 import { describe, expect, it } from "vitest";

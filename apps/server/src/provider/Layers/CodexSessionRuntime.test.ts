@@ -1,5 +1,8 @@
+import * as ProviderDateTime from "effect/DateTime";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+// Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { readFileSync } from "node:fs";
 import { makeCodexChildUsageAccounting } from "../codexChildUsageAccounting.ts";
 import { observeCodexServiceTier, type CodexServiceTierSnapshot } from "../codexServiceTier.ts";
@@ -149,6 +152,9 @@ import {
   type CodexSessionRuntimeOptions,
   type CodexSubagentHistoryReadClient,
 } from "./CodexSessionRuntime.ts";
+
+const decodeProviderJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 const decodeMessageId = Schema.decodeUnknownSync(MessageId);
 const decodeCodexErrorNotification = Schema.decodeUnknownSync(
@@ -277,7 +283,7 @@ for (const request of [
                   const lines = pending.split("\n");
                   pending = lines.pop() ?? "";
                   for (const line of lines) {
-                    const request = JSON.parse(line) as {
+                    const request = decodeProviderJsonString(line) as {
                       id?: string | number;
                       method: string;
                       params?: Record<string, unknown>;
@@ -316,7 +322,7 @@ for (const request of [
                     yield* Queue.offer(
                       output,
                       encoder.encode(
-                        `${JSON.stringify({
+                        `${encodeProviderJsonString({
                           id: request.id,
                           ...(openingWillBeRejected &&
                           (request.method === "thread/start" || request.method === "thread/resume")
@@ -577,7 +583,10 @@ for (const request of [
           ];
           for (const frame of frames) {
             const admittedShape = decodeNativeNotificationForDiagnostics(frame);
-            yield* Queue.offer(output, encoder.encode(`${JSON.stringify(admittedShape)}\n`));
+            yield* Queue.offer(
+              output,
+              encoder.encode(`${encodeProviderJsonString(admittedShape)}\n`),
+            );
           }
           yield* Deferred.await(barrierObserved);
           const received = Array.from(yield* Fiber.join(notifications));
@@ -1500,7 +1509,9 @@ function makePendingSteerProcessingFixture(index: number): CodexPendingSteerProc
     clientCorrelationId: buildCodexSteerClientCorrelationId(`message-${index}`),
     providerThreadId: "provider-thread-1",
     turnId: TurnId.make("turn-active"),
-    requestedAt: new Date(Date.UTC(2026, 4, 26) + index).toISOString(),
+    requestedAt: ProviderDateTime.formatIso(
+      ProviderDateTime.makeUnsafe(Date.UTC(2026, 4, 26) + index),
+    ),
     promptByteLength: 10,
     attachmentCount: 0,
     warningCount: 0,
@@ -2093,7 +2104,7 @@ describe("Codex subagent thread ownership validation", () => {
       assert.deepEqual(snapshot.publicActivities, []);
       assert.equal(snapshot.historyIncomplete, true);
       assert.equal(snapshot.activityHistoryIncomplete, true);
-      assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_|prompt-id|answer-id/);
+      assert.doesNotMatch(encodeProviderJsonString(snapshot), /PRIVATE_|prompt-id|answer-id/);
     }),
   );
 
@@ -2331,7 +2342,7 @@ describe("Codex subagent thread ownership validation", () => {
           calls.every((call) => call.sortDirection === "desc" && call.threadId === nestedChild.id),
         );
         assert.doesNotMatch(
-          JSON.stringify(snapshot.publicHistory),
+          encodeProviderJsonString(snapshot.publicHistory),
           /PRIVATE_|-id|child-turn|overlapping/,
         );
       }),
@@ -2512,7 +2523,7 @@ describe("Codex subagent thread ownership validation", () => {
         );
         assert.deepEqual(snapshot.publicHistory, [{ role: "assistant", text: "Public progress" }]);
         assert.doesNotMatch(
-          JSON.stringify(snapshot),
+          encodeProviderJsonString(snapshot),
           /PRIVATE_|reasoning|aggregatedOutput|arguments|receiverThreadIds|diff/,
         );
       }),
@@ -2608,7 +2619,7 @@ describe("Codex subagent thread ownership validation", () => {
           ],
         );
         assert.doesNotMatch(
-          JSON.stringify(detail),
+          encodeProviderJsonString(detail),
           /PRIVATE_|native-|arguments|aggregatedOutput|identityDigest/,
         );
       }),
@@ -2647,20 +2658,20 @@ describe("Codex subagent thread ownership validation", () => {
         assert.deepEqual(snapshot.publicActivities?.[0], {
           kind: "file_read",
           identityDigest: createHash("sha256")
-            .update(JSON.stringify(["PRIVATE_TURN", "PRIVATE_ITEM_32"]), "utf16le")
+            .update(encodeProviderJsonString(["PRIVATE_TURN", "PRIVATE_ITEM_32"]), "utf16le")
             .digest("hex"),
-          timestamp: new Date(1_800_000_000_032).toISOString(),
+          timestamp: ProviderDateTime.formatIso(ProviderDateTime.makeUnsafe(1_800_000_000_032)),
         });
         assert.deepEqual(snapshot.publicActivities?.at(-1), {
           kind: "file_read",
           identityDigest: createHash("sha256")
-            .update(JSON.stringify(["PRIVATE_TURN", "PRIVATE_ITEM_159"]), "utf16le")
+            .update(encodeProviderJsonString(["PRIVATE_TURN", "PRIVATE_ITEM_159"]), "utf16le")
             .digest("hex"),
-          timestamp: new Date(1_800_000_000_159).toISOString(),
+          timestamp: ProviderDateTime.formatIso(ProviderDateTime.makeUnsafe(1_800_000_000_159)),
         });
         assert.equal(snapshot.activityHistoryIncomplete, true);
         assert.equal(snapshot.historyIncomplete, false);
-        assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_/);
+        assert.doesNotMatch(encodeProviderJsonString(snapshot), /PRIVATE_/);
       }),
   );
 
@@ -2699,7 +2710,10 @@ describe("Codex subagent thread ownership validation", () => {
             (activity) => activity.kind === "file_read" && activity.timestamp === undefined,
           ),
         );
-        assert.doesNotMatch(JSON.stringify([first, next]), /PRIVATE_|identityDigest|path/);
+        assert.doesNotMatch(
+          encodeProviderJsonString([first, next]),
+          /PRIVATE_|identityDigest|path/,
+        );
       }),
   );
 
@@ -2838,9 +2852,12 @@ describe("Codex subagent thread ownership validation", () => {
           Effect.flip,
         );
         assert.equal(spawnCalls, 1);
+        // Require the actual local transport failure class, not a structurally
+        // similar wire value, when qualifying native byte-budget enforcement.
+        // @effect-diagnostics-next-line instanceOfSchema:off
         assert.ok(failure instanceof CodexErrors.CodexAppServerIncomingMessageTooLargeError);
         assert.equal(failure.maxBytes, CODEX_SUBAGENT_HISTORY_MAX_INCOMING_LINE_BYTES);
-        assert.doesNotMatch(JSON.stringify(failure), /PRIVATE_WIRE/);
+        assert.doesNotMatch(encodeProviderJsonString(failure), /PRIVATE_WIRE/);
         assert.deepEqual(logs, []);
       }),
   );
@@ -7385,7 +7402,9 @@ describe("Codex steer processing diagnostics", () => {
       const claim = claimCodexRestartedSteerProcessingObservation(bounded, {
         ...observation,
         clientCorrelationId: buildCodexSteerClientCorrelationId(`message-${index}`),
-        observedAt: new Date(Date.UTC(2026, 4, 26) + index).toISOString(),
+        observedAt: ProviderDateTime.formatIso(
+          ProviderDateTime.makeUnsafe(Date.UTC(2026, 4, 26) + index),
+        ),
       });
       assert.equal(claim.claimed, true);
       bounded = claim.next;

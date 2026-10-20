@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import {
   UI_DIRECTION,
   resolveUiLocale,
@@ -567,7 +568,7 @@ const ClientDebugEvent = Schema.Struct({
 const debugRates = new Map<string, { expires: number; count: number }>();
 let debugWindow = { expires: 0, count: 0 };
 function admitClientDebugEvent(sessionId: string): boolean {
-  const now = Date.now();
+  const now = DateTime.toEpochMillis(DateTime.nowUnsafe());
   if (debugWindow.expires <= now) debugWindow = { expires: now + 60_000, count: 0 };
   if (++debugWindow.count > 120) return false;
   for (const [id, rate] of debugRates) if (rate.expires <= now) debugRates.delete(id);

@@ -50,6 +50,8 @@ import {
   validateGrokImageAttachmentBytes,
   type GrokAdapterLiveOptions,
 } from "./GrokAdapter.ts";
+
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -640,7 +642,7 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         })
         .pipe(Effect.flip);
       assert.equal(failure._tag, "ProviderAdapterProcessError");
-      assert.notInclude(JSON.stringify(failure), "private activation diagnostic");
+      assert.notInclude(encodeProviderJsonString(failure), "private activation diagnostic");
       assert.deepEqual(fixture.lifecycle, [
         "bind:1",
         "launch:1",
@@ -2504,7 +2506,7 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         "goal",
         "state.json",
       );
-      const serializedGoal = `${JSON.stringify({
+      const serializedGoal = `${encodeProviderJsonString({
         objective: "Finish the fragmented state review",
         status: "active",
         token_budget: null,
@@ -2597,7 +2599,7 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       yield* adapter.stopSession(threadId);
 
       assert.deepEqual(yield* Ref.get(revoked), [String(authSessionId)]);
-      assert.notInclude(JSON.stringify(nativeRecords), secretToken);
+      assert.notInclude(encodeProviderJsonString(nativeRecords), secretToken);
     }),
   );
 });

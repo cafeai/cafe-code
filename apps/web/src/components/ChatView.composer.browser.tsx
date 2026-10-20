@@ -432,10 +432,13 @@ describe("ChatView full app (composer)", () => {
     "claude-opus-4-8",
     [{ id: "effort", value: "max" }],
   );
-  const createResponseLimitSnapshot = (): OrchestrationReadModel => {
+  const createResponseLimitSnapshot = (
+    history: "full" | "essential" = "full",
+  ): OrchestrationReadModel => {
     const base = createSnapshotForTargetUser({
       targetMessageId: MessageId.make("response-limit-request"),
       targetText: "Existing work",
+      history,
       provider: "claudeAgent",
       runtimeMode: "approval-required",
       sessionStatus: "error",
@@ -672,7 +675,7 @@ describe("ChatView full app (composer)", () => {
     async (state) => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
-        snapshot: createResponseLimitSnapshot(),
+        snapshot: createResponseLimitSnapshot("essential"),
         configureFixture: configureResponseLimitFixture,
       });
       try {
@@ -1083,6 +1086,7 @@ describe("ChatView full app (composer)", () => {
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "compact-args" as MessageId,
         targetText: "Existing conversation",
+        history: "essential",
       }),
     });
     try {
@@ -1911,6 +1915,7 @@ describe("ChatView full app (composer)", () => {
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-user-bootstrap-project-expand" as MessageId,
         targetText: "bootstrap project expand",
+        history: "essential",
       }),
     });
 
@@ -3426,6 +3431,7 @@ describe("ChatView full app (composer)", () => {
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-provider-starting" as MessageId,
         targetText: "provider starting",
+        history: "essential",
         sessionStatus: "starting",
       }),
     });
@@ -3461,6 +3467,7 @@ describe("ChatView full app (composer)", () => {
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-user-target-hotkey" as MessageId,
         targetText: "hotkey target",
+        history: "essential",
       }),
     });
 
@@ -3515,6 +3522,7 @@ describe("ChatView full app (composer)", () => {
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-user-target-claude-mode-hotkey" as MessageId,
         targetText: "claude mode hotkey target",
+        history: "essential",
         provider: "claudeAgent",
         runtimeMode: "approval-required",
       }),
@@ -3835,6 +3843,7 @@ describe("ChatView full app (composer)", () => {
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-user-surround-basic" as MessageId,
         targetText: "surround basic",
+        history: "essential",
       }),
     });
 
@@ -3860,6 +3869,7 @@ describe("ChatView full app (composer)", () => {
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-user-surround-collapsed" as MessageId,
         targetText: "surround collapsed",
+        history: "essential",
       }),
     });
 
@@ -3884,6 +3894,7 @@ describe("ChatView full app (composer)", () => {
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-user-surround-backward" as MessageId,
         targetText: "surround backward",
+        history: "essential",
       }),
     });
 
@@ -3909,6 +3920,7 @@ describe("ChatView full app (composer)", () => {
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-user-surround-guillemet" as MessageId,
         targetText: "surround guillemet",
+        history: "essential",
       }),
     });
 
@@ -3930,6 +3942,7 @@ describe("ChatView full app (composer)", () => {
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-user-surround-dead-quote" as MessageId,
         targetText: "surround dead quote",
+        history: "essential",
       }),
     });
 
@@ -3977,6 +3990,7 @@ describe("ChatView full app (composer)", () => {
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-user-surround-after-mention" as MessageId,
         targetText: "surround after mention",
+        history: "essential",
       }),
     });
 
@@ -4007,6 +4021,7 @@ describe("ChatView full app (composer)", () => {
       snapshot: createSnapshotForTargetUser({
         targetMessageId: "msg-user-surround-token" as MessageId,
         targetText: "surround token",
+        history: "essential",
       }),
     });
 

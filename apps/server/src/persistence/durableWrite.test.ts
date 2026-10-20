@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Data from "effect/Data";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
@@ -14,6 +15,15 @@ import {
 import { isSqliteLockTimeoutError } from "./sqliteLockRetry.ts";
 
 const settle = Effect.forEach(Array.from({ length: 16 }), () => Effect.yieldNow, { discard: true });
+class PermanentStorageFixtureError extends Data.TaggedError("PermanentStorageFixtureError")<{}> {
+  constructor() {
+    super();
+    this.name = "Error";
+  }
+  override get message() {
+    return "private sql parameters";
+  }
+}
 const lockError = new SqlError.SqlError({
   reason: new SqlError.LockTimeoutError({
     operation: "execute",
@@ -76,7 +86,7 @@ describe("settleDurableWrite", () => {
           },
           operation: Effect.suspend(() => {
             attempts += 1;
-            return Effect.fail(new Error("private sql parameters"));
+            return Effect.fail(new PermanentStorageFixtureError());
           }),
         }).pipe(
           Effect.tap(() =>

@@ -2,6 +2,7 @@
 import type * as http from "node:http";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
+import { VisualizationTransportError } from "./transportError.ts";
 
 export const VISUALIZATION_MCP_RESPONSE_MS = 10_000;
 export const VISUALIZATION_MCP_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -47,6 +48,9 @@ export function acquireVisualizationMcpResponse(response: http.ServerResponse) {
     beginOutput: () => {
       if (transferred || released) return;
       transferred = true;
+      // The fixed deadline owns the actual native response's drain lifetime,
+      // which can outlive the upstream Effect stream and its clock scope.
+      // @effect-diagnostics-next-line globalTimers:off
       deadline = setTimeout(retire, VISUALIZATION_MCP_RESPONSE_MS);
       if (response.destroyed || response.writableFinished) release();
     },
@@ -71,12 +75,21 @@ export function boundVisualizationMcpResponse<E, R>(stream: Stream.Stream<Uint8A
     Stream.mapEffect((chunk) =>
       ++chunks > MAX_RESPONSE_CHUNKS ||
       length + chunk.byteLength > VISUALIZATION_MCP_MAX_RESPONSE_BYTES
-        ? Effect.fail(new Error("Visualization response could not be delivered."))
+        ? Effect.fail(
+            new VisualizationTransportError({
+              message: "Visualization response could not be delivered.",
+            }),
+          )
         : Effect.sync(() => {
             length += chunk.byteLength;
             return chunk;
           }),
     ),
-    Stream.mapError(() => new Error("Visualization response could not be delivered.")),
+    Stream.mapError(
+      () =>
+        new VisualizationTransportError({
+          message: "Visualization response could not be delivered.",
+        }),
+    ),
   );
 }

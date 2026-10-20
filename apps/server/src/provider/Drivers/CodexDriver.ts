@@ -58,6 +58,7 @@ import {
 } from "../Layers/CodexProvider.ts";
 import { requestCodexSkills } from "../codexSkills.ts";
 import { makeCodexLogin } from "../codexLogin.ts";
+import type * as CodexClient from "effect-codex-app-server/client";
 import { launchBrowser } from "../../process/externalLauncher.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
@@ -446,7 +447,14 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
 
       const skillReadPermit = yield* Semaphore.make(1);
       const login = yield* makeCodexLogin({
-        withClient: (use, onTermination) =>
+        // Keep the selected operation's actual error channel generic across
+        // this disposable metadata owner instead of widening it to unknown.
+        withClient: <OperationError>(
+          use: (
+            client: CodexClient.CodexAppServerClientShape,
+          ) => Effect.Effect<void, OperationError>,
+          onTermination: Effect.Effect<void>,
+        ) =>
           withCodexMetadataClient(
             {
               binaryPath: effectiveConfig.binaryPath,

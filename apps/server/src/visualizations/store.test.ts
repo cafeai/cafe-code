@@ -1,6 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
+// Asset namespace/identity traps must retain their actual native filesystem IO.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
+// The fixture exercises actual native socket buffering and finish/close leases.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as http from "node:http";
+// Fixture asset paths use the same host grammar as production admission.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -23,6 +29,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
+import * as Schema from "effect/Schema";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -50,6 +58,30 @@ import { exportGeneratedVisualizationHtml } from "./offlineHtml.ts";
 // observation of this exact fixture's host-marker reads without mutating Node's
 // non-configurable native ESM namespace exports.
 vi.mock("node:fs/promises", { spy: true });
+const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+
+it("retains the exact native input commitment bytes across JSON codec changes", () => {
+  const input = {
+    version: 1,
+    purpose: "generated-visualization",
+    requestId: "00000000-0000-4000-8000-000000000001",
+    source: '<p>🌸\n"quoted"</p>',
+    title: "Synthetic chart",
+    assets: [{ assetId: "plot", attachmentId: "fixture-image" }],
+    appearance: "dark",
+    viewport: { width: 240, height: 80 },
+  };
+  // This literal is deliberately independent of the serializer under test:
+  // field ordering, UTF-8, newline/quote escaping and the native domain separator
+  // are part of the authenticated provider receipt, not cosmetic formatting.
+  const canonical = String.raw`{"version":1,"purpose":"generated-visualization","requestId":"00000000-0000-4000-8000-000000000001","source":"<p>🌸\n\"quoted\"</p>","title":"Synthetic chart","assets":[{"assetId":"plot","attachmentId":"fixture-image"}],"appearance":"dark","viewport":{"width":240,"height":80}}`;
+  const expected = createHash("sha256")
+    .update("cafe-visual-input-v1\0")
+    .update(canonical)
+    .digest("hex");
+  assert.equal(computeGeneratedVisualizationInputSha256(input), expected);
+});
 
 function pngChunk(name: string, data: Buffer) {
   const type = Buffer.from(name);
@@ -88,7 +120,7 @@ const fixture = Effect.gen(function* () {
     request.on("data", (value: Buffer) => chunks.push(value));
     request.on("end", () => {
       nativeRequests++;
-      const input = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+      const input = decodeJson(Buffer.concat(chunks).toString("utf8")) as {
         method?: string;
         payload?: unknown;
       };
@@ -119,7 +151,7 @@ const fixture = Effect.gen(function* () {
   yield* Effect.promise(() =>
     fs.writeFile(
       hostPath,
-      JSON.stringify({
+      encodeJson({
         version: 1,
         generation,
         url: `http://127.0.0.1:${address.port}/visualizations`,
@@ -141,7 +173,7 @@ const fixture = Effect.gen(function* () {
     providerInstanceId: ProviderInstanceId.make("codex_fixture"),
     provider: "codex" as const,
   };
-  const occurredAt = new Date().toISOString();
+  const occurredAt = DateTime.formatIso(DateTime.nowUnsafe());
   yield* sql`INSERT INTO projection_threads(thread_id,project_id,title,runtime_mode,created_at,updated_at) VALUES(${identity.threadId},NULL,'Isolated visualization fixture','full-access',${occurredAt},${occurredAt})`;
   const binding = yield* Effect.promise(() =>
     runtime.bind({ ...identity, runtimeMode: "full-access" }),
@@ -247,7 +279,7 @@ const fillTicketLedger = (
         .update(`synthetic-ticket-${tuple.threadId}-${index}`)
         .digest("hex");
       yield* context.sql`INSERT INTO visualization_viewer_tickets(ticket_digest,thread_id,revision_id,host_generation,expires_at)
-      VALUES(${digest},${tuple.threadId},${tuple.revisionId},${context.generation},${Date.now() + 360000})`;
+      VALUES(${digest},${tuple.threadId},${tuple.revisionId},${context.generation},${DateTime.toEpochMillis(DateTime.nowUnsafe()) + 360000})`;
     }
   });
 
@@ -303,7 +335,7 @@ it.layer(services)("immutable private visualization store", (it) => {
       Effect.gen(function* () {
         const context = yield* fixture;
         const tuple = yield* ownedVisualization(context);
-        const now = Date.now();
+        const now = DateTime.toEpochMillis(DateTime.nowUnsafe());
         const clock = vi.spyOn(Date, "now").mockReturnValue(now);
         yield* Effect.addFinalizer(() => Effect.sync(() => clock.mockRestore()));
         const first = yield* context.service.inline(tuple);
@@ -375,7 +407,7 @@ it.layer(services)("immutable private visualization store", (it) => {
           ];
           for (const result of failures) {
             assert.equal(result._tag, "Failure");
-            const json = JSON.stringify(result);
+            const json = encodeJson(result);
             assert.equal(json.includes("private-source-marker"), false);
             assert.equal(json.includes(candidate.ticket), false);
             assert.equal(json.includes(context.hostPath), false);
@@ -452,7 +484,7 @@ it.layer(services)("immutable private visualization store", (it) => {
         const tuples = [tuple];
         for (let index = 1; index < 5; index++) {
           const threadId = ThreadId.make(`inline-quota-${randomUUID()}`);
-          const time = new Date().toISOString();
+          const time = DateTime.formatIso(DateTime.nowUnsafe());
           yield* context.sql`INSERT INTO projection_threads(thread_id,project_id,title,runtime_mode,created_at,updated_at) VALUES(${threadId},NULL,'Isolated fork','full-access',${time},${time})`;
           yield* context.sql`INSERT INTO projection_turns(thread_id,turn_id,state,requested_at,checkpoint_turn_count,checkpoint_files_json) VALUES(${threadId},${`copy:${threadId}:${context.witness.turnId}`},'completed',${time},1,'[]')`;
           yield* context.sql.withTransaction(
@@ -500,7 +532,7 @@ it.layer(services)("immutable private visualization store", (it) => {
         const controlledSql = new Proxy(context.sql, {
           get(target, property, receiver) {
             if (property !== "withTransaction") return Reflect.get(target, property, receiver);
-            return (work: Parameters<typeof target.withTransaction>[0]) =>
+            return <A, E, R>(work: Effect.Effect<A, E, R>) =>
               Effect.suspend(() => {
                 if (!hold) return target.withTransaction(work);
                 return Effect.gen(function* () {
@@ -573,9 +605,9 @@ it.layer(services)("immutable private visualization store", (it) => {
         assert.ok(admitted);
         const list = yield* service.list({ threadId: witness.threadId });
         assert.equal(list.entries.length, 1);
-        assert.equal(JSON.stringify(list).includes("private-source-marker"), false);
-        assert.equal(JSON.stringify(list).includes(first.proof), false);
-        assert.equal(JSON.stringify(list).includes(witness.nativeItemId), false);
+        assert.equal(encodeJson(list).includes("private-source-marker"), false);
+        assert.equal(encodeJson(list).includes(first.proof), false);
+        assert.equal(encodeJson(list).includes(witness.nativeItemId), false);
         assert.equal(
           yield* Effect.promise(() =>
             binding.claimNativeCompletion(
@@ -606,7 +638,7 @@ it.layer(services)("immutable private visualization store", (it) => {
         assert.equal((yield* Effect.exit(service.details(tuple)))._tag, "Failure");
         yield* Effect.promise(() => binding.claimNativeCompletion(witness, receipt.proof));
         assert.equal((yield* service.details(tuple)).source.source, input.source);
-        assert.equal((yield* service.details(tuple)).rawJson, JSON.stringify(input));
+        assert.equal((yield* service.details(tuple)).rawJson, encodeJson(input));
         assert.equal(
           (yield* Effect.exit(service.details({ ...tuple, threadId: ThreadId.make("other-chat") })))
             ._tag,
@@ -667,7 +699,7 @@ it.layer(services)("immutable private visualization store", (it) => {
           }),
         );
         assert.equal((yield* service.list({ threadId: child })).entries.length, 1);
-        yield* sql`INSERT INTO hard_deleted_threads(thread_id,deleted_at) VALUES(${witness.threadId},${new Date().toISOString()})`;
+        yield* sql`INSERT INTO hard_deleted_threads(thread_id,deleted_at) VALUES(${witness.threadId},${DateTime.formatIso(DateTime.nowUnsafe())})`;
         assert.equal(
           (yield* Effect.exit(service.list({ threadId: witness.threadId })))._tag,
           "Failure",
@@ -682,7 +714,7 @@ it.layer(services)("immutable private visualization store", (it) => {
         assert.equal((yield* service.details(tuple)).source.source, input.source);
         yield* sql`DELETE FROM projection_turns WHERE thread_id=${child}`;
         yield* sql.withTransaction(reconcileVisualizationHistory(sql, child));
-        yield* sql`INSERT INTO hard_deleted_threads(thread_id,deleted_at) VALUES(${child},${new Date().toISOString()})`;
+        yield* sql`INSERT INTO hard_deleted_threads(thread_id,deleted_at) VALUES(${child},${DateTime.formatIso(DateTime.nowUnsafe())})`;
         // Producer deletion already removed invocation authority; only the last
         // immutable fork reference prevented the previous bounded reclamation.
         yield* service.sweep;
@@ -747,7 +779,7 @@ it.layer(services)("immutable private visualization store", (it) => {
         assert.equal(debug.frameCount, 0);
         assert.equal(debug.frameLimit, 32);
         assert.ok(debug.storedBytes > 0);
-        assert.equal(JSON.stringify(debug).includes("private-source-marker"), false);
+        assert.equal(encodeJson(debug).includes("private-source-marker"), false);
         assert.equal((yield* service.list({ threadId: witness.threadId })).entries.length, 1);
         assert.equal(
           (yield* sql`SELECT 1 FROM visualization_invocations WHERE thread_id=${witness.threadId}`)
@@ -760,7 +792,7 @@ it.layer(services)("immutable private visualization store", (it) => {
           revisionId: entry.reference.revisionId,
         };
         assert.equal((yield* service.inline(tuple)).purpose, "mcp-app");
-        assert.deepEqual(JSON.parse((yield* service.readMcpAppSnapshot(tuple)).privateJson), {
+        assert.deepEqual(decodeJson((yield* service.readMcpAppSnapshot(tuple)).privateJson), {
           input: app.input,
           witness: app.witness,
         });
@@ -946,7 +978,7 @@ it.layer(services)("immutable private visualization store", (it) => {
         // tail. The viewport reads it directly, with the original fifty-row cap.
         yield* sql`WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<120)
       INSERT INTO visualization_history(id,thread_id,turn_id,message_id,origin_item_id,occurred_at,actor_json,reference_json,revision_id,native_call_key,byte_length)
-      SELECT printf('70000000-0000-4000-8000-%012d',value),${witness.threadId},${witness.turnId},${witness.messageId},'viewport-history-'||value,${oldTime},'{"type":"root"}',${JSON.stringify(receipt.reference)},${receipt.reference.revisionId},'viewport-window-'||value,4096 FROM sequence`;
+      SELECT printf('70000000-0000-4000-8000-%012d',value),${witness.threadId},${witness.turnId},${witness.messageId},'viewport-history-'||value,${oldTime},'{"type":"root"}',${encodeJson(receipt.reference)},${receipt.reference.revisionId},'viewport-window-'||value,4096 FROM sequence`;
         const first = yield* service.list({ threadId: witness.threadId, atOrBefore: oldTime });
         assert.equal(first.entries.length, 50);
         assert.ok(first.entries.every((entry) => entry.occurredAt === oldTime));
@@ -995,7 +1027,7 @@ it.layer(services)("immutable private visualization store", (it) => {
           }),
           { entries: [] },
         );
-        yield* sql`INSERT INTO hard_deleted_threads(thread_id,deleted_at) VALUES(${witness.threadId},${new Date().toISOString()})`;
+        yield* sql`INSERT INTO hard_deleted_threads(thread_id,deleted_at) VALUES(${witness.threadId},${DateTime.formatIso(DateTime.nowUnsafe())})`;
         assert.equal(
           (yield* Effect.exit(service.list({ threadId: witness.threadId, atOrBefore: oldTime })))
             ._tag,
@@ -1011,7 +1043,7 @@ it.layer(services)("immutable private visualization store", (it) => {
       // This database fixture qualifies history pagination, not native receipts.
       yield* sql`WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<510)
       INSERT INTO visualization_history(id,thread_id,turn_id,message_id,origin_item_id,occurred_at,actor_json,reference_json,revision_id,native_call_key,byte_length)
-      SELECT lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-'||lower(hex(randomblob(2)))||'-'||lower(hex(randomblob(2)))||'-'||lower(hex(randomblob(6))),${witness.threadId},${witness.turnId},${witness.messageId},'synthetic-history-'||value,${witness.occurredAt},'{"type":"root"}',${JSON.stringify(receipt.reference)},${receipt.reference.revisionId},'synthetic-window-'||value,4096 FROM sequence`;
+      SELECT lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-'||lower(hex(randomblob(2)))||'-'||lower(hex(randomblob(2)))||'-'||lower(hex(randomblob(6))),${witness.threadId},${witness.turnId},${witness.messageId},'synthetic-history-'||value,${witness.occurredAt},'{"type":"root"}',${encodeJson(receipt.reference)},${receipt.reference.revisionId},'synthetic-window-'||value,4096 FROM sequence`;
       let cursor: string | undefined;
       const origins = new Set<string>();
       do {
@@ -1057,7 +1089,7 @@ it.layer(services)("immutable private visualization store", (it) => {
         assert.equal(lastPreviewPayload(), undefined);
         assert.equal(entry.reference.purpose, "mcp-app");
         assert.equal(
-          JSON.stringify(yield* service.list({ threadId: witness.threadId })).includes(
+          encodeJson(yield* service.list({ threadId: witness.threadId })).includes(
             'fixture-external-app"',
           ),
           true,
@@ -1068,7 +1100,7 @@ it.layer(services)("immutable private visualization store", (it) => {
           revisionId: entry.reference.revisionId,
         };
         const row = yield* service.readMcpAppSnapshot(tuple);
-        assert.deepEqual(JSON.parse(row.privateJson), { input: appInput, witness: appWitness });
+        assert.deepEqual(decodeJson(row.privateJson), { input: appInput, witness: appWitness });
         const inline = yield* service.inline(tuple);
         assert.equal(inline.purpose, "mcp-app");
         assert.equal(Object.hasOwn(inline, "previewReplay"), false);
@@ -1207,7 +1239,7 @@ it.layer(services)("immutable private visualization store", (it) => {
           client.callTool({ name: "preview_visualization", arguments: input }),
         );
         assert.equal(preview.isError, true);
-        assert.equal(JSON.stringify(preview).includes("private-source-marker"), false);
+        assert.equal(encodeJson(preview).includes("private-source-marker"), false);
         const published = yield* Effect.promise(() =>
           client.callTool({ name: "publish_visualization", arguments: input }),
         );
@@ -1242,12 +1274,9 @@ it.layer(services)("immutable private visualization store", (it) => {
         assert.equal(entry.turnId, witness.turnId);
         assert.equal(entry.occurredAt, witness.occurredAt);
         assert.deepEqual(entry.actor, witness.actor);
-        assert.equal(JSON.stringify(admitted).includes("private-source-marker"), false);
-        assert.equal(
-          JSON.stringify(admitted).includes(structured.visualizationReceipt.proof),
-          false,
-        );
-        assert.equal(JSON.stringify(admitted).includes(witness.nativeItemId), false);
+        assert.equal(encodeJson(admitted).includes("private-source-marker"), false);
+        assert.equal(encodeJson(admitted).includes(structured.visualizationReceipt.proof), false);
+        assert.equal(encodeJson(admitted).includes(witness.nativeItemId), false);
         yield* Effect.promise(() => claimVisualizationNativeItem(binding, completedItem, witness));
         assert.deepEqual(yield* service.list({ threadId: witness.threadId }), admitted);
         // The second envelope has a matching item/witness identity, so its
@@ -1274,7 +1303,7 @@ it.layer(services)("immutable private visualization store", (it) => {
           }),
         );
         assert.equal(overflow.isError, true);
-        assert.equal(JSON.stringify(overflow).includes("🌸"), false);
+        assert.equal(encodeJson(overflow).includes("🌸"), false);
         const selector = yield* Effect.promise(() =>
           client.callTool({
             name: "publish_visualization",
@@ -1287,7 +1316,7 @@ it.layer(services)("immutable private visualization store", (it) => {
           client.callTool({ name: "publish_visualization", arguments: input }),
         );
         assert.equal(revoked.isError, true);
-        assert.equal(JSON.stringify(revoked).includes("private-source-marker"), false);
+        assert.equal(encodeJson(revoked).includes("private-source-marker"), false);
       }),
   );
 });

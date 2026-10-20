@@ -3,6 +3,8 @@ import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+// SQLite fixture retains actual native descriptors, file identity and namespace cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import type { fstatSync, writeSync } from "node:fs";
 
 import {

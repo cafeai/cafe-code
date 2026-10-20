@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 // @effect-diagnostics nodeBuiltinImport:off
 import { createHash } from "node:crypto";
 import { MCP_APP_MAX_MESSAGE_BYTES, MCP_APP_RESOURCE_MIME } from "@cafecode/contracts/mcpApps";
@@ -346,7 +347,7 @@ export async function dispatchMcpAppOwnerOperation(input: McpAppOwnerOperation):
       (typeof consentExpiresAtMs !== "number" ||
         !Number.isSafeInteger(consentExpiresAtMs) ||
         consentExpiresAtMs <= 0 ||
-        Date.now() >= consentExpiresAtMs)
+        DateTime.toEpochMillis(DateTime.nowUnsafe()) >= consentExpiresAtMs)
     )
       throw unavailable();
   };

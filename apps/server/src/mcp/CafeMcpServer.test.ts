@@ -341,7 +341,7 @@ describe("Cafe Code MCP server", () => {
   });
 
   it("acknowledges self-restarts before scheduling provider teardown", async () => {
-    const scheduled: Array<Effect.Effect<void, never, unknown>> = [];
+    const scheduled: Array<Effect.Effect<void>> = [];
     const result = await withClient(
       makeDependencies(),
       (client) =>

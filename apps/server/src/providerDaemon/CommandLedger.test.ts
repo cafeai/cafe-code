@@ -18,6 +18,8 @@ import { describe, expect, it } from "vitest";
 import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { makeProviderDaemonCommandLedger } from "./CommandLedger.ts";
 
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
 const encodeProviderDaemonRpcRequestJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonRpcRequest),
 );
@@ -401,7 +403,7 @@ describe("ProviderDaemonCommandLedger", () => {
             ok: false,
             error: { tag: "ProviderDaemonCommandIdentityMismatch" },
           });
-          expect(JSON.stringify(result)).not.toContain("private-malformed-request");
+          expect(encodeProviderJsonString(result)).not.toContain("private-malformed-request");
         }
         expect(count).toBe(1);
       }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
@@ -441,8 +443,8 @@ describe("ProviderDaemonCommandLedger", () => {
           const contents = yield* sql.unsafe(
             `SELECT * FROM "${String(row.name).replaceAll('"', '""')}"`,
           );
-          expect(JSON.stringify(contents)).not.toContain("private-answer");
-          expect(JSON.stringify(contents)).not.toContain("private-token");
+          expect(encodeProviderJsonString(contents)).not.toContain("private-answer");
+          expect(encodeProviderJsonString(contents)).not.toContain("private-token");
         }
       }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
@@ -543,7 +545,7 @@ describe("ProviderDaemonCommandLedger", () => {
             status: "active",
           },
         });
-        expect(JSON.stringify(snapshot)).not.toContain(objective);
+        expect(encodeProviderJsonString(snapshot)).not.toContain(objective);
       }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
     );
   });

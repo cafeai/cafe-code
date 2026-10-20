@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Schema from "effect/Schema";
 import { expect, it } from "@effect/vitest";
 import { AuthSessionId } from "@cafecode/contracts/auth";
 import * as DateTime from "effect/DateTime";
@@ -14,6 +15,10 @@ import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts"
 import { SessionCredentialService } from "../Services/SessionCredentialService.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
 import { SessionCredentialServiceLive } from "./SessionCredentialService.ts";
+
+// Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
+// this codec does not replace production admission or grant received-data authority.
+const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const makeServerConfigLayer = (
   overrides?: Partial<
@@ -177,7 +182,7 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
         expect(error._tag).toBe("SessionCredentialError");
         expect(error.message).toBe("The authenticated session is no longer active.");
         expect(error.cause).toBeUndefined();
-        expect(JSON.stringify(error)).not.toContain(issued.token);
+        expect(encodeFixtureJson(error)).not.toContain(issued.token);
       }
       // Rejected alternative claims cannot change the real session or revoke
       // its valid identity; the original captured owner remains admitted.
@@ -251,7 +256,7 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
         expect(error._tag).toBe("SessionCredentialError");
         expect(error.message).toBe("The authenticated session is no longer active.");
         expect(error.cause).toBeUndefined();
-        expect(JSON.stringify(error)).not.toMatch(
+        expect(encodeFixtureJson(error)).not.toMatch(
           /synthetic-private-row-sentinel|original-diagnostic-owner|auth_sessions|no such table/u,
         );
       });

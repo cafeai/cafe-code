@@ -1,6 +1,10 @@
 import * as Electron from "electron";
 import { randomUUID } from "node:crypto";
+// Opt-in native fixture keeps its existing Electron-owned screenshot/result-file Promise lifecycle.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { writeFile } from "node:fs/promises";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { CHAT_MONO_FONT_FAMILY, CHAT_SANS_FONT_FAMILY } from "@cafecode/shared/chatTypography";
 import type {
@@ -35,6 +39,8 @@ async function observe(
     const value = await Promise.race([
       contents.executeJavaScript(expression),
       new Promise<false>((resolve) => {
+        // Native-host fixture: preserve its existing wall-clock budget and callback cleanup.
+        // @effect-diagnostics-next-line globalTimers:off
         timer = setTimeout(() => resolve(false), Math.max(0, deadline - performance.now()));
       }),
     ]).finally(() => {
@@ -43,6 +49,8 @@ async function observe(
     if (value === true) return;
     if (performance.now() >= deadline)
       throw new NativeFontFailure(`Native font fixture ${label} unavailable.`);
+    // Native-host fixture: preserve its existing wall-clock budget and callback cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
 }
@@ -268,6 +276,8 @@ async function qualify(): Promise<void> {
           height = event.layout.height;
           break;
         }
+        // Native-host fixture: preserve its existing wall-clock budget and callback cleanup.
+        // @effect-diagnostics-next-line globalTimers:off
         await new Promise<void>((resolve) => setTimeout(resolve, 10));
       }
       if (!Number.isSafeInteger(height) || height < 80 || height > 2000)

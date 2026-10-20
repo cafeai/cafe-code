@@ -1,4 +1,8 @@
+// Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { stat } from "node:fs/promises";
+// Native provider path boundary: retain host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import path from "node:path";
 
 /** Preserve configured cwd spelling while admitting equivalent normalization

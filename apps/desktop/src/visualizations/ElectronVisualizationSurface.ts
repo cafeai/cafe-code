@@ -1038,6 +1038,8 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
     // crash that owned process while page JavaScript blocks; this is not a claim
     // of survival when Electron main/native code or the entire system stalls.
     this.lastHeartbeat = performance.now();
+    // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+    // @effect-diagnostics-next-line globalTimers:off
     this.watchdog = setInterval(() => {
       if (!this.revoked && performance.now() - this.lastHeartbeat > 3_000) {
         this.rejection = "heartbeat-missed";
@@ -1570,6 +1572,8 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
           finish(false);
           return;
         }
+        // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+        // @effect-diagnostics-next-line globalTimers:off
         setTimeout(tick, 10);
       };
       const finish = (retired: boolean) => {

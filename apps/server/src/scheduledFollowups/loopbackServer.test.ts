@@ -15,6 +15,9 @@ import {
   schedulingLoopbackListenPort,
   startSchedulingLoopbackServer,
 } from "./loopbackServer.ts";
+import * as Schema from "effect/Schema";
+
+const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const unused = () =>
   Effect.die(new Error("The unauthenticated listener must not call a scheduling service."));
@@ -112,7 +115,7 @@ it.effect("fails closed when another socket already owns the required loopback p
       if (result._tag === "Failure") {
         assert.equal(result.failure._tag, "SchedulingLoopbackServerError");
         assert.doesNotMatch(
-          JSON.stringify(result.failure),
+          encodeJsonText(result.failure),
           /192\.0\.2\.10|EADDRINUSE|127\.0\.0\.1/u,
         );
       }

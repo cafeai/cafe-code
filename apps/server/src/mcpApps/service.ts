@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 // @effect-diagnostics nodeBuiltinImport:off
 import { randomUUID } from "node:crypto";
 import {
@@ -58,6 +59,17 @@ const identity = (input: McpAppPrepareInput) =>
 const isRuntimeMode = Schema.is(RuntimeMode);
 const isInteractionMode = Schema.is(ProviderInteractionMode);
 const decodeModelSelection = Schema.decodeUnknownResult(ModelSelection);
+// Keep ordinary JSON byte/key order; the existing own-record and protocol
+// checks below still decide admission. Codec issues can embed private input,
+// so neither persisted snapshots nor provider replies may expose those issues.
+const decodeJson = (text: string) =>
+  Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(text).pipe(
+    Effect.mapError(() => visualizationDenied()),
+  );
+const encodeJson = (value: unknown) =>
+  Schema.encodeUnknownEffect(Schema.UnknownFromJsonString)(value).pipe(
+    Effect.mapError(() => visualizationDenied()),
+  );
 type Session = {
   input: McpAppPrepareInput;
   documentGeneration: string;
@@ -91,7 +103,10 @@ export const makeMcpAppsService = Effect.gen(function* () {
   ) =>
     Effect.tryPromise({
       try: async (signal) => {
-        if (consentDeadline !== undefined && Date.now() >= consentDeadline)
+        if (
+          consentDeadline !== undefined &&
+          DateTime.toEpochMillis(DateTime.nowUnsafe()) >= consentDeadline
+        )
           throw visualizationDenied();
         const input = {
           ...session.owner,
@@ -140,7 +155,7 @@ export const makeMcpAppsService = Effect.gen(function* () {
       }),
     );
   const sweep = () => {
-    const now = Date.now();
+    const now = DateTime.toEpochMillis(DateTime.nowUnsafe());
     for (const [key, session] of sessions) {
       // Heartbeat refresh is owned by the exact frame grant, not by App traffic
       // or pending consent. A healthy idle App retains its initialized protocol
@@ -195,7 +210,7 @@ export const makeMcpAppsService = Effect.gen(function* () {
           if (sessions.size >= 128) return yield* visualizationDenied();
           const row = yield* artifacts.readMcpAppSnapshot(input);
           if (row.kind !== "mcp-app") return yield* visualizationDenied();
-          const privateData = JSON.parse(row.privateJson) as unknown;
+          const privateData = yield* decodeJson(row.privateJson);
           const data = ownRecord(privateData);
           const snapshot = ownRecord(data?.input);
           const witness = ownRecord(data?.witness);
@@ -220,7 +235,7 @@ export const makeMcpAppsService = Effect.gen(function* () {
           const currentFrame = yield* inspect(input);
           if (
             currentFrame.documentGeneration !== observed.documentGeneration ||
-            Date.now() >= currentFrame.expiresAtMs ||
+            DateTime.toEpochMillis(DateTime.nowUnsafe()) >= currentFrame.expiresAtMs ||
             sessions.size >= 128
           )
             return yield* visualizationDenied();
@@ -265,7 +280,7 @@ export const makeMcpAppsService = Effect.gen(function* () {
           // The owner updates a replace-only untrusted snapshot, never a system
           // instruction or an implicit turn. Native generation is checked again.
           yield* alive(session);
-          yield* ownerOperation(session, "context", JSON.stringify({ json: context }));
+          yield* ownerOperation(session, "context", yield* encodeJson({ json: context }));
           return { kind: "reply" as const, json: mcpAppSuccess(request.id!, {}) };
         }
         if (
@@ -324,7 +339,10 @@ export const makeMcpAppsService = Effect.gen(function* () {
         if (pending.size >= MCP_APP_MAX_PENDING_CONSENTS)
           return { kind: "reply" as const, json: failureReply(request) };
         const operationId = randomUUID();
-        const expiresAtMs = Math.min(Date.now() + MCP_APP_CONSENT_LIFETIME_MS, session.expiresAt);
+        const expiresAtMs = Math.min(
+          DateTime.toEpochMillis(DateTime.nowUnsafe()) + MCP_APP_CONSENT_LIFETIME_MS,
+          session.expiresAt,
+        );
         pending.set(operationId, {
           session,
           request,
@@ -350,7 +368,9 @@ export const makeMcpAppsService = Effect.gen(function* () {
       pending.delete(input.operationId); // one-use BEFORE any async/native side effect
       const { session, request } = operation;
       const unexpired = Effect.suspend(() =>
-        Date.now() < operation.expiresAt ? Effect.void : Effect.fail(visualizationDenied()),
+        DateTime.toEpochMillis(DateTime.nowUnsafe()) < operation.expiresAt
+          ? Effect.void
+          : Effect.fail(visualizationDenied()),
       );
       if (input.decision !== "approve") return { json: failureReply(request) };
       yield* alive(session, true);
@@ -397,7 +417,7 @@ export const makeMcpAppsService = Effect.gen(function* () {
         // different account selected while consent/catalogue I/O was pending.
         yield* alive(session, true);
         yield* Effect.suspend(() =>
-          Date.now() >= operation.expiresAt
+          DateTime.toEpochMillis(DateTime.nowUnsafe()) >= operation.expiresAt
             ? Effect.fail(visualizationDenied())
             : engine
                 .dispatch({
@@ -413,7 +433,7 @@ export const makeMcpAppsService = Effect.gen(function* () {
                   },
                   runtimeMode,
                   interactionMode,
-                  createdAt: new Date().toISOString(),
+                  createdAt: DateTime.formatIso(DateTime.nowUnsafe()),
                 })
                 // The broker never exposes a received persistence/dispatch
                 // error through the privileged page's operation response.
@@ -446,11 +466,11 @@ export const makeMcpAppsService = Effect.gen(function* () {
       const json = yield* ownerOperation(
         session,
         request.method === "tools/call" ? "tool" : "resource",
-        JSON.stringify(params),
+        yield* encodeJson(params),
         operation.expiresAt,
       );
       yield* alive(session, true);
-      const reply = mcpAppSuccess(request.id!, JSON.parse(json));
+      const reply = mcpAppSuccess(request.id!, yield* decodeJson(json));
       if (!readBoundedMcpAppJson(reply).ok) return yield* visualizationDenied();
       return { json: reply };
     }).pipe(Effect.mapError(() => visualizationDenied()));
@@ -460,7 +480,7 @@ export const makeMcpAppsService = Effect.gen(function* () {
       const operation = pending.get(input.operationId);
       if (!operation) return yield* visualizationDenied();
       yield* alive(operation.session, true);
-      return { json: JSON.stringify(operation.request) };
+      return { json: yield* encodeJson(operation.request) };
     }).pipe(Effect.mapError(() => visualizationDenied()));
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {

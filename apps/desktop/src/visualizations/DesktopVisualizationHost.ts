@@ -1,5 +1,12 @@
+import * as DateTime from "effect/DateTime";
+// The private broker owns exact native socket/response lifetimes and bounded connection limits.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+// Native filesystem boundary: preserve descriptor, no-follow and bigint identity operations.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type * as Electron from "electron";
@@ -241,7 +248,7 @@ export class DesktopVisualizationHost {
     return this.options.now?.() ?? performance.now();
   }
   private wallNow(): number {
-    return this.options.wallNow?.() ?? Date.now();
+    return this.options.wallNow?.() ?? DateTime.toEpochMillis(DateTime.nowUnsafe());
   }
 
   /** Called only after Cafe's existing primary single-instance admission. */
@@ -618,6 +625,8 @@ export class DesktopVisualizationHost {
     this.preparedTimer = undefined;
     if (!this.prepared.size || this.closed) return;
     const earliest = Math.min(...[...this.prepared.values()].map((value) => value.expires));
+    // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+    // @effect-diagnostics-next-line globalTimers:off
     this.preparedTimer = setTimeout(
       () => this.expirePrepared(),
       Math.max(0, earliest - this.now()),
@@ -744,6 +753,8 @@ export class DesktopVisualizationHost {
       // A generated viewer still has the original absolute startup budget
       // through its first exact trusted presentation commit. This timer is
       // cleared once, never rearmed as a live document/session lifetime.
+      // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+      // @effect-diagnostics-next-line globalTimers:off
       timer: setTimeout(() => {
         void this.retireRecord(record, "timeout");
       }, duration ?? VISUALIZATION_HOST_PREVIEW_MS),
@@ -904,6 +915,8 @@ export class DesktopVisualizationHost {
           return true;
         }),
         new Promise<false>((resolve) => {
+          // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+          // @effect-diagnostics-next-line globalTimers:off
           timer = setTimeout(
             () => resolve(false),
             this.remaining(record, VISUALIZATION_HOST_PREVIEW_MS),
@@ -1010,6 +1023,8 @@ export class DesktopVisualizationHost {
       }
       this.emit(record, "active");
       const admitted = record;
+      // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+      // @effect-diagnostics-next-line globalTimers:off
       setTimeout(() => {
         if (this.contains(admitted) && admitted.state === "active") {
           for (const json of admitted.messages.splice(0)) this.emit(admitted, "message", json);
@@ -1135,6 +1150,8 @@ export class DesktopVisualizationHost {
     )
       return false;
     record.transitioning = true;
+    // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+    // @effect-diagnostics-next-line globalTimers:off
     record.transitionTimer = setTimeout(
       () => {
         void this.retireRecord(record, "timeout");
@@ -1204,6 +1221,8 @@ export class DesktopVisualizationHost {
           const settled = await Promise.race([
             peerWork.done.then(() => true),
             new Promise<false>((resolve) => {
+              // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+              // @effect-diagnostics-next-line globalTimers:off
               timer = setTimeout(
                 () => resolve(false),
                 Math.max(0, retirementDeadline - this.now()),
@@ -1226,6 +1245,8 @@ export class DesktopVisualizationHost {
           retired = await Promise.race([
             work.done.then(() => true),
             new Promise<false>((resolve) => {
+              // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+              // @effect-diagnostics-next-line globalTimers:off
               timer = setTimeout(
                 () => resolve(false),
                 Math.max(0, retirementDeadline - this.now()),
@@ -1308,6 +1329,8 @@ export class DesktopVisualizationHost {
       // A continuation is finite one-use metadata, not the generated document's
       // visibility lifetime. No hidden source bytes or live DOM are retained.
       const expires = this.now() + VISUALIZATION_HOST_TICKET_MS;
+      // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+      // @effect-diagnostics-next-line globalTimers:off
       const timer = setTimeout(
         () => this.continuations.delete(token),
         VISUALIZATION_HOST_TICKET_MS,
@@ -1354,6 +1377,8 @@ export class DesktopVisualizationHost {
       const value = await Promise.race([
         this.nativeWork(record, () => record.surface!.capture()),
         new Promise<null>((resolve) => {
+          // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+          // @effect-diagnostics-next-line globalTimers:off
           timer = setTimeout(() => resolve(null), this.remaining(record, 5_000));
         }),
       ]);
@@ -1432,6 +1457,8 @@ export class DesktopVisualizationHost {
       record.spentConsents.add(consentId);
       record.suspendedConsentId = consentId;
       record.suspended = true;
+      // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+      // @effect-diagnostics-next-line globalTimers:off
       record.suspensionTimer = setTimeout(() => {
         void this.retireRecord(record, "timeout");
       }, VISUALIZATION_HOST_SUSPEND_MS);
@@ -1473,6 +1500,8 @@ export class DesktopVisualizationHost {
         inputBytes: bytes,
         deadline: this.now() + VISUALIZATION_HOST_PREVIEW_MS,
         resolve,
+        // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+        // @effect-diagnostics-next-line globalTimers:off
         timer: setTimeout(() => {
           const index = this.queue.indexOf(job);
           if (index >= 0) {
@@ -1539,6 +1568,8 @@ export class DesktopVisualizationHost {
           const replayed = await Promise.race([
             replayReady,
             new Promise<false>((resolve) => {
+              // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+              // @effect-diagnostics-next-line globalTimers:off
               captureTimer = setTimeout(
                 () => resolve(false),
                 Math.max(0, job.deadline - this.now()),
@@ -1553,6 +1584,8 @@ export class DesktopVisualizationHost {
         const capture = await Promise.race([
           this.nativeWork(record, () => record!.surface!.capture()),
           new Promise<null>((resolve) => {
+            // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+            // @effect-diagnostics-next-line globalTimers:off
             captureTimer = setTimeout(() => resolve(null), Math.max(0, job.deadline - this.now()));
           }),
         ]);

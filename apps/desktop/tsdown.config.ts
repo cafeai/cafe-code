@@ -1,4 +1,6 @@
 import { defineConfig } from "tsdown";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { resolve } from "node:path";
 import { publishSourceDebugBuildManifest } from "../../packages/shared/src/sourceDebugBuild.ts";
 

@@ -1,4 +1,6 @@
-import { ProviderInstanceId, SubagentRuntimeId, ThreadId, TurnId } from "@cafecode/contracts";
+import * as Schema from "effect/Schema";
+import { SubagentRuntimeId, ThreadId, TurnId } from "@cafecode/contracts/baseSchemas";
+import { ProviderInstanceId } from "@cafecode/contracts/providerInstance";
 import { assert, it as effectIt } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -15,6 +17,8 @@ import {
   runtimeRecoveryPreparationDelayMs,
   saturateRuntimeRecoveryAttempt,
 } from "./providerRuntimeRecovery.ts";
+
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const threadId = ThreadId.make("transient-thread");
 const instanceId = ProviderInstanceId.make("codex-account");
@@ -98,7 +102,7 @@ const setup = Effect.gen(function* () {
           payload_json, metadata_json)
         VALUES (${`event-${version}`}, 'thread', ${threadId}, ${version}, ${eventType}, ${now},
           ${commandId ?? `server:test-${version}`}, NULL, NULL, ${actor},
-          ${JSON.stringify({ threadId, createdAt: now, ...payload })}, '{}') RETURNING sequence
+          ${encodeJsonString({ threadId, createdAt: now, ...payload })}, '{}') RETURNING sequence
       `;
       return rows[0]!.sequence;
     });

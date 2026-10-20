@@ -1,9 +1,14 @@
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtemp, writeFile, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// Native fixture paths retain host drive, separator and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { ServerConfig } from "../config.ts";
@@ -31,8 +36,7 @@ it.each(["codex", "claudeAgent"] as const)(
     const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       Effect.runPromise(
         Effect.scoped(effect).pipe(
-          Effect.provide(layer),
-          Effect.provide(NodeServices.layer),
+          Effect.provide(layer.pipe(Layer.provideMerge(NodeServices.layer))),
           Effect.provideService(ServerConfig, { stateDir: directory, baseDir: directory } as never),
         ) as Effect.Effect<A, E>,
       );

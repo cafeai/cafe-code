@@ -142,6 +142,9 @@ function createBaseUpdateState(
       channel,
       installMode,
     ),
+    // Packaging identity is supplied by the trusted main process. Feed absence,
+    // disabled updates and manual installation do not imply a source checkout.
+    runtimeKind: environment.isPackaged ? "packaged" : "source",
     enabled,
     status: enabled ? "idle" : "disabled",
   };
@@ -197,14 +200,15 @@ const make = Effect.gen(function* () {
   const updateInstallInFlightRef = yield* Ref.make(false);
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
-  const updateStateRef = yield* Ref.make<DesktopUpdateState>(
-    createInitialDesktopUpdateState(
+  const updateStateRef = yield* Ref.make<DesktopUpdateState>({
+    ...createInitialDesktopUpdateState(
       environment.appVersion,
       environment.runtimeInfo,
       environment.defaultDesktopSettings.updateChannel,
       installMode,
     ),
-  );
+    runtimeKind: environment.isPackaged ? "packaged" : "source",
+  });
 
   const emitState = Ref.get(updateStateRef).pipe(
     Effect.flatMap((state) => electronWindow.sendAll(IpcChannels.UPDATE_STATE_CHANNEL, state)),

@@ -1,4 +1,7 @@
+import * as Schema from "effect/Schema";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
+import * as Data from "effect/Data";
 import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 // @effect-diagnostics nodeBuiltinImport:off
@@ -99,6 +102,18 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return { ...actual, lstat: vi.fn(actual.lstat) };
 });
 
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeRecoveryActivityJson = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Struct({
+      activity: Schema.Struct({ payload: Schema.Record(Schema.String, Schema.Unknown) }),
+    }),
+  ),
+);
+class FixturePreparationFailure extends Data.TaggedError("FixturePreparationFailure")<{
+  readonly message: string;
+}> {}
+
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
@@ -134,7 +149,7 @@ const metadataHelperSelectionCases = [
 ] as const;
 
 const liveDurableRuntimeOwnerPayload = () => {
-  const now = new Date().toISOString();
+  const now = DateTime.formatIso(DateTime.nowUnsafe());
   return {
     runtimeOwnerId: "00000000-0000-4000-8000-000000000001",
     runtimeOwnerPid: process.pid,
@@ -230,6 +245,8 @@ describe("ProviderCommandReactor", () => {
     readonly codexFailedRootRestart?: boolean | "unknown";
     /** Exact synthetic send failures that occur before any cold-owner mutation. */
     readonly coldRetirementRefusalCount?: number;
+    /** Sequential positive fixtures model distinct accepted native roots. */
+    readonly distinctNativeTurns?: boolean;
     readonly subagentPolicyContinuation?: boolean;
     readonly subagentRuntimeId?: ProviderSession["subagentRuntimeId"];
     readonly providerInstances?: ServerSettings["providerInstances"];
@@ -242,6 +259,7 @@ describe("ProviderCommandReactor", () => {
     createdStateDirs.add(stateDir);
     const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
     let nextSessionIndex = 1;
+    let nextNativeTurnIndex = 1;
     let nextRecoveryGeneration = 150;
     let coldRetirementRefusalsRemaining = input?.coldRetirementRefusalCount ?? 0;
     const recoveryTransitions: Array<{
@@ -375,8 +393,24 @@ describe("ProviderCommandReactor", () => {
         return session;
       }),
     );
-    const sendTurn = vi.fn<ProviderServiceShape["sendTurn"]>((input) => {
-      const threadId = input.threadId;
+    const sendTurn = vi.fn<ProviderServiceShape["sendTurn"]>((request) => {
+      const threadId = request.threadId;
+      if (input?.distinctNativeTurns) {
+        // Allocate only when this original fake effect actually accepts the
+        // request. Reusing a completed root's turn-1 would correctly trigger
+        // the production replay fence instead of modeling a later native turn.
+        return Effect.sync(() => {
+          const index = runtimeSessions.findIndex((session) => session.threadId === threadId);
+          const current = runtimeSessions[index];
+          if (current === undefined)
+            throw new FixturePreparationFailure({
+              message: "Cannot accept a synthetic turn without its owned provider session.",
+            });
+          const turnId = asTurnId(`turn-${nextNativeTurnIndex++}`);
+          runtimeSessions.splice(index, 1, { ...current, status: "running", activeTurnId: turnId });
+          return { threadId, turnId };
+        });
+      }
       return Effect.succeed({
         threadId,
         turnId: asTurnId("turn-1"),
@@ -394,7 +428,9 @@ describe("ProviderCommandReactor", () => {
     );
     const setGoal = vi.fn<NonNullable<ProviderServiceShape["setGoal"]>>((goalInput) => {
       const objective = goalInput.objective ?? providerGoal?.objective ?? "Test goal";
-      const updatedAt = new Date(Date.parse(now) + nextGoalRevision++ * 1_000).toISOString();
+      const updatedAt = DateTime.formatIso(
+        DateTime.makeUnsafe(Date.parse(now) + nextGoalRevision++ * 1_000),
+      );
       const nextGoal: ProviderThreadGoal = {
         threadId: goalInput.threadId,
         objective,
@@ -822,7 +858,8 @@ describe("ProviderCommandReactor", () => {
         Effect.orDie,
         Effect.map((settings) => settings.providerInstances),
       );
-    scope = await Effect.runPromise(Scope.make("sequential"));
+    const fixtureScope = await Effect.runPromise(Scope.make("sequential"));
+    scope = fixtureScope;
     const startReactor = () => {
       const start = reactor.start().pipe(Scope.provide(scope!));
       // Layer construction logs and later start() logs execute in different
@@ -848,10 +885,114 @@ describe("ProviderCommandReactor", () => {
       await startReactor();
     }
     const drain = () => Effect.runPromise(reactor.drain);
+    const observerScope = fixtureScope;
+    const observerAbort = new AbortController();
+    const observerWaits = new Set<Promise<unknown>>();
+    const awaitOwnedObserver = <A, E>(effect: Effect.Effect<A, E>): Promise<A> => {
+      observerAbort.signal.throwIfAborted();
+      const waiting = Effect.runPromise(effect, { signal: observerAbort.signal }).then((value) => {
+        observerAbort.signal.throwIfAborted();
+        return value;
+      });
+      observerWaits.add(waiting);
+      // Handle either settlement explicitly. A discarded rejecting finally
+      // promise would itself create an unhandled failure during retirement.
+      void waiting.then(
+        () => {
+          observerWaits.delete(waiting);
+        },
+        () => {
+          observerWaits.delete(waiting);
+        },
+      );
+      return waiting;
+    };
+    // These are observation fibers, not provider work. A hard test timeout
+    // must interrupt and join them before fixture teardown rather than leave
+    // an external Deferred await suspended after the owned runtime closes.
+    // Capture this exact scope now; never consult the mutable next-test slot.
+    await Effect.runPromise(
+      Scope.addFinalizer(
+        observerScope,
+        Effect.promise(async () => {
+          observerAbort.abort();
+          await Promise.allSettled([...observerWaits]);
+        }),
+      ),
+    );
+    const observeNextProviderTurn = (
+      messageId: MessageId,
+      options?: { readonly threadId?: ThreadId; readonly opening?: boolean },
+    ) => {
+      const threadId = options?.threadId ?? ThreadId.make("thread-1");
+      const opened = options?.opening
+        ? Effect.runSync(Deferred.make<ProviderSession>())
+        : undefined;
+      const accepted = Effect.runSync(
+        Deferred.make<{
+          readonly request: Parameters<ProviderServiceShape["sendTurn"]>[0];
+          readonly turn: ProviderTurnStartResult;
+        }>(),
+      );
+      // Arm before the durable command. Observe completion of the original
+      // fixture effects, not invocation of mocks which can precede settings,
+      // materialization, acceptance and detached running projection.
+      if (opened !== undefined) {
+        const originalStart = startSession.getMockImplementation()!;
+        startSession.mockImplementationOnce((requestedThreadId, request) =>
+          originalStart(requestedThreadId, request).pipe(
+            Effect.tap((session) => Deferred.succeed(opened, session)),
+          ),
+        );
+      }
+      const originalSend = sendTurn.getMockImplementation()!;
+      sendTurn.mockImplementationOnce((request) =>
+        originalSend(request).pipe(
+          Effect.tap((turn) => Deferred.succeed(accepted, { request, turn })),
+        ),
+      );
+      return {
+        waitForRunning: async (): Promise<ProviderTurnStartResult> => {
+          if (opened !== undefined) {
+            const session = await awaitOwnedObserver(Deferred.await(opened));
+            observerAbort.signal.throwIfAborted();
+            expect(session.threadId).toBe(threadId);
+          }
+          const receipt = await awaitOwnedObserver(Deferred.await(accepted));
+          observerAbort.signal.throwIfAborted();
+          expect(receipt.request).toMatchObject({ threadId, messageId });
+          expect(receipt.turn.threadId).toBe(threadId);
+          await waitFor(async () => {
+            observerAbort.signal.throwIfAborted();
+            const detail = Option.getOrUndefined(
+              await awaitOwnedObserver(snapshotQuery.getThreadDetailById(threadId)),
+            );
+            observerAbort.signal.throwIfAborted();
+            return (
+              detail?.session?.status === "running" &&
+              detail.session.activeTurnId === receipt.turn.turnId &&
+              detail.latestTurn?.state === "running" &&
+              detail.latestTurn.turnId === receipt.turn.turnId
+            );
+          });
+          observerAbort.signal.throwIfAborted();
+          return receipt.turn;
+        },
+      };
+    };
     const markThreadReady = async (
       threadId = ThreadId.make("thread-1"),
       updatedAt = now,
+      ownedTurn?: ReturnType<typeof observeNextProviderTurn>,
     ): Promise<void> => {
+      // Sequential-turn fixtures must retire only the exact fake provider
+      // acceptance whose detached running marker has committed. Publishing
+      // ready after mock invocation alone lets that older marker race the
+      // next command and incorrectly restore a running session.
+      const accepted = ownedTurn === undefined ? undefined : await ownedTurn.waitForRunning();
+      if (accepted !== undefined) {
+        expect(accepted.threadId).toBe(threadId);
+      }
       const snapshot = await Effect.runPromise(snapshotQuery.getSnapshot());
       const thread = snapshot.threads.find((entry) => entry.id === threadId);
       const detail = await Effect.runPromise(snapshotQuery.getThreadDetailById(threadId));
@@ -868,6 +1009,20 @@ describe("ProviderCommandReactor", () => {
       };
       if (!session) {
         throw new Error(`Cannot mark thread '${threadId}' ready without a projected session.`);
+      }
+      if (input?.distinctNativeTurns && accepted !== undefined) {
+        observerAbort.signal.throwIfAborted();
+        const index = runtimeSessions.findIndex((entry) => entry.threadId === threadId);
+        const native = runtimeSessions[index];
+        expect(native).toMatchObject({
+          threadId,
+          status: "running",
+          activeTurnId: accepted.turnId,
+        });
+        // The exact witnessed root completes natively before its terminal
+        // projection; do not leave a live fake owner behind the ready edge.
+        const { activeTurnId: _completed, ...idle } = native!;
+        runtimeSessions.splice(index, 1, { ...idle, status: "ready", updatedAt });
       }
       await Effect.runPromise(
         engine.dispatch({
@@ -992,10 +1147,44 @@ describe("ProviderCommandReactor", () => {
       systemPromptPath,
       startReactor,
       drain,
+      awaitOwnedObserver,
+      observeNextProviderTurn,
       markThreadReady,
       setRunningCodexTurn,
     };
   }
+
+  it("retires fixture observers without accepting pending work or admitting later observers", async () => {
+    const harness = await createHarness({ startReactor: false });
+    const fixtureScope = scope!;
+    const pending = Effect.runSync(Deferred.make<void>());
+    let rejectedBeforeCloseReturned = false;
+    // Install the waiter and both result handlers before retiring this exact
+    // fixture. Neither timeout cleanup nor Scope.close may forge acceptance.
+    const outcome = harness.awaitOwnedObserver(Deferred.await(pending)).then(
+      () => "accepted" as const,
+      () => {
+        rejectedBeforeCloseReturned = true;
+        return "retired" as const;
+      },
+    );
+    await Effect.runPromise(Scope.close(fixtureScope, Exit.void));
+    expect(rejectedBeforeCloseReturned).toBe(true);
+    expect(await outcome).toBe("retired");
+    expect(Effect.runSync(Deferred.isDone(pending))).toBe(false);
+    let lateObserverExecuted = false;
+    expect(() =>
+      harness.awaitOwnedObserver(
+        Effect.sync(() => {
+          lateObserverExecuted = true;
+        }),
+      ),
+    ).toThrow();
+    expect(lateObserverExecuted).toBe(false);
+    expect(harness.startSession).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect(harness.steerTurn).not.toHaveBeenCalled();
+  });
 
   describe("scheduled follow-up dispatch", () => {
     const threadId = ThreadId.make("thread-1");
@@ -1455,7 +1644,9 @@ describe("ProviderCommandReactor", () => {
           runtimeMode: "approval-required",
           interactionMode: "default",
           ...(modelSelection !== undefined ? { modelSelection } : {}),
-          createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, ++sendIndex * 2 - 1)).toISOString(),
+          createdAt: DateTime.formatIso(
+            DateTime.makeUnsafe(Date.UTC(2026, 0, 1, 0, 0, ++sendIndex * 2 - 1)),
+          ),
         }),
       );
       // A command receipt commits intent, not asynchronous preparation or the
@@ -1717,6 +1908,12 @@ describe("ProviderCommandReactor", () => {
               : {}),
           };
         }
+        const acceptedSteer = Effect.runSync(
+          Deferred.make<{
+            readonly request: Parameters<ProviderServiceShape["steerTurn"]>[0];
+            readonly turn: ProviderTurnStartResult;
+          }>(),
+        );
         harness.steerTurn.mockImplementation((input) =>
           outcome === "no active turn"
             ? Effect.fail(
@@ -1726,7 +1923,9 @@ describe("ProviderCommandReactor", () => {
                   detail: "no active turn to steer",
                 }),
               )
-            : Effect.succeed({ threadId, turnId: input.expectedTurnId }),
+            : Effect.succeed({ threadId, turnId: input.expectedTurnId }).pipe(
+                Effect.tap((turn) => Deferred.succeed(acceptedSteer, { request: input, turn })),
+              ),
         );
         const commonCommand = {
           commandId: CommandId.make(`fenced-${entrypoint}-${outcome}`),
@@ -1752,6 +1951,25 @@ describe("ProviderCommandReactor", () => {
           ),
         );
         const refused = outcome !== "accepted";
+        if (!refused) {
+          // Durable dispatch does not complete the detached failed-start/steer
+          // path. Observe its actual successful fake effect before starting
+          // the unchanged acceptance-projection poll; invocation alone cannot
+          // attest the exact process fence or successful provider acceptance.
+          const receipt = await harness.awaitOwnedObserver(Deferred.await(acceptedSteer));
+          expect(receipt.request).toMatchObject({
+            threadId,
+            messageId,
+            expectedTurnId: activeTurnId,
+            expectedSubagentPolicySession: {
+              threadId,
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              subagentRuntimeId: runtimeId,
+              maxConcurrentSubagents: 16,
+            },
+          });
+          expect(receipt.turn).toEqual({ threadId, turnId: activeTurnId });
+        }
         await waitFor(async () => {
           const detail = await harness.readThreadDetail(threadId);
           return (
@@ -2785,7 +3003,14 @@ describe("ProviderCommandReactor", () => {
             }),
           ),
         );
-        await send(harness, `paired-owner-migration-refused-${support}`, true);
+        const preparation = observeFreshFailurePreparation(harness);
+        await send(
+          harness,
+          `paired-owner-migration-refused-${support}`,
+          true,
+          undefined,
+          preparation,
+        );
         expect(harness.startSession).toHaveBeenCalledTimes(1);
         expect(harness.sendTurn).toHaveBeenCalledTimes(1);
         expect(harness.runtimeSessions[0]).toBe(legacy);
@@ -3237,7 +3462,8 @@ describe("ProviderCommandReactor", () => {
     it("rejects a requested override when the configured runtime is unqualified", async () => {
       const harness = await createHarness({ standalone: true, subagentConcurrency: false });
       await change(harness, "unsupported-limit", { codex: 2 });
-      await send(harness, "unsupported-limit-send", true);
+      const preparation = observeFreshFailurePreparation(harness);
+      await send(harness, "unsupported-limit-send", true, undefined, preparation);
       expect(harness.startSession).not.toHaveBeenCalled();
       expect(harness.sendTurn).not.toHaveBeenCalled();
       const thread = await harness.readThreadDetail(threadId);
@@ -3304,7 +3530,9 @@ describe("ProviderCommandReactor", () => {
 
     it("reports an unexpected preparation defect without exposing its private cause", async () => {
       const harness = await createHarness({
-        beforeProjectRead: Effect.fail(new Error("secret filesystem path /private/account")),
+        beforeProjectRead: Effect.fail(
+          new FixturePreparationFailure({ message: "secret filesystem path /private/account" }),
+        ),
       });
       await send(harness);
       await waitForFailure(harness);
@@ -3315,7 +3543,7 @@ describe("ProviderCommandReactor", () => {
         activeTurnId: null,
         lastError: "Cafe Code could not prepare this turn. No message was sent to the provider.",
       });
-      expect(JSON.stringify(thread?.activities)).not.toContain("/private/account");
+      expect(encodeJsonString(thread?.activities)).not.toContain("/private/account");
       expect(harness.startSession).not.toHaveBeenCalled();
       expect(harness.sendTurn).not.toHaveBeenCalled();
     });
@@ -3335,7 +3563,7 @@ describe("ProviderCommandReactor", () => {
         lastError:
           "Cafe Code could not start this turn. Check the provider connection before trying again.",
       });
-      expect(JSON.stringify(thread?.activities)).not.toContain("/secret/account");
+      expect(encodeJsonString(thread?.activities)).not.toContain("/secret/account");
       expect(harness.startSession).toHaveBeenCalledTimes(1);
       expect(harness.sendTurn).not.toHaveBeenCalled();
     });
@@ -3348,7 +3576,11 @@ describe("ProviderCommandReactor", () => {
         const harness = await createHarness({
           beforeProjectRead: Deferred.succeed(entered, undefined).pipe(
             Effect.andThen(Deferred.await(release)),
-            Effect.andThen(Effect.fail(new Error("delayed preparation failure"))),
+            Effect.andThen(
+              Effect.fail(
+                new FixturePreparationFailure({ message: "delayed preparation failure" }),
+              ),
+            ),
           ),
         });
         await send(harness);
@@ -3391,7 +3623,9 @@ describe("ProviderCommandReactor", () => {
       const entered = Effect.runSync(Deferred.make<void>());
       const release = Effect.runSync(Deferred.make<void>());
       const harness = await createHarness({
-        beforeProjectRead: Effect.fail(new Error("preparation rejected")),
+        beforeProjectRead: Effect.fail(
+          new FixturePreparationFailure({ message: "preparation rejected" }),
+        ),
         beforeTurnStartFailureDispatch: Deferred.succeed(entered, undefined).pipe(
           Effect.andThen(Deferred.await(release)),
         ),
@@ -3672,9 +3906,11 @@ describe("ProviderCommandReactor", () => {
     ) {
       const at =
         observedAt ??
-        new Date(
-          Date.parse("2026-01-01T00:00:04.000Z") + harness.sendTurn.mock.calls.length * 1000,
-        ).toISOString();
+        DateTime.formatIso(
+          DateTime.makeUnsafe(
+            Date.parse("2026-01-01T00:00:04.000Z") + harness.sendTurn.mock.calls.length * 1000,
+          ),
+        );
       const owningRuntimeId =
         harness.runtimeSessions.find((session) => session.threadId === threadId)
           ?.subagentRuntimeId ?? runtimeId;
@@ -3902,9 +4138,9 @@ describe("ProviderCommandReactor", () => {
       expect(harness.startSession).not.toHaveBeenCalled();
       expect(harness.stopSession).not.toHaveBeenCalled();
       expect(harness.steerTurn).not.toHaveBeenCalled();
-      expect(JSON.stringify((await harness.readThreadDetail(threadId))?.activities)).not.toContain(
-        "private-native-root",
-      );
+      expect(
+        encodeJsonString((await harness.readThreadDetail(threadId))?.activities),
+      ).not.toContain("private-native-root");
     });
 
     it.each(["Stop", "unknown next delivery"] as const)(
@@ -4020,10 +4256,7 @@ describe("ProviderCommandReactor", () => {
               readonly payloadJson: string;
             }>`SELECT sequence, payload_json AS "payloadJson" FROM orchestration_events
               WHERE stream_id = ${threadId} AND json_extract(payload_json, '$.activity.payload.recovery') = 'codex-transient-continuation-unsubmitted'`);
-            const payload = JSON.parse(receipt!.payloadJson).activity.payload as Record<
-              string,
-              unknown
-            >;
+            const payload = decodeRecoveryActivityJson(receipt!.payloadJson).activity.payload;
             const commandId = CommandId.make(
               `server:codex-transient-resubmit:${payload.recoveryIntentSequence}:${receipt!.sequence}`,
             );
@@ -4117,7 +4350,7 @@ describe("ProviderCommandReactor", () => {
       expect(replacement.resumeCursor).toEqual({ opaque: "existing-native-context" });
       expect(replacement.runtimeMode).toBe("approval-required");
       const detail = await harness.readThreadDetail(threadId);
-      expect(JSON.stringify(detail?.activities)).not.toContain("private-native-root");
+      expect(encodeJsonString(detail?.activities)).not.toContain("private-native-root");
       expect(
         detail?.activities.some(
           (activity) =>
@@ -4182,7 +4415,7 @@ describe("ProviderCommandReactor", () => {
         harness,
         nextRoot,
         false,
-        new Date(await Effect.runPromise(clock.currentTimeMillis)).toISOString(),
+        DateTime.formatIso(DateTime.makeUnsafe(await Effect.runPromise(clock.currentTimeMillis))),
       );
       await waitForIntent(harness, 2);
       await Effect.runPromise(clock.adjust(1000));
@@ -4267,7 +4500,7 @@ describe("ProviderCommandReactor", () => {
           harness,
           TurnId.make(`continued-root-${attempt + 1}`),
           false,
-          new Date(clockNow).toISOString(),
+          DateTime.formatIso(DateTime.makeUnsafe(clockNow)),
         );
       }
       await waitForIntent(harness, 37);
@@ -4773,9 +5006,9 @@ describe("ProviderCommandReactor", () => {
           expect(ownedRoot.subagentRuntimeId).not.toBe(runtimeId);
           expect(ownedRoot.resumeCursor).toEqual({ opaque: "existing-native-context" });
           await Effect.runPromise(clock.adjust(2000));
-          const completedAt = new Date(
-            await Effect.runPromise(clock.currentTimeMillis),
-          ).toISOString();
+          const completedAt = DateTime.formatIso(
+            DateTime.makeUnsafe(await Effect.runPromise(clock.currentTimeMillis)),
+          );
           // Complete only this fixture-owned accepted root. Native completion
           // truth does not publish the cancelled running ACK or fabricate a
           // durable start for it; the later explicit canonical-message retry
@@ -5454,7 +5687,7 @@ describe("ProviderCommandReactor", () => {
         allowActiveTurnSteerFallback: false,
         input: expect.stringContaining("Continue the unfinished request"),
       });
-      expect(JSON.stringify(harness.sendTurn.mock.calls[0]?.[0])).not.toContain(originalText);
+      expect(encodeJsonString(harness.sendTurn.mock.calls[0]?.[0])).not.toContain(originalText);
       const events = await Effect.runPromise(
         harness.engine.readEvents(loss.sequence).pipe(Stream.runCollect),
       );
@@ -5569,7 +5802,7 @@ describe("ProviderCommandReactor", () => {
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "approval-required",
-          createdAt: new Date().toISOString(),
+          createdAt: DateTime.formatIso(DateTime.nowUnsafe()),
         }),
       );
       await Effect.runPromise(Deferred.succeed(release, undefined));
@@ -5612,7 +5845,7 @@ describe("ProviderCommandReactor", () => {
         throw new Error("Expected the admitted runtime recovery intent before its attempt.");
       }
       const winningOwnerId = "00000000-0000-4000-8000-000000000099";
-      const createdAt = new Date().toISOString();
+      const createdAt = DateTime.formatIso(DateTime.nowUnsafe());
       await Effect.runPromise(
         harness.engine.dispatch({
           type: "thread.activity.append",
@@ -5716,7 +5949,7 @@ describe("ProviderCommandReactor", () => {
             },
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             runtimeMode: "approval-required",
-            createdAt: new Date().toISOString(),
+            createdAt: DateTime.formatIso(DateTime.nowUnsafe()),
           }),
         );
         if (barrier === "later Stop") await interrupt(harness);
@@ -6562,7 +6795,7 @@ describe("ProviderCommandReactor", () => {
         runtimeOwnerHeartbeatAt: startedAt,
       },
       resumeCursor: { opaque: "resume-stale-codex" },
-      lastSeenAt: new Date().toISOString(),
+      lastSeenAt: DateTime.formatIso(DateTime.nowUnsafe()),
     });
 
     await harness.startReactor();
@@ -6850,10 +7083,14 @@ describe("ProviderCommandReactor", () => {
   );
 
   it("does not prepend a blank system prompt or apply the prompt to later provider turns", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ distinctNativeTurns: true });
     const now = "2026-01-01T00:00:00.000Z";
     fs.mkdirSync(path.dirname(harness.systemPromptPath), { recursive: true });
     fs.writeFileSync(harness.systemPromptPath, " \n\t\n", "utf8");
+    const firstTurn = harness.observeNextProviderTurn(
+      asMessageId("user-message-blank-system-prompt"),
+      { opening: true },
+    );
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -6877,8 +7114,11 @@ describe("ProviderCommandReactor", () => {
       input: "first message",
     });
 
-    await harness.markThreadReady();
+    await harness.markThreadReady(undefined, undefined, firstTurn);
     fs.writeFileSync(harness.systemPromptPath, "Now active", "utf8");
+    const secondTurn = harness.observeNextProviderTurn(
+      asMessageId("user-message-system-prompt-follow-up"),
+    );
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.start",
@@ -6897,6 +7137,7 @@ describe("ProviderCommandReactor", () => {
     );
 
     await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await secondTurn.waitForRunning();
     expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
       input: "second message",
     });
@@ -7216,9 +7457,9 @@ describe("ProviderCommandReactor", () => {
           message: { messageId: asMessageId(id), role: "user", text, attachments: [] },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "approval-required",
-          createdAt: new Date(
-            Date.parse("2026-01-01T00:00:03.000Z") + ++sendSequence * 1000,
-          ).toISOString(),
+          createdAt: DateTime.formatIso(
+            DateTime.makeUnsafe(Date.parse("2026-01-01T00:00:03.000Z") + ++sendSequence * 1000),
+          ),
         }),
       );
       await waitFor(async () => {
@@ -7498,7 +7739,10 @@ describe("ProviderCommandReactor", () => {
             // A newly materialized native session cannot predate the turn that
             // requested it. The general harness freezes all starts at midnight,
             // which makes the projection correctly reject this binding as stale.
-            const materialized = { ...session, updatedAt: new Date().toISOString() };
+            const materialized = {
+              ...session,
+              updatedAt: DateTime.formatIso(DateTime.nowUnsafe()),
+            };
             const index = harness.runtimeSessions.findIndex((entry) => entry.threadId === threadId);
             harness.runtimeSessions.splice(index, 1, materialized);
             return materialized;
@@ -7644,7 +7888,7 @@ describe("ProviderCommandReactor", () => {
           },
         },
       });
-      expect(JSON.stringify(rows)).not.toContain("private configuration fixture prompt");
+      expect(encodeJsonString(rows)).not.toContain("private configuration fixture prompt");
       expect(harness.sendTurn).toHaveBeenCalledTimes(2);
     });
 
@@ -8424,8 +8668,14 @@ describe("ProviderCommandReactor", () => {
   });
 
   it("preserves the active session model when in-session model switching is unsupported", async () => {
-    const harness = await createHarness({ sessionModelSwitch: "unsupported" });
+    const harness = await createHarness({
+      sessionModelSwitch: "unsupported",
+      distinctNativeTurns: true,
+    });
     const now = "2026-01-01T00:00:00.000Z";
+    const firstTurn = harness.observeNextProviderTurn(asMessageId("user-message-unsupported-1"), {
+      opening: true,
+    });
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -8445,7 +8695,8 @@ describe("ProviderCommandReactor", () => {
     );
 
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    await harness.markThreadReady();
+    await harness.markThreadReady(undefined, undefined, firstTurn);
+    const secondTurn = harness.observeNextProviderTurn(asMessageId("user-message-unsupported-2"));
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -8465,6 +8716,7 @@ describe("ProviderCommandReactor", () => {
     );
 
     await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await secondTurn.waitForRunning();
 
     expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
@@ -8857,12 +9109,16 @@ describe("ProviderCommandReactor", () => {
 
   it("restarts the provider session when the thread workspace changes", async () => {
     const harness = await createHarness({
+      distinctNativeTurns: true,
       threadModelSelection: {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-sonnet-4-6",
       },
     });
     const now = "2026-01-01T00:00:00.000Z";
+    const firstTurn = harness.observeNextProviderTurn(asMessageId("user-message-workspace-1"), {
+      opening: true,
+    });
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -8883,7 +9139,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    await harness.markThreadReady();
+    await harness.markThreadReady(undefined, undefined, firstTurn);
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
       cwd: "/tmp/provider-project",
     });
@@ -8897,6 +9153,9 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
+    const secondTurn = harness.observeNextProviderTurn(asMessageId("user-message-workspace-2"), {
+      opening: true,
+    });
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.start",
@@ -8916,6 +9175,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 2);
     await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await secondTurn.waitForRunning();
     expect(harness.stopSession.mock.calls.length).toBe(0);
     expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
@@ -8931,12 +9191,16 @@ describe("ProviderCommandReactor", () => {
 
   it("restarts claude sessions when claude effort changes", async () => {
     const harness = await createHarness({
+      distinctNativeTurns: true,
       threadModelSelection: {
         instanceId: ProviderInstanceId.make("claudeAgent"),
         model: "claude-sonnet-4-6",
       },
     });
     const now = "2026-01-01T00:00:00.000Z";
+    const firstTurn = harness.observeNextProviderTurn(asMessageId("user-message-claude-effort-1"), {
+      opening: true,
+    });
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -8962,8 +9226,14 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    await harness.markThreadReady();
+    await harness.markThreadReady(undefined, undefined, firstTurn);
 
+    const secondTurn = harness.observeNextProviderTurn(
+      asMessageId("user-message-claude-effort-2"),
+      {
+        opening: true,
+      },
+    );
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.start",
@@ -8988,6 +9258,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.startSession.mock.calls.length === 2);
     await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await secondTurn.waitForRunning();
     expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
       resumeCursor: { opaque: "resume-1" },
       modelSelection: createModelSelection(
@@ -9005,8 +9276,13 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness({
       threadModelSelection: initialSelection,
       sessionModelSwitch: "restart-resume",
+      distinctNativeTurns: true,
     });
     const now = "2026-01-01T00:00:00.000Z";
+    const firstTurn = harness.observeNextProviderTurn(
+      asMessageId("user-message-grok-restart-resume-1"),
+      { opening: true },
+    );
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -9027,11 +9303,15 @@ describe("ProviderCommandReactor", () => {
     );
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    await harness.markThreadReady();
+    await harness.markThreadReady(undefined, undefined, firstTurn);
 
     const lowerEffortSelection = createModelSelection(ProviderInstanceId.make("grok"), "grok-4.6", [
       { id: "reasoningEffort", value: "low" },
     ]);
+    const lowerEffortTurn = harness.observeNextProviderTurn(
+      asMessageId("user-message-grok-restart-resume-2"),
+      { opening: true },
+    );
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.start",
@@ -9055,12 +9335,16 @@ describe("ProviderCommandReactor", () => {
       resumeCursor: { opaque: "resume-1" },
       modelSelection: lowerEffortSelection,
     });
-    await harness.markThreadReady();
+    await harness.markThreadReady(undefined, undefined, lowerEffortTurn);
 
     const changedModelSelection = createModelSelection(
       ProviderInstanceId.make("grok"),
       "grok-4.5",
       [{ id: "reasoningEffort", value: "low" }],
+    );
+    const changedModelTurn = harness.observeNextProviderTurn(
+      asMessageId("user-message-grok-restart-resume-3"),
+      { opening: true },
     );
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -9088,7 +9372,7 @@ describe("ProviderCommandReactor", () => {
     expect(harness.sendTurn.mock.calls[2]?.[0]).toMatchObject({
       modelSelection: changedModelSelection,
     });
-    await harness.markThreadReady();
+    await harness.markThreadReady(undefined, undefined, changedModelTurn);
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -9098,6 +9382,10 @@ describe("ProviderCommandReactor", () => {
         interactionMode: "plan",
         createdAt: now,
       }),
+    );
+    const planTurn = harness.observeNextProviderTurn(
+      asMessageId("user-message-grok-restart-resume-plan"),
+      { opening: true },
     );
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -9123,7 +9411,7 @@ describe("ProviderCommandReactor", () => {
       runtimeMode: "approval-required",
     });
     await waitFor(() => harness.sendTurn.mock.calls.length === 4);
-    await harness.markThreadReady();
+    await harness.markThreadReady(undefined, undefined, planTurn);
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -9142,6 +9430,10 @@ describe("ProviderCommandReactor", () => {
         runtimeMode: "auto-accept-edits",
         createdAt: now,
       }),
+    );
+    const autoTurn = harness.observeNextProviderTurn(
+      asMessageId("user-message-grok-restart-resume-auto"),
+      { opening: true },
     );
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -9166,6 +9458,7 @@ describe("ProviderCommandReactor", () => {
       interactionMode: "auto",
       runtimeMode: "auto-accept-edits",
     });
+    await autoTurn.waitForRunning();
   });
 
   it("starts a fresh provider session without resume state when a thread switches drivers", async () => {
@@ -10051,6 +10344,17 @@ describe("ProviderCommandReactor", () => {
         subagentRuntimeId,
         activeTurnId,
       };
+      const accepted = Effect.runSync(
+        Deferred.make<Parameters<ProviderServiceShape["steerTurn"]>[0]>(),
+      );
+      if (change === "unchanged") {
+        const originalSteer = harness.steerTurn.getMockImplementation()!;
+        // The reactor forks delivery after admitted preparation. Its worker
+        // drain is not completion of this exact provider effect.
+        harness.steerTurn.mockImplementationOnce((input) =>
+          originalSteer(input).pipe(Effect.tap(() => Deferred.succeed(accepted, input))),
+        );
+      }
       await Effect.runPromise(
         harness.engine.dispatch({
           type: "thread.turn.steer",
@@ -10091,6 +10395,13 @@ describe("ProviderCommandReactor", () => {
       await Effect.runPromise(Deferred.succeed(releasePreparation, undefined));
       await harness.drain();
       if (change === "unchanged") {
+        expect(await harness.awaitOwnedObserver(Deferred.await(accepted))).toMatchObject({
+          threadId,
+          messageId: asMessageId("priority-message"),
+          deliveryPriority,
+          expectedPrioritySession,
+          expectedTurnId: activeTurnId,
+        });
         expect(harness.steerTurn).toHaveBeenCalledTimes(1);
         expect(harness.steerTurn.mock.calls[0]?.[0]).toMatchObject({
           deliveryPriority,
@@ -11140,6 +11451,7 @@ describe("ProviderCommandReactor", () => {
     const threadId = ThreadId.make("thread-1");
     const staleTurnId = asTurnId("turn-stale");
     const messageId = asMessageId("user-message-stale-steer");
+    const nextTurn = harness.observeNextProviderTurn(messageId);
     harness.steerTurn.mockImplementationOnce(() =>
       Effect.fail(
         new ProviderAdapterRequestError({
@@ -11186,6 +11498,7 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.steerTurn.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await nextTurn.waitForRunning();
 
     expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
       threadId,
@@ -11218,6 +11531,18 @@ describe("ProviderCommandReactor", () => {
         updatedThread.latestTurn.state === "running"
       );
     });
+    // Running projection and the message-bound delivery receipt are separate
+    // durable writes. Observe this exact receipt before asserting its fields;
+    // neither the provider mock call nor the running marker completes it.
+    await waitFor(
+      async () =>
+        (await harness.readThreadDetail(threadId))?.activities.some(
+          (activity) =>
+            activity.kind === "provider.turn.steer.delivered" &&
+            (activity.payload as Readonly<Record<string, unknown>> | undefined)?.messageId ===
+              messageId,
+        ) === true,
+    );
     const deliveredThread = await harness.readThreadDetail(threadId);
     expect(
       deliveredThread?.activities.find(
@@ -11804,6 +12129,10 @@ describe("ProviderCommandReactor", () => {
         }),
       );
 
+      const nextTurn = harness.observeNextProviderTurn(
+        asMessageId(`user-message-${scenario.status}-steer`),
+        { threadId: scenario.threadId },
+      );
       await Effect.runPromise(
         harness.engine.dispatch({
           type: "thread.turn.steer",
@@ -11820,6 +12149,7 @@ describe("ProviderCommandReactor", () => {
       );
 
       await waitFor(() => harness.sendTurn.mock.calls.length === index + 1);
+      await nextTurn.waitForRunning();
       expect(harness.sendTurn.mock.calls[index]?.[0], scenario.name).toMatchObject({
         threadId: scenario.threadId,
         input: scenario.input,
@@ -12015,7 +12345,7 @@ describe("ProviderCommandReactor", () => {
       retryAfter: "active-turn",
       codexNonSteerableTurnKind: "review",
     });
-    expect(JSON.stringify(failure?.payload)).toContain("review active turn");
+    expect(encodeJsonString(failure?.payload)).toContain("review active turn");
   });
 
   it("requeues a rejected Grok interjection instead of exposing the extension error", async () => {
@@ -12102,7 +12432,7 @@ describe("ProviderCommandReactor", () => {
         retryAfter: "active-turn",
       },
     });
-    expect(JSON.stringify(queued?.payload)).not.toContain("x.ai/interject");
+    expect(encodeJsonString(queued?.payload)).not.toContain("x.ai/interject");
   });
 
   for (const wrapped of [false, true])
@@ -12202,7 +12532,7 @@ describe("ProviderCommandReactor", () => {
         axiomWebEnabled: true,
         axiomMcpRevision: 7,
       });
-      expect(JSON.stringify(queued?.payload)).not.toContain("_axiom/turn/steer");
+      expect(encodeJsonString(queued?.payload)).not.toContain("_axiom/turn/steer");
     });
 
   it("does not route steer requests to providers without live steering support", async () => {

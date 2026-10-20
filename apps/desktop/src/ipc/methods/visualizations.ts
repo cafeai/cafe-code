@@ -1,3 +1,4 @@
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Electron from "electron";
@@ -38,15 +39,28 @@ function owner(event: DesktopIpcInvokeEvent): Electron.BrowserWindow {
 }
 // Schema issues may retain the rejected bearer ticket. Replace the complete
 // failure before it leaves this method, without formatting or logging its cause.
-function privateMethod<E, R>(method: DesktopIpcMethod<E, R>): DesktopIpcMethod<Error, R> {
+class VisualizationRequestRefusedError extends Data.TaggedError(
+  "VisualizationRequestRefusedError",
+)<{}> {
+  constructor() {
+    super();
+    this.name = "Error";
+  }
+
+  override get message() {
+    return "Visualization request was refused.";
+  }
+}
+
+function privateMethod<E, R>(
+  method: DesktopIpcMethod<E, R>,
+): DesktopIpcMethod<VisualizationRequestRefusedError, R> {
   return {
     ...method,
     handler: (raw, event) =>
       method
         .handler(raw, event)
-        .pipe(
-          Effect.catchCause(() => Effect.fail(new Error("Visualization request was refused."))),
-        ),
+        .pipe(Effect.catchCause(() => Effect.fail(new VisualizationRequestRefusedError()))),
   };
 }
 export const getVisualizationHostCapabilities = privateMethod(

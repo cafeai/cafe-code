@@ -7,7 +7,11 @@
  * Source transcripts are never overwritten or deleted by a rewind.
  */
 import { createHash } from "node:crypto";
+// Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { constants } from "node:fs";
+// Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { lstat, open } from "node:fs/promises";
 import type { SessionStoreEntry } from "@anthropic-ai/claude-agent-sdk";
 

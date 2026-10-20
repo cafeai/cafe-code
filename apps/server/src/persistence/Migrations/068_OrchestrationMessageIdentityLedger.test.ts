@@ -1,14 +1,24 @@
 import { MessageId, ThreadId } from "@cafecode/contracts";
+import * as Schema from "effect/Schema";
 import { assert, it } from "@effect/vitest";
+// SQLite fixture retains exact child IPC/exit ownership and bounded native retirement.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { fork, type ChildProcess } from "node:child_process";
+// SQLite fixture retains actual native descriptors, file identity and namespace cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtempSync } from "node:fs";
+// SQLite fixture retains actual native descriptors, file identity and namespace cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// SQLite fixture paths retain actual host drive and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import type * as Statement from "effect/unstable/sql/Statement";
 import { expect, it as vitestIt } from "vitest";
 
 import {
@@ -19,6 +29,10 @@ import { purgeHardDeletedThreadPersistence } from "../../orchestration/threadHar
 import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "../NodeSqliteClient.ts";
 import * as TestSqliteClient from "../TestSqliteClient.ts";
+
+// Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
+// this codec does not replace production admission or grant received-data authority.
+const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const layer = it.layer(Layer.mergeAll(TestSqliteClient.layerMemory()));
 
@@ -105,6 +119,8 @@ function observeChildTermination(child: ChildProcess): ChildTermination {
 function waitForPromiseWithin(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     let settled = false;
+    // Native SQLite peer deadline/release retains its actual wall clock and exact child cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -163,6 +179,8 @@ async function stopSqliteWriterFixture(
 
 function readSqliteWriterFixtureReply(child: ChildProcess, phase: string): Promise<string> {
   return new Promise<string>((resolve, reject) => {
+    // Native SQLite peer deadline/release retains its actual wall clock and exact child cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error(`Timed out waiting for SQLite writer fixture during ${phase}.`));
@@ -215,6 +233,8 @@ async function removeTemporaryDirectory(directory: string): Promise<void> {
       // Windows can report child exit before SQLite releases the final WAL or
       // shared-memory handle. Match the bounded retry policy used by native
       // artifact cleanup instead of making this process-backed test flaky.
+      // Native SQLite peer deadline/release retains its actual wall clock and exact child cleanup.
+      // @effect-diagnostics-next-line globalTimers:off
       await new Promise((resolve) => setTimeout(resolve, WINDOWS_CLEANUP_RETRY_DELAY_MS));
     }
   }
@@ -259,7 +279,7 @@ layer("068_OrchestrationMessageIdentityLedger", (it) => {
           NULL,
           NULL,
           'client',
-          ${JSON.stringify({
+          ${encodeFixtureJson({
             threadId,
             messageId: "message-legacy",
             role: "user",
@@ -334,7 +354,7 @@ layer("068_OrchestrationMessageIdentityLedger", (it) => {
           NULL,
           NULL,
           'client',
-          ${JSON.stringify({
+          ${encodeFixtureJson({
             threadId,
             messageId: "message-new",
             role: "user",
@@ -374,7 +394,7 @@ layer("068_OrchestrationMessageIdentityLedger", (it) => {
           NULL,
           NULL,
           'server',
-          ${JSON.stringify({
+          ${encodeFixtureJson({
             threadId,
             messageId: "message-new",
             role: "user",
@@ -638,7 +658,7 @@ async function runHydrationContentionScenario(
               NULL,
               NULL,
               'client',
-              ${JSON.stringify({
+              ${encodeFixtureJson({
                 threadId,
                 messageId,
                 role: "user",
@@ -691,7 +711,13 @@ async function runHydrationContentionScenario(
             let terminalWriterReply: Promise<string> | undefined;
             const contendedSql = new Proxy(sql, {
               apply(target, thisArg, argumentList) {
-                const statement = Reflect.apply(target, thisArg, argumentList);
+                // Reflect invokes the exact real SQL client's template call.
+                // Retain its actual SqlError channel and service-free Statement contract.
+                const statement = Reflect.apply(
+                  target,
+                  thisArg,
+                  argumentList,
+                ) as Statement.Statement<unknown>;
                 const [segments] = argumentList;
                 let waitForReleasedWriter = false;
                 const isIdentityWrite =
@@ -735,7 +761,7 @@ async function runHydrationContentionScenario(
                     return Effect.promise(async () => {
                       assert.ok(terminalWriterReply);
                       assert.equal(await terminalWriterReply, "committed");
-                    }).pipe(Effect.andThen(statement as Effect.Effect<unknown, unknown, unknown>));
+                    }).pipe(Effect.andThen(statement));
                   }
                   return statement;
                 }
@@ -788,6 +814,8 @@ async function runHydrationContentionScenario(
                     // the parent's transaction: a preceding SELECT would pin
                     // a stale snapshot and still fail its read-to-write upgrade.
                     await new Promise((resolve) =>
+                      // Native SQLite peer deadline/release retains its actual wall clock and exact child cleanup.
+                      // @effect-diagnostics-next-line globalTimers:off
                       setTimeout(resolve, SQLITE_WRITER_ORDERING_RELEASE_DELAY_MS),
                     );
                     lockOwner.send({ type: "release-write" });
@@ -808,9 +836,7 @@ async function runHydrationContentionScenario(
                         Effect.andThen(synchronizeWriter),
                       )
                     : synchronizeWriter;
-                return synchronizedWrite.pipe(
-                  Effect.andThen(statement as Effect.Effect<unknown, unknown, unknown>),
-                );
+                return synchronizedWrite.pipe(Effect.andThen(statement));
               },
             }) as unknown as SqlClient.SqlClient;
 

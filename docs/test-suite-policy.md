@@ -39,6 +39,8 @@ Local Node tests default to two independent workspaces with at most two Vitest
 workers each; `--test-concurrency=1|2|3` changes only that workspace admission.
 Server file execution, fork isolation, native browser ordering and build limits
 remain unchanged. Typechecking has a separate bounded local option.
+Typechecking defaults to three workspace compilers, as does the canonical CI
+command; its per-compiler heap ceiling is not an aggregate memory guarantee.
 See [local verification](test-performance.md) for commands, input-cache bounds
 and timing interpretation. Existing CI commands below retain their native-host
 selection and preparation; local qualification is not release delivery.
@@ -75,15 +77,18 @@ assertion values, environment or arbitrary test metadata. Vitest 5.0.2's browser
 `prepareDuration` includes reused page uptime and must not be used for phase
 attribution. Wall-clock, collection and individual test durations remain useful.
 
-Feature SQL fixtures use `SqlitePersistenceTest`: build an immutable snapshot
-from the current real migrations once per isolated module, then initialize a
-fresh scoped in-memory database for every runtime. Copy tables, data, indexes,
+Feature SQL fixtures use `SqlitePersistenceTest`: build an immutable bounded
+binary seed from the current real migrations once per isolated module, then
+deserialize a separately writable scoped in-memory database for every runtime,
+before any statements/client caches exist. Restore connection-local foreign-key
+and busy-timeout policy; refuse active source transactions, unsupported virtual
+tables and seeds larger than 16 MiB. Copy tables, data, indexes,
 triggers, views, generated columns, sequences and schema metadata. Never share
 mutable connections, cache a snapshot on disk or substitute this fixture in
 migration tests. Recorded seed timestamps belong to the migrated snapshot;
 tests of time boundaries seed their own dates. The fidelity fixture compares
-the current real schema/seed values and exercises independent writes, rollback,
-constraints, triggers and native ownership.
+the current real schema/seed values and exercises independent writes, hidden
+rowids, rollback, deferred constraints, triggers and exact native ownership.
 
 Exhaustive source-only Mermaid refusal combinations execute the exact inert
 receiver in fresh Node VM fixtures and assert zero parser/render calls. Native

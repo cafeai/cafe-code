@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -10,6 +11,9 @@ import * as TestClock from "effect/testing/TestClock";
 import { Rpc, RpcClient, RpcGroup, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
 import { describe, expect, it } from "vitest";
+
+const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 const streamRpc = Rpc.make("stream", {
   payload: Schema.Struct({}),
   success: Schema.String,
@@ -47,7 +51,7 @@ function eventually(assertion: () => void): Effect.Effect<void> {
 
 function requests(generation: SocketGeneration) {
   return generation.sent.flatMap((encoded) => {
-    const message = JSON.parse(encoded) as { _tag: string; id: string; tag: string };
+    const message = decodeJson(encoded) as { _tag: string; id: string; tag: string };
     return message._tag === "Request" ? [message] : [];
   });
 }
@@ -65,7 +69,7 @@ function verifyFreshClients(
     const freshRequests = requests(generation).slice(countBefore);
     yield* Queue.offer(
       generation.inbox,
-      JSON.stringify({
+      encodeJson({
         _tag: "Exit",
         requestId: retiredId,
         exit: { _tag: "Success", value: "stale" },
@@ -73,14 +77,14 @@ function verifyFreshClients(
     );
     yield* Queue.offer(
       generation.inbox,
-      JSON.stringify({ _tag: "Chunk", requestId: retiredId, values: ["stale"] }),
+      encodeJson({ _tag: "Chunk", requestId: retiredId, values: ["stale"] }),
     );
     // The peer delivers stale frames before these valid replies. Exact final
     // results prove neither client accepted them without counting event-loop turns.
     for (const [index, request] of freshRequests.entries()) {
       yield* Queue.offer(
         generation.inbox,
-        JSON.stringify({
+        encodeJson({
           _tag: "Exit",
           requestId: request.id,
           exit: { _tag: "Success", value: `client-${index}` },
@@ -91,8 +95,8 @@ function verifyFreshClients(
     expect(yield* Fiber.join(second)).toEqual(Exit.succeed("client-1"));
   });
 }
-async function withClientFixture(
-  run: (fixture: ClientFixture) => Effect.Effect<void, unknown, Scope.Scope>,
+async function withClientFixture<E>(
+  run: (fixture: ClientFixture) => Effect.Effect<void, E, Scope.Scope>,
 ): Promise<void> {
   const generations: SocketGeneration[] = [];
   const socket = Socket.make({
@@ -134,8 +138,7 @@ async function withClientFixture(
       }),
     ).pipe(
       Effect.provideService(Socket.Socket, socket),
-      Effect.provide(RpcSerialization.layerJson),
-      Effect.provide(TestClock.layer()),
+      Effect.provide(RpcSerialization.layerJson.pipe(Layer.provideMerge(TestClock.layer()))),
     ),
   );
 }
@@ -189,11 +192,11 @@ describe("typed RPC feature behavior", () => {
         const id = requests(generations[0]!)[0]!.id;
         yield* Queue.offer(
           generations[0]!.inbox,
-          JSON.stringify({ _tag: "Chunk", requestId: id, values: ["first", "second"] }),
+          encodeJson({ _tag: "Chunk", requestId: id, values: ["first", "second"] }),
         );
         yield* Queue.offer(
           generations[0]!.inbox,
-          JSON.stringify({
+          encodeJson({
             _tag: "Exit",
             requestId: id,
             exit: Schema.encodeUnknownSync(Schema.toCodecJson(Rpc.exitSchema(streamRpc)))(

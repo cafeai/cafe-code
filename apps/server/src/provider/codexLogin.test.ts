@@ -1,3 +1,5 @@
+import * as ProviderJsonSchema from "effect/Schema";
+import * as Data from "effect/Data";
 import { describe, expect, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -13,6 +15,16 @@ import {
   codexLoginUrl,
   makeCodexLogin,
 } from "./codexLogin.ts";
+
+const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
+  ProviderJsonSchema.UnknownFromJsonString,
+);
+
+class LoginFixtureFailure extends Data.TaggedError("LoginFixtureFailure")<{
+  readonly message: string;
+}> {
+  override name = "Error";
+}
 
 const authUrl = "https://auth.openai.com/oauth/authorize?state=private-fixture-state";
 const loginId = "fixture-owned-login";
@@ -64,7 +76,8 @@ const fixture = Effect.fn("codexLogin.test.fixture")(function* (
         if (method === "account/login/start") {
           yield* Deferred.succeed(startEntered, undefined);
           if (input.holdStart) yield* Deferred.await(startGate);
-          if (input.startFailure) return yield* Effect.fail(new Error(authUrl));
+          if (input.startFailure)
+            return yield* Effect.fail(new LoginFixtureFailure({ message: authUrl }));
           if (input.earlyCompletion) yield* complete(loginId);
           return { type: "chatgpt", loginId, authUrl: input.url ?? authUrl };
         }
@@ -86,7 +99,8 @@ const fixture = Effect.fn("codexLogin.test.fixture")(function* (
     openUrl: (url) =>
       Effect.gen(function* () {
         opened.push(url);
-        if (input.browserFailure) return yield* Effect.fail(new Error(authUrl));
+        if (input.browserFailure)
+          return yield* Effect.fail(new LoginFixtureFailure({ message: authUrl }));
       }),
   });
   return {
@@ -224,7 +238,7 @@ describe("Codex browser sign-in", () => {
         });
         const error = yield* f.login().pipe(Effect.flip);
         expect(error.issue).toBe(CODEX_LOGIN_ERRORS[scenario]);
-        expect(JSON.stringify(error)).not.toContain("private");
+        expect(encodeProviderJsonString(error)).not.toContain("private");
         yield* Deferred.await(f.released);
         expect(f.state.refreshes).toBe(0);
         expect(f.calls.filter((call) => call.method === "account/login/cancel")).toEqual(

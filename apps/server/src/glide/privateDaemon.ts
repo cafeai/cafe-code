@@ -1,3 +1,5 @@
+// Native bridge keeps exact socket/response identity, stream lifetime and resource limits.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -68,6 +70,8 @@ function readBody(request: IncomingMessage): Promise<unknown> {
         fail();
       }
     };
+    // Native callback deadline keeps exact socket/process lifetime, cancellation and ref/unref behavior.
+    // @effect-diagnostics-next-line globalTimers:off
     const timer = setTimeout(fail, 10_000);
     request.on("data", data);
     request.once("end", end);
@@ -147,6 +151,8 @@ export async function runPrivateGlideRequest(
         response.destroy();
         complete();
       };
+      // Native callback deadline keeps exact socket/process lifetime, cancellation and ref/unref behavior.
+      // @effect-diagnostics-next-line globalTimers:off
       const timer = setTimeout(retire, 10_000);
       response.once("finish", complete);
       response.once("close", complete);

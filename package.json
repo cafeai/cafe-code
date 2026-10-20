@@ -11,7 +11,7 @@
   ],
   "type": "module",
   "scripts": {
-    "prepare": "effect-language-service patch",
+    "prepare": "effect-language-service patch --force",
     "dev": "node scripts/dev-runner.ts dev",
     "dev:server": "node scripts/dev-runner.ts dev:server",
     "dev:web": "node scripts/dev-runner.ts dev:web",
@@ -25,7 +25,7 @@
     "start:mock-update-server": "node scripts/mock-update-server.ts",
     "build": "turbo run build",
     "build:desktop": "turbo run build --filter=@cafecode/desktop --filter=@cafeai/cafe-code",
-    "typecheck": "turbo run typecheck",
+    "typecheck": "turbo run typecheck --concurrency=3",
     "i18n:extract": "node scripts/internationalization.ts --extract",
     "i18n:check": "node scripts/internationalization.ts --check",
     "lint": "node scripts/internationalization.ts --check && oxlint --report-unused-disable-directives",
@@ -91,6 +91,7 @@
   },
   "resolutions": {
     "@effect/atom-react": "4.0.0-beta.59",
+    "@effect/language-service": "patch:@effect/language-service@npm%3A0.84.2#./.yarn/patches/@effect-language-service-npm-0.84.2-ast-fifo.patch",
     "@effect/platform-node": "4.0.0-beta.59",
     "@effect/platform-node-shared": "4.0.0-beta.59",
     "@effect/vitest": "patch:@effect/vitest@npm%3A4.0.0-beta.59#./.yarn/patches/effect-vitest.patch",

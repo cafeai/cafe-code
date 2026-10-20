@@ -3,6 +3,7 @@ import * as Http from "node:http";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { HttpServer, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { describe, expect, it } from "vitest";
 import { readHttpBody } from "./httpBody.ts";
@@ -35,8 +36,11 @@ async function fixture(task: (port: number) => Promise<void>) {
         );
       }),
     ).pipe(
-      Effect.provide(NodeHttpServer.layer(() => nodeServer, { host: "127.0.0.1", port: 0 })),
-      Effect.provide(NodeServices.layer),
+      Effect.provide(
+        NodeHttpServer.layer(() => nodeServer, { host: "127.0.0.1", port: 0 }).pipe(
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
     ),
   );
 }
@@ -91,6 +95,8 @@ describe("native bounded body admission", () => {
           request.on("error", reject);
           for (const chunk of chunks) request.write(chunk);
           if (delay) {
+            // Native callback deadline keeps exact socket/process lifetime, cancellation and ref/unref behavior.
+            // @effect-diagnostics-next-line globalTimers:off
             const timer = setTimeout(() => request.end(), delay);
             request.on("close", () => clearTimeout(timer));
           } else request.end();

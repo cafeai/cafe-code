@@ -4,6 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -118,7 +119,7 @@ function writeMockGrokInferenceUsage(requestedSessionId: string, promptId: strin
     src: "shell",
     pid: process.pid,
     sid: requestedSessionId,
-    ts: new Date().toISOString(),
+    ts: DateTime.formatIso(DateTime.nowUnsafe()),
   };
   const records = [
     {
@@ -165,7 +166,7 @@ function applyMockGoalCommand(requestedSessionId: string, command: string): void
   const existing = NodeFS.existsSync(statePath)
     ? (JSON.parse(NodeFS.readFileSync(statePath, "utf8")) as Record<string, unknown>)
     : undefined;
-  const now = new Date().toISOString();
+  const now = DateTime.formatIso(DateTime.nowUnsafe());
   const next =
     command === "/goal pause" || command === "/goal resume"
       ? {

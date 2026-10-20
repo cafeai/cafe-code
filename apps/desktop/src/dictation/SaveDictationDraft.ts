@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
+// Native filesystem boundary: preserve descriptor, no-follow and bigint identity operations.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { constants } from "node:fs";
+// Native filesystem boundary: preserve descriptor, no-follow and bigint identity operations.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { lstat, open, rename, unlink } from "node:fs/promises";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { basename, dirname, join } from "node:path";
 
 export type SaveDictationDraftResult = "saved" | "cancelled" | "failed";

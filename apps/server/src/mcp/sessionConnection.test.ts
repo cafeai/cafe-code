@@ -16,6 +16,10 @@ import { ServerSecretStoreLive } from "../auth/Layers/ServerSecretStore.ts";
 import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { makeManagementMcpSession } from "./sessionConnection.ts";
 import { readBridgeConnection } from "./localBridge.ts";
+import * as Schema from "effect/Schema";
+
+const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
 const configLayer = ServerConfig.layerTest(process.cwd(), { prefix: "cafe-session-mcp-test-" });
 const sessionsLayer = SessionCredentialServiceLive.pipe(
   Layer.provide(SqlitePersistenceTest),
@@ -55,7 +59,7 @@ it.layer(NodeServices.layer)("launch-time management connection", (it) => {
         const b = yield* Effect.promise(() => readBridgeConnection(second.launch.args[1]!));
         expect(first.name).not.toBe(second.name);
         expect(a.token).not.toBe(b.token);
-        expect(JSON.stringify(first.launch)).not.toContain(a.token);
+        expect(encodeJsonText(first.launch)).not.toContain(a.token);
         expect(first.launch.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
         expect((yield* f.credentials.verify(a.token)).role).toBe("owner");
         yield* first.dispose;
@@ -65,7 +69,7 @@ it.layer(NodeServices.layer)("launch-time management connection", (it) => {
         expect(yield* f.fs.exists(first.launch.args[1]!)).toBe(false);
         yield* second.dispose;
         expect((yield* Effect.exit(f.credentials.verify(b.token)))._tag).toBe("Failure");
-      }).pipe(Effect.provide(sessionsLayer), Effect.provide(configLayer)),
+      }).pipe(Effect.provide(sessionsLayer.pipe(Layer.provideMerge(configLayer)))),
   );
   it.effect("renews a multi-day connection without overriding owner revocation", () =>
     Effect.gen(function* () {
@@ -91,7 +95,7 @@ it.layer(NodeServices.layer)("launch-time management connection", (it) => {
       expect((yield* Effect.exit(f.credentials.verify(next.token)))._tag).toBe("Failure");
       yield* binding.dispose;
       expect((yield* Effect.exit(f.credentials.verify(first.token)))._tag).toBe("Failure");
-    }).pipe(Effect.provide(sessionsLayer), Effect.provide(configLayer)),
+    }).pipe(Effect.provide(sessionsLayer.pipe(Layer.provideMerge(configLayer)))),
   );
   it.effect(
     "retires a failed launch credential and preserves replaced private files during cleanup",
@@ -116,7 +120,7 @@ it.layer(NodeServices.layer)("launch-time management connection", (it) => {
         expect((yield* Effect.exit(f.credentials.verify(original.token)))._tag).toBe("Failure");
         expect(yield* f.fs.readFileString(binding.launch.args[1]!)).toBe("replacement");
         yield* f.fs.remove(f.path.dirname(binding.launch.args[1]!), { recursive: true });
-      }).pipe(Effect.provide(sessionsLayer), Effect.provide(configLayer)),
+      }).pipe(Effect.provide(sessionsLayer.pipe(Layer.provideMerge(configLayer)))),
   );
   it.effect("retires every old installer credential without touching ordinary owner sessions", () =>
     Effect.gen(function* () {
@@ -144,9 +148,12 @@ it.layer(NodeServices.layer)("launch-time management connection", (it) => {
       expect((yield* Effect.exit(f.credentials.verify(oldB.token)))._tag).toBe("Failure");
       expect((yield* f.credentials.verify(owner.token)).role).toBe("owner");
     }).pipe(
-      Effect.provide(ServerSettingsService.layerTest()),
-      Effect.provide(sessionsLayer),
-      Effect.provide(configLayer),
+      Effect.provide(
+        ServerSettingsService.layerTest().pipe(
+          Layer.provideMerge(sessionsLayer),
+          Layer.provideMerge(configLayer),
+        ),
+      ),
     ),
   );
 });

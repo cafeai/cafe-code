@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { rmSync } from "node:fs";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dirname, "..");

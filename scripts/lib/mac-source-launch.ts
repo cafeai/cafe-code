@@ -1,3 +1,5 @@
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { isAbsolute, join, resolve } from "node:path";
 
 /** Match desktop lexical home expansion before LaunchServices loses cwd. */

@@ -10,7 +10,7 @@ import {
   readWorkLogOperationId,
   readWorkLogOperationIdentity,
 } from "@cafecode/shared/providerWorkLog";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { deriveWorkLogEntries, type WorkLogEntry } from "../../session-logic";
 import { activityCursor, compareActivityCursors } from "../../activityOrder";
 export { activityCursor, compareActivityCursors } from "../../activityOrder";

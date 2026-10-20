@@ -62,8 +62,8 @@ const fixture = Effect.fn("accountLogin.fixture")(function* (driver = "axiom") {
     refreshInterval: "5 minutes",
     probePolicy: { initialRefresh: "external" },
   });
-  const login: NonNullable<ProviderInstance["adapter"]["login"]> = (
-    hasSessions = Effect.succeed(false),
+  const login: NonNullable<ProviderInstance["adapter"]["login"]> = <SessionError>(
+    hasSessions: Effect.Effect<boolean, SessionError> = Effect.succeed(false),
   ) =>
     Effect.gen(function* () {
       if (

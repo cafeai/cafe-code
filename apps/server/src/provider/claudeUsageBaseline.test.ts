@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
+// Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+// Native provider path boundary: retain host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import { readClaudeUsageBaseline } from "./claudeUsageBaseline.ts";
 

@@ -1,5 +1,11 @@
+// Private native filesystem boundary retains no-follow descriptors and bigint namespace identity.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { constants } from "node:fs";
+// Private native filesystem boundary retains no-follow descriptors and bigint namespace identity.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
+// Native namespace boundary retains host drive, separator and canonical path semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 

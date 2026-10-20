@@ -1,3 +1,5 @@
+// Native updater probe retains its exclusive Promise result-file write and exact cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { writeFile } from "node:fs/promises";
 
 import { autoUpdater } from "electron-updater";
@@ -143,6 +145,8 @@ export async function collectDesktopUpdateDetectionProbeResult(
 
 function withTimeout<A>(promise: Promise<A>, timeoutMs: number): Promise<A> {
   return new Promise<A>((resolve, reject) => {
+    // Native lifecycle timer: retain callback ownership, cancellation and ref/unref semantics.
+    // @effect-diagnostics-next-line globalTimers:off
     const timeout = setTimeout(() => reject(new Error("update check timed out")), timeoutMs);
     promise.then(
       (value) => {
@@ -222,6 +226,8 @@ export async function runDesktopUpdateDetectionProbeAndExit(): Promise<void> {
     }
   }
 
+  // Native probe output is a fixed stdout protocol; Effect logging would change its wire format.
+  // @effect-diagnostics-next-line globalConsole:off
   console.info(`${DESKTOP_UPDATE_DETECTION_OUTPUT_PREFIX}${JSON.stringify(result)}`);
   Electron.app.exit(result.ok ? 0 : 1);
 }

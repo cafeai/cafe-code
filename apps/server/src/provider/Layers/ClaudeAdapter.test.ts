@@ -81,6 +81,8 @@ import {
   resolveClaudeModelSessionOptions,
   type ClaudeAdapterLiveOptions,
 } from "./ClaudeAdapter.ts";
+
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
@@ -763,8 +765,8 @@ describe("ClaudeAdapterLive", () => {
             throw new Error("Expected Claude's native preset append");
           assert.equal(prompt.preset, "claude_code");
           assert.include(prompt.append!, "<app-context>");
-          assert.include(prompt.append!, JSON.stringify(directory));
-          assert.include(prompt.append!, JSON.stringify(path.join(directory, "charts")));
+          assert.include(prompt.append!, encodeProviderJsonString(directory));
+          assert.include(prompt.append!, encodeProviderJsonString(path.join(directory, "charts")));
           assert.include(prompt.append!, "authenticated remote viewers");
           assert.include(
             prompt.append!,
@@ -837,7 +839,7 @@ describe("ClaudeAdapterLive", () => {
         assert.equal(failure._tag, "ProviderAdapterProcessError");
         if (failure._tag === "ProviderAdapterProcessError")
           assert.equal(failure.detail, "Could not read custom instructions.");
-        assert.notInclude(JSON.stringify(failure), directory);
+        assert.notInclude(encodeProviderJsonString(failure), directory);
         assert.equal(harness.createInputs.length, 1);
         assert.equal(harness.query.closeCalls, 0);
         assert.equal((yield* adapter.listSessions()).length, 1);
@@ -961,10 +963,10 @@ describe("ClaudeAdapterLive", () => {
             events.some((event) => event.type === "turn.started"),
             false,
           );
-          assert.equal(JSON.stringify(nativeEvents).includes(secret), false);
-          assert.equal(JSON.stringify(events).includes(secret), false);
-          assert.equal(JSON.stringify(nativeEvents).includes("usage_report"), false);
-          assert.equal(JSON.stringify(events).includes("claude-session"), false);
+          assert.equal(encodeProviderJsonString(nativeEvents).includes(secret), false);
+          assert.equal(encodeProviderJsonString(events).includes(secret), false);
+          assert.equal(encodeProviderJsonString(nativeEvents).includes("usage_report"), false);
+          assert.equal(encodeProviderJsonString(events).includes("claude-session"), false);
           assert.equal(harness.createInputs.length, 1);
           assert.lengthOf(harness.query.interruptCalls, 0);
           assert.equal(harness.query.closeCalls, 0);
@@ -1112,8 +1114,8 @@ describe("ClaudeAdapterLive", () => {
             events.filter((event) => event.type === "thread.usage-accounting.updated"),
             0,
           );
-          assert.equal(JSON.stringify(events).includes("usage_report"), false);
-          assert.equal(JSON.stringify(events).includes("12345"), false);
+          assert.equal(encodeProviderJsonString(events).includes("usage_report"), false);
+          assert.equal(encodeProviderJsonString(events).includes("12345"), false);
           assert.deepEqual((yield* adapter.listSessions())[0]?.quotaReport?.meters, []);
         }).pipe(Effect.scoped, Effect.provide(harness.layer));
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
@@ -2387,7 +2389,10 @@ describe("ClaudeAdapterLive", () => {
                   runtimeMode === "full-access" ? true : undefined,
                 );
                 if (!enabled)
-                  assert.equal(JSON.stringify(options).includes("preview_visualization"), false);
+                  assert.equal(
+                    encodeProviderJsonString(options).includes("preview_visualization"),
+                    false,
+                  );
                 assert.deepEqual(lifecycle, [
                   "scheduling-active",
                   ...(runtimeMode === "full-access" ? ["visualization-bound"] : []),
@@ -2526,7 +2531,7 @@ describe("ClaudeAdapterLive", () => {
         })
         .pipe(Effect.flip);
       assert.equal(failure._tag, "ProviderAdapterProcessError");
-      assert.notInclude(JSON.stringify(failure), "private activation diagnostic");
+      assert.notInclude(encodeProviderJsonString(failure), "private activation diagnostic");
       assert.equal(harness.createInputs.length, 0);
       assert.isTrue(disposed);
     }).pipe(Effect.provide(harness.layer));
@@ -3459,7 +3464,10 @@ describe("ClaudeAdapterLive", () => {
             "remoteErrorTag" in denied.failure ? denied.failure.remoteErrorTag : null,
             "subagent-concurrency-retirement-uncertain",
           );
-          assert.equal(JSON.stringify(denied.failure).includes("private synthetic"), false);
+          assert.equal(
+            encodeProviderJsonString(denied.failure).includes("private synthetic"),
+            false,
+          );
         }
         const retry = yield* adapter
           .startSession({
@@ -4401,7 +4409,7 @@ describe("ClaudeAdapterLive", () => {
           readPromptMessages(harness.getLastCreateQueryInput(), 2),
         );
         for (const message of messages) {
-          const serialized = JSON.stringify(message.message.content);
+          const serialized = encodeProviderJsonString(message.message.content);
           assert.include(serialized, "reference.tex");
           assert.include(serialized, ".provider.tex");
           assert.notInclude(serialized, "PRIVATE_TEX_BODY_NOT_IN_INITIAL_PROMPT");
@@ -6116,25 +6124,27 @@ describe("ClaudeAdapterLive", () => {
           String(data.resourceLinks?.[0]?.description),
           "A bounded provider resource at [resource URI omitted; ref sha256:",
         );
-        const serializedRaw = JSON.stringify(toolResultUpdated.raw?.payload);
+        const serializedRaw = encodeProviderJsonString(toolResultUpdated.raw?.payload);
         assert.notInclude(serializedRaw, resourceUri);
         assert.notInclude(serializedRaw, "do-not-persist");
         assert.notInclude(serializedRaw, "provider-resource-annotation");
         assert.notInclude(serializedRaw, "src/example.ts:1:foo");
       }
 
-      const serializedRuntimeEvents = JSON.stringify(runtimeEvents);
+      const serializedRuntimeEvents = encodeProviderJsonString(runtimeEvents);
       assert.notInclude(serializedRuntimeEvents, resourceUri);
       assert.notInclude(serializedRuntimeEvents, "do-not-persist");
       assert.notInclude(serializedRuntimeEvents, "provider-resource-annotation");
       assert.include(serializedRuntimeEvents, "src/example.ts:1:foo");
 
-      const serializedThread = JSON.stringify(yield* adapter.readThread(session.threadId));
+      const serializedThread = encodeProviderJsonString(
+        yield* adapter.readThread(session.threadId),
+      );
       assert.notInclude(serializedThread, resourceUri);
       assert.notInclude(serializedThread, "do-not-persist");
       assert.include(serializedThread, "src/example.ts:1:foo");
 
-      const serializedNativeEvents = JSON.stringify(nativeEvents);
+      const serializedNativeEvents = encodeProviderJsonString(nativeEvents);
       assert.notInclude(serializedNativeEvents, resourceUri);
       assert.notInclude(serializedNativeEvents, "do-not-persist");
       assert.notInclude(serializedNativeEvents, "provider-resource-annotation");
@@ -6254,19 +6264,21 @@ describe("ClaudeAdapterLive", () => {
           });
         }
 
-        const serializedRuntimeEvents = JSON.stringify(runtimeEvents);
+        const serializedRuntimeEvents = encodeProviderJsonString(runtimeEvents);
         assert.notInclude(serializedRuntimeEvents, overflowResourceUri);
         assert.notInclude(serializedRuntimeEvents, "entry-101-must-not-persist");
         assert.notInclude(serializedRuntimeEvents, "overflow-annotation-must-not-persist");
         assert.notInclude(serializedRuntimeEvents, "Useful-but-untrusted provider output");
 
-        const serializedThread = JSON.stringify(yield* adapter.readThread(session.threadId));
+        const serializedThread = encodeProviderJsonString(
+          yield* adapter.readThread(session.threadId),
+        );
         assert.notInclude(serializedThread, overflowResourceUri);
         assert.notInclude(serializedThread, "entry-101-must-not-persist");
         assert.notInclude(serializedThread, "Useful-but-untrusted provider output");
         assert.include(serializedThread, "resource-link metadata exceeded safety limit");
 
-        const serializedNativeEvents = JSON.stringify(nativeEvents);
+        const serializedNativeEvents = encodeProviderJsonString(nativeEvents);
         assert.notInclude(serializedNativeEvents, overflowResourceUri);
         assert.notInclude(serializedNativeEvents, "entry-101-must-not-persist");
         assert.notInclude(serializedNativeEvents, "overflow-annotation-must-not-persist");
@@ -7088,7 +7100,7 @@ describe("ClaudeAdapterLive", () => {
         assert.deepEqual(events[4]?.payload.workflow, events[1]?.payload.workflow);
         assert.deepEqual(events[5]?.payload.workflow, events[1]?.payload.workflow);
         assert.notInclude(
-          JSON.stringify(events.map((event) => event.payload.workflow)),
+          encodeProviderJsonString(events.map((event) => event.payload.workflow)),
           "Ambient must not overwrite",
         );
       }).pipe(
@@ -7157,8 +7169,8 @@ describe("ClaudeAdapterLive", () => {
           events[4]?.payload.individualTaskControl?.capability.taskGeneration,
           events[0]?.payload.individualTaskControl?.capability.taskGeneration,
         );
-        assert.notInclude(JSON.stringify(events), "Late terminal overwrite");
-        assert.notInclude(JSON.stringify(events), "Old incarnation overwrite");
+        assert.notInclude(encodeProviderJsonString(events), "Late terminal overwrite");
+        assert.notInclude(encodeProviderJsonString(events), "Old incarnation overwrite");
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),
@@ -7307,7 +7319,7 @@ describe("ClaudeAdapterLive", () => {
         { index: 2, phaseIndex: 1, status: "failed" },
       ]);
       for (const event of events) {
-        assert.notInclude(JSON.stringify(event), secret);
+        assert.notInclude(encodeProviderJsonString(event), secret);
         assert.notProperty((event.raw?.payload as object) ?? {}, "workflow_progress");
       }
       const progressPayload = nativeEvents.find(
@@ -7315,7 +7327,7 @@ describe("ClaudeAdapterLive", () => {
       )?.event?.payload as Record<string, unknown>;
       assert.ok(progressPayload);
       assert.notProperty(progressPayload, "workflow_progress");
-      assert.notInclude(JSON.stringify(nativeEvents), secret);
+      assert.notInclude(encodeProviderJsonString(nativeEvents), secret);
       for (const field of [
         "agentId",
         "promptPreview",
@@ -7325,8 +7337,8 @@ describe("ClaudeAdapterLive", () => {
         "script",
         "private_extension",
       ]) {
-        assert.notInclude(JSON.stringify(events), `"${field}"`);
-        assert.notInclude(JSON.stringify(nativeEvents), `"${field}"`);
+        assert.notInclude(encodeProviderJsonString(events), `"${field}"`);
+        assert.notInclude(encodeProviderJsonString(nativeEvents), `"${field}"`);
       }
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -7485,7 +7497,7 @@ describe("ClaudeAdapterLive", () => {
         const raw = event.raw?.payload as Record<string, unknown>;
         for (const payload of [config, native, raw]) {
           assert.notProperty(payload, "plugin_errors");
-          assert.notInclude(JSON.stringify(payload), secret);
+          assert.notInclude(encodeProviderJsonString(payload), secret);
           assert.equal(payload?.model, "claude-sonnet-5");
           assert.deepEqual(payload?.plugin_error_summary, config.plugin_error_summary);
         }
@@ -7511,8 +7523,8 @@ describe("ClaudeAdapterLive", () => {
           );
         }
       }
-      assert.notInclude(JSON.stringify(configuredEvents), secret);
-      assert.notInclude(JSON.stringify(nativeEvents), secret);
+      assert.notInclude(encodeProviderJsonString(configuredEvents), secret);
+      assert.notInclude(encodeProviderJsonString(nativeEvents), secret);
       assert.lengthOf(harness.query.interruptCalls, 0);
       assert.equal(harness.query.closeCalls, 0);
     }).pipe(
@@ -7615,9 +7627,9 @@ describe("ClaudeAdapterLive", () => {
         assert.lengthOf(String(rawPayload?.summary ?? ""), 4_000);
         assert.lengthOf(String(rawPayload?.last_tool_name ?? ""), 256);
         assert.match(String(rawPayload?.task_id ?? ""), /^sha256:[a-f0-9]{64}$/);
-        assert.notInclude(JSON.stringify(rawPayload), "provider-secret-tail");
+        assert.notInclude(encodeProviderJsonString(rawPayload), "provider-secret-tail");
         assert.notProperty(rawPayload ?? {}, "secret_provider_field");
-        assert.notInclude(JSON.stringify(rawPayload?.usage), "secret_usage_field");
+        assert.notInclude(encodeProviderJsonString(rawPayload?.usage), "secret_usage_field");
       }
 
       const hookEvent = boundedEvents.find((event) => event.type === "hook.completed");
@@ -7646,9 +7658,9 @@ describe("ClaudeAdapterLive", () => {
           assert.lengthOf(String(payload?.summary ?? ""), 4_000);
           assert.lengthOf(String(payload?.last_tool_name ?? ""), 256);
           assert.match(String(payload?.task_id ?? ""), /^sha256:[a-f0-9]{64}$/);
-          assert.notInclude(JSON.stringify(payload), "provider-secret-tail");
+          assert.notInclude(encodeProviderJsonString(payload), "provider-secret-tail");
           assert.notProperty(payload ?? {}, "secret_provider_field");
-          assert.notInclude(JSON.stringify(payload?.usage), "secret_usage_field");
+          assert.notInclude(encodeProviderJsonString(payload?.usage), "secret_usage_field");
         } else {
           assert.lengthOf(String(payload?.output ?? ""), 16_000);
           assert.lengthOf(String(payload?.stdout ?? ""), 16_000);
@@ -7766,7 +7778,7 @@ describe("ClaudeAdapterLive", () => {
         const payload = nativeEvents.find((record) => record.event?.method === method)?.event
           ?.payload as Record<string, unknown> | undefined;
         assert.ok(payload, `Expected a native record for ${method}.`);
-        assert.notInclude(JSON.stringify(payload), sentinel);
+        assert.notInclude(encodeProviderJsonString(payload), sentinel);
         assert.notProperty(payload ?? {}, "secret_provider_field");
       }
       const startPayload = nativeEvents.find(
@@ -7777,13 +7789,13 @@ describe("ClaudeAdapterLive", () => {
         (record) => record.event?.method === "claude/system/task_notification",
       )?.event?.payload as Record<string, unknown>;
       assert.notProperty(notificationPayload, "output_file");
-      assert.notInclude(JSON.stringify(notificationPayload), "mcp://private-provider");
-      assert.notInclude(JSON.stringify(notificationPayload), "bearer=do-not-persist");
+      assert.notInclude(encodeProviderJsonString(notificationPayload), "mcp://private-provider");
+      assert.notInclude(encodeProviderJsonString(notificationPayload), "bearer=do-not-persist");
       const completed = taskEvents.find((event) => event.type === "task.completed");
       assert.equal(completed?.type, "task.completed");
       if (completed?.type === "task.completed") {
         assert.lengthOf(completed.payload.resourceLinks ?? [], 50);
-        assert.notInclude(JSON.stringify(completed.payload.resourceLinks), sentinel);
+        assert.notInclude(encodeProviderJsonString(completed.payload.resourceLinks), sentinel);
         assert.deepInclude(completed.payload.resourceLinks?.[0] ?? {}, {
           name: "report",
           description: "Provider report",
@@ -7803,7 +7815,7 @@ describe("ClaudeAdapterLive", () => {
         (record) => record.event?.method === "claude/system/background_tasks_changed",
       )?.event?.payload as { tasks?: Array<Record<string, unknown>> };
       assert.notProperty(backgroundPayload.tasks?.[0] ?? {}, "secret_task_field");
-      const serializedNativeEvents = JSON.stringify(nativeEvents);
+      const serializedNativeEvents = encodeProviderJsonString(nativeEvents);
       assert.notInclude(serializedNativeEvents, "native-session");
       assert.notInclude(serializedNativeEvents, "native-tool-start");
       assert.notInclude(serializedNativeEvents, "native-start-uuid");
@@ -9787,7 +9799,7 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual(detail.gaps, []);
       assert.equal(detail.truncated, false);
       assert.deepEqual(historyCalls, [{ sessionId, historyId, dir: "/tmp/public-project" }]);
-      assert.equal(JSON.stringify(detail).includes("PRIVATE"), false);
+      assert.equal(encodeProviderJsonString(detail).includes("PRIVATE"), false);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -10053,7 +10065,7 @@ describe("ClaudeAdapterLive", () => {
           [{ role: "assistant", text: "Public update remains visible" }],
         );
         assert.equal(detail.activityHistoryIncomplete, undefined);
-        assert.equal(JSON.stringify(detail).includes("PRIVATE_"), false);
+        assert.equal(encodeProviderJsonString(detail).includes("PRIVATE_"), false);
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),
@@ -10247,7 +10259,7 @@ describe("ClaudeAdapterLive", () => {
           [{ role: "assistant", text: "Inspected files and ran the requested checks." }],
         );
         assert.equal(detail.activityHistoryIncomplete, undefined);
-        assert.equal(JSON.stringify(detail).includes("PRIVATE_"), false);
+        assert.equal(encodeProviderJsonString(detail).includes("PRIVATE_"), false);
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),
@@ -10302,7 +10314,7 @@ describe("ClaudeAdapterLive", () => {
         assert.equal(detail.activityHistoryIncomplete, true);
         assert.equal(detail.messages[0]?.text, "Public result survives the activity cutoff");
         assert.equal(detail.truncated, false);
-        assert.equal(JSON.stringify(detail).includes("PRIVATE_"), false);
+        assert.equal(encodeProviderJsonString(detail).includes("PRIVATE_"), false);
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
         Effect.provide(harness.layer),
@@ -10536,7 +10548,7 @@ describe("ClaudeAdapterLive", () => {
             { role: "assistant", text: "Configured-home history is live." },
           ],
         );
-        assert.equal(JSON.stringify(detail).includes("PRIVATE"), false);
+        assert.equal(encodeProviderJsonString(detail).includes("PRIVATE"), false);
         const replacementRootId = "00000000-0000-4000-8000-000000000945";
         const replacementStarted = yield* Stream.filter(
           adapter.streamEvents,
@@ -10678,7 +10690,10 @@ describe("ClaudeAdapterLive", () => {
         if (result.failure._tag === "ProviderSubagentDetailReadError") {
           assert.equal(result.failure.reason, "provider-request-failed");
         }
-        assert.equal(JSON.stringify(result.failure).includes("PRIVATE SYMLINK TARGET"), false);
+        assert.equal(
+          encodeProviderJsonString(result.failure).includes("PRIVATE SYMLINK TARGET"),
+          false,
+        );
       }
     }).pipe(
       Effect.ensuring(
@@ -13155,7 +13170,7 @@ describe("ClaudeAdapterLive", () => {
       if (vcsEvent?.type === "vcs.state.changed") {
         assert.deepEqual(vcsEvent.payload, { kind: "commit", branch: "main" });
         assert.equal(
-          (JSON.stringify(vcsEvent.raw) ?? "").includes("/untrusted/provider/path"),
+          (encodeProviderJsonString(vcsEvent.raw) ?? "").includes("/untrusted/provider/path"),
           false,
         );
       }
@@ -13167,7 +13182,7 @@ describe("ClaudeAdapterLive", () => {
       );
       assert.equal(publicationEvent?.type, "tool.progress");
       assert.equal(
-        (JSON.stringify(publicationEvent?.raw) ?? "").includes("https://example.invalid"),
+        (encodeProviderJsonString(publicationEvent?.raw) ?? "").includes("https://example.invalid"),
         false,
       );
       assert.equal(
@@ -13274,8 +13289,8 @@ describe("ClaudeAdapterLive", () => {
         assert.equal(snapshots[0]?.scopeId, snapshots[2]?.scopeId);
         assert.notEqual(snapshots[0]?.scopeId, snapshots[3]?.scopeId);
         assert.equal(snapshots[3]?.revision, 1);
-        assert.equal(JSON.stringify(snapshots).includes("sdk-billing-session"), false);
-        assert.equal(JSON.stringify(snapshots).includes("api-a"), false);
+        assert.equal(encodeProviderJsonString(snapshots).includes("sdk-billing-session"), false);
+        assert.equal(encodeProviderJsonString(snapshots).includes("api-a"), false);
       }).pipe(Effect.provide(harness.layer));
     },
   );
@@ -14159,8 +14174,8 @@ describe("ClaudeAdapterLive", () => {
         );
         const warnings = events.filter((event) => event.type === "runtime.warning");
         assert.equal(warnings.length, 1);
-        assert.equal(JSON.stringify(warnings).includes("Unrelated replacement"), false);
-        assert.equal(JSON.stringify(warnings).includes("Preserved prefix"), false);
+        assert.equal(encodeProviderJsonString(warnings).includes("Unrelated replacement"), false);
+        assert.equal(encodeProviderJsonString(warnings).includes("Preserved prefix"), false);
         assert.equal(
           events.filter(
             (event) =>
@@ -17248,7 +17263,7 @@ describe("ClaudeAdapterLive", () => {
       const opened = yield* Stream.runHead(adapter.streamEvents);
       if (opened._tag !== "Some" || opened.value.type !== "user-input.requested")
         return assert.fail("Expected elicitation request");
-      assert.notInclude(JSON.stringify(opened.value), "private-token");
+      assert.notInclude(encodeProviderJsonString(opened.value), "private-token");
       const id = ApprovalRequestId.make(String(opened.value.requestId));
       assert.equal(yield* adapter.resolveInteractionUrl!(THREAD_ID, id), url);
       controller.abort();
@@ -17290,7 +17305,7 @@ describe("ClaudeAdapterLive", () => {
             return assert.fail("Expected authorization callback");
           const id = ApprovalRequestId.make(String(opened.value.requestId));
           assert.notEqual(id, previousRequestId);
-          assert.notInclude(JSON.stringify(opened.value), "private");
+          assert.notInclude(encodeProviderJsonString(opened.value), "private");
           assert.equal(yield* adapter.resolveInteractionUrl!(THREAD_ID, id), url);
           yield* adapter.respondToUserInput(THREAD_ID, id, {
             __cafeInteraction: { action: "accept" },
@@ -17512,8 +17527,8 @@ describe("ClaudeAdapterLive", () => {
             .join(""),
           "Public introduction.",
         );
-        assert.equal(JSON.stringify(events).includes("OPAQUE_SIGNATURE"), false);
-        assert.equal(JSON.stringify(nativeEvents).includes("OPAQUE_SIGNATURE"), false);
+        assert.equal(encodeProviderJsonString(events).includes("OPAQUE_SIGNATURE"), false);
+        assert.equal(encodeProviderJsonString(nativeEvents).includes("OPAQUE_SIGNATURE"), false);
         const expanded = events.find(
           (event) => event.type === "item.completed" && event.itemId === "bash-controls",
         );
@@ -17784,7 +17799,7 @@ describe("ClaudeAdapterLive", () => {
             events.filter((event) => event.type === "thread.started").length,
             invalidParent === "rebind-valid-old" ? 2 : 1,
           );
-          assert.equal(JSON.stringify(events).includes("UNOWNED_OUTPUT"), false);
+          assert.equal(encodeProviderJsonString(events).includes("UNOWNED_OUTPUT"), false);
           const session = (yield* adapter.listSessions())[0];
           const resumeCursor = session?.resumeCursor as { readonly resume?: string } | undefined;
           assert.equal(resumeCursor?.resume, finalSessionId);
@@ -18144,7 +18159,7 @@ describe("ClaudeAdapterLive", () => {
             false,
           );
         }
-        assert.equal(JSON.stringify(events).includes("PRIVATE_SIGNATURE"), false);
+        assert.equal(encodeProviderJsonString(events).includes("PRIVATE_SIGNATURE"), false);
       }).pipe(Effect.provide(harness.layer));
     });
   }
@@ -18333,7 +18348,7 @@ describe("ClaudeAdapterLive", () => {
         const runtimeError = events.find((event) => event.type === "runtime.error");
         assert.equal(runtimeError?.payload.message, CLAUDE_RESPONSE_LIMIT_MESSAGE);
         const snapshot = yield* adapter.readThread(THREAD_ID);
-        assert.equal(JSON.stringify(snapshot).includes(nativeError), false);
+        assert.equal(encodeProviderJsonString(snapshot).includes(nativeError), false);
         assert.equal(snapshot.turns[0]?.id, turn.turnId);
         const ready = (yield* adapter.listSessions())[0];
         assert.equal(ready?.status, "ready");
@@ -18961,9 +18976,9 @@ describe("ClaudeAdapterLive", () => {
         ),
         true,
       );
-      assert.notInclude(JSON.stringify(nativeEvents), "sdk-session-native-log");
-      assert.notInclude(JSON.stringify(nativeEvents), "stream-native-log");
-      assert.notInclude(JSON.stringify(nativeEvents), "result-native-log");
+      assert.notInclude(encodeProviderJsonString(nativeEvents), "sdk-session-native-log");
+      assert.notInclude(encodeProviderJsonString(nativeEvents), "stream-native-log");
+      assert.notInclude(encodeProviderJsonString(nativeEvents), "result-native-log");
       assert.equal(
         nativeEvents.some((record) => String(record.event?.turnId) === String(turn.turnId)),
         true,

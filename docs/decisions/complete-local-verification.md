@@ -2,11 +2,15 @@
 
 Decision status: Accepted within the authorized local implementation scope
 Created: 2026-10-20 08:25:58 JST (UTC+0900)
-Last updated: 2026-10-20 09:06:20 JST (UTC+0900)
+Last updated: 2026-10-20 14:15:56 JST (UTC+0900)
 Decision authority: implementation discretion under the human's request to focus
 on local test-performance improvements; no hosted or publication-policy change.
-Implementation status: Implemented; integrated verification and timings pending.
+Implementation status: Implemented; the qualification procedure and evidence limits
+below apply to each resulting source state. Acceptance alone does not attest a pass.
 Supersedes: None. Existing isolation, required coverage and final-build rules remain.
+Superseded in part by: [three-slot typechecking](three-slot-typechecking.md),
+only for typecheck default/allowed admission and its CI scope. The historical
+one/two-compiler rationale below is retained; all other decisions remain active.
 
 ## Context and alternatives
 
@@ -29,6 +33,16 @@ needed by copied-artifact tests in an exclusively owned temporary namespace.
 Split large test modules semantically without removing their assertions or
 sharing mutable state across isolated files. Reuse immutable test document
 instrumentation, never parser realms, ports, sources or render outcomes.
+
+Keep feature-database seed reuse in memory and per isolated module. Build it
+from actual current migrations, bound it to 16 MiB and committed supported
+schema state, then deserialize a separate native database for each runtime
+before statements exist. Restore connection-local PRAGMAs, preserve exact
+scope-owned close, and retain real migration and independent fidelity tests.
+No connection, transaction, disk snapshot or passed outcome is shared. Explicit
+policy-only ChatView fixtures may retain just the original target and tail
+pairs; full-history journeys remain the default and all original actions and
+assertions still execute.
 
 Permit optional bounded local reuse of public-asset compression input. Raw-byte
 identity, actual runtime/codec versions and unchanged compression settings bind
@@ -64,6 +78,32 @@ files remain serial in isolated forks. This can admit four or six test workers
 in total, plus coordinators, and is not a hard aggregate memory guarantee.
 Browser providers/media groups remain sequential, builds stay at concurrency
 one, and no stage overlaps the next. CI and all test deadlines are unchanged.
+The established POSIX copied-native Codex test tail remains an isolated final
+Node phase, never overlapping the other workspaces.
+
+For local no-output type programs, discover the same workspace metadata through
+pinned Corepack Yarn, reject unsupported scripts/aliases/compilers, and schedule
+direct pinned Node/TypeScript children at the finite chosen limit. This removes
+unnecessary dependency ordering without trusting a Yarn wrapper to fence queued
+work on cancellation. The canonical Turbo typecheck remains unchanged. Refuse
+unsupported future workspace contracts rather than silently losing programs.
+Remove duplicate scripts/lib test roots from the server program only; scripts
+retains their complete coverage under the same compiler options. Imported server
+helpers and every server/integration test remain server roots. Prefix direct
+compiler diagnostics with exact workspace ownership and retain bounded UTF-8
+streaming output plus all failure status, not only successful durations.
+
+The same-version language-service dependency patch changes only audited
+append-only AST FIFO implementation, preserving breadth-first visitation and
+clearing consumed references. Require original-versus-patched actual API/CLI
+diagnostic equivalence on bounded private copies; no rule is disabled and no
+diagnostic success is cached. Narrow documented native API exceptions preserve
+existing no-follow/bigint filesystem and native callback lifetime semantics where
+Effect services do not provide equivalent operations.
+Force the supported patch reinjection during explicit prepare so an old
+same-version marker cannot leave stale implementation code installed. The paired
+qualifier must compare both installed entries to independent rebuilt indexed
+entries, not merely demonstrate equivalence between two private copies.
 
 The local preflight must prove actual installed Effect API/CLI diagnostic
 behavior, not accept a successful plain-TypeScript run or the upstream patch

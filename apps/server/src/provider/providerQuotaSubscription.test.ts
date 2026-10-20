@@ -1,11 +1,7 @@
 import { describe, assert, it } from "@effect/vitest";
-import {
-  ProviderDriverKind,
-  ProviderInstanceId,
-  ThreadId,
-  type ProviderSession,
-  type ProviderSessionQuotaResult,
-} from "@cafecode/contracts";
+import type { ProviderSession, ProviderSessionQuotaResult } from "@cafecode/contracts";
+import { ThreadId } from "@cafecode/contracts/baseSchemas";
+import { ProviderDriverKind, ProviderInstanceId } from "@cafecode/contracts/providerInstance";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";

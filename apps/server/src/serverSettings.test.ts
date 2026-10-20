@@ -22,6 +22,17 @@ import {
   ServerSettingsService,
 } from "./serverSettings.ts";
 
+const decodeJsonText = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const isPersistedDebugSettings = Schema.is(
+  Schema.Struct({
+    providerInstances: Schema.Struct({
+      axiom: Schema.Struct({ debugStateSharing: Schema.Boolean }),
+    }),
+    providers: Schema.Struct({ codex: Schema.Struct({ enabled: Schema.Boolean }) }),
+  }),
+);
+
 const makeServerSettingsLayer = (dataProfile?: "production" | "debug") =>
   ServerSettingsLive.pipe(
     Layer.provideMerge(
@@ -110,7 +121,9 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.strictEqual(enabled.providerInstances[axiom]?.debugStateSharing, true);
       assert.strictEqual(enabled.providerInstances[axiom]?.enabled, true);
       assert.strictEqual(enabled.providers.codex.enabled, false);
-      const persisted = JSON.parse(yield* fs.readFileString(config.settingsPath));
+      const persisted = decodeJsonText(yield* fs.readFileString(config.settingsPath));
+      if (!isPersistedDebugSettings(persisted))
+        assert.fail("Expected the exact persisted Debug provider settings");
       assert.strictEqual(persisted.providerInstances.axiom.debugStateSharing, true);
       assert.strictEqual(persisted.providers.codex.enabled, false);
       yield* service.start;
@@ -126,7 +139,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         const service = yield* ServerSettingsService;
         const config = yield* ServerConfig;
         const fs = yield* FileSystem.FileSystem;
-        const original = JSON.stringify({ providerInstances: {} });
+        const original = encodeJsonText({ providerInstances: {} });
         yield* fs.writeFileString(config.settingsPath, original);
         const settings = yield* service.getSettings;
         assert.deepEqual(settings.providerInstances, DEFAULT_SERVER_SETTINGS.providerInstances);
@@ -139,7 +152,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         };
         const saved = yield* service.updateSettings({ providerInstances: { [axiomId]: disabled } });
         assert.deepEqual(saved.providerInstances[axiomId], disabled);
-        const persisted = JSON.parse(yield* fs.readFileString(config.settingsPath));
+        const persisted = decodeJsonText(yield* fs.readFileString(config.settingsPath));
         assert.deepEqual(
           Schema.decodeUnknownSync(ServerSettings)(persisted).providerInstances[axiomId],
           disabled,
@@ -451,8 +464,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
               result.failure.detail,
               "Claude maximum response tokens must be an integer between 1 and 128000.",
             );
-            assert.notInclude(JSON.stringify(result.failure), "private-cap-sentinel");
-            assert.notInclude(JSON.stringify(result.failure), "private-env-sentinel");
+            assert.notInclude(encodeJsonText(result.failure), "private-cap-sentinel");
+            assert.notInclude(encodeJsonText(result.failure), "private-env-sentinel");
           }
           assert.equal(yield* fs.readFileString(config.settingsPath), before);
           assert.deepEqual((yield* service.getSettings).providerInstances[instanceId]?.config, {
@@ -473,7 +486,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       const result = yield* service.getSettings.pipe(Effect.result);
       assert.isTrue(Result.isFailure(result));
       if (Result.isFailure(result)) {
-        assert.notInclude(JSON.stringify(result.failure), "private-cap-sentinel");
+        assert.notInclude(encodeJsonText(result.failure), "private-cap-sentinel");
       }
       assert.equal(yield* fs.readFileString(config.settingsPath), persisted);
     }).pipe(Effect.provide(makeServerSettingsLayer())),

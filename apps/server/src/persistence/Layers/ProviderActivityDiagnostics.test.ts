@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as Schema from "effect/Schema";
 import {
   EventId,
   ThreadId,
@@ -18,6 +19,13 @@ import {
   providerDiagnosticOccurrenceKey,
 } from "./ProviderActivityDiagnostics.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
+
+// Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
+// this codec does not replace production admission or grant received-data authority.
+const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeFixtureJson = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ error: Schema.Record(Schema.String, Schema.Unknown) })),
+);
 
 const observedAt = "2026-10-12T00:00:00.000Z";
 const input = (name: string, turnId: string | null = "turn") => ({
@@ -162,7 +170,7 @@ layer("ProviderActivityDiagnostics", (it) => {
           snapshot: {
             ...received.snapshot,
             message: privateProse,
-            json: JSON.stringify({
+            json: encodeFixtureJson({
               error: { message: privateProse, additionalDetails: privateJson },
             }),
           },
@@ -179,13 +187,15 @@ layer("ProviderActivityDiagnostics", (it) => {
           const result = yield* store.persist(owner, privateCopy).pipe(Effect.result);
           assert.equal(result._tag, "Failure");
           if (result._tag === "Failure") {
+            // Keep actual producer class identity, not merely structural schema/tag compatibility.
+            // @effect-diagnostics-next-line instanceOfSchema:off
             assert.ok(result.failure instanceof PersistenceSqlError);
             assert.equal(result.failure._tag, "PersistenceSqlError");
             assert.equal(result.failure.operation, "ProviderActivityDiagnostics.persist");
             assert.equal(result.failure.detail, "Private diagnostic operation failed");
             assert.equal(result.failure.cause, undefined);
             for (const serialized of [
-              JSON.stringify(result.failure),
+              encodeFixtureJson(result.failure),
               String(result.failure),
               result.failure.stack ?? "",
             ]) {
@@ -231,7 +241,7 @@ layer("ProviderActivityDiagnostics", (it) => {
         if (result._tag === "Failure") {
           assert.equal(result.failure._tag, "PersistenceDecodeError");
           assert.doesNotMatch(
-            JSON.stringify(result.failure),
+            encodeFixtureJson(result.failure),
             /secret-corrupt-diagnostic|\{"private"/,
           );
         }
@@ -293,10 +303,10 @@ layer("ProviderActivityDiagnostics", (it) => {
           ...terminal,
           snapshot: {
             ...terminal.snapshot,
-            json: JSON.stringify({ turn: { id: "native-turn", status: "failed", error } }),
+            json: encodeFixtureJson({ turn: { id: "native-turn", status: "failed", error } }),
           },
         });
-        const receivedError = JSON.parse(received.snapshot.json).error as Record<string, unknown>;
+        const receivedError = decodeFixtureJson(received.snapshot.json).error;
         for (const changed of [
           // A capture marker inside the error object makes the copy ambiguous.
           withErrorJson({ ...receivedError, message: "[Redacted: credential material]" }),

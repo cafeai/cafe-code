@@ -1,7 +1,12 @@
 import { EventEmitter } from "node:events";
+// Exact private native fixture paths and cleanup qualify the child-handle runner.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
+// Native event-emitter fixtures implement this exact held child/close contract.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import type { ChildProcess } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { runTestPlan } from "./run-test-plan.ts";

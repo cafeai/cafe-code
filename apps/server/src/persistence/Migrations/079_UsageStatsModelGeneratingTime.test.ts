@@ -1,6 +1,7 @@
 import { ProviderDriverKind } from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -32,7 +33,10 @@ layer("079_UsageStatsModelGeneratingTime", (it) => {
           yield* sql`SELECT day, provider_driver AS provider, model, output_tokens AS "outputTokens", input_tokens AS "inputTokens", cached_input_tokens AS "cachedInputTokens", cache_write_input_tokens AS "cacheWriteInputTokens", reasoning_output_tokens AS "reasoningOutputTokens" FROM usage_stats_token_breakdown_days ORDER BY day, provider_driver, model`;
         yield* runMigrations();
         const first = yield* repository.readModelGeneratingTime;
-        assert.equal(new Date(first.startedAt).toISOString(), first.startedAt);
+        assert.equal(
+          DateTime.formatIso(DateTime.makeUnsafe(Date.parse(first.startedAt))),
+          first.startedAt,
+        );
         assert.deepEqual(first.days, []);
         assert.deepEqual(yield* repository.listDays, oldDays);
         assert.deepEqual(yield* repository.listTokenBreakdownDays, oldTokens);

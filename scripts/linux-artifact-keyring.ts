@@ -1,6 +1,12 @@
+// This boundary retains exact native child handles and close/signal ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdir } from "node:fs/promises";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -55,6 +61,9 @@ export async function withLinuxArtifactKeyring(
     readinessController.abort();
     await readiness.catch(() => undefined);
     if (daemon.exitCode === null && daemon.signalCode === null) daemon.kill("SIGTERM");
+    // This native wait owns an external child/stream lifetime; a virtual
+    // Effect clock must not replace its existing deadline or cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     const timeout = setTimeout(() => daemon.kill("SIGKILL"), 5_000);
     try {
       await exited;

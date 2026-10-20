@@ -1,5 +1,10 @@
+// The private bridge fixture exercises native file identity and cleanup rather
+// than substituting a path-only filesystem service for its ownership checks.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+// Native temporary peer paths must match the bridge's actual host spelling.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import { assert, it } from "@effect/vitest";
 import { ProviderInstanceId, ThreadId } from "@cafecode/contracts";
@@ -16,6 +21,9 @@ import {
   requireSchedulingSessionAuthority,
   type SchedulingSessionBinding,
 } from "./sessionRuntime.ts";
+import * as Schema from "effect/Schema";
+
+const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const identity = {
   threadId: ThreadId.make("synthetic-scheduling-chat"),
@@ -51,7 +59,7 @@ it.layer(TestSqliteClient.layerMemory())("private scheduling session capabilitie
         const binding = yield* Effect.promise(() => runtime.bind(identity));
         const { token, url } = yield* readToken(binding);
         assert.equal(url, "http://127.0.0.1:12345/mcp/scheduling");
-        assert.equal(JSON.stringify(binding.launch).includes(token), false);
+        assert.equal(encodeJsonText(binding.launch).includes(token), false);
         assert.match(binding.name, /^cafe-[A-Za-z0-9_-]{22}$/);
         const authority = yield* Effect.promise(() => runtime.authorize(token));
         assert.deepEqual(
@@ -79,7 +87,7 @@ it.layer(TestSqliteClient.layerMemory())("private scheduling session capabilitie
             "Failure",
           );
         const rows = yield* sql`SELECT * FROM scheduling_session_capabilities`;
-        assert.equal(JSON.stringify(rows).includes(token), false);
+        assert.equal(encodeJsonText(rows).includes(token), false);
         for (const invalid of ["", "a".repeat(64), token.toUpperCase(), `${token}extra`]) {
           assert.equal(
             (yield* Effect.exit(Effect.tryPromise(() => runtime.authorize(invalid))))._tag,

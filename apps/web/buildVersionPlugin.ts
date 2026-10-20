@@ -1,3 +1,6 @@
+// Vite invokes this synchronous native write boundary outside an Effect
+// runtime; preserve its exact host path semantics for the byte-bound receipt.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { resolve } from "node:path";
 import type { Plugin } from "vite";
 import { publishApplicationBuildVersionManifest } from "../../packages/shared/src/applicationBuildVersion.ts";

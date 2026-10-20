@@ -1,9 +1,14 @@
+// The fixture qualifies actual private connection files and their retirement.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+// Native bridge paths remain structured inputs on the actual host.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import { assert, it } from "@effect/vitest";
 import { ProviderInstanceId, ThreadId } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { runMigrations } from "../persistence/Migrations.ts";
 import * as TestSqliteClient from "../persistence/TestSqliteClient.ts";
@@ -13,6 +18,7 @@ import {
   requireVisualizationSessionAuthority,
   type VisualizationSessionBinding,
 } from "./sessionRuntime.ts";
+const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const identity = {
   threadId: ThreadId.make("visual-fixture"),
@@ -55,7 +61,7 @@ it.layer(TestSqliteClient.layerMemory())("private visualization generations", (i
         const { token, url } = yield* tokenFor(binding);
         assert.equal(url, "http://127.0.0.1:12345/mcp/visualizations");
         assert.match(binding.name, /^cafe-visualizations-[A-Za-z0-9_-]{22}$/);
-        assert.equal(JSON.stringify(binding.launch).includes(token), false);
+        assert.equal(encodeJson(binding.launch).includes(token), false);
         const authority = yield* Effect.promise(() => runtime.authorize(token));
         assert.equal(
           (yield* Effect.exit(
@@ -78,9 +84,7 @@ it.layer(TestSqliteClient.layerMemory())("private visualization generations", (i
             "Failure",
           );
         assert.equal(
-          JSON.stringify(yield* sql`SELECT * FROM visualization_session_capabilities`).includes(
-            token,
-          ),
+          encodeJson(yield* sql`SELECT * FROM visualization_session_capabilities`).includes(token),
           false,
         );
         yield* Effect.promise(binding.dispose);

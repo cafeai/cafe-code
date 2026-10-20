@@ -27,6 +27,8 @@ import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as NodePath from "node:path";
 import { BACKEND_PROFILE_STARTUP_REFUSED_EXIT_CODE } from "@cafecode/shared/backendStartupFailure";
 import { uiText } from "@cafecode/shared/i18n";
@@ -41,6 +43,8 @@ import {
 const decodeDesktopBackendBootstrap = Schema.decodeEffect(
   Schema.fromJsonString(DesktopBackendBootstrap),
 );
+// Observation-only JSON snapshots retain native JSON field/value semantics.
+const encodeDiagnosticJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const baseConfig: DesktopBackendManager.DesktopBackendStartConfig = {
   executablePath: "/electron",
@@ -363,7 +367,7 @@ describe("DesktopBackendManager", () => {
             assert.isTrue(Option.isNone(refused.activePid));
             assert.equal(readyCount, 0);
             assert.equal(dialogs.length, 1);
-            const rendered = JSON.stringify(dialogs);
+            const rendered = encodeDiagnosticJson(dialogs);
             assert.equal(dialogs[0]?.title, uiText("Cafe Code data profile could not start"));
             assert.isTrue((dialogs[0]?.content.length ?? 0) > 0);
             assert.notInclude(rendered, profiledConfig(profile).bootstrap.cafeCodeHome);
@@ -774,7 +778,7 @@ describe("DesktopBackendManager", () => {
               challenges.push(challenge);
               // Only a public nonce enters HTTP. Neither the actual child key nor
               // the stale supplied key may appear in URL, headers or other fields.
-              const outgoing = JSON.stringify({ url: request.url, headers: request.headers });
+              const outgoing = encodeDiagnosticJson({ url: request.url, headers: request.headers });
               for (const token of [...tokens, staleSuppliedToken])
                 assert.notInclude(outgoing, token);
               yield* Queue.offer(probes, spawns);

@@ -1,5 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { X509Certificate } from "node:crypto";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { readFileSync } from "node:fs";
 import type * as Electron from "electron";
 import * as Effect from "effect/Effect";
@@ -7,6 +9,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as References from "effect/References";
+import * as Schema from "effect/Schema";
 import * as Path from "effect/Path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -41,7 +44,17 @@ beforeEach(() => {
   probe.mockResolvedValue({ status: "self-signed", certificate });
 });
 
-function fixture(
+const pinsDocument = Schema.fromJsonString(
+  Schema.Struct({
+    version: Schema.Literal(1),
+    records: Schema.Array(Schema.Struct({ origin: Schema.String, fingerprint256: Schema.String })),
+  }),
+);
+const encodePinsDocument = Schema.encodeEffect(pinsDocument);
+const decodePinsDocument = Schema.decodeEffect(pinsDocument);
+const encodeDiagnosticJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+function fixture<E>(
   options: {
     response: number;
     corrupt?: boolean;
@@ -58,7 +71,7 @@ function fixture(
     reload: <A>(
       effect: Effect.Effect<A, never, DesktopRemoteCertificates.DesktopRemoteCertificates>,
     ) => Effect.Effect<A>;
-  }) => Effect.Effect<void, unknown>,
+  }) => Effect.Effect<void, E>,
 ) {
   return Effect.runPromise(
     Effect.scoped(
@@ -73,7 +86,7 @@ function fixture(
         if (options.previousFingerprint)
           yield* fileSystem.writeFileString(
             registryPath,
-            JSON.stringify({
+            yield* encodePinsDocument({
               version: 1,
               records: [{ origin, fingerprint256: options.previousFingerprint }],
             }),
@@ -112,7 +125,7 @@ function fixture(
         const layer = DesktopRemoteCertificates.layer.pipe(Layer.provide(dependencies));
         const reload = <A>(
           effect: Effect.Effect<A, never, DesktopRemoteCertificates.DesktopRemoteCertificates>,
-        ) => effect.pipe(Effect.provide(layer));
+        ): Effect.Effect<A> => effect.pipe(Effect.provide(layer));
         yield* Effect.gen(function* () {
           const service = yield* DesktopRemoteCertificates.DesktopRemoteCertificates;
           yield* test({
@@ -166,7 +179,7 @@ describe("desktop remote certificate approval", () => {
           "address-mismatch",
           "certificate-error",
         ]);
-        expect(JSON.stringify(warnings.map((entry) => entry.annotations))).not.toMatch(
+        expect(encodeDiagnosticJson(warnings.map((entry) => entry.annotations))).not.toMatch(
           /private|wsToken|3776/,
         );
       }),
@@ -185,10 +198,15 @@ describe("desktop remote certificate approval", () => {
             expect(showMessageBox.mock.calls[0]?.[0].message).toBe(
               "This server’s certificate has changed.",
             );
-            const document = JSON.parse(yield* fileSystem.readFileString(registryPath));
-            expect(document.records[0].fingerprint256).toBe(
-              response === 1 ? certificate.fingerprint256 : previousFingerprint,
+            const document = yield* decodePinsDocument(
+              yield* fileSystem.readFileString(registryPath),
             );
+            expect(document.records).toEqual([
+              {
+                origin,
+                fingerprint256: response === 1 ? certificate.fingerprint256 : previousFingerprint,
+              },
+            ]);
           }),
       );
     },
@@ -220,7 +238,9 @@ describe("desktop remote certificate approval", () => {
           expect(yield* service.prepare(origin)).toBe("approved");
           expect(check()).toBe(true);
           expect(check("https://127.0.0.1:3776/")).toBe(false);
-          const document = JSON.parse(yield* fileSystem.readFileString(registryPath));
+          const document = yield* decodePinsDocument(
+            yield* fileSystem.readFileString(registryPath),
+          );
           expect(document).toEqual({
             version: 1,
             records: [{ origin, fingerprint256: certificate.fingerprint256 }],

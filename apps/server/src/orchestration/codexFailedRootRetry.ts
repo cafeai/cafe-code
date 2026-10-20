@@ -16,6 +16,9 @@ import { types as utilTypes } from "node:util";
 import { toPersistenceSqlError } from "../persistence/Errors.ts";
 import { ProviderAdapterRequestError } from "../provider/Errors.ts";
 
+const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+
 const encodeRequest = Schema.encodeSync(Schema.fromJsonString(ProviderSendTurnInput));
 const decodeRequest = Schema.decodeUnknownSync(ProviderSendTurnInput);
 const isFailedRootRetirementRefusal = Schema.is(ProviderDaemonFailedRootRetirementRefusal);
@@ -38,7 +41,7 @@ function requireSequence(value: number): number {
 export const codexFailedRootRetryRequestCommitment = (request: ProviderSendTurnInput): string =>
   createHash("sha256")
     .update(
-      JSON.stringify([
+      encodeJsonString([
         "cafe-codex-failed-root-retry-request-v1",
         encodeRequest(decodeRequest(request)),
       ]),
@@ -79,6 +82,10 @@ export function readCodexFailedRootRetirementRefusal(
   if (cause.reasons.length !== 1 || failure === undefined || !Cause.isFailReason(failure))
     return undefined;
   const error = failure.error;
+  // Schema.is intentionally accepts Effect's forgeable HMR class-brand property.
+  // This no-submit witness instead retains the proxy refusal, actual native
+  // error instance requirement and subsequent own-data field reconstruction.
+  // @effect-diagnostics-next-line instanceOfSchema:off
   if (
     typeof error !== "object" ||
     error === null ||
@@ -156,7 +163,7 @@ function activityPayload(
   )
     return undefined;
   try {
-    const payload = record(JSON.parse(row.payloadJson));
+    const payload = record(decodeJsonString(row.payloadJson));
     const activity = record(payload?.activity);
     if (
       payload?.threadId !== input.threadId ||

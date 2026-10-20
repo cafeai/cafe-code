@@ -3,6 +3,8 @@
  * Query.close() requests shutdown but is not an exit acknowledgement. Rewind
  * uses this separate promise; ordinary query controls retain their SDK owner.
  */
+// Native provider child boundary: preserve the exact child handle, structured argv and exit/signal ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn } from "node:child_process";
 import { query, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 

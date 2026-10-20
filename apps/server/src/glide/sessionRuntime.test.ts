@@ -1,5 +1,9 @@
+// Native fixture retains actual host file/socket identity and exact owned cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// Native fixture retains actual host file/socket identity and exact owned cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ProviderInstanceId, ThreadId } from "@cafecode/contracts";

@@ -1,3 +1,4 @@
+import * as ProviderDateTime from "effect/DateTime";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -12,23 +13,27 @@ function ownerPayload(input?: {
   readonly startedAtMs?: number;
   readonly heartbeatAtMs?: number;
 }) {
-  const now = Date.now();
+  const now = ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe());
   return {
     runtimeOwnerId: ownerId,
     runtimeOwnerPid: input?.pid ?? process.pid,
-    runtimeOwnerStartedAt: new Date(input?.startedAtMs ?? now).toISOString(),
-    runtimeOwnerHeartbeatAt: new Date(input?.heartbeatAtMs ?? now).toISOString(),
+    runtimeOwnerStartedAt: ProviderDateTime.formatIso(
+      ProviderDateTime.makeUnsafe(input?.startedAtMs ?? now),
+    ),
+    runtimeOwnerHeartbeatAt: ProviderDateTime.formatIso(
+      ProviderDateTime.makeUnsafe(input?.heartbeatAtMs ?? now),
+    ),
   };
 }
 
 describe("provider runtime owner evidence", () => {
   it("accepts a fresh heartbeat from the current live process", () => {
-    const now = Date.now();
+    const now = ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe());
     expect(hasLiveProviderRuntimeOwner(ownerPayload({ heartbeatAtMs: now }), now)).toBe(true);
   });
 
   it("rejects stale owner evidence even when the recorded PID still exists", () => {
-    const now = Date.now();
+    const now = ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe());
     expect(
       hasLiveProviderRuntimeOwner(
         ownerPayload({
@@ -41,12 +46,12 @@ describe("provider runtime owner evidence", () => {
   });
 
   it("rejects a fresh-looking lease whose owner process does not exist", () => {
-    const now = Date.now();
+    const now = ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe());
     expect(hasLiveProviderRuntimeOwner(ownerPayload({ pid: 2_147_483_647 }), now)).toBe(false);
   });
 
   it("rejects malformed owner metadata before probing a PID", () => {
-    const now = Date.now();
+    const now = ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe());
     expect(
       hasLiveProviderRuntimeOwner(
         {

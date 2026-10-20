@@ -15,6 +15,7 @@ import { PersistenceDecodeError, PersistenceSqlError } from "../Errors.ts";
 
 const decodeSnapshot = Schema.decodeUnknownSync(Schema.fromJsonString(ProviderDiagnosticSnapshot));
 const validateSnapshot = Schema.decodeUnknownSync(ProviderDiagnosticSnapshot);
+const encodeSnapshot = Schema.encodeSync(Schema.fromJsonString(ProviderDiagnosticSnapshot));
 // SQL causes can quote bound JSON. Keep all ordinary ingestion/RPC logs
 // content-free even when the private database operation itself fails.
 const privateSqlError = (operation: string) => () =>
@@ -115,7 +116,7 @@ export function makeProviderActivityDiagnosticStore(sql: SqlClient.SqlClient) {
     Effect.gen(function* () {
       let encoded: string;
       try {
-        encoded = JSON.stringify(validateSnapshot(diagnostic.snapshot));
+        encoded = encodeSnapshot(validateSnapshot(diagnostic.snapshot));
       } catch {
         return false;
       }

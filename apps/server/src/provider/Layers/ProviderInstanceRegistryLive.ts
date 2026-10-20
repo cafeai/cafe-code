@@ -354,7 +354,7 @@ const buildEntry = <R>(input: {
     // A parent which already closed may have run the newly registered finalizer
     // synchronously. Closed is a refusal signal, never a successful cleanup
     // witness authorizing a replacement or a provider call.
-    if (childScope.state._tag === "Closed") yield* Effect.interrupt;
+    if (childScope.state._tag === "Closed") return yield* Effect.interrupt;
 
     const createResult = yield* driver
       .create({
@@ -553,7 +553,7 @@ const makeReconcile = <R>(input: {
                 return [false, current] as const;
               return [true, builtEntries] as const;
             });
-            if (!admitted) yield* Effect.interrupt;
+            if (!admitted) return yield* Effect.interrupt;
             yield* Ref.set(state.unavailable, builtUnavailable);
             state.unpublishedScopes.clear();
             if (entriesChanged || unavailableChanged) {

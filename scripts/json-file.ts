@@ -1,3 +1,5 @@
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { readFile } from "node:fs/promises";
 
 export function parseJsonText(jsonText: string): unknown {

@@ -6,6 +6,10 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as TestClock from "effect/testing/TestClock";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 
 import * as DesktopConfig from "../app/DesktopConfig.ts";
@@ -151,6 +155,50 @@ function withUpdates<A, E, R>(
 
 describe("macOS packaged update policy", () => {
   it.effect(
+    "executes the delayed startup and recurring release checks without automatic installation",
+    () =>
+      withUpdates('{"cafeCodeMacInAppUpdates":true}', ({ calls, available, announce }) =>
+        Effect.gen(function* () {
+          const updates = yield* DesktopUpdates.DesktopUpdates;
+          const state = yield* DesktopState.DesktopState;
+          const checks = () => calls.filter((call) => call === "check").length;
+          yield* updates.configure;
+          // TestClock drains the actual scoped sleep fibers. These counts are
+          // recorded inside the original fake updater Effect, not mock invocation.
+          yield* TestClock.adjust("14 seconds");
+          assert.equal(checks(), 0);
+          yield* TestClock.adjust("1 second");
+          assert.equal(checks(), 1);
+          yield* announce;
+          assert.equal((yield* Deferred.await(available)).availableVersion, "1.1.0");
+          assert.isFalse(calls.includes("download"));
+          assert.isFalse(calls.includes("install"));
+
+          // Polling starts from configuration, not from the startup check.
+          yield* TestClock.adjust("224 seconds");
+          assert.equal(checks(), 1);
+          yield* TestClock.adjust("1 second");
+          assert.equal(checks(), 2);
+          yield* TestClock.adjust("4 minutes");
+          assert.equal(checks(), 3);
+
+          // A later timer tick during quit cannot check, download, stop the
+          // backend, destroy windows or install the already announced release.
+          yield* Ref.set(state.quitting, true);
+          yield* TestClock.adjust("4 minutes");
+          assert.deepEqual(calls, [
+            "autoDownload:false",
+            "autoInstallOnAppQuit:false",
+            "channel:latest",
+            "check",
+            "check",
+            "check",
+          ]);
+        }),
+      ),
+  );
+
+  it.effect(
     "preserves the signed package mode across tracks and admits only requested download/install",
     () =>
       withUpdates(
@@ -158,15 +206,19 @@ describe("macOS packaged update policy", () => {
         ({ calls, available, downloaded, announce }) =>
           Effect.gen(function* () {
             const updates = yield* DesktopUpdates.DesktopUpdates;
+            assert.equal((yield* updates.getState).runtimeKind, "packaged");
             assert.equal((yield* updates.getState).installMode, "in-app");
             yield* updates.configure;
+            assert.equal((yield* updates.getState).runtimeKind, "packaged");
             assert.deepEqual(calls, [
               "autoDownload:false",
               "autoInstallOnAppQuit:false",
               "channel:latest",
             ]);
             assert.equal((yield* updates.setChannel("nightly")).installMode, "in-app");
+            assert.equal((yield* updates.getState).runtimeKind, "packaged");
             assert.equal((yield* updates.setChannel("latest")).installMode, "in-app");
+            assert.equal((yield* updates.getState).runtimeKind, "packaged");
             assert.deepEqual(calls.slice(3), [
               "channel:nightly",
               "check",
@@ -180,6 +232,7 @@ describe("macOS packaged update policy", () => {
             assert.isFalse(calls.includes("download"));
             assert.isFalse(calls.includes("install"));
             const result = yield* updates.download;
+            assert.equal(result.state.runtimeKind, "packaged");
             assert.isTrue(result.accepted);
             assert.isTrue(result.completed);
             assert.equal((yield* Deferred.await(downloaded)).downloadedVersion, "1.1.0");
@@ -201,6 +254,7 @@ describe("macOS packaged update policy", () => {
         Effect.gen(function* () {
           const updates = yield* DesktopUpdates.DesktopUpdates;
           yield* updates.configure;
+          assert.equal((yield* updates.getState).runtimeKind, "packaged");
           assert.isTrue((yield* updates.getState).enabled);
           assert.equal((yield* updates.setChannel("nightly")).installMode, "manual");
           assert.equal((yield* updates.setChannel("latest")).installMode, "manual");
@@ -223,11 +277,18 @@ describe("macOS packaged update policy", () => {
       ({ calls, reads }) =>
         Effect.gen(function* () {
           const updates = yield* DesktopUpdates.DesktopUpdates;
+          assert.equal((yield* updates.getState).runtimeKind, "source");
           yield* updates.configure;
+          assert.equal((yield* updates.getState).runtimeKind, "source");
           assert.equal((yield* updates.getState).status, "disabled");
           assert.equal((yield* updates.getState).installMode, "manual");
           assert.isFalse((yield* updates.download).accepted);
           assert.isFalse((yield* updates.install).accepted);
+          assert.equal((yield* updates.setChannel("nightly")).runtimeKind, "source");
+          const check = yield* updates.check("synthetic-source");
+          assert.isFalse(check.checked);
+          assert.equal(check.state.runtimeKind, "source");
+          yield* TestClock.adjust("5 minutes");
           assert.deepEqual(calls, []);
           assert.isFalse(reads.some((filePath) => filePath.endsWith(`${path.sep}package.json`)));
         }),

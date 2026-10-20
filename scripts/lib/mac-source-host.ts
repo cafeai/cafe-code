@@ -1,5 +1,9 @@
+// This boundary retains exact native child handles and close/signal ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+// Native checkout/fixture IO retains its existing descriptor, identity and lifetime semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import {
   existsSync,
   closeSync,
@@ -14,6 +18,8 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 

@@ -28,6 +28,8 @@ import { CAFE_CODE_ENVIRONMENT_ENDPOINT_PATH } from "@cafecode/shared/environmen
 import { resolveBootstrappedDataProfile } from "@cafecode/shared/dataProfile";
 import { BACKEND_PROFILE_STARTUP_REFUSED_EXIT_CODE } from "@cafecode/shared/backendStartupFailure";
 import { uiText } from "@cafecode/shared/i18n";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as NodePath from "node:path";
 import {
   BACKEND_READINESS_CHALLENGE_HEADER,

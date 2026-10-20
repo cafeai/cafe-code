@@ -1,5 +1,9 @@
+// Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import os from "node:os";
+// Native provider path boundary: retain host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import path from "node:path";
 import { expect, it } from "vitest";
 import { sameForkWorkspace } from "./sameForkWorkspace.ts";

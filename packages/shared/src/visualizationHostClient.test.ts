@@ -1,6 +1,10 @@
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
+// Native fixture boundary: exercise actual filesystem and host-path identity semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { VISUALIZATION_HOST_FILE } from "@cafecode/contracts/visualizationHost";

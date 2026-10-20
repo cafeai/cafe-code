@@ -1,11 +1,7 @@
 import { expect, it } from "@effect/vitest";
-import {
-  ProviderInstanceId,
-  SubagentRuntimeId,
-  ThreadId,
-  type ProviderSecurityInput,
-  type ProviderSecurityReport,
-} from "@cafecode/contracts";
+import type { ProviderSecurityInput, ProviderSecurityReport } from "@cafecode/contracts";
+import { SubagentRuntimeId, ThreadId } from "@cafecode/contracts/baseSchemas";
+import { ProviderInstanceId } from "@cafecode/contracts/providerInstance";
 import * as Effect from "effect/Effect";
 import { readOwnedProviderSecurity } from "./providerSecuritySubscription.ts";
 

@@ -28,6 +28,8 @@ import {
   resolveLatestProviderVersion,
   type ProviderMaintenanceCapabilities,
 } from "./providerMaintenance.ts";
+
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const isServerProviderUpdateError = Schema.is(ServerProviderUpdateError);
 
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
@@ -547,7 +549,7 @@ describe("providerMaintenanceRunner", () => {
       const updater = yield* makeTestRunner(registry);
 
       const result = yield* updater.updateProvider(CODEX_DRIVER);
-      const serializedState = JSON.stringify(result.providers[0]?.updateState);
+      const serializedState = encodeProviderJsonString(result.providers[0]?.updateState);
 
       assert.strictEqual(result.providers[0]?.updateState?.status, "failed");
       assert.strictEqual(
@@ -667,8 +669,8 @@ describe("providerMaintenanceRunner", () => {
           (yield* Ref.get(updateStatesRef)).map((state) => state.status),
           ["queued", "running", scenario.expectedStatus],
         );
-        assert.notInclude(JSON.stringify(updateState), "private-provider-diagnostic");
-        assert.notInclude(JSON.stringify(updateState), "/private/provider/home");
+        assert.notInclude(encodeProviderJsonString(updateState), "private-provider-diagnostic");
+        assert.notInclude(encodeProviderJsonString(updateState), "/private/provider/home");
       }).pipe(
         Effect.provide(
           Layer.mergeAll(

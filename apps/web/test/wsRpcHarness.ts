@@ -73,6 +73,9 @@ function normalizeRequest(tag: string, payload: unknown): NormalizedWsRpcRequest
   return { _tag: tag, payload };
 }
 
+// Synthetic handlers intentionally retain arbitrary declared RPC error values;
+// the actual Exit codec below, not this fixture, owns their wire representation.
+// @effect-diagnostics-next-line anyUnknownInErrorContext:off
 function asEffect(result: UnaryResolverResult): Effect.Effect<unknown, unknown> {
   if (result instanceof BrowserWsRpcFailure) {
     return Effect.fail(result.error);
@@ -173,6 +176,9 @@ export class BrowserWsRpcHarness {
   private makeLayer() {
     const handlers: Record<string, (payload: unknown) => unknown> = {};
     for (const method of ALL_RPC_METHODS) {
+      // Synthetic unary handlers retain arbitrary declared RPC failures through
+      // the real wire codec; wrapping that channel would change the fixture.
+      // @effect-diagnostics-next-line anyUnknownInErrorContext:off
       handlers[method] = STREAM_METHODS.has(method)
         ? (payload) => this.handleStream(method, payload)
         : (payload) => this.handleUnary(method, payload);
@@ -182,6 +188,8 @@ export class BrowserWsRpcHarness {
 
   private makeServerOptions() {
     return {
+      // This real-codec fixture must accept arbitrary synthetic RPC errors
+      // unchanged; narrowing or wrapping them would stop qualifying that wire.
       onFromServer: (response: RpcMessage.FromServer<any>) =>
         Effect.sync(() => {
           if (!this.client) {
@@ -197,6 +205,9 @@ export class BrowserWsRpcHarness {
     };
   }
 
+  // Preserve the same arbitrary fixture error channel through the real server
+  // handler instead of replacing received errors with a different tagged value.
+  // @effect-diagnostics-next-line anyUnknownInErrorContext:off
   private handleUnary(method: string, payload: unknown) {
     const request = normalizeRequest(method, payload);
     this.requests.push(request);

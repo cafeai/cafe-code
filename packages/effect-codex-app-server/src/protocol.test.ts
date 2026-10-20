@@ -15,6 +15,15 @@ import * as CodexProtocol from "./protocol.ts";
 import * as CodexSchema from "./schema.ts";
 import { makeInMemoryStdio } from "./_internal/stdio.ts";
 const encodeUnknownJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const isIncomingMessageTooLarge = Schema.is(CodexError.CodexAppServerIncomingMessageTooLargeError);
+const isIncomingBudgetExceeded = Schema.is(CodexError.CodexAppServerIncomingBudgetExceededError);
+// Preserve the exact protocol error object while rejecting an unexpected
+// successful raw payload, rather than promoting that unknown payload into
+// Effect's error channel with flip.
+const expectRequestFailure = Effect.match({
+  onSuccess: () => assert.fail("Expected the fixture request to fail"),
+  onFailure: (error: CodexError.CodexAppServerError) => error,
+});
 
 const encoder = new TextEncoder();
 
@@ -1072,13 +1081,13 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       yield* Queue.offer(input, encoder.encode('{"id":1,"result":"'));
       yield* Queue.offer(input, encoder.encode("private-wire-sentinel-that-must-not-leak"));
 
-      const error = yield* Fiber.join(pending).pipe(Effect.flip);
+      const error = yield* Fiber.join(pending).pipe(expectRequestFailure);
       assert.instanceOf(error, CodexError.CodexAppServerIncomingMessageTooLargeError);
-      if (error instanceof CodexError.CodexAppServerIncomingMessageTooLargeError) {
+      if (isIncomingMessageTooLarge(error)) {
         assert.equal(error.maxBytes, 32);
       }
       assert.equal(String(error).includes("private-wire-sentinel"), false);
-      assert.equal(JSON.stringify(error).includes("private-wire-sentinel"), false);
+      assert.equal(encodeUnknownJsonString(error).includes("private-wire-sentinel"), false);
     }),
   );
 
@@ -1140,10 +1149,10 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
         // There was no pending request when the budget was exhausted. Registering
         // one now must replay the finite transport failure, not wait forever on
         // an outgoing queue whose false offer result was previously discarded.
-        const late = yield* transport.request("x/next-page").pipe(Effect.flip);
+        const late = yield* transport.request("x/next-page").pipe(expectRequestFailure);
         assert.equal(late, error);
         assert.equal(outgoing.length, 2);
-        assert.equal(JSON.stringify(outgoing).includes("x/next-page"), false);
+        assert.equal(encodeUnknownJsonString(outgoing).includes("x/next-page"), false);
       }),
   );
 
@@ -1178,9 +1187,9 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       yield* Queue.take(output);
       yield* Queue.offer(input, encoder.encode(" \n \n \n"));
       yield* Queue.offer(input, encoder.encode("PRIVATE_INVALID_JSON"));
-      const error = yield* Fiber.join(pending).pipe(Effect.flip);
+      const error = yield* Fiber.join(pending).pipe(expectRequestFailure);
       assert.instanceOf(error, CodexError.CodexAppServerIncomingBudgetExceededError);
-      assert.equal(JSON.stringify([logs, error]).includes("PRIVATE_INVALID_JSON"), false);
+      assert.equal(encodeUnknownJsonString([logs, error]).includes("PRIVATE_INVALID_JSON"), false);
     }),
   );
 
@@ -1216,9 +1225,9 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
             const pending = yield* transport.request("x/read").pipe(Effect.forkScoped);
             yield* Queue.take(output);
             yield* Queue.offer(input, encodeJsonl({ id: 1, result: null }));
-            const error = yield* Fiber.join(pending).pipe(Effect.flip);
+            const error = yield* Fiber.join(pending).pipe(expectRequestFailure);
             assert.instanceOf(error, CodexError.CodexAppServerIncomingBudgetExceededError);
-            if (error instanceof CodexError.CodexAppServerIncomingBudgetExceededError) {
+            if (isIncomingBudgetExceeded(error)) {
               assert.equal(error.maxBytes, 1);
             }
           }),
@@ -1243,7 +1252,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       const pending = yield* transport.request("x/read").pipe(Effect.forkScoped);
       yield* Deferred.await(held);
       yield* Queue.offer(input, encoder.encode(" \n"));
-      const error = yield* Fiber.join(pending).pipe(Effect.flip);
+      const error = yield* Fiber.join(pending).pipe(expectRequestFailure);
       assert.instanceOf(error, CodexError.CodexAppServerIncomingBudgetExceededError);
     }),
   );

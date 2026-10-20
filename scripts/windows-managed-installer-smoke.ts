@@ -1,3 +1,6 @@
+import * as DateTime from "effect/DateTime";
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
 // @effect-diagnostics nodeBuiltinImport:off
 import { execFile, spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
@@ -140,7 +143,7 @@ async function run() {
     // A file captures native output without an inherited pipe delaying the
     // primary PowerShell exit while the deliberately detached peer is paused.
     const output = openSync(log, "wx");
-    console.info("managed-installer-fixture", { phase, event: "start" });
+    Effect.runSync(Console.info("managed-installer-fixture", { phase, event: "start" }));
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(
@@ -172,6 +175,9 @@ async function run() {
     }
     const exit = new Promise<number>((accept, reject) => {
       let timedOut = false;
+      // This native wait owns an external child/stream lifetime; a virtual
+      // Effect clock must not replace its existing deadline or cleanup.
+      // @effect-diagnostics-next-line globalTimers:off
       const timer = setTimeout(() => {
         timedOut = true;
         child.kill();
@@ -202,15 +208,17 @@ async function run() {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
         throw error;
       });
-      console.error("managed-installer-fixture-output", {
-        phase,
-        output: await readBoundedOutput(log, 16 * 1024 - 512),
-        preparation,
-      });
+      Effect.runSync(
+        Console.error("managed-installer-fixture-output", {
+          phase,
+          output: await readBoundedOutput(log, 16 * 1024 - 512),
+          preparation,
+        }),
+      );
     };
     const observedExit = exit.then(
       async (code) => {
-        console.info("managed-installer-fixture", { phase, event: "exit", code });
+        Effect.runSync(Console.info("managed-installer-fixture", { phase, event: "exit", code }));
         if (code !== 0) await reportOutput();
         return code;
       },
@@ -223,14 +231,17 @@ async function run() {
   };
   const invoke = (phase: string) => start(phase).exit;
   const waitForFile = async (file: string) => {
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
+    const deadline = DateTime.toEpochMillis(DateTime.nowUnsafe()) + 30_000;
+    while (DateTime.toEpochMillis(DateTime.nowUnsafe()) < deadline) {
       try {
         await readFile(file);
         return;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
+      // This native wait owns an external child/stream lifetime; a virtual
+      // Effect clock must not replace its existing deadline or cleanup.
+      // @effect-diagnostics-next-line globalTimers:off
       await new Promise((accept) => setTimeout(accept, 50));
     }
     throw new Error("Synthetic installer peer did not reach its bounded phase.");
@@ -386,8 +397,10 @@ async function run() {
       await rm(join(managed, "fixture-pause"), { force: true });
       if (preparing) await waitForFile(join(managed, "fixture-child-completed"));
     }
-    console.info(
-      "Native synthetic managed-installer prepare, repair, rollback, guard and interruption checks passed.",
+    Effect.runSync(
+      Console.info(
+        "Native synthetic managed-installer prepare, repair, rollback, guard and interruption checks passed.",
+      ),
     );
   } finally {
     await removePathWithRetries(root);

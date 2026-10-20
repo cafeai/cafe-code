@@ -39,6 +39,9 @@ const StoredRewind = Schema.Struct({
   candidate: Schema.NullOr(DurableProviderSessionJson),
 });
 const encodeSession = Schema.encodeSync(DurableProviderSessionJson);
+// Cursor equality is byte-sensitive SQL authority. Keep the exact native JSON
+// serialization of the already-admitted opaque cursor, including key order.
+const encodeResumeCursor = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeRewind = Schema.decodeUnknownEffect(StoredRewind);
 const isProviderSession = Schema.is(ProviderSession);
 
@@ -130,7 +133,7 @@ export function makeConversationRewindStore(sql: SqlClient.SqlClient): Conversat
         WHERE r.thread_id = ${input.threadId} AND r.provider_name = ${original.provider}
           AND r.provider_instance_id = ${original.providerInstanceId}
           AND json_extract(r.runtime_payload_json,'$.subagentRuntimeId') = ${original.subagentRuntimeId}
-          AND r.resume_cursor_json IS ${JSON.stringify(original.resumeCursor ?? null)}
+          AND r.resume_cursor_json IS ${encodeResumeCursor(original.resumeCursor ?? null)}
           AND COALESCE((SELECT MAX(sequence) FROM orchestration_runtime_recovery_controls
             WHERE thread_id = r.thread_id),0) = ${input.expectedControlSequence}
         ON CONFLICT(thread_id) DO UPDATE SET

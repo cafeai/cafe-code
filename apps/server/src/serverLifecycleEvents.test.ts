@@ -1,4 +1,4 @@
-import { EnvironmentId } from "@cafecode/contracts";
+import { EnvironmentId } from "@cafecode/contracts/baseSchemas";
 import { assert, it } from "@effect/vitest";
 import { assertTrue } from "@effect/vitest/utils";
 import * as Effect from "effect/Effect";

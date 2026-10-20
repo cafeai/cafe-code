@@ -16,6 +16,7 @@ import {
 } from "@cafecode/shared/providerPipelineDiagnostics";
 import * as Cause from "effect/Cause";
 import * as Schema from "effect/Schema";
+import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -52,6 +53,12 @@ import {
   ProviderAdapterRequestError,
   ProviderAdapterRewindOutcomeUnknownError,
 } from "../provider/Errors.ts";
+
+class RemoteHealthFixtureFailure extends Data.TaggedError("RemoteHealthFixtureFailure")<{
+  readonly message: string;
+}> {
+  override name = "Error";
+}
 
 const rewindIdentity = {
   threadId: ThreadId.make("rewind-thread"),
@@ -1264,7 +1271,9 @@ describe("RemoteProviderService", () => {
       const cursor = yield* resolveProviderDaemonReplayCursor({
         persistedCursor: 44_289_959,
         projector: PROVIDER_DAEMON_RUNTIME_CURSOR_PROJECTOR,
-        health: Effect.fail(new Error("synthetic health failure")),
+        health: Effect.fail(
+          new RemoteHealthFixtureFailure({ message: "synthetic health failure" }),
+        ),
       });
 
       assert.equal(cursor, 44_288_959);

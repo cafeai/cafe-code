@@ -1,7 +1,15 @@
+// Native fixture owns exact child argv, stdio handles and retirement; keep that process boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { watch, type FSWatcher } from "node:fs";
+// Native fixture exercises actual file identity, namespace and cleanup behavior.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+// Native fixture paths retain host drive, separator and namespace semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it, onTestFinished } from "vitest";
@@ -34,6 +42,8 @@ it.skipIf(process.platform !== "darwin")(
         for (const peer of peers) {
           peer.child.stdin.end();
           peer.child.kill("SIGTERM");
+          // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+          // @effect-diagnostics-next-line globalTimers:off
           const force = setTimeout(() => peer.child.kill("SIGKILL"), 1500);
           try {
             await peer.exited;
@@ -47,6 +57,8 @@ it.skipIf(process.platform !== "darwin")(
         await runtime?.close();
         if (child && exited) {
           child.kill("SIGTERM");
+          // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+          // @effect-diagnostics-next-line globalTimers:off
           const force = setTimeout(() => child?.kill("SIGKILL"), 1000);
           try {
             await exited;
@@ -69,6 +81,8 @@ it.skipIf(process.platform !== "darwin")(
         return await Promise.race([
           promise,
           new Promise<never>((_resolve, reject) => {
+            // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+            // @effect-diagnostics-next-line globalTimers:off
             timer = setTimeout(() => reject(new Error(label)), milliseconds);
           }),
         ]);
@@ -421,6 +435,8 @@ it.skipIf(process.platform !== "darwin")(
         await Promise.race([
           first.exited,
           new Promise<never>((_resolve, reject) => {
+            // Native opt-in fixture retains its exact wall-clock deadline, callback and child cleanup.
+            // @effect-diagnostics-next-line globalTimers:off
             expiry = setTimeout(
               () => reject(new Error("Native helper did not retire after parent EOF.")),
               3000,

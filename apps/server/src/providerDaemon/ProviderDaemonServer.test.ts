@@ -30,6 +30,8 @@ import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlError from "effect/unstable/sql/SqlError";
 import { EventEmitter } from "node:events";
+// Native transport fixture: retain actual loopback socket, request and close ownership qualification.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as http from "node:http";
 import type { Socket } from "node:net";
 
@@ -78,6 +80,12 @@ import * as McpAppOwner from "../mcpApps/owner.ts";
 import { privateVisualizationDaemonRequestCount } from "../visualizations/privateDaemonBody.ts";
 import { MCP_APP_JSON_MAX_TRANSPORT_BYTES } from "@cafecode/shared/mcpAppJson";
 import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
+
+const decodeProviderJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeErrorKeysJsonString = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ error: Schema.Record(Schema.String, Schema.Unknown) })),
+);
+const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
 
@@ -353,7 +361,7 @@ describe("ProviderDaemonServer", () => {
               }),
             );
             const text = yield* Effect.promise(() => response.text());
-            const receipt = JSON.parse(text) as Record<string, unknown>;
+            const receipt = decodeProviderJsonString(text) as Record<string, unknown>;
             assert.equal(response.status, 200);
             assert.equal(receipt.dataProfile, profile);
             assert.equal(
@@ -458,12 +466,13 @@ describe("ProviderDaemonServer", () => {
           name: "inherited-reason",
           error: () => {
             const error = requestError();
-            return Object.setPrototypeOf(
+            Object.setPrototypeOf(
               error,
               Object.create(Object.getPrototypeOf(error), {
                 failedRootRetirementRefusal: { value: "notifications-pending" },
               }),
             );
+            return error;
           },
         },
         {
@@ -554,6 +563,8 @@ describe("ProviderDaemonServer", () => {
               const testCase = cases[current]!;
               const result = yield* remote.sendTurn(coldInput).pipe(Effect.flip);
               assert.instanceOf(result, ProviderAdapterRequestError);
+              // This fixture requires the exact local error class; structural lookalikes must not satisfy its provenance assertion.
+              // @effect-diagnostics-next-line instanceOfSchema:off
               if (!(result instanceof ProviderAdapterRequestError))
                 return yield* Effect.die("Expected typed remote refusal");
               assert.equal(result.method, "sendTurn");
@@ -568,7 +579,7 @@ describe("ProviderDaemonServer", () => {
                 result.cause.failedRootRetirementRefusal,
                 "expected" in testCase ? testCase.expected : undefined,
               );
-              assert.notInclude(JSON.stringify(result.cause), privateExtra);
+              assert.notInclude(encodeProviderJsonString(result.cause), privateExtra);
               assert.equal(sendCalls, current + 1);
               assert.equal(stopCalls, 0);
               if ("expected" in testCase) {
@@ -582,7 +593,7 @@ describe("ProviderDaemonServer", () => {
                 assert.equal(healthResponse.status, 200);
                 const rawHealth = yield* Effect.promise(() => healthResponse.text());
                 assert.notInclude(rawHealth, privateExtra);
-                const health = decodeProviderDaemonHealth(JSON.parse(rawHealth));
+                const health = decodeProviderDaemonHealth(decodeProviderJsonString(rawHealth));
                 assert.isTrue(
                   health.rpc?.recentFailures?.some(
                     (failure) =>
@@ -610,6 +621,8 @@ describe("ProviderDaemonServer", () => {
               })
               .pipe(Effect.flip);
             assert.instanceOf(start, ProviderAdapterRequestError);
+            // This fixture requires the exact local error class; structural lookalikes must not satisfy its provenance assertion.
+            // @effect-diagnostics-next-line instanceOfSchema:off
             if (start instanceof ProviderAdapterRequestError)
               assert.equal(start.failedRootRetirementRefusal, undefined);
             current = 0;
@@ -617,6 +630,8 @@ describe("ProviderDaemonServer", () => {
               .sendTurn({ threadId, input: coldInput.input })
               .pipe(Effect.flip);
             assert.instanceOf(ordinary, ProviderAdapterRequestError);
+            // This fixture requires the exact local error class; structural lookalikes must not satisfy its provenance assertion.
+            // @effect-diagnostics-next-line instanceOfSchema:off
             if (ordinary instanceof ProviderAdapterRequestError)
               assert.equal(ordinary.failedRootRetirementRefusal, undefined);
           }).pipe(Effect.provide(remoteLayer), Effect.scoped);
@@ -665,7 +680,7 @@ describe("ProviderDaemonServer", () => {
         assert.equal(healthResponse.status, 200);
         const rawHealth = yield* Effect.promise(() => healthResponse.text());
         assert.notInclude(rawHealth, privateExtra);
-        const health = decodeProviderDaemonHealth(JSON.parse(rawHealth));
+        const health = decodeProviderDaemonHealth(decodeProviderJsonString(rawHealth));
         assert.equal(health.rpc?.failedRpcCount, cases.length + 5);
         assert.equal(sendCalls, cases.length + 4);
         assert.equal(startCalls, 1);
@@ -762,7 +777,8 @@ describe("ProviderDaemonServer", () => {
             Object.defineProperty(prototype, "remoteErrorTag", {
               value: "codex-context-window-active",
             });
-            return Object.setPrototypeOf(error, prototype);
+            Object.setPrototypeOf(error, prototype);
+            return error;
           },
           outer: "ProviderAdapterRequestError",
         },
@@ -846,6 +862,8 @@ describe("ProviderDaemonServer", () => {
                 })
                 .pipe(Effect.flip);
               assert.instanceOf(result, ProviderAdapterRequestError);
+              // This fixture requires the exact local error class; structural lookalikes must not satisfy its provenance assertion.
+              // @effect-diagnostics-next-line instanceOfSchema:off
               if (!(result instanceof ProviderAdapterRequestError)) {
                 return yield* Effect.die("Expected reconstructed typed remote refusal");
               }
@@ -863,7 +881,7 @@ describe("ProviderDaemonServer", () => {
                 result.cause.sessionReconfigurationRefusal,
                 "expected" in testCase ? testCase.expected : undefined,
               );
-              assert.notInclude(JSON.stringify(result.cause), privateExtra);
+              assert.notInclude(encodeProviderJsonString(result.cause), privateExtra);
               assert.equal(startCalls, current + 1);
               assert.equal(sendCalls, 0);
               assert.equal(stopCalls, 0);
@@ -942,7 +960,7 @@ describe("ProviderDaemonServer", () => {
       if (envelope.ok) return yield* Effect.die("Expected finite failed RPC envelope");
       assert.equal(envelope.error.tag, "ProviderAdapterRequestError");
       assert.equal(envelope.error.sessionReconfigurationRefusal, "subagent-concurrency-active");
-      assert.deepEqual(Object.keys(JSON.parse(raw).error).sort(), [
+      assert.deepEqual(Object.keys(decodeErrorKeysJsonString(raw).error).sort(), [
         "diagnostics",
         "message",
         "sessionReconfigurationRefusal",
@@ -1246,7 +1264,7 @@ describe("ProviderDaemonServer", () => {
         );
         const accepted = yield* request(
           VISUALIZATION_SESSION_DAEMON_PATH,
-          JSON.stringify({ token }),
+          encodeProviderJsonString({ token }),
         );
         assert.equal(accepted.status, 200);
         assert.deepEqual(yield* Effect.promise(() => accepted.json()), authority);
@@ -1263,11 +1281,11 @@ describe("ProviderDaemonServer", () => {
     "admits the separately bounded escaped App transport without enlarging native JSON",
     () =>
       Effect.gen(function* () {
-        const requestJson = JSON.stringify({
+        const requestJson = encodeProviderJsonString({
           name: "quote-fixture",
           arguments: { text: '"'.repeat(50_000) },
         });
-        const resultJson = JSON.stringify({
+        const resultJson = encodeProviderJsonString({
           content: [{ type: "text", text: '"'.repeat(50_000) }],
         });
         const input = {
@@ -1295,7 +1313,7 @@ describe("ProviderDaemonServer", () => {
           version: "0.0.0-test",
           protocolVersion: 1,
         });
-        const body = JSON.stringify(input);
+        const body = encodeProviderJsonString(input);
         assert.equal(Buffer.byteLength(requestJson, "utf8") < 128 * 1024, true);
         assert.equal(Buffer.byteLength(resultJson, "utf8") < 128 * 1024, true);
         assert.equal(Buffer.byteLength(body, "utf8") > 128 * 1024, true);
@@ -1312,7 +1330,7 @@ describe("ProviderDaemonServer", () => {
         assert.equal(accepted.status, 200);
         const result = yield* Effect.promise(() => accepted.text());
         assert.equal(Buffer.byteLength(result, "utf8") > 128 * 1024, true);
-        assert.deepEqual(JSON.parse(result), { json: resultJson });
+        assert.deepEqual(decodeProviderJsonString(result), { json: resultJson });
         assert.equal(dispatch.mock.calls.length, 1);
         const rejected = yield* request(" ".repeat(MCP_APP_JSON_MAX_TRANSPORT_BYTES + 1));
         assert.equal(rejected.status, 403);
@@ -2408,10 +2426,10 @@ describe("ProviderDaemonServer", () => {
         }),
       );
       const healthText = yield* Effect.promise(() => healthResponse.text());
-      const health = decodeProviderDaemonHealth(JSON.parse(healthText));
+      const health = decodeProviderDaemonHealth(decodeProviderJsonString(healthText));
       assert.equal(health.rpc?.recentFailures?.[0]?.tag, "ProviderSubagentDetailReadError");
 
-      const serializedLogs = JSON.stringify(logMessages);
+      const serializedLogs = encodeProviderJsonString(logMessages);
       assert.match(serializedLogs, /provider daemon rpc failed/u);
       const observableOutput = `${responseText}\n${healthText}\n${serializedLogs}`;
       for (const sentinel of sentinels) {

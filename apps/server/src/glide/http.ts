@@ -1,7 +1,10 @@
+// Native bridge keeps exact socket/response identity, stream lifetime and resource limits.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { ServerResponse } from "node:http";
 import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import * as Effect from "effect/Effect";
+import * as Data from "effect/Data";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
@@ -10,6 +13,17 @@ import { glideExecutionResponses, glideControlResponses } from "./mcpResponse.ts
 import { createGlideMcpServer } from "./mcp.ts";
 import { cellResultSchema } from "./protocol.ts";
 import { makeGlideService } from "./sessionRuntime.ts";
+
+// Typed internal failure preserves existing Error name, fixed text and optional cause.
+class GlideHttpBoundaryError extends Data.TaggedError("GlideHttpBoundaryError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {
+  constructor(message: string, options?: { readonly cause?: unknown }) {
+    super({ message, ...options });
+    this.name = "Error";
+  }
+}
 
 export const handleGlideMcpRequest = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
@@ -25,7 +39,7 @@ export const handleGlideMcpRequest = Effect.gen(function* () {
   const operation = yield* makeGlideService;
   const authorized = yield* Effect.tryPromise({
     try: () => operation({ kind: "catalog", token }),
-    catch: () => new Error("Glide session expired."),
+    catch: () => new GlideHttpBoundaryError("Glide session expired."),
   }).pipe(Effect.option);
   if (Option.isNone(authorized)) return HttpServerResponse.empty({ status: 403 });
   const incoming = yield* boundedWebRequest(request);
@@ -49,7 +63,7 @@ export const handleGlideMcpRequest = Effect.gen(function* () {
         responses: execution ? glideExecutionResponses : glideControlResponses,
       };
     },
-    catch: () => new Error("Invalid Glide envelope."),
+    catch: () => new GlideHttpBoundaryError("Invalid Glide envelope."),
   }).pipe(Effect.option);
   if (Option.isNone(prepared)) return HttpServerResponse.empty({ status: 400 });
   const { webRequest, responses } = prepared.value;
@@ -58,10 +72,10 @@ export const handleGlideMcpRequest = Effect.gen(function* () {
       try: () => {
         const response = NodeHttpServerRequest.toServerResponse(request);
         if (!(response instanceof ServerResponse))
-          throw new Error("Native HTTP response required.");
+          throw new GlideHttpBoundaryError("Native HTTP response required.");
         return responses.acquire(response);
       },
-      catch: () => new Error("Glide unavailable."),
+      catch: () => new GlideHttpBoundaryError("Glide unavailable."),
     }),
     (lease) =>
       Effect.gen(function* () {
@@ -102,7 +116,7 @@ export const handleGlideMcpRequest = Effect.gen(function* () {
                     responses.bound(
                       Stream.fromReadableStream({
                         evaluate: () => outgoing.body!,
-                        onError: () => new Error("Glide response failed."),
+                        onError: () => new GlideHttpBoundaryError("Glide response failed."),
                       }),
                     ),
                     {
@@ -120,7 +134,7 @@ export const handleGlideMcpRequest = Effect.gen(function* () {
               await transport.close().catch(() => undefined);
             }
           },
-          catch: () => new Error("Glide request failed."),
+          catch: () => new GlideHttpBoundaryError("Glide request failed."),
         });
       }).pipe(
         Effect.catch(() => {

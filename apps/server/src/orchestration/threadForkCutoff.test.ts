@@ -1,12 +1,12 @@
+import type { OrchestrationThread } from "@cafecode/contracts";
 import {
   CheckpointRef,
   EventId,
   MessageId,
-  ProviderInstanceId,
   ThreadId,
   TurnId,
-  type OrchestrationThread,
-} from "@cafecode/contracts";
+} from "@cafecode/contracts/baseSchemas";
+import { ProviderInstanceId } from "@cafecode/contracts/providerInstance";
 import { describe, expect, it } from "vitest";
 import { resolveThreadForkMessageCutoff, threadForkPrefix } from "./threadForkCutoff.ts";
 

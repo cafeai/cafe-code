@@ -158,20 +158,29 @@ const GROK_SANDBOX_APPLY_FAILURE = "warning: sandbox could not be applied:";
  * login failure without copying any of the original diagnostic into a log.
  */
 export class GrokSandboxStartupError extends EffectAcpErrors.AcpRequestError {
-  readonly reason: "container-socket-symlink" | "sandbox-unavailable";
+  declare readonly reason: "container-socket-symlink" | "sandbox-unavailable";
 
-  constructor(
+  static fromSandboxProfile(
     profile: GrokSandboxProfile,
     reason: "container-socket-symlink" | "sandbox-unavailable",
   ) {
-    super({
+    const failure = new GrokSandboxStartupError({
       code: -32603,
       errorMessage:
         reason === "container-socket-symlink"
           ? `Grok cannot start its ${profile} sandbox because a container-runtime socket is a symbolic link. Review the Docker/container socket configuration or use a Grok version that supports it. Cafe has not disabled sandbox protection.`
           : `Grok could not enforce its ${profile} sandbox. Check Grok's sandbox requirements for this machine. Cafe stopped startup instead of continuing without protection.`,
     });
-    this.reason = reason;
+    // Preserve the original instance's own, enumerable discriminator without
+    // overriding the Schema constructor or decoding provider-authored data as
+    // a locally classified sandbox refusal.
+    Object.defineProperty(failure, "reason", {
+      value: reason,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    return failure;
   }
 }
 
@@ -200,7 +209,7 @@ export function classifyGrokSandboxStartupStderr(
   // phrases only; never return the intervening path or suggest an off fallback.
   // Upstream: xai-org/grok-build at 482711333c7195dc16a272777f86086d615e2afb,
   // crates/codegen/xai-grok-sandbox/src/runtime_sockets.rs (endpoint validation).
-  return new GrokSandboxStartupError(
+  return GrokSandboxStartupError.fromSandboxProfile(
     sandboxProfile,
     normalized.includes("runtime-socket deny path") && normalized.includes("endpoint is a symlink")
       ? "container-socket-symlink"

@@ -70,9 +70,9 @@ export function isCommandMissingCause(error: { readonly message: string }): bool
   return lower.includes("enoent") || lower.includes("notfound");
 }
 
-interface TerminableChildProcess {
-  readonly isRunning: Effect.Effect<boolean, unknown>;
-  readonly kill: (options?: ChildProcess.KillOptions) => Effect.Effect<void, unknown>;
+interface TerminableChildProcess<RunningError, KillError> {
+  readonly isRunning: Effect.Effect<boolean, RunningError>;
+  readonly kill: (options?: ChildProcess.KillOptions) => Effect.Effect<void, KillError>;
 }
 
 /**
@@ -83,8 +83,8 @@ interface TerminableChildProcess {
  * exit. Running this cleanup before the scope finalizer ensures a timeout
  * cannot leave that finalizer waiting forever on an ignored SIGTERM.
  */
-export const terminateProbeChild = (
-  child: TerminableChildProcess,
+export const terminateProbeChild = <RunningError, KillError>(
+  child: TerminableChildProcess<RunningError, KillError>,
   grace: Duration.Input,
 ): Effect.Effect<void> =>
   child.isRunning.pipe(

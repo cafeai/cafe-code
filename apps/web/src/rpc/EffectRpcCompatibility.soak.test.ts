@@ -1,12 +1,15 @@
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import type { FromServerEncoded } from "effect/unstable/rpc/RpcMessage";
 import * as Socket from "effect/unstable/socket/Socket";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+
+const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const runtimeUrl = import.meta.resolve("effect/unstable/rpc/RpcClient");
 const runtimePath = fileURLToPath(runtimeUrl);
@@ -55,8 +58,8 @@ function eventually(assertion: () => void): Effect.Effect<void> {
   });
 }
 
-async function withProtocolFixture(
-  run: (fixture: ProtocolFixture) => Effect.Effect<void, unknown>,
+async function withProtocolFixture<E>(
+  run: (fixture: ProtocolFixture) => Effect.Effect<void, E>,
   options?: { readonly retry?: boolean },
 ): Promise<void> {
   const generations: SocketGeneration[] = [];
@@ -182,7 +185,7 @@ describe("pinned Effect socket RPC compatibility", () => {
           // broadcast to either unrelated client on the replacement socket.
           yield* Queue.offer(
             generations[cycle + 1]!.inbox,
-            JSON.stringify({ _tag: "Chunk", requestId: `${cycle}:0`, values: ["stale"] }),
+            encodeJson({ _tag: "Chunk", requestId: `${cycle}:0`, values: ["stale"] }),
           );
           yield* Effect.yieldNow;
           expect(received.some(({ message }) => message._tag === "Chunk")).toBe(false);
@@ -191,7 +194,7 @@ describe("pinned Effect socket RPC compatibility", () => {
         yield* protocol.send(2, request("fresh", false));
         yield* Queue.offer(
           generations.at(-1)!.inbox,
-          JSON.stringify({
+          encodeJson({
             _tag: "Exit",
             requestId: "fresh",
             exit: { _tag: "Success", value: "current" },
@@ -283,7 +286,7 @@ describe("pinned Effect socket RPC compatibility", () => {
             generations[0]!.inbox,
             failureKind === "malformed-json"
               ? "{"
-              : JSON.stringify({ _tag: "Defect", defect: "controlled peer failure" }),
+              : encodeJson({ _tag: "Defect", defect: "controlled peer failure" }),
           );
           yield* eventually(() => expect(received).toHaveLength(2));
           expect(routingMap.size).toBe(0);

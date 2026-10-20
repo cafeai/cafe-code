@@ -5,15 +5,16 @@ import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { resolveDataProfileRoot, type DataProfile } from "@cafecode/shared/dataProfile";
 import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
+import * as Data from "effect/Data";
 
 /** Fixed operator copy: native errors and filesystem paths never escape. */
-export class BackendProfileGuardError extends Error {
+export class BackendProfileGuardError extends Data.TaggedError("BackendProfileGuardError") {
   constructor() {
-    super(
-      "This data profile's backend is already running, or its backend ownership could not be verified. Existing processes and data were preserved. Close the existing owner before retrying; do not remove ownership files while it may still be running.",
-    );
+    super();
     this.name = "BackendProfileGuardError";
   }
+  override readonly message =
+    "This data profile's backend is already running, or its backend ownership could not be verified. Existing processes and data were preserved. Close the existing owner before retrying; do not remove ownership files while it may still be running.";
 }
 
 export interface BackendProfileGuardInput {

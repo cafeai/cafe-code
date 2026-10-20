@@ -20,6 +20,8 @@ export {
 } from "./lib/mac-app-privacy.ts";
 
 import { createHash } from "node:crypto";
+// Host-native path spelling must agree with the existing native file and tool boundary.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { resolve } from "node:path";
 import { stripTypeScriptTypes } from "node:module";
 import {
@@ -793,9 +795,9 @@ const stageWindowsManagedRuntime = Effect.fn("stageWindowsManagedRuntime")(funct
     `win-${archive.arch}`,
   );
   const contentRoot = path.join(providersRoot, "content");
-  const manifest = JSON.parse(
+  const manifest = (yield* Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(
     yield* fs.readFileString(path.join(repoRoot, "packaging/managed-providers/manifest.json")),
-  ) as ManagedProviderManifest;
+  )) as ManagedProviderManifest;
   if (manifest.node !== MANAGED_WINDOWS_NODE_VERSION)
     return yield* new BuildScriptError({ message: "Managed provider manifest Node pin is stale." });
   yield* Effect.tryPromise({
@@ -813,7 +815,10 @@ const stageWindowsManagedRuntime = Effect.fn("stageWindowsManagedRuntime")(funct
     try: () => inventoryManagedBundle(contentRoot),
     catch: () => new BuildScriptError({ message: "Failed to seal managed provider bundle." }),
   });
-  yield* fs.writeFileString(path.join(providersRoot, "inventory.json"), JSON.stringify(inventory));
+  yield* fs.writeFileString(
+    path.join(providersRoot, "inventory.json"),
+    yield* encodeJsonString(inventory),
+  );
   const installerSource = yield* fs.readFileString(
     path.join(repoRoot, "scripts/lib/managed-provider-bundle.ts"),
   );

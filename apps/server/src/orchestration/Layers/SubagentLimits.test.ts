@@ -1,5 +1,9 @@
+// The scoped fixture creates and retires its actual native repository namespace.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import fs from "node:fs";
 import os from "node:os";
+// Test and provider cwd construction retain the same host-native spelling.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import path from "node:path";
 
 import {

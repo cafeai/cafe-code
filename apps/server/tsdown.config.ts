@@ -1,4 +1,7 @@
 import { defineConfig } from "tsdown";
+// This bundler callback is outside an Effect runtime and binds emitted files
+// to the native host namespace used by the version/ownership receipt writer.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { relative, resolve, sep } from "node:path";
 import { publishSourceDebugBuildManifest } from "../../packages/shared/src/sourceDebugBuild.ts";
 import {

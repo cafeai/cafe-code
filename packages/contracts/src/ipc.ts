@@ -208,6 +208,8 @@ export const DesktopRuntimeInfoSchema = Schema.Struct({
 });
 
 export interface DesktopUpdateState {
+  /** Main-process packaging identity; legacy omission is unknown, not source. */
+  runtimeKind?: "source" | "packaged";
   enabled: boolean;
   status: DesktopUpdateStatus;
   channel: DesktopUpdateChannel;
@@ -226,6 +228,7 @@ export interface DesktopUpdateState {
 }
 
 export const DesktopUpdateStateSchema = Schema.Struct({
+  runtimeKind: Schema.optionalKey(Schema.Literals(["source", "packaged"])),
   enabled: Schema.Boolean,
   status: DesktopUpdateStatusSchema,
   channel: DesktopUpdateChannelSchema,

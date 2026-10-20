@@ -1,6 +1,10 @@
 import * as Electron from "electron";
 import { randomUUID } from "node:crypto";
+// Opt-in native fixture keeps its existing Electron-owned screenshot/result-file Promise lifecycle.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { readFile, writeFile } from "node:fs/promises";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { DesktopVisualizationHost } from "./DesktopVisualizationHost.ts";
 import { VISUALIZATION_FLUID_DIAGNOSTIC_COUNTER_MAX } from "@cafecode/shared/visualizationFluidRuntime";
@@ -27,6 +31,8 @@ async function observed(predicate: () => boolean): Promise<void> {
   const until = performance.now() + 5_000;
   while (!predicate()) {
     if (performance.now() >= until) throw new Error("Native fixture observation unavailable.");
+    // Native-host fixture: preserve its existing wall-clock budget and callback cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
 }
@@ -44,6 +50,8 @@ async function observedNativeDom(
     const ready = await Promise.race([
       contents.executeJavaScript(expression),
       new Promise<false>((resolve) => {
+        // Native-host fixture: preserve its existing wall-clock budget and callback cleanup.
+        // @effect-diagnostics-next-line globalTimers:off
         timer = setTimeout(() => resolve(false), Math.max(0, until - performance.now()));
       }),
     ]).finally(() => {
@@ -112,6 +120,8 @@ async function observedNativeDom(
       if (fluidDiagnostic) process.stderr.write(`Native fixture fluid state: ${fluidDiagnostic}\n`);
       throw new Error(`Native fixture ${classification} delivery unavailable.`);
     }
+    // Native-host fixture: preserve its existing wall-clock budget and callback cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
 }
@@ -132,6 +142,8 @@ async function settledChartLayout(
         "(()=>{const body=document.body,unit=document.querySelector('.unit'),padding=Number.parseFloat(getComputedStyle(body).paddingBottom)||0;return Math.ceil(unit.getBoundingClientRect().bottom-body.getBoundingClientRect().top+padding)})()",
       ),
       new Promise<undefined>((resolve) => {
+        // Native-host fixture: preserve its existing wall-clock budget and callback cleanup.
+        // @effect-diagnostics-next-line globalTimers:off
         timer = setTimeout(() => resolve(undefined), Math.max(0, until - performance.now()));
       }),
     ]).finally(() => {
@@ -151,6 +163,8 @@ async function settledChartLayout(
     )
       return after;
     if (performance.now() >= until) throw new Error("Native settled chart extent unavailable.");
+    // Native-host fixture: preserve its existing wall-clock budget and callback cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
 }
@@ -759,6 +773,8 @@ async function qualify(): Promise<void> {
       throw new Error("Native open exposed source before trusted visibility commit.");
     // Qualification must outlive the3s watchdog: a short successful open does
     // not establish private pulse survival across document.open replacement.
+    // Native-host fixture: preserve its existing wall-clock budget and callback cleanup.
+    // @effect-diagnostics-next-line globalTimers:off
     await new Promise<void>((resolve) => setTimeout(resolve, 3_500));
     if (!host.inspect(ticket, state.leaseId))
       throw new Error("Native normal-document heartbeat unavailable.");

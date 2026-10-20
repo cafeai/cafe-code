@@ -5,6 +5,8 @@
  * of renderer-visible provider snapshots.
  */
 import { createHash } from "node:crypto";
+// Native provider path boundary: retain host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { resolve } from "node:path";
 
 import { GrokSettings, ProviderDriverKind, type ServerProvider } from "@cafecode/contracts";

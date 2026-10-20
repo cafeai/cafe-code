@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import * as Data from "effect/Data";
+// Native filesystem boundary: preserve descriptor, no-follow and bigint identity operations.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import {
   closeSync,
   constants,
@@ -10,6 +13,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+// Native path boundary: preserve host drive, namespace and separator semantics.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 
 export type SourceDebugBuildRole = "desktop" | "server";
@@ -22,12 +27,14 @@ const MAX_FILE_BYTES = 128 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 256 * 1024 * 1024;
 const MAX_MANIFEST_BYTES = 256 * 1024;
 
-export class SourceDebugBuildError extends Error {
+export class SourceDebugBuildError extends Data.TaggedError("SourceDebugBuildError")<{}> {
   constructor() {
-    super(
-      "Source Debug build is missing, outdated or inconsistent. Rebuild using yarn build:desktop before starting Cafe Code. No application or provider was started.",
-    );
+    super();
     this.name = "SourceDebugBuildError";
+  }
+
+  override get message() {
+    return "Source Debug build is missing, outdated or inconsistent. Rebuild using yarn build:desktop before starting Cafe Code. No application or provider was started.";
   }
 }
 

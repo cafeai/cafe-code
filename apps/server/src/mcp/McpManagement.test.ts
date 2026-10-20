@@ -1,6 +1,10 @@
 import { legacyMcpConfiguration } from "./fixtures/legacyConfiguration.ts";
+// Native fixture retains actual host file/socket identity and exact owned cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+// Native fixture retains actual host file/socket identity and exact owned cleanup.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { retireLegacyMcpRegistrations } from "./McpManagement.ts";

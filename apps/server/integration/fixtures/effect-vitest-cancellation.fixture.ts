@@ -22,7 +22,7 @@ it.live(
           console.log("FINALIZER_RETIRED");
         }),
       );
-      yield* Effect.never;
+      return yield* Effect.never;
     }),
   20,
 );

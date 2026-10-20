@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MessageId, ProviderInstanceId, ThreadId, TurnId } from "@cafecode/contracts";
@@ -148,7 +149,7 @@ function fixture(run: Parameters<typeof registerMcpAppOwner>[2] = Effect.runProm
     method,
     requestJson: JSON.stringify(params),
     ...(method === "resource" || method === "tool"
-      ? { consentExpiresAtMs: Date.now() + 30_000 }
+      ? { consentExpiresAtMs: DateTime.toEpochMillis(DateTime.nowUnsafe()) + 30_000 }
       : {}),
   });
   return {
@@ -339,7 +340,7 @@ describe("actual adapter-owned MCP App transport", () => {
   it.each(["resource", "tool"] as const)(
     "refuses %s consent that expires during asynchronous owner admission without accepting a caller's renewal",
     async (method) => {
-      let clock = Date.now();
+      let clock = DateTime.toEpochMillis(DateTime.nowUnsafe());
       const date = vi.spyOn(Date, "now").mockImplementation(() => clock);
       let release!: () => void;
       let entered!: () => void;
@@ -381,7 +382,7 @@ describe("actual adapter-owned MCP App transport", () => {
   it.each(["resource", "tool"] as const)(
     "rechecks %s consent when the real transport effect is evaluated, not only when admission completes",
     async (method) => {
-      let clock = Date.now();
+      let clock = DateTime.toEpochMillis(DateTime.nowUnsafe());
       const date = vi.spyOn(Date, "now").mockImplementation(() => clock);
       const deadline = clock + 30_000;
       try {
@@ -412,7 +413,13 @@ describe("actual adapter-owned MCP App transport", () => {
       const params = method === "resource" ? { uri: "ui://owned" } : { name: "act", arguments: {} };
       const { consentExpiresAtMs: _deadline, ...withoutConsent } = peer.operation(method, params);
       await expect(dispatchMcpAppOwnerOperation(withoutConsent)).rejects.toThrow("unavailable");
-      for (const deadline of [Date.now(), 0, Number.NaN, Number.POSITIVE_INFINITY, 1.5])
+      for (const deadline of [
+        DateTime.toEpochMillis(DateTime.nowUnsafe()),
+        0,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        1.5,
+      ])
         await expect(
           dispatchMcpAppOwnerOperation({ ...withoutConsent, consentExpiresAtMs: deadline }),
         ).rejects.toThrow("unavailable");

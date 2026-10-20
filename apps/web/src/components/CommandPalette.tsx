@@ -10,7 +10,6 @@ import {
   type FilesystemBrowseResult,
   type ProjectId,
   ProviderInstanceId,
-  SourceControlRepositoryError,
   type SourceControlDiscoveryResult,
   type SourceControlProviderKind,
   type SourceControlRepositoryInfo,
@@ -87,6 +86,7 @@ import {
   buildProjectActionItems,
   buildRootGroups,
   buildThreadActionItems,
+  commandPaletteErrorDescription as errorDescription,
   type CommandPaletteActionItem,
   type CommandPaletteSubmenuItem,
   type CommandPaletteView,
@@ -316,21 +316,6 @@ function buildAddProjectRemoteSourceReadiness(
   }
 
   return readiness;
-}
-
-/**
- * A failure's own message when it has one (for example a missing folder), and
- * nothing otherwise: a generic "An error occurred." adds no information, so
- * the toast title stands alone.
- */
-function errorDescription(error: unknown): { description?: string } {
-  if (error instanceof SourceControlRepositoryError && error.detail.trim().length > 0) {
-    return { description: error.detail };
-  }
-  if (error instanceof Error && error.message.trim().length > 0) {
-    return { description: error.message };
-  }
-  return {};
 }
 
 function inferCloneDirectoryNameFromReference(value: string): string | null {
