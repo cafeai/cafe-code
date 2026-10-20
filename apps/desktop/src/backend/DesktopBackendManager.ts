@@ -151,7 +151,11 @@ export interface DesktopBackendSnapshot {
 
 export interface DesktopBackendManagerShape {
   readonly start: Effect.Effect<void>;
-  readonly stop: (options?: { readonly timeout?: Duration.Duration }) => Effect.Effect<void>;
+  readonly stop: (options?: {
+    readonly timeout?: Duration.Duration;
+    /** Update installation may proceed only after this exact run actually closes. */
+    readonly requireConfirmedExit?: boolean;
+  }) => Effect.Effect<void>;
   readonly currentConfig: Effect.Effect<Option.Option<DesktopBackendStartConfig>>;
   readonly snapshot: Effect.Effect<DesktopBackendSnapshot>;
 }
@@ -160,6 +164,15 @@ export class DesktopBackendManager extends Context.Service<
   DesktopBackendManager,
   DesktopBackendManagerShape
 >()("cafecode/desktop/BackendManager") {}
+
+/** A stop deadline is not evidence that the old backend released its data profile. */
+export class BackendTerminationUnconfirmedError extends Data.TaggedError(
+  "BackendTerminationUnconfirmedError",
+)<{}> {
+  override get message() {
+    return "Backend native exit could not be confirmed; the current owner was preserved and update installation was refused.";
+  }
+}
 
 const { logWarning: logBackendManagerWarning, logError: logBackendManagerError } =
   DesktopObservability.makeComponentLogger("desktop-backend-manager");
@@ -471,6 +484,10 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     .spawn(command)
     .pipe(Effect.mapError((cause) => new BackendProcessSpawnError({ cause })));
 
+  // The qualified Node spawner completes its private exit signal only from
+  // ChildProcess's native `exit` event. Its exitCode failure denotes a signal
+  // exit after that event, not an inconclusive observer. Preserve that actual
+  // exit evidence for strict update shutdown, including SIGTERM/SIGKILL exits.
   const nativeExit = Effect.result(handle.exitCode).pipe(Effect.asVoid);
   const terminationStarted = yield* Ref.make(false);
   const terminate = (grace: Duration.Duration = DEFAULT_BACKEND_TERMINATE_GRACE) =>
@@ -927,6 +944,7 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
 
   const stop = Effect.fn("desktop.backendManager.stop")(function* (options?: {
     readonly timeout?: Duration.Duration;
+    readonly requireConfirmedExit?: boolean;
   }) {
     const { active, restartFiber } = yield* mutex.withPermits(1)(
       Effect.gen(function* () {
@@ -980,6 +998,12 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
             timeoutMs: Duration.toMillis(options.timeout),
             ...(Option.isSome(run.pid) ? { pid: run.pid.value } : {}),
           });
+          if (options.requireConfirmedExit) {
+            // Keep the retained generation and the existing five-second update
+            // budget. The installer must not interpret this void Stop API's
+            // historical best-effort timeout as release of the old DB writer.
+            return yield* Effect.die(new BackendTerminationUnconfirmedError());
+          }
         }),
     });
   });

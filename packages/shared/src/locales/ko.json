@@ -1,4 +1,12 @@
 {
+  "Cafe Code could not confirm update installation.": "Cafe Code 업데이트 설치를 확인할 수 없습니다.",
+  "Cafe Code could not download the update.": "Cafe Code 업데이트를 다운로드할 수 없습니다.",
+  "Cafe Code could not check for updates.": "Cafe Code 업데이트를 확인할 수 없습니다.",
+  "Stop sessions and update": "세션 중지 후 업데이트",
+  "Stop all provider sessions and install Cafe Code {version}?": "모든 제공자 세션을 중지하고 Cafe Code {version}을(를) 설치할까요?",
+  "Updating will stop all Codex, Claude, and other provider work, including work that starts while this dialog is open. Stop sessions and install the downloaded update?": "업데이트하면 이 대화상자가 열린 동안 시작된 작업을 포함하여 Codex, Claude 및 다른 제공자의 모든 작업이 중지됩니다. 세션을 중지하고 다운로드한 업데이트를 설치할까요?",
+  "Stop Sessions and Update": "세션 중지 후 업데이트",
+  "The update was not installed because Cafe Code could not safely prepare and stop its provider runtime. The downloaded update is still available. Stop the runtime explicitly before retrying.": "제공자 런타임을 안전하게 준비하고 중지할 수 없어 업데이트를 설치하지 않았습니다. 다운로드한 업데이트는 그대로 유지됩니다. 런타임을 명시적으로 중지한 후 다시 시도하세요.",
   "Desktop update information is unavailable.": "데스크톱 앱의 업데이트 정보를 확인할 수 없습니다.",
   "Update checks are unavailable for this installation.": "이 설치에서는 업데이트를 확인할 수 없습니다.",
   "installed app": "설치된 앱",

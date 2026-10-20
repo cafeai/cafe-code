@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ProviderDaemonHealth } from "@cafecode/contracts";
+import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -14,7 +18,10 @@ import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
 import type { DesktopEnvironmentShape } from "../app/DesktopEnvironment.ts";
 import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
-import { makeWindowsDesktopProviderDaemonManager } from "./WindowsDesktopProviderDaemonManager.ts";
+import {
+  makeWindowsDesktopProviderDaemonManager,
+  type WindowsDesktopProviderDaemonDependencies,
+} from "./WindowsDesktopProviderDaemonManager.ts";
 
 const environment = {
   platform: "win32",
@@ -107,7 +114,10 @@ function runtimeFixture() {
       current = result;
       return result;
     }),
-    observe: vi.fn(async () => ({ status: "same-process" as const, ownershipId: generation })),
+    observe: vi.fn<WindowsProviderRuntime["observe"]>(async () => ({
+      status: "same-process",
+      ownershipId: generation,
+    })),
     recover: vi.fn(async (_expected?: string) => {
       current = result;
       return result;
@@ -120,10 +130,13 @@ function runtimeFixture() {
 }
 async function setup(runtime = runtimeFixture(), health = result.health) {
   let options!: WindowsProviderRuntimeOptions;
-  const requestJson = vi.fn(async () => ({
-    statusCode: 200,
-    body: JSON.stringify({ ...health, transport: "ipc" }),
-  }));
+  const scope = await fixtureScope();
+  const requestJson = vi.fn<NonNullable<WindowsDesktopProviderDaemonDependencies["requestJson"]>>(
+    async () => ({
+      statusCode: 200,
+      body: JSON.stringify({ ...health, transport: "ipc" }),
+    }),
+  );
   const manager = await Effect.runPromise(
     makeWindowsDesktopProviderDaemonManager(environment, "test-build", {
       createRuntime: (input) => {
@@ -133,10 +146,10 @@ async function setup(runtime = runtimeFixture(), health = result.health) {
       requestJson,
     }).pipe(
       Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage),
-      Effect.provideService(Scope.Scope, await fixtureScope()),
+      Effect.provideService(Scope.Scope, scope),
     ),
   );
-  return { manager, runtime, options, requestJson };
+  return { manager, runtime, options, requestJson, scope };
 }
 afterEach(async () => {
   for (const scope of fixtureScopes.splice(0))
@@ -257,6 +270,190 @@ describe("Windows desktop daemon authority adapter", () => {
     expect(Option.getOrThrow(await Effect.runPromise(manager.currentConfig))).toEqual(
       result.endpoint,
     );
+  });
+
+  it("refuses update preparation without an admitted native owner", async () => {
+    const { manager, runtime, requestJson } = await setup();
+    const before = await Effect.runPromise(manager.snapshot);
+    await expect(Effect.runPromise(manager.prepareForUpdate!)).rejects.toThrow(
+      "could not be safely prepared",
+    );
+    expect(await Effect.runPromise(manager.snapshot)).toEqual(before);
+    expect(runtime.ensure).not.toHaveBeenCalled();
+    expect(runtime.observe).not.toHaveBeenCalled();
+    expect(runtime.recover).not.toHaveBeenCalled();
+    expect(runtime.stop).not.toHaveBeenCalled();
+    expect(requestJson).not.toHaveBeenCalled();
+  });
+
+  it("qualifies fresh health between two native observations without mutating its admitted owner", async () => {
+    const { manager, runtime, requestJson } = await setup();
+    await Effect.runPromise(manager.ensureRunning);
+    const before = await Effect.runPromise(manager.snapshot);
+    await Effect.runPromise(manager.prepareForUpdate!);
+    expect(runtime.observe).toHaveBeenCalledTimes(2);
+    expect(requestJson).toHaveBeenCalledExactlyOnceWith(
+      result.endpoint,
+      "/api/provider-daemon/health",
+      expect.objectContaining({
+        timeoutMs: 5_000,
+        maxResponseBytes: 1_048_576,
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(runtime.ensure).toHaveBeenCalledTimes(1);
+    expect(runtime.stop).not.toHaveBeenCalled();
+    expect(runtime.recover).not.toHaveBeenCalled();
+    expect(runtime.current()).toBe(result);
+    expect(await Effect.runPromise(manager.snapshot)).toEqual(before);
+    expect(Option.getOrThrow(await Effect.runPromise(manager.currentConfig))).toEqual(
+      result.endpoint,
+    );
+  });
+
+  const changedHealth: ReadonlyArray<readonly [string, Partial<ProviderDaemonHealth>]> = [
+    ["process", { pid: 42 }],
+    ["mode", { mode: "provider-supervisor" }],
+    ["version", { version: "private-old-version" }],
+    ["protocol", { protocolVersion: 2 }],
+    ["build", { runtimeBuildId: "private-old-build" }],
+    ["profile", { dataProfile: "debug" }],
+    ["profile root", { dataProfileId: dataProfileIdentity("production", "C:\\foreign") }],
+    ["generation", { windowsOwnershipId: "00000000-0000-4000-8000-000000000000" }],
+    [
+      "birth identity",
+      { windowsProcessIdentity: { ...identity, creationTime100ns: "134192244880123457" } },
+    ],
+    ["upstream owner", { upstreamSupervisor: { configured: true, reachable: true } }],
+  ];
+  it.each(changedHealth)(
+    "refuses changed fresh %s proof without stopping or replacing its owner",
+    async (_phase, patch) => {
+      const { manager, runtime, requestJson } = await setup(undefined, {
+        ...result.health,
+        ...patch,
+      });
+      await Effect.runPromise(manager.ensureRunning);
+      const before = await Effect.runPromise(manager.snapshot);
+      const prepared = await Effect.runPromise(Effect.exit(manager.prepareForUpdate!));
+      expect(Exit.isFailure(prepared)).toBe(true);
+      if (Exit.isFailure(prepared)) {
+        const message = Cause.pretty(prepared.cause);
+        expect(message).toContain("could not be safely prepared");
+        expect(message).not.toMatch(/private-old|synthetic-lease|C:\\\\foreign/);
+      }
+      expect(runtime.observe).toHaveBeenCalledTimes(1);
+      expect(requestJson).toHaveBeenCalledTimes(1);
+      expect(runtime.ensure).toHaveBeenCalledTimes(1);
+      expect(runtime.stop).not.toHaveBeenCalled();
+      expect(runtime.recover).not.toHaveBeenCalled();
+      expect(runtime.current()).toBe(result);
+      expect(await Effect.runPromise(manager.snapshot)).toEqual(before);
+    },
+  );
+
+  it.each([
+    ["before", "unknown"],
+    ["after", "unknown"],
+    ["before", "changed-generation"],
+    ["after", "changed-generation"],
+  ] as const)(
+    "refuses %s-health %s native ownership without mutation",
+    async (phase, observation) => {
+      const { manager, runtime, requestJson } = await setup();
+      await Effect.runPromise(manager.ensureRunning);
+      const before = await Effect.runPromise(manager.snapshot);
+      if (phase === "after")
+        runtime.observe.mockResolvedValueOnce({ status: "same-process", ownershipId: generation });
+      runtime.observe.mockResolvedValueOnce(
+        observation === "unknown"
+          ? { status: "unknown" }
+          : { status: "same-process", ownershipId: "00000000-0000-4000-8000-000000000000" },
+      );
+      await expect(Effect.runPromise(manager.prepareForUpdate!)).rejects.toThrow(
+        "could not be safely prepared",
+      );
+      expect(runtime.observe).toHaveBeenCalledTimes(phase === "before" ? 1 : 2);
+      expect(requestJson).toHaveBeenCalledTimes(phase === "before" ? 0 : 1);
+      expect(runtime.ensure).toHaveBeenCalledTimes(1);
+      expect(runtime.stop).not.toHaveBeenCalled();
+      expect(runtime.recover).not.toHaveBeenCalled();
+      expect(await Effect.runPromise(manager.snapshot)).toEqual(before);
+    },
+  );
+
+  it("preserves interruption and retires its exact held health request before returning", async () => {
+    const { manager, runtime, requestJson, scope } = await setup();
+    await Effect.runPromise(manager.ensureRunning);
+    const before = await Effect.runPromise(manager.snapshot);
+    const entered = await Effect.runPromise(Deferred.make<void>());
+    const aborted = await Effect.runPromise(Deferred.make<void>());
+    let abortCount = 0;
+    let retireRequest = () => {};
+    // Install exact fixture cleanup before admission, so even a hard test
+    // timeout cannot leave the synthetic request or its signal listener alive.
+    await Effect.runPromise(
+      Scope.addFinalizer(
+        scope,
+        Effect.sync(() => retireRequest()),
+      ),
+    );
+    requestJson.mockImplementationOnce(
+      (_endpoint, _path, options) =>
+        new Promise<never>((_resolve, reject) => {
+          const signal = options?.signal;
+          if (!signal) {
+            reject(new Error("Missing fixture-owned request signal"));
+            return;
+          }
+          let retired = false;
+          const retire = () => {
+            if (retired) return;
+            retired = true;
+            signal.removeEventListener("abort", onAbort);
+            reject(new Error("Private fixture request retired"));
+          };
+          const onAbort = () => {
+            abortCount += 1;
+            retire();
+            Effect.runSync(Deferred.succeed(aborted, undefined));
+          };
+          retireRequest = retire;
+          signal.addEventListener("abort", onAbort, { once: true });
+          // A Deferred resumes its observers synchronously. Let this Promise
+          // executor return before allowing the verifier to interrupt: Effect
+          // installs the exact request's abort finalizer after try returns.
+          // This is a registration handshake, not a timer or another attempt.
+          queueMicrotask(() => {
+            if (!retired) Effect.runSync(Deferred.succeed(entered, undefined));
+          });
+          if (signal.aborted) onAbort();
+        }),
+    );
+    // All Deferred waits belong to this captured fixture scope as well as the
+    // preflight fiber; afterEach can retire both if an earlier guard regresses.
+    const verification = await Effect.runPromise(
+      Effect.gen(function* () {
+        const attempted = yield* manager.prepareForUpdate!.pipe(Effect.forkScoped);
+        yield* Deferred.await(entered);
+        yield* Fiber.interrupt(attempted);
+        const prepared = yield* Fiber.await(attempted);
+        expect(Exit.isFailure(prepared)).toBe(true);
+        if (Exit.isFailure(prepared)) expect(Cause.hasInterrupts(prepared.cause)).toBe(true);
+        // Only the actual AbortSignal callback completes this receipt; the scope's
+        // fallback retirement cannot manufacture a successful abort observation.
+        yield* Deferred.await(aborted);
+      }).pipe(Effect.forkScoped, Effect.provideService(Scope.Scope, scope)),
+    );
+    await Effect.runPromise(Fiber.join(verification));
+    expect(abortCount).toBe(1);
+    expect(runtime.observe).toHaveBeenCalledTimes(1);
+    expect(requestJson).toHaveBeenCalledTimes(1);
+    expect(runtime.ensure).toHaveBeenCalledTimes(1);
+    expect(runtime.stop).not.toHaveBeenCalled();
+    expect(runtime.recover).not.toHaveBeenCalled();
+    expect(runtime.current()).toBe(result);
+    expect(await Effect.runPromise(manager.snapshot)).toEqual(before);
   });
 
   it("sanitizes unknown adapter errors and never grants PID authority after a probe failure", async () => {

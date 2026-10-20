@@ -27,6 +27,7 @@ import {
   type ProviderDaemonStartupProgress,
 } from "@cafecode/shared/backendStartupProgress";
 import * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
@@ -146,6 +147,15 @@ export interface DesktopProviderDaemonManagerShape {
   }>;
   readonly currentConfig: Effect.Effect<Option.Option<ProviderDaemonClientConfig>>;
   /**
+   * Read-only update preflight. A successful observation grants no new process
+   * authority: the existing guarded Stop must still confirm native exit before
+   * the updater may destroy windows or invoke the installer.
+   *
+   * Optional only for compatibility with older/injected service layers. The
+   * updater must refuse installation when this capability is absent.
+   */
+  readonly prepareForUpdate?: Effect.Effect<void>;
+  /**
    * Probe only authenticated process liveness. This path is deliberately
    * independent of provider adapters and SQLite so long-running workload
    * pressure cannot trigger destructive false-positive daemon recovery.
@@ -231,6 +241,59 @@ class ProviderDaemonMarkerInspectionError extends Data.TaggedError(
   override get message() {
     return "Existing provider daemon marker inspection was inconclusive; its files and any running process were preserved. Retry connection.";
   }
+}
+
+/** Never expose received health, credential, filesystem or native error text. */
+class ProviderDaemonUpdatePreparationError extends Data.TaggedError(
+  "ProviderDaemonUpdatePreparationError",
+)<{}> {
+  override get message() {
+    return "The provider daemon could not be safely prepared for this update. Its process and recovery files were preserved. Keep Cafe Code open and stop the owning runtime explicitly before retrying the update.";
+  }
+}
+
+type ProviderDaemonCompatibilityReason =
+  | "process-id"
+  | "process-mode"
+  | "application-version"
+  | "protocol-version"
+  | "runtime-build"
+  | "cafe-mcp-port";
+
+/** Fixed labels, not received version strings, paths, endpoints or capabilities. */
+const compatibilityLabels: Readonly<Record<ProviderDaemonCompatibilityReason, string>> = {
+  "process-id": "process identity",
+  "process-mode": "runtime role",
+  "application-version": "application version",
+  "protocol-version": "provider protocol",
+  "runtime-build": "runtime build",
+  "cafe-mcp-port": "backend MCP port",
+};
+
+function compatibilityReason(input: {
+  readonly health: ProviderDaemonHealthValue;
+  readonly pid: number;
+  readonly appVersion: string;
+  readonly runtimeBuildId: string;
+  readonly marker?: ProviderDaemonMarkerValue;
+  readonly cafeMcpPort: number | undefined;
+}): ProviderDaemonCompatibilityReason | undefined {
+  const { health, marker } = input;
+  // Preserve the original admission ordering. These are code-owned diagnostic
+  // categories for a known mismatch, never permission to retire the old owner.
+  if (health.pid !== input.pid) return "process-id";
+  if (health.mode !== "provider-daemon") return "process-mode";
+  if (health.version !== input.appVersion) return "application-version";
+  if (health.protocolVersion !== PROVIDER_DAEMON_PROTOCOL_VERSION) return "protocol-version";
+  if (health.runtimeBuildId !== input.runtimeBuildId) return "runtime-build";
+  if (marker !== undefined) {
+    if (marker.appVersion !== input.appVersion) return "application-version";
+    if (marker.protocolVersion !== PROVIDER_DAEMON_PROTOCOL_VERSION) return "protocol-version";
+    if (marker.runtimeBuildId !== input.runtimeBuildId) return "runtime-build";
+    if (input.cafeMcpPort !== undefined && marker.cafeMcpPort !== input.cafeMcpPort)
+      return "cafe-mcp-port";
+  }
+  return undefined;
 }
 
 interface ProviderDaemonState {
@@ -362,9 +425,13 @@ function markerEndpoint(
 
 async function fetchProviderDaemonHealth(
   endpoint: ProviderDaemonClientConfig,
+  signal?: AbortSignal,
 ): Promise<ProviderDaemonHealthValue> {
   const response = await requestProviderDaemonJson(endpoint, PROVIDER_DAEMON_HEALTH_PATH, {
     timeoutMs: 5_000,
+    // Update preparation owns an absolute Effect deadline as well as the
+    // existing idle timeout; cancellation must close its exact HTTP request.
+    ...(signal === undefined ? {} : { signal, maxResponseBytes: 1_048_576 }),
   });
   if (response.statusCode < 200 || response.statusCode >= 300) {
     throw new Error(`provider daemon health failed with HTTP ${response.statusCode}`);
@@ -744,20 +811,27 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       if (!matchesCurrentProfile(health.value)) {
         return yield* preserveInconclusiveOwner("profile");
       }
-      if (
-        health.value.pid !== marker.pid ||
-        health.value.mode !== "provider-daemon" ||
-        health.value.version !== environment.appVersion ||
-        health.value.protocolVersion !== PROVIDER_DAEMON_PROTOCOL_VERSION ||
-        health.value.runtimeBuildId !== runtimeBuildId ||
-        marker.appVersion !== environment.appVersion ||
-        marker.protocolVersion !== PROVIDER_DAEMON_PROTOCOL_VERSION ||
-        marker.runtimeBuildId !== runtimeBuildId ||
-        (cafeMcpPort !== undefined && marker.cafeMcpPort !== cafeMcpPort)
-      ) {
+      const mismatch = compatibilityReason({
+        health: health.value,
+        pid: marker.pid,
+        appVersion: environment.appVersion,
+        runtimeBuildId,
+        marker,
+        cafeMcpPort,
+      });
+      if (mismatch !== undefined) {
         // An authenticated response proves a runtime is present, not that a
         // recycled PID may be signaled. Older/incompatible owners remain intact.
-        return yield* preserveInconclusiveOwner("compatibility");
+        const message = `Existing provider daemon ${compatibilityLabels[mismatch]} does not match this Cafe Code build. Its process and recovery files were preserved. Stop the owning runtime explicitly before retrying, or reopen its matching Cafe Code build.`;
+        yield* Ref.update(state, (current) => ({
+          ...current,
+          status: "error" as const,
+          pid: Option.some(marker.pid),
+          lastError: Option.some(message),
+        }));
+        yield* publishDebugSnapshot;
+        yield* logWarning("provider daemon compatibility refused", { reason: mismatch });
+        return yield* Effect.die(new Error(message));
       }
 
       const lease = yield* observeForAdoption(() => issueProviderDaemonLease(rootEndpoint));
@@ -1267,6 +1341,58 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   );
   const refreshHealth = lifecycleMutex.withPermits(1)(refreshHealthUnlocked);
 
+  const prepareForUpdate = lifecycleMutex
+    .withPermits(1)(
+      Effect.gen(function* () {
+        const current = yield* Ref.get(state);
+        if (
+          current.status !== "running" ||
+          current.adoptedExistingProcess ||
+          Option.isNone(current.ownedChild) ||
+          Option.isNone(current.endpoint) ||
+          Option.isNone(current.pid) ||
+          Option.getOrUndefined(current.lastHealth)?.upstreamSupervisor !== undefined
+        ) {
+          return yield* Effect.die(new ProviderDaemonUpdatePreparationError());
+        }
+
+        const handle = current.ownedChild.value;
+        const endpoint = current.endpoint.value;
+        if (handle.pid !== current.pid.value || !(yield* handle.isRunning)) {
+          return yield* Effect.die(new ProviderDaemonUpdatePreparationError());
+        }
+        const health = yield* Effect.tryPromise({
+          try: (signal) => fetchProviderDaemonHealth(endpoint, signal),
+          catch: () => new ProviderDaemonUpdatePreparationError(),
+        });
+        if (
+          !matchesCurrentProfile(health) ||
+          health.upstreamSupervisor !== undefined ||
+          compatibilityReason({
+            health,
+            pid: handle.pid,
+            appVersion: environment.appVersion,
+            runtimeBuildId,
+            cafeMcpPort: undefined,
+          }) !== undefined ||
+          !(yield* handle.isRunning)
+        ) {
+          return yield* Effect.die(new ProviderDaemonUpdatePreparationError());
+        }
+        // Do not cache this observation or change files, leases, sessions or
+        // process state. Stop retains the exact handle and native-exit fence.
+      }),
+    )
+    .pipe(
+      Effect.timeout(Duration.seconds(5)),
+      Effect.orDie,
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.failCause(cause)
+          : Effect.die(new ProviderDaemonUpdatePreparationError()),
+      ),
+    );
+
   const stopUnlocked = Effect.gen(function* () {
     const current = yield* Ref.get(state);
     if (Option.isNone(current.ownedChild)) {
@@ -1348,6 +1474,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         ? Ref.set(cafeMcpPortRef, port)
         : Effect.die(new Error("Invalid Cafe MCP backend port.")),
     ensureRunning,
+    prepareForUpdate,
     recover,
     currentConfig,
     probeLiveness,

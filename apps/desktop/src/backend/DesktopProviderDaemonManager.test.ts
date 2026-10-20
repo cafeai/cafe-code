@@ -6,6 +6,7 @@ import * as fs from "node:fs/promises";
 import {
   PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LEASES_PATH,
+  ProviderDaemonBootstrap,
   ProviderDaemonHealth,
   ProviderDaemonLeaseResponse,
   ProviderDaemonMarker,
@@ -14,6 +15,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { afterEach, vi } from "vitest";
 import type * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -25,6 +27,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -92,6 +95,7 @@ const startFakeProviderDaemon = (
   runtimeBuildId: string,
   failRequest?: (pathname: string) => boolean,
   proof: "matching" | "missing" | "foreign" = "matching",
+  healthPatch: Partial<ProviderDaemonHealth> = {},
 ): Effect.Effect<FakeProviderDaemon, FakeProviderDaemonError> =>
   Effect.tryPromise({
     try: () =>
@@ -149,6 +153,7 @@ const startFakeProviderDaemon = (
               activeSessionCount: 3,
               configuredInstanceCount: 2,
               eventCursor: 9,
+              ...healthPatch,
             })}\n`,
           );
         });
@@ -418,6 +423,11 @@ describe("DesktopProviderDaemonManager", () => {
               assert.equal(snapshot.status, "running");
               assert.isTrue(snapshot.adoptedExistingProcess);
               assert.isTrue(Option.isSome(yield* manager.currentConfig));
+              const beforePreparationRequests = requests;
+              assert.isTrue(Exit.isFailure(yield* manager.prepareForUpdate!.pipe(Effect.exit)));
+              // Authentication/adoption is not a retained POSIX child handle.
+              assert.equal(requests, beforePreparationRequests);
+              assert.equal(leaseRequests, 1);
             }
           }).pipe(
             Effect.provide(
@@ -430,6 +440,340 @@ describe("DesktopProviderDaemonManager", () => {
         }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
   }
+
+  for (const scenario of [
+    { reason: "application-version", label: "application version" },
+    { reason: "runtime-build", label: "runtime build" },
+    { reason: "protocol-version", label: "provider protocol" },
+    { reason: "cafe-mcp-port", label: "backend MCP port" },
+    { reason: "process-id", label: "process identity" },
+    { reason: "process-mode", label: "runtime role" },
+  ] as const) {
+    it.effect(
+      `preserves an authenticated incompatible daemon with ${scenario.reason} guidance`,
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const baseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cafe-old-daemon-" });
+          const markerPath = `${baseDir}/provider-daemon.json`;
+          const credentialPath = `${baseDir}/provider-daemon-token.bin`;
+          const socketPath = `${baseDir}/provider-daemon-ipc/provider-daemon.sock`;
+          const backendEntryPath = `${baseDir}/backend.mjs`;
+          const backendBundle = "// new synthetic installed bundle\n";
+          yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
+          yield* fileSystem.writeFileString(credentialPath, TEST_TOKEN);
+          yield* fileSystem.makeDirectory(`${baseDir}/provider-daemon-ipc`);
+          yield* fileSystem.writeFileString(socketPath, "preserved old socket entry");
+          const currentBuild = makeRuntimeBuildId({
+            appVersion: "0.0.0-test",
+            backendEntryPath,
+            backendBundle,
+          });
+          const oldVersion = scenario.reason === "application-version" ? "0.0.0-old" : "0.0.0-test";
+          const observedBuild =
+            scenario.reason === "application-version" || scenario.reason === "runtime-build"
+              ? makeRuntimeBuildId({
+                  appVersion: oldVersion,
+                  backendEntryPath,
+                  backendBundle: "// old installed bundle\n",
+                })
+              : currentBuild;
+          const protocol = scenario.reason === "protocol-version" ? 2 : 1;
+          let requests = 0;
+          let leases = 0;
+          let spawns = 0;
+          const fake = yield* startFakeProviderDaemon(
+            baseDir,
+            observedBuild,
+            (pathname) => {
+              requests += 1;
+              if (pathname === PROVIDER_DAEMON_LEASES_PATH) leases += 1;
+              return false;
+            },
+            "matching",
+            {
+              version: oldVersion,
+              protocolVersion: protocol,
+              ...(scenario.reason === "process-id" ? { pid: process.pid + 1 } : {}),
+              ...(scenario.reason === "process-mode" ? { mode: "provider-supervisor" } : {}),
+            },
+          );
+          yield* Effect.addFinalizer(() => fake.close);
+          const marker = encodeProviderDaemonMarkerJson({
+            version: 2,
+            mode: "provider-daemon",
+            dataProfile: "production",
+            dataProfileId: dataProfileIdentity("production", baseDir),
+            pid: process.pid,
+            ppid: process.ppid,
+            protocolVersion: protocol,
+            transport: "tcp",
+            httpBaseUrl: `http://127.0.0.1:${fake.port}`,
+            credentialPath,
+            credentialEncrypted: false,
+            createdAt: "1970-01-01T00:00:00.000Z",
+            updatedAt: "1970-01-01T00:00:00.000Z",
+            appVersion: oldVersion,
+            runtimeBuildId: observedBuild,
+            cafeMcpPort: scenario.reason === "cafe-mcp-port" ? 3774 : 3773,
+          });
+          yield* fileSystem.writeFileString(markerPath, marker);
+          const signals = vi.spyOn(process, "kill").mockReturnValue(true);
+          const guardedSpawner: TestProcessSpawner = {
+            ...spawner,
+            spawn: () =>
+              Effect.sync(() => {
+                spawns += 1;
+              }).pipe(
+                Effect.andThen(
+                  Effect.die(new FakeProviderDaemonError({ cause: "Unexpected competing owner" })),
+                ),
+              ),
+          };
+          yield* Effect.gen(function* () {
+            const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
+            yield* manager.configureCafeMcpPort!(3773);
+            assert.isTrue(Exit.isFailure(yield* manager.ensureRunning.pipe(Effect.exit)));
+            const snapshot = yield* manager.snapshot;
+            const message = Option.getOrThrow(snapshot.lastError);
+            assert.include(message, scenario.label);
+            assert.include(message, "Stop the owning runtime explicitly");
+            assert.notInclude(message, "inconclusive");
+            assert.notInclude(message, TEST_TOKEN);
+            assert.notInclude(message, baseDir);
+            assert.notInclude(message, oldVersion);
+            assert.equal(requests, 1);
+            assert.equal(leases, 0);
+            assert.equal(spawns, 0);
+            assert.isTrue(signals.mock.calls.every(([, signal]) => signal === 0));
+            assert.equal(yield* fileSystem.readFileString(markerPath), marker);
+            assert.equal(yield* fileSystem.readFileString(credentialPath), TEST_TOKEN);
+            assert.equal(
+              yield* fileSystem.readFileString(socketPath),
+              "preserved old socket entry",
+            );
+          }).pipe(
+            Effect.provide(
+              makeManagerLayer(baseDir, markerPath, backendEntryPath, undefined, {
+                fileSystem,
+                spawner: guardedSpawner,
+              }),
+            ),
+          );
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
+  // This is an actual POSIX socket/manager boundary. Windows exercises its
+  // distinct guarded native-owner adapter in WindowsDesktopProviderDaemonManager.test.ts.
+  if (process.platform !== "win32")
+    for (const phase of [
+      "matching",
+      "changed-profile",
+      "changed-build",
+      "upstream",
+      "exited-before",
+      "exited-during-health",
+      "interrupted",
+    ] as const) {
+      it.effect(`prepares an exact owned POSIX daemon without mutation: ${phase}`, () =>
+        Effect.gen(function* () {
+          const fixtureScope = yield* Scope.Scope;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          // Keep the Unix-domain path below native socket length bounds on macOS
+          // without changing the application namespace or using a shared socket.
+          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+            directory: "/tmp",
+            prefix: "cafe-update-",
+          });
+          const markerPath = `${baseDir}/provider-daemon.json`;
+          const credentialPath = `${baseDir}/provider-daemon-token.bin`;
+          const backendEntryPath = `${baseDir}/backend.mjs`;
+          yield* fileSystem.writeFileString(backendEntryPath, "// inert owned update fixture\n");
+          let healthPatch: Partial<ProviderDaemonHealth> = {};
+          let running = true;
+          let preparing = false;
+          let healthRequests = 0;
+          let leases = 0;
+          let spawns = 0;
+          let kills = 0;
+          let observations = 0;
+          const heldRequest = yield* Deferred.make<void>();
+          const closedRequest = yield* Deferred.make<void>();
+          const guardedSpawner: TestProcessSpawner = {
+            ...spawner,
+            spawn: (command) =>
+              Effect.gen(function* () {
+                spawns += 1;
+                if (command._tag !== "StandardCommand")
+                  return yield* Effect.die(
+                    new FakeProviderDaemonError({ cause: "Expected private bootstrap command" }),
+                  );
+                const fd3 = command.options.additionalFds?.fd3;
+                if (fd3?.type !== "input" || !fd3.stream)
+                  return yield* Effect.die(
+                    new FakeProviderDaemonError({ cause: "Expected private fd3 bootstrap" }),
+                  );
+                const bootstrap = yield* Schema.decodeUnknownEffect(
+                  Schema.fromJsonString(ProviderDaemonBootstrap),
+                )(yield* fd3.stream.pipe(Stream.decodeText(), Stream.mkString)).pipe(Effect.orDie);
+                assert.equal(bootstrap.mode, "provider-daemon");
+                assert.equal(bootstrap.dataProfile, "production");
+                assert.equal(bootstrap.cafeCodeHome, baseDir);
+                assert.isString(bootstrap.socketPath);
+                const server = http.createServer((request, response) => {
+                  const expected =
+                    request.url === PROVIDER_DAEMON_LEASES_PATH
+                      ? bootstrap.token
+                      : preparing
+                        ? TEST_LEASE_TOKEN
+                        : bootstrap.token;
+                  if (request.headers.authorization !== `Bearer ${expected}`) {
+                    response.writeHead(401);
+                    response.end();
+                    return;
+                  }
+                  response.writeHead(200, { "content-type": "application/json" });
+                  if (request.url === PROVIDER_DAEMON_LEASES_PATH) {
+                    leases += 1;
+                    response.end(
+                      encodeProviderDaemonLeaseResponseJson({
+                        leaseId: "lease-000000000000000000000000000",
+                        token: TEST_LEASE_TOKEN,
+                        capabilities: ["health", "events", "rpc"],
+                        issuedAt: "1970-01-01T00:00:00.000Z",
+                      }),
+                    );
+                    return;
+                  }
+                  assert.equal(request.url, PROVIDER_DAEMON_HEALTH_PATH);
+                  healthRequests += 1;
+                  if (preparing && phase === "interrupted") {
+                    response.once("close", () =>
+                      Effect.runSync(Deferred.succeed(closedRequest, undefined)),
+                    );
+                    Effect.runSync(Deferred.succeed(heldRequest, undefined));
+                    return;
+                  }
+                  if (preparing && phase === "exited-during-health") running = false;
+                  response.end(
+                    encodeProviderDaemonHealthJson({
+                      ok: true,
+                      mode: "provider-daemon",
+                      dataProfile: "production",
+                      dataProfileId: dataProfileIdentity("production", baseDir),
+                      pid: 1_234_567,
+                      ppid: process.pid,
+                      version: "0.0.0-test",
+                      protocolVersion: 1,
+                      runtimeBuildId: bootstrap.runtimeBuildId,
+                      startedAt: "1970-01-01T00:00:00.000Z",
+                      activeSessionCount: 3,
+                      configuredInstanceCount: 2,
+                      eventCursor: 9,
+                      ...healthPatch,
+                    }),
+                  );
+                });
+                // Capture the fixture's outer scope, not the intentionally durable
+                // daemon scope supplied to spawn; register retirement before listen.
+                yield* Scope.addFinalizer(
+                  fixtureScope,
+                  Effect.promise(
+                    () =>
+                      new Promise<void>((resolve) => {
+                        server.closeAllConnections();
+                        server.close(() => resolve());
+                      }),
+                  ),
+                );
+                yield* Effect.tryPromise({
+                  try: () =>
+                    new Promise<void>((resolve, reject) => {
+                      server.once("error", reject);
+                      server.listen(bootstrap.socketPath!, resolve);
+                    }),
+                  catch: (cause) => new FakeProviderDaemonError({ cause }),
+                }).pipe(Effect.orDie);
+                return ChildProcessSpawner.makeHandle({
+                  pid: ChildProcessSpawner.ProcessId(1_234_567),
+                  stdout: Stream.empty,
+                  stderr: Stream.empty,
+                  all: Stream.empty,
+                  exitCode: Effect.never,
+                  isRunning: Effect.sync(() => {
+                    observations += 1;
+                    return running;
+                  }),
+                  kill: () =>
+                    Effect.sync(() => {
+                      kills += 1;
+                      running = false;
+                    }),
+                  stdin: Sink.drain,
+                  getInputFd: () => Sink.drain,
+                  getOutputFd: () => Stream.empty,
+                  unref: Effect.succeed(Effect.void),
+                });
+              }),
+          };
+          yield* Effect.gen(function* () {
+            const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
+            yield* manager.ensureRunning;
+            const markerBefore = yield* fileSystem.readFileString(markerPath);
+            const credentialBefore = yield* fileSystem.readFile(credentialPath);
+            const snapshotBefore = yield* manager.snapshot;
+            const observationsBefore = observations;
+            preparing = true;
+            if (phase === "changed-profile") healthPatch = { dataProfile: "debug" };
+            if (phase === "changed-build")
+              healthPatch = { runtimeBuildId: "private-invalid-build" };
+            if (phase === "upstream")
+              healthPatch = { upstreamSupervisor: { configured: true, reachable: true } };
+            if (phase === "exited-before") running = false;
+            const prepared =
+              phase === "interrupted"
+                ? yield* Effect.gen(function* () {
+                    const attempt = yield* manager.prepareForUpdate!.pipe(Effect.forkScoped);
+                    yield* Deferred.await(heldRequest);
+                    yield* Fiber.interrupt(attempt);
+                    const result = yield* Fiber.await(attempt);
+                    assert.isTrue(Exit.isFailure(result));
+                    if (Exit.isFailure(result)) assert.isTrue(Cause.hasInterrupts(result.cause));
+                    // This receipt belongs to the actual held HTTP response, not a
+                    // mock call: interruption must abort its exact native request.
+                    yield* Deferred.await(closedRequest);
+                    return result;
+                  })
+                : yield* manager.prepareForUpdate!.pipe(Effect.exit);
+            assert.equal(Exit.isSuccess(prepared), phase === "matching");
+            assert.equal(healthRequests, phase === "exited-before" ? 1 : 2);
+            assert.equal(
+              observations - observationsBefore,
+              phase === "matching" || phase === "exited-during-health" ? 2 : 1,
+            );
+            assert.equal(spawns, 1);
+            assert.equal(leases, 1);
+            assert.equal(kills, 0);
+            assert.deepEqual(yield* manager.snapshot, snapshotBefore);
+            assert.equal(yield* fileSystem.readFileString(markerPath), markerBefore);
+            assert.deepEqual(yield* fileSystem.readFile(credentialPath), credentialBefore);
+            assert.isTrue(
+              yield* fileSystem.exists(`${baseDir}/provider-daemon-ipc/provider-daemon.sock`),
+            );
+          }).pipe(
+            Effect.provide(
+              makeManagerLayer(baseDir, markerPath, backendEntryPath, undefined, {
+                fileSystem,
+                spawner: guardedSpawner,
+              }),
+            ),
+          );
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      );
+    }
 
   for (const phase of ["spawn", "publication"] as const) {
     it.effect(

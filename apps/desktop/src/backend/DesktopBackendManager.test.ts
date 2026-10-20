@@ -4,8 +4,10 @@ import {
 } from "@cafecode/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
+import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -1109,70 +1111,94 @@ describe("DesktopBackendManager", () => {
     }),
   );
 
-  it.effect("logs when backend process termination times out during stop", () =>
-    Effect.gen(function* () {
-      const messages: string[] = [];
-      const logger = Logger.make(({ message }) => {
-        messages.push(String(message));
-      });
-      const started = yield* Deferred.make<void>();
-      const nativeExited = yield* Deferred.make<void>();
-      let startCount = 0;
+  for (const requireConfirmedExit of [false, true]) {
+    it.effect(
+      requireConfirmedExit
+        ? "refuses an update stop timeout without relinquishing the retained backend"
+        : "logs when backend process termination times out during stop",
+      () =>
+        Effect.gen(function* () {
+          const messages: string[] = [];
+          const logger = Logger.make(({ message }) => {
+            messages.push(String(message));
+          });
+          const started = yield* Deferred.make<void>();
+          const nativeExited = yield* Deferred.make<void>();
+          let startCount = 0;
 
-      const spawnerLayer = Layer.succeed(
-        ChildProcessSpawner.ChildProcessSpawner,
-        ChildProcessSpawner.make(() =>
-          Effect.gen(function* () {
-            startCount += 1;
-            yield* Deferred.succeed(started, void 0);
-            return makeProcess({
-              exitCode: Deferred.await(nativeExited).pipe(
-                Effect.as(ChildProcessSpawner.ExitCode(0)),
+          const spawnerLayer = Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.gen(function* () {
+                startCount += 1;
+                yield* Deferred.succeed(started, void 0);
+                return makeProcess({
+                  exitCode: Deferred.await(nativeExited).pipe(
+                    Effect.as(ChildProcessSpawner.ExitCode(0)),
+                  ),
+                  kill: () => Effect.never,
+                });
+              }),
+            ),
+          );
+
+          const managerLayer = makeManagerLayer({ spawnerLayer });
+
+          yield* Effect.gen(function* () {
+            const manager = yield* DesktopBackendManager.DesktopBackendManager;
+            yield* manager.start;
+            yield* Deferred.await(started);
+
+            const stopFiber = yield* Effect.forkDetach(
+              manager
+                .stop({
+                  timeout: Duration.seconds(1),
+                  ...(requireConfirmedExit ? { requireConfirmedExit: true } : {}),
+                })
+                .pipe(Effect.exit),
+            );
+            yield* Effect.yieldNow;
+
+            const stoppingSnapshot = yield* manager.snapshot;
+            assert.equal(stoppingSnapshot.desiredRunning, false);
+            assert.equal(stoppingSnapshot.ready, false);
+            assert.deepEqual(stoppingSnapshot.activePid, Option.some(123));
+
+            yield* TestClock.adjust(Duration.seconds(1));
+            const stopped = yield* Fiber.join(stopFiber);
+            assert.equal(Exit.isFailure(stopped), requireConfirmedExit);
+            if (Exit.isFailure(stopped)) {
+              assert.include(
+                Cause.pretty(stopped.cause),
+                "Backend native exit could not be confirmed",
+              );
+            }
+
+            assert.isTrue(
+              messages.some((message) => message.includes("backend close timed out during stop")),
+            );
+            yield* manager.start;
+            assert.equal(startCount, 1);
+            assert.deepEqual((yield* manager.snapshot).activePid, Option.some(123));
+            yield* Deferred.succeed(nativeExited, undefined);
+            yield* TestClock.adjust(Duration.seconds(5));
+            // Actual exit settles the retained run; strict Stop can now complete
+            // without mistaking a deadline, missing PID or another port for closure.
+            yield* manager.stop({ timeout: Duration.seconds(1), requireConfirmedExit: true });
+            assert.isTrue(Option.isNone((yield* manager.snapshot).activePid));
+          }).pipe(
+            Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
+            Effect.provide(
+              Layer.mergeAll(
+                TestClock.layer(),
+                managerLayer,
+                Logger.layer([logger], { mergeWithExisting: false }),
               ),
-              kill: () => Effect.never,
-            });
-          }),
-        ),
-      );
-
-      const managerLayer = makeManagerLayer({ spawnerLayer });
-
-      yield* Effect.gen(function* () {
-        const manager = yield* DesktopBackendManager.DesktopBackendManager;
-        yield* manager.start;
-        yield* Deferred.await(started);
-
-        const stopFiber = yield* Effect.forkDetach(manager.stop({ timeout: Duration.seconds(1) }));
-        yield* Effect.yieldNow;
-
-        const stoppingSnapshot = yield* manager.snapshot;
-        assert.equal(stoppingSnapshot.desiredRunning, false);
-        assert.equal(stoppingSnapshot.ready, false);
-        assert.deepEqual(stoppingSnapshot.activePid, Option.some(123));
-
-        yield* TestClock.adjust(Duration.seconds(1));
-        yield* Fiber.join(stopFiber);
-
-        assert.isTrue(
-          messages.some((message) => message.includes("backend close timed out during stop")),
-        );
-        yield* manager.start;
-        assert.equal(startCount, 1);
-        assert.deepEqual((yield* manager.snapshot).activePid, Option.some(123));
-        yield* Deferred.succeed(nativeExited, undefined);
-        yield* TestClock.adjust(Duration.seconds(5));
-      }).pipe(
-        Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
-        Effect.provide(
-          Layer.mergeAll(
-            TestClock.layer(),
-            managerLayer,
-            Logger.layer([logger], { mergeWithExisting: false }),
-          ),
-        ),
-      );
-    }),
-  );
+            ),
+          );
+        }),
+    );
+  }
 
   it.effect("restarts an unexpectedly exited backend with the Effect clock", () =>
     Effect.gen(function* () {

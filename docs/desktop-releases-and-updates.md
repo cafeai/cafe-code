@@ -1,6 +1,6 @@
 # Desktop Releases And Updates
 
-Last updated: 2026-10-20 21:56:16 JST (UTC+0900)
+Last updated: 2026-10-20 22:29:56 JST (UTC+0900)
 
 Cafe Code publishes desktop artifacts from version tags. macOS apps are Developer ID signed and
 notarized; Windows and Linux artifacts remain unsigned. Stable tags use
@@ -214,6 +214,31 @@ exclusion from fresh provider bootstrap. Neither repair nor uninstall guesses wh
 or running generation can be deleted; retained user runtime/data policy is unchanged.
 
 ## Runtime Behavior
+
+In-app installation must first obtain explicit native confirmation that all
+provider sessions, including running work, will stop. Cancel is the default.
+Before any shutdown, the desktop qualifies its existing exact daemon-control
+authority and fresh authenticated owner. It then stops the backend and confirms
+the provider daemon's native exit before destroying windows or invoking the
+installer. An unknown or unowned daemon blocks the update while retaining the
+download and an actionable error, rather than installing an app that cannot
+adopt the surviving old build. Preparation never grants POSIX adopted-PID
+control or relaxes Windows generation/FILETIME checks. See the
+[update-retirement decision](decisions/provider-daemon-update-retirement.md).
+
+The update-specific backend stop requires actual closure under the existing
+deadline; ordinary best-effort timeout behavior cannot authorize installation.
+Consent is bound to the exact downloaded version and channel across asynchronous
+preparation. After a native installer invocation, a return or later error is not
+proof that handoff never began: keep installation reserved instead of replaying
+it. Received native event errors remain opaque and use fixed localized feedback.
+
+This source repair does not alter an already installed older updater. A legacy
+incompatible daemon already left running still requires a deliberate, separately
+authorized runtime stop; do not delete its marker or kill a PID to bypass that
+refusal. A failed retirement may already have closed the backend, so resolve
+the ownership/exit problem before explicitly restarting the desktop. No live
+native upgrade is implied by source tests or release publication.
 
 Packaged apps check 15 seconds after launch and every four minutes afterward. Users can also check
 from the application menu. Cafe Code does not automatically download an update and does not install

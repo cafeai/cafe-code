@@ -6,6 +6,7 @@ import type {
   DesktopUpdateInstallMode,
   DesktopUpdateState,
 } from "@cafecode/contracts";
+import { uiText } from "@cafecode/shared/i18n";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -20,11 +21,13 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 import * as DesktopBackendManager from "../backend/DesktopBackendManager.ts";
+import * as DesktopProviderDaemonManager from "../backend/DesktopProviderDaemonManager.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
@@ -150,10 +153,6 @@ function createBaseUpdateState(
   };
 }
 
-function getCanRetryFromState(state: DesktopUpdateState): boolean {
-  return state.availableVersion !== null || state.downloadedVersion !== null;
-}
-
 function shouldBroadcastDownloadProgress(
   currentState: DesktopUpdateState,
   nextPercent: number,
@@ -179,9 +178,11 @@ function isArm64HostRunningIntelBuild(runtimeInfo: DesktopRuntimeInfo): boolean 
 const make = Effect.gen(function* () {
   const config = yield* DesktopConfig.DesktopConfig;
   const backendManager = yield* DesktopBackendManager.DesktopBackendManager;
+  const providerDaemon = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
   const desktopState = yield* DesktopState.DesktopState;
   const electronUpdater = yield* ElectronUpdater.ElectronUpdater;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
+  const electronDialog = yield* ElectronDialog.ElectronDialog;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
@@ -198,6 +199,12 @@ const make = Effect.gen(function* () {
   const updateCheckInFlightRef = yield* Ref.make(false);
   const updateDownloadInFlightRef = yield* Ref.make(false);
   const updateInstallInFlightRef = yield* Ref.make(false);
+  // Native updater events may invalidate an attempt, but cannot release its
+  // shutdown reservation while its exact controller is still awaiting IO.
+  const installAttemptRef = yield* Ref.make<{
+    invalidated: boolean;
+    installerInvoked: boolean;
+  } | null>(null);
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
   const updateStateRef = yield* Ref.make<DesktopUpdateState>({
@@ -356,42 +363,160 @@ const make = Effect.gen(function* () {
     );
   }).pipe(Effect.withSpan("desktop.updates.downloadAvailableUpdate"));
 
-  const installDownloadedUpdate = Effect.gen(function* () {
-    const state = yield* Ref.get(updateStateRef);
-    if (
-      (yield* Ref.get(desktopState.quitting)) ||
-      !(yield* Ref.get(updaterConfiguredRef)) ||
-      state.installMode !== "in-app" ||
-      state.status !== "downloaded"
-    ) {
-      return { accepted: false, completed: false };
-    }
+  const installDownloadedUpdate = Effect.uninterruptibleMask((restore) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.get(updateStateRef);
+      if (
+        (yield* Ref.get(desktopState.quitting)) ||
+        !(yield* Ref.get(updaterConfiguredRef)) ||
+        state.installMode !== "in-app" ||
+        state.status !== "downloaded" ||
+        state.downloadedVersion === null
+      )
+        return { accepted: false, completed: false };
 
-    yield* Ref.set(desktopState.quitting, true);
-    yield* Ref.set(updateInstallInFlightRef, true);
-
-    return yield* Effect.gen(function* () {
-      yield* backendManager.stop({ timeout: Duration.seconds(5) });
-      yield* electronWindow.destroyAll;
-      yield* electronUpdater.quitAndInstall({
-        isSilent: true,
-        isForceRunAfter: true,
+      const downloadedVersion = state.downloadedVersion;
+      const attempt = { invalidated: false, installerInvoked: false };
+      const admitted = yield* Ref.modify(installAttemptRef, (current) =>
+        current === null ? ([true, attempt] as const) : ([false, current] as const),
+      );
+      if (!admitted) return { accepted: false, completed: false };
+      let ownsQuitting = false;
+      const isCurrent = Effect.gen(function* () {
+        const currentAttempt = yield* Ref.get(installAttemptRef);
+        const currentState = yield* Ref.get(updateStateRef);
+        // Consent belongs to this exact downloaded target, not whichever feed
+        // event happens to arrive while the native dialog/retirement is pending.
+        return (
+          currentAttempt === attempt &&
+          !attempt.invalidated &&
+          currentState.status === "downloaded" &&
+          currentState.downloadedVersion === downloadedVersion &&
+          currentState.channel === state.channel &&
+          currentState.installMode === "in-app"
+        );
       });
-      return { accepted: true, completed: false };
-    }).pipe(
-      Effect.catch(
-        Effect.fn("desktop.updates.handleInstallFailure")(function* (error) {
-          yield* Ref.set(updateInstallInFlightRef, false);
-          yield* updateState((current) =>
-            reduceDesktopUpdateStateOnInstallFailure(current, error.message),
-          );
-          yield* Ref.set(desktopState.quitting, false);
-          yield* logUpdaterError("failed to install update", { message: error.message });
+      const installFailure = (message: string) =>
+        Effect.gen(function* () {
+          yield* updateState((current) => ({
+            ...reduceDesktopUpdateStateOnInstallFailure(current, message),
+            // A thrown updater call is not evidence that native handoff did not
+            // occur. Feedback may change, but an indeterminate install cannot retry.
+            canRetry: !attempt.installerInvoked,
+          }));
+          yield* logUpdaterError("failed to install update", { message });
           return { accepted: true, completed: false };
-        }),
-      ),
-    );
-  }).pipe(Effect.withSpan("desktop.updates.installDownloadedUpdate"));
+        });
+      const ownershipFailure = (cause: Cause.Cause<unknown>) =>
+        (attempt.invalidated
+          ? Effect.succeed({ accepted: true, completed: false })
+          : installFailure(
+              uiText(
+                "The update was not installed because Cafe Code could not safely prepare and stop its provider runtime. The downloaded update is still available. Stop the runtime explicitly before retrying.",
+              ),
+            )
+        ).pipe(
+          // Publish only fixed feedback, then preserve exact caller interruption.
+          // The controller finalizer, not a received event, retires admission.
+          Effect.flatMap((result) =>
+            Cause.hasInterrupts(cause)
+              ? Effect.failCause(
+                  Cause.fromReasons<never>(cause.reasons.filter(Cause.isInterruptReason)),
+                )
+              : Effect.succeed(result),
+          ),
+        );
+
+      return yield* Effect.gen(function* () {
+        // Reserve before the native dialog can yield. Do not clear another
+        // lifecycle owner's already-established quit reservation in finalization.
+        if (yield* Ref.getAndSet(desktopState.quitting, true))
+          return { accepted: false, completed: false };
+        ownsQuitting = true;
+        yield* Ref.set(updateInstallInFlightRef, true);
+        const retirement = yield* restore(
+          Effect.gen(function* () {
+            const confirmation = yield* electronDialog.showMessageBox({
+              type: "warning",
+              title: uiText("Stop sessions and update"),
+              message: uiText("Stop all provider sessions and install Cafe Code {version}?", {
+                version: downloadedVersion,
+              }),
+              detail: uiText(
+                "Updating will stop all Codex, Claude, and other provider work, including work that starts while this dialog is open. Stop sessions and install the downloaded update?",
+              ),
+              buttons: [uiText("Cancel"), uiText("Stop Sessions and Update")],
+              defaultId: 0,
+              cancelId: 0,
+              noLink: true,
+            });
+            if (!(yield* isCurrent)) return "invalidated" as const;
+            if (confirmation.response !== 1) return "cancelled" as const;
+            // Missing qualification is never permission to stop or install.
+            if (!providerDaemon.prepareForUpdate) return "unavailable" as const;
+            yield* providerDaemon.prepareForUpdate;
+            if (!(yield* isCurrent)) return "invalidated" as const;
+            yield* backendManager.stop({
+              timeout: Duration.seconds(5),
+              requireConfirmedExit: true,
+            });
+            if (!(yield* isCurrent)) return "invalidated" as const;
+            // Final Stop independently rechecks its native owner and confirms exit.
+            yield* providerDaemon.stop;
+            if (!(yield* isCurrent)) return "invalidated" as const;
+            return "retired" as const;
+          }),
+        ).pipe(
+          Effect.catchCause((cause) => ownershipFailure(cause).pipe(Effect.as("failed" as const))),
+        );
+        if (retirement === "cancelled") return { accepted: false, completed: false };
+        if (retirement === "unavailable")
+          return yield* ownershipFailure(
+            Cause.die("Provider daemon update preparation unavailable"),
+          );
+        if (retirement !== "retired") return { accepted: true, completed: false };
+
+        const destroyed = yield* restore(electronWindow.destroyAll).pipe(
+          Effect.as(true),
+          Effect.catchCause((cause) => ownershipFailure(cause).pipe(Effect.as(false))),
+        );
+        if (!destroyed || !(yield* isCurrent)) return { accepted: true, completed: false };
+
+        // Native handoff has no positive installation ACK. Keep quit reserved
+        // after success or an unknown defect/interrupt; never authorize replay.
+        attempt.installerInvoked = true;
+        return yield* restore(
+          electronUpdater.quitAndInstall({
+            isSilent: true,
+            isForceRunAfter: true,
+          }),
+        ).pipe(
+          Effect.as({ accepted: true, completed: false }),
+          Effect.catch(
+            Effect.fn("desktop.updates.handleInstallFailure")(function* (error) {
+              return yield* installFailure(error.message);
+            }),
+          ),
+        );
+      }).pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            if (!attempt.installerInvoked) {
+              if (ownsQuitting) {
+                yield* Ref.set(updateInstallInFlightRef, false);
+                yield* Ref.set(desktopState.quitting, false);
+              }
+              yield* Ref.update(installAttemptRef, (current) =>
+                current === attempt ? null : current,
+              );
+            }
+            // Once the native installer has been invoked, retain this exact attempt
+            // through app teardown. A later error event must not mint replay authority.
+          }),
+        ),
+      );
+    }),
+  ).pipe(Effect.withSpan("desktop.updates.installDownloadedUpdate"));
 
   const startUpdatePollers: Effect.Effect<void, never, Scope.Scope> = Effect.gen(function* () {
     yield* Effect.sleep(AUTO_UPDATE_STARTUP_DELAY).pipe(
@@ -454,32 +579,50 @@ const make = Effect.gen(function* () {
   }).pipe(Effect.withSpan("desktop.updates.handleUpdateNotAvailable"));
 
   const handleUpdaterError = Effect.fn("desktop.updates.handleUpdaterError")(function* (
-    error: unknown,
+    _error: unknown,
   ) {
-    const message = error instanceof Error ? error.message : String(error);
+    // Electron forwards arbitrary native event values, not the typed wrapper's
+    // fixed errors. Never inspect a received message/name/stack, enumerate it or
+    // invoke toString; even diagnostics must contain only this finite context.
+    const attempt = yield* Ref.get(installAttemptRef);
+    const context = attempt !== null ? "install" : ((yield* resolveUpdaterErrorContext) ?? "check");
+    const message =
+      context === "install"
+        ? uiText("Cafe Code could not confirm update installation.")
+        : context === "download"
+          ? uiText("Cafe Code could not download the update.")
+          : uiText("Cafe Code could not check for updates.");
+    if (attempt !== null) {
+      // A native error can veto this exact controller, but cannot let another
+      // install/watchdog/poller race its still-pending ownership operations.
+      attempt.invalidated = true;
+      yield* updateState((current) => ({
+        ...reduceDesktopUpdateStateOnInstallFailure(current, message),
+        canRetry: !attempt.installerInvoked,
+      }));
+      yield* logUpdaterError("updater error", { message, context });
+      return;
+    }
     if (yield* Ref.get(updateInstallInFlightRef)) {
       yield* Ref.set(updateInstallInFlightRef, false);
       yield* Ref.set(desktopState.quitting, false);
       yield* updateState((current) => reduceDesktopUpdateStateOnInstallFailure(current, message));
-      yield* logUpdaterError("updater error", { message });
+      yield* logUpdaterError("updater error", { message, context });
       return;
     }
 
-    if (!(yield* Ref.get(updateCheckInFlightRef)) && !(yield* Ref.get(updateDownloadInFlightRef))) {
-      const errorContext = yield* resolveUpdaterErrorContext;
+    if (context === "download") {
+      yield* updateState((current) => reduceDesktopUpdateStateOnDownloadFailure(current, message));
+    } else if (context === "install") {
+      yield* updateState((current) => reduceDesktopUpdateStateOnInstallFailure(current, message));
+    } else {
       const checkedAt = yield* currentIsoTimestamp;
-      yield* updateState((current) => ({
-        ...current,
-        status: "error",
-        message,
-        checkedAt,
-        downloadPercent: null,
-        errorContext,
-        canRetry: getCanRetryFromState(current),
-      }));
+      yield* updateState((current) =>
+        reduceDesktopUpdateStateOnCheckFailure(current, message, checkedAt),
+      );
     }
 
-    yield* logUpdaterError("updater error", { message });
+    yield* logUpdaterError("updater error", { message, context });
   });
 
   const handleDownloadProgress = Effect.fn("desktop.updates.handleDownloadProgress")(function* (

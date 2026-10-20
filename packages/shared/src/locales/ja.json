@@ -1,4 +1,12 @@
 {
+  "Cafe Code could not confirm update installation.": "Cafe Code の更新インストールを確認できませんでした。",
+  "Cafe Code could not download the update.": "Cafe Code の更新をダウンロードできませんでした。",
+  "Cafe Code could not check for updates.": "Cafe Code の更新を確認できませんでした。",
+  "Stop sessions and update": "セッションを停止して更新",
+  "Stop all provider sessions and install Cafe Code {version}?": "すべてのプロバイダーセッションを停止して Cafe Code {version} をインストールしますか？",
+  "Updating will stop all Codex, Claude, and other provider work, including work that starts while this dialog is open. Stop sessions and install the downloaded update?": "更新すると、このダイアログの表示中に開始された作業も含め、Codex、Claude、その他のプロバイダーのすべての作業が停止します。セッションを停止して、ダウンロード済みの更新をインストールしますか？",
+  "Stop Sessions and Update": "セッションを停止して更新",
+  "The update was not installed because Cafe Code could not safely prepare and stop its provider runtime. The downloaded update is still available. Stop the runtime explicitly before retrying.": "プロバイダーの実行環境を安全に準備・停止できなかったため、更新はインストールされませんでした。ダウンロード済みの更新は保持されています。実行環境を明示的に停止してから再試行してください。",
   "Desktop update information is unavailable.": "デスクトップアプリの更新情報を取得できません。",
   "Update checks are unavailable for this installation.": "このインストールでは更新を確認できません。",
   "installed app": "インストール済みアプリ",

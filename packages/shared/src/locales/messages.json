@@ -1586,6 +1586,18 @@
     "message": "Cafe Code connects to Cafe servers you select on your local network.",
     "locations": ["scripts/lib/mac-app-privacy.ts:6"]
   },
+  "Cafe Code could not check for updates.": {
+    "message": "Cafe Code could not check for updates.",
+    "locations": ["apps/desktop/src/updates/DesktopUpdates.ts:594"]
+  },
+  "Cafe Code could not confirm update installation.": {
+    "message": "Cafe Code could not confirm update installation.",
+    "locations": ["apps/desktop/src/updates/DesktopUpdates.ts:591"]
+  },
+  "Cafe Code could not download the update.": {
+    "message": "Cafe Code could not download the update.",
+    "locations": ["apps/desktop/src/updates/DesktopUpdates.ts:593"]
+  },
   "Cafe Code could not load dictation status.": {
     "message": "Cafe Code could not load dictation status.",
     "locations": ["apps/web/src/components/settings/DictationSettings.tsx:211"]
@@ -1600,7 +1612,7 @@
   },
   "Cafe Code data profile could not start": {
     "message": "Cafe Code data profile could not start",
-    "locations": ["apps/desktop/src/backend/DesktopBackendManager.ts:764"]
+    "locations": ["apps/desktop/src/backend/DesktopBackendManager.ts:781"]
   },
   "Cafe Code doesn''t know this condition. You can save it, but it only matches if something provides it.": {
     "message": "Cafe Code doesn''t know this condition. You can save it, but it only matches if something provides it.",
@@ -1773,6 +1785,7 @@
     "message": "Cancel",
     "locations": [
       "apps/desktop/src/settings/DesktopRemoteCertificates.ts:144",
+      "apps/desktop/src/updates/DesktopUpdates.ts:448",
       "apps/web/src/components/ProjectScriptsControl.tsx:508",
       "apps/web/src/components/ProjectScriptsControl.tsx:531",
       "apps/web/src/components/ProviderUsageResetButton.tsx:308",
@@ -11633,6 +11646,14 @@
     "message": "Stop Sessions",
     "locations": ["apps/desktop/src/app/DesktopLifecycle.ts:156"]
   },
+  "Stop Sessions and Update": {
+    "message": "Stop Sessions and Update",
+    "locations": ["apps/desktop/src/updates/DesktopUpdates.ts:448"]
+  },
+  "Stop all provider sessions and install Cafe Code {version}?": {
+    "message": "Stop all provider sessions and install Cafe Code {version}?",
+    "locations": ["apps/desktop/src/updates/DesktopUpdates.ts:442"]
+  },
   "Stop dictation": {
     "message": "Stop dictation",
     "locations": ["apps/web/src/components/chat/ComposerDictationButton.tsx:34"]
@@ -11656,6 +11677,10 @@
   "Stop requested. Waiting for the provider’s status update.": {
     "message": "Stop requested. Waiting for the provider’s status update.",
     "locations": ["apps/web/src/components/chat/SubagentTaskControls.tsx:97"]
+  },
+  "Stop sessions and update": {
+    "message": "Stop sessions and update",
+    "locations": ["apps/desktop/src/updates/DesktopUpdates.ts:441"]
   },
   "Stop task": {
     "message": "Stop task",
@@ -12393,6 +12418,10 @@
     "message": "The terminal was not opened.",
     "locations": ["apps/web/src/components/chat/OpenInPicker.tsx:46"]
   },
+  "The update was not installed because Cafe Code could not safely prepare and stop its provider runtime. The downloaded update is still available. Stop the runtime explicitly before retrying.": {
+    "message": "The update was not installed because Cafe Code could not safely prepare and stop its provider runtime. The downloaded update is still available. Stop the runtime explicitly before retrying.",
+    "locations": ["apps/desktop/src/updates/DesktopUpdates.ts:414"]
+  },
   "The voice command microphone stopped. Your draft is unchanged.": {
     "message": "The voice command microphone stopped. Your draft is unchanged.",
     "locations": ["apps/web/src/globalDictation/entry.tsx:90"]
@@ -12545,7 +12574,7 @@
   },
   "This data profile is already in use, unavailable or unsafe. No other profile was selected and automatic restart has stopped. Close the other Cafe Code instance using this profile, or check permissions, free space and startup recovery files. After resolving the problem, quit and reopen this Cafe Code instance. Do not delete ownership files to bypass this refusal.": {
     "message": "This data profile is already in use, unavailable or unsafe. No other profile was selected and automatic restart has stopped. Close the other Cafe Code instance using this profile, or check permissions, free space and startup recovery files. After resolving the problem, quit and reopen this Cafe Code instance. Do not delete ownership files to bypass this refusal.",
-    "locations": ["apps/desktop/src/backend/DesktopBackendManager.ts:765"]
+    "locations": ["apps/desktop/src/backend/DesktopBackendManager.ts:782"]
   },
   "This device": {
     "message": "This device",
@@ -13428,6 +13457,10 @@
   "Updates unavailable": {
     "message": "Updates unavailable",
     "locations": ["apps/desktop/src/window/DesktopApplicationMenu.ts:87"]
+  },
+  "Updating will stop all Codex, Claude, and other provider work, including work that starts while this dialog is open. Stop sessions and install the downloaded update?": {
+    "message": "Updating will stop all Codex, Claude, and other provider work, including work that starts while this dialog is open. Stop sessions and install the downloaded update?",
+    "locations": ["apps/desktop/src/updates/DesktopUpdates.ts:445"]
   },
   "Updating your workspace…": {
     "message": "Updating your workspace…",

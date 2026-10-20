@@ -21,6 +21,8 @@ import {
   type WindowsProviderRuntimeResult,
 } from "@cafecode/shared/windowsProviderRuntime";
 import * as Data from "effect/Data";
+import * as Cause from "effect/Cause";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -53,7 +55,17 @@ class WindowsDesktopProviderDaemonError extends Data.TaggedError(
   }
 }
 const decodeHealth = Schema.decodeUnknownSync(ProviderDaemonHealth);
+const decodeHealthJson = Schema.decodeUnknownSync(Schema.fromJsonString(ProviderDaemonHealth));
 const decodeLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
+
+/** Update preflight never exports a native/transport error or its private input. */
+class WindowsProviderDaemonUpdatePreparationError extends Data.TaggedError(
+  "WindowsProviderDaemonUpdatePreparationError",
+)<{}> {
+  override get message() {
+    return "The provider daemon could not be safely prepared for this update. Its process and recovery files were preserved. Keep Cafe Code open and stop the owning runtime explicitly before retrying the update.";
+  }
+}
 
 // Never trust a response from a different owner or profile. Native generation
 // and birth identity remain independent proof; neither substitutes for the
@@ -405,6 +417,78 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
       );
       return result;
     });
+  const prepareForUpdate = mutex
+    .withPermits(1)(
+      Effect.gen(function* () {
+        const current = runtime.current();
+        const expectedPort = cafeMcpPort;
+        if (
+          current === null ||
+          current.marker.mode !== "provider-daemon" ||
+          current.marker.windowsProcessIdentity === undefined ||
+          current.marker.appVersion !== environment.appVersion ||
+          current.marker.protocolVersion !== 1 ||
+          current.marker.runtimeBuildId !== runtimeBuildId ||
+          (expectedPort !== undefined && current.marker.cafeMcpPort !== expectedPort) ||
+          current.health.upstreamSupervisor !== undefined
+        ) {
+          return yield* Effect.die(new WindowsProviderDaemonUpdatePreparationError());
+        }
+        const before = yield* Effect.tryPromise({
+          try: () => runtime.observe(),
+          catch: () => new WindowsProviderDaemonUpdatePreparationError(),
+        });
+        if (before.status !== "same-process" || before.ownershipId !== current.ownershipId) {
+          return yield* Effect.die(new WindowsProviderDaemonUpdatePreparationError());
+        }
+        const health = yield* Effect.tryPromise({
+          try: async (signal) => {
+            const response = await requestJson(current.endpoint, PROVIDER_DAEMON_HEALTH_PATH, {
+              timeoutMs: 5_000,
+              signal,
+              maxResponseBytes: 1_048_576,
+            });
+            if (response.statusCode !== 200)
+              throw new WindowsProviderDaemonUpdatePreparationError();
+            return decodeHealthJson(response.body);
+          },
+          catch: () => new WindowsProviderDaemonUpdatePreparationError(),
+        });
+        if (
+          !matches(current, health, profile) ||
+          health.version !== environment.appVersion ||
+          health.protocolVersion !== 1 ||
+          health.runtimeBuildId !== runtimeBuildId ||
+          health.upstreamSupervisor !== undefined
+        ) {
+          return yield* Effect.die(new WindowsProviderDaemonUpdatePreparationError());
+        }
+        const after = yield* Effect.tryPromise({
+          try: () => runtime.observe(),
+          catch: () => new WindowsProviderDaemonUpdatePreparationError(),
+        });
+        if (
+          after.status !== "same-process" ||
+          after.ownershipId !== current.ownershipId ||
+          runtime.current() !== current ||
+          cafeMcpPort !== expectedPort
+        ) {
+          return yield* Effect.die(new WindowsProviderDaemonUpdatePreparationError());
+        }
+        // Native observation is read-only. Do not call ensure/recover/stop,
+        // publish a new lease, or clear state here. The existing guarded Stop
+        // independently re-admits its generation and confirms native exit.
+      }),
+    )
+    .pipe(
+      Effect.timeout(Duration.seconds(5)),
+      Effect.orDie,
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.failCause(cause)
+          : Effect.die(new WindowsProviderDaemonUpdatePreparationError()),
+      ),
+    );
   const stop = mutex
     .withPermits(1)(
       Effect.gen(function* () {
@@ -430,6 +514,7 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
           })
         : Effect.die(new Error("Invalid Cafe MCP backend port.")),
     ensureRunning,
+    prepareForUpdate,
     startupProgress: Stream.fromPubSub(startupUpdates),
     recover,
     currentConfig: Ref.get(state).pipe(Effect.map((current) => current.endpoint)),

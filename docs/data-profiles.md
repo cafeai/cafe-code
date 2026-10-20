@@ -1,5 +1,7 @@
 # Debug and Production data
 
+Last updated: 2026-10-20 22:11:35 JST (UTC+0900)
+
 Source desktop builds and repository development launchers use a separate,
 persistent Debug profile. Installed packaged releases retain their existing
 Production data. Enabling diagnostic logging on a release does not change its
@@ -190,6 +192,14 @@ the live owner and recovery files intact and requires a deliberate, separately
 authorized runtime stop; do not delete its marker to bypass the check. Windows
 retains its existing authenticated generation/FILETIME native guard control,
 with the same exact profile and namespace requirement for profiled callers.
+
+In-app updates use a separate read-only ownership preparation before shutdown,
+then retire the exact controlled daemon before installing a different build.
+The native update warning explicitly includes stopping active provider work.
+Unproved/adopted POSIX owners cannot be auto-terminated by this path; the update
+is blocked before replacing the app instead. This does not change ordinary
+Leave Running behavior or retroactively repair an already stranded legacy
+owner. See [update retirement](decisions/provider-daemon-update-retirement.md).
 
 Automatic provider-supervisor handoff remains disabled. The internal POSIX
 supervisor ensure path can adopt an exactly qualified existing owner but refuses
