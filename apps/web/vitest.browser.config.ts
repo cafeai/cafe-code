@@ -63,6 +63,7 @@ export default mergeConfig(
         "effect/Option",
         "effect/Predicate",
         "effect/Result",
+        "effect/References",
         "effect/Schedule",
         "effect/SchemaGetter",
         "effect/SchemaIssue",

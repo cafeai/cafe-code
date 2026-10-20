@@ -59,7 +59,7 @@ import {
   withCodexMetadataClient,
 } from "../Layers/CodexProvider.ts";
 import { requestCodexSkills } from "../codexSkills.ts";
-import { makeCodexLogin } from "../codexLogin.ts";
+import { makeCodexLogin, supportsCodexDeviceCodeLogin } from "../codexLogin.ts";
 import { makeCodexAuthenticationState, withCodexSignInRequired } from "../codexAuthentication.ts";
 import type * as CodexClient from "effect-codex-app-server/client";
 import { launchBrowser } from "../../process/externalLauncher.ts";
@@ -222,7 +222,14 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       });
       const stampIdentity = (snapshot: ServerProviderDraft): ServerProvider => {
         observedCliVersion = snapshot.version;
-        return stampInstanceIdentity(snapshot);
+        const stamped = stampInstanceIdentity(snapshot);
+        return {
+          ...stamped,
+          authActions: {
+            login: true,
+            deviceCodeLogin: supportsCodexDeviceCodeLogin(snapshot.version),
+          },
+        };
       };
       if (enabled) {
         yield* materializeCodexShadowHome(homeLayout, { authSource }).pipe(
@@ -488,6 +495,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       yield* Ref.set(snapshotRefreshRef, snapshot.refreshAfterAccountChange ?? snapshot.refresh);
       const skillReadPermit = yield* Semaphore.make(1);
       const login = yield* makeCodexLogin({
+        supportsDeviceCode: () => supportsCodexDeviceCodeLogin(observedCliVersion),
         // Keep the selected operation's actual error channel generic across
         // this disposable metadata owner instead of widening it to unknown.
         withClient: <OperationError>(
@@ -568,7 +576,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
-        adapter: { ...adapter, login },
+        adapter: { ...adapter, ...login },
         textGeneration,
         discoverSkills,
         usageReset: {

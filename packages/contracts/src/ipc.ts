@@ -70,6 +70,7 @@ import type {
   ServerProcessResourceHistoryResult,
   ServerProviderLoginInput,
   ServerProviderLoginResult,
+  ServerProviderDeviceLoginEvent,
   ServerProviderUpdateInput,
   ServerProviderRuntimeRestartInput,
   ServerProviderRuntimeRestartResult,
@@ -552,6 +553,12 @@ export interface LocalApi {
     }) => Promise<ServerProviderUpdatedPayload>;
     listProviderSkills: (input: ProviderSkillsInput) => Promise<ProviderSkillsResult>;
     loginProvider: (input: ServerProviderLoginInput) => Promise<ServerProviderLoginResult>;
+    /** One user gesture, no reconnect/replay; unsubscribe cancels native login. */
+    subscribeProviderDeviceLogin: (
+      input: ServerProviderLoginInput,
+      listener: (event: ServerProviderDeviceLoginEvent) => void,
+      onError: (error: unknown) => void,
+    ) => () => void;
     updateProvider: (input: ServerProviderUpdateInput) => Promise<ServerProviderUpdatedPayload>;
     restartProviderRuntime: (
       input: ServerProviderRuntimeRestartInput,

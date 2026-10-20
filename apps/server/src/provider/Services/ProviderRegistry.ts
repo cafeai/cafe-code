@@ -21,6 +21,7 @@ import type {
   ProviderSession,
   ServerProviderLoginInput,
   ServerProviderLoginResult,
+  ServerProviderDeviceLoginEvent,
 } from "@cafecode/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -33,6 +34,10 @@ import type { ProviderAdapterError } from "../Errors.ts";
 export type ProviderMaintenanceActionKind = "update";
 
 export interface ProviderRegistryShape {
+  readonly loginProviderDeviceCode?: <SessionError>(
+    input: ServerProviderLoginInput,
+    listSessions: Effect.Effect<ReadonlyArray<ProviderSession>, SessionError>,
+  ) => Stream.Stream<ServerProviderDeviceLoginEvent, ProviderAdapterError>;
   readonly loginProvider?: (
     input: ServerProviderLoginInput,
     listSessions: Effect.Effect<ReadonlyArray<ProviderSession>>,

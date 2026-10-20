@@ -16,6 +16,7 @@ import {
   type ServerConfig,
   type ServerProcessResourceHistoryResult,
   type ServerProvider,
+  type ServerProviderDeviceLoginEvent,
   type ServerRuntimeLayerDiagnosticsResult,
   type SourceControlDiscoveryResult,
 } from "@cafecode/contracts";
@@ -63,6 +64,7 @@ import {
   TextGenerationModelSettingsRow,
 } from "./SettingsPanels";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
+import { CodexDeviceLoginDialog } from "./CodexDeviceLoginDialog";
 
 function renderWithTestRouter(children: ReactNode) {
   const queryClient = new QueryClient({
@@ -2665,6 +2667,159 @@ describe("settings panels", () => {
     } finally {
       writeText.mockRestore();
     }
+  });
+
+  it("opens Codex device-code sign-in in the client and cancels its one-shot stream", async () => {
+    const base = createBaseServerConfig();
+    const instanceId = ProviderInstanceId.make("codex_work");
+    installProviderAccountSettings({
+      ...base,
+      settings: {
+        ...base.settings,
+        providerInstances: {
+          [instanceId]: {
+            driver: ProviderDriverKind.make("codex"),
+            enabled: true,
+            displayName: "Work Codex",
+          },
+        },
+      },
+      providers: [
+        {
+          ...createOutdatedProvider("codex"),
+          instanceId,
+          driver: ProviderDriverKind.make("codex"),
+          displayName: "Work Codex",
+          installed: true,
+          auth: { status: "unauthenticated" },
+          authActions: { login: true, deviceCodeLogin: true },
+        },
+      ],
+    });
+    let publish!: (event: ServerProviderDeviceLoginEvent) => void;
+    const cancel = vi.fn();
+    const subscribe = vi
+      .fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>()
+      .mockImplementation((_input, listener) => {
+        publish = listener;
+        return cancel;
+      });
+    window.nativeApi!.server.subscribeProviderDeviceLogin = subscribe;
+    const browserLogin = vi.fn<LocalApi["server"]["loginProvider"]>();
+    window.nativeApi!.server.loginProvider = browserLogin;
+    const openExternal = vi.fn<LocalApi["shell"]["openExternal"]>().mockResolvedValue(undefined);
+    window.nativeApi!.shell = {
+      openExternal,
+      openInEditor: vi.fn().mockResolvedValue(undefined),
+      openTerminal: vi.fn().mockResolvedValue(undefined),
+      openPath: vi.fn().mockResolvedValue(undefined),
+      revealPath: vi.fn().mockResolvedValue(undefined),
+    };
+    const copy = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    try {
+      mounted = await render(
+        <AppAtomRegistryProvider>
+          <ProviderSettingsPanel />
+        </AppAtomRegistryProvider>,
+      );
+      await page.getByRole("button", { name: "Log in", exact: true }).click();
+      await expect.element(page.getByRole("dialog")).toBeVisible();
+      expect(subscribe).toHaveBeenCalledExactlyOnceWith(
+        { instanceId },
+        expect.any(Function),
+        expect.any(Function),
+      );
+      publish({
+        type: "device-code",
+        verificationUrl: "https://auth.openai.com/codex/device",
+        userCode: "ABCD-12345",
+      });
+      await expect.element(page.getByText("ABCD-12345", { exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Copy code", exact: true }).click();
+      await vi.waitFor(() => expect(copy).toHaveBeenCalledExactlyOnceWith("ABCD-12345"));
+      await page.getByRole("button", { name: "Open verification page", exact: true }).click();
+      expect(openExternal).toHaveBeenCalledExactlyOnceWith("https://auth.openai.com/codex/device");
+      expect(browserLogin).not.toHaveBeenCalled();
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+      publish({ type: "authenticated" });
+      await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+      expect(subscribe).toHaveBeenCalledOnce();
+    } finally {
+      copy.mockRestore();
+    }
+  });
+
+  it("clears the device code after native completion without starting another login", async () => {
+    const instanceId = ProviderInstanceId.make("codex_work");
+    let publish!: (event: ServerProviderDeviceLoginEvent) => void;
+    const cancel = vi.fn();
+    const subscribe = vi
+      .fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>()
+      .mockImplementation((_input, listener) => {
+        publish = listener;
+        return cancel;
+      });
+    const api = { server: { subscribeProviderDeviceLogin: subscribe } } as unknown as LocalApi;
+    mounted = await render(
+      <CodexDeviceLoginDialog
+        api={api}
+        instanceId={instanceId}
+        displayName="Work Codex"
+        onClose={() => undefined}
+      />,
+    );
+    publish({
+      type: "device-code",
+      verificationUrl: "https://auth.openai.com/codex/device",
+      userCode: "ABCD-12345",
+    });
+    await expect.element(page.getByText("ABCD-12345", { exact: true })).toBeVisible();
+    publish({ type: "authenticated" });
+    await expect
+      .element(page.getByText("Signed in. Provider status has been refreshed.", { exact: true }))
+      .toBeVisible();
+    await expect.element(page.getByText("ABCD-12345", { exact: true })).not.toBeInTheDocument();
+    expect(subscribe).toHaveBeenCalledOnce();
+  });
+
+  it("discards device codes on stream failure and never renders received error text", async () => {
+    const instanceId = ProviderInstanceId.make("codex_work");
+    let publish!: (event: ServerProviderDeviceLoginEvent) => void;
+    let fail!: (error: unknown) => void;
+    const subscribe = vi
+      .fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>()
+      .mockImplementation((_input, listener, onError) => {
+        publish = listener;
+        fail = onError;
+        return () => undefined;
+      });
+    const api = { server: { subscribeProviderDeviceLogin: subscribe } } as unknown as LocalApi;
+    mounted = await render(
+      <CodexDeviceLoginDialog
+        api={api}
+        instanceId={instanceId}
+        displayName="Work Codex"
+        onClose={() => undefined}
+      />,
+    );
+    publish({
+      type: "device-code",
+      verificationUrl: "https://auth.openai.com/codex/device",
+      userCode: "ABCD-12345",
+    });
+    await expect.element(page.getByText("ABCD-12345", { exact: true })).toBeVisible();
+    fail(new Error("private-auth-token"));
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent(
+        "The connection or sign-in attempt ended. Close this dialog and try again.",
+      );
+    await expect.element(page.getByText("ABCD-12345", { exact: true })).not.toBeInTheDocument();
+    await expect
+      .element(page.getByText("private-auth-token", { exact: true }))
+      .not.toBeInTheDocument();
+    expect(subscribe).toHaveBeenCalledOnce();
   });
 
   it.each(["started", "authenticated"] as const)(

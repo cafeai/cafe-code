@@ -43,7 +43,10 @@ import {
   type ProviderInstanceConfig,
   type ProviderInstanceId,
   type ScopedThreadRef,
+  type EnvironmentId,
+  type LocalApi,
 } from "@cafecode/contracts";
+import { CodexDeviceLoginDialog } from "./CodexDeviceLoginDialog";
 import { scopeThreadRef } from "@cafecode/client-runtime";
 import { copyTextToClipboard } from "../../lib/copyToClipboard";
 import {
@@ -2008,6 +2011,9 @@ export function ProviderSettingsPanel() {
     environmentId ? state.byId[environmentId]?.connectionState : undefined,
   );
   const remote = useIsSavedRemoteEnvironment(environmentId);
+  const remoteRole = useSavedEnvironmentRuntimeStore((state) =>
+    environmentId ? state.byId[environmentId]?.role : undefined,
+  );
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const serverProviders = useServerProviders();
@@ -2023,6 +2029,15 @@ export function ProviderSettingsPanel() {
     ReadonlySet<ProviderInstanceId>
   >(() => new Set());
   const [openInstanceDetails, setOpenInstanceDetails] = useState<Record<string, boolean>>({});
+  const [deviceLogin, setDeviceLogin] = useState<{
+    readonly environmentId: EnvironmentId | null;
+    readonly instanceId: ProviderInstanceId;
+    readonly displayName: string;
+    readonly api: LocalApi;
+  } | null>(null);
+  useEffect(() => {
+    setDeviceLogin(null);
+  }, [environmentId]);
   const refreshingRef = useRef(false);
 
   const providerUpdateCandidates = useMemo(
@@ -2664,11 +2679,38 @@ export function ProviderSettingsPanel() {
               onLogIn={
                 canLogInProvider
                   ? () =>
-                      void logInProvider({
-                        instanceId: row.instanceId,
-                        displayName: providerDisplayName,
-                        browser: row.driver === "axiom" || row.driver === "codex",
-                      })
+                      row.driver === "codex" &&
+                      (remote || liveProvider?.authActions?.deviceCodeLogin)
+                        ? setDeviceLogin({
+                            environmentId,
+                            instanceId: row.instanceId,
+                            displayName: providerDisplayName,
+                            api: ensureWorkspaceApi(environmentId),
+                          })
+                        : void logInProvider({
+                            instanceId: row.instanceId,
+                            displayName: providerDisplayName,
+                            browser: row.driver === "axiom" || row.driver === "codex",
+                          })
+                  : undefined
+              }
+              loginDisabledReason={
+                canLogInProvider && row.driver === "codex" && remote
+                  ? remoteRole !== "owner"
+                    ? uiText(
+                        "Sign-in requires an owner connection to this server.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )
+                    : !liveProvider?.authActions?.deviceCodeLogin
+                      ? uiText(
+                          "Update Cafe and Codex on the server to use device-code sign-in.",
+                          undefined,
+                          undefined,
+                          uiLocale,
+                        )
+                      : undefined
                   : undefined
               }
               isLoggingIn={loggingInProviderInstanceIds.has(row.instanceId)}
@@ -2687,6 +2729,14 @@ export function ProviderSettingsPanel() {
         })}
       </SettingsSection>
 
+      {deviceLogin && deviceLogin.environmentId === environmentId && (
+        <CodexDeviceLoginDialog
+          api={deviceLogin.api}
+          instanceId={deviceLogin.instanceId}
+          displayName={deviceLogin.displayName}
+          onClose={() => setDeviceLogin(null)}
+        />
+      )}
       <AddProviderInstanceDialog
         open={isAddInstanceDialogOpen}
         onOpenChange={setIsAddInstanceDialogOpen}

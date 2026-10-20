@@ -130,6 +130,41 @@ export class WsTransport {
     );
   }
 
+  /** Account-changing streams belong to one gesture and one socket lifetime.
+   * Never feed these through the reconnecting subscription loop below. */
+  subscribeOnce<TValue>(
+    connect: (client: WsRpcProtocolClient) => Stream.Stream<TValue, Error, never>,
+    listener: (value: TValue) => void,
+    onError: (error: unknown) => void,
+    onComplete: () => void,
+  ): () => void {
+    if (this.disposed) {
+      onError(new Error("Transport disposed"));
+      return NOOP;
+    }
+    let active = true;
+    const running = this.runStreamOnSession(
+      this.session,
+      connect,
+      listener,
+      {},
+      () => active,
+      NOOP,
+    );
+    void running.completed.then(
+      () => {
+        if (active) onComplete();
+      },
+      (error: unknown) => {
+        if (active) onError(error);
+      },
+    );
+    return () => {
+      active = false;
+      running.cancel();
+    };
+  }
+
   subscribe<TValue>(
     connect: (client: WsRpcProtocolClient) => Stream.Stream<TValue, Error, never>,
     listener: (value: TValue) => void,

@@ -61,6 +61,7 @@ export type ServerProviderAuth = typeof ServerProviderAuth.Type;
 
 export const ServerProviderAuthActions = Schema.Struct({
   login: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  deviceCodeLogin: Schema.optionalKey(Schema.Boolean),
 });
 export type ServerProviderAuthActions = typeof ServerProviderAuthActions.Type;
 
@@ -1068,6 +1069,18 @@ export const ServerProviderLoginInput = Schema.Struct({
   instanceId: ProviderInstanceId,
 });
 export type ServerProviderLoginInput = typeof ServerProviderLoginInput.Type;
+
+// Ephemeral, requester-only instructions. Never include these in provider
+// snapshots, persisted settings or a replaying subscription.
+export const ServerProviderDeviceLoginEvent = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("device-code"),
+    verificationUrl: Schema.Literal("https://auth.openai.com/codex/device"),
+    userCode: Schema.String.check(Schema.isPattern(/^[A-Z0-9]{2,16}-[A-Z0-9]{2,16}$/u)),
+  }),
+  Schema.Struct({ type: Schema.Literal("authenticated") }),
+]);
+export type ServerProviderDeviceLoginEvent = typeof ServerProviderDeviceLoginEvent.Type;
 
 export const ServerProviderLoginResult = Schema.Struct({
   instanceId: ProviderInstanceId,

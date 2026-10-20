@@ -22,6 +22,7 @@ import type {
   ProviderSecurityResult,
   ProviderSendTurnInput,
   ProviderSession,
+  ServerProviderDeviceLoginEvent,
   ProviderSessionForkInput,
   ProviderSessionForkResult,
   ProviderSessionStartInput,
@@ -145,6 +146,9 @@ export interface ProviderAdapterShape<TError> {
   readonly login?: <SessionError>(
     hasOwnedSessions?: Effect.Effect<boolean, SessionError>,
   ) => Effect.Effect<"authenticated" | "started", TError>;
+  readonly loginDeviceCode?: <SessionError>(
+    hasOwnedSessions: Effect.Effect<boolean, SessionError>,
+  ) => Stream.Stream<ServerProviderDeviceLoginEvent, TError>;
   readonly manageMcp?: (input: ProviderMcpNativeInput) => Effect.Effect<ProviderMcpResult, TError>;
   readonly readSecurity?: (
     input: ProviderSecurityReadInput,

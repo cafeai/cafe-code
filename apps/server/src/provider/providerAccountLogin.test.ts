@@ -22,7 +22,10 @@ import { ProviderRegistry } from "./Services/ProviderRegistry.ts";
 import type { ProviderInstance } from "./ProviderDriver.ts";
 import { ProviderAdapterValidationError } from "./Errors.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
-import { loginBoundProviderAccount } from "./providerAccountLogin.ts";
+import {
+  loginBoundProviderAccount,
+  loginBoundProviderDeviceAccount,
+} from "./providerAccountLogin.ts";
 
 const fixture = Effect.fn("accountLogin.fixture")(function* (driver = "axiom") {
   const instanceId = ProviderInstanceId.make(`${driver}_work`);
@@ -115,6 +118,95 @@ const fixture = Effect.fn("accountLogin.fixture")(function* (driver = "axiom") {
 });
 
 describe("backend-owned account login", () => {
+  it.effect("binds device login to the exact backend instance across daemon inventory waits", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture("codex");
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let submissions = 0;
+      const instance: ProviderInstance = {
+        ...f.instance,
+        adapter: {
+          ...f.instance.adapter,
+          loginDeviceCode: (inventory) =>
+            Stream.fromEffect(
+              inventory.pipe(
+                Effect.mapError(
+                  () =>
+                    new ProviderAdapterValidationError({
+                      provider: "codex",
+                      operation: "login",
+                      issue: "owner changed",
+                    }),
+                ),
+                Effect.andThen(
+                  Effect.sync(() => {
+                    submissions++;
+                    return { type: "authenticated" as const };
+                  }),
+                ),
+              ),
+            ),
+        },
+      };
+      let current = instance;
+      const fiber = yield* loginBoundProviderDeviceAccount({
+        instanceId: instance.instanceId,
+        getInstance: () => Effect.sync(() => current),
+        listSessions: Effect.gen(function* () {
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(release);
+          return [];
+        }),
+      }).pipe(Stream.runCollect, Effect.forkChild);
+      yield* Deferred.await(entered);
+      current = { ...instance };
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(fiber).pipe(Effect.flip);
+      expect(submissions).toBe(0);
+    }),
+  );
+
+  it.effect("refuses a replaced backend instance's delayed private device instructions", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture("codex");
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const retired = yield* Deferred.make<void>();
+      const instance: ProviderInstance = {
+        ...f.instance,
+        adapter: {
+          ...f.instance.adapter,
+          loginDeviceCode: () =>
+            Stream.fromEffect(
+              Effect.gen(function* () {
+                yield* Effect.addFinalizer(() => Deferred.succeed(retired, undefined));
+                yield* Deferred.succeed(entered, undefined);
+                yield* Deferred.await(release);
+                return {
+                  type: "device-code" as const,
+                  verificationUrl: "https://auth.openai.com/codex/device" as const,
+                  userCode: "ABCD-12345",
+                };
+              }).pipe(Effect.scoped),
+            ),
+        },
+      };
+      let current = instance;
+      const fiber = yield* loginBoundProviderDeviceAccount({
+        instanceId: instance.instanceId,
+        getInstance: () => Effect.sync(() => current),
+        listSessions: Effect.succeed([]),
+      }).pipe(Stream.runCollect, Effect.forkChild);
+      yield* Deferred.await(entered);
+      current = { ...instance };
+      yield* Deferred.succeed(release, undefined);
+      expect(yield* Fiber.join(fiber).pipe(Effect.flip)).toMatchObject({
+        _tag: "ProviderAdapterValidationError",
+      });
+      expect(yield* Deferred.isDone(retired)).toBe(true);
+    }),
+  );
   for (const driver of ["axiom", "codex"]) {
     it.effect(
       `publishes ${driver} login completion through the backend registry without manual refresh`,

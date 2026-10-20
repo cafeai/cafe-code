@@ -1501,6 +1501,87 @@ describe("WsTransport", () => {
     await transport.dispose();
   });
 
+  it("retires one-shot device login after disconnect without replaying on reconnect", async () => {
+    const transport = createTransport("ws://localhost:3020");
+    const client = createWsRpcClient(transport);
+    const listener = vi.fn();
+    const onError = vi.fn();
+    const cancel = client.server.subscribeProviderDeviceLogin(
+      {
+        instanceId: "codex" as Parameters<
+          typeof client.server.subscribeProviderDeviceLogin
+        >[0]["instanceId"],
+      },
+      listener,
+      onError,
+    );
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    const socket = getSocket();
+    socket.open();
+    await waitFor(() => expect(socket.sent).toHaveLength(1));
+    const request = JSON.parse(socket.sent[0]!) as { id: string; tag: string };
+    expect(request.tag).toBe(WS_METHODS.serverLoginProviderDeviceCode);
+    const event = {
+      type: "device-code",
+      verificationUrl: "https://auth.openai.com/codex/device",
+      userCode: "ABCD-12345",
+    };
+    socket.serverMessage(JSON.stringify({ _tag: "Chunk", requestId: request.id, values: [event] }));
+    await waitFor(() => expect(listener).toHaveBeenCalledExactlyOnceWith(event));
+    socket.close(1011, "fixture disconnect");
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    const reconnect = transport.reconnect();
+    await waitFor(() => expect(sockets.length).toBeGreaterThan(1));
+    const replacement = getSocket();
+    replacement.open();
+    await reconnect;
+    expect(replacement.sent).toEqual([]);
+    expect(listener).toHaveBeenCalledOnce();
+    cancel();
+  });
+
+  it("interrupts a cancelled one-shot login and ignores late instructions", async () => {
+    const transport = createTransport("ws://localhost:3020");
+    const client = createWsRpcClient(transport);
+    const listener = vi.fn();
+    const onError = vi.fn();
+    const cancel = client.server.subscribeProviderDeviceLogin(
+      {
+        instanceId: "codex" as Parameters<
+          typeof client.server.subscribeProviderDeviceLogin
+        >[0]["instanceId"],
+      },
+      listener,
+      onError,
+    );
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    const socket = getSocket();
+    socket.open();
+    await waitFor(() => expect(socket.sent).toHaveLength(1));
+    const request = JSON.parse(socket.sent[0]!) as { id: string };
+    cancel();
+    await waitFor(() =>
+      expect(socket.sent.map((value) => JSON.parse(value))).toContainEqual(
+        expect.objectContaining({ _tag: "Interrupt", requestId: request.id }),
+      ),
+    );
+    socket.serverMessage(
+      JSON.stringify({
+        _tag: "Chunk",
+        requestId: request.id,
+        values: [
+          {
+            type: "device-code",
+            verificationUrl: "https://auth.openai.com/codex/device",
+            userCode: "ABCD-12345",
+          },
+        ],
+      }),
+    );
+    expect(listener).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it("delivers stream chunks to subscribers", async () => {
     const transport = createTransport("ws://localhost:3020");
     const listener = vi.fn();

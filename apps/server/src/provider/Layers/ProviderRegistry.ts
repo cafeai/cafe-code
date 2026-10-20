@@ -36,7 +36,10 @@ import * as Cause from "effect/Cause";
 import { makeProviderUsageReset } from "../ProviderUsageReset.ts";
 import { discoverBoundProviderSkills } from "../providerSkillsDiscovery.ts";
 import { readBoundInstanceQuota } from "../providerQuotaSubscription.ts";
-import { loginBoundProviderAccount } from "../providerAccountLogin.ts";
+import {
+  loginBoundProviderAccount,
+  loginBoundProviderDeviceAccount,
+} from "../providerAccountLogin.ts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Equal from "effect/Equal";
@@ -1269,6 +1272,12 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
 
     return {
       getProviders: Ref.get(providersRef),
+      loginProviderDeviceCode: (input, listSessions) =>
+        loginBoundProviderDeviceAccount({
+          instanceId: input.instanceId,
+          getInstance: () => instanceRegistry.getInstance(input.instanceId),
+          listSessions,
+        }),
       loginProvider: (input, listSessions) =>
         loginBoundProviderAccount({
           instanceId: input.instanceId,

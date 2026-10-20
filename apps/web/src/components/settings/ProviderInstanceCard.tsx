@@ -1041,6 +1041,7 @@ interface ProviderInstanceCardProps {
   readonly onRunUpdate?: (() => void) | undefined;
   readonly isUpdating?: boolean | undefined;
   readonly onLogIn?: (() => void) | undefined;
+  readonly loginDisabledReason?: string | undefined;
   readonly isLoggingIn?: boolean | undefined;
   readonly onRestartRuntime?: (() => void) | undefined;
   readonly isRestartingRuntime?: boolean | undefined;
@@ -1092,6 +1093,7 @@ export function ProviderInstanceCard({
   onRunUpdate,
   isUpdating = false,
   onLogIn,
+  loginDisabledReason,
   isLoggingIn = false,
   onRestartRuntime,
   isRestartingRuntime = false,
@@ -1499,7 +1501,8 @@ export function ProviderInstanceCard({
                 size="xs"
                 variant="outline"
                 className="h-7 gap-1.5 px-2 text-xs"
-                disabled={isLoggingIn}
+                disabled={isLoggingIn || loginDisabledReason !== undefined}
+                title={loginDisabledReason}
                 onClick={onLogIn}
               >
                 {isLoggingIn ? (
@@ -1509,6 +1512,9 @@ export function ProviderInstanceCard({
                 )}
                 {uiText("Log in", undefined, undefined, uiLocale)}
               </Button>
+            ) : null}
+            {onLogIn && loginDisabledReason ? (
+              <span className="text-xs text-muted-foreground">{loginDisabledReason}</span>
             ) : null}
             {/* Keep the optional reset alongside the existing controls. A
                 standalone quota action row would push all usage facts down

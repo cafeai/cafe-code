@@ -9,6 +9,7 @@ import {
 } from "@cafecode/contracts";
 import { applyGitStatusStreamEvent } from "@cafecode/shared/git";
 import * as Effect from "effect/Effect";
+import * as References from "effect/References";
 import * as Stream from "effect/Stream";
 
 import { dispatchIdempotentCommandWithTransportRetry } from "./idempotentDispatch";
@@ -151,6 +152,7 @@ export interface WsRpcClient {
       typeof WS_METHODS.serverSubscribeProviderQuota
     >;
     readonly loginProvider: RpcUnaryMethod<typeof WS_METHODS.serverLoginProvider>;
+    readonly subscribeProviderDeviceLogin: LocalApi["server"]["subscribeProviderDeviceLogin"];
     readonly updateProvider: RpcUnaryMethod<typeof WS_METHODS.serverUpdateProvider>;
     readonly restartProviderRuntime: RpcUnaryMethod<typeof WS_METHODS.serverRestartProviderRuntime>;
     readonly openSystemPromptFile: RpcUnaryNoArgMethod<
@@ -350,6 +352,23 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         ),
       loginProvider: (input) =>
         transport.request((client) => client[WS_METHODS.serverLoginProvider](input)),
+      subscribeProviderDeviceLogin: (input, listener, onError) => {
+        let authenticated = false;
+        return transport.subscribeOnce(
+          (client) =>
+            client[WS_METHODS.serverLoginProviderDeviceCode](input).pipe(
+              Stream.provideService(References.TracerEnabled, false),
+            ),
+          (event) => {
+            authenticated ||= event.type === "authenticated";
+            listener(event);
+          },
+          onError,
+          () => {
+            if (!authenticated) onError(new Error("Codex sign-in did not complete."));
+          },
+        );
+      },
       updateProvider: (input) =>
         transport.request((client) => client[WS_METHODS.serverUpdateProvider](input)),
       restartProviderRuntime: (input) =>

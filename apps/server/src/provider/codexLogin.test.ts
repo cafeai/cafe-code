@@ -6,14 +6,18 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Scope from "effect/Scope";
 import * as Exit from "effect/Exit";
+import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import type * as CodexClient from "effect-codex-app-server/client";
+import type { ServerProviderDeviceLoginEvent } from "@cafecode/contracts";
 import { ProviderAdapterValidationError } from "./Errors.ts";
 import {
   CODEX_LOGIN_ERRORS,
   codexLoginFailureMessage,
   codexLoginUrl,
   makeCodexLogin,
+  codexDeviceLoginInstructions,
+  supportsCodexDeviceCodeLogin,
 } from "./codexLogin.ts";
 
 const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
@@ -39,6 +43,10 @@ const fixture = Effect.fn("codexLogin.test.fixture")(function* (
     readonly startFailure?: boolean;
     readonly earlyCompletion?: boolean;
     readonly holdStart?: boolean;
+    readonly deviceUrl?: string;
+    readonly userCode?: string;
+    readonly unsupported?: boolean;
+    readonly ownerScope?: Scope.Scope;
   } = {},
 ) {
   const released = yield* Deferred.make<void>();
@@ -80,13 +88,21 @@ const fixture = Effect.fn("codexLogin.test.fixture")(function* (
           if (input.startFailure)
             return yield* Effect.fail(new LoginFixtureFailure({ message: authUrl }));
           if (input.earlyCompletion) yield* complete(loginId);
-          return { type: "chatgpt", loginId, authUrl: input.url ?? authUrl };
+          return (params as { type: string }).type === "chatgptDeviceCode"
+            ? {
+                type: "chatgptDeviceCode",
+                loginId,
+                verificationUrl: input.deviceUrl ?? "https://auth.openai.com/codex/device",
+                userCode: input.userCode ?? "ABCD-12345",
+              }
+            : { type: "chatgpt", loginId, authUrl: input.url ?? authUrl };
         }
         if (method === "account/login/cancel" || method === "account/logout") return {};
         return yield* Effect.die(new Error(`Unexpected method ${method}`));
       }),
   } as unknown as CodexClient.CodexAppServerClientShape;
-  const login = yield* makeCodexLogin({
+  const controller = makeCodexLogin({
+    supportsDeviceCode: () => !input.unsupported,
     withClient: (use, onTermination) =>
       Effect.gen(function* () {
         terminate = onTermination;
@@ -105,8 +121,9 @@ const fixture = Effect.fn("codexLogin.test.fixture")(function* (
           return yield* Effect.fail(new LoginFixtureFailure({ message: authUrl }));
       }),
   });
+  const login = yield* input.ownerScope ? Scope.provide(input.ownerScope)(controller) : controller;
   return {
-    login,
+    ...login,
     complete,
     calls,
     opened,
@@ -116,6 +133,258 @@ const fixture = Effect.fn("codexLogin.test.fixture")(function* (
     startGate,
     terminate: () => terminate,
   };
+});
+
+describe("Codex device-code sign-in", () => {
+  it.effect(
+    "rechecks rejected credentials after the final awaited daemon admission before logout",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture({ authenticated: true, requiresReauthentication: true });
+        let reads = 0;
+        const guard = Effect.sync(() => {
+          reads++;
+          if (reads === 2) f.state.requiresReauthentication = false;
+          return false;
+        });
+        expect(
+          yield* f.loginDeviceCode(guard).pipe(Stream.take(1), Stream.runCollect, Effect.flip),
+        ).toMatchObject({ issue: CODEX_LOGIN_ERRORS.account });
+        expect(reads).toBe(2);
+        expect(f.calls.map((call) => call.method)).toEqual(["account/read"]);
+        expect(f.state.refreshes).toBe(0);
+      }),
+  );
+  it.effect("retires the subscriber when its exact provider instance closes", () =>
+    Effect.gen(function* () {
+      const owner = yield* Scope.make();
+      yield* Effect.addFinalizer((exit) => Scope.close(owner, exit));
+      const f = yield* fixture({ ownerScope: owner });
+      const a = yield* attempt(f);
+      yield* Deferred.await(a.shown);
+      yield* Scope.close(owner, Exit.void);
+      expect(yield* Fiber.join(a.fiber).pipe(Effect.flip)).toMatchObject({
+        issue: CODEX_LOGIN_ERRORS.start,
+      });
+      expect(yield* Deferred.isDone(f.released)).toBe(true);
+      expect(f.calls.at(-1)).toEqual({ method: "account/login/cancel", params: { loginId } });
+      expect(f.state.refreshes).toBe(0);
+    }),
+  );
+
+  it.effect("refuses a controller whose instance retired before stream admission", () =>
+    Effect.gen(function* () {
+      const owner = yield* Scope.make();
+      yield* Effect.addFinalizer((exit) => Scope.close(owner, exit));
+      const f = yield* fixture({ ownerScope: owner });
+      yield* Scope.close(owner, Exit.void);
+      expect(
+        yield* f.loginDeviceCode(Effect.succeed(false)).pipe(Stream.runCollect, Effect.flip),
+      ).toMatchObject({ issue: CODEX_LOGIN_ERRORS.start });
+      expect(f.calls).toEqual([]);
+    }),
+  );
+  it.effect("bounds native initialization and joins cleanup before releasing its reservation", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const retired = yield* Deferred.make<void>();
+      const controller = yield* makeCodexLogin({
+        supportsDeviceCode: () => true,
+        withClient: () =>
+          Effect.gen(function* () {
+            yield* Effect.addFinalizer(() => Deferred.succeed(retired, undefined));
+            yield* Deferred.succeed(entered, undefined);
+            return yield* Effect.never;
+          }),
+        hasSessions: Effect.succeed(false),
+        refresh: Effect.void,
+        openUrl: () => Effect.void,
+      });
+      const fiber = yield* controller
+        .loginDeviceCode(Effect.succeed(false))
+        .pipe(Stream.runCollect, Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(60_000);
+      expect(yield* Fiber.join(fiber).pipe(Effect.flip)).toMatchObject({
+        issue: CODEX_LOGIN_ERRORS.start,
+      });
+      expect(yield* Deferred.isDone(retired)).toBe(true);
+    }),
+  );
+  const attempt = Effect.fn("deviceLogin.test.attempt")(function* (
+    f: Effect.Success<ReturnType<typeof fixture>>,
+  ) {
+    const shown = yield* Deferred.make<void>();
+    const events: ServerProviderDeviceLoginEvent[] = [];
+    const fiber = yield* f.loginDeviceCode(Effect.succeed(false)).pipe(
+      Stream.runForEach((event) =>
+        Effect.gen(function* () {
+          events.push(event);
+          if (event.type === "device-code") yield* Deferred.succeed(shown, undefined);
+        }),
+      ),
+      Effect.forkChild,
+    );
+    return { fiber, shown, events };
+  });
+
+  it.effect(
+    "emits private instructions and refreshes only the exact successful native attempt",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const a = yield* attempt(f);
+        yield* Deferred.await(a.shown);
+        expect(a.events).toEqual([
+          {
+            type: "device-code",
+            verificationUrl: "https://auth.openai.com/codex/device",
+            userCode: "ABCD-12345",
+          },
+        ]);
+        expect(f.opened).toEqual([]);
+        expect(f.calls).toContainEqual({
+          method: "account/login/start",
+          params: { type: "chatgptDeviceCode" },
+        });
+        expect(yield* f.login().pipe(Effect.flip)).toMatchObject({
+          issue: CODEX_LOGIN_ERRORS.pending,
+        });
+        yield* f.complete("unrelated");
+        expect(f.state.refreshes).toBe(0);
+        yield* f.complete(loginId);
+        yield* Fiber.join(a.fiber);
+        expect(a.events.at(-1)).toEqual({ type: "authenticated" });
+        expect(f.state.refreshes).toBe(1);
+        expect(yield* Deferred.isDone(f.released)).toBe(true);
+        expect(f.calls.some((call) => call.method === "account/login/cancel")).toBe(false);
+      }),
+  );
+
+  it.effect("cancels the exact native login and joins its child when the subscriber closes", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const a = yield* attempt(f);
+      yield* Deferred.await(a.shown);
+      yield* Fiber.interrupt(a.fiber);
+      expect(yield* Deferred.isDone(f.released)).toBe(true);
+      expect(f.calls.at(-1)).toEqual({ method: "account/login/cancel", params: { loginId } });
+      expect(f.state.refreshes).toBe(0);
+      expect(yield* f.login()).toBe("started");
+    }),
+  );
+
+  for (const earlyCompletion of [false, true])
+    it.effect(`accepts matching native completion with early=${earlyCompletion}`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture({ earlyCompletion });
+        const a = yield* attempt(f);
+        yield* Deferred.await(a.shown);
+        if (!earlyCompletion) yield* f.complete(loginId);
+        yield* Fiber.join(a.fiber);
+        expect(a.events.map((event) => event.type)).toEqual(["device-code", "authenticated"]);
+      }),
+    );
+
+  for (const failure of ["rejected", "timeout", "exit"] as const)
+    it.effect(`retires a ${failure} attempt without publishing native error text`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const a = yield* attempt(f);
+        yield* Deferred.await(a.shown);
+        if (failure === "rejected") yield* f.complete(loginId, false);
+        if (failure === "timeout") yield* TestClock.adjust(10 * 60_000);
+        if (failure === "exit") yield* f.terminate();
+        expect(yield* Fiber.join(a.fiber).pipe(Effect.flip)).toMatchObject({
+          issue:
+            CODEX_LOGIN_ERRORS[
+              failure === "rejected" ? "failed" : failure === "exit" ? "start" : "timeout"
+            ],
+        });
+        expect(f.state.refreshes).toBe(0);
+        expect(f.calls.at(-1)).toEqual({ method: "account/login/cancel", params: { loginId } });
+        expect(yield* Deferred.isDone(f.released)).toBe(true);
+      }),
+    );
+
+  for (const input of [
+    { busy: true },
+    { unsupported: true },
+    { deviceUrl: "https://example.com/private" },
+    { userCode: "private-token?" },
+  ])
+    it.effect(`refuses inadmissible device login ${Object.keys(input)[0]}`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture(input);
+        const result = yield* f
+          .loginDeviceCode(Effect.succeed(false))
+          .pipe(Stream.runCollect, Effect.flip);
+        expect(result).toBeInstanceOf(ProviderAdapterValidationError);
+        expect(f.state.refreshes).toBe(0);
+        expect(f.opened).toEqual([]);
+        if ("busy" in input || "unsupported" in input)
+          expect(f.calls.some((call) => call.method === "account/login/start")).toBe(false);
+      }),
+    );
+
+  it.effect(
+    "refuses actual daemon sessions and unavailable admission before native credential changes",
+    () =>
+      Effect.gen(function* () {
+        for (const guard of [Effect.succeed(true), Effect.fail("private inventory failure")]) {
+          const f = yield* fixture({ authenticated: true, requiresReauthentication: true });
+          yield* f.loginDeviceCode(guard).pipe(Stream.runCollect, Effect.flip);
+          expect(f.calls.map((call) => call.method)).toEqual(["account/read"]);
+        }
+      }),
+  );
+
+  it.effect("replaces a rejected cached login through the explicit idle device flow", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture({ authenticated: true, requiresReauthentication: true });
+      const a = yield* attempt(f);
+      yield* Deferred.await(a.shown);
+      expect(f.calls.map((call) => call.method)).toEqual([
+        "account/read",
+        "account/logout",
+        "account/login/start",
+      ]);
+      yield* f.complete(loginId);
+      yield* Fiber.join(a.fiber);
+      expect(f.state.refreshes).toBe(1);
+    }),
+  );
+
+  it.effect("refreshes an already authenticated account without generating a code", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture({ authenticated: true });
+      expect(yield* f.loginDeviceCode(Effect.succeed(false)).pipe(Stream.runCollect)).toEqual([
+        { type: "authenticated" },
+      ]);
+      expect(f.calls.map((call) => call.method)).toEqual(["account/read"]);
+    }),
+  );
+
+  it("admits only qualified native versions and official bounded instructions", () => {
+    for (const version of [undefined, null, "", "garbage", "0.159.9", "0.160.0-alpha.1"])
+      expect(supportsCodexDeviceCodeLogin(version)).toBe(false);
+    for (const version of ["0.160.0", "0.162.1"])
+      expect(supportsCodexDeviceCodeLogin(version)).toBe(true);
+    for (const url of [
+      "http://auth.openai.com/codex/device",
+      "https://auth.openai.com/codex/device?token=private",
+      "https://auth.openai.com/codex/device#private",
+      "https://auth.openai.com.evil.test/codex/device",
+    ])
+      expect(codexDeviceLoginInstructions(url, "ABCD-1234")).toBeNull();
+    for (const code of ["ABCD-1234", "ABCD-12345"])
+      expect(codexDeviceLoginInstructions("https://auth.openai.com/codex/device", code)?.type).toBe(
+        "device-code",
+      );
+    expect(
+      codexDeviceLoginInstructions("https://auth.openai.com/codex/device", "A".repeat(4096)),
+    ).toBeNull();
+  });
 });
 
 describe("Codex browser sign-in", () => {
@@ -195,7 +464,7 @@ describe("Codex browser sign-in", () => {
         refresh: Effect.die("Startup cannot refresh an account"),
         openUrl: () => Effect.die("Startup cannot open a browser"),
       });
-      const fiber = yield* Effect.forkChild(login());
+      const fiber = yield* Effect.forkChild(login.login());
       yield* Deferred.await(entered);
       yield* TestClock.adjust(60_000);
       expect(yield* Fiber.join(fiber).pipe(Effect.flip)).toMatchObject({

@@ -2,8 +2,10 @@ import type {
   ProviderInstanceId,
   ProviderSession,
   ServerProviderLoginResult,
+  ServerProviderDeviceLoginEvent,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 import type { ProviderInstance } from "./ProviderDriver.ts";
 import { ProviderAdapterValidationError } from "./Errors.ts";
 
@@ -54,3 +56,42 @@ export const loginBoundProviderAccount = Effect.fn("loginBoundProviderAccount")(
         : "Opened native sign-in in your browser.",
   } satisfies ServerProviderLoginResult;
 });
+
+/** A one-shot subscriber owns the temporary login, never the daemon ledger. */
+export const loginBoundProviderDeviceAccount = <SessionError>(input: {
+  readonly instanceId: ProviderInstanceId;
+  readonly getInstance: () => Effect.Effect<ProviderInstance | undefined>;
+  readonly listSessions: Effect.Effect<ReadonlyArray<ProviderSession>, SessionError>;
+}) =>
+  Stream.unwrap(
+    Effect.gen(function* () {
+      const instance = yield* input.getInstance();
+      if (
+        !instance?.enabled ||
+        instance.instanceId !== input.instanceId ||
+        instance.driverKind !== "codex" ||
+        !instance.adapter.loginDeviceCode
+      )
+        return yield* ownerChanged();
+      const current = Effect.gen(function* () {
+        if ((yield* input.getInstance()) !== instance) return yield* ownerChanged();
+      });
+      const hasOwnedSessions = Effect.gen(function* () {
+        yield* current;
+        const sessions = yield* input.listSessions;
+        yield* current;
+        return sessions.some(
+          (session) =>
+            session.providerInstanceId === input.instanceId ||
+            (session.providerInstanceId === undefined && session.provider === instance.driverKind),
+        );
+      });
+      return instance.adapter
+        .loginDeviceCode(hasOwnedSessions)
+        .pipe(
+          Stream.mapEffect((event: ServerProviderDeviceLoginEvent) =>
+            current.pipe(Effect.as(event)),
+          ),
+        );
+    }),
+  );
