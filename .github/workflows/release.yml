@@ -146,6 +146,22 @@ jobs:
       - name: Install dependencies
         run: corepack yarn install --immutable
 
+      - name: Route Intel notarization traffic over TCP
+        if: matrix.os == 'macos-15-intel'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_ENVIRONMENT}" != "github-hosted" || "$(uname -m)" != "x86_64" ]]; then
+            echo "The network workaround requires an ephemeral GitHub-hosted Intel runner." >&2
+            exit 1
+          fi
+          # Intel hosted runners drop Apple's HTTP/3 ticket requests. Apply
+          # GitHub's workaround only inside this disposable release VM; HTTPS
+          # falls back to TCP and all signing/ticket checks remain mandatory.
+          # https://github.com/actions/runner-images/issues/14924
+          echo "block return out quick proto udp from any to any port 443" | sudo pfctl -f -
+          sudo pfctl -E
+
       - name: Build unsigned Windows or Linux artifact
         if: runner.os != 'macOS'
         run: corepack yarn ${{ matrix.command }}

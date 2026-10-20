@@ -16,6 +16,14 @@ stapled-ticket verification. Publication verifies the complete four-target sourc
 and byte evidence, merges macOS manifests, validates updater sizes and SHA-512
 digests, and publishes `SHA256SUMS.txt` for manual downloads.
 
+The ephemeral GitHub-hosted Intel Mac release VM blocks outbound UDP port 443
+before notarization so Apple's ticket requests fall back from HTTP/3 to HTTPS
+over TCP. This follows the runner maintainers' workaround for
+[runner-images issue 14924](https://github.com/actions/runner-images/issues/14924).
+It does not change local machines or packaged apps, and signature, Gatekeeper
+and stapled-ticket validation remain mandatory. Remove the workaround once the
+upstream Intel runner network issue is resolved and qualified.
+
 A release branch can run this workflow before its tag exists. Substitute the
 deliberately selected, unused version and prepared branch in this template:
 `gh workflow run release.yml --ref release/X.Y.Z -f version=vX.Y.Z -f publish_release=true`.
