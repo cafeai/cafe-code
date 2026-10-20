@@ -196,7 +196,7 @@ Use the repository's pinned Node and Corepack Yarn. Focused checks:
 corepack yarn workspace @cafecode/web test src/lib/remarkMermaid.test.ts src/lib/chatMarkdownMermaid.test.ts src/lib/chatClipboard.test.ts src/lib/mermaid/renderService.test.ts
 corepack yarn workspace @cafecode/web test src/lib/mermaid/bundleIdentity.test.ts src/lib/mermaid/familyAdmission.test.ts src/lib/mermaid/extendedFamilyAdmission.test.ts src/lib/mermaid/eventModelingSvgLabels.test.ts
 corepack yarn workspace @cafecode/web test:browser src/components/ChatMarkdown.browser.tsx src/components/MermaidBlock.browser.tsx src/components/MermaidPreview.browser.tsx src/components/MermaidRendering.browser.tsx src/components/MermaidSecurity.browser.tsx
-corepack yarn workspace @cafecode/web test:browser src/components/MermaidFamilies.browser.tsx
+corepack yarn workspace @cafecode/web test:browser src/components/MermaidFamilies --project=desktop --maxWorkers=2
 corepack yarn workspace @cafecode/desktop test src/preload.test.ts src/window/DesktopWindow.test.ts
 corepack yarn workspace @cafecode/web test:browser src/components/DiagramImageExport.browser.tsx src/components/MarkdownTableExport.browser.tsx src/components/ImageExportMenu.browser.tsx
 corepack yarn workspace @cafecode/desktop test src/imageExport/PngExport.test.ts src/ipc/methods/imageExport.test.ts

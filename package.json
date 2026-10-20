@@ -59,7 +59,9 @@
     "sync:vscode-icons": "node scripts/sync-vscode-icons.mjs",
     "sync:mac-icons": "node scripts/build-macos-icons.ts",
     "test:ci:node": "node scripts/run-node-tests.ts",
-    "test:browser:ci": "node scripts/run-browser-tests.ts"
+    "test:browser:ci": "node scripts/run-browser-tests.ts",
+    "test:browser:local": "node scripts/run-browser-tests.ts --complete-local",
+    "verify:local": "node scripts/verify-local.ts"
   },
   "devDependencies": {
     "@effect/language-service": "catalog:",

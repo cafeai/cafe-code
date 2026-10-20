@@ -109,7 +109,7 @@ export default mergeConfig(
           extends: true,
           test: {
             name: "desktop",
-            include: ["src/components/**/*.browser.tsx"],
+            include: browserTestPolicy.desktopInclude,
             exclude: [
               ...configDefaults.exclude,
               touchTimelineFile,

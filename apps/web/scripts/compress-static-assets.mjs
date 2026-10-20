@@ -1,8 +1,12 @@
-import { constants as zlibConstants, brotliCompress, gzip } from "node:zlib";
+import { brotliCompress, gzip } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, join, relative } from "node:path";
 import { promisify } from "node:util";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  openStaticCompressionCache,
+  staticCompressionOptions,
+} from "./static-compression-cache.mjs";
 
 const brotliCompressAsync = promisify(brotliCompress);
 const gzipAsync = promisify(gzip);
@@ -48,21 +52,21 @@ async function collectFiles(directory) {
   return files;
 }
 
-async function writeCompressedSidecars(filePath) {
+async function writeCompressedSidecars(filePath, cache) {
   const input = await readFile(filePath);
-  const [brotliData, gzipData] = await Promise.all([
-    brotliCompressAsync(input, {
-      params: {
-        [zlibConstants.BROTLI_PARAM_QUALITY]: zlibConstants.BROTLI_MAX_QUALITY,
-      },
-    }),
-    gzipAsync(input, { level: zlibConstants.Z_BEST_COMPRESSION }),
-  ]);
+  const cached = await cache?.get(input);
+  const [brotliData, gzipData] = cached
+    ? [cached.brotliData, cached.gzipData]
+    : await Promise.all([
+        brotliCompressAsync(input, staticCompressionOptions.brotli),
+        gzipAsync(input, staticCompressionOptions.gzip),
+      ]);
 
   await Promise.all([
     writeFile(`${filePath}.br`, brotliData),
     writeFile(`${filePath}.gz`, gzipData),
   ]);
+  if (!cached) await cache?.put(input, { brotliData, gzipData });
 
   return {
     sourceBytes: input.byteLength,
@@ -71,7 +75,7 @@ async function writeCompressedSidecars(filePath) {
   };
 }
 
-export async function compressStaticAssets(distDir = defaultDistDir) {
+export async function compressStaticAssets(distDir = defaultDistDir, options = {}) {
   const distStat = await stat(distDir).catch(() => null);
   if (!distStat?.isDirectory()) {
     throw new Error(`Static asset dist directory does not exist: ${distDir}`);
@@ -82,12 +86,32 @@ export async function compressStaticAssets(distDir = defaultDistDir) {
   let sourceBytes = 0;
   let brotliBytes = 0;
   let gzipBytes = 0;
-
-  for (const filePath of compressibleFiles) {
-    const result = await writeCompressedSidecars(filePath);
-    sourceBytes += result.sourceBytes;
-    brotliBytes += result.brotliBytes;
-    gzipBytes += result.gzipBytes;
+  const cacheDirectory =
+    options.cacheDirectory === undefined
+      ? process.env.CAFE_CODE_ASSET_COMPRESSION_CACHE
+      : options.cacheDirectory;
+  const optedIn = typeof cacheDirectory === "string" && cacheDirectory !== "";
+  const cache = optedIn
+    ? await openStaticCompressionCache(cacheDirectory, { forbiddenRoot: distDir })
+    : null;
+  let cacheSummary;
+  try {
+    // Files remain serial; only the same two existing codec operations overlap.
+    for (const filePath of compressibleFiles) {
+      const result = await writeCompressedSidecars(filePath, cache);
+      sourceBytes += result.sourceBytes;
+      brotliBytes += result.brotliBytes;
+      gzipBytes += result.gzipBytes;
+    }
+    if (optedIn)
+      cacheSummary = cache?.snapshot() ?? {
+        status: "unavailable",
+        hits: 0,
+        misses: compressibleFiles.length,
+        stored: 0,
+      };
+  } finally {
+    await cache?.close();
   }
 
   return {
@@ -97,6 +121,7 @@ export async function compressStaticAssets(distDir = defaultDistDir) {
     brotliBytes,
     gzipBytes,
     files: compressibleFiles.map((filePath) => relative(distDir, filePath)),
+    ...(cacheSummary ? { cache: cacheSummary } : {}),
   };
 }
 
@@ -109,6 +134,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
           `(${result.sourceBytes} source bytes, ${result.brotliBytes} Brotli bytes, ` +
           `${result.gzipBytes} gzip bytes)`,
       );
+      if (result.cache)
+        console.log(
+          `[compress-static-assets] local input cache ${result.cache.status}: ` +
+            `${result.cache.hits} reused, ${result.cache.misses} fresh, ${result.cache.stored} stored`,
+        );
     })
     .catch((error) => {
       console.error(error instanceof Error ? error.message : error);

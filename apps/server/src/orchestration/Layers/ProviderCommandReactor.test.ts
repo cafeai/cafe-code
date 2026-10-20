@@ -56,9 +56,9 @@ import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
-import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
+import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
 import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
-import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import { ProviderAdapterRequestError, type ProviderServiceError } from "../../provider/Errors.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -103,6 +103,13 @@ const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
+
+// Repository remotes are not part of provider-command admission. These tests
+// deliberately use a synthetic project root; keep snapshot reads independent
+// of native Git and any unrelated repository which might exist on the host.
+const RepositoryIdentityResolverTest = Layer.succeed(RepositoryIdentityResolver, {
+  resolve: () => Effect.succeed(null),
+});
 
 // Exercise all active metadata paths with a missing helper setting and an
 // explicit saved choice. These models intentionally differ from the harness's
@@ -636,7 +643,7 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
-      Layer.provide(RepositoryIdentityResolverLive),
+      Layer.provide(RepositoryIdentityResolverTest),
       Layer.provide(SqlitePersistenceTest),
     );
     const providerCommandEngineLayer =
@@ -712,7 +719,7 @@ describe("ProviderCommandReactor", () => {
             })),
           ).pipe(Layer.provide(orchestrationLayer));
     const baseProjectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
-      Layer.provide(RepositoryIdentityResolverLive),
+      Layer.provide(RepositoryIdentityResolverTest),
       Layer.provide(SqlitePersistenceTest),
     );
     const projectionSnapshotLayer =
@@ -2161,16 +2168,45 @@ describe("ProviderCommandReactor", () => {
         );
         await harness.drain();
         const replacement = (await harness.readThreadDetail(threadId))!.goal!;
-        await Effect.runPromise(
-          harness.engine.dispatch({
-            type: "thread.goal.clear",
-            commandId: CommandId.make("pending-account-goal-clear"),
-            threadId,
-            expectedUpdatedAt: replacement.updatedAt,
-            createdAt: "2026-01-01T00:00:05.000Z",
-          }),
+        const clearEntered = Effect.runSync(Deferred.make<void>());
+        const releaseClear = Effect.runSync(Deferred.make<void>());
+        const clearCompleted = Effect.runSync(Deferred.make<void, ProviderServiceError>());
+        const originalClear = harness.clearGoal.getMockImplementation()!;
+        const clearsBefore = harness.clearGoal.mock.calls.length;
+        harness.clearGoal.mockImplementationOnce((request) =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(clearEntered, undefined);
+            yield* Deferred.await(releaseClear);
+            return yield* originalClear(request);
+          }).pipe(Effect.onExit((exit) => Deferred.done(clearCompleted, Exit.asVoid(exit)))),
         );
-        await waitFor(async () => (await harness.readThreadDetail(threadId))?.goal === null);
+        try {
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.goal.clear",
+              commandId: CommandId.make("pending-account-goal-clear"),
+              threadId,
+              expectedUpdatedAt: replacement.updatedAt,
+              createdAt: "2026-01-01T00:00:05.000Z",
+            }),
+          );
+          await Effect.runPromise(Deferred.await(clearEntered));
+          expect((await harness.readThreadDetail(threadId))?.goal).toEqual(replacement);
+          expect(harness.goalOperations).toEqual(["set", "clear", "set"]);
+          expect(harness.clearGoal).toHaveBeenCalledTimes(clearsBefore + 1);
+          expect(harness.startSession).toHaveBeenCalledTimes(1);
+          expect(harness.stopSession).not.toHaveBeenCalled();
+          expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+          await Effect.runPromise(Deferred.succeed(releaseClear, undefined));
+          // Durable dispatch precedes worker admission and native completion.
+          // This exact original effect admits drain, which then owns the
+          // synchronized goal commit before the unchanged state observer.
+          await Effect.runPromise(Deferred.await(clearCompleted));
+          await harness.drain();
+          await waitFor(async () => (await harness.readThreadDetail(threadId))?.goal === null);
+        } finally {
+          await Effect.runPromise(Deferred.succeed(releaseClear, undefined));
+        }
         await harness.drain();
         expect(harness.goalOperations).toEqual(["set", "clear", "set", "clear"]);
         expect(harness.startSession).toHaveBeenCalledTimes(1);

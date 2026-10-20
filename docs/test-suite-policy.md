@@ -30,6 +30,19 @@ desktop build. Do not restart or push without the existing explicit authorizatio
 
 ## Efficient execution and timing
 
+For the complete local graph on any development host, use `corepack yarn
+verify:local` (at low scheduling priority on macOS/Linux). It retains all
+required local tests and a forced final build, without hosted runners or cached
+test successes. `test:browser:local` discovers the complete browser domain with
+disjoint native groups and prepares only its real copied MCP bridge artifacts.
+Local Node tests default to two independent workspaces with at most two Vitest
+workers each; `--test-concurrency=1|2|3` changes only that workspace admission.
+Server file execution, fork isolation, native browser ordering and build limits
+remain unchanged. Typechecking has a separate bounded local option.
+See [local verification](test-performance.md) for commands, input-cache bounds
+and timing interpretation. Existing CI commands below retain their native-host
+selection and preparation; local qualification is not release delivery.
+
 CI runs the native Node and browser matrices independently. The existing
 `Quality` matrix waits for both before the final forced desktop build; native
 artifact jobs still depend on that gate. Worker, heap and timeout limits remain

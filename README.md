@@ -147,6 +147,11 @@ corepack yarn test
 corepack yarn build:desktop --force
 ```
 
+For complete bounded local qualification, including all required browser groups
+and the forced build last, use `corepack yarn verify:local`. See
+[local verification](docs/test-performance.md) for low-priority commands,
+timings and warm-cache limitations; it needs no hosted test runners.
+
 See [source development](docs/source-development.md) for the scoped CI
 typecheck memory setting, [dependency maintenance](docs/dependency-updates.md)
 for the Node/Yarn update policy, and [Contributing](CONTRIBUTING.md) for project

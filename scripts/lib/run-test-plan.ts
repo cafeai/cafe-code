@@ -26,6 +26,7 @@ export async function runTestPlan(steps: readonly TestStep[]) {
         shell: false,
       });
       let cancelled = false;
+      let processError: Error | undefined;
       const interrupt = () => {
         cancelled = true;
         child.kill("SIGINT");
@@ -41,14 +42,19 @@ export async function runTestPlan(steps: readonly TestStep[]) {
         process.removeListener("SIGTERM", terminate);
       };
       child.once("error", (error) => {
-        cleanup();
-        reject(error);
+        // A spawn/transport error does not authorize the next invocation while
+        // this owned child's stdio or process lifetime is still unsettled.
+        processError = error;
       });
-      child.once("exit", (code, signal) => {
+      child.once("close", (code, signal) => {
         cleanup();
         console.log(`${step.name}: ${((performance.now() - started) / 1000).toFixed(2)}s`);
-        if (code === 0 && !cancelled) resolve();
-        else reject(new Error(`${step.name} failed (${signal ?? code}).`));
+        if (code === 0 && !cancelled && !processError) resolve();
+        else if (processError) reject(processError);
+        else
+          reject(
+            new Error(`${step.name} ${cancelled ? "cancelled" : "failed"} (${signal ?? code}).`),
+          );
       });
     });
   }

@@ -1,4 +1,5 @@
 {
+  "desktopInclude": ["src/components/**/*.browser.tsx"],
   "touchTimelineFile": "src/components/chat/MessagesTimeline.touch.browser.tsx",
   "visualizationFluidFile": "src/components/visualizations/VisualizationFluid.browser.tsx",
   "reducedMotionFiles": [
@@ -89,7 +90,13 @@
     "src/components/chat/MessagesTimeline.images.browser.tsx"
   ],
   "mermaidSecurityFiles": ["src/components/MermaidSecurity.browser.tsx"],
-  "mermaidFamilyFiles": ["src/components/MermaidFamilies.browser.tsx"],
+  "mermaidFamilyFiles": [
+    "src/components/MermaidFamilies.browser.tsx",
+    "src/components/MermaidFamilies.probe.browser.tsx",
+    "src/components/MermaidFamilies.output.browser.tsx",
+    "src/components/MermaidFamilies.parsed.browser.tsx",
+    "src/components/MermaidFamilies.allocation.browser.tsx"
+  ],
   "imageExportFiles": [
     "src/components/DiagramImageExport.browser.tsx",
     "src/components/MarkdownTableExport.browser.tsx",

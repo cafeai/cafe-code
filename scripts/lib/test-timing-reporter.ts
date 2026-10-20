@@ -1,12 +1,13 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
-import type { Reporter, TestModule, Vitest } from "vitest/node";
+import type { Reporter, TestModule, TestRunEndReason, Vitest } from "vitest/node";
 
 export function moduleTiming(module: TestModule) {
   const diagnostic = module.diagnostic();
   return {
     file: relative(resolve(import.meta.dirname, "../.."), module.moduleId).replaceAll("\\", "/"),
     project: module.project.name,
+    state: module.state(),
     executionMs: diagnostic.duration,
     collectionMs: diagnostic.collectDuration,
     setupMs: diagnostic.setupDuration,
@@ -20,19 +21,47 @@ export function moduleTiming(module: TestModule) {
   };
 }
 
+export function runTiming(
+  files: readonly ReturnType<typeof moduleTiming>[],
+  reason: TestRunEndReason,
+  unhandledErrorCount: number,
+) {
+  return {
+    reason,
+    unhandledErrorCount,
+    fileCount: files.length,
+    testCounts: files
+      .flatMap((file) => file.tests)
+      .reduce(
+        (counts, test) => {
+          counts[test.state] += 1;
+          return counts;
+        },
+        { passed: 0, failed: 0, pending: 0, skipped: 0 },
+      ),
+  };
+}
+
 export default class TestTimingReporter implements Reporter {
   private started = performance.now();
   private cwd = "";
   onInit(ctx: Vitest) {
     this.cwd = ctx.config.root;
   }
-  async onTestRunEnd(modules: readonly TestModule[]) {
+  async onTestRunEnd(
+    modules: readonly TestModule[],
+    unhandledErrors: readonly unknown[],
+    reason: TestRunEndReason,
+  ) {
     const root = resolve(import.meta.dirname, "../..");
     const output = resolve(root, ".logs/test-timings");
     const files = modules.map(moduleTiming);
     const report = {
       workspace: relative(root, this.cwd).replaceAll("\\", "/"),
       wallMs: performance.now() - this.started,
+      // A cancelled run can have many passing files. Keep its actual terminal
+      // classification and finite counts without serializing received errors.
+      ...runTiming(files, reason, unhandledErrors.length),
       files,
     };
     await mkdir(output, { recursive: true });
