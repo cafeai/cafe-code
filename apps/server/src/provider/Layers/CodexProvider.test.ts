@@ -41,6 +41,8 @@ describe("private reset account identity", () => {
         Effect.provideService(
           FileSystem.FileSystem,
           FileSystem.makeNoop({
+            stat: () =>
+              Effect.succeed({ type: "File", size: FileSystem.Size(4096) } as FileSystem.File.Info),
             readFileString: () =>
               Effect.succeed(
                 JSON.stringify({

@@ -64,6 +64,7 @@ export const makeCodexLogin = Effect.fn("makeCodexLogin")(function* <
     onTermination: Effect.Effect<void>,
   ) => Effect.Effect<void, OperationError | ClientError, Scope.Scope>;
   readonly hasSessions: Effect.Effect<boolean>;
+  readonly requiresReauthentication?: Effect.Effect<boolean>;
   readonly refresh: Effect.Effect<unknown>;
   readonly openUrl: (url: string) => Effect.Effect<void, BrowserError>;
 }) {
@@ -89,7 +90,10 @@ export const makeCodexLogin = Effect.fn("makeCodexLogin")(function* <
                   Effect.timeout(15_000),
                   Effect.mapError(() => invalid(CODEX_LOGIN_ERRORS.account)),
                 );
-                if (account.account) {
+                const requiresReauthentication = yield* (
+                  options.requiresReauthentication ?? Effect.succeed(false)
+                );
+                if (account.account && !requiresReauthentication) {
                   yield* options.refresh;
                   yield* Deferred.succeed(acknowledged, "authenticated");
                   return;
@@ -102,6 +106,16 @@ export const makeCodexLogin = Effect.fn("makeCodexLogin")(function* <
                   ))
                 )
                   return yield* invalid(CODEX_LOGIN_ERRORS.busy);
+                // This is the explicit, idle owner-triggered Log in action.
+                // Cached account/read metadata cannot repair a revoked login.
+                if (requiresReauthentication) {
+                  if (!(yield* options.requiresReauthentication ?? Effect.succeed(false)))
+                    return yield* invalid(CODEX_LOGIN_ERRORS.account);
+                  yield* client.request("account/logout", undefined).pipe(
+                    Effect.timeout(15_000),
+                    Effect.mapError(() => invalid(CODEX_LOGIN_ERRORS.start)),
+                  );
+                }
                 let loginId: string | undefined;
                 // A native completion may precede the start response. Retain one bounded
                 // early receipt; unrelated IDs never authorize a refresh or successful login.

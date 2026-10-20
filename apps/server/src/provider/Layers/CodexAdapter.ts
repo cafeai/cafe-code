@@ -105,6 +105,7 @@ import {
 } from "@cafecode/shared/providerDiagnostic";
 import { readCodexServiceTier, resolveCodexServiceTier } from "../codexServiceTier.ts";
 import { resolveCodexDaybreak } from "../codexDaybreak.ts";
+import { codexAuthenticationObservation } from "../codexAuthentication.ts";
 import { makeResponseGenerationSample } from "../responseGenerationClock.ts";
 import {
   classifyCodexTransientFailure,
@@ -544,6 +545,10 @@ export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
   readonly prepareRuntimeHome?: Effect.Effect<void, CodexShadowHomeError>;
+  /** Private observer captured for this opening's credential revision. */
+  readonly captureAuthenticationObserver?: Effect.Effect<
+    (authenticated: boolean) => Effect.Effect<void>
+  >;
   readonly makeRuntime?: (
     options: CodexSessionRuntimeOptions,
   ) => Effect.Effect<
@@ -5808,6 +5813,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(requireExactResume === true ? { requireExactResume } : {}),
         };
         const createRuntime = options?.makeRuntime ?? makeCodexSessionRuntime;
+        const observeAuthentication = yield* (
+          options?.captureAuthenticationObserver ?? Effect.succeed(undefined)
+        );
+        let authenticationObserverActive = true;
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            authenticationObserverActive = false;
+          }),
+        ).pipe(Effect.provideService(Scope.Scope, sessionScope));
         const { runtime, eventFiber, started, activeAuthRecoveryTasksById } = yield* Effect.gen(
           function* () {
             const runtime = yield* createRuntime(runtimeInput).pipe(
@@ -5867,6 +5881,19 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
             const eventFiber = yield* Stream.runForEach(runtime.events, (rawEvent) =>
               Effect.gen(function* () {
+                if (
+                  observeAuthentication &&
+                  authenticationObserverActive &&
+                  subagentTitleRuntimeId &&
+                  rawEvent.kind === "notification" &&
+                  rawEvent.provider === PROVIDER &&
+                  rawEvent.providerInstanceId === boundInstanceId &&
+                  rawEvent.threadId === input.threadId &&
+                  rawEvent.subagentRuntimeId === subagentTitleRuntimeId
+                ) {
+                  const authenticated = codexAuthenticationObservation(rawEvent);
+                  if (authenticated !== undefined) yield* observeAuthentication(authenticated);
+                }
                 // Injected runtimes and replay can bypass the current runtime's
                 // metadata filter. Drop provider-owned attachment and gateway
                 // login notifications before the native logger as well as before

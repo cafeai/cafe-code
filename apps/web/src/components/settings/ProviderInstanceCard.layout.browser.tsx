@@ -221,7 +221,7 @@ async function mountCards(
   host = document.createElement("div");
   host.style.width = `${width}px`;
   document.body.append(host);
-  mounted = await render(
+  const content = () => (
     <TooltipProvider>
       {fixtures.map((fixture) => (
         <ProviderInstanceCard
@@ -246,11 +246,32 @@ async function mountCards(
           onModelOrderChange={vi.fn()}
         />
       ))}
-    </TooltipProvider>,
-    { container: host },
+    </TooltipProvider>
   );
-  return { fixtures, host };
+  mounted = await render(content(), { container: host });
+  return { fixtures, host, rerender: () => mounted!.rerender(content()) };
 }
+
+it("replaces cached signed-in identity with Not signed in and exposes Log in after rejection", async () => {
+  const fixture = cardFixture("login", true);
+  fixture.provider = {
+    ...fixture.provider,
+    status: "ready",
+    auth: { status: "authenticated", type: "chatgpt", email: "stale-login@example.invalid" },
+  };
+  const screen = await mountCards(520, 100, true, [fixture]);
+  await expect.element(page.getByText("Authenticated as", { exact: true })).toBeVisible();
+  fixture.provider = { ...fixture.provider, status: "error", auth: { status: "unauthenticated" } };
+  await screen.rerender();
+  await expect.element(page.getByText("Not signed in", { exact: true })).toBeVisible();
+  await expect.element(page.getByText("Authenticated as", { exact: true })).not.toBeInTheDocument();
+  await expect
+    .element(page.getByText("stale-login@example.invalid", { exact: true }))
+    .not.toBeInTheDocument();
+  await page.getByRole("button", { name: "Log in", exact: true }).click();
+  expect(fixture.onLogIn).toHaveBeenCalledTimes(1);
+  expect(api.ensureLocalApi).not.toHaveBeenCalled();
+});
 
 function expectNoHorizontalOverflow(element: HTMLElement) {
   expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);

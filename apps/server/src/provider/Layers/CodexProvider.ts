@@ -228,6 +228,8 @@ const readCodexAuthEmail = Effect.fn("readCodexAuthEmail")(function* (
 });
 
 interface CodexUsageCredentials {
+  readonly credentialIdentity: string;
+  readonly mayRefresh: boolean;
   readonly accessToken: string;
   readonly accountId?: string;
   readonly isFedrampAccount: boolean;
@@ -294,7 +296,34 @@ function readChatGptAuthClaims(idToken: unknown): Record<string, unknown> | unde
   return readRecord(decodeJwtPayload(idToken)?.["https://api.openai.com/auth"]);
 }
 
-function extractCodexUsageCredentials(authJson: string): CodexUsageCredentials | undefined {
+function codexCredentialIdentity(authJson: string): string | undefined {
+  try {
+    const record = readRecord(JSON.parse(authJson));
+    const tokens = readRecord(record?.tokens);
+    if (!readSafeHeaderValue(tokens?.access_token) && !readSafeHeaderValue(record?.OPENAI_API_KEY))
+      return undefined;
+    // Metadata-only rewrites (last_refresh, email, plan, whitespace) cannot
+    // turn the same rejected credentials into a new usable sign-in.
+    return createHash("sha256")
+      .update(
+        JSON.stringify([
+          record?.auth_mode,
+          record?.OPENAI_API_KEY,
+          tokens?.access_token,
+          tokens?.refresh_token,
+          tokens?.account_id,
+        ]),
+      )
+      .digest("hex");
+  } catch {
+    return undefined;
+  }
+}
+
+function extractCodexUsageCredentials(
+  authJson: string,
+  nowMs: number,
+): CodexUsageCredentials | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(authJson) as unknown;
@@ -307,23 +336,31 @@ function extractCodexUsageCredentials(authJson: string): CodexUsageCredentials |
 
   const tokens = readRecord(record.tokens);
   const accessToken = readSafeHeaderValue(tokens?.access_token);
-  if (!tokens || !accessToken) return undefined;
+  const credentialIdentity = codexCredentialIdentity(authJson);
+  if (!tokens || !accessToken || !credentialIdentity) return undefined;
 
   const authClaims = readChatGptAuthClaims(tokens.id_token);
   const accountId =
     readSafeHeaderValue(tokens.account_id) ?? readSafeHeaderValue(authClaims?.chatgpt_account_id);
   const isFedrampAccount = authClaims?.chatgpt_account_is_fedramp === true;
+  const expiresAt = decodeJwtPayload(accessToken)?.exp;
   return {
+    credentialIdentity,
+    // An expired access token with a refresh token is not a revoked login.
+    mayRefresh:
+      typeof tokens.refresh_token === "string" &&
+      tokens.refresh_token.length > 0 &&
+      (typeof expiresAt !== "number" || !Number.isFinite(expiresAt) || expiresAt * 1000 <= nowMs),
     accessToken,
     ...(accountId ? { accountId } : {}),
     isFedrampAccount,
   };
 }
 
-const readCodexUsageCredentials = Effect.fn("readCodexUsageCredentials")(function* (
+const readCodexAuthJson = Effect.fn("readCodexAuthJson")(function* (
   codexSettings: CodexSettings,
   environment: NodeJS.ProcessEnv,
-): Effect.fn.Return<CodexUsageCredentials | undefined, never, FileSystem.FileSystem | Path.Path> {
+): Effect.fn.Return<string | undefined, never, FileSystem.FileSystem | Path.Path> {
   // Provider snapshots normally receive the effective shadow CODEX_HOME from
   // `CodexDriver`; avoid reading a user's default ~/.codex during isolated
   // status tests or low-level helper calls that have not opted into a home.
@@ -344,9 +381,30 @@ const readCodexUsageCredentials = Effect.fn("readCodexUsageCredentials")(functio
     return undefined;
   }
 
+  const info = yield* fileSystem.stat(authPath).pipe(Effect.option);
+  if (Option.isNone(info) || info.value.type !== "File" || info.value.size > 65_536n)
+    return undefined;
   const authJson = yield* fileSystem.readFileString(authPath).pipe(Effect.option);
-  return Option.isSome(authJson) ? extractCodexUsageCredentials(authJson.value) : undefined;
+  return Option.isSome(authJson) && Buffer.byteLength(authJson.value, "utf8") <= 65_536
+    ? authJson.value
+    : undefined;
 });
+
+const readCodexUsageCredentials = (settings: CodexSettings, environment: NodeJS.ProcessEnv) =>
+  Effect.gen(function* () {
+    const json = yield* readCodexAuthJson(settings, environment);
+    const nowMs = yield* Clock.currentTimeMillis;
+    return json === undefined ? undefined : extractCodexUsageCredentials(json, nowMs);
+  });
+
+/** A private, volatile exact credential revision; never publish or persist it. */
+export const readCodexCredentialIdentity = (
+  settings: CodexSettings,
+  environment: NodeJS.ProcessEnv,
+) =>
+  readCodexAuthJson(settings, environment).pipe(
+    Effect.map((json) => (json === undefined ? undefined : codexCredentialIdentity(json))),
+  );
 
 /** Private, volatile comparison key only; never publish or persist this digest. */
 export const readCodexUsageIdentity = (settings: CodexSettings, environment: NodeJS.ProcessEnv) =>
@@ -654,7 +712,7 @@ function parseCodexAccountRateLimitsPayload(
 async function fetchCodexAccountRateLimits(input: {
   readonly credentials: CodexUsageCredentials;
   readonly checkedAt: string;
-}): Promise<ServerProviderAccountRateLimits | undefined> {
+}): Promise<ServerProviderAccountRateLimits | "authentication-rejected" | undefined> {
   try {
     // Upstream Codex 0.143.0 fetches ChatGPT-backed account usage from
     // `{chatgpt_base_url}/wham/usage` via BackendClient::get_rate_limits_many
@@ -680,7 +738,9 @@ async function fetchCodexAccountRateLimits(input: {
       signal: AbortSignal.timeout(CODEX_ACCOUNT_RATE_LIMIT_TIMEOUT_MS),
     });
     if (!response.ok) {
-      return undefined;
+      return response.status === 401 && !input.credentials.mayRefresh
+        ? "authentication-rejected"
+        : undefined;
     }
     return parseCodexAccountRateLimitsPayload(await response.json(), input.checkedAt);
   } catch {
@@ -700,6 +760,7 @@ export const readCodexAccountRateLimits = Effect.fn("readCodexAccountRateLimits"
   codexSettings: CodexSettings,
   environment: NodeJS.ProcessEnv,
   checkedAt: string,
+  onAuthenticationRejected?: (credentialIdentity: string) => Effect.Effect<void>,
 ): Effect.fn.Return<
   ServerProviderAccountRateLimits | undefined,
   never,
@@ -709,7 +770,19 @@ export const readCodexAccountRateLimits = Effect.fn("readCodexAccountRateLimits"
   if (!credentials) {
     return undefined;
   }
-  return yield* Effect.promise(() => fetchCodexAccountRateLimits({ credentials, checkedAt }));
+  const result = yield* Effect.promise(() =>
+    fetchCodexAccountRateLimits({ credentials, checkedAt }),
+  );
+  if (result === "authentication-rejected") {
+    if (
+      onAuthenticationRejected &&
+      (yield* readCodexCredentialIdentity(codexSettings, environment)) ===
+        credentials.credentialIdentity
+    )
+      yield* onAuthenticationRejected(credentials.credentialIdentity);
+    return undefined;
+  }
+  return result;
 });
 
 function mapCodexModelCapabilities(
@@ -1712,6 +1785,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
 export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatus")(function* (
   codexSettings: CodexSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  onAuthenticationRejected?: (credentialIdentity: string) => Effect.Effect<void>,
 ): Effect.fn.Return<
   ServerProviderDraft,
   never,
@@ -1893,7 +1967,12 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
   let accountRateLimits: ServerProviderAccountRateLimits | undefined;
   if (accountStatus.auth.status === "authenticated" && accountStatus.auth.type === "chatgpt") {
     const usageStartedAtMs = yield* Clock.currentTimeMillis;
-    accountRateLimits = yield* readCodexAccountRateLimits(codexSettings, environment, checkedAt);
+    accountRateLimits = yield* readCodexAccountRateLimits(
+      codexSettings,
+      environment,
+      checkedAt,
+      onAuthenticationRejected,
+    );
     const usageFinishedAtMs = yield* Clock.currentTimeMillis;
     phases.push({
       phase: "account-usage",

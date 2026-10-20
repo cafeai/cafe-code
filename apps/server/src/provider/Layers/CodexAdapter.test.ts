@@ -1329,6 +1329,7 @@ function makeConcurrencyTestLayer(
   factory: ReturnType<typeof makeRuntimeFactory>,
   instanceLimit?: number,
   contextSupport: () => boolean = () => true,
+  extraOptions: Pick<CodexAdapterLiveOptions, "captureAuthenticationObserver"> = {},
 ) {
   return Layer.effect(
     CodexAdapter,
@@ -1340,6 +1341,7 @@ function makeConcurrencyTestLayer(
         makeRuntime: factory.factory,
         getSubagentConcurrencySupport: () => true,
         getCodexContextWindowSupport: contextSupport,
+        ...extraOptions,
       },
     ),
   ).pipe(
@@ -1349,6 +1351,72 @@ function makeConcurrencyTestLayer(
     Layer.provideMerge(NodeServices.layer),
   );
 }
+
+it.effect(
+  "reports revoked sign-in only from the exact current account and native generation",
+  () => {
+    const factory = makeRuntimeFactory();
+    const instanceId = ProviderInstanceId.make("codex");
+    const generation = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000098");
+    factory.factory.mockImplementation((options) => {
+      const runtime = new FakeCodexRuntime(options);
+      runtime.getSession = runtime.getSession.pipe(
+        Effect.map((session) => ({
+          ...session,
+          providerInstanceId: instanceId,
+          subagentRuntimeId: generation,
+        })),
+      );
+      factory.runtimes.push(runtime);
+      return Effect.succeed(runtime);
+    });
+    const notified = Effect.runSync(Deferred.make<void>());
+    const observations: boolean[] = [];
+    const captureAuthenticationObserver = Effect.succeed((authenticated: boolean) =>
+      Effect.sync(() => {
+        observations.push(authenticated);
+      }).pipe(Effect.andThen(Deferred.succeed(notified, undefined)), Effect.asVoid),
+    );
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-auth"),
+        runtimeMode: "full-access",
+      });
+      const runtime = factory.lastRuntime!;
+      const event: ProviderEvent = {
+        id: asEventId("owned-native-auth-refusal"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        subagentRuntimeId: generation,
+        threadId: asThreadId("thread-auth"),
+        kind: "notification",
+        method: "process/stderr",
+        createdAt: "2026-10-19T23:32:39.528Z",
+        message:
+          "2026-10-19T23:32:39.528101Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.",
+      };
+      for (const foreign of [
+        { ...event, providerInstanceId: ProviderInstanceId.make("peer-account") },
+        {
+          ...event,
+          subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000099"),
+        },
+        { ...event, threadId: asThreadId("peer-thread") },
+        { ...event, method: "warning" },
+      ])
+        yield* runtime.emit(foreign);
+      yield* runtime.emit(event);
+      yield* Deferred.await(notified);
+      assert.deepEqual(observations, [false]);
+    }).pipe(
+      Effect.provide(
+        makeConcurrencyTestLayer(factory, undefined, () => true, { captureAuthenticationObserver }),
+      ),
+    );
+  },
+);
 
 it.effect("binds paired compaction support to the current qualified native owner", () => {
   const factory = makeRuntimeFactory();

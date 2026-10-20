@@ -39,6 +39,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
+import * as Ref from "effect/Ref";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
@@ -53,11 +54,13 @@ import {
   isCodexCliLoginStatusProbeInconclusive,
   makePendingCodexProvider,
   readCodexAccountRateLimits,
+  readCodexCredentialIdentity,
   readCodexAppServerModels,
   withCodexMetadataClient,
 } from "../Layers/CodexProvider.ts";
 import { requestCodexSkills } from "../codexSkills.ts";
 import { makeCodexLogin } from "../codexLogin.ts";
+import { makeCodexAuthenticationState, withCodexSignInRequired } from "../codexAuthentication.ts";
 import type * as CodexClient from "effect-codex-app-server/client";
 import { launchBrowser } from "../../process/externalLauncher.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
@@ -287,7 +290,32 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // per-operation closures they return. No `mapError` wrapper is needed
       // here; the registry only has to worry about snapshot-build and
       // spawner-availability failures surfaced from the status probe below.
+      const authentication = makeCodexAuthenticationState(
+        readCodexCredentialIdentity(effectiveConfig, effectiveEnvironment).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        ),
+      );
+      const snapshotRefreshRef = yield* Ref.make<Effect.Effect<unknown> | undefined>(undefined);
+      const instanceScope = yield* Effect.scope;
+      const refreshAfterAuthChange = Effect.gen(function* () {
+        const refresh = yield* Ref.get(snapshotRefreshRef);
+        if (refresh)
+          yield* refresh.pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(instanceScope));
+      });
+      const observeUsageAuthentication = (identity: string) =>
+        authentication
+          .reject(identity)
+          .pipe(Effect.flatMap((changed) => (changed ? refreshAfterAuthChange : Effect.void)));
       const adapter = yield* makeCodexAdapter(effectiveConfig, {
+        captureAuthenticationObserver: authentication.capture.pipe(
+          Effect.map(
+            (observe) => (authenticated: boolean) =>
+              observe(authenticated).pipe(
+                Effect.flatMap((changed) => (changed ? refreshAfterAuthChange : Effect.void)),
+              ),
+          ),
+        ),
         getModels: () => snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
         getSubagentConcurrencySupport: () =>
           supportsSubagentConcurrency("codex", observedCliVersion),
@@ -323,8 +351,12 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
           }),
         );
         const prepareFinishedAtMs = yield* Clock.currentTimeMillis;
-        const checked = yield* checkCodexCliProviderStatus(effectiveConfig, effectiveEnvironment);
-        return stampIdentity({
+        const checked = yield* checkCodexCliProviderStatus(
+          effectiveConfig,
+          effectiveEnvironment,
+          (identity) => authentication.reject(identity).pipe(Effect.asVoid),
+        );
+        const result = stampIdentity({
           ...checked,
           probePhases: [
             {
@@ -335,6 +367,9 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             ...(checked.probePhases ?? []),
           ],
         });
+        return result.enabled && result.installed && (yield* authentication.isRejected)
+          ? withCodexSignInRequired(result)
+          : result;
       }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(FileSystem.FileSystem, fileSystem),
@@ -368,7 +403,12 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             Effect.andThen(DateTime.now),
             Effect.map(DateTime.formatIso),
             Effect.flatMap((checkedAt) =>
-              readCodexAccountRateLimits(settings, effectiveEnvironment, checkedAt),
+              readCodexAccountRateLimits(
+                settings,
+                effectiveEnvironment,
+                checkedAt,
+                observeUsageAuthentication,
+              ),
             ),
             Effect.provideService(FileSystem.FileSystem, fileSystem),
             Effect.provideService(Path.Path, path),
@@ -445,6 +485,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         ),
       );
 
+      yield* Ref.set(snapshotRefreshRef, snapshot.refreshAfterAccountChange ?? snapshot.refresh);
       const skillReadPermit = yield* Semaphore.make(1);
       const login = yield* makeCodexLogin({
         // Keep the selected operation's actual error channel generic across
@@ -468,6 +509,15 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             use,
           ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)),
         hasSessions: adapter.listSessions().pipe(Effect.map((sessions) => sessions.length > 0)),
+        requiresReauthentication: authentication.isRejectedIn(
+          readCodexCredentialIdentity(
+            { ...effectiveConfig, homePath: codexLoginHomePath(homeLayout, authSource) },
+            effectiveEnvironment,
+          ).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+          ),
+        ),
         refresh: snapshot.refreshAfterAccountChange ?? snapshot.refresh,
         openUrl: (url) =>
           launchBrowser(url).pipe(

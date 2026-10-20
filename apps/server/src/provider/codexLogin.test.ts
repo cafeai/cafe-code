@@ -32,6 +32,7 @@ const loginId = "fixture-owned-login";
 const fixture = Effect.fn("codexLogin.test.fixture")(function* (
   input: {
     readonly authenticated?: boolean;
+    readonly requiresReauthentication?: boolean;
     readonly busy?: boolean;
     readonly url?: string;
     readonly browserFailure?: boolean;
@@ -45,7 +46,7 @@ const fixture = Effect.fn("codexLogin.test.fixture")(function* (
   const startGate = yield* Deferred.make<void>();
   const calls: { method: string; params: unknown }[] = [];
   const opened: string[] = [];
-  const state = { refreshes: 0 };
+  const state = { refreshes: 0, requiresReauthentication: input.requiresReauthentication ?? false };
   let notification:
     | ((event: {
         loginId?: string | null;
@@ -81,7 +82,7 @@ const fixture = Effect.fn("codexLogin.test.fixture")(function* (
           if (input.earlyCompletion) yield* complete(loginId);
           return { type: "chatgpt", loginId, authUrl: input.url ?? authUrl };
         }
-        if (method === "account/login/cancel") return {};
+        if (method === "account/login/cancel" || method === "account/logout") return {};
         return yield* Effect.die(new Error(`Unexpected method ${method}`));
       }),
   } as unknown as CodexClient.CodexAppServerClientShape;
@@ -93,6 +94,7 @@ const fixture = Effect.fn("codexLogin.test.fixture")(function* (
         yield* use(client);
       }),
     hasSessions: Effect.succeed(input.busy ?? false),
+    requiresReauthentication: Effect.sync(() => state.requiresReauthentication),
     refresh: Effect.sync(() => {
       state.refreshes++;
     }),
@@ -117,6 +119,47 @@ const fixture = Effect.fn("codexLogin.test.fixture")(function* (
 });
 
 describe("Codex browser sign-in", () => {
+  it.effect("rechecks rejection after awaited session admission before native logout", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture({ authenticated: true, requiresReauthentication: true });
+      const result = yield* f
+        .login(
+          Effect.sync(() => {
+            f.state.requiresReauthentication = false;
+            return false;
+          }),
+        )
+        .pipe(Effect.flip);
+      expect(result).toMatchObject({ issue: CODEX_LOGIN_ERRORS.account });
+      yield* Deferred.await(f.released);
+      expect(f.calls.map((call) => call.method)).toEqual(["account/read"]);
+    }),
+  );
+  it.effect("replaces a confirmed revoked login despite cached account metadata", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture({ authenticated: true, requiresReauthentication: true });
+      expect(yield* f.login()).toBe("started");
+      expect(f.calls.map((call) => call.method)).toEqual([
+        "account/read",
+        "account/logout",
+        "account/login/start",
+      ]);
+      expect(f.state.refreshes).toBe(0);
+      yield* f.complete(loginId);
+      yield* Deferred.await(f.released);
+      expect(f.state.refreshes).toBe(1);
+    }),
+  );
+
+  it.effect("never logs out a rejected account while its Cafe session is open", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture({ authenticated: true, requiresReauthentication: true, busy: true });
+      expect(yield* f.login().pipe(Effect.flip)).toMatchObject({ issue: CODEX_LOGIN_ERRORS.busy });
+      yield* Deferred.await(f.released);
+      expect(f.calls.map((call) => call.method)).toEqual(["account/read"]);
+      expect(f.opened).toEqual([]);
+    }),
+  );
   it.effect("checks actual daemon sessions before starting native login", () =>
     Effect.gen(function* () {
       const f = yield* fixture();
