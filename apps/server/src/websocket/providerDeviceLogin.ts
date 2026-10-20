@@ -13,7 +13,7 @@ import * as References from "effect/References";
 import * as Stream from "effect/Stream";
 import { codexLoginFailureMessage } from "../provider/codexLogin.ts";
 import type { ProviderAdapterError } from "../provider/Errors.ts";
-import { canLoginProvider } from "./providerLoginAccess.ts";
+import { canLoginProviderDeviceCode } from "./providerLoginAccess.ts";
 
 /** Private, non-replaying RPC. No device code enters a shared snapshot,
  * trace, native daemon command ledger, settings file or reconnect cache. */
@@ -36,11 +36,12 @@ export function providerDeviceLogin<AccountError, SessionError>(
     new ServerProviderLoginError({
       instanceId: input.instanceId,
       reason:
-        "Provider sign-in requires the enabled account and a current owner connection over HTTPS or the same machine.",
+        "Provider sign-in requires the enabled Codex account and a current authenticated connection over HTTPS or the same machine.",
     });
   return Stream.unwrap(
     Effect.gen(function* () {
-      if (options.role !== "owner" || !options.secureSecretTransport) return yield* denied();
+      if ((options.role !== "owner" && options.role !== "client") || !options.secureSecretTransport)
+        return yield* denied();
       const revoked = yield* Deferred.make<never, ServerProviderLoginError>();
       let account: ProviderInstanceConfig | undefined;
       const validate = Effect.gen(function* () {
@@ -53,12 +54,11 @@ export function providerDeviceLogin<AccountError, SessionError>(
         )
           return yield* denied();
         if (
-          !canLoginProvider({
+          !canLoginProviderDeviceCode({
             role: options.role,
             secureSecretTransport: options.secureSecretTransport,
             instance: current,
           }) ||
-          current?.driver !== "codex" ||
           (account !== undefined && !Equal.equals(account, current))
         )
           return yield* denied();

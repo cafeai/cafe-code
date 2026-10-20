@@ -4,6 +4,8 @@ Decision status: Accepted within the requested implementation scope
 Created: 2026-10-20
 Decision authority: the user's request to implement the code-based Codex flow
 in Cafe for remote clients, without signing into a live account during development.
+Updated authority: the user's clarification that an authenticated Client
+connection must be able to trigger sign-in without becoming the server Owner.
 
 ## Native protocol and client behavior
 
@@ -32,9 +34,12 @@ cancellation limits.
 
 ## Authority and lifetime
 
-Keep the existing owner-only, HTTPS-or-same-machine sign-in policy. Paired client
-roles cannot change server credentials; Settings explains that restriction for
-saved remote connections. Revalidate the exact persisted owner session, enabled
+Permit authenticated Owner and Client roles to start the private Codex device-code
+flow over HTTPS or from the same machine. This explicit action authenticates the
+selected account on the server; it does not grant server ownership, settings
+authority, generic browser/terminal login, or access to another connection's
+pending attempt. Unknown roles remain denied. Keep generic browser/terminal
+login owner-only. Revalidate the exact persisted requesting session, enabled
 instance and selected configuration before admission, after awaited daemon session
 inventory, and before releasing each private event. Session revocation/expiry and
 configuration replacement retire the attempt. No open Cafe session for the
@@ -60,7 +65,7 @@ not submit inference, start a chat or restart Cafe.
 Synthetic native fixtures cover exact completion, early notifications, selected
 account idle checks, rejected cached authentication, unsupported versions,
 official bounded instructions, cancellation, failure, startup/completion budgets
-and native exit. Backend fixtures exercise owner/transport/session admission,
+and native exit. Backend fixtures exercise Owner/Client/transport/session admission,
 revocation, expiry, replacement and private event release. Transport fixtures use
 the actual RPC/socket protocol to prove cancellation and no reconnect replay.
 Native browser fixtures exercise Log in, Copy, client browser opening, Cancel,

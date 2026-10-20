@@ -32,6 +32,7 @@ const loginReasons = [
   "Codex sign-in did not complete. Start again and approve the code in your browser.",
   "Codex sign-in timed out. Start again to get a new code.",
   "Provider sign-in requires the enabled account and a current owner connection over HTTPS or the same machine.",
+  "Provider sign-in requires the enabled Codex account and a current authenticated connection over HTTPS or the same machine.",
   "Update the Cafe server to use Codex device-code sign-in.",
 ];
 const isLoginError = Schema.is(ServerProviderLoginError);
@@ -98,6 +99,12 @@ export function CodexDeviceLoginDialog({
     ),
     uiText(
       "Provider sign-in requires the enabled account and a current owner connection over HTTPS or the same machine.",
+      undefined,
+      undefined,
+      uiLocale,
+    ),
+    uiText(
+      "Provider sign-in requires the enabled Codex account and a current authenticated connection over HTTPS or the same machine.",
       undefined,
       undefined,
       uiLocale,

@@ -4,7 +4,7 @@ import {
   ProviderInstanceId,
 } from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
-import { canLoginProvider } from "./providerLoginAccess.ts";
+import { canLoginProvider, canLoginProviderDeviceCode } from "./providerLoginAccess.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/Layers/ProviderInstanceRegistryHydration.ts";
 
 describe("provider login authorization", () => {
@@ -21,12 +21,22 @@ describe("provider login authorization", () => {
     const instance = deriveProviderInstanceConfigMap(settings)[instanceId];
     expect(instance?.driver).toBe("codex");
     expect(canLoginProvider({ role: "owner", secureSecretTransport: true, instance })).toBe(true);
+    expect(
+      canLoginProviderDeviceCode({ role: "client", secureSecretTransport: true, instance }),
+    ).toBe(true);
     const disabled = deriveProviderInstanceConfigMap({
       ...settings,
       providers: { ...settings.providers, codex: { ...settings.providers.codex, enabled: false } },
     })[instanceId];
     expect(
       canLoginProvider({ role: "owner", secureSecretTransport: true, instance: disabled }),
+    ).toBe(false);
+    expect(
+      canLoginProviderDeviceCode({
+        role: "client",
+        secureSecretTransport: true,
+        instance: disabled,
+      }),
     ).toBe(false);
     expect(
       canLoginProvider({
@@ -57,4 +67,39 @@ describe("provider login authorization", () => {
       ).toBe(false);
     });
   }
+
+  it("admits only authenticated Owner and Client roles to secure enabled Codex device login", () => {
+    const instance = { driver: ProviderDriverKind.make("codex"), enabled: true };
+    for (const role of ["owner", "client"]) {
+      expect(canLoginProviderDeviceCode({ role, secureSecretTransport: true, instance })).toBe(
+        true,
+      );
+      expect(canLoginProviderDeviceCode({ role, secureSecretTransport: false, instance })).toBe(
+        false,
+      );
+      expect(
+        canLoginProviderDeviceCode({ role, secureSecretTransport: true, instance: undefined }),
+      ).toBe(false);
+      expect(
+        canLoginProviderDeviceCode({
+          role,
+          secureSecretTransport: true,
+          instance: { ...instance, enabled: false },
+        }),
+      ).toBe(false);
+      for (const driver of ["claudeAgent", "axiom"])
+        expect(
+          canLoginProviderDeviceCode({
+            role,
+            secureSecretTransport: true,
+            instance: { driver: ProviderDriverKind.make(driver) },
+          }),
+        ).toBe(false);
+    }
+    for (const role of ["viewer", "member", "", "admin"])
+      expect(canLoginProviderDeviceCode({ role, secureSecretTransport: true, instance })).toBe(
+        false,
+      );
+    expect(canLoginProvider({ role: "client", secureSecretTransport: true, instance })).toBe(false);
+  });
 });

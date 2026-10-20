@@ -2696,9 +2696,9 @@ export function ProviderSettingsPanel() {
               }
               loginDisabledReason={
                 canLogInProvider && row.driver === "codex" && remote
-                  ? remoteRole !== "owner"
+                  ? remoteRole !== "owner" && remoteRole !== "client"
                     ? uiText(
-                        "Sign-in requires an owner connection to this server.",
+                        "Connect to this server before signing in.",
                         undefined,
                         undefined,
                         uiLocale,

@@ -1802,7 +1802,7 @@
       "apps/web/src/components/chat/ThreadGoalControl.tsx:481",
       "apps/web/src/components/global-dictation/GlobalDictationOverlay.tsx:1020",
       "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:469",
-      "apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:271",
+      "apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:278",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:1016",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:1221",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:1269",
@@ -2388,7 +2388,7 @@
       "apps/web/src/components/CommandPalette.tsx:1829",
       "apps/web/src/components/Sidebar.tsx:523",
       "apps/web/src/components/chat/GlideSetupDialog.tsx:294",
-      "apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:270",
+      "apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:277",
       "apps/web/src/components/ui/dialog.tsx:90",
       "apps/web/src/components/ui/sheet.tsx:108"
     ]
@@ -2463,7 +2463,7 @@
   },
   "Close this account's Cafe chats before changing its native sign-in.": {
     "message": "Close this account's Cafe chats before changing its native sign-in.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:57"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:58"]
   },
   "Close this view and open it again.": {
     "message": "Close this view and open it again.",
@@ -2556,7 +2556,7 @@
   },
   "Codex returned an invalid sign-in link. Update Codex before trying again.": {
     "message": "Codex returned an invalid sign-in link. Update Codex before trying again.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:75"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:76"]
   },
   "Codex reviews code for bugs and risks; findings appear in this chat.": {
     "message": "Codex reviews code for bugs and risks; findings appear in this chat.",
@@ -2564,15 +2564,15 @@
   },
   "Codex sign-in did not complete. Start again and approve the code in your browser.": {
     "message": "Codex sign-in did not complete. Start again and approve the code in your browser.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:87"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:88"]
   },
   "Codex sign-in is already in progress.": {
     "message": "Codex sign-in is already in progress.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:56"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:57"]
   },
   "Codex sign-in timed out. Start again to get a new code.": {
     "message": "Codex sign-in timed out. Start again to get a new code.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:93"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:94"]
   },
   "Collapse plan": {
     "message": "Collapse plan",
@@ -2871,6 +2871,10 @@
       "apps/web/src/components/OnboardingScreen.tsx:714"
     ]
   },
+  "Connect to this server before signing in.": {
+    "message": "Connect to this server before signing in.",
+    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2700"]
+  },
   "Connected": {
     "message": "Connected",
     "locations": [
@@ -3078,7 +3082,7 @@
       "apps/web/src/components/chat/MessagesTimeline.tsx:2210",
       "apps/web/src/components/chat/ProposedPlanCard.tsx:190",
       "apps/web/src/components/chat/ProviderDiagnosticWorkEntry.tsx:532",
-      "apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:216",
+      "apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:223",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:363",
       "apps/web/src/components/settings/ProviderInstanceCard.tsx:1482",
       "apps/web/src/components/visualizations/VisualizationCard.tsx:882"
@@ -3143,7 +3147,7 @@
     "locations": [
       "apps/web/src/components/ChatMarkdown.tsx:261",
       "apps/web/src/components/ChatMarkdown.tsx:266",
-      "apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:217",
+      "apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:224",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:522",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:704",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:770"
@@ -3370,7 +3374,7 @@
   },
   "Could not copy the code. Select and copy it manually.": {
     "message": "Could not copy the code. Select and copy it manually.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:242"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:249"]
   },
   "Could not copy {value0} update command": {
     "message": "Could not copy {value0} update command",
@@ -3500,7 +3504,7 @@
   },
   "Could not open the browser. Open the verification address above manually.": {
     "message": "Could not open the browser. Open the verification address above manually.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:248"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:255"]
   },
   "Could not open {value0} login": {
     "message": "Could not open {value0} login",
@@ -3654,7 +3658,7 @@
   },
   "Could not start Codex sign-in. Try again or run codex login in a terminal.": {
     "message": "Could not start Codex sign-in. Try again or run codex login in a terminal.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:69"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:70"]
   },
   "Could not start implementation thread": {
     "message": "Could not start implementation thread",
@@ -3723,7 +3727,7 @@
   },
   "Could not verify Codex's account status. Refresh this provider before trying sign-in again.": {
     "message": "Could not verify Codex's account status. Refresh this provider before trying sign-in again.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:63"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:64"]
   },
   "Couldn''t confirm the new chat. No prompt was sent — check your chat list before trying again.": {
     "message": "Couldn''t confirm the new chat. No prompt was sent — check your chat list before trying again.",
@@ -6171,7 +6175,7 @@
   },
   "If your account disables device-code sign-in, enable it in ChatGPT security settings or ask your workspace administrator.": {
     "message": "If your account disables device-code sign-in, enable it in ChatGPT security settings or ask your workspace administrator.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:258"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:265"]
   },
   "If {app} isn’t in the list, click + in that Settings pane and choose this app.": {
     "message": "If {app} isn’t in the list, click + in that Settings pane and choose this app.",
@@ -8314,7 +8318,7 @@
   },
   "Open the verification page and enter this code. Only approve a code you requested here.": {
     "message": "Open the verification page and enter this code. Only approve a code you requested here.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:188"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:195"]
   },
   "Open this from the Cafe desktop app, or paste a pairing credential.": {
     "message": "Open this from the Cafe desktop app, or paste a pairing credential.",
@@ -8322,7 +8326,7 @@
   },
   "Open verification page": {
     "message": "Open verification page",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:227"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:234"]
   },
   "Open {label} here": {
     "message": "Open {label} here",
@@ -9195,9 +9199,13 @@
       "apps/desktop/src/app/DesktopLifecycle.ts:151"
     ]
   },
+  "Provider sign-in requires the enabled Codex account and a current authenticated connection over HTTPS or the same machine.": {
+    "message": "Provider sign-in requires the enabled Codex account and a current authenticated connection over HTTPS or the same machine.",
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:106"]
+  },
   "Provider sign-in requires the enabled account and a current owner connection over HTTPS or the same machine.": {
     "message": "Provider sign-in requires the enabled account and a current owner connection over HTTPS or the same machine.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:99"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:100"]
   },
   "Provider status has been refreshed.": {
     "message": "Provider status has been refreshed.",
@@ -9963,7 +9971,7 @@
   },
   "Requesting a sign-in code…": {
     "message": "Requesting a sign-in code…",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:236"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:243"]
   },
   "Requeued": {
     "message": "Requeued",
@@ -11336,7 +11344,7 @@
   },
   "Sign in to Codex on this server using a browser on your device.": {
     "message": "Sign in to Codex on this server using a browser on your device.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:165"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:172"]
   },
   "Sign in to the selected server before managing access.": {
     "message": "Sign in to the selected server before managing access.",
@@ -11347,7 +11355,7 @@
   },
   "Sign in to {value0}": {
     "message": "Sign in to {value0}",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:162"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:169"]
   },
   "Sign in with the admin password or a one-time pairing token.": {
     "message": "Sign in with the admin password or a one-time pairing token.",
@@ -11363,7 +11371,7 @@
   },
   "Sign-in code": {
     "message": "Sign-in code",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:197"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:204"]
   },
   "Sign-in is kept in a private file; config, history and the history database stay shared. Use a different Codex home folder for separate history.": {
     "message": "Sign-in is kept in a private file; config, history and the history database stay shared. Use a different Codex home folder for separate history.",
@@ -11381,10 +11389,6 @@
     "message": "Sign-in required",
     "locations": ["apps/web/src/providerDiagnostic.ts:290"]
   },
-  "Sign-in requires an owner connection to this server.": {
-    "message": "Sign-in requires an owner connection to this server.",
-    "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2700"]
-  },
   "Signal": {
     "message": "Signal",
     "locations": ["apps/web/src/components/settings/DiagnosticsSettings.tsx:572"]
@@ -11395,7 +11399,7 @@
   },
   "Signed in. Provider status has been refreshed.": {
     "message": "Signed in. Provider status has been refreshed.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:178"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:185"]
   },
   "Skills": {
     "message": "Skills",
@@ -12225,7 +12229,7 @@
   },
   "The connection or sign-in attempt ended. Close this dialog and try again.": {
     "message": "The connection or sign-in attempt ended. Close this dialog and try again.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:111"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:118"]
   },
   "The connection to the provider dropped. Reconnects usually recover on their own.": {
     "message": "The connection to the provider dropped. Reconnects usually recover on their own.",
@@ -13457,7 +13461,7 @@
   },
   "Update Codex to use device-code sign-in on this server.": {
     "message": "Update Codex to use device-code sign-in on this server.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:81"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:82"]
   },
   "Update available": {
     "message": "Update available",
@@ -13509,7 +13513,7 @@
   },
   "Update the Cafe server to use Codex device-code sign-in.": {
     "message": "Update the Cafe server to use Codex device-code sign-in.",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:105"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:112"]
   },
   "Update the project title.": {
     "message": "Update the project title.",
@@ -14010,7 +14014,7 @@
   },
   "Waiting for Codex to confirm sign-in…": {
     "message": "Waiting for Codex to confirm sign-in…",
-    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:231"]
+    "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:238"]
   },
   "Waiting for a network connection.": {
     "message": "Waiting for a network connection.",

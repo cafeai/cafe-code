@@ -31,7 +31,14 @@ import { getUiLocale, resolveUiLocale, setUiLocale } from "@cafecode/shared/i18n
 import { useEffect } from "react";
 import { useSettings } from "../../hooks/useSettings";
 import { useUiLocale } from "../../i18n";
-import { selectWorkspaceEnvironment } from "../../environments/workspace";
+import {
+  selectWorkspaceEnvironment,
+  WorkspaceEnvironmentProvider,
+} from "../../environments/workspace";
+import {
+  useSavedEnvironmentRegistryStore,
+  useSavedEnvironmentRuntimeStore,
+} from "../../environments/runtime/catalog";
 import {
   RouterProvider,
   createMemoryHistory,
@@ -189,6 +196,24 @@ const authAccessHarness = vi.hoisted(() => {
   };
 });
 
+const remoteDeviceLoginHarness = vi.hoisted(() => ({
+  environmentId: undefined as EnvironmentId | undefined,
+  connection: undefined as { client: LocalApi } | undefined,
+}));
+
+// Keep the connection service synthetic: importing its real implementation from
+// an async mock cycles through useSettings and back into workspaceApi before
+// the mock resolves. The actual workspace API and saved runtime stores below
+// still route the user action to the selected remote server.
+vi.mock("../../environments/runtime/service", () => ({
+  getPrimaryEnvironmentConnection: () => ({ client: { server: {} } }),
+  resetEnvironmentServiceForTests: async () => undefined,
+  readEnvironmentConnection: (environmentId: EnvironmentId) =>
+    environmentId === remoteDeviceLoginHarness.environmentId
+      ? remoteDeviceLoginHarness.connection
+      : undefined,
+}));
+
 vi.mock("../../environments/runtime", () => {
   const primaryConnection = {
     kind: "primary" as const,
@@ -226,8 +251,8 @@ vi.mock("../../environments/runtime", () => {
     startEnvironmentConnectionService: () => undefined,
     subscribeEnvironmentConnections: () => () => {},
     useSavedEnvironmentRuntimeStore: (
-      selector: (state: { readonly byId: Record<string, never> }) => unknown,
-    ) => selector({ byId: {} }),
+      selector: (state: ReturnType<typeof useSavedEnvironmentRuntimeStore.getState>) => unknown,
+    ) => useSavedEnvironmentRuntimeStore(selector),
   };
 });
 
@@ -742,6 +767,10 @@ describe("settings panels", () => {
     localStorage.clear();
     useUiStateStore.setState({ defaultAdvertisedEndpointKey: null });
     authAccessHarness.reset();
+    remoteDeviceLoginHarness.environmentId = undefined;
+    remoteDeviceLoginHarness.connection = undefined;
+    useSavedEnvironmentRegistryStore.setState({ byId: {} });
+    useSavedEnvironmentRuntimeStore.setState({ byId: {} });
   });
 
   afterEach(async () => {
@@ -759,6 +788,10 @@ describe("settings panels", () => {
     resetServerStateForTests();
     await __resetLocalApiForTests();
     authAccessHarness.reset();
+    remoteDeviceLoginHarness.environmentId = undefined;
+    remoteDeviceLoginHarness.connection = undefined;
+    useSavedEnvironmentRegistryStore.setState({ byId: {} });
+    useSavedEnvironmentRuntimeStore.setState({ byId: {} });
   });
 
   it("persists explicit language choices independently of the selected remote workspace", async () => {
@@ -2669,86 +2702,124 @@ describe("settings panels", () => {
     }
   });
 
-  it("opens Codex device-code sign-in in the client and cancels its one-shot stream", async () => {
-    const base = createBaseServerConfig();
-    const instanceId = ProviderInstanceId.make("codex_work");
-    installProviderAccountSettings({
-      ...base,
-      settings: {
-        ...base.settings,
-        providerInstances: {
-          [instanceId]: {
-            driver: ProviderDriverKind.make("codex"),
-            enabled: true,
-            displayName: "Work Codex",
+  it.each(["local", "remote-owner", "remote-client"] as const)(
+    "opens Codex device-code sign-in from %s and cancels its own one-shot stream",
+    async (scope) => {
+      const base = createBaseServerConfig();
+      const instanceId = ProviderInstanceId.make("codex_work");
+      const config: ServerConfig = {
+        ...base,
+        settings: {
+          ...base.settings,
+          providerInstances: {
+            [instanceId]: {
+              driver: ProviderDriverKind.make("codex"),
+              enabled: true,
+              displayName: "Work Codex",
+            },
           },
         },
-      },
-      providers: [
-        {
-          ...createOutdatedProvider("codex"),
-          instanceId,
-          driver: ProviderDriverKind.make("codex"),
-          displayName: "Work Codex",
-          installed: true,
-          auth: { status: "unauthenticated" },
-          authActions: { login: true, deviceCodeLogin: true },
-        },
-      ],
-    });
-    let publish!: (event: ServerProviderDeviceLoginEvent) => void;
-    const cancel = vi.fn();
-    const subscribe = vi
-      .fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>()
-      .mockImplementation((_input, listener) => {
-        publish = listener;
-        return cancel;
-      });
-    window.nativeApi!.server.subscribeProviderDeviceLogin = subscribe;
-    const browserLogin = vi.fn<LocalApi["server"]["loginProvider"]>();
-    window.nativeApi!.server.loginProvider = browserLogin;
-    const openExternal = vi.fn<LocalApi["shell"]["openExternal"]>().mockResolvedValue(undefined);
-    window.nativeApi!.shell = {
-      openExternal,
-      openInEditor: vi.fn().mockResolvedValue(undefined),
-      openTerminal: vi.fn().mockResolvedValue(undefined),
-      openPath: vi.fn().mockResolvedValue(undefined),
-      revealPath: vi.fn().mockResolvedValue(undefined),
-    };
-    const copy = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
-    try {
-      mounted = await render(
-        <AppAtomRegistryProvider>
-          <ProviderSettingsPanel />
-        </AppAtomRegistryProvider>,
-      );
-      await page.getByRole("button", { name: "Log in", exact: true }).click();
-      await expect.element(page.getByRole("dialog")).toBeVisible();
-      expect(subscribe).toHaveBeenCalledExactlyOnceWith(
-        { instanceId },
-        expect.any(Function),
-        expect.any(Function),
-      );
-      publish({
-        type: "device-code",
-        verificationUrl: "https://auth.openai.com/codex/device",
-        userCode: "ABCD-12345",
-      });
-      await expect.element(page.getByText("ABCD-12345", { exact: true })).toBeVisible();
-      await page.getByRole("button", { name: "Copy code", exact: true }).click();
-      await vi.waitFor(() => expect(copy).toHaveBeenCalledExactlyOnceWith("ABCD-12345"));
-      await page.getByRole("button", { name: "Open verification page", exact: true }).click();
-      expect(openExternal).toHaveBeenCalledExactlyOnceWith("https://auth.openai.com/codex/device");
-      expect(browserLogin).not.toHaveBeenCalled();
-      await page.getByRole("button", { name: "Cancel", exact: true }).click();
-      await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
-      publish({ type: "authenticated" });
-      await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
-      expect(subscribe).toHaveBeenCalledOnce();
-    } finally {
-      copy.mockRestore();
-    }
-  });
+        providers: [
+          {
+            ...createOutdatedProvider("codex"),
+            instanceId,
+            driver: ProviderDriverKind.make("codex"),
+            displayName: "Work Codex",
+            installed: true,
+            auth: { status: "unauthenticated" },
+            authActions: { login: true, deviceCodeLogin: true },
+          },
+        ],
+      };
+      installProviderAccountSettings(scope === "local" ? config : base);
+      let publish!: (event: ServerProviderDeviceLoginEvent) => void;
+      const cancel = vi.fn();
+      const subscribe = vi
+        .fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>()
+        .mockImplementation((_input, listener) => {
+          publish = listener;
+          return cancel;
+        });
+      const primarySubscribe = vi.fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>();
+      window.nativeApi!.server.subscribeProviderDeviceLogin =
+        scope === "local" ? subscribe : primarySubscribe;
+      if (scope !== "local") {
+        const environmentId = EnvironmentId.make("remote-codex-device-login");
+        remoteDeviceLoginHarness.environmentId = environmentId;
+        remoteDeviceLoginHarness.connection = {
+          client: { server: { subscribeProviderDeviceLogin: subscribe } } as unknown as LocalApi,
+        };
+        const environment = { ...config.environment, environmentId };
+        useSavedEnvironmentRegistryStore.setState({
+          byId: {
+            [environmentId]: {
+              environmentId,
+              label: "Remote Codex",
+              httpBaseUrl: "https://remote.example",
+              wsBaseUrl: "wss://remote.example",
+              createdAt: "2026-10-20T00:00:00.000Z",
+              lastConnectedAt: null,
+            },
+          },
+        });
+        useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
+          connectionState: "connected",
+          role: scope === "remote-client" ? "client" : "owner",
+          descriptor: environment,
+          serverConfig: { ...config, environment },
+        });
+        selectWorkspaceEnvironment(environmentId);
+      }
+      const browserLogin = vi.fn<LocalApi["server"]["loginProvider"]>();
+      window.nativeApi!.server.loginProvider = browserLogin;
+      const openExternal = vi.fn<LocalApi["shell"]["openExternal"]>().mockResolvedValue(undefined);
+      window.nativeApi!.shell = {
+        openExternal,
+        openInEditor: vi.fn().mockResolvedValue(undefined),
+        openTerminal: vi.fn().mockResolvedValue(undefined),
+        openPath: vi.fn().mockResolvedValue(undefined),
+        revealPath: vi.fn().mockResolvedValue(undefined),
+      };
+      const copy = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+      try {
+        mounted = await renderWithTestRouter(
+          <AppAtomRegistryProvider>
+            <WorkspaceEnvironmentProvider>
+              <ProviderSettingsPanel />
+            </WorkspaceEnvironmentProvider>
+          </AppAtomRegistryProvider>,
+        );
+        await page.getByRole("button", { name: "Log in", exact: true }).click();
+        await expect.element(page.getByRole("dialog")).toBeVisible();
+        expect(subscribe).toHaveBeenCalledExactlyOnceWith(
+          { instanceId },
+          expect.any(Function),
+          expect.any(Function),
+        );
+        publish({
+          type: "device-code",
+          verificationUrl: "https://auth.openai.com/codex/device",
+          userCode: "ABCD-12345",
+        });
+        await expect.element(page.getByText("ABCD-12345", { exact: true })).toBeVisible();
+        await page.getByRole("button", { name: "Copy code", exact: true }).click();
+        await vi.waitFor(() => expect(copy).toHaveBeenCalledExactlyOnceWith("ABCD-12345"));
+        await page.getByRole("button", { name: "Open verification page", exact: true }).click();
+        expect(openExternal).toHaveBeenCalledExactlyOnceWith(
+          "https://auth.openai.com/codex/device",
+        );
+        expect(browserLogin).not.toHaveBeenCalled();
+        expect(primarySubscribe).not.toHaveBeenCalled();
+        await page.getByRole("button", { name: "Cancel", exact: true }).click();
+        await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+        publish({ type: "authenticated" });
+        await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+        expect(subscribe).toHaveBeenCalledOnce();
+      } finally {
+        copy.mockRestore();
+      }
+    },
+  );
 
   it("clears the device code after native completion without starting another login", async () => {
     const instanceId = ProviderInstanceId.make("codex_work");

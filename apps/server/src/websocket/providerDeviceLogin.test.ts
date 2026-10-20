@@ -102,12 +102,16 @@ const fixture = Effect.fn("deviceLoginAccess.fixture")(function* (
 
 describe("private device login access", () => {
   for (const input of [
-    { role: "client" },
+    { role: "viewer" },
+    { role: "" },
     { secure: false },
+    { role: "client", secure: false },
     { expired: true },
+    { role: "client", expired: true },
     { enabled: false },
+    { role: "client", enabled: false },
   ])
-    it.effect(`refuses ${Object.keys(input)[0]} before opening native login`, () =>
+    it.effect(`refuses ${JSON.stringify(input)} before opening native login`, () =>
       Effect.gen(function* () {
         const f = yield* fixture(input);
         expect(yield* f.run.pipe(Effect.flip)).toMatchObject({ _tag: "ServerProviderLoginError" });
@@ -116,67 +120,86 @@ describe("private device login access", () => {
       }),
     );
 
-  it.effect("releases instructions only to the admitted subscriber and joins cancellation", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture();
-      const fiber = yield* Effect.forkChild(f.run);
-      yield* Deferred.await(f.shown);
-      expect(f.events).toEqual([instructions]);
-      expect(f.state.submissions).toBe(1);
-      yield* Fiber.interrupt(fiber);
-      expect(yield* Deferred.isDone(f.retired)).toBe(true);
-    }),
-  );
-
-  for (const change of ["revocation", "replacement", "disable"] as const)
-    it.effect(`retires a waiting native attempt on ${change}`, () =>
+  for (const role of ["owner", "client"]) {
+    it.effect(`delivers instructions and completion to the admitted ${role} subscriber`, () =>
       Effect.gen(function* () {
-        const f = yield* fixture();
+        const f = yield* fixture({ role });
         const fiber = yield* Effect.forkChild(f.run);
         yield* Deferred.await(f.shown);
-        if (change === "revocation") f.state.active = false;
-        else
-          f.state.account = {
-            ...f.state.account!,
-            ...(change === "disable"
-              ? { enabled: false }
-              : { config: { homePath: "another-account" } }),
-          };
-        yield* f.invalidate;
+        expect(f.events).toEqual([instructions]);
+        yield* Deferred.succeed(f.finished, undefined);
+        yield* Fiber.join(fiber);
+        expect(f.events).toEqual([instructions, { type: "authenticated" }]);
+        expect(f.state.starts).toBe(1);
+        expect(f.state.submissions).toBe(1);
+        expect(yield* Deferred.isDone(f.retired)).toBe(true);
+      }),
+    );
+
+    it.effect(
+      `releases instructions only to the admitted ${role} subscriber and joins cancellation`,
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture({ role });
+          const fiber = yield* Effect.forkChild(f.run);
+          yield* Deferred.await(f.shown);
+          expect(f.events).toEqual([instructions]);
+          expect(f.state.submissions).toBe(1);
+          yield* Fiber.interrupt(fiber);
+          expect(yield* Deferred.isDone(f.retired)).toBe(true);
+        }),
+    );
+
+    for (const change of ["revocation", "replacement", "disable"] as const)
+      it.effect(`retires a waiting ${role} native attempt on ${change}`, () =>
+        Effect.gen(function* () {
+          const f = yield* fixture({ role });
+          const fiber = yield* Effect.forkChild(f.run);
+          yield* Deferred.await(f.shown);
+          if (change === "revocation") f.state.active = false;
+          else
+            f.state.account = {
+              ...f.state.account!,
+              ...(change === "disable"
+                ? { enabled: false }
+                : { config: { homePath: "another-account" } }),
+            };
+          yield* f.invalidate;
+          expect(yield* Fiber.join(fiber).pipe(Effect.flip)).toMatchObject({
+            _tag: "ServerProviderLoginError",
+          });
+          expect(yield* Deferred.isDone(f.retired)).toBe(true);
+          yield* Deferred.succeed(f.finished, undefined);
+          expect(f.events).toEqual([instructions]);
+          expect(f.state.submissions).toBe(1);
+        }),
+      );
+
+    it.effect(`retires the native attempt at the ${role}'s exact session expiry`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture({ role, expiresAt: (yield* Clock.currentTimeMillis) + 1000 });
+        const fiber = yield* Effect.forkChild(f.run);
+        yield* Deferred.await(f.shown);
+        yield* TestClock.adjust(1000);
         expect(yield* Fiber.join(fiber).pipe(Effect.flip)).toMatchObject({
           _tag: "ServerProviderLoginError",
         });
         expect(yield* Deferred.isDone(f.retired)).toBe(true);
-        yield* Deferred.succeed(f.finished, undefined);
         expect(f.events).toEqual([instructions]);
-        expect(f.state.submissions).toBe(1);
       }),
     );
 
-  it.effect("retires the native attempt at the owner's exact session expiry", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture({ expiresAt: (yield* Clock.currentTimeMillis) + 1000 });
-      const fiber = yield* Effect.forkChild(f.run);
-      yield* Deferred.await(f.shown);
-      yield* TestClock.adjust(1000);
-      expect(yield* Fiber.join(fiber).pipe(Effect.flip)).toMatchObject({
-        _tag: "ServerProviderLoginError",
-      });
-      expect(yield* Deferred.isDone(f.retired)).toBe(true);
-      expect(f.events).toEqual([instructions]);
-    }),
-  );
-
-  it.effect("revalidates the session immediately before releasing a completion", () =>
-    Effect.gen(function* () {
-      const f = yield* fixture();
-      const fiber = yield* Effect.forkChild(f.run);
-      yield* Deferred.await(f.shown);
-      f.state.active = false;
-      yield* Deferred.succeed(f.finished, undefined);
-      yield* Fiber.join(fiber).pipe(Effect.flip);
-      expect(f.events).toEqual([instructions]);
-      expect(yield* Deferred.isDone(f.retired)).toBe(true);
-    }),
-  );
+    it.effect(`revalidates the ${role} session immediately before releasing a completion`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture({ role });
+        const fiber = yield* Effect.forkChild(f.run);
+        yield* Deferred.await(f.shown);
+        f.state.active = false;
+        yield* Deferred.succeed(f.finished, undefined);
+        yield* Fiber.join(fiber).pipe(Effect.flip);
+        expect(f.events).toEqual([instructions]);
+        expect(yield* Deferred.isDone(f.retired)).toBe(true);
+      }),
+    );
+  }
 });
