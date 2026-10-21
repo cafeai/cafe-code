@@ -59,17 +59,24 @@ export function acknowledgeCodexServiceTier(input: {
 
 /** Resolve only this account's selection. Native ids are opaque catalogue
  * values, never aliases or inferred prices. Legacy Fast retains its exact old
- * mapping; canonical Fast accepts its equivalent legacy capability, while new
+ * mapping; an unset Cafe selection explicitly requests Standard rather than
+ * inheriting a native paid tier. Canonical Fast accepts its equivalent legacy capability, while new
  * exact tiers still require model-specific modern catalogue evidence. */
 export function resolveCodexServiceTier(
   selection: ModelSelection | undefined,
   instanceId: ProviderInstanceId,
   models: ReadonlyArray<ServerProviderModel> | undefined,
 ): { readonly serviceTier?: string; readonly error?: string } {
-  if (selection?.instanceId !== instanceId) return {};
+  // Codex's pinned protocol config_types.rs defines `default` as the explicit
+  // standard-routing sentinel (not a catalogue id). Omission retains native
+  // settings, which may be priority even while Cafe's unset Fast control shows
+  // Off. Resolve absence at the request boundary, never by relabeling native
+  // observations or changing the user's provider configuration on disk.
+  if (selection === undefined) return { serviceTier: "default" };
+  if (selection.instanceId !== instanceId) return {};
   const raw = getModelSelectionOptionValue(selection, "serviceTier");
   const fast = getModelSelectionOptionValue(selection, "fastMode");
-  if (raw === undefined && typeof fast !== "boolean") return {};
+  if (raw === undefined && typeof fast !== "boolean") return { serviceTier: "default" };
   const tier = raw ?? (fast ? "priority" : "default");
   if (typeof tier !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/.test(tier)) {
     return {

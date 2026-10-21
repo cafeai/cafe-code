@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { TraitsPicker } from "./TraitsPicker";
 
-const models: ServerProviderModel[] = [
+const models = [
   {
     slug: "sol",
     name: "Sol",
@@ -29,30 +29,35 @@ const models: ServerProviderModel[] = [
       ],
     },
   },
-];
+] satisfies ServerProviderModel[];
 async function mount(
   options?: readonly ProviderOptionSelection[],
   catalogue: readonly ServerProviderModel[] = models,
 ) {
   const onModelOptionsChange = vi.fn();
+  const onPromptChange = vi.fn();
   const screen = await render(
     <TraitsPicker
       provider={ProviderDriverKind.make("codex")}
       models={catalogue}
       model="sol"
       prompt=""
-      onPromptChange={vi.fn()}
+      onPromptChange={onPromptChange}
       modelOptions={options}
       onModelOptionsChange={onModelOptionsChange}
     />,
   );
-  return { screen, onModelOptionsChange };
+  return { screen, onModelOptionsChange, onPromptChange };
 }
 describe("advertised Codex service tier selector", () => {
   it("does not choose a paid tier on mount and preserves the exact selected id", async () => {
     const { screen, onModelOptionsChange } = await mount();
     expect(onModelOptionsChange).not.toHaveBeenCalled();
+    await expect.element(screen.getByRole("button")).toHaveTextContent("Standard");
     await screen.getByRole("button").click();
+    await expect
+      .element(page.getByRole("menuitemradio", { name: "Standard", exact: true }))
+      .toHaveAttribute("aria-checked", "true");
     await page.getByRole("menuitemradio", { name: "Ultra fast", exact: true }).click();
     expect(onModelOptionsChange).toHaveBeenLastCalledWith([
       { id: "serviceTier", value: "ultrafast" },
@@ -60,13 +65,31 @@ describe("advertised Codex service tier selector", () => {
   });
 
   it("shows legacy Fast as its same tier and permits explicit Standard", async () => {
-    const { screen, onModelOptionsChange } = await mount([{ id: "fastMode", value: true }]);
+    const { screen, onModelOptionsChange, onPromptChange } = await mount(
+      [{ id: "fastMode", value: true }],
+      [
+        {
+          ...models[0]!,
+          capabilities: {
+            optionDescriptors: [
+              {
+                ...models[0]!.capabilities!.optionDescriptors![0]!,
+                // Cached effort-only metadata must not turn clicking Standard
+                // into prompt editing, leaving the previous Fast choice active.
+                promptInjectedValues: ["default"],
+              },
+            ],
+          },
+        },
+      ],
+    );
     await expect.element(screen.getByRole("button")).toHaveTextContent("Fast");
     await screen.getByRole("button").click();
     await page.getByRole("menuitemradio", { name: "Standard", exact: true }).click();
     expect(onModelOptionsChange).toHaveBeenLastCalledWith([
       { id: "serviceTier", value: "default" },
     ]);
+    expect(onPromptChange).not.toHaveBeenCalled();
   });
 
   it("keeps a removed tier visibly unavailable until the user changes it", async () => {

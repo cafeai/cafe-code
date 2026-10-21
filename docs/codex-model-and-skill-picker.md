@@ -31,11 +31,17 @@ name establishes a price or entitlement; the provider still decides what the
 account is allowed to use.
 
 Cafe never enables a paid tier simply because it appears first in a catalogue.
-An unchanged, omitted tier inherits native settings. Explicit Standard sends the
-provider's standard-routing sentinel, so it can turn a previous Fast choice off.
+An unset tier defaults to Standard (Fast Off), even if native configuration or
+the preceding turn used Fast. Cafe explicitly sends the provider's
+standard-routing sentinel on ordinary openings and new turns.
 Older saved Fast on/off settings retain the same Fast/Standard meaning, rather
 than being upgraded to Ultra fast. No account or model preference is rewritten
 merely by opening the menu.
+
+Changing the composer does not change a running turn's routing during steering.
+Native review and private guarded recovery keep their materialized/recorded
+policy rather than adopting an unset composer choice. One-shot Codex metadata
+helpers also default to Standard. See the [Standard-default decision](decisions/codex-standard-default.md).
 
 The picker and native daemon can temporarily hold different catalogue formats.
 An exact Fast choice (`priority`) also works when its owning model still exposes

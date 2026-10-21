@@ -90,7 +90,7 @@ describe("native input capabilities", () => {
     };
     expect(
       buildProviderOptionSelectionsFromDescriptors(getProviderOptionDescriptors({ caps })),
-    ).toBeUndefined();
+    ).toEqual([{ id: "serviceTier", value: "default" }]);
     for (const [value, tier] of [
       [true, "priority"],
       [false, "default"],
@@ -116,6 +116,42 @@ describe("native input capabilities", () => {
         }),
       ),
     ).toEqual([{ id: "serviceTier", value: "ultrafast" }]);
+  });
+  it("never remaps exact service tiers through cached prompt-injected effort metadata", () => {
+    const caps: ModelCapabilities = {
+      optionDescriptors: [
+        {
+          id: "serviceTier",
+          label: "Tier",
+          type: "select",
+          currentValue: "ultrafast",
+          options: [
+            { id: "ultrafast", label: "Ultra fast", isDefault: true },
+            { id: "default", label: "Standard" },
+            { id: "priority", label: "Fast" },
+          ],
+          promptInjectedValues: ["default", "priority"],
+        },
+      ],
+    };
+    for (const [selections, tier] of [
+      [undefined, "default"],
+      [[{ id: "serviceTier", value: "default" }], "default"],
+      [[{ id: "fastMode", value: false }], "default"],
+      [[{ id: "serviceTier", value: "priority" }], "priority"],
+      [[{ id: "serviceTier", value: "removed" }], "removed"],
+    ] as const) {
+      const descriptors = getProviderOptionDescriptors({ caps, selections });
+      expect(buildProviderOptionSelectionsFromDescriptors(descriptors)).toEqual([
+        { id: "serviceTier", value: tier },
+      ]);
+      expect(descriptors[0]).not.toHaveProperty("promptInjectedValues");
+    }
+    expect(caps.optionDescriptors?.[0]?.currentValue).toBe("ultrafast");
+    expect(caps.optionDescriptors?.[0]).toHaveProperty("promptInjectedValues", [
+      "default",
+      "priority",
+    ]);
   });
   it("retains canonical Fast across legacy catalogue presentation without selecting a paid default", () => {
     const caps: ModelCapabilities = {

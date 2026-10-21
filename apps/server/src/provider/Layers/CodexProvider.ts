@@ -853,9 +853,11 @@ function mapCodexModelCapabilities(
         description:
           "Provider-advertised routing. Availability and charges depend on your account.",
         type: "select" as const,
-        // No current/default value: omission must not silently change native
-        // routing, and catalogue order is never consent to paid service.
-        options: [{ id: "default", label: "Standard" }, ...tiers],
+        // Cafe defaults Fast to Off. Serialize Standard explicitly instead of
+        // omitting the request and inheriting a native paid-priority setting.
+        // Advertised tier order never supplies consent to a paid default.
+        currentValue: "default",
+        options: [{ id: "default", label: "Standard", isDefault: true }, ...tiers],
       },
       ...(daybreak ? [daybreak] : []),
     ],
@@ -901,6 +903,7 @@ function makeStaticCodexReasoningCapabilities(input: {
               id: "fastMode",
               label: "Fast Mode",
               type: "boolean" as const,
+              currentValue: false,
             },
           ]
         : []),

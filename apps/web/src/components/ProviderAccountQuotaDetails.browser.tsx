@@ -1,11 +1,12 @@
 import "../index.css";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
 import type { ProviderSessionQuotaReport } from "@cafecode/contracts";
 
 import { formatCodexRateLimitPresentation } from "../lib/codexRateLimits";
+import { observeNativeInput } from "./nativeInput.browser.fixture";
 import { ProviderAccountQuotaDetails } from "./ProviderAccountQuotaDetails";
 
 describe("ProviderAccountQuotaDetails bounds", () => {
@@ -163,55 +164,87 @@ describe("ProviderAccountQuotaDetails bounds", () => {
   it.each(["popover", "panel", "settings"] as const)(
     "keeps applicable meters and inline extra usage in one bounded scroll owner in %s",
     async (layout) => {
-      await page.viewport(700, 650);
-      const report: ProviderSessionQuotaReport = {
-        source: "claude-session",
-        observedAt: new Date().toISOString(),
-        meters: Array.from({ length: 24 }, (_, index) => ({
-          kind: index === 0 ? "session" : "future_meter",
-          group: index === 0 ? "session" : "weekly",
-          usedPercent: index === 0 ? 23.456 : 25,
-          resetsAt: "2099-10-09T05:00:00.000Z",
-          modelLabel: "Repeated model",
-          surfaceLabel: "Native CLI",
-          severity: "normal",
-          isActive: index === 0,
-        })),
-        extraUsage: {
-          enabled: true,
-          monthlyLimit: 100,
-          usedCredits: 25,
-          usedPercent: 25,
-          currency: null,
-        },
-      };
-      mounted = await render(
-        <div style={{ width: 270 }}>
-          <ProviderAccountQuotaDetails
-            layout={layout}
-            sessionQuota={{ status: "available", report }}
-          />
-        </div>,
-      );
-      expect(document.querySelectorAll("[data-claude-quota-meter]")).toHaveLength(24);
-      await expect.element(page.getByText("76.544% left", { exact: true })).toBeVisible();
-      const scroll = document.querySelector<HTMLElement>("[data-account-quota-scroll]")!;
-      expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
-      expect(scroll.clientHeight).toBeLessThanOrEqual(window.innerHeight * 0.4 + 1);
-      expect(scroll.scrollWidth).toBeLessThanOrEqual(scroll.clientWidth + 1);
-      scroll.focus();
-      expect(document.activeElement).toBe(scroll);
-      await userEvent.keyboard("{End}");
-      await expect
-        .poll(() => scroll.scrollTop + scroll.clientHeight)
-        .toBeGreaterThanOrEqual(scroll.scrollHeight - 1);
-      await expect
-        .element(page.getByText("25% of extra usage used", { exact: true }))
-        .toBeVisible();
-      expect(document.querySelectorAll("[data-account-quota-scroll]")).toHaveLength(1);
-      expect(document.querySelector("[data-claude-session-quota]")?.textContent).not.toContain(
-        "Refresh",
-      );
+      let observedScroll: HTMLElement | null = null;
+      let screen: Awaited<ReturnType<typeof render>> | undefined;
+      let published = false;
+      const observation = observeNativeInput("quota-panel", () => observedScroll);
+      // Retire passive listeners even when the hard deadline bypasses finally.
+      onTestFinished(observation.retire);
+      try {
+        await page.viewport(700, 650);
+        observation.assertActive();
+        const report: ProviderSessionQuotaReport = {
+          source: "claude-session",
+          observedAt: new Date().toISOString(),
+          meters: Array.from({ length: 24 }, (_, index) => ({
+            kind: index === 0 ? "session" : "future_meter",
+            group: index === 0 ? "session" : "weekly",
+            usedPercent: index === 0 ? 23.456 : 25,
+            resetsAt: "2099-10-09T05:00:00.000Z",
+            modelLabel: "Repeated model",
+            surfaceLabel: "Native CLI",
+            severity: "normal",
+            isActive: index === 0,
+          })),
+          extraUsage: {
+            enabled: true,
+            monthlyLimit: 100,
+            usedCredits: 25,
+            usedPercent: 25,
+            currency: null,
+          },
+        };
+        screen = await render(
+          <div style={{ width: 270 }}>
+            <ProviderAccountQuotaDetails
+              layout={layout}
+              sessionQuota={{ status: "available", report }}
+            />
+          </div>,
+        );
+        observation.assertActive();
+        mounted = screen;
+        published = true;
+        expect(document.querySelectorAll("[data-claude-quota-meter]")).toHaveLength(24);
+        await expect.element(page.getByText("76.544% left", { exact: true })).toBeVisible();
+        observation.assertActive();
+        const scroll = document.querySelector<HTMLElement>("[data-account-quota-scroll]")!;
+        observedScroll = scroll;
+        expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
+        expect(scroll.clientHeight).toBeLessThanOrEqual(window.innerHeight * 0.4 + 1);
+        expect(scroll.scrollWidth).toBeLessThanOrEqual(scroll.clientWidth + 1);
+        scroll.focus();
+        expect(document.activeElement).toBe(scroll);
+        observation.mark("ready");
+        observation.mark("before-input");
+        await userEvent.keyboard("{End}");
+        observation.assertActive();
+        observation.mark("after-input");
+        await expect
+          .poll(() => scroll.scrollTop + scroll.clientHeight)
+          .toBeGreaterThanOrEqual(scroll.scrollHeight - 1);
+        observation.assertActive();
+        await expect
+          .element(page.getByText("25% of extra usage used", { exact: true }))
+          .toBeVisible();
+        observation.assertActive();
+        expect(document.querySelectorAll("[data-account-quota-scroll]")).toHaveLength(1);
+        expect(document.querySelector("[data-claude-session-quota]")?.textContent).not.toContain(
+          "Refresh",
+        );
+        observation.complete();
+      } catch (error) {
+        observation.fail();
+        throw error;
+      } finally {
+        observation.retire();
+        // The late continuation can retire only its own render. If afterEach
+        // already unmounted a published screen, never touch a later case's root.
+        if (screen && (!published || mounted === screen)) {
+          await screen.unmount();
+          if (mounted === screen) mounted = undefined;
+        }
+      }
     },
   );
 

@@ -6,6 +6,7 @@ Last updated: 2026-10-05 16:58:09 JST (UTC+0900)
 Implementation status: Implemented and released; integrated local and exact-head platform CI gates verified on 36c64874.
 Supersedes: None; extends the existing Fast selection without changing its meaning.
 Superseded in part: [Canonical legacy Fast parity](codex-legacy-fast-tier-parity.md) permits the equivalent exact `priority` choice against that model's existing legacy Boolean capability; modern revocations remain authoritative.
+Superseded in part: [Standard default](codex-standard-default.md) replaces native inheritance for unset ordinary Cafe requests with explicit Standard; other admission and snapshot rules remain unchanged.
 
 ## Decision and authority
 

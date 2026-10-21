@@ -5,7 +5,12 @@ import { createHash } from "node:crypto";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { readFileSync } from "node:fs";
 import { makeCodexChildUsageAccounting } from "../codexChildUsageAccounting.ts";
-import { observeCodexServiceTier, type CodexServiceTierSnapshot } from "../codexServiceTier.ts";
+import {
+  observeCodexServiceTier,
+  resolveCodexServiceTier,
+  resolveCodexTurnServiceTier,
+  type CodexServiceTierSnapshot,
+} from "../codexServiceTier.ts";
 import { canonicalizeCodexSubagentDetail } from "./CodexAdapter.ts";
 
 import {
@@ -17,6 +22,7 @@ import {
   SubagentRuntimeId,
   ThreadId,
   TurnId,
+  type ModelSelection,
   type ProviderDaemonFailedRootRetirementRefusal,
   type ProviderEvent,
   type ProviderSession,
@@ -8758,6 +8764,141 @@ describe("buildCodexThreadSnapshotBackfillEvents", () => {
 });
 
 describe("openCodexThread", () => {
+  const tierInstance = ProviderInstanceId.make("codex-standard-wire-account");
+  const standardSelections: ReadonlyArray<{
+    readonly label: string;
+    readonly selection: ModelSelection | undefined;
+  }> = [
+    { label: "unset selection", selection: undefined },
+    {
+      label: "selected model without options",
+      selection: { instanceId: tierInstance, model: "gpt-6.1-sol" },
+    },
+    {
+      label: "legacy Fast Off",
+      selection: {
+        instanceId: tierInstance,
+        model: "gpt-6.1-sol",
+        options: [{ id: "fastMode", value: false }],
+      },
+    },
+    {
+      label: "explicit Standard ahead of a stale legacy Fast On",
+      selection: {
+        instanceId: tierInstance,
+        model: "gpt-6.1-sol",
+        options: [
+          { id: "serviceTier", value: "default" },
+          { id: "fastMode", value: true },
+        ],
+      },
+    },
+  ];
+
+  for (const method of ["thread/start", "thread/resume"] as const) {
+    it.each(standardSelections)(
+      `forwards $label as explicit Standard on ${method} without rewriting native observations`,
+      async ({ selection }) => {
+        const resolved = resolveCodexServiceTier(selection, tierInstance, undefined);
+        assert.equal(resolved.error, undefined);
+        assert.equal(resolved.serviceTier, "default");
+        const calls: Array<{ method: string; payload: unknown }> = [];
+        const opened = await Effect.runPromise(
+          openCodexThread({
+            client: {
+              raw: {
+                request: (requestedMethod, payload) => {
+                  calls.push({ method: requestedMethod, payload });
+                  // Deliberately retain an older native priority observation.
+                  // Request forwarding must not relabel it as adoption/billing.
+                  return Effect.succeed({
+                    ...makeThreadOpenResponse("native-standard-wire-root"),
+                    serviceTier: "priority",
+                  });
+                },
+              },
+            },
+            threadId: ThreadId.make("standard-wire-cafe-thread"),
+            runtimeMode: "full-access",
+            cwd: process.cwd(),
+            requestedModel: "gpt-6.1-sol",
+            serviceTier: resolved.serviceTier,
+            resumeThreadId: method === "thread/resume" ? "native-standard-wire-root" : undefined,
+          }),
+        );
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0]!.method, method);
+        const payload = calls[0]!.payload as Record<string, unknown>;
+        assert.equal(Object.hasOwn(payload, "serviceTier"), true);
+        assert.equal(payload.serviceTier, "default");
+        assert.equal(payload.model, "gpt-6.1-sol");
+        assert.equal(
+          payload.threadId,
+          method === "thread/resume" ? "native-standard-wire-root" : undefined,
+        );
+        assert.equal(Object.hasOwn(payload, "input"), false);
+        assert.equal(opened.serviceTier, "priority");
+      },
+    );
+  }
+
+  it.each(standardSelections)(
+    "builds $label as Standard turn/start parameters despite a retained native priority snapshot",
+    async ({ selection }) => {
+      const providerThreadId = "native-standard-wire-root";
+      const nativePriority = observeCodexServiceTier({
+        current: undefined,
+        providerThreadId,
+        serviceTier: "priority",
+      });
+      const resolved = resolveCodexServiceTier(selection, tierInstance, undefined);
+      assert.equal(resolved.error, undefined);
+      assert.ok(typeof resolved.serviceTier === "string");
+      const params = await Effect.runPromise(
+        buildTurnStartParams({
+          threadId: providerThreadId,
+          runtimeMode: "full-access",
+          serviceTier: resolved.serviceTier,
+          prompt: "Synthetic Standard routing request.",
+        }),
+      );
+      assert.equal(Object.hasOwn(params, "serviceTier"), true);
+      assert.equal(params.serviceTier, "default");
+      assert.ok(typeof params.serviceTier === "string");
+      assert.deepEqual(params.input, [
+        { type: "text", text: "Synthetic Standard routing request." },
+      ]);
+      assert.equal(
+        resolveCodexTurnServiceTier({
+          providerThreadId,
+          snapshot: nativePriority,
+          requestedTier: params.serviceTier,
+        }),
+        "default",
+      );
+      assert.deepEqual(nativePriority, { providerThreadId, serviceTier: "priority" });
+
+      // Raw low-level omission remains meaningful to private recovery. Only
+      // the Cafe request resolver changes absence into Standard; the builder
+      // must not invent a tier for callers deliberately omitting that policy.
+      const omitted = await Effect.runPromise(
+        buildTurnStartParams({
+          threadId: providerThreadId,
+          runtimeMode: "full-access",
+        }),
+      );
+      assert.equal(Object.hasOwn(omitted, "serviceTier"), false);
+      assert.equal(
+        resolveCodexTurnServiceTier({
+          providerThreadId,
+          snapshot: nativePriority,
+          requestedTier: undefined,
+        }),
+        "priority",
+      );
+    },
+  );
+
   it.each(["thread/start", "thread/resume"] as const)(
     "preserves native routing from %s without changing requested settings",
     async (method) => {

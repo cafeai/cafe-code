@@ -6,7 +6,7 @@ Last updated: 2026-10-18 07:09:03 JST (UTC+0900)
 Decision authority: The current request to trace and fix the reported rejection and publish to dev.
 Implementation status: Source and synthetic regressions implemented; exact-source publication qualification is recorded separately in task evidence.
 Supersedes: Only the blanket modern-descriptor requirement for explicit canonical Fast in [model service tiers](codex-model-service-tiers.md).
-Superseded by: None
+Superseded in part: [Standard default](codex-standard-default.md) replaces native inheritance for unset ordinary Cafe requests only; exact-tier precedence and capability admission remain unchanged.
 
 ## Context
 

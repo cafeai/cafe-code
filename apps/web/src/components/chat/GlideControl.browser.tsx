@@ -204,15 +204,18 @@ it("requires Full access, then opens setup on first click without enabling or op
   expect(fixture.control.mock.calls.every(([input]) => input.action === "status")).toBe(true);
 
   // Opening Settings returns fresh native status; it never implies a grant.
+  // Setup polling may follow either click, so require the exact ordered actions
+  // rather than treating the last global call as the settings-action receipt.
+  const nonStatusInputs = () =>
+    fixture.control.mock.calls.map(([input]) => input).filter((input) => input.action !== "status");
   await page.getByRole("button", { name: "Open Device Control and Data Access settings" }).click();
-  await expect
-    .poll(() => fixture.control.mock.calls.at(-1)?.[0])
-    .toEqual({ action: "open-accessibility", threadId });
+  await expect.poll(nonStatusInputs).toEqual([{ action: "open-accessibility", threadId }]);
   await expect.poll(() => permissionState("accessibility")).toBe("missing");
   await page.getByRole("button", { name: "Open Screen & System Audio Recording settings" }).click();
-  await expect
-    .poll(() => fixture.control.mock.calls.at(-1)?.[0])
-    .toEqual({ action: "open-screen-recording", threadId });
+  await expect.poll(nonStatusInputs).toEqual([
+    { action: "open-accessibility", threadId },
+    { action: "open-screen-recording", threadId },
+  ]);
   expect(fixture.control.mock.calls.some(([input]) => input.action === "set-enabled")).toBe(false);
   // Escape dismisses setup and returns to the truthful, still-off switch.
   await userEvent.keyboard("{Escape}");

@@ -705,7 +705,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   for (const testCase of [
     { fastMode: true, tier: "priority" },
     { fastMode: false, tier: "default" },
-    { fastMode: undefined, tier: "omitted" },
+    { fastMode: undefined, tier: "default" },
   ] as const) {
     it.effect(`uses ${testCase.tier} routing for helper Fast ${String(testCase.fastMode)}`, () =>
       withFakeCodexSpawner(
@@ -819,7 +819,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           {
             output: encodeJsonText({ title: "Helper title", branch: "helper-branch" }),
             requireReasoningEffort: "medium",
-            expectedServiceTier: "omitted",
+            expectedServiceTier: "default",
             inspectCommand: (command) => {
               requests += 1;
               expect(command.args[command.args.indexOf("--model") + 1]).toBe("gpt-6.1-sol");

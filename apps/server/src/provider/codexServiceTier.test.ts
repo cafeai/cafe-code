@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildProviderOptionSelectionsFromDescriptors,
+  getProviderOptionCurrentLabel,
+  getProviderOptionDescriptors,
+} from "@cafecode/shared/model";
+import {
   ProviderInstanceId,
   type ModelSelection,
   type ServerProviderModel,
@@ -133,6 +138,40 @@ describe("native Codex turn routing evidence", () => {
   });
 });
 describe("exact Codex service tier admission", () => {
+  it.each([true, false])(
+    "rejects malformed modern Boolean %s after cached picker serialization",
+    (value) => {
+      const caps = {
+        optionDescriptors: [
+          {
+            id: "serviceTier",
+            label: "Tier",
+            type: "select" as const,
+            currentValue: "priority",
+            options: [
+              { id: "priority", label: "Fast", isDefault: true },
+              { id: "default", label: "Standard" },
+            ],
+          },
+        ],
+      };
+      for (const catalogue of [caps, { optionDescriptors: [] }]) {
+        const descriptors = getProviderOptionDescriptors({
+          caps: catalogue,
+          selections: [{ id: "serviceTier", value }],
+        });
+        expect(getProviderOptionCurrentLabel(descriptors[0])).toBe("Unavailable service tier");
+        const options = buildProviderOptionSelectionsFromDescriptors(descriptors);
+        const serialized = JSON.parse(JSON.stringify(selection(options)));
+        expect(resolveCodexServiceTier(serialized, instance, models)).toEqual({
+          error: "The selected Codex service tier is invalid. Choose an available service tier.",
+        });
+        // Refusal, not a cached Fast request or silent valid-tier substitution.
+        expect(options).not.toContainEqual({ id: "serviceTier", value: "priority" });
+      }
+      expect(caps.optionDescriptors[0]?.currentValue).toBe("priority");
+    },
+  );
   it.each(["default", "priority", "ultrafast"])(
     "retains the advertised wire id %s through JSON resume",
     (tier) => {
@@ -140,8 +179,19 @@ describe("exact Codex service tier admission", () => {
       expect(resolveCodexServiceTier(saved, instance, models)).toEqual({ serviceTier: tier });
     },
   );
-  it("migrates Fast without upgrading it and distinguishes omission from explicit Off", () => {
-    expect(resolveCodexServiceTier(selection(undefined), instance, models)).toEqual({});
+  it("defaults unset Fast to Standard while preserving explicit Fast and exact-tier precedence", () => {
+    expect(resolveCodexServiceTier(undefined, instance, models)).toEqual({
+      serviceTier: "default",
+    });
+    expect(resolveCodexServiceTier(selection(undefined), instance, models)).toEqual({
+      serviceTier: "default",
+    });
+    expect(resolveCodexServiceTier(selection([]), instance, undefined)).toEqual({
+      serviceTier: "default",
+    });
+    expect(
+      resolveCodexServiceTier(selection([{ id: "reasoningEffort", value: "high" }]), instance, []),
+    ).toEqual({ serviceTier: "default" });
     expect(
       resolveCodexServiceTier(selection([{ id: "fastMode", value: true }]), instance, models),
     ).toEqual({ serviceTier: "priority" });
@@ -158,6 +208,17 @@ describe("exact Codex service tier admission", () => {
         models,
       ),
     ).toEqual({ serviceTier: "default" });
+  });
+  it("does not turn another account's unset or explicit choice into an override", () => {
+    const other = ProviderInstanceId.make("other");
+    for (const options of [
+      undefined,
+      [],
+      [{ id: "fastMode", value: false }],
+      [{ id: "serviceTier", value: "priority" }],
+    ]) {
+      expect(resolveCodexServiceTier(selection(options), other, models)).toEqual({});
+    }
   });
   it("admits the same legacy Fast capability for an exact priority choice without upgrading it", () => {
     const explicit = selection([

@@ -13,6 +13,7 @@ import {
 } from "../lib/mermaid/renderService";
 import { MermaidBlock } from "./MermaidBlock";
 import { GANTT_SCHEDULE } from "./mermaidGantt.test.fixture";
+import { observeNativeInput } from "./nativeInput.browser.fixture";
 
 const mocks = vi.hoisted(() => ({
   render: vi.fn<(source: string, theme: "dark" | "light") => Promise<MermaidResult>>(),
@@ -543,6 +544,11 @@ describe("Mermaid block", () => {
   it.for(REAL_CHARTS.map((chart) => ({ ...chart, theme: "dark" as const, scale: 100 })))(
     "retains real $name source, copy and expanded controls",
     async ({ source, label, theme, scale }, { onTestFinished }) => {
+      let nativeInputOwner: HTMLElement | null = null;
+      const nativeInput = observeNativeInput("mermaid-family", () => nativeInputOwner);
+      // The passive observer belongs to this invocation even if a hard test
+      // deadline retires it before an awaited render or input command returns.
+      onTestFinished(nativeInput.retire);
       let retired = false;
       let ownedHost: HTMLDivElement | undefined;
       let screen: Awaited<ReturnType<typeof render>> | undefined;
@@ -550,11 +556,13 @@ describe("Mermaid block", () => {
       let cleanupPromise: Promise<void> | undefined;
       let retireKeyboardObservation: (() => void) | undefined;
       const requireActive = () => {
+        nativeInput.assertActive();
         if (retired) throw new Error("Mermaid chart fixture already retired");
       };
       const cleanup = () => {
         if (cleanupPromise) return cleanupPromise;
         retired = true;
+        nativeInput.retire();
         retireKeyboardObservation?.();
         cleanupPromise = (async () => {
           try {
@@ -650,6 +658,7 @@ describe("Mermaid block", () => {
         requireActive();
         const popup = document.querySelector<HTMLElement>(".mermaid-expanded-dialog")!;
         const viewport = document.querySelector<HTMLElement>(".mermaid-expanded-viewport")!;
+        nativeInputOwner = viewport;
         await vi.waitFor(() => {
           expect(Number(getComputedStyle(popup).opacity)).toBe(1);
           expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 1);
@@ -759,8 +768,11 @@ describe("Mermaid block", () => {
           requireActive();
           if (keyboardRetired) throw new Error("Mermaid keyboard fixture already retired");
           keyboardObservations.push(readKeyboardViewport("ready"));
+          nativeInput.mark("ready");
+          nativeInput.mark("before-input");
           await userEvent.keyboard("{ArrowRight}");
           requireActive();
+          nativeInput.mark("after-input");
           if (keyboardRetired) throw new Error("Mermaid keyboard fixture already retired");
           await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(0));
           requireActive();
@@ -828,6 +840,10 @@ describe("Mermaid block", () => {
         requireActive();
         await expect.element(page.getByRole("button", { name: "Expand diagram" })).toHaveFocus();
         requireActive();
+        nativeInput.complete();
+      } catch (error) {
+        nativeInput.fail();
+        throw error;
       } finally {
         await cleanup();
       }

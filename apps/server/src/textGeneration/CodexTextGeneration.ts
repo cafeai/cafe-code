@@ -229,8 +229,9 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           `model_reasoning_effort="${reasoningEffort}"`,
           // Match the app-server/TUI wire ids. An explicit Off must override a
           // user's priority config, otherwise even a short metadata helper can
-          // silently incur the premium the Cafe selection turned off. Only an
-          // absent selection delegates to upstream configuration.
+          // silently incur the premium the Cafe selection turned off. An unset
+          // Cafe choice also resolves to Standard; explicit advertised tiers
+          // keep their exact validated ids.
           ...(tier.serviceTier !== undefined
             ? ["--config", `service_tier=${encodeServiceTier(tier.serviceTier)}`]
             : []),

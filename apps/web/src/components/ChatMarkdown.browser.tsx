@@ -8,6 +8,7 @@ import { page, userEvent } from "vitest/browser";
 
 import { applyInterfaceScalePercent } from "../interfaceScale";
 import { GANTT_SCHEDULE } from "./mermaidGantt.test.fixture";
+import { observeNativeInput } from "./nativeInput.browser.fixture";
 
 const {
   confirmMock,
@@ -1009,15 +1010,24 @@ describe("ChatMarkdown", () => {
     }
   });
 
-  it("opens a wide table fitted to the screen and supports zoom and native horizontal scrolling", async () => {
+  it("opens a wide table fitted to the screen and supports zoom and native horizontal scrolling", async ({
+    onTestFinished,
+  }) => {
+    let nativeInputOwner: HTMLElement | null = null;
+    const nativeInput = observeNativeInput("markdown-table", () => nativeInputOwner);
+    onTestFinished(nativeInput.retire);
     const screen = await render(renderTableViewerFixture());
     try {
+      nativeInput.assertActive();
       const expand = page.getByRole("button", { name: "Expand table" });
       await expect.element(expand).toBeVisible();
+      nativeInput.assertActive();
       await expand.click();
+      nativeInput.assertActive();
 
       const dialog = page.getByRole("dialog", { name: "Expanded table" });
       await expect.element(dialog).toBeVisible();
+      nativeInput.assertActive();
       const dialogElement = dialog.element();
       // Visibility precedes the shared dialog's 98% -> 100% entrance scale.
       // Pixel comparisons must observe the finished presentation so that
@@ -1025,6 +1035,7 @@ describe("ChatMarkdown", () => {
       await vi.waitFor(() =>
         expect(Number.parseFloat(getComputedStyle(dialogElement).scale)).toBe(1),
       );
+      nativeInput.assertActive();
       const table = dialogElement.querySelector<HTMLTableElement>("table");
       expect(table).not.toBeNull();
       expect(table!.querySelectorAll("tr")).toHaveLength(3);
@@ -1035,23 +1046,28 @@ describe("ChatMarkdown", () => {
       const viewport = page
         .getByRole("region", { name: "Expanded table; scroll to inspect" })
         .element() as HTMLElement;
+      nativeInputOwner = viewport;
       // Fit is the opening state. Give ResizeObserver its normal frame to
       // measure the dialog before asserting the full table fits the viewport.
       await vi.waitFor(() => {
         expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 2);
         expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.clientHeight + 2);
       });
+      nativeInput.assertActive();
       const fitWidth = table!.getBoundingClientRect().width;
 
       await page.getByRole("button", { name: "Reset", exact: true }).click();
+      nativeInput.assertActive();
       const resetWidth = table!.getBoundingClientRect().width;
       expect(resetWidth).toBeGreaterThan(fitWidth + 1);
       expect(viewport.scrollWidth).toBeGreaterThan(viewport.clientWidth);
 
       await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+      nativeInput.assertActive();
       expect(table!.getBoundingClientRect().width).toBeGreaterThan(resetWidth);
       expect(page.getByRole("status", { name: "Zoom level" }).element().textContent).toBe("125%");
       await page.getByRole("button", { name: "Zoom out", exact: true }).click();
+      nativeInput.assertActive();
       expect(page.getByRole("status", { name: "Zoom level" }).element().textContent).toBe("100%");
       expect(table!.getBoundingClientRect().width).toBeCloseTo(resetWidth, 0);
       expect(
@@ -1059,18 +1075,33 @@ describe("ChatMarkdown", () => {
       ).toBeLessThanOrEqual(1);
 
       viewport.focus();
+      nativeInput.mark("ready");
+      nativeInput.mark("before-input");
       await userEvent.keyboard("{ArrowRight}");
+      nativeInput.assertActive();
+      nativeInput.mark("after-input");
       await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(0));
+      nativeInput.assertActive();
       await page.getByRole("button", { name: "Fit", exact: true }).click();
+      nativeInput.assertActive();
       await vi.waitFor(() =>
         expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth + 2),
       );
+      nativeInput.assertActive();
       expect(viewport.scrollLeft).toBe(0);
 
       await userEvent.keyboard("{Escape}");
+      nativeInput.assertActive();
       await expect.element(dialog).not.toBeInTheDocument();
+      nativeInput.assertActive();
       await expect.element(expand).toHaveFocus();
+      nativeInput.assertActive();
+      nativeInput.complete();
+    } catch (error) {
+      nativeInput.fail();
+      throw error;
     } finally {
+      nativeInput.retire();
       await screen.unmount();
     }
   });

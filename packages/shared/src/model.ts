@@ -117,6 +117,10 @@ function resolveDescriptorChoiceValue(
   raw: string | null | undefined,
 ): string | undefined {
   const trimmed = trimOrNull(raw);
+  // Routing ids are exact request values, never prompt-injected effort aliases.
+  // In particular cached metadata cannot remap Standard into a paid default.
+  // Preserve unavailable ids for server rejection rather than substituting.
+  if (descriptor.id === "serviceTier") return trimmed ?? "default";
   if (!trimmed) {
     return descriptor.currentValue ?? descriptor.options.find((option) => option.isDefault)?.id;
   }
@@ -134,11 +138,18 @@ function resolveDescriptorChoiceValue(
   }
   // Preserve removed tier/program choices for explicit correction and server
   // rejection rather than silently resetting a saved selection on refresh.
-  if (descriptor.id === "serviceTier" || descriptor.id === "cyberAccessProgram") return trimmed;
+  if (descriptor.id === "cyberAccessProgram") return trimmed;
   return descriptor.currentValue ?? descriptor.options.find((option) => option.isDefault)?.id;
 }
 
 function cloneDescriptor(descriptor: ProviderOptionDescriptor): ProviderOptionDescriptor {
+  // Effort aliases must not intercept routing actions (e.g. selecting Standard)
+  // in the menu. Strip only from a fresh service-tier copy; other descriptors,
+  // including Claude's prompt-controlled efforts, retain their native policy.
+  if (descriptor.type === "select" && descriptor.id === "serviceTier") {
+    const { promptInjectedValues: _unusedPromptInjectedValues, ...routing } = descriptor;
+    return { ...routing, options: [...routing.options] };
+  }
   return descriptor.type === "select"
     ? {
         ...descriptor,
@@ -166,6 +177,15 @@ function withDescriptorCurrentValue(
       };
     }
     return descriptor;
+  }
+  if (descriptor.id === "serviceTier" && typeof rawCurrentValue === "boolean") {
+    // The generic option contract also permits Booleans, but modern routing
+    // does not. Never launder that malformed selection into a cached paid
+    // currentValue. Retain a visible unavailable choice using a fixed invalid
+    // wire marker: ':' is outside native tier syntax, so server validation
+    // must refuse it before any request regardless of advertised capabilities.
+    // A deliberate menu selection replaces it with the actual chosen string.
+    return { ...descriptor, currentValue: "invalid:service-tier" };
   }
   const currentValue =
     typeof rawCurrentValue === "string"
@@ -208,7 +228,7 @@ export function getProviderOptionDescriptors(input: {
   const baseDescriptors = (caps.optionDescriptors ?? []).map(cloneDescriptor);
   if (
     !baseDescriptors.some((entry) => entry.id === "serviceTier") &&
-    typeof getRawSelectionValueById(selections, "serviceTier") === "string"
+    getRawSelectionValueById(selections, "serviceTier") !== undefined
   ) {
     // Losing a model/account capability is not consent to erase a persisted
     // tier. Keep the safe explicit-standard escape, plus canonical Fast only
@@ -241,7 +261,12 @@ export function getProviderOptionDescriptors(input: {
                 ? "default"
                 : undefined
             : undefined) ??
-          descriptor.currentValue,
+          // A service-tier catalogue describes available routing, not consent
+          // to use its paid default. Explicit saved choices (including legacy
+          // Fast) win above; otherwise Cafe deliberately requests Standard.
+          // This also normalizes older cached Codex descriptors that predate
+          // the explicit Standard default, without changing Claude Booleans.
+          (descriptor.id === "serviceTier" ? "default" : descriptor.currentValue),
       ),
     );
 }

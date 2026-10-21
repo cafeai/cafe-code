@@ -443,7 +443,7 @@ function makeRuntimeFactory() {
   };
 }
 
-function makeFailedRootRecoveryFixture() {
+function makeFailedRootRecoveryFixture(fastMode = false) {
   const factory = makeRuntimeFactory();
   const generations = [
     SubagentRuntimeId.make("00000000-0000-4000-8000-000000000081"),
@@ -515,6 +515,7 @@ function makeFailedRootRecoveryFixture() {
       additionalDirectories: [path.join(process.cwd(), "packages")],
       modelSelection: createModelSelection(account, "gpt-5.4", [
         { id: "reasoningEffort", value: "high" },
+        ...(fastMode ? [{ id: "fastMode", value: true }] : []),
       ]),
       maxConcurrentSubagents: 3,
       codexContextWindowOverride: 800_000,
@@ -552,7 +553,7 @@ function makeFailedRootRecoveryFixture() {
 it.effect(
   "cold failed-root recovery retires before exact-history reopening and submits one new turn with unchanged launch policy",
   () => {
-    const fixture = makeFailedRootRecoveryFixture();
+    const fixture = makeFailedRootRecoveryFixture(true);
     return Effect.gen(function* () {
       const { adapter, oldRuntime } = yield* fixture.prepare;
       const closeReached = yield* Deferred.make<void>();
@@ -620,6 +621,8 @@ it.effect(
       assert.equal(replacement.options.codexContextWindowOverride, 800_000);
       assert.equal(replacement.options.autoCompactTokenLimit, 640_000);
       assert.equal(replacement.options.runtimeMode, "approval-required");
+      assert.equal(oldRuntime.options.serviceTier, "priority");
+      assert.equal(replacement.options.serviceTier, "priority");
       assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
       assert.equal(oldRuntime.steerTurnImpl.mock.calls.length, 0);
       assert.equal(replacement.steerTurnImpl.mock.calls.length, 0);
@@ -633,6 +636,9 @@ it.effect(
       assert.equal(request.allowActiveTurnSteerFallback, false);
       assert.deepEqual(request.expectedRecoverySession, result.recoverySession);
       assert.equal(request.expectedFailedRoot, undefined);
+      // Private recovery reopens recorded Fast policy, not an ordinary unset
+      // composer request. Its new continuation must inherit that exact policy.
+      assert.equal(Object.hasOwn(request, "serviceTier"), false);
       assert.equal(
         request.input,
         "Continue the unfinished work. Check existing work before repeating any action.",
@@ -1945,34 +1951,37 @@ validationLayer("CodexAdapterLive validation", (it) => {
     }),
   );
 
-  it.effect("preserves explicit Fast off, omitted settings, and provider identity on start", () =>
-    Effect.gen(function* () {
-      const adapter = yield* CodexAdapter;
-      const selections = [
-        createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-astra", [
-          { id: "fastMode", value: false },
-        ]),
-        createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-astra"),
-        createModelSelection(ProviderInstanceId.make("other_codex"), "gpt-6-astra", [
-          { id: "fastMode", value: true },
-        ]),
-      ];
-      const expectedTiers = ["default", undefined, undefined];
-      validationRuntimeFactory.factory.mockClear();
-      for (const [index, modelSelection] of selections.entries()) {
-        yield* adapter.startSession({
-          provider: ProviderDriverKind.make("codex"),
-          threadId: asThreadId(`thread-astra-start-${index}`),
-          runtimeMode: "approval-required",
-          modelSelection,
-        });
-        const options = validationRuntimeFactory.factory.mock.calls[index]?.[0];
-        assert.ok(options);
-        assert.equal(options.serviceTier, expectedTiers[index]);
-        assert.equal(Object.hasOwn(options, "serviceTier"), index === 0);
-        assert.equal(options.model, index === 2 ? undefined : "gpt-6-astra");
-      }
-    }),
+  it.effect(
+    "defaults unset Fast to Standard and preserves explicit Off and provider identity on start",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const selections = [
+          createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-astra", [
+            { id: "fastMode", value: false },
+          ]),
+          createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-astra"),
+          createModelSelection(ProviderInstanceId.make("other_codex"), "gpt-6-astra", [
+            { id: "fastMode", value: true },
+          ]),
+          undefined,
+        ];
+        const expectedTiers = ["default", "default", undefined, "default"];
+        validationRuntimeFactory.factory.mockClear();
+        for (const [index, modelSelection] of selections.entries()) {
+          yield* adapter.startSession({
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId(`thread-astra-start-${index}`),
+            runtimeMode: "approval-required",
+            modelSelection,
+          });
+          const options = validationRuntimeFactory.factory.mock.calls[index]?.[0];
+          assert.ok(options);
+          assert.equal(options.serviceTier, expectedTiers[index]);
+          assert.equal(Object.hasOwn(options, "serviceTier"), index !== 2);
+          assert.equal(options.model, index >= 2 ? undefined : "gpt-6-astra");
+        }
+      }),
   );
 
   it.effect("forks and discards a persisted Codex thread through the native runtime", () =>
@@ -2427,8 +2436,16 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.model, undefined);
       assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.effort, undefined);
       assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.serviceTier, undefined);
+      assert.equal(Object.hasOwn(runtime.sendTurnImpl.mock.calls[0]![0], "serviceTier"), false);
       assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.cyberAccessProgram, undefined);
       assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0]?.interactionMode, undefined);
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Review the retained native settings",
+        codexReview,
+      });
+      assert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+      assert.equal(Object.hasOwn(runtime.sendTurnImpl.mock.calls[1]![0], "serviceTier"), false);
 
       const invalid = yield* Effect.exit(
         adapter.sendTurn({
@@ -2442,7 +2459,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         }),
       );
       assert.equal(invalid._tag, "Failure");
-      assert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+      assert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
     }),
   );
 
@@ -2479,51 +2496,55 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }),
   );
 
-  it.effect("turns Astra Fast on and off while retaining Ultra and the exact model", () =>
-    Effect.gen(function* () {
-      const adapter = yield* CodexAdapter;
-      const threadId = asThreadId("sess-astra-fast-toggle");
-      yield* adapter.startSession({
-        provider: ProviderDriverKind.make("codex"),
-        threadId,
-        runtimeMode: "approval-required",
-      });
-      const runtime = sessionRuntimeFactory.lastRuntime;
-      assert.ok(runtime);
-      runtime.sendTurnImpl.mockClear();
+  it.effect(
+    "turns Astra Fast on, off and unset to Standard while retaining Ultra and exact account routing",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const threadId = asThreadId("sess-astra-fast-toggle");
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          runtimeMode: "approval-required",
+        });
+        const runtime = sessionRuntimeFactory.lastRuntime;
+        assert.ok(runtime);
+        runtime.sendTurnImpl.mockClear();
 
-      for (const fastMode of [true, false, undefined]) {
+        for (const fastMode of [true, false, undefined]) {
+          yield* adapter.sendTurn({
+            threadId,
+            input: "Continue",
+            modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-astra", [
+              { id: "reasoningEffort", value: "ultra" },
+              ...(fastMode === undefined ? [] : [{ id: "fastMode", value: fastMode }]),
+            ]),
+            attachments: [],
+          });
+        }
+        yield* adapter.sendTurn({ threadId, input: "Continue", attachments: [] });
         yield* adapter.sendTurn({
           threadId,
           input: "Continue",
-          modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-astra", [
-            { id: "reasoningEffort", value: "ultra" },
-            ...(fastMode === undefined ? [] : [{ id: "fastMode", value: fastMode }]),
-          ]),
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("other_codex"),
+            "gpt-6-astra",
+            [{ id: "fastMode", value: false }],
+          ),
           attachments: [],
         });
-      }
-      yield* adapter.sendTurn({
-        threadId,
-        input: "Continue",
-        modelSelection: createModelSelection(
-          ProviderInstanceId.make("other_codex"),
-          "gpt-6-astra",
-          [{ id: "fastMode", value: false }],
-        ),
-        attachments: [],
-      });
 
-      assert.deepStrictEqual(
-        runtime.sendTurnImpl.mock.calls.map(([input]) => input),
-        [
-          { input: "Continue", model: "gpt-6-astra", effort: "ultra", serviceTier: "priority" },
-          { input: "Continue", model: "gpt-6-astra", effort: "ultra", serviceTier: "default" },
-          { input: "Continue", model: "gpt-6-astra", effort: "ultra" },
-          { input: "Continue" },
-        ],
-      );
-    }),
+        assert.deepStrictEqual(
+          runtime.sendTurnImpl.mock.calls.map(([input]) => input),
+          [
+            { input: "Continue", model: "gpt-6-astra", effort: "ultra", serviceTier: "priority" },
+            { input: "Continue", model: "gpt-6-astra", effort: "ultra", serviceTier: "default" },
+            { input: "Continue", model: "gpt-6-astra", effort: "ultra", serviceTier: "default" },
+            { input: "Continue", serviceTier: "default" },
+            { input: "Continue" },
+          ],
+        );
+      }),
   );
 
   it.effect(
@@ -2562,6 +2583,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
           runtime.sendTurnImpl.mock.calls[0]?.[0].expectedSubagentPolicySession,
           expected,
         );
+        assert.equal(Object.hasOwn(runtime.sendTurnImpl.mock.calls[0]![0], "serviceTier"), false);
         assert.deepEqual(
           runtime.steerTurnImpl.mock.calls[0]?.[0].expectedSubagentPolicySession,
           expected,
@@ -3670,6 +3692,10 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         );
         assert.equal(
           runtime.sendTurnImpl.mock.calls.at(-1)?.[0].allowActiveTurnSteerFallback,
+          false,
+        );
+        assert.equal(
+          Object.hasOwn(runtime.sendTurnImpl.mock.calls.at(-1)![0], "serviceTier"),
           false,
         );
         assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);

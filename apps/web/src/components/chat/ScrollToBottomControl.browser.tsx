@@ -1,11 +1,12 @@
 import "../../index.css";
 
 import { getUiLocale, setUiLocale, uiText, type UiLocale } from "@cafecode/shared/i18n";
-import { expect, it, vi } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
 
 import { Button } from "../ui/button";
+import { observeNativeInput } from "../nativeInput.browser.fixture";
 import { ScrollToBottomControl } from "./ScrollToBottomControl";
 
 const popup = () => document.querySelector<HTMLDivElement>('[data-scroll-to-bottom-popup="true"]');
@@ -121,27 +122,55 @@ it.each([
 );
 
 it("keeps the main native press a scroll action and dismisses an unpinned hover preview on exit", async () => {
+  let retainedPopup: HTMLDivElement | null = null;
+  const diagnostic = observeNativeInput("scroll-control", () => retainedPopup);
+  // Retire the passive observer even when the enclosing test times out before
+  // an awaited native action returns; a late continuation must not send input.
+  onTestFinished(diagnostic.retire);
   const previousLocale = getUiLocale();
   setUiLocale("en");
   const { view, onScrollToBottom, onHideUntilBottom } = await mountControl();
   try {
+    diagnostic.assertActive();
     const before = page.getByRole("button", { name: "Before control", exact: true });
     const scroll = page.getByRole("button", { name: "Scroll to bottom", exact: true });
     await before.click();
+    diagnostic.assertActive();
     await scroll.hover();
+    diagnostic.assertActive();
     await expect
       .element(page.getByRole("button", { name: "Hide until bottom", exact: true }))
       .toBeVisible();
+    diagnostic.assertActive();
+    retainedPopup = popup();
+    // Visibility can precede the preview's native entrance. Exercise departure
+    // from an observed preview, as the neighboring hover fixtures do, without
+    // bypassing the finite exit or its physical resource-retirement assertion.
+    await settleEntrance(retainedPopup!);
+    diagnostic.assertActive();
+    diagnostic.mark("ready");
+    diagnostic.mark("before-exit");
     await before.hover();
+    diagnostic.assertActive();
+    diagnostic.mark("after-exit");
     await vi.waitFor(() => expect(popup()).toBeNull());
+    diagnostic.assertActive();
     expect(onScrollToBottom).not.toHaveBeenCalled();
     expect(onHideUntilBottom).not.toHaveBeenCalled();
     await scroll.click();
+    diagnostic.assertActive();
     expect(onScrollToBottom).toHaveBeenCalledOnce();
     expect(onHideUntilBottom).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(popup()).toBeNull());
+    diagnostic.assertActive();
     await expect.element(scroll).toHaveFocus();
+    diagnostic.assertActive();
+    diagnostic.complete();
+  } catch (error) {
+    diagnostic.fail();
+    throw error;
   } finally {
+    diagnostic.retire();
     await view.unmount();
     setUiLocale(previousLocale);
   }

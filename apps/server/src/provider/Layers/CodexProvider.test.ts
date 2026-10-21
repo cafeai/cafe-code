@@ -1,4 +1,8 @@
 import { CodexSettings } from "@cafecode/contracts";
+import {
+  buildProviderOptionSelectionsFromDescriptors,
+  getProviderOptionDescriptors,
+} from "@cafecode/shared/model";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -520,8 +524,10 @@ describe("Codex catalogue producer provenance", () => {
           options: [{ id: "medium", isDefault: true }],
         });
         const tier = options?.find((entry) => entry.id === "serviceTier");
-        expect(tier).toMatchObject({ options: [{ id: "default", label: "Standard" }] });
-        expect(tier).not.toHaveProperty("currentValue");
+        expect(tier).toMatchObject({
+          currentValue: "default",
+          options: [{ id: "default", label: "Standard", isDefault: true }],
+        });
       }
       if (earlyReturn || failed) expect(snapshot.status).toBe("error");
       else expect(snapshot.status).toBe("ready");
@@ -736,7 +742,23 @@ describe("Codex picker model/list refresh", () => {
         id: "fastMode",
         label: "Fast Mode",
         type: "boolean",
+        currentValue: false,
       });
+      const caps = row?.capabilities ?? { optionDescriptors: [] };
+      for (const fastMode of [undefined, false, true]) {
+        const selections = buildProviderOptionSelectionsFromDescriptors(
+          getProviderOptionDescriptors({
+            caps,
+            ...(fastMode !== undefined
+              ? { selections: [{ id: "fastMode", value: fastMode }] }
+              : {}),
+          }),
+        );
+        expect(selections?.find((option) => option.id === "fastMode")).toEqual({
+          id: "fastMode",
+          value: fastMode ?? false,
+        });
+      }
 
       const live = { slug, name: "Account model", isCustom: false, capabilities: null };
       expect(finalizeCodexModelListRefresh([live], [slug])).toEqual([live]);
@@ -899,6 +921,47 @@ describe("Codex picker model/list refresh", () => {
     ]);
   });
 
+  it("serializes Standard by default without replacing explicit Fast selections", async () => {
+    const rows = await Effect.runPromise(
+      requestAllCodexModelsWithClient(
+        makeModelListClient(() =>
+          Effect.succeed({
+            data: [
+              {
+                ...makeModel("live-tier-model"),
+                // A paid choice first in the native list must not become the
+                // composer's default merely because of provider ordering.
+                serviceTiers: [
+                  { id: "ultrafast", name: "Ultra fast", description: "Ultra fast processing" },
+                  { id: "priority", name: "Fast", description: "Priority processing" },
+                ],
+              },
+            ],
+          }),
+        ),
+      ),
+    );
+    const caps = rows[0]?.capabilities ?? { optionDescriptors: [] };
+    for (const [selections, expectedTier] of [
+      [undefined, "default"],
+      [[], "default"],
+      [[{ id: "fastMode", value: false }], "default"],
+      [[{ id: "fastMode", value: true }], "priority"],
+      [[{ id: "serviceTier", value: "default" }], "default"],
+      [[{ id: "serviceTier", value: "priority" }], "priority"],
+      [[{ id: "serviceTier", value: "ultrafast" }], "ultrafast"],
+    ] as const) {
+      expect(
+        buildProviderOptionSelectionsFromDescriptors(
+          getProviderOptionDescriptors({ caps, selections }),
+        ),
+      ).toEqual([
+        { id: "reasoningEffort", value: "medium" },
+        { id: "serviceTier", value: expectedTier },
+      ]);
+    }
+  });
+
   it("bounds and sanitizes advertised tiers without selecting any paid default or borrowing custom model tiers", async () => {
     const rows = await Effect.runPromise(
       requestAllCodexModelsWithClient(
@@ -932,19 +995,20 @@ describe("Codex picker model/list refresh", () => {
     const tier = rows[0]?.capabilities?.optionDescriptors?.find(
       (entry) => entry.id === "serviceTier",
     );
-    expect(tier).not.toHaveProperty("currentValue");
+    expect(tier?.currentValue).toBe("default");
     expect(tier?.type).toBe("select");
     if (tier?.type !== "select") throw new Error("Missing advertised tiers");
-    expect(tier.options[0]).toEqual({ id: "default", label: "Standard" });
+    expect(tier.options[0]).toEqual({ id: "default", label: "Standard", isDefault: true });
     expect(tier.options.filter((option) => option.id === "ultrafast")).toEqual([
       { id: "ultrafast", label: "Ultra fast" },
     ]);
     expect(tier.options.length).toBeLessThanOrEqual(33);
-    expect(
-      tier.options.some(
-        (option) => option.isDefault || option.id === "secret" || option.id === "bad id",
-      ),
-    ).toBe(false);
+    expect(tier.options.some((option) => option.id === "secret" || option.id === "bad id")).toBe(
+      false,
+    );
+    expect(tier.options.filter((option) => option.isDefault).map((option) => option.id)).toEqual([
+      "default",
+    ]);
     const all = finalizeCodexModelListRefresh(rows, ["custom-unknown-model"]);
     expect(
       all
@@ -1075,6 +1139,7 @@ describe("Codex picker model/list refresh", () => {
         id: "fastMode",
         label: "Fast Mode",
         type: "boolean",
+        currentValue: false,
       },
     ]);
   });

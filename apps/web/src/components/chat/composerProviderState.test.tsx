@@ -63,6 +63,40 @@ const ULTRATHINK_FRAME_CLASSES = {
 } as const;
 
 describe("getComposerProviderState", () => {
+  it("dispatches Standard for an unset cached tier without borrowing a paid catalogue default", () => {
+    const models = modelWith([
+      {
+        ...selectDescriptor("serviceTier", [
+          { id: "priority", label: "Fast", isDefault: true },
+          { id: "default", label: "Standard" },
+        ]),
+        currentValue: "priority",
+      },
+    ]);
+    for (const modelOptions of [undefined, null, []]) {
+      const state = getComposerProviderState({
+        provider: PROVIDER,
+        model: MODEL,
+        models,
+        prompt: "",
+        modelOptions,
+      });
+      expect(state.traitsTriggerLabel).toBe("Standard");
+      expect(state.modelOptionsForDispatch).toEqual(selections(["serviceTier", "default"]));
+    }
+    // A saved choice, rather than the catalogue's order/current value, grants
+    // routing intent. Rendering must neither erase it nor mutate the catalogue.
+    expect(
+      getComposerProviderState({
+        provider: PROVIDER,
+        model: MODEL,
+        models,
+        prompt: "",
+        modelOptions: selections(["serviceTier", "priority"]),
+      }).modelOptionsForDispatch,
+    ).toEqual(selections(["serviceTier", "priority"]));
+    expect(models[0]?.capabilities?.optionDescriptors?.[0]?.currentValue).toBe("priority");
+  });
   it("dispatches the persisted Daybreak choice and retains it for validation after capability loss", () => {
     const input = {
       provider: PROVIDER,

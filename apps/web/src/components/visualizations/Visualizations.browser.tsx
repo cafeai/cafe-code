@@ -856,7 +856,15 @@ describe("Full-access live inline visualizations", () => {
             ).naturalWidth,
           ).toBe(640),
         );
-        await vi.waitFor(() => expect(anchor.getBoundingClientRect().height).toBe(240));
+        // The resized box is visible before the timeline's ResizeObserver and
+        // animation-frame correction have restored the retained review anchor.
+        // Observe that actual restoration within the existing wait; keep the
+        // same exact position/offset assertions after the readiness boundary.
+        await vi.waitFor(() => {
+          expect(anchor.getBoundingClientRect().height).toBe(240);
+          expect(scroller.scrollTop).toBeCloseTo(reviewTop, 0);
+          expect(anchor.getBoundingClientRect().top).toBeCloseTo(anchorTop, 0);
+        });
         expect(scroller.scrollTop).toBeCloseTo(reviewTop, 0);
         expect(anchor.getBoundingClientRect().top).toBeCloseTo(anchorTop, 0);
         expect(firstImage.element()).toBe(imageNode);

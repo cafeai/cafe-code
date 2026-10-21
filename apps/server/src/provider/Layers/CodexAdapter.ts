@@ -6429,7 +6429,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         issue: daybreak.error,
       });
     const tier =
-      input.codexReview !== undefined
+      // Internal guarded continuations carry their exact existing policy, not
+      // an unset composer choice. Preserve that policy (including native
+      // omission) and the native review contract. Ordinary new turns instead
+      // resolve an absent selection to explicit Standard, so a preceding Fast
+      // turn or native account default cannot silently enable paid routing.
+      input.codexReview !== undefined ||
+      (input.modelSelection === undefined &&
+        (input.expectedFailedRoot !== undefined ||
+          input.expectedSubagentPolicySession !== undefined))
         ? {}
         : resolveCodexServiceTier(input.modelSelection, boundInstanceId, advertisedModels);
     if (tier.error)
