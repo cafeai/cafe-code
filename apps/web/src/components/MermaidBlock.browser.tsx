@@ -329,8 +329,10 @@ describe("Mermaid block", () => {
     onTestFinished,
   }) => {
     let observedViewport: HTMLElement | null = null;
-    let observingArrow = false;
+    let observingInput = false;
     let retired = false;
+    let activationPointerId: number | undefined;
+    const nativeArrowEvents = new Map<"keydown" | "keyup", KeyboardEvent>();
     let sequence = 0;
     const started = performance.now();
     const finite = (value: unknown) =>
@@ -358,6 +360,10 @@ describe("Mermaid block", () => {
           parentActiveFrame: frame ? frame.ownerDocument.activeElement === frame : null,
           connected: viewport?.isConnected === true,
           inert: viewport ? viewport.closest("[inert]") !== null : null,
+          pointerCaptured:
+            viewport && activationPointerId !== undefined
+              ? viewport.hasPointerCapture(activationPointerId)
+              : null,
           scrollLeft: finite(viewport?.scrollLeft),
           scrollTop: finite(viewport?.scrollTop),
           scrollWidth: finite(viewport?.scrollWidth),
@@ -373,17 +379,18 @@ describe("Mermaid block", () => {
     };
     type KeyboardViewportReceipt = ReturnType<typeof readKeyboardViewport>;
     let baseline: KeyboardViewportReceipt | null = null;
-    const events: KeyboardViewportReceipt[] = [];
+    const events: Array<KeyboardViewportReceipt & { readonly defaultPrevented?: boolean }> = [];
     const recordKeyboardViewport = (
       phase: string,
       extra: Record<string, string | number | boolean | null> = {},
     ) => {
-      if (!observingArrow || retired) return;
+      if (!observingInput || retired) return;
       events.push(readKeyboardViewport(phase, extra));
       if (events.length > 16) events.shift();
     };
     const observeKeyboard = (event: KeyboardEvent) => {
-      if (event.key !== "ArrowRight" || !observingArrow || retired) return;
+      if (event.key !== "ArrowRight" || !observingInput || retired) return;
+      nativeArrowEvents.set(event.type === "keydown" ? "keydown" : "keyup", event);
       const fields = () => ({
         trusted: event.isTrusted,
         exactTarget: event.target === observedViewport,
@@ -412,6 +419,44 @@ describe("Mermaid block", () => {
         );
       });
     };
+    const activationTarget = (target: EventTarget | null) => {
+      if (target === observedViewport) return "owner";
+      if (!(target instanceof Element) || !observedViewport?.contains(target)) return "other";
+      if (target.closest("img")) return "img";
+      if (target.closest("canvas")) return "canvas";
+      if (target.closest("table")) return "table";
+      return "descendant";
+    };
+    const activationEvents = [
+      "pointerdown",
+      "mousedown",
+      "pointerup",
+      "mouseup",
+      "click",
+      "gotpointercapture",
+      "lostpointercapture",
+    ] as const;
+    const activationObservations = new Map<
+      (typeof activationEvents)[number],
+      { event: Event; receipt: KeyboardViewportReceipt }
+    >();
+    const observeActivation = (event: Event) => {
+      if (!observingInput || retired) return;
+      const type = activationEvents.find((name) => name === event.type);
+      if (type === undefined) return;
+      if (event instanceof PointerEvent) activationPointerId = event.pointerId;
+      // Capture native geometry/capture state now, but retain at most one
+      // event per fixed kind until the original click has actually fulfilled.
+      // Capture-phase microtasks alone cannot attest final default prevention.
+      activationObservations.set(type, {
+        event,
+        receipt: readKeyboardViewport(`native-${type}`, {
+          trusted: event.isTrusted,
+          target: activationTarget(event.target),
+          preventedAtCapture: event.defaultPrevented,
+        }),
+      });
+    };
     const observeNativeFocus = (event: FocusEvent) => {
       recordKeyboardViewport(event.type === "focus" ? "native-focus" : "native-blur", {
         trusted: event.isTrusted,
@@ -428,27 +473,34 @@ describe("Mermaid block", () => {
     const retireKeyboardDiagnostic = () => {
       if (retired) return;
       retired = true;
-      observingArrow = false;
+      observingInput = false;
       window.removeEventListener("keydown", observeKeyboard, true);
       window.removeEventListener("keyup", observeKeyboard, true);
+      for (const name of activationEvents)
+        window.removeEventListener(name, observeActivation, true);
       window.removeEventListener("focus", observeNativeFocus, true);
       window.removeEventListener("blur", observeNativeFocus, true);
       observedViewport?.removeEventListener("scroll", observeNativeScroll);
       observedViewport?.removeEventListener("scrollend", observeNativeScroll);
       // One bounded source-free receipt on both ordinary and hard-timeout
       // retirement. Late microtasks cannot publish into a later test's realm.
-      console.info(
-        "mermaid-keyboard-pan-diagnostic",
-        JSON.stringify({
-          baseline,
-          events,
-          final: readKeyboardViewport("final"),
-        }),
-      );
+      const final = readKeyboardViewport("final");
+      nativeArrowEvents.clear();
+      activationObservations.clear();
+      activationPointerId = undefined;
+      try {
+        console.info(
+          "mermaid-keyboard-pan-diagnostic",
+          JSON.stringify({ baseline, events, final }),
+        );
+      } catch {
+        /* Diagnostic delivery never replaces the original test outcome. */
+      }
     };
     onTestFinished(retireKeyboardDiagnostic);
     window.addEventListener("keydown", observeKeyboard, true);
     window.addEventListener("keyup", observeKeyboard, true);
+    for (const name of activationEvents) window.addEventListener(name, observeActivation, true);
     window.addEventListener("focus", observeNativeFocus, true);
     window.addEventListener("blur", observeNativeFocus, true);
     mocks.render.mockResolvedValue(diagram("Large diagram", 3000, 1600));
@@ -478,20 +530,41 @@ describe("Mermaid block", () => {
       await page.getByRole("button", { name: "Zoom out", exact: true }).click();
       // Use ordinary native pointer activation as well as DOM focus, while
       // retaining the single key action and the original scrolling assertion.
+      if (retired) throw new Error("Mermaid keyboard fixture already retired");
+      observingInput = true;
+      recordKeyboardViewport("before-activation");
       await page.getByRole("region", { name: "Expanded diagram; scroll or drag to pan" }).click();
       if (retired) throw new Error("Mermaid keyboard fixture already retired");
+      for (const { event, receipt } of activationObservations.values()) {
+        events.push({ ...receipt, defaultPrevented: event.defaultPrevented });
+        events.sort((a, b) => a.sequence - b.sequence);
+        if (events.length > 16) events.shift();
+      }
+      activationObservations.clear();
+      recordKeyboardViewport("after-activation");
       await vi.waitFor(() => {
         expect(document.activeElement).toBe(viewport);
         expect(viewport.hasAttribute("data-dragging")).toBe(false);
       });
       if (retired) throw new Error("Mermaid keyboard fixture already retired");
-      observingArrow = true;
       baseline = readKeyboardViewport("baseline");
       await userEvent.keyboard("{ArrowRight}");
-      recordKeyboardViewport("after-key-command");
+      if (retired) throw new Error("Mermaid keyboard fixture already retired");
+      // Keep the exact received events until the original native command has
+      // fulfilled: a dispatch microtask alone does not attest its final flags.
+      recordKeyboardViewport("after-key-command", {
+        nativeKeydownCaptured: nativeArrowEvents.has("keydown"),
+        nativeKeydownPrevented: nativeArrowEvents.get("keydown")?.defaultPrevented ?? null,
+        nativeKeyupCaptured: nativeArrowEvents.has("keyup"),
+        nativeKeyupPrevented: nativeArrowEvents.get("keyup")?.defaultPrevented ?? null,
+      });
+      expect(nativeArrowEvents.get("keydown")?.isTrusted).toBe(true);
+      expect(nativeArrowEvents.get("keydown")?.target).toBe(viewport);
+      expect(nativeArrowEvents.get("keydown")?.defaultPrevented).toBe(true);
+      nativeArrowEvents.clear();
       await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(0));
       recordKeyboardViewport("arrow-observed");
-      observingArrow = false;
+      observingInput = false;
       viewport.scrollTo(100, 100);
       const rect = viewport.getBoundingClientRect();
       const start = browserPoint({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
@@ -691,6 +764,8 @@ describe("Mermaid block", () => {
         // not a claim about an earlier failure's unobserved cause.
         let keyboardRetired = false;
         let keyboardSucceeded = false;
+        let viewportArrow: KeyboardEvent | undefined;
+        const readViewportArrow = (): KeyboardEvent | undefined => viewportArrow;
         const keyboardObservations: Array<Record<string, string | number | boolean>> = [];
         const readKeyboardViewport = (phase: string) => ({
           phase,
@@ -707,8 +782,9 @@ describe("Mermaid block", () => {
           clientHeight: viewport.clientHeight,
         });
         const recordKeyboard = (event: KeyboardEvent) => {
-          if (keyboardRetired || event.key !== "ArrowRight" || keyboardObservations.length >= 16)
-            return;
+          if (keyboardRetired || event.key !== "ArrowRight") return;
+          if (event.type === "keydown") viewportArrow = event;
+          if (keyboardObservations.length >= 16) return;
           const fields = () => ({
             ...readKeyboardViewport(event.type),
             trusted: event.isTrusted,
@@ -736,6 +812,7 @@ describe("Mermaid block", () => {
         retireKeyboardObservation = () => {
           if (keyboardRetired) return;
           keyboardRetired = true;
+          viewportArrow = undefined;
           window.removeEventListener("keydown", recordKeyboard, true);
           window.removeEventListener("keyup", recordKeyboard, true);
           window.removeEventListener("focus", recordKeyboardFocus, true);
@@ -754,10 +831,12 @@ describe("Mermaid block", () => {
         window.addEventListener("focus", recordKeyboardFocus, true);
         window.addEventListener("blur", recordKeyboardFocus, true);
         try {
+          nativeInput.mark("before-activation");
           await page
             .getByRole("region", { name: "Expanded diagram; scroll or drag to pan" })
             .click();
           requireActive();
+          nativeInput.mark("after-activation");
           await vi.waitFor(() => {
             expect(document.hasFocus()).toBe(true);
             expect(document.activeElement).toBe(viewport);
@@ -774,6 +853,12 @@ describe("Mermaid block", () => {
           requireActive();
           nativeInput.mark("after-input");
           if (keyboardRetired) throw new Error("Mermaid keyboard fixture already retired");
+          // Read the exact native event after React has consumed the moved
+          // viewport arrow; a capture-phase flag alone precedes that handler.
+          const receivedArrow = readViewportArrow();
+          expect(receivedArrow?.isTrusted).toBe(true);
+          expect(receivedArrow?.target).toBe(viewport);
+          expect(receivedArrow?.defaultPrevented).toBe(true);
           await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(0));
           requireActive();
           if (keyboardRetired) throw new Error("Mermaid keyboard fixture already retired");

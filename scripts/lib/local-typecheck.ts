@@ -293,7 +293,10 @@ export interface LocalCompilerChild {
   readonly terminate: () => void;
 }
 
-export type LocalCompilerLaunch = (program: LocalTypecheckProgram) => LocalCompilerChild;
+export type LocalCompilerLaunch = (
+  program: LocalTypecheckProgram,
+  environment?: Readonly<NodeJS.ProcessEnv>,
+) => LocalCompilerChild;
 
 interface HeldCompiler {
   readonly program: LocalTypecheckProgram;
@@ -335,12 +338,12 @@ export function localTypecheckOutput(name: string, emit: (text: string) => void)
   };
 }
 
-export const launchLocalTypecheckCompiler: LocalCompilerLaunch = (program) => {
+export const launchLocalTypecheckCompiler: LocalCompilerLaunch = (program, environment) => {
   process.stdout.write(`Typechecking ${program.name}\n`);
   const started = performance.now();
   const child = spawn(process.execPath, [program.compiler, "--noEmit"], {
     cwd: program.cwd,
-    env: { ...process.env, NODE_OPTIONS: "--max-old-space-size=4096" },
+    env: { ...(environment ?? process.env), NODE_OPTIONS: "--max-old-space-size=4096" },
     stdio: ["inherit", "pipe", "pipe"],
     shell: false,
   });

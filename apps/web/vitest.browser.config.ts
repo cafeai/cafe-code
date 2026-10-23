@@ -6,6 +6,9 @@ import browserTestPolicy from "./browser-test-policy.json" with { type: "json" }
 import viteConfig from "./vite.config.ts";
 
 const srcPath = fileURLToPath(new URL("./src", import.meta.url));
+// Bind setup to each actual instance below. Inherited parent setup runs on a
+// hidden browser container, which is not the selected specification's owner.
+const compilationSetup = fileURLToPath(new URL("./browserCompilationSetup.ts", import.meta.url));
 const { touchTimelineFile, visualizationFluidFile, reducedMotionFiles, browserStressPattern } =
   browserTestPolicy;
 const touchViewport = { width: 430, height: 932 };
@@ -123,7 +126,9 @@ export default mergeConfig(
               ...browserOptions,
               provider: playwright(),
               // Retain the existing public project name and native mouse input.
-              instances: [{ browser: "chromium", name: "chromium" }],
+              instances: [
+                { browser: "chromium", name: "chromium", globalSetup: [compilationSetup] },
+              ],
             },
           },
         },
@@ -151,7 +156,9 @@ export default mergeConfig(
               viewport: touchViewport,
               // Vitest/Playwright owns and closes this context at runner exit;
               // it is never reused by any desktop fixture or live application.
-              instances: [{ browser: "chromium", name: "chromium-touch" }],
+              instances: [
+                { browser: "chromium", name: "chromium-touch", globalSetup: [compilationSetup] },
+              ],
             },
           },
         },
@@ -172,7 +179,13 @@ export default mergeConfig(
             browser: {
               ...browserOptions,
               provider: playwright({ contextOptions: { reducedMotion: "no-preference" } }),
-              instances: [{ browser: "chromium", name: "chromium-visualization-fluid-motion" }],
+              instances: [
+                {
+                  browser: "chromium",
+                  name: "chromium-visualization-fluid-motion",
+                  globalSetup: [compilationSetup],
+                },
+              ],
             },
           },
         },
@@ -189,7 +202,13 @@ export default mergeConfig(
             browser: {
               ...browserOptions,
               provider: playwright({ contextOptions: { reducedMotion: "reduce" } }),
-              instances: [{ browser: "chromium", name: "chromium-context-reduced-motion" }],
+              instances: [
+                {
+                  browser: "chromium",
+                  name: "chromium-context-reduced-motion",
+                  globalSetup: [compilationSetup],
+                },
+              ],
             },
           },
         },

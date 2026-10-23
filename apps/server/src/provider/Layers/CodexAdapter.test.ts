@@ -4671,6 +4671,10 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             id: "image-generation-1",
             status: "completed",
             result: "base64-result-is-not-used-as-the-visible-detail",
+            fileId: "private-image-adapter-attachment",
+            inputImages: [
+              { path: "/private-image-adapter-input.png", sha256: "private-image-adapter-digest" },
+            ],
             revisedPrompt: "A precise technical diagram",
             savedPath: "/tmp/image-generation-1.png",
           },
@@ -4685,7 +4689,144 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       assert.equal(firstEvent.value.payload.itemType, "image_generation");
       assert.equal(firstEvent.value.payload.title, "Image generation");
       assert.equal(firstEvent.value.payload.detail, "A precise technical diagram");
+      assert.doesNotMatch(encodeProviderJsonString(firstEvent.value), /private-image-adapter/);
+      assert.match(encodeProviderJsonString(firstEvent.value), /\/tmp\/image-generation-1\.png/);
     }),
+  );
+
+  it.effect(
+    "preserves inline, file-only and transitional image lifecycle without exposing new metadata",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const references = [
+          { result: "legacy-inline-result" },
+          { fileId: "private-image-reference-file" },
+          { result: "", fileId: "private-image-reference-both" },
+        ];
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.take(references.length * 2),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const originals: Array<{ readonly payload: unknown; readonly before: string }> = [];
+        for (const [index, reference] of references.entries()) {
+          for (const method of ["item/started", "item/completed"] as const) {
+            const payload = {
+              threadId: "provider-thread-1",
+              turnId: "turn-image-references",
+              ...(method === "item/started" ? { startedAtMs: 1 } : { completedAtMs: 2 }),
+              item: {
+                type: "imageGeneration",
+                id: `image-reference-${index}`,
+                status: method === "item/started" ? "inProgress" : "completed",
+                revisedPrompt: "The original visible image prompt",
+                savedPath: "/fixture/existing-image.png",
+                inputImages: [
+                  {
+                    path: "/private-image-reference-input.png",
+                    sha256: "private-image-reference-digest",
+                  },
+                ],
+                ...reference,
+              },
+            };
+            originals.push({ payload, before: encodeProviderJsonString(payload) });
+            yield* runtime.emit({
+              id: asEventId(`image-reference-${index}-${method}`),
+              kind: "notification",
+              provider: ProviderDriverKind.make("codex"),
+              createdAt: "2026-10-23T00:00:00.000Z",
+              method,
+              threadId: asThreadId("thread-1"),
+              turnId: asTurnId("turn-image-references"),
+              itemId: asItemId(`image-reference-${index}`),
+              payload,
+            });
+          }
+        }
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        assert.equal(events.length, 6);
+        for (const [index, event] of events.entries()) {
+          assert.equal(event.type, index % 2 === 0 ? "item.started" : "item.completed");
+          if (event.type !== "item.started" && event.type !== "item.completed")
+            assert.fail("Expected the original image lifecycle");
+          assert.equal(event.payload.itemType, "image_generation");
+          assert.equal(event.payload.title, "Image generation");
+          assert.equal(event.payload.detail, "The original visible image prompt");
+          assert.equal(event.itemId, `image-reference-${Math.floor(index / 2)}`);
+          assert.doesNotMatch(encodeProviderJsonString(event), /private-image-reference/);
+          assert.match(encodeProviderJsonString(event), /\/fixture\/existing-image\.png/);
+        }
+        for (const original of originals)
+          assert.equal(encodeProviderJsonString(original.payload), original.before);
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+      }),
+  );
+
+  it.effect(
+    "projects image metadata from public read and rollback history without changing native snapshots",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const snapshot = {
+          threadId: "provider-thread-1",
+          turns: [
+            {
+              id: asTurnId("history-image-turn"),
+              items: [
+                {
+                  type: "imageGeneration",
+                  id: "inline-image",
+                  status: "completed",
+                  result: "legacy-inline-result",
+                  revisedPrompt: "Visible prompt",
+                  savedPath: "/fixture/existing-image.png",
+                  inputImages: [
+                    {
+                      path: "/private-image-history-input.png",
+                      sha256: "private-image-history-digest",
+                    },
+                  ],
+                },
+                {
+                  type: "imageGeneration",
+                  id: "file-image",
+                  status: "completed",
+                  fileId: "private-image-history-file",
+                },
+                {
+                  type: "imageGeneration",
+                  id: "both-image",
+                  status: "completed",
+                  result: "",
+                  fileId: "private-image-history-both",
+                },
+              ],
+            },
+          ],
+        } satisfies CodexThreadSnapshot;
+        const before = encodeProviderJsonString(snapshot);
+        runtime.readThreadImpl.mockResolvedValueOnce(snapshot);
+        runtime.rollbackThreadImpl.mockResolvedValueOnce(snapshot);
+        for (const projected of [
+          yield* adapter.readThread(asThreadId("thread-1")),
+          yield* adapter.rollbackThread(asThreadId("thread-1"), 1),
+        ]) {
+          assert.equal(projected.threadId, "thread-1");
+          assert.equal(projected.turns[0]?.id, "history-image-turn");
+          assert.equal(projected.turns[0]?.items.length, 3);
+          assert.doesNotMatch(encodeProviderJsonString(projected), /private-image-history/);
+          assert.match(encodeProviderJsonString(projected), /legacy-inline-result/);
+          assert.match(encodeProviderJsonString(projected), /\/fixture\/existing-image\.png/);
+        }
+        assert.equal(encodeProviderJsonString(snapshot), before);
+        assert.equal(runtime.readThreadImpl.mock.calls.length, 1);
+        assert.equal(runtime.rollbackThreadImpl.mock.calls.length, 1);
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+      }),
   );
 
   it.effect("maps Codex interrupt hook lifecycle into canonical hook events", () =>
@@ -9240,12 +9381,12 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       const runtime = runtimeFactory.lastRuntime;
       assert.ok(runtime);
 
-      const mappedEventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
+      const mappedEventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 6)).pipe(
         Effect.forkChild,
       );
       // The fake runtime deliberately bypasses the live runtime's filter.
       // The following visible events are also an ordering barrier: after all
-      // three map, the attachment event must have been discarded before the
+      // six map, the attachment event must have been discarded before the
       // native logger rather than merely ignored by canonical projection.
       yield* runtime.emit({
         id: asEventId("evt-native-log-stored-attachment"),
@@ -9289,6 +9430,39 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
           result: { type: "completed", text: "native-log-secret-prediction" },
         },
       } satisfies ProviderEvent);
+      for (const [index, reference] of [
+        { result: "legacy-inline-result" },
+        { fileId: "native-log-secret-image-file" },
+        { result: "", fileId: "native-log-secret-image-both" },
+      ].entries()) {
+        yield* runtime.emit({
+          id: asEventId(`evt-native-log-image-${index}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-logger"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "item/completed",
+          payload: {
+            threadId: "provider-thread-logger",
+            turnId: "image-log-turn",
+            completedAtMs: 1,
+            item: {
+              type: "imageGeneration",
+              id: `native-log-image-${index}`,
+              status: "completed",
+              revisedPrompt: "Visible image prompt",
+              savedPath: "/fixture/existing-log-image.png",
+              inputImages: [
+                {
+                  path: "/native-log-secret-image-input.png",
+                  sha256: "native-log-secret-image-digest",
+                },
+              ],
+              ...reference,
+            },
+          },
+        });
+      }
       yield* runtime.emit({
         id: asEventId("evt-native-log-unknown-root-error"),
         kind: "notification",
@@ -9414,6 +9588,8 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       assert.match(contents, /NTIVE: .*"model":"gpt-5\.4"/);
       assert.match(contents, /"reason":"subagent-provider-content"/);
       assert.match(contents, /"reason":"model-provider-auth-recovery-content"/);
+      assert.match(contents, /"type":"imageGeneration"/);
+      assert.match(contents, /\/fixture\/existing-log-image\.png/);
       assert.doesNotMatch(contents, /thread\/attachment\/updated/);
       assert.doesNotMatch(contents, /account\/gatewayOAuth\/changed/);
       assert.doesNotMatch(contents, /thread\/prediction\/updated/);

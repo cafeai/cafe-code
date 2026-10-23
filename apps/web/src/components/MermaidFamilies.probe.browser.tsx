@@ -25,6 +25,7 @@ function startSyntheticProbe(
   source = "synthetic isolated probe",
   observeBootstrap?: (phase: MermaidProbeBootstrapPhase) => void,
   admitSourceOnReady = false,
+  signal?: AbortSignal,
 ) {
   const nonce = crypto.randomUUID();
   const id = crypto.randomUUID();
@@ -46,6 +47,9 @@ function startSyntheticProbe(
       port.start();
     });
     </script></body></html>`;
+  const readResult = vi.fn((data: Record<string, unknown>) =>
+    readMermaidProbeSentinel(data, [], probeSentinel),
+  );
   const result = runMermaidProbe({
     id,
     documentSource,
@@ -53,16 +57,17 @@ function startSyntheticProbe(
     theme: "dark",
     kind: "Family admission probe",
     invocation: "baseline",
+    ...(signal ? { signal } : {}),
     ...(observeBootstrap
       ? { bootstrapObservation: { nonce, onPhase: observeBootstrap, admitSourceOnReady } }
       : {}),
-    readResult: (data) => readMermaidProbeSentinel(data, [], probeSentinel),
+    readResult,
   });
   const frame = document.querySelector<HTMLIFrameElement>(
     `iframe[data-mermaid-family-security-fixture="${id}"]`,
   )!;
   expect(frame).not.toBeNull();
-  return { id, nonce, frame, result };
+  return { id, nonce, frame, result, readResult };
 }
 
 function expectRetiredProbe(frame: HTMLIFrameElement, ports: readonly unknown[]): void {
@@ -79,6 +84,306 @@ function expectRetiredProbe(frame: HTMLIFrameElement, ports: readonly unknown[])
 }
 
 describe("Mermaid family probe qualification", () => {
+  it.for(["before setup", "during observer registration"] as const)(
+    "rejects an exact owner aborted %s without appending a frame",
+    async (timing, { onTestFinished }) => {
+      const controller = new AbortController();
+      const reason = { private: "unqualified synthetic cancellation detail" };
+      const create = vi.spyOn(document, "createElement");
+      // The pre-aborted path must never invoke this constructor. Leave the
+      // actual native constructor untouched in the registration-race control.
+      const channels =
+        timing === "before setup" ? vi.spyOn(globalThis, "MessageChannel") : undefined;
+      const append = vi.spyOn(document.body, "append");
+      const close = vi.spyOn(MessagePort.prototype, "close");
+      const readResult = vi.fn(() => true);
+      let result: Promise<boolean> | undefined;
+      onTestFinished(async () => {
+        controller.abort(reason);
+        await result?.catch(() => undefined);
+      });
+      if (timing === "before setup") controller.abort(reason);
+      else {
+        // Abort with the real native controller just before its listener is
+        // installed. Only the synchronous post-registration recheck can see
+        // this already-delivered edge; no fake clock or signal flag is used.
+        const nativeAdd = controller.signal.addEventListener.bind(controller.signal);
+        vi.spyOn(controller.signal, "addEventListener").mockImplementation(
+          (type, listener, options) => {
+            if (type === "abort") controller.abort(reason);
+            nativeAdd(type, listener, options);
+          },
+        );
+      }
+      result = runMermaidProbe({
+        id: crypto.randomUUID(),
+        documentSource: "<!doctype html><html><body></body></html>",
+        source: "unsubmitted synthetic source",
+        theme: "dark",
+        kind: "Family admission probe",
+        invocation: "baseline",
+        signal: controller.signal,
+        readResult,
+      });
+      await expect(result).rejects.toMatchObject({
+        name: "Error",
+        message: "Mermaid probe owner retired",
+      });
+      expect(append).not.toHaveBeenCalled();
+      expect(readResult).not.toHaveBeenCalled();
+      if (timing === "before setup") {
+        expect(create).not.toHaveBeenCalled();
+        expect(channels).not.toHaveBeenCalled();
+        expect(close).not.toHaveBeenCalled();
+      } else {
+        expect(close).toHaveBeenCalledTimes(2);
+      }
+    },
+  );
+
+  it("retires a held native load and rejects its queued startup callbacks without source", async ({
+    signal,
+    onTestFinished,
+  }) => {
+    const controller = new AbortController();
+    const abort = () => controller.abort({ private: "unqualified synthetic owner detail" });
+    const close = vi.spyOn(MessagePort.prototype, "close");
+    const send = vi.spyOn(MessagePort.prototype, "postMessage");
+    const added = vi.spyOn(window, "addEventListener");
+    const removed = vi.spyOn(window, "removeEventListener");
+    const removeAbort = vi.spyOn(controller.signal, "removeEventListener");
+    const addAbort = vi.spyOn(controller.signal, "addEventListener");
+    const nativeAppend = document.body.append;
+    const held: { load: HTMLIFrameElement["onload"] } = { load: null };
+    let receiveLoad!: (event: Event) => void;
+    const loaded = new Promise<Event>((resolve) => {
+      receiveLoad = resolve;
+    });
+    const witness = (event: Event) => receiveLoad(event);
+    let probe: ReturnType<typeof startSyntheticProbe> | undefined;
+    onTestFinished(async () => {
+      signal.removeEventListener("abort", abort);
+      abort();
+      probe?.frame.removeEventListener("load", witness);
+      await probe?.result.catch(() => undefined);
+    });
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    vi.spyOn(document.body, "append").mockImplementation(function (this: HTMLElement, ...nodes) {
+      for (const node of nodes) {
+        if (node instanceof HTMLIFrameElement && node.dataset.mermaidFamilySecurityFixture) {
+          held.load = node.onload;
+          node.onload = null;
+          node.addEventListener("load", witness, { once: true });
+        }
+      }
+      nativeAppend.apply(this, nodes);
+    });
+    probe = startSyntheticProbe(
+      "port.postMessage({ id, failed: true });",
+      undefined,
+      () => undefined,
+      false,
+      controller.signal,
+    );
+    const ownedProbe = probe;
+    const observer = added.mock.calls.find(([type]) => type === "message")?.[1];
+    const ownerWindow = ownedProbe.frame.contentWindow;
+    const rejected = expect(ownedProbe.result).rejects.toMatchObject({
+      name: "Error",
+      message: "Mermaid probe owner retired",
+    });
+    try {
+      const nativeLoad = await Promise.race([
+        loaded,
+        ownedProbe.result.then(() => {
+          throw new Error("The held native load completed without retirement.");
+        }),
+      ]);
+      expect(signal.aborted).toBe(false);
+      expect(nativeLoad.isTrusted).toBe(true);
+      expect(nativeLoad.target).toBe(ownedProbe.frame);
+      expect(send).not.toHaveBeenCalled();
+      abort();
+      expectRetiredProbe(ownedProbe.frame, close.mock.contexts);
+      held.load?.call(ownedProbe.frame, nativeLoad);
+      const stale = new MessageEvent("message", {
+        source: ownerWindow,
+        origin: "null",
+        data: {
+          id: ownedProbe.id,
+          nonce: ownedProbe.nonce,
+          probeBootstrapPhase: "engine-entered",
+        },
+      });
+      window.dispatchEvent(stale);
+      if (typeof observer === "function") observer.call(window, stale);
+      await rejected;
+      expect(send).not.toHaveBeenCalled();
+      expect(ownedProbe.readResult).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalledTimes(2);
+      expect(removed).toHaveBeenCalledWith("message", observer);
+      expect(removeAbort).toHaveBeenCalledWith("abort", addAbort.mock.calls[0]?.[1]);
+    } finally {
+      abort();
+      ownedProbe.frame.removeEventListener("load", witness);
+      await ownedProbe.result.catch(() => undefined);
+    }
+  });
+
+  it("retires after the original native request and refuses a captured late valid result", async ({
+    signal,
+    onTestFinished,
+  }) => {
+    const controller = new AbortController();
+    const abort = () => controller.abort({ private: "unqualified synthetic owner detail" });
+    const close = vi.spyOn(MessagePort.prototype, "close");
+    const nativeSend = MessagePort.prototype.postMessage;
+    let announceSent!: () => void;
+    const sent = new Promise<void>((resolve) => {
+      announceSent = resolve;
+    });
+    const captured: { port?: MessagePort; receive: MessagePort["onmessage"] } = {
+      receive: null,
+    };
+    let probe: ReturnType<typeof startSyntheticProbe> | undefined;
+    onTestFinished(async () => {
+      signal.removeEventListener("abort", abort);
+      abort();
+      await probe?.result.catch(() => undefined);
+    });
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    const send = vi.spyOn(MessagePort.prototype, "postMessage").mockImplementation(function (
+      this: MessagePort,
+      message: unknown,
+    ) {
+      // Complete the real native source send first; this receipt is not a
+      // manufactured renderer result and cannot qualify Mermaid admission.
+      nativeSend.call(this, message);
+      captured.port = this;
+      captured.receive = this.onmessage;
+      announceSent();
+    });
+    probe = startSyntheticProbe("", undefined, undefined, false, controller.signal);
+    const ownedProbe = probe;
+    const queuedLoad = ownedProbe.frame.onload;
+    const rejected = expect(ownedProbe.result).rejects.toMatchObject({
+      name: "Error",
+      message: "Mermaid probe owner retired",
+    });
+    try {
+      await Promise.race([
+        sent,
+        ownedProbe.result.then(() => {
+          throw new Error("The synthetic probe completed without its native request.");
+        }),
+      ]);
+      expect(signal.aborted).toBe(false);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledWith({
+        id: ownedProbe.id,
+        source: "synthetic isolated probe",
+        theme: "dark",
+      });
+      expect(captured.receive).toBeTypeOf("function");
+      abort();
+      expectRetiredProbe(ownedProbe.frame, close.mock.contexts);
+      queuedLoad?.call(ownedProbe.frame, new Event("load"));
+      captured.receive?.call(
+        captured.port!,
+        new MessageEvent("message", { data: { id: ownedProbe.id, svg: probeSentinel } }),
+      );
+      await rejected;
+      expect(ownedProbe.readResult).not.toHaveBeenCalled();
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledTimes(2);
+    } finally {
+      abort();
+      await ownedProbe.result.catch(() => undefined);
+    }
+  });
+
+  it("propagates exact owner retirement through the real family builder before source admission", async ({
+    signal,
+    onTestFinished,
+  }) => {
+    const controller = new AbortController();
+    const abort = () => controller.abort({ private: "unqualified synthetic owner detail" });
+    const phases: MermaidProbeBootstrapPhase[] = [];
+    const close = vi.spyOn(MessagePort.prototype, "close");
+    const send = vi.spyOn(MessagePort.prototype, "postMessage");
+    const nativeAppend = document.body.append;
+    const owned: { frame?: HTMLIFrameElement; load: HTMLIFrameElement["onload"] } = {
+      load: null,
+    };
+    let admission: ReturnType<typeof admitsParsedFamily> | undefined;
+    // Own cancellation before the real builder constructs or appends its
+    // opaque full-engine document. Cleanup joins only this original promise;
+    // the assertion below still observes its actual retirement rejection.
+    onTestFinished(async () => {
+      signal.removeEventListener("abort", abort);
+      abort();
+      await admission?.catch(() => undefined);
+    });
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    vi.spyOn(document.body, "append").mockImplementation(function (this: HTMLElement, ...nodes) {
+      for (const node of nodes) {
+        if (node instanceof HTMLIFrameElement && node.dataset.mermaidFamilySecurityFixture) {
+          expect(owned.frame).toBeUndefined();
+          owned.frame = node;
+          // Observe, but do not withhold or replace, its native load callback.
+          owned.load = node.onload;
+        }
+      }
+      nativeAppend.apply(this, nodes);
+    });
+    const fixture = MERMAID_FAMILY_FIXTURES.find((entry) => entry.family === "kanban")!;
+    admission = admitsParsedFamily(
+      fixture.source,
+      "",
+      undefined,
+      undefined,
+      undefined,
+      (phase) => {
+        phases.push(phase);
+        // This marker comes from the completed real engine, receiver and
+        // override script. Retire the exact owner before the observer returns
+        // to the existing source-admission step, not by changing its timer.
+        if (phase === "fixture-ready") abort();
+      },
+      true,
+      controller.signal,
+    );
+    try {
+      await expect(admission).rejects.toMatchObject({
+        name: "Error",
+        message: "Mermaid probe owner retired",
+      });
+      expect(signal.aborted).toBe(false);
+      expect(phases).toEqual([
+        "engine-entered",
+        "engine-returned",
+        "receiver-installed",
+        "fixture-ready",
+      ]);
+      expect(owned.frame).toBeDefined();
+      expect(owned.frame!.getAttribute("sandbox")).toBe("allow-scripts");
+      expect(owned.load).toBeTypeOf("function");
+      expect(send).not.toHaveBeenCalled();
+      expectRetiredProbe(owned.frame!, close.mock.contexts);
+      expect(close).toHaveBeenCalledTimes(2);
+      // An already-queued callback cannot transfer its port after retirement.
+      owned.load?.call(owned.frame!, new Event("load"));
+      expect(send).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalledTimes(2);
+    } finally {
+      abort();
+      await admission.catch(() => undefined);
+    }
+  });
+
   it("preserves exact instrumented bytes while binding each fresh opaque family document", () => {
     for (let index = 0; index < 2; index++) {
       const nonce = crypto.randomUUID();

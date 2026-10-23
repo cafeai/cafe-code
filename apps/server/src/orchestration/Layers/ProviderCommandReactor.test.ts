@@ -49,7 +49,16 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlError from "effect/unstable/sql/SqlError";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  onTestFailed,
+  onTestFinished,
+  vi,
+} from "vitest";
 
 import { TextGenerationError } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -920,6 +929,11 @@ describe("ProviderCommandReactor", () => {
         }),
       ),
     );
+    // Bind cleanup to this harness's immutable scope, not the file's mutable
+    // current-test slot. The owned observer rejects late registration before
+    // any finalizer can be attached to a retired or replacement fixture.
+    const addFixtureFinalizer = (finalizer: Effect.Effect<unknown>) =>
+      awaitOwnedObserver(Scope.addFinalizer(fixtureScope, finalizer));
     const observeNextProviderTurn = (
       messageId: MessageId,
       options?: { readonly threadId?: ThreadId; readonly opening?: boolean },
@@ -1148,6 +1162,7 @@ describe("ProviderCommandReactor", () => {
       startReactor,
       drain,
       awaitOwnedObserver,
+      addFixtureFinalizer,
       observeNextProviderTurn,
       markThreadReady,
       setRunningCodexTurn,
@@ -1159,6 +1174,13 @@ describe("ProviderCommandReactor", () => {
     const fixtureScope = scope!;
     const pending = Effect.runSync(Deferred.make<void>());
     let rejectedBeforeCloseReturned = false;
+    let ownedFinalizerRan = false;
+    let lateFinalizerRan = false;
+    await harness.addFixtureFinalizer(
+      Effect.sync(() => {
+        ownedFinalizerRan = true;
+      }),
+    );
     // Install the waiter and both result handlers before retiring this exact
     // fixture. Neither timeout cleanup nor Scope.close may forge acceptance.
     const outcome = harness.awaitOwnedObserver(Deferred.await(pending)).then(
@@ -1171,7 +1193,16 @@ describe("ProviderCommandReactor", () => {
     await Effect.runPromise(Scope.close(fixtureScope, Exit.void));
     expect(rejectedBeforeCloseReturned).toBe(true);
     expect(await outcome).toBe("retired");
+    expect(ownedFinalizerRan).toBe(true);
     expect(Effect.runSync(Deferred.isDone(pending))).toBe(false);
+    expect(() =>
+      harness.addFixtureFinalizer(
+        Effect.sync(() => {
+          lateFinalizerRan = true;
+        }),
+      ),
+    ).toThrow();
+    expect(lateFinalizerRan).toBe(false);
     let lateObserverExecuted = false;
     expect(() =>
       harness.awaitOwnedObserver(
@@ -1604,6 +1635,16 @@ describe("ProviderCommandReactor", () => {
       expect(error.cause).toBe(responseError);
       return error;
     }
+    type SendPhase =
+      | "dispatch-start"
+      | "dispatch-committed"
+      | "ack-wait"
+      | "ack-received"
+      | "drain-start"
+      | "drain-complete"
+      | "running-start"
+      | "running-complete";
+
     async function send(
       harness: Awaited<ReturnType<typeof createHarness>>,
       key: string,
@@ -1615,6 +1656,7 @@ describe("ProviderCommandReactor", () => {
             readonly instanceId: ProviderInstanceId;
           }
         | { readonly refused: Deferred.Deferred<void> },
+      observePhase?: (phase: SendPhase) => void,
     ) {
       const sentBefore = harness.sendTurn.mock.calls.length;
       const turnId = asTurnId(`${key}-native-turn`);
@@ -1635,6 +1677,7 @@ describe("ProviderCommandReactor", () => {
           }).pipe(Effect.tap(() => Deferred.succeed(accepted, input))),
         );
       }
+      observePhase?.("dispatch-start");
       await Effect.runPromise(
         harness.engine.dispatch({
           type: "thread.turn.start",
@@ -1649,6 +1692,7 @@ describe("ProviderCommandReactor", () => {
           ),
         }),
       );
+      observePhase?.("dispatch-committed");
       // A command receipt commits intent, not asynchronous preparation or the
       // provider effect. The exact successful fake acknowledgement supplies the
       // positive readiness boundary under the unchanged enclosing test budget;
@@ -1663,11 +1707,11 @@ describe("ProviderCommandReactor", () => {
             // A native reconfiguration refusal is a completed failed effect,
             // not an invocation or a successful capability observation. Await
             // that exact test-owned failure before draining its admitted work.
-            await Effect.runPromise(Deferred.await(failurePreparation.refused));
+            await harness.awaitOwnedObserver(Deferred.await(failurePreparation.refused));
           } else {
-            expect(await Effect.runPromise(Deferred.await(failurePreparation.receipt))).toBe(
-              failurePreparation.instanceId,
-            );
+            expect(
+              await harness.awaitOwnedObserver(Deferred.await(failurePreparation.receipt)),
+            ).toBe(failurePreparation.instanceId);
           }
           await harness.drain();
         }
@@ -1678,20 +1722,26 @@ describe("ProviderCommandReactor", () => {
             ) === true,
         );
       } else {
-        const request = await Effect.runPromise(Deferred.await(accepted));
+        observePhase?.("ack-wait");
+        const request = await harness.awaitOwnedObserver(Deferred.await(accepted));
+        observePhase?.("ack-received");
         expect(request).toMatchObject({ threadId, messageId: asMessageId(key) });
         expect(harness.sendTurn.mock.calls.length).toBe(sentBefore + 1);
       }
+      observePhase?.("drain-start");
       await harness.drain();
+      observePhase?.("drain-complete");
       if (!fails) {
         // The provider acknowledgement's presentation write is intentionally
         // detached from delivery. Wait for that exact marker before the test
         // emits its terminal ready edge, so a late ACK cannot reopen the fake
         // idle session after markThreadReady has run.
+        observePhase?.("running-start");
         await waitFor(async () => {
           const session = (await harness.readThreadDetail(threadId))?.session;
           return session?.status === "running" && session.activeTurnId === turnId;
         });
+        observePhase?.("running-complete");
       }
     }
 
@@ -1705,6 +1755,19 @@ describe("ProviderCommandReactor", () => {
       );
       return { receipt, instanceId: ProviderInstanceId.make("codex") };
     }
+
+    function observeNextGoalSetCompletion(harness: Awaited<ReturnType<typeof createHarness>>) {
+      const completed = Effect.runSync(Deferred.make<ProviderThreadGoal, ProviderServiceError>());
+      const originalSet = harness.setGoal.getMockImplementation()!;
+      // Preserve the original result and failure, observing execution rather
+      // than mock invocation. Each caller owns its wait through the fixture's
+      // abort/join boundary before draining the admitted projection worker.
+      harness.setGoal.mockImplementationOnce((request) =>
+        originalSet(request).pipe(Effect.onExit((exit) => Deferred.done(completed, exit))),
+      );
+      return completed;
+    }
+
     async function change(
       harness: Awaited<ReturnType<typeof createHarness>>,
       key: string,
@@ -1748,24 +1811,63 @@ describe("ProviderCommandReactor", () => {
     it.each([false, "unknown"] as const)(
       "continues identical numeric policy only in the exact existing Codex process with %s native support",
       async (subagentConcurrency) => {
+        // A hard timeout does not identify which awaited fixture phase stalled.
+        // Retain only bounded, fixed phase names and monotonic elapsed times;
+        // never record message bodies, native state, paths or received errors.
+        // Register retirement before the first await so a timed-out body cannot
+        // append misleading observations while the next case owns the harness.
+        const phaseStart = performance.now();
+        const phases: { readonly phase: string; readonly elapsedMs: number }[] = [];
+        let recording = true;
+        const recordPhase = (
+          phase:
+            | "harness-start"
+            | "harness-ready"
+            | "policy-committed"
+            | `first-send:${SendPhase}`
+            | "ready-start"
+            | "ready-committed"
+            | `follow-up:${SendPhase}`
+            | "follow-up-capabilities-resolved",
+        ) => {
+          if (recording && phases.length < 32)
+            phases.push({ phase, elapsedMs: Math.round(performance.now() - phaseStart) });
+        };
+        onTestFinished(() => {
+          recording = false;
+        });
+        onTestFailed(() => {
+          Effect.runSync(Effect.logError("Synthetic Codex policy-continuation phases", phases));
+        });
+        recordPhase("harness-start");
         const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000016");
         const harness = await createHarness({
           standalone: true,
           subagentRuntimeId: runtimeId,
           subagentPolicyContinuation: true,
         });
+        recordPhase("harness-ready");
         await change(harness, "set-original-sixteen", { codex: 16 });
-        await send(harness, "qualified-original-sixteen");
+        recordPhase("policy-committed");
+        await send(harness, "qualified-original-sixteen", false, undefined, undefined, (phase) =>
+          recordPhase(`first-send:${phase}`),
+        );
+        recordPhase("ready-start");
         await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+        recordPhase("ready-committed");
         harness.getCapabilities.mockImplementation(() =>
           Effect.succeed({
             sessionModelSwitch: "in-session",
             liveSteer: "supported",
             subagentPolicyContinuation: true,
             ...(subagentConcurrency === "unknown" ? {} : { subagentConcurrency }),
-          }),
+          } as const).pipe(
+            Effect.tap(() => Effect.sync(() => recordPhase("follow-up-capabilities-resolved"))),
+          ),
         );
-        await send(harness, "same-process-follow-up");
+        await send(harness, "same-process-follow-up", false, undefined, undefined, (phase) =>
+          recordPhase(`follow-up:${phase}`),
+        );
         expect(harness.startSession).toHaveBeenCalledTimes(1);
         expect(harness.stopSession).not.toHaveBeenCalled();
         expect(harness.sendTurn.mock.calls[1]?.[0].expectedSubagentPolicySession).toEqual({
@@ -1914,6 +2016,12 @@ describe("ProviderCommandReactor", () => {
             readonly turn: ProviderTurnStartResult;
           }>(),
         );
+        const refusedSteer = Effect.runSync(
+          Deferred.make<{
+            readonly request: Parameters<ProviderServiceShape["steerTurn"]>[0];
+            readonly error: ProviderAdapterRequestError;
+          }>(),
+        );
         harness.steerTurn.mockImplementation((input) =>
           outcome === "no active turn"
             ? Effect.fail(
@@ -1922,6 +2030,10 @@ describe("ProviderCommandReactor", () => {
                   method: "turn/steer",
                   detail: "no active turn to steer",
                 }),
+              ).pipe(
+                Effect.tapError((error) =>
+                  Deferred.succeed(refusedSteer, { request: input, error }),
+                ),
               )
             : Effect.succeed({ threadId, turnId: input.expectedTurnId }).pipe(
                 Effect.tap((turn) => Deferred.succeed(acceptedSteer, { request: input, turn })),
@@ -1951,6 +2063,30 @@ describe("ProviderCommandReactor", () => {
           ),
         );
         const refused = outcome !== "accepted";
+        if (outcome === "no active turn") {
+          // This refusal occurs inside the actual fake steer effect, which
+          // may run after the outer worker drains. Observe its unchanged
+          // failure before the projection poll; pre-steer owner refusals must
+          // never wait for a provider operation they intentionally do not reach.
+          const receipt = await harness.awaitOwnedObserver(Deferred.await(refusedSteer));
+          expect(receipt.request).toMatchObject({
+            threadId,
+            messageId,
+            expectedTurnId: activeTurnId,
+            expectedSubagentPolicySession: {
+              threadId,
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              subagentRuntimeId: runtimeId,
+              maxConcurrentSubagents: 16,
+            },
+          });
+          expect(receipt.error).toBeInstanceOf(ProviderAdapterRequestError);
+          expect(receipt.error).toMatchObject({
+            provider: "codex",
+            method: "turn/steer",
+            detail: "no active turn to steer",
+          });
+        }
         if (!refused) {
           // Durable dispatch does not complete the detached failed-start/steer
           // path. Observe its actual successful fake effect before starting
@@ -2275,7 +2411,8 @@ describe("ProviderCommandReactor", () => {
     it("rejects an inherited account default when the selected runtime is unqualified", async () => {
       const harness = await createHarness({ standalone: true, subagentConcurrency: false });
       await accountDefault(harness, 15);
-      await send(harness, "unsupported-inherited-account", true);
+      const preparation = observeFreshFailurePreparation(harness);
+      await send(harness, "unsupported-inherited-account", true, undefined, preparation);
       expect(harness.startSession).not.toHaveBeenCalled();
       expect(harness.sendTurn).not.toHaveBeenCalled();
       expect(harness.stopSession).not.toHaveBeenCalled();
@@ -2350,6 +2487,7 @@ describe("ProviderCommandReactor", () => {
         await send(harness, "before-control-only-account-edit");
         await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
         await accountDefault(harness, 15);
+        const firstSetCompleted = observeNextGoalSetCompletion(harness);
         await Effect.runPromise(
           harness.engine.dispatch({
             type: "thread.goal.set",
@@ -2361,6 +2499,13 @@ describe("ProviderCommandReactor", () => {
             createdAt: "2026-01-01T00:00:03.000Z",
           }),
         );
+        expect(await harness.awaitOwnedObserver(Deferred.await(firstSetCompleted))).toMatchObject({
+          threadId,
+          objective: "Synthetic control-only goal",
+        });
+        // Completion proves worker admission; drain then owns its synchronized
+        // goal projection before the unchanged two-second state observer.
+        await harness.drain();
         await waitFor(
           async () =>
             (await harness.readThreadDetail(threadId))?.goal?.objective ===
@@ -2368,6 +2513,10 @@ describe("ProviderCommandReactor", () => {
         );
         await harness.drain();
         const firstGoal = (await harness.readThreadDetail(threadId))!.goal!;
+        // Replacement reaches the same set effect only after its original
+        // ordered clear. Retain that order and observe the replacement's own
+        // completion rather than reusing the first update's receipt.
+        const replacementSetCompleted = observeNextGoalSetCompletion(harness);
         await Effect.runPromise(
           harness.engine.dispatch({
             type: "thread.goal.set",
@@ -2379,6 +2528,10 @@ describe("ProviderCommandReactor", () => {
             createdAt: "2026-01-01T00:00:04.000Z",
           }),
         );
+        expect(
+          await harness.awaitOwnedObserver(Deferred.await(replacementSetCompleted)),
+        ).toMatchObject({ threadId, objective: "Synthetic replacement goal" });
+        await harness.drain();
         await waitFor(
           async () =>
             (await harness.readThreadDetail(threadId))?.goal?.objective ===
@@ -2391,6 +2544,10 @@ describe("ProviderCommandReactor", () => {
         const clearCompleted = Effect.runSync(Deferred.make<void, ProviderServiceError>());
         const originalClear = harness.clearGoal.getMockImplementation()!;
         const clearsBefore = harness.clearGoal.mock.calls.length;
+        // Register the owned gate's release before dispatch. A hard timeout
+        // must not rely on the async body's finally running before teardown
+        // joins the reactor that is waiting on this exact fixture gate.
+        await harness.addFixtureFinalizer(Deferred.succeed(releaseClear, undefined));
         harness.clearGoal.mockImplementationOnce((request) =>
           Effect.gen(function* () {
             yield* Deferred.succeed(clearEntered, undefined);
@@ -2408,7 +2565,7 @@ describe("ProviderCommandReactor", () => {
               createdAt: "2026-01-01T00:00:05.000Z",
             }),
           );
-          await Effect.runPromise(Deferred.await(clearEntered));
+          await harness.awaitOwnedObserver(Deferred.await(clearEntered));
           expect((await harness.readThreadDetail(threadId))?.goal).toEqual(replacement);
           expect(harness.goalOperations).toEqual(["set", "clear", "set"]);
           expect(harness.clearGoal).toHaveBeenCalledTimes(clearsBefore + 1);
@@ -2419,7 +2576,7 @@ describe("ProviderCommandReactor", () => {
           // Durable dispatch precedes worker admission and native completion.
           // This exact original effect admits drain, which then owns the
           // synchronized goal commit before the unchanged state observer.
-          await Effect.runPromise(Deferred.await(clearCompleted));
+          await harness.awaitOwnedObserver(Deferred.await(clearCompleted));
           await harness.drain();
           await waitFor(async () => (await harness.readThreadDetail(threadId))?.goal === null);
         } finally {
@@ -2435,7 +2592,15 @@ describe("ProviderCommandReactor", () => {
         // Only an actual next turn requests account policy. Unknown/unsupported
         // capability remains a strict turn admission failure, not a reason to
         // prevent control-only goal cleanup or manufacture a continuation.
-        await send(harness, "turn-after-control-only-account-edit", subagentConcurrency !== true);
+        const nextTurnPreparation =
+          subagentConcurrency !== true ? observeFreshFailurePreparation(harness) : undefined;
+        await send(
+          harness,
+          "turn-after-control-only-account-edit",
+          subagentConcurrency !== true,
+          undefined,
+          nextTurnPreparation,
+        );
         if (subagentConcurrency === true) {
           expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
             maxConcurrentSubagents: 15,
@@ -2556,6 +2721,7 @@ describe("ProviderCommandReactor", () => {
             createdAt: "2026-01-01T00:00:01.000Z",
           }),
         );
+        const goalSetCompleted = observeNextGoalSetCompletion(harness);
         await Effect.runPromise(
           harness.engine.dispatch({
             type: "thread.goal.set",
@@ -2567,6 +2733,11 @@ describe("ProviderCommandReactor", () => {
             createdAt: "2026-01-01T00:00:02.000Z",
           }),
         );
+        expect(await harness.awaitOwnedObserver(Deferred.await(goalSetCompleted))).toMatchObject({
+          threadId,
+          objective: "Synthetic policy-preserving goal",
+        });
+        await harness.drain();
         await waitFor(() => harness.setGoal.mock.calls.length === 1);
         await harness.drain();
         const nativeStart = harness.startSession.mock.calls[0]?.[1];
@@ -2594,6 +2765,7 @@ describe("ProviderCommandReactor", () => {
           },
         },
       });
+      const goalSetCompleted = observeNextGoalSetCompletion(harness);
       await Effect.runPromise(
         harness.engine.dispatch({
           type: "thread.goal.set",
@@ -2605,6 +2777,11 @@ describe("ProviderCommandReactor", () => {
           createdAt: "2026-01-01T00:00:01.000Z",
         }),
       );
+      expect(await harness.awaitOwnedObserver(Deferred.await(goalSetCompleted))).toMatchObject({
+        threadId,
+        objective: "Synthetic fresh control-only goal",
+      });
+      await harness.drain();
       await waitFor(() => harness.setGoal.mock.calls.length === 1);
       await harness.drain();
       expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
@@ -2814,8 +2991,16 @@ describe("ProviderCommandReactor", () => {
         ),
       );
       const messageId = asMessageId("paired-busy-retained-steer");
+      const acceptedSteer = Effect.runSync(
+        Deferred.make<{
+          readonly request: Parameters<ProviderServiceShape["steerTurn"]>[0];
+          readonly turn: ProviderTurnStartResult;
+        }>(),
+      );
       harness.steerTurn.mockImplementationOnce((input) =>
-        Effect.succeed({ threadId: input.threadId, turnId: input.expectedTurnId }),
+        Effect.succeed({ threadId: input.threadId, turnId: input.expectedTurnId }).pipe(
+          Effect.tap((turn) => Deferred.succeed(acceptedSteer, { request: input, turn })),
+        ),
       );
       await Effect.runPromise(
         harness.engine.dispatch({
@@ -2831,6 +3016,11 @@ describe("ProviderCommandReactor", () => {
           createdAt: "2026-01-01T00:00:03.000Z",
         }),
       );
+      // Durable admission precedes this exact successful retained-root steer.
+      // Observe its unchanged fake effect before the acceptance projection poll.
+      const accepted = await harness.awaitOwnedObserver(Deferred.await(acceptedSteer));
+      expect(accepted.request).toMatchObject({ threadId, messageId, expectedTurnId: rootTurnId });
+      expect(accepted.turn).toEqual({ threadId, turnId: rootTurnId });
       await waitFor(
         async () =>
           (await harness.readThreadDetail(threadId))?.activities.some(
@@ -3122,6 +3312,7 @@ describe("ProviderCommandReactor", () => {
       });
       // Isolate default resolution from the unchanged downstream disabled-owner
       // admission. The synthetic provider refuses; no native process is started.
+      const refused = Effect.runSync(Deferred.make<void>());
       harness.startSession.mockImplementationOnce(() =>
         Effect.fail(
           new ProviderAdapterRequestError({
@@ -3129,9 +3320,9 @@ describe("ProviderCommandReactor", () => {
             method: "startSession",
             detail: "Synthetic disabled owner refusal.",
           }),
-        ),
+        ).pipe(Effect.tapError(() => Deferred.succeed(refused, undefined))),
       );
-      await send(harness, "disabled-context-default-prepare", true);
+      await send(harness, "disabled-context-default-prepare", true, undefined, { refused });
       expect(harness.startSession).toHaveBeenCalledTimes(1);
       expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
         codexContextWindowOverride: null,
@@ -3165,13 +3356,21 @@ describe("ProviderCommandReactor", () => {
       await harness.setRunningCodexTurn(root, "2026-01-01T00:00:01.000Z");
       // This retained-process fixture qualifies only context default selection.
       // The existing provider boundary still refuses this disabled owner.
-      harness.steerTurn.mockImplementationOnce(() =>
+      const refusedSteer = Effect.runSync(
+        Deferred.make<{
+          readonly request: Parameters<ProviderServiceShape["steerTurn"]>[0];
+          readonly error: ProviderAdapterRequestError;
+        }>(),
+      );
+      harness.steerTurn.mockImplementationOnce((input) =>
         Effect.fail(
           new ProviderAdapterRequestError({
             provider: "codex",
             method: "turn/steer",
             detail: "Synthetic disabled owner refusal.",
           }),
+        ).pipe(
+          Effect.tapError((error) => Deferred.succeed(refusedSteer, { request: input, error })),
         ),
       );
       await Effect.runPromise(
@@ -3188,6 +3387,20 @@ describe("ProviderCommandReactor", () => {
           createdAt: "2026-01-01T00:00:02.000Z",
         }),
       );
+      // The refusal must come from the original failed provider effect, not
+      // merely a durable dispatch or an invocation of the synthetic mock.
+      const refused = await harness.awaitOwnedObserver(Deferred.await(refusedSteer));
+      expect(refused.request).toMatchObject({
+        threadId,
+        messageId: asMessageId("disabled-context-default-steer"),
+        expectedTurnId: root,
+      });
+      expect(refused.error).toBeInstanceOf(ProviderAdapterRequestError);
+      expect(refused.error).toMatchObject({
+        provider: "codex",
+        method: "turn/steer",
+        detail: "Synthetic disabled owner refusal.",
+      });
       await waitFor(
         async () =>
           (await harness.readThreadDetail(threadId))?.activities.some(
@@ -3253,7 +3466,8 @@ describe("ProviderCommandReactor", () => {
       async (support) => {
         const harness = await createHarness({ standalone: true, codexContextWindow: support });
         await contextDefault(harness, 500_000);
-        await send(harness, `unqualified-context-${support}`, true);
+        const preparation = observeFreshFailurePreparation(harness);
+        await send(harness, `unqualified-context-${support}`, true, undefined, preparation);
         expect(harness.startSession).not.toHaveBeenCalled();
         expect(harness.sendTurn).not.toHaveBeenCalled();
       },
@@ -3277,7 +3491,8 @@ describe("ProviderCommandReactor", () => {
             ...(support === "unknown" ? {} : { codexContextWindow: false }),
           }),
         );
-        await send(harness, `context-reset-unqualified-${support}`, true);
+        const preparation = observeFreshFailurePreparation(harness);
+        await send(harness, `context-reset-unqualified-${support}`, true, undefined, preparation);
         expect(harness.startSession).toHaveBeenCalledTimes(1);
         expect(harness.sendTurn).toHaveBeenCalledTimes(1);
         expect(harness.stopSession).not.toHaveBeenCalled();
@@ -3309,6 +3524,7 @@ describe("ProviderCommandReactor", () => {
             ...(support === "unknown" ? {} : { codexContextWindow: false }),
           }),
         );
+        const preparation = observeFreshFailurePreparation(harness);
         await Effect.runPromise(
           harness.engine.dispatch({
             type: "thread.turn.steer",
@@ -3323,6 +3539,12 @@ describe("ProviderCommandReactor", () => {
             createdAt: "2026-01-01T00:00:03.000Z",
           }),
         );
+        // This exact successful capability read admits the policy-refusal
+        // worker; no steer operation is permitted to run for either cell.
+        expect(await harness.awaitOwnedObserver(Deferred.await(preparation.receipt))).toBe(
+          preparation.instanceId,
+        );
+        await harness.drain();
         await waitFor(
           async () =>
             (await harness.readThreadDetail(threadId))?.activities.some(
@@ -3369,6 +3591,7 @@ describe("ProviderCommandReactor", () => {
             createdAt: "2026-01-01T00:00:01.000Z",
           }),
         );
+        const goalSetCompleted = observeNextGoalSetCompletion(harness);
         await Effect.runPromise(
           harness.engine.dispatch({
             type: "thread.goal.set",
@@ -3380,6 +3603,11 @@ describe("ProviderCommandReactor", () => {
             createdAt: "2026-01-01T00:00:02.000Z",
           }),
         );
+        expect(await harness.awaitOwnedObserver(Deferred.await(goalSetCompleted))).toMatchObject({
+          threadId,
+          objective: "Synthetic retained context control",
+        });
+        await harness.drain();
         await waitFor(() => harness.setGoal.mock.calls.length === 1);
         await harness.drain();
         expect(harness.startSession).toHaveBeenCalledTimes(1);

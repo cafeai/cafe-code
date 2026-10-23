@@ -32,8 +32,11 @@ desktop build. Do not restart or push without the existing explicit authorizatio
 
 For the complete local graph on any development host, use `corepack yarn
 verify:local` (at low scheduling priority on macOS/Linux). It retains all
-required local tests and a forced final build, without hosted runners or cached
-test successes. `test:browser:local` discovers the complete browser domain with
+required local checks and a fresh forced final build, without hosted runners.
+Its explicitly requested exact-input local success reuse follows the separate
+[receipt policy](decisions/verified-local-result-cache.md); `--fresh` bypasses
+receipt reads and writes. Canonical CI/release still executes uncached.
+`test:browser:local` discovers the complete browser domain with
 disjoint native groups and prepares only its real copied MCP bridge artifacts.
 Local Node tests default to two independent workspaces with at most two Vitest
 workers each; `--test-concurrency=1|2|3` changes only that workspace admission.
@@ -98,6 +101,17 @@ the shared controller's Node matrix; full-app numeric-save/reset journeys and
 native hook owner-retirement checks qualify the actual wiring.
 
 ## Assertions and fixtures
+
+Load inert Node fixture modules during collection, after any required synthetic
+globals and mock bindings are initialized. Framework transformation and module
+evaluation are preparation, not feature readiness: putting only a dynamic import
+inside `beforeAll` makes its hook budget also cover that preparation. The saved-
+environment and timeline renderer fixtures keep their real imports and original
+setup order in collection; their former import-hook timers no longer cover this
+work. Actual connection actions, rendering assertions and cleanup remain in their
+tests with unchanged action deadlines and worker limits. This is not permission
+to move provider opening, network or persistence work, native acquisition, user
+actions or lifecycle readiness out of their existing bounded scopes.
 
 Keep native input, focus and accessibility semantics. Geometry is appropriate
 for hit targets, clipped content, native control exclusion, drag destinations,

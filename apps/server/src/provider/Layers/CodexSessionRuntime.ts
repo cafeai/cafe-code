@@ -42,6 +42,7 @@ import {
   classifyCodexTransientFailure,
   redactCodexFailureDiagnosticPayload,
 } from "../codexTransientFailure.ts";
+import { redactCodexImageGenerationMetadata } from "../codexImageGenerationPrivacy.ts";
 import {
   hasVisibleProviderSubagentPublicText,
   type ProviderSubagentActivityInput,
@@ -5231,7 +5232,13 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
     };
   }
 
-  const payload = readRecord(input.payload);
+  // This is an observational copy only. The caller's native payload remains
+  // intact for strict decoding/control; a projected file-only image is not a
+  // valid native item and must never be fed back into that private wire path.
+  // Project before reading received object properties so getters/proxies cannot
+  // execute while this diagnostic's method is being selected.
+  const diagnosticPayload = redactCodexImageGenerationMetadata(input.payload);
+  const payload = readRecord(diagnosticPayload);
   const method = payload ? readString(payload.method) : undefined;
   if (
     method === "item/mcpToolCall/progress" ||
@@ -5296,8 +5303,8 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
       // trusted classifier. Preserve only the fixed failure kind and stage.
       return { stage: input.stage, diagnosticClass: "protocol-decode-failure-redacted" };
   }
-  const privateCopy = redactVisualizationNativePayload(input.payload);
-  if (privateCopy !== input.payload)
+  const privateCopy = redactVisualizationNativePayload(diagnosticPayload);
+  if (privateCopy !== diagnosticPayload)
     return {
       diagnosticClass: "private-visualization-redacted",
       stage: input.stage,
@@ -5323,7 +5330,7 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
     method !== "modelProvider/authRecoveryStarted" &&
     method !== "modelProvider/authRecoveryCompleted"
   ) {
-    return input.payload;
+    return diagnosticPayload;
   }
 
   const phase = method === "modelProvider/authRecoveryStarted" ? "started" : "completed";
@@ -5334,7 +5341,7 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
       diagnosticClass: "notification-payload-redacted",
     };
   }
-  return input.payload;
+  return diagnosticPayload;
 }
 
 function readString(value: unknown): string | undefined {

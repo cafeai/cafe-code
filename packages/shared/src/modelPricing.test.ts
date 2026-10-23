@@ -112,6 +112,9 @@ describe("resolveModelRate", () => {
     ["gpt-6-sol", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
     ["gpt-6-luna", { input: 0.1, cachedInput: 0.01, cacheWrite: 0.125, output: 0.5 }],
     ["gpt-5.6-sol", { input: 4, cachedInput: 0.4, cacheWrite: 5, output: 20 }],
+    ["gpt-5.6-cyber", { input: 12.5, cachedInput: 1.25, cacheWrite: 15.625, output: 75 }],
+    ["gpt-daybreak-blue-latest", { input: 4, cachedInput: 0.4, cacheWrite: 5, output: 20 }],
+    ["gpt-daybreak-red-latest", { input: 12.5, cachedInput: 1.25, cacheWrite: 15.625, output: 75 }],
     ["gpt-5.6-terra", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 12 }],
     ["gpt-5.6-luna", { input: 0.2, cachedInput: 0.02, cacheWrite: 0.25, output: 1.2 }],
     ["claude-opus-5-5", { input: 4, cachedInput: 0.2, cacheWrite: 5, output: 20 }],
@@ -136,6 +139,36 @@ describe("resolveModelRate", () => {
     const custom: ModelRate = { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 8 };
     expect(resolveModelRate("gpt-6-astra", { "gpt-6-astra": custom })).toEqual(custom);
     expect(resolveModelRate("gpt-6-astra", { gpt: custom })).toEqual(custom);
+  });
+
+  it("keeps alias pricing distinct from underlying-model override identities", () => {
+    const underlyingOverrides = { "gpt-5.6-sol": RATE, "gpt-5.6-cyber": RATE };
+    expect(resolveModelRate("gpt-daybreak-blue-latest", underlyingOverrides)).toEqual({
+      input: 4,
+      cachedInput: 0.4,
+      cacheWrite: 5,
+      output: 20,
+    });
+    expect(resolveModelRate("gpt-daybreak-red-latest", underlyingOverrides)).toEqual({
+      input: 12.5,
+      cachedInput: 1.25,
+      cacheWrite: 15.625,
+      output: 75,
+    });
+    // Existing exact/prefix overrides still apply to the actual recorded id;
+    // looking up a bundled alias must not turn it into another model request.
+    expect(resolveModelRate("gpt-daybreak-blue-latest", { "gpt-daybreak-blue": RATE })).toBe(RATE);
+    expect(resolveModelRate("gpt-daybreak-red-latest", { "gpt-daybreak-red": RATE })).toBe(RATE);
+  });
+
+  it("does not broaden the known aliases into a generic Daybreak price", () => {
+    const legacyGptFallback = { input: 1.25, cachedInput: 0.125, cacheWrite: 1.25, output: 10 };
+    for (const model of [
+      "gpt-daybreak-green-latest",
+      "gpt-daybreak-blue-preview",
+      "gpt-daybreak-red-preview",
+    ])
+      expect(resolveModelRate(model)).toEqual(legacyGptFallback);
   });
 
   it("keeps the Sonnet 5.5 cache reduction separate from older Sonnet 5", () => {

@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import type { CodexRateLimitPresentation } from "../lib/codexRateLimits";
 import { cn } from "../lib/utils";
+import { scrollViewportOnEndKey } from "../lib/viewportKeyboardScroll";
 import { CLAUDE_QUOTA_STALE_AFTER_MS, formatClaudeSessionQuota } from "../lib/claudeSessionQuota";
 import type { ProviderQuotaState } from "./chat/useProviderQuota";
 import type { ClaudeSessionQuotaPresentation } from "../lib/claudeSessionQuota";
@@ -122,6 +123,7 @@ export function ProviderAccountQuotaDetails(props: {
                 className="focus-ring min-h-0 min-w-0 max-h-[40vh] space-y-3 overflow-y-auto rounded-sm"
                 data-account-quota-scroll
                 tabIndex={0}
+                onKeyDown={scrollViewportOnEndKey}
                 role="region"
                 aria-label={uiText(
                   "Claude reported quota meters and extra usage",

@@ -9,7 +9,7 @@ import { join } from "node:path";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import type { ChildProcess } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
-import { runTestPlan } from "./run-test-plan.ts";
+import { runTestPlan, type TestPlanExecution } from "./run-test-plan.ts";
 import type { TestStep } from "./test-run-plan.ts";
 
 const { spawn } = vi.hoisted(() => ({ spawn: vi.fn() }));
@@ -18,7 +18,7 @@ vi.mock("node:child_process", () => ({ spawn }));
 async function withRunner(
   use: (
     children: ChildProcess[],
-    run: (steps: readonly TestStep[]) => Promise<void>,
+    run: (steps: readonly TestStep[], execution?: TestPlanExecution) => Promise<void>,
   ) => Promise<void>,
 ) {
   const root = mkdtempSync(join(tmpdir(), "cafe-test-plan-"));
@@ -26,8 +26,8 @@ async function withRunner(
   writeFileSync(join(root, "dist/yarn.js"), "// inert Corepack entry\n");
   const children: ChildProcess[] = [];
   const runs: Promise<void>[] = [];
-  const run = (steps: readonly TestStep[]) => {
-    const pending = runTestPlan(steps);
+  const run = (steps: readonly TestStep[], execution?: TestPlanExecution) => {
+    const pending = runTestPlan(steps, execution);
     runs.push(pending);
     // Join below even if a preceding fixture assertion throws before the test
     // reaches its own await; cleanup must not produce an unhandled rejection.
@@ -57,6 +57,41 @@ async function withRunner(
 }
 
 describe("sequential test-plan lifetime", () => {
+  it("fences queued admission on explicit cancellation and executes the captured environment", async () => {
+    await withRunner(async (children, execute) => {
+      const controller = new AbortController();
+      const environment = Object.freeze({
+        COREPACK_ROOT: process.env.COREPACK_ROOT,
+        CAFE_FIXTURE: "captured",
+      });
+      const pending = execute(
+        [
+          { name: "held", args: ["exec", "fixture"] },
+          { name: "queued", args: ["exec", "must-not-run"] },
+        ],
+        { signal: controller.signal, environment },
+      );
+      const failure = expect(pending).rejects.toThrow("cancelled");
+      expect(spawn).toHaveBeenLastCalledWith(
+        process.execPath,
+        expect.any(Array),
+        expect.objectContaining({ env: environment }),
+      );
+      controller.abort();
+      expect(children[0]!.kill).toHaveBeenCalledExactlyOnceWith("SIGTERM");
+      children[0]!.emit("close", 0, null);
+      await failure;
+      expect(children).toHaveLength(1);
+    });
+    await withRunner(async (children, execute) => {
+      const controller = new AbortController();
+      controller.abort();
+      await expect(
+        execute([{ name: "not admitted", args: [] }], { signal: controller.signal }),
+      ).rejects.toThrow("before admission");
+      expect(children).toHaveLength(0);
+    });
+  });
   it("waits for stdio close, not only process exit, before starting the next owned invocation", async () => {
     await withRunner(async (children, execute) => {
       let settled = false;

@@ -1,7 +1,7 @@
 # Agent visualizations and MCP Apps
 
 Status: Full-access inline-browser implementation
-Last updated: 2026-10-19 12:42:24 JST (UTC+0900)
+Last updated: 2026-10-22 19:07:25 JST (UTC+0900)
 
 Visualizations are live, ordinary same-origin browser documents embedded in the
 conversation. They are not image previews. They fill the available chat width,
@@ -120,6 +120,17 @@ removing the duplicate fragment is not a measured per-turn billing claim. See
 Generated documents receive the actual bundled DM Sans Variable faces used by
 chat, with semantic code left monospace. Font bytes, descriptors and OFL notice
 are fixed and offline. External Apps retain their own typography.
+
+Inline composition preserves the authored root/head attributes and source order
+while placing its fixed prelude in the document head. Fragments receive a
+standards-mode wrapper. The bounded lexical
+pass skips comments, templates and raw-text bodies; its offsets always refer to
+the unchanged source. Compare tag names case-insensitively only in their bounded
+ASCII spelling, never by indexing a whole-source Unicode lowercase copy: Unicode
+inside a comment or script can otherwise expand UTF-16 and move the insertion.
+Mixed-case closing tags and suffix refusals retain the same raw-text boundaries.
+The complete wrapped document keeps its 16 MiB UTF-8 limit. This is composition,
+not sanitization or an additional execution-containment boundary.
 
 Generated inline native selects do not retain a pointer-only focus outline or glow
 after a choice. A finite document-owned controller suppresses only those two

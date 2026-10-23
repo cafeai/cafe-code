@@ -3506,6 +3506,115 @@ describe("Codex notification emission timestamps", () => {
 });
 
 describe("Codex protocol diagnostic redaction", () => {
+  it("redacts image attachment identities only from decoded diagnostic copies", () => {
+    const item = {
+      type: "imageGeneration",
+      id: "image-1",
+      status: "completed",
+      fileId: "private-image-file-sentinel",
+      inputImages: [
+        { path: "/private-input-path-sentinel.png", sha256: "private-input-digest-sentinel" },
+      ],
+      revisedPrompt: "A public image description",
+      savedPath: "/synthetic/generated.png",
+    } as const;
+    const wire = {
+      method: "item/completed",
+      params: { threadId: "thread-1", turnId: "turn-1", completedAtMs: 123, item },
+    } as const;
+    // The real typed decoder must admit the original File representation.
+    // Its diagnostic copy intentionally lacks a usable attachment reference;
+    // it is never substituted for this decoded native notification.
+    const decoded = decodeNativeNotificationForDiagnostics(wire);
+    assert.deepEqual(decoded, wire);
+    const diagnostic = sanitizeCodexProtocolDiagnosticPayload({
+      direction: "incoming",
+      stage: "decoded",
+      payload: decoded,
+    });
+    const serialized = encodeProviderJsonString(diagnostic);
+    assert.doesNotMatch(serialized, /private-(?:image-file|input-path|input-digest)-sentinel/);
+    assert.doesNotMatch(serialized, /"(?:fileId|inputImages)"/);
+    assert.match(serialized, /"imageGeneration"/);
+    assert.match(serialized, /"image-1"/);
+    assert.match(serialized, /A public image description/);
+    assert.equal(item.fileId, "private-image-file-sentinel");
+    assert.equal(item.inputImages[0].path, "/private-input-path-sentinel.png");
+    assert.equal(item.inputImages[0].sha256, "private-input-digest-sentinel");
+    assert.deepEqual(decodeNativeNotificationForDiagnostics(wire), wire);
+  });
+
+  it("redacts image references in aggregate turn and retained-thread diagnostics", () => {
+    const item = {
+      type: "imageGeneration",
+      id: "image-1",
+      status: "completed",
+      result: "legacy-inline-image",
+      fileId: "private-aggregate-file-sentinel",
+      inputImages: [
+        { path: "/private-aggregate-path-sentinel.png", sha256: "private-aggregate-hash-sentinel" },
+      ],
+    } as const;
+    const turn = { id: "turn-1", status: "completed", items: [item], error: null };
+    for (const method of ["turn/started", "turn/completed", "thread/started"] as const) {
+      const params =
+        method === "thread/started"
+          ? { thread: { turns: [turn] } }
+          : { threadId: "thread-1", turn };
+      const diagnostic = sanitizeCodexProtocolDiagnosticPayload({
+        direction: "incoming",
+        stage: "decoded",
+        payload: { method, params },
+      });
+      const serialized = encodeProviderJsonString(diagnostic);
+      assert.doesNotMatch(serialized, /private-aggregate-(?:file|path|hash)-sentinel/);
+      assert.match(serialized, /"imageGeneration"/);
+      assert.match(serialized, /"legacy-inline-image"/);
+    }
+    assert.equal(item.fileId, "private-aggregate-file-sentinel");
+    assert.equal(item.inputImages[0].path, "/private-aggregate-path-sentinel.png");
+  });
+
+  it("does not invoke received proxy or accessor code while selecting diagnostic methods", () => {
+    let reads = 0;
+    const receivedProxy = new Proxy(
+      {},
+      {
+        get() {
+          reads += 1;
+          throw new Error("private-proxy-sentinel");
+        },
+        ownKeys() {
+          reads += 1;
+          throw new Error("private-proxy-sentinel");
+        },
+        getOwnPropertyDescriptor() {
+          reads += 1;
+          throw new Error("private-proxy-sentinel");
+        },
+      },
+    );
+    const accessor = Object.defineProperty({}, "method", {
+      get() {
+        reads += 1;
+        throw new Error("private-accessor-sentinel");
+      },
+    });
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    for (const payload of [receivedProxy, accessor, revoked.proxy]) {
+      assert.equal(
+        sanitizeCodexProtocolDiagnosticPayload({
+          direction: "incoming",
+          stage: "decoded",
+          payload,
+        }),
+        "[Private image metadata omitted]",
+      );
+    }
+    assert.equal(reads, 0);
+  });
+
   it("redacts the actual typed schema cause of malformed private attachment metadata", () => {
     for (const invalidField of ["attachmentId", "identityKey", "operation"] as const) {
       const params = {

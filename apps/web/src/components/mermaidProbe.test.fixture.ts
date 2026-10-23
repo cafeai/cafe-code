@@ -106,6 +106,7 @@ interface MermaidProbeOptions<T> {
   readonly kind: "Graph admission probe" | "Family admission probe" | "Native diagram-output probe";
   readonly invocation: ProbeInvocation;
   readonly readResult: (data: Record<string, unknown>) => T;
+  readonly signal?: AbortSignal;
   readonly bootstrapObservation?: {
     readonly nonce: string;
     readonly onPhase?: (phase: MermaidProbeBootstrapPhase) => void;
@@ -117,6 +118,10 @@ interface MermaidProbeOptions<T> {
 }
 
 export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> {
+  // Capture the exact caller's owner once. A retired invocation must not even
+  // allocate a frame or native ports, and its unqualified reason stays opaque.
+  const signal = options.signal;
+  if (signal?.aborted) return Promise.reject(new Error("Mermaid probe owner retired"));
   const frame = document.createElement("iframe");
   const channel = new MessageChannel();
   frame.dataset.mermaidFamilySecurityFixture = options.id;
@@ -145,12 +150,18 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
       channel.port1.onmessage = null;
       channel.port1.onmessageerror = null;
       window.removeEventListener("message", observeBootstrap);
+      signal?.removeEventListener("abort", onAbort);
       channel.port1.close();
       channel.port2.close();
       frame.remove();
       if ("error" in outcome) reject(outcome.error);
       else resolve(outcome.result);
     };
+    function onAbort(): void {
+      // Retirement is neither a renderer refusal nor retry authority. Use the
+      // same exact-owner cleanup without reading/coercing the received reason.
+      finish({ error: new Error("Mermaid probe owner retired") });
+    }
     // Preserve the original scope and duration: document construction has
     // finished, while frame loading, parsing and the reply all share one fixed
     // allowance. Observed breadcrumbs never renew this timer or authorize a
@@ -268,8 +279,14 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
       if (settled || sourceReserved || options.bootstrapObservation?.admitSourceOnReady) return;
       sendSource("frame-loaded");
     };
+    // Register before native insertion, then close the check/register race.
+    // Existing callbacks also retain the settled fence if already queued.
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+    if (settled) return;
     try {
       frame.srcdoc = options.documentSource;
+      if (settled) return;
       document.body.append(frame);
     } catch {
       finish({ error: failure("setup failed") });

@@ -1014,8 +1014,18 @@ describe("ChatMarkdown", () => {
     onTestFinished,
   }) => {
     let nativeInputOwner: HTMLElement | null = null;
+    let viewportArrow: KeyboardEvent | undefined;
+    const readViewportArrow = (): KeyboardEvent | undefined => viewportArrow;
+    const observeArrow = (event: KeyboardEvent) => {
+      if (event.key === "ArrowRight" && event.target === nativeInputOwner) viewportArrow = event;
+    };
     const nativeInput = observeNativeInput("markdown-table", () => nativeInputOwner);
-    onTestFinished(nativeInput.retire);
+    const retire = () => {
+      nativeInput.retire();
+      viewportArrow = undefined;
+      window.removeEventListener("keydown", observeArrow, true);
+    };
+    onTestFinished(retire);
     const screen = await render(renderTableViewerFixture());
     try {
       nativeInput.assertActive();
@@ -1074,12 +1084,25 @@ describe("ChatMarkdown", () => {
         Math.abs(table!.getBoundingClientRect().width - table!.offsetWidth),
       ).toBeLessThanOrEqual(1);
 
+      // Observe the existing activation separately from the original key. A
+      // captured key's microtask does not by itself prove that later handlers
+      // left its native default action intact.
+      nativeInput.mark("before-activation");
       viewport.focus();
+      nativeInput.mark("after-activation");
       nativeInput.mark("ready");
       nativeInput.mark("before-input");
+      nativeInput.assertActive();
+      window.addEventListener("keydown", observeArrow, true);
       await userEvent.keyboard("{ArrowRight}");
       nativeInput.assertActive();
       nativeInput.mark("after-input");
+      const receivedArrow = readViewportArrow();
+      expect(receivedArrow?.isTrusted).toBe(true);
+      expect(receivedArrow?.target).toBe(viewport);
+      expect(receivedArrow?.defaultPrevented).toBe(true);
+      window.removeEventListener("keydown", observeArrow, true);
+      viewportArrow = undefined;
       await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(0));
       nativeInput.assertActive();
       await page.getByRole("button", { name: "Fit", exact: true }).click();
@@ -1101,8 +1124,127 @@ describe("ChatMarkdown", () => {
       nativeInput.fail();
       throw error;
     } finally {
-      nativeInput.retire();
+      retire();
       await screen.unmount();
+    }
+  });
+
+  it("leaves selected table text and focused cell links to native arrow handling", async ({
+    onTestFinished,
+    signal,
+  }) => {
+    const text = [
+      "| Text | Action | Detail |",
+      "| --- | --- | --- |",
+      `| Selectable | [Help](https://example.com/) | \`${"wide-cell-".repeat(160)}\` |`,
+    ].join("\n");
+    let retired = false;
+    let view: Awaited<ReturnType<typeof render>> | undefined;
+    let pendingRender: ReturnType<typeof render> | undefined;
+    let arrow: KeyboardEvent | undefined;
+    const readArrow = (): KeyboardEvent | undefined => arrow;
+    let cleanupPromise: Promise<void> | undefined;
+    const pending = new Set<Promise<unknown>>();
+    const requireActive = () => {
+      if (retired) throw new Error("Table keyboard ownership fixture retired");
+    };
+    const own = <T,>(operation: () => Promise<T>): Promise<T> => {
+      requireActive();
+      const result = operation();
+      pending.add(result);
+      // Observe both outcomes without changing the original action's error.
+      void result.then(
+        () => pending.delete(result),
+        () => pending.delete(result),
+      );
+      return result;
+    };
+    const observeArrow = (event: KeyboardEvent) => {
+      if (!retired && event.key === "ArrowRight") arrow = event;
+    };
+    const retire = () => {
+      retired = true;
+      arrow = undefined;
+      window.removeEventListener("keydown", observeArrow, true);
+    };
+    const cleanup = () => {
+      if (cleanupPromise) return cleanupPromise;
+      retire();
+      cleanupPromise = (async () => {
+        try {
+          // Drain admitted native actions while their exact controls still exist.
+          // No late continuation may start another action after retirement.
+          await Promise.allSettled([...pending]);
+          const mounted = view ?? (await pendingRender);
+          await mounted?.unmount();
+        } finally {
+          signal?.removeEventListener("abort", retire);
+        }
+      })();
+      return cleanupPromise;
+    };
+    onTestFinished(cleanup);
+    signal?.addEventListener("abort", retire, { once: true });
+    if (signal?.aborted) retire();
+    try {
+      await own(() => page.viewport(1100, 800));
+      requireActive();
+      pendingRender = own(() => render(renderTableViewerFixture(text)));
+      view = await pendingRender;
+      requireActive();
+      await own(() => page.getByRole("button", { name: "Expand table" }).click());
+      requireActive();
+      const dialog = page.getByRole("dialog", { name: "Expanded table" });
+      await own(() => expect.element(dialog).toBeVisible());
+      requireActive();
+      await own(() => page.getByRole("button", { name: "Reset", exact: true }).click());
+      requireActive();
+      const viewport = page
+        .getByRole("region", { name: "Expanded table; scroll to inspect" })
+        .element();
+      expect(viewport.scrollWidth).toBeGreaterThan(viewport.clientWidth);
+      viewport.focus();
+      await own(() => dialog.getByRole("cell", { name: "Selectable", exact: true }).dblClick());
+      requireActive();
+      await own(() =>
+        vi.waitFor(() => {
+          expect(document.activeElement).toBe(viewport);
+          expect(document.getSelection()?.isCollapsed).toBe(false);
+          expect(document.getSelection()?.toString()).toBe("Selectable");
+        }),
+      );
+      requireActive();
+      window.addEventListener("keydown", observeArrow, true);
+      await own(() => userEvent.keyboard("{ArrowRight}"));
+      requireActive();
+      const selectionArrow = readArrow();
+      expect(selectionArrow?.isTrusted).toBe(true);
+      expect(selectionArrow?.target).toBe(viewport);
+      expect(selectionArrow?.defaultPrevented).toBe(false);
+      expect(dialog.element().querySelector("td")?.textContent).toBe("Selectable");
+      arrow = undefined;
+
+      // Native Tab, not a forced focus, transfers keyboard ownership into the
+      // real sanitized table link. The viewport must not consume its arrow.
+      await own(() => userEvent.keyboard("{Tab}"));
+      requireActive();
+      const link = dialog.getByRole("link", { name: "Help", exact: true });
+      await own(() => expect.element(link).toHaveFocus());
+      requireActive();
+      await own(() => userEvent.keyboard("{ArrowRight}"));
+      requireActive();
+      const linkArrow = readArrow();
+      expect(linkArrow?.isTrusted).toBe(true);
+      expect(linkArrow?.target).toBe(link.element());
+      expect(linkArrow?.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(link.element());
+      expect(link.element().getAttribute("href")).toBe("https://example.com/");
+      await own(() => userEvent.keyboard("{Escape}"));
+      requireActive();
+      await own(() => expect.element(dialog).not.toBeInTheDocument());
+      requireActive();
+    } finally {
+      await cleanup();
     }
   });
 

@@ -1,5 +1,5 @@
 import { EnvironmentId } from "@cafecode/contracts";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 let mockSavedRecords: Array<Record<string, unknown>> = [];
 
@@ -135,11 +135,12 @@ const remoteRecord = () => ({
   lastConnectedAt: null,
 });
 
-describe("direct saved environments", () => {
-  beforeAll(async () => {
-    await import("./service");
-  });
+// Collect the real service only after all fixture-owned mock bindings exist.
+// Connection actions remain inside the tests; loading the module is preparation,
+// not a lifecycle readiness check that belongs inside a beforeAll deadline.
+await import("./service");
 
+describe("direct saved environments", () => {
   afterEach(async () => {
     const { resetEnvironmentServiceForTests } = await import("./service");
     await resetEnvironmentServiceForTests();

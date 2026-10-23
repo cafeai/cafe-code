@@ -20,15 +20,27 @@ export function corepackTestCommand(root: string | undefined, args: readonly str
   return { command: process.execPath, args: [entry, ...args] };
 }
 
-export async function runTestPlan(steps: readonly TestStep[]) {
+export interface TestPlanExecution {
+  /** An explicit local owner may fence queued work as well as its current child.
+   * Ordinary CI callers keep the same uncached, sequential default. */
+  readonly signal?: AbortSignal;
+  readonly cwd?: string;
+  readonly environment?: Readonly<NodeJS.ProcessEnv>;
+}
+
+export async function runTestPlan(steps: readonly TestStep[], execution: TestPlanExecution = {}) {
   for (const step of steps) {
+    if (execution.signal?.aborted) throw new Error("Test plan cancelled before admission.");
     Effect.runSync(Console.log(`\n${step.name}`));
-    const { command, args } = corepackTestCommand(process.env.COREPACK_ROOT, step.args);
+    const { command, args } = corepackTestCommand(
+      (execution.environment ?? process.env).COREPACK_ROOT,
+      step.args,
+    );
     const started = performance.now();
     await new Promise<void>((resolve, reject) => {
       const child = spawn(command, args, {
-        cwd: testRepositoryRoot,
-        env: { ...process.env, ...step.env },
+        cwd: execution.cwd ?? testRepositoryRoot,
+        env: { ...(execution.environment ?? process.env), ...step.env },
         stdio: "inherit",
         shell: false,
       });
@@ -44,9 +56,11 @@ export async function runTestPlan(steps: readonly TestStep[]) {
       };
       process.once("SIGINT", interrupt);
       process.once("SIGTERM", terminate);
+      execution.signal?.addEventListener("abort", terminate, { once: true });
       const cleanup = () => {
         process.removeListener("SIGINT", interrupt);
         process.removeListener("SIGTERM", terminate);
+        execution.signal?.removeEventListener("abort", terminate);
       };
       child.once("error", (error) => {
         // A spawn/transport error does not authorize the next invocation while
@@ -65,6 +79,10 @@ export async function runTestPlan(steps: readonly TestStep[]) {
             new Error(`${step.name} ${cancelled ? "cancelled" : "failed"} (${signal ?? code}).`),
           );
       });
+      // Native spawn can synchronously deliver cancellation before this exact
+      // held child has registered its listener. Never admit the next step from
+      // a zero close after that race.
+      if (execution.signal?.aborted) terminate();
     });
   }
 }

@@ -76,10 +76,6 @@ function focusTargetFor(anchor: HTMLElement): HTMLElement | null {
   return null;
 }
 
-function prefersReducedMotion(): boolean {
-  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-}
-
 let activeHighlight: { element: HTMLElement; cleanup: () => void } | null = null;
 
 export function clearSettingsSearchHighlight(): void {
@@ -138,9 +134,13 @@ export async function revealSettingsSearchTarget(input: {
   // One frame lets the page's entrance layout settle before measuring.
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   if (signal.aborted || !anchor.isConnected) return false;
+  // Navigation must reveal the target before focus moves and this operation
+  // reports success. A scheduled smooth scroll can leave that focused control
+  // offscreen while native animation is still pending. Position immediately
+  // for both motion preferences; the existing tint remains the visual cue.
   anchor.scrollIntoView({
     block: "center",
-    behavior: prefersReducedMotion() ? "auto" : "smooth",
+    behavior: "instant",
   });
   highlight(anchor);
   if (anchor.dataset.settingsSearchTarget === "row") {

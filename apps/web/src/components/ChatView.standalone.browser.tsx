@@ -1741,58 +1741,173 @@ describe("ChatView full app (standalone)", () => {
       }
     });
 
-    it.each([
+    it.for([
       { before: true, reset: false },
       { before: false, reset: true },
     ])(
       "does not resurrect obsolete ACK intent over newer canonical metadata (before=$before reset=$reset)",
-      async ({ before, reset }) => {
+      async ({ before, reset }, { signal, onTestFinished }) => {
+        let retired = false;
+        let mounting: ReturnType<typeof mountChatView> | undefined;
+        let mountCleanup: (() => Promise<void>) | undefined;
+        let cleanupPromise: Promise<void> | undefined;
+        const pendingOperations = new Set<Promise<unknown>>();
         let release!: (value: { sequence: number }) => void;
+        let ackReleased = false;
         const pending = new Promise<{ sequence: number }>((resolve) => {
           release = resolve;
         });
-        const mounted = await mountChatView({
-          viewport: DEFAULT_VIEWPORT,
-          snapshot: contextSnapshot(),
-          configureFixture: configureContext,
-          resolveRpc: (body) =>
-            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? pending : undefined,
-        });
-        try {
-          await openContextEditor();
-          if (!reset) await contextInput().fill("700000");
-          await page.getByRole("button", { name: reset ? "Reset" : "Save", exact: true }).click();
-          await vi.waitFor(() =>
-            expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+        const requested = reset ? null : 700_000;
+        const assertActive = () => {
+          if (retired || signal.aborted)
+            throw new Error("The exact context ACK fixture was retired.");
+        };
+        const releaseAck = () => {
+          if (ackReleased) return;
+          ackReleased = true;
+          release({ sequence: 2 });
+        };
+        const cleanup = () => {
+          retired = true;
+          signal.removeEventListener("abort", onAbort);
+          return (cleanupPromise ??= (async () => {
+            // The caller's retirement fences mount/input continuations. Release
+            // only this held reply before joining work that may await it, while
+            // retaining native targets until their original actions settle.
+            releaseAck();
+            try {
+              try {
+                await mounting;
+              } catch {
+                // The original mount await retains its failure. Cleanup only
+                // joins that same owned promise, never substitutes readiness.
+              }
+              await Promise.allSettled([...pendingOperations]);
+            } finally {
+              // Scoped disposal clears only this exact mount's RPC resolver.
+              await mountCleanup?.();
+            }
+          })());
+        };
+        const onAbort = () => {
+          void cleanup().catch(() => undefined);
+        };
+        const owned = async <T,>(operation: () => PromiseLike<T>): Promise<T> => {
+          assertActive();
+          const operationPromise = Promise.resolve(operation());
+          pendingOperations.add(operationPromise);
+          try {
+            const result = await operationPromise;
+            assertActive();
+            return result;
+          } finally {
+            pendingOperations.delete(operationPromise);
+          }
+        };
+        // Keep the original native opening actions, with a retirement fence
+        // between them rather than allowing a late helper to open another menu.
+        const openOwnedContextEditor = async () => {
+          await owned(() =>
+            page.getByRole("button", { name: "More composer controls", exact: true }).click(),
           );
+          await owned(() =>
+            page.getByRole("menuitem", { name: "Context window…", exact: true }).click(),
+          );
+          await owned(() =>
+            expect
+              .element(page.getByRole("dialog", { name: "Context window", exact: true }))
+              .toBeVisible(),
+          );
+        };
+        onTestFinished(cleanup);
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+        try {
+          await owned(
+            () =>
+              (mounting = mountChatView({
+                viewport: DEFAULT_VIEWPORT,
+                snapshot: contextSnapshot(),
+                configureFixture: configureContext,
+                lifecycle: {
+                  assertActive,
+                  retire: cleanup,
+                  ownCleanup: (cleanupMount) => {
+                    mountCleanup = cleanupMount;
+                  },
+                  observePhase: assertActive,
+                },
+                resolveRpc: (body) => {
+                  if (body._tag !== ORCHESTRATION_WS_METHODS.dispatchCommand) return undefined;
+                  return body.type === "thread.meta.update" &&
+                    body.threadId === THREAD_ID &&
+                    body.codexContextWindowOverride === requested
+                    ? pending
+                    : { sequence: 2 };
+                },
+              })),
+          );
+          await openOwnedContextEditor();
+          const popup = page.getByRole("dialog", { name: "Context window", exact: true }).element();
+          expect(popup.isConnected).toBe(true);
+          expect(popup.hasAttribute("data-open")).toBe(true);
+          if (!reset) await owned(() => contextInput().fill("700000"));
+          await owned(() =>
+            page.getByRole("button", { name: reset ? "Reset" : "Save", exact: true }).click(),
+          );
+          await owned(() =>
+            vi.waitFor(() =>
+              expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+            ),
+          );
+          expect(wsRequests.find((body) => body.type === "thread.meta.update")).toMatchObject({
+            threadId: THREAD_ID,
+            codexContextWindowOverride: requested,
+          });
           if (!before) {
-            release({ sequence: 2 });
-            await vi.waitFor(() =>
+            releaseAck();
+            await owned(() =>
+              vi.waitFor(() =>
+                expect(
+                  useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
+                    ?.codexContextWindowOverride,
+                ).toBe(reset ? null : 700_000),
+              ),
+            );
+          }
+          assertActive();
+          publishContext(900_000, 500_000, 3);
+          await owned(() =>
+            vi.waitFor(() =>
+              expect(
+                selectThreadByRef(useStore.getState(), THREAD_REF)?.codexContextWindowOverride,
+              ).toBe(900_000),
+            ),
+          );
+          if (before) releaseAck();
+          await owned(() =>
+            vi.waitFor(() => {
+              // A closed Base UI popup may retain its exit painting. Require
+              // semantic closure of this exact originally-open popup instead
+              // of a cosmetic physical-unmount schedule; reopening below still
+              // proves ordinary native access to the current canonical value.
+              if (popup.isConnected) {
+                expect(popup.hasAttribute("data-closed")).toBe(true);
+                expect(popup.hasAttribute("data-open")).toBe(false);
+              }
               expect(
                 useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
                   ?.codexContextWindowOverride,
-              ).toBe(reset ? null : 700_000),
-            );
-          }
-          publishContext(900_000, 500_000, 3);
-          await vi.waitFor(() =>
-            expect(
-              selectThreadByRef(useStore.getState(), THREAD_REF)?.codexContextWindowOverride,
-            ).toBe(900_000),
+              ).toBeUndefined();
+              expect(
+                selectThreadByRef(useStore.getState(), THREAD_REF)?.codexContextWindowOverride,
+              ).toBe(900_000);
+            }),
           );
-          if (before) release({ sequence: 2 });
-          await vi.waitFor(() => {
-            expect(document.querySelector('[role="dialog"]')).toBeNull();
-            expect(
-              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
-                ?.codexContextWindowOverride,
-            ).toBeUndefined();
-          });
-          await openContextEditor();
-          await expect.element(contextInput()).toHaveValue(900_000);
+          await openOwnedContextEditor();
+          await owned(() => expect.element(contextInput()).toHaveValue(900_000));
         } finally {
-          release({ sequence: 2 });
-          await mounted.cleanup();
+          await cleanup();
         }
       },
     );

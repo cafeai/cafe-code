@@ -59,6 +59,215 @@ const decodeThreadItemsListParams = Schema.decodeUnknownSync(
 );
 const isThreadItemsListParams = Schema.is(CodexSchema.CLIENT_REQUEST_PARAMS["thread/items/list"]);
 
+it("preserves native read-state metadata without widening unread-position tags", () => {
+  for (const firstUnread of [
+    undefined,
+    null,
+    { type: "threadStart" },
+    { type: "turn", turnId: "turn-1" },
+  ] as const) {
+    const notification = {
+      method: "thread/readState/changed",
+      params: {
+        threadId: "thread-1",
+        readState: {
+          revision: "revision-1",
+          ...(firstUnread === undefined ? {} : { firstUnread }),
+        },
+      },
+    } as const;
+    assert.deepEqual(decodeServerNotification(notification), notification);
+  }
+  for (const readState of [
+    { revision: 1 },
+    { revision: "revision-1", firstUnread: { type: "futurePosition" } },
+    { revision: "revision-1", firstUnread: { type: "turn" } },
+  ]) {
+    assert.throws(() =>
+      decodeServerNotification({
+        method: "thread/readState/changed",
+        params: { threadId: "thread-1", readState },
+      }),
+    );
+  }
+});
+
+it("preserves Codex 0.164 inline and file-backed image items in live and paged history", () => {
+  const decodeEntry = Schema.decodeUnknownSync(
+    CodexSchema.V2ThreadItemsListResponse__ThreadItemEntry,
+  );
+  for (const reference of [
+    { result: "synthetic-inline-image" },
+    { fileId: "synthetic-stored-image" },
+  ]) {
+    for (const inputImages of [
+      undefined,
+      [{ path: "/synthetic/reference.png", sha256: "ab".repeat(32) }],
+    ]) {
+      const item = {
+        type: "imageGeneration",
+        id: "image-1",
+        status: "completed",
+        revisedPrompt: "A synthetic blue square",
+        savedPath: "/synthetic/generated.png",
+        ...reference,
+        ...(inputImages === undefined ? {} : { inputImages }),
+      } as const;
+      const completed = {
+        method: "item/completed",
+        params: { threadId: "thread-1", turnId: "turn-1", completedAtMs: 123, item },
+      } as const;
+      assert.deepEqual(decodeServerNotification(completed), completed);
+      const entry = { turnId: "turn-1", item };
+      assert.deepEqual(decodeEntry(entry), entry);
+    }
+  }
+
+  // The native untagged File branch precedes Inline during rollout migration.
+  // Its JSON schema is anyOf, not an exclusive oneOf: both may be present.
+  // Preserve the durable identity without asserting that this observational
+  // codec deletes otherwise valid legacy bytes or grants retrieval authority.
+  for (const result of ["", "stale-inline-image"]) {
+    const item = {
+      type: "imageGeneration",
+      id: "image-1",
+      status: "completed",
+      fileId: "synthetic-stored-image",
+      result,
+    } as const;
+    const decoded = decodeEntry({ turnId: "turn-1", item });
+    assert.equal(decoded.item.type, "imageGeneration");
+    assert.equal("fileId" in decoded.item && decoded.item.fileId, item.fileId);
+  }
+});
+
+it("rejects missing or malformed image references without loosening shared item fields", () => {
+  const decodeEntry = Schema.decodeUnknownSync(
+    CodexSchema.V2ThreadItemsListResponse__ThreadItemEntry,
+  );
+  const base = { type: "imageGeneration", id: "image-1", status: "completed" } as const;
+  for (const item of [
+    base,
+    { ...base, fileId: null },
+    { ...base, fileId: 42 },
+    { ...base, result: null },
+    { ...base, result: {} },
+    { ...base, fileId: "image-file", id: null },
+    { ...base, fileId: "image-file", status: 42 },
+    { ...base, fileId: "image-file", inputImages: {} },
+    { ...base, fileId: "image-file", inputImages: [{ path: "/synthetic/reference.png" }] },
+    { ...base, fileId: "image-file", inputImages: [{ path: 42, sha256: "ab" }] },
+  ]) {
+    assert.throws(() =>
+      decodeServerNotification({
+        method: "item/completed",
+        params: { threadId: "thread-1", turnId: "turn-1", completedAtMs: 123, item },
+      }),
+    );
+    assert.throws(() => decodeEntry({ turnId: "turn-1", item }));
+  }
+});
+
+it("keeps experimental sampled turns outside the stable client request boundary", () => {
+  const isStableRequest = Schema.is(CodexSchema.ClientRequest);
+  for (const method of ["thread/sample", "thread/sample/cancel"]) {
+    assert.equal(
+      isStableRequest({
+        method,
+        id: 1,
+        params: { threadId: "thread-1", expectedTurnId: "turn-1", prompt: "synthetic" },
+      }),
+      false,
+    );
+  }
+});
+
+it("retains optional response metadata in raw notifications and resumed history", () => {
+  const decodeResumeItem = Schema.decodeUnknownSync(CodexSchema.V2ThreadResumeParams__ResponseItem);
+  // Native raw-response notifications are absent from the upstream aggregate
+  // JSON union. Exercise the exact per-method codec used by the live client,
+  // not a manually widened aggregate that would change the upstream contract.
+  const decodeRaw = Schema.decodeUnknownSync(
+    CodexSchema.SERVER_NOTIFICATION_PARAMS["rawResponseItem/completed"],
+  );
+  // These are native opaque wire values, not user-visible message content or
+  // retry/approval authority. Keep the declared arrays and nullable fields exact
+  // while accepting older providers that omit every additive field.
+  for (const extension of [
+    {},
+    { status: null, encrypted_content: null, annotations: null, logprobs: null },
+    {
+      status: "completed",
+      encrypted_content: "opaque-ciphertext",
+      annotations: [{ type: "opaque_annotation", start: 0 }],
+      logprobs: [{ token: "x", logprob: -0.5 }],
+    },
+  ]) {
+    const { annotations, logprobs, ...itemExtension } = extension;
+    const item = {
+      type: "message",
+      role: "assistant",
+      ...itemExtension,
+      content: [
+        {
+          type: "output_text",
+          text: "Public reply",
+          ...(Object.hasOwn(extension, "annotations") ? { annotations } : {}),
+          ...(Object.hasOwn(extension, "logprobs") ? { logprobs } : {}),
+        },
+      ],
+    } as const;
+    const notification = {
+      method: "rawResponseItem/completed",
+      params: { threadId: "thread-1", turnId: "turn-1", item },
+    };
+    assert.deepEqual(decodeRaw(notification.params), notification.params);
+    assert.deepEqual(decodeResumeItem(item), item);
+  }
+  for (const item of [
+    { type: "message", role: "assistant", encrypted_content: 42, content: [] },
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "x", annotations: {} }],
+    },
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "x", logprobs: "bad" }],
+    },
+    { type: "futureItem", role: "assistant", content: [] },
+  ]) {
+    assert.throws(() => decodeRaw({ threadId: "thread-1", turnId: "turn-1", item }));
+    assert.throws(() => decodeResumeItem(item));
+  }
+});
+
+it("preserves explicit tool-output retention without inventing a default", () => {
+  const decode = Schema.decodeUnknownSync(CodexSchema.V2TurnStartParams);
+  for (const retain of [undefined, false, true]) {
+    const params = {
+      threadId: "thread-1",
+      input: [],
+      toolOutput: {
+        name: "synthetic_tool",
+        output: "result",
+        ...(retain === undefined ? {} : { retain }),
+      },
+    };
+    assert.deepEqual(decode(params), params);
+  }
+  for (const retain of [null, "true"]) {
+    assert.throws(() =>
+      decode({
+        threadId: "thread-1",
+        input: [],
+        toolOutput: { name: "synthetic_tool", output: "result", retain },
+      }),
+    );
+  }
+});
+
 it("preserves Codex 0.162 partial public replies without inventing terminal status", () => {
   const item = {
     type: "agentMessage",
@@ -251,6 +460,24 @@ it("preserves Codex 0.158 Pro Max account and rate-limit metadata", () => {
   assert.deepEqual(decodeServerNotification(rateLimitsUpdated), rateLimitsUpdated);
   assert.equal(isAccountRateLimitPlanType("promax"), true);
   assert.equal(isAccountRateLimitPlanType("pro-max"), false);
+});
+
+it("preserves Codex 0.164 reported academic plans across account and quota envelopes", () => {
+  for (const planType of ["sci", "sci_plus"] as const) {
+    const account = {
+      account: { type: "chatgpt", email: null, planType },
+      requiresOpenaiAuth: true,
+    } as const;
+    assert.deepEqual(decodeAccountResponse(account), account);
+    for (const notification of [
+      { method: "account/updated", params: { authMode: "chatgpt", planType } },
+      { method: "account/rateLimits/updated", params: { rateLimits: { planType } } },
+    ] as const) {
+      assert.deepEqual(decodeServerNotification(notification), notification);
+    }
+    assert.equal(isAccountRateLimitPlanType(planType), true);
+  }
+  assert.equal(isAccountRateLimitPlanType("academic_researchers"), false);
 });
 
 it("decodes Codex 0.158 Flex capacity failures without losing terminal notifications", () => {

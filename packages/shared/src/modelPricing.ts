@@ -97,9 +97,23 @@ const BUNDLED_RATES: ReadonlyArray<readonly [prefix: string, rate: ModelRate]> =
   ["gpt-6-sol", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
   ["gpt-6-luna", { input: 0.1, cachedInput: 0.01, cacheWrite: 0.125, output: 0.5 }],
   // Verified 2026-09-23 against each model's official API page. GPT-5.6
-  // remains selectable during rollout and Luna is the metadata-helper default.
+  // remains selectable during rollout.
   // Sol's promotional pricing is promised through at least 2026-11-21.
   ["gpt-5.6-sol", { input: 4, cachedInput: 0.4, cacheWrite: 5, output: 20 }],
+
+  // Verified 2026-10-23: standard short-context rates use the 30m cache-write
+  // column, not the distinct 12h price. The API's deprecated Daybreak aliases
+  // currently map Blue to 5.6 Sol and Red to 5.6 Cyber; these pricing rows do
+  // not infer native availability/entitlement or change request routing.
+  // Keep only the known alias prefixes, not a generic Daybreak price. Alias
+  // targets can change, so re-audit their published mapping on provider updates.
+  // https://developers.openai.com/api/docs/pricing
+  // https://developers.openai.com/api/docs/models/gpt-daybreak-blue-latest
+  // https://developers.openai.com/api/docs/models/gpt-daybreak-red-latest
+  ["gpt-5.6-cyber", { input: 12.5, cachedInput: 1.25, cacheWrite: 15.625, output: 75 }],
+
+  ["gpt-daybreak-blue-latest", { input: 4, cachedInput: 0.4, cacheWrite: 5, output: 20 }],
+  ["gpt-daybreak-red-latest", { input: 12.5, cachedInput: 1.25, cacheWrite: 15.625, output: 75 }],
   ["gpt-5.6-terra", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 12 }],
   ["gpt-5.6-luna", { input: 0.2, cachedInput: 0.02, cacheWrite: 0.25, output: 1.2 }],
   ["gpt-5", { input: 1.25, cachedInput: 0.125, cacheWrite: 1.25, output: 10 }],

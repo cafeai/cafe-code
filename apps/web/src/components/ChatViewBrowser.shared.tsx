@@ -1,4 +1,5 @@
 import { createChatViewSnapshots } from "./ChatViewSnapshots.fixture";
+import { createChatViewFixtureRetirement } from "./chatViewFixtureRetirement.test.fixture";
 import "../index.css";
 import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import {
@@ -108,6 +109,7 @@ let fixture: TestFixture;
 const rpcHarness = new BrowserWsRpcHarness();
 const wsRequests = rpcHarness.requests;
 let customWsRpcResolver: ((body: NormalizedWsRpcRequestBody) => unknown | undefined) | null = null;
+const scopedFixtureRetirement = createChatViewFixtureRetirement();
 const wsLink = ws.link(/ws(s)?:\/\/.*/);
 const encodeServerConfig = Schema.encodeSync(ServerConfigSchema);
 
@@ -1517,14 +1519,78 @@ async function mountChatView(options: {
   configureFixture?: (fixture: TestFixture) => void;
   resolveRpc?: (body: NormalizedWsRpcRequestBody) => unknown | undefined;
   initialPath?: string;
+  lifecycle?: {
+    readonly assertActive: () => void;
+    readonly retire: () => Promise<void>;
+    readonly ownCleanup: (cleanup: () => Promise<void>) => void;
+    readonly observePhase: (
+      phase: "viewport" | "styles" | "render" | "websocket" | "bootstrap" | "layout",
+    ) => void;
+  };
 }): Promise<MountedChatView> {
+  const lifecycle = options.lifecycle;
+  // A scoped caller owns its complete mount/native-action drain, not just the
+  // eventual React unmount. Admit that exact owner before any fixture mutation.
+  // An uncertain previous owner cannot be replaced even by an unscoped mount.
+  if (lifecycle) scopedFixtureRetirement.admit(lifecycle.retire);
+  else scopedFixtureRetirement.assertIdle();
+  let retired = false;
+  let host: HTMLDivElement | undefined;
+  let rendering: ReturnType<typeof render> | undefined;
+  let screen: Awaited<ReturnType<typeof render>> | undefined;
+  let cleanupPromise: Promise<void> | undefined;
+  const ownedResolver = options.resolveRpc ?? null;
+  const assertActive = () => {
+    if (retired) throw new Error("The exact chat mount fixture was retired.");
+    lifecycle?.assertActive();
+  };
+  const dispose = async () => {
+    if (lifecycle === undefined) {
+      // Preserve the established cleanup ordering for unscoped consumers.
+      customWsRpcResolver = null;
+      await screen?.unmount();
+      host?.remove();
+      await waitForLayout();
+      return;
+    }
+    if (customWsRpcResolver === ownedResolver) customWsRpcResolver = null;
+    // The scoped caller owns this promise before render can yield. A timeout
+    // must join its exact result and unmount it, not clear a replacement root
+    // or abandon a render that may commit after ordinary DOM cleanup.
+    let ownedScreen: Awaited<ReturnType<typeof render>> | undefined;
+    try {
+      ownedScreen = await rendering;
+    } catch {
+      // The original mount await retains the render failure. Cleanup still
+      // removes this exact owned host without replacing that original error.
+    }
+    try {
+      await ownedScreen?.unmount();
+    } finally {
+      host?.remove();
+      await waitForLayout();
+    }
+  };
+  const cleanup = () => {
+    if (lifecycle === undefined) return dispose();
+    retired = true;
+    return (cleanupPromise ??= dispose());
+  };
+  // Optional ownership is installed synchronously before viewport, render or
+  // bootstrap awaits. Existing unscoped consumers retain their own lifecycle.
+  lifecycle?.ownCleanup(cleanup);
+  assertActive();
   fixture = buildFixture(options.snapshot);
   options.configureFixture?.(fixture);
-  customWsRpcResolver = options.resolveRpc ?? null;
+  customWsRpcResolver = ownedResolver;
+  lifecycle?.observePhase("viewport");
   await setViewport(options.viewport);
+  assertActive();
+  lifecycle?.observePhase("styles");
   await waitForProductionStyles();
+  assertActive();
 
-  const host = document.createElement("div");
+  host = document.createElement("div");
   host.style.position = "fixed";
   host.style.top = "0";
   host.style.left = "0";
@@ -1540,7 +1606,8 @@ async function mountChatView(options: {
     }),
   );
 
-  const screen = await render(
+  lifecycle?.observePhase("render");
+  rendering = render(
     <AppAtomRegistryProvider>
       <RouterProvider router={router} />
     </AppAtomRegistryProvider>,
@@ -1548,29 +1615,37 @@ async function mountChatView(options: {
       container: host,
     },
   );
+  screen = await rendering;
+  assertActive();
 
+  lifecycle?.observePhase("websocket");
   await waitForWsClient();
+  assertActive();
+  lifecycle?.observePhase("bootstrap");
   await waitForAppBootstrap();
+  assertActive();
+  lifecycle?.observePhase("layout");
   await waitForLayout();
-
-  const cleanup = async () => {
-    customWsRpcResolver = null;
-    await screen.unmount();
-    host.remove();
-    await waitForLayout();
-  };
+  assertActive();
 
   return {
     [Symbol.asyncDispose]: cleanup,
     cleanup,
     setViewport: async (viewport: ViewportSpec) => {
+      assertActive();
       await setViewport(viewport);
+      assertActive();
       await waitForProductionStyles();
+      assertActive();
     },
     setContainerSize: async (viewport) => {
+      assertActive();
+      // Successful mounting above owns this exact host through cleanup.
+      if (!host) throw new Error("The exact chat mount host is unavailable.");
       host.style.width = `${viewport.width}px`;
       host.style.height = `${viewport.height}px`;
       await waitForLayout();
+      assertActive();
     },
     router,
   };
@@ -1634,11 +1709,20 @@ export function registerChatViewBrowserHooks(): void {
   });
 
   afterAll(async () => {
-    await rpcHarness.disconnect();
-    await worker.stop();
+    try {
+      await scopedFixtureRetirement.retire();
+    } finally {
+      await rpcHarness.disconnect();
+      await worker.stop();
+    }
   });
 
   beforeEach(async () => {
+    // A timed-out hook wrapper does not settle its native child. Refuse a new
+    // fixture/reset while its exact prior retirement is still outstanding.
+    // React's global beforeEach may clean an old root, but cannot authorize a
+    // replacement RPC harness, store or matching controls through this fence.
+    scopedFixtureRetirement.assertIdle();
     await rpcHarness.reset({
       resolveUnary: resolveWsRpc,
       getInitialStreamValues: (request) => {
@@ -1724,12 +1808,19 @@ export function registerChatViewBrowserHooks(): void {
   });
 
   afterEach(async () => {
-    customWsRpcResolver = null;
-    // Imperative context menus own separate React roots. Finish active menus
-    // and their exit transitions before clearing the DOM they still own.
-    await showContextMenuFallback([]);
-    expect(document.querySelector("[data-context-menu-host]")).toBeNull();
-    document.body.innerHTML = "";
+    try {
+      // Vitest runs afterEach before onTestFinished. Join the SAME caller-owned
+      // cleanup here before clearing a still-resolving native locator's target;
+      // a later completion callback alone cannot establish that ordering.
+      await scopedFixtureRetirement.retire();
+    } finally {
+      customWsRpcResolver = null;
+      // Imperative context menus own separate React roots. Finish active menus
+      // and their exit transitions before clearing the DOM they still own.
+      await showContextMenuFallback([]);
+      expect(document.querySelector("[data-context-menu-host]")).toBeNull();
+      document.body.innerHTML = "";
+    }
   });
 }
 

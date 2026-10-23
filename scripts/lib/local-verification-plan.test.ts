@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  localVerificationPlan,
+  localVerificationPlan as completePlan,
   parseLocalVerificationArguments,
   type LocalVerificationOptions,
 } from "./local-verification-plan.ts";
@@ -8,7 +8,45 @@ import { nodeTestPlan, type TestStep } from "./test-run-plan.ts";
 
 const isTypecheck = (step: TestStep) => step.args.some((arg) => arg.endsWith("typecheck-local.ts"));
 
+// Existing complete-graph controls exercise the explicit all-fresh replay.
+// Cache admission has separate tests below; it must not erase that lane.
+const localVerificationPlan = (
+  options: LocalVerificationOptions = { typecheckConcurrency: 3, testConcurrency: 2 },
+  platform: NodeJS.Platform = process.platform,
+) => completePlan({ ...options, fresh: true }, platform);
+
 describe("complete local verification", () => {
+  it("opts only local type/Node/native groups into reuse while retaining fresh gates and a forced last build", () => {
+    const steps = completePlan();
+    expect(steps.find(isTypecheck)?.args).toContain("--reuse-local-results");
+    const node = steps.filter((step) =>
+      step.args.some((arg) => arg.endsWith("node-tests-local.ts")),
+    );
+    expect(node.length).toBe(process.platform === "win32" ? 1 : 2);
+    expect(node[0]?.args).toContain("--phase=main");
+    expect(node[0]?.args).toContain("--concurrency=2");
+    if (process.platform !== "win32") {
+      expect(node[1]?.args).toContain("--phase=codex-tail");
+      expect(node[1]?.args).toContain("--concurrency=1");
+    }
+    expect(steps.find((step) => step.args[0] === "test:browser:local")?.args).toEqual([
+      "test:browser:local",
+      "--reuse-local-results",
+    ]);
+    expect(steps.slice(0, 4).every((step) => !step.args.includes("--reuse-local-results"))).toBe(
+      true,
+    );
+    expect(steps.at(-1)?.args).toEqual(["build:desktop", "--force", "--concurrency=1"]);
+    expect(steps.at(-1)?.args).not.toContain("--reuse-local-results");
+    expect(parseLocalVerificationArguments(["--fresh"])).toEqual({
+      typecheckConcurrency: 3,
+      testConcurrency: 2,
+      fresh: true,
+    });
+    expect(() => parseLocalVerificationArguments(["--fresh", "--fresh"])).toThrow(
+      "selection and skip",
+    );
+  });
   it("qualifies the installed compiler before any typecheck can attest success", () => {
     const steps = localVerificationPlan();
     const compiler = steps.findIndex((step) =>

@@ -1,7 +1,7 @@
 # Dependency maintenance with Renovate
 
 Created: 2026-10-03 01:30:40 JST (UTC+0900)
-Last updated: 2026-10-20 05:31:30 JST (UTC+0900)
+Last updated: 2026-10-22 04:49:25 JST (UTC+0900)
 
 Cafe is configured to use the Mend-hosted [Renovate GitHub App](https://github.com/apps/renovate)
 to propose dependency updates once activated. The checked-in repository policy is
@@ -12,6 +12,8 @@ The [initial decision](decisions/renovate-dependency-maintenance.md) explains th
 trust boundary and why Yarn catalogs require this approach. The
 [LTS successor decision](decisions/latest-node-lts-toolchain.md) replaces its
 manual-only Node exclusion without changing the other safety boundaries.
+The [qualified October provider update](provider-updates-2026-10-22.md) records
+the separately coordinated Claude/Codex pins, protocol review and replay limits.
 
 ## Activation
 

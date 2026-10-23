@@ -27,6 +27,11 @@ const CODEX_SUBSCRIPTION_LABELS = {
   edu: "ChatGPT Edu Subscription",
   edu_plus: "ChatGPT Edu Plus Subscription",
   edu_pro: "ChatGPT Edu Pro Subscription",
+  // Codex 0.164 names these reported plans in protocol/src/auth.rs. They are
+  // display metadata only, never proof of model access or quota entitlement.
+  // https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/protocol/src/auth.rs
+  sci: "ChatGPT Academic Researchers Subscription",
+  sci_plus: "ChatGPT Academic Researchers Plus Subscription",
   unknown: "ChatGPT Subscription",
 } as const satisfies Record<CodexSchema.V2GetAccountResponse__PlanType, string>;
 

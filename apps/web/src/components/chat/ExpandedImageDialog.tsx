@@ -48,6 +48,20 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
         onClose();
         return;
       }
+      if (
+        (event.key === "ArrowLeft" || event.key === "ArrowRight") &&
+        (event.altKey ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey ||
+          event.isComposing ||
+          event.keyCode === 229 ||
+          window.getSelection()?.isCollapsed === false)
+      ) {
+        // A viewport deliberately leaves these arrows to selection, IME and
+        // parent shortcuts. Gallery routing must not consume them afterward.
+        return;
+      }
       if (preview.images.length <= 1) return;
       if (event.key === "ArrowLeft") {
         event.preventDefault();

@@ -10,6 +10,7 @@ import {
   type ManagementMcpBinding,
 } from "../../mcp/sessionConnection.ts";
 import { isArchivedPrivateToolServer } from "../archivedToolPrivacy.ts";
+import { redactCodexImageGenerationMetadata } from "../codexImageGenerationPrivacy.ts";
 import { readCodexAutoCompactTokenLimit } from "../codexContextWindowPolicy.ts";
 
 import {
@@ -126,7 +127,10 @@ import {
   type ProviderSubagentDetailReadError,
 } from "../Errors.ts";
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
-import type { ProviderSubagentDetail } from "../Services/ProviderAdapter.ts";
+import type {
+  ProviderSubagentDetail,
+  ProviderThreadTurnSnapshot,
+} from "../Services/ProviderAdapter.ts";
 import {
   canonicalizeProviderSubagentDetail,
   canonicalizeProviderSubagentActivities,
@@ -2188,6 +2192,21 @@ export function redactArchivedToolEvent(event: ProviderEvent): ProviderEvent {
   return { ...safe, payload };
 }
 
+function projectCodexThreadTurns(
+  turns: CodexThreadSnapshot["turns"],
+): ReadonlyArray<ProviderThreadTurnSnapshot> {
+  return turns.map((turn) => {
+    // This is the public history copy, not the native snapshot used to decode,
+    // resume or fork. A file-only image deliberately loses its private native
+    // reference without manufacturing an inline result or filesystem right.
+    const projected = redactCodexImageGenerationMetadata(turn.items);
+    return {
+      id: turn.id,
+      items: Array.isArray(projected) ? redactArchivedToolPayload(projected) : [],
+    };
+  });
+}
+
 function sanitizeNativeProviderEventForLog(event: ProviderEvent): ProviderEvent {
   const errorDiagnosticCopy = redactCodexFailureDiagnosticPayload(event.method, event.payload);
   if (errorDiagnosticCopy !== event.payload)
@@ -2408,10 +2427,11 @@ function runtimeEventBase(
     raw: {
       source: eventRawSource(event),
       method: event.method,
-      payload:
+      payload: redactCodexImageGenerationMetadata(
         options?.rawPayload ??
-        redactCodexFailureDiagnosticPayload(event.method, event.payload) ??
-        {},
+          redactCodexFailureDiagnosticPayload(event.method, event.payload) ??
+          {},
+      ),
     },
   };
 }
@@ -3658,10 +3678,11 @@ function mapItemLifecycle(
             // Keep item completion separate from authoritative turn
             // completion, and never grant async-final question authority to
             // this new upstream phase.
-            data:
+            data: redactCodexImageGenerationMetadata(
               item.type === "agentMessage" && item.phase === "partial_answer"
                 ? { ...payload, item: { ...item, phase: "commentary" } }
                 : event.payload,
+            ),
           }
         : {}),
     },
@@ -6802,7 +6823,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       ),
       Effect.map((snapshot) => ({
         threadId,
-        turns: redactArchivedToolPayload(snapshot.turns),
+        turns: projectCodexThreadTurns(snapshot.turns),
       })),
     );
 
@@ -6927,7 +6948,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       ),
       Effect.map((snapshot) => ({
         threadId,
-        turns: redactArchivedToolPayload(snapshot.turns),
+        turns: projectCodexThreadTurns(snapshot.turns),
       })),
     );
   };
@@ -6997,7 +7018,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     if (!nativeEventLogger) {
       return;
     }
-    yield* nativeEventLogger.write(sanitizeNativeProviderEventForLog(event), event.threadId);
+    yield* nativeEventLogger.write(
+      redactCodexImageGenerationMetadata(sanitizeNativeProviderEventForLog(event)),
+      event.threadId,
+    );
   });
 
   const terminalizeAuthRecoveryForAdapterStop = Effect.fn(

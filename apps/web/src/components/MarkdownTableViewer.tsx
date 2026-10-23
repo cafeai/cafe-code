@@ -15,6 +15,7 @@ import type { ExtraProps } from "react-markdown";
 import { isElectron } from "../env";
 import { useTheme } from "../hooks/useTheme";
 import { isWindowsPlatform } from "../lib/utils";
+import { scrollViewportOnArrowKey } from "../lib/viewportKeyboardScroll";
 import { ImageExportMenu } from "./ImageExportMenu";
 import { Button } from "./ui/button";
 import { Dialog, DialogDescription, DialogPopup, DialogTitle, DialogTrigger } from "./ui/dialog";
@@ -228,6 +229,7 @@ function ExpandedTable({ children, tableProps, exportContentKey, createPng }: Ex
         role="region"
         aria-label={uiText("Expanded table; scroll to inspect", undefined, undefined, uiLocale)}
         tabIndex={0}
+        onKeyDown={scrollViewportOnArrowKey}
         onPointerDown={beginPan}
         onPointerMove={(event) => {
           const drag = dragRef.current;

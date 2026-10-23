@@ -7,8 +7,23 @@ export function observeNativeInput(
   readOwner: () => HTMLElement | null,
 ) {
   const started = performance.now();
-  const observations: unknown[] = [];
+  const observations: Array<{ phase: string; [field: string]: unknown }> = [];
   const frames = new Set<number>();
+  const activationTypes = new Set([
+    "pointerdown",
+    "mousedown",
+    "pointerup",
+    "mouseup",
+    "click",
+    "gotpointercapture",
+    "lostpointercapture",
+  ]);
+  // Retain only these original native events until the caller has awaited its
+  // existing action. Capture-listener microtasks need not follow every later
+  // dispatch listener, so they are not final default-prevention evidence.
+  const activationEvents = new Map<string, Event>();
+  let lastKeydown: KeyboardEvent | undefined;
+  let lastKeyup: KeyboardEvent | undefined;
   let retired = false;
   let settled = false;
   let failed = false;
@@ -28,6 +43,14 @@ export function observeNativeInput(
           : node === document || node === window
             ? "document"
             : "other";
+  const activationLocation = (node: EventTarget | null, owner: HTMLElement | null) => {
+    if (node === owner && owner !== null) return "owner";
+    if (!(node instanceof Element) || !owner?.contains(node)) return "other";
+    if (node.tagName === "IMG") return "img";
+    if (node.tagName === "CANVAS") return "canvas";
+    if (node.tagName === "TABLE") return "table";
+    return "descendant";
+  };
   const editable = (node: Node | null) => {
     const element = node instanceof Element ? node : node?.parentElement;
     return (
@@ -90,9 +113,25 @@ export function observeNativeInput(
   };
   const record = (phase: string, extra: Record<string, string | number | boolean | null> = {}) => {
     if (retired || !armed) return;
+    // Keep the completed activation and key dispatch observations even when
+    // later pan/close activity fills the ledger. Otherwise successful controls
+    // could discard the very activation needed to compare a failed control.
+    // At most seven fixed activation kinds and three key rows are protected;
+    // all other observations form a FIFO within the same thirty-record bound.
+    const completedAction = (value: string) =>
+      value === "after-input" ||
+      value === "after-input-keydown" ||
+      value === "after-input-keyup" ||
+      [...activationTypes].some((type) => value === `after-activation-${type}`);
+    if (completedAction(phase)) {
+      const previous = observations.findIndex((entry) => entry.phase === phase);
+      if (previous !== -1) observations.splice(previous, 1);
+    }
     if (observations.length >= 30) {
       dropped = Math.min(dropped + 1, 1_000_000);
-      return;
+      const oldest = observations.findIndex((entry) => !completedAction(entry.phase));
+      if (oldest === -1) return;
+      observations.splice(oldest, 1);
     }
     try {
       observations.push({ phase, elapsedMs: performance.now() - started, ...extra, ...snapshot() });
@@ -100,29 +139,50 @@ export function observeNativeInput(
       observations.push({ phase, elapsedMs: performance.now() - started, unavailable: true });
     }
   };
+  const keyboardFields = (event: KeyboardEvent) => ({
+    key: event.key === "End" ? "End" : "ArrowRight",
+    code: event.code === "End" || event.code === "ArrowRight" ? event.code : "other",
+    keyCode: finite(event.keyCode),
+    location: finite(event.location),
+    trusted: event.isTrusted,
+    target: location(event.target, readOwner()),
+    prevented: event.defaultPrevented,
+    ctrl: event.ctrlKey,
+    meta: event.metaKey,
+    alt: event.altKey,
+    shift: event.shiftKey,
+    repeat: event.repeat,
+    composing: event.isComposing,
+    exactTarget: event.target === readOwner() && event.target !== null,
+  });
   const keyboard = (event: KeyboardEvent) => {
-    if (event.key !== "ArrowRight" && event.key !== "End") return;
-    const fields = () => ({
-      key: event.key === "End" ? "End" : "ArrowRight",
-      code: event.code === "End" || event.code === "ArrowRight" ? event.code : "other",
-      keyCode: finite(event.keyCode),
-      location: finite(event.location),
-      trusted: event.isTrusted,
-      target: location(event.target, readOwner()),
-      prevented: event.defaultPrevented,
-      ctrl: event.ctrlKey,
-      meta: event.metaKey,
-      alt: event.altKey,
-      shift: event.shiftKey,
-      repeat: event.repeat,
-      composing: event.isComposing,
+    if (retired || !armed || (event.key !== "ArrowRight" && event.key !== "End")) return;
+    if (event.type === "keydown") lastKeydown = event;
+    else lastKeyup = event;
+    record(event.type, keyboardFields(event));
+    queueMicrotask(() => {
+      if (!retired) record(`${event.type}-settled`, keyboardFields(event));
     });
-    record(event.type, fields());
-    queueMicrotask(() => record(`${event.type}-settled`, fields()));
+  };
+  const activationFields = (event: Event) => {
+    const owner = readOwner();
+    return {
+      trusted: event.isTrusted,
+      target: location(event.target, owner),
+      activationTarget: activationLocation(event.target, owner),
+      exactTarget: event.target === owner && owner !== null,
+      prevented: event.defaultPrevented,
+    };
   };
   const observe = (event: Event) => {
+    if (retired || !armed) return;
     if (event instanceof PointerEvent) pointerId = event.pointerId;
-    record(event.type, { trusted: event.isTrusted, target: location(event.target, readOwner()) });
+    if (activationTypes.has(event.type)) {
+      activationEvents.set(event.type, event);
+      record(event.type, activationFields(event));
+    } else {
+      record(event.type, { trusted: event.isTrusted, target: location(event.target, readOwner()) });
+    }
   };
   const events = [
     "focus",
@@ -130,7 +190,12 @@ export function observeNativeInput(
     "scroll",
     "selectionchange",
     "pointerdown",
+    "mousedown",
     "pointerup",
+    "mouseup",
+    "click",
+    "gotpointercapture",
+    "lostpointercapture",
     "transitionrun",
     "transitionend",
     "transitioncancel",
@@ -141,9 +206,33 @@ export function observeNativeInput(
   window.addEventListener("keyup", keyboard, true);
   for (const name of events) window.addEventListener(name, observe, true);
   return {
-    mark(phase: "ready" | "before-input" | "after-input" | "before-exit" | "after-exit") {
+    mark(
+      phase:
+        | "before-activation"
+        | "after-activation"
+        | "ready"
+        | "before-input"
+        | "after-input"
+        | "before-exit"
+        | "after-exit",
+    ) {
+      if (retired) return;
       armed = true;
+      if (phase === "before-activation") activationEvents.clear();
+      if (phase === "before-input") {
+        lastKeydown = undefined;
+        lastKeyup = undefined;
+      }
       record(phase);
+      // These marks follow the original awaited action, not a listener-created
+      // microtask. Project fixed fields only; never serialize native objects.
+      if (phase === "after-activation") {
+        for (const [type, event] of activationEvents)
+          record(`after-activation-${type}`, activationFields(event));
+      } else if (phase === "after-input") {
+        if (lastKeydown) record("after-input-keydown", keyboardFields(lastKeydown));
+        if (lastKeyup) record("after-input-keyup", keyboardFields(lastKeyup));
+      }
       // Two passive frame receipts can distinguish queued rendering from an
       // observed native frame. They are never awaited or asserted as a budget.
       if (!framesArmed && (phase === "before-input" || phase === "before-exit")) {
@@ -180,6 +269,9 @@ export function observeNativeInput(
         final = { unavailable: true };
       }
       retired = true;
+      lastKeydown = undefined;
+      lastKeyup = undefined;
+      activationEvents.clear();
       window.removeEventListener("keydown", keyboard, true);
       window.removeEventListener("keyup", keyboard, true);
       for (const name of events) window.removeEventListener(name, observe, true);

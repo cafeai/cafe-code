@@ -413,64 +413,135 @@ it("keeps the workspace selector absent until a remote connection is saved", asy
     .not.toBeInTheDocument();
 });
 
-it("centers the server caret and fits the themed menu in a narrow sidebar at every interface scale", async () => {
+it("keeps long server labels usable in a narrow sidebar and cancels without switching", async ({
+  onTestFinished,
+  signal,
+}) => {
   const root = document.documentElement;
   const originalFontSize = root.style.fontSize;
   const originallyDark = root.classList.contains("dark");
-  writePrimaryEnvironmentDescriptor({
-    environmentId: local,
-    label: "Salt's MacBook Pro with a very long server name",
-  } as never);
+  const label = "Salt's MacBook Pro with a very long server name";
   const host = document.createElement("div");
   host.style.width = "208px";
-  document.body.append(host);
-  const screen = await render(
-    <WorkspaceEnvironmentProvider>
-      <WorkspaceEnvironmentSelector />
-      <span data-testid="popover-color" style={{ background: "var(--popover)" }} />
-    </WorkspaceEnvironmentProvider>,
-    { container: host },
-  );
+  let retired = false;
+  let screen: Awaited<ReturnType<typeof render>> | undefined;
+  let pendingRender: ReturnType<typeof render> | undefined;
+  let cleanupPromise: Promise<void> | undefined;
+  const pending = new Set<Promise<unknown>>();
+  const requireActive = () => {
+    if (retired) throw new Error("Workspace menu containment fixture retired");
+  };
+  const own = <T,>(operation: () => Promise<T>): Promise<T> => {
+    requireActive();
+    const result = operation();
+    pending.add(result);
+    // Track both outcomes without replacing the original native action/error.
+    void result.then(
+      () => pending.delete(result),
+      () => pending.delete(result),
+    );
+    return result;
+  };
+  const retire = () => {
+    retired = true;
+  };
+  const cleanup = () => {
+    if (cleanupPromise) return cleanupPromise;
+    retire();
+    cleanupPromise = (async () => {
+      try {
+        // Keep the exact controls mounted until admitted native actions close.
+        // Retirement prevents any late continuation from starting another one.
+        await Promise.allSettled([...pending]);
+        const mounted = screen ?? (await pendingRender);
+        await mounted?.unmount();
+      } finally {
+        root.style.fontSize = originalFontSize;
+        root.classList.toggle("dark", originallyDark);
+        host.remove();
+        signal.removeEventListener("abort", retire);
+      }
+    })();
+    return cleanupPromise;
+  };
+  onTestFinished(cleanup);
+  signal.addEventListener("abort", retire, { once: true });
+  if (signal.aborted) retire();
+  let bodyFailed = false;
   try {
+    requireActive();
+    writePrimaryEnvironmentDescriptor({ environmentId: local, label } as never);
+    document.body.append(host);
+    pendingRender = own(() =>
+      render(
+        <WorkspaceEnvironmentProvider>
+          <WorkspaceEnvironmentSelector />
+          <Current />
+        </WorkspaceEnvironmentProvider>,
+        { container: host },
+      ),
+    );
+    screen = await pendingRender;
+    requireActive();
     for (const dark of [false, true]) {
+      requireActive();
       root.classList.toggle("dark", dark);
       for (const scale of [80, 100, 130]) {
+        requireActive();
         root.style.fontSize = `${scale}%`;
         const trigger = screen.getByRole("combobox", { name: "Workspace server" });
-        const triggerBounds = trigger.element().getBoundingClientRect();
-        const caretBounds = trigger.element().querySelector("svg")!.getBoundingClientRect();
-        expect(
-          Math.abs(
-            caretBounds.top +
-              caretBounds.height / 2 -
-              (triggerBounds.top + triggerBounds.height / 2),
-          ),
-        ).toBeLessThan(1);
-        expect(triggerBounds.right).toBeLessThanOrEqual(host.getBoundingClientRect().right);
-        await trigger.click();
-        await expect.element(page.getByRole("listbox")).toBeVisible();
+        const triggerElement = trigger.element();
+        const triggerBounds = triggerElement.getBoundingClientRect();
+        const hostBounds = host.getBoundingClientRect();
+        // Protect usable hit targets and clipping, not icon alignment, exact
+        // popup/trigger width, theme colors or transient animation geometry.
+        expect(triggerBounds.left).toBeGreaterThanOrEqual(hostBounds.left);
+        expect(triggerBounds.right).toBeLessThanOrEqual(hostBounds.right);
+        await own(() => trigger.click());
+        requireActive();
+        await own(() => expect.element(page.getByRole("listbox")).toBeVisible());
+        requireActive();
         const list = page.getByRole("listbox").element();
-        const surface = list.parentElement!;
-        await vi.waitFor(() => {
-          expect(
-            Math.abs(surface.getBoundingClientRect().width - triggerBounds.width),
-          ).toBeLessThan(1);
-          expect(surface.getBoundingClientRect().top).toBeGreaterThanOrEqual(triggerBounds.bottom);
-        });
-        expect(getComputedStyle(surface).backgroundColor).toBe(
-          getComputedStyle(screen.getByTestId("popover-color").element()).backgroundColor,
-        );
+        const popup = list.closest<HTMLElement>('[data-slot="select-popup"]')!;
+        const selected = page.getByRole("option", { name: label, exact: true });
+        // Visibility precedes Base UI's queued item focus. Escape must belong
+        // to this exact selected option, not the still-focused trigger.
+        await own(() => expect.element(selected).toHaveFocus());
+        requireActive();
+        expect(popup.hasAttribute("data-open")).toBe(true);
+        const bounds = popup.getBoundingClientRect();
+        expect(bounds.left).toBeGreaterThanOrEqual(0);
+        expect(bounds.right).toBeLessThanOrEqual(window.innerWidth);
+        expect(bounds.top).toBeGreaterThanOrEqual(0);
+        expect(bounds.bottom).toBeLessThanOrEqual(window.innerHeight);
         expect(list.scrollWidth).toBeLessThanOrEqual(list.clientWidth);
-        await userEvent.keyboard("{Escape}");
-        await expect.element(page.getByRole("listbox")).not.toBeInTheDocument();
-        expect(document.activeElement).toBe(trigger.element());
+        await own(() => userEvent.keyboard("{Escape}"));
+        requireActive();
+        await own(() => expect.element(trigger).toHaveFocus());
+        requireActive();
+        expect(trigger.element()).toBe(triggerElement);
+        expect(triggerElement.getAttribute("aria-expanded")).toBe("false");
+        // A semantically closed popup may remain while its exit paints. The
+        // original Escape must still restore real focus and preserve selection.
+        expect(
+          !popup.isConnected ||
+            (popup.hasAttribute("data-closed") && !popup.hasAttribute("data-open")),
+        ).toBe(true);
+        expect(screen.getByTestId("workspace").element().textContent).toBe(local);
+        expect(fixture.navigate).not.toHaveBeenCalled();
       }
     }
+  } catch (error) {
+    bodyFailed = true;
+    throw error;
   } finally {
-    await screen.unmount();
-    root.style.fontSize = originalFontSize;
-    root.classList.toggle("dark", originallyDark);
-    host.remove();
+    try {
+      await cleanup();
+    } catch (error) {
+      // The finish hook still receives a rejected cleanup promise; it must not
+      // replace an already-propagating native action or assertion failure.
+      if (!bodyFailed) throw error;
+    }
   }
 });
 

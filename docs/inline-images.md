@@ -1,6 +1,16 @@
 # Inline images and custom instructions
 
+Last updated: 2026-10-23 15:31:43 JST (UTC+0900)
+
 Cafe enables assistant-local image publication for Codex and Claude. Other providers keep their existing behavior.
+
+Codex's native `imageGeneration` items may contain inline bytes or an opaque
+attachment `fileId`. Cafe retains their lifecycle presentation but does not
+interpret that ID as a path, URL or download permission; the stable app-server
+offers no attachment-store file-ID resolver. New input-image paths/hashes and
+generated file IDs are removed from observational logs, activities and public
+history copies, without changing private native decoding. Local Markdown and
+independently admitted saved paths keep the authorization contract below.
 
 ## Custom instructions
 
@@ -50,13 +60,13 @@ to publish new workspace images; new publication remains Codex/Claude-only.
 
 `GET /api/chat-images?threadId=…&messageId=…` returns the bounded metadata manifest. Adding `source=…` reads only that exact published message binding. Both operations authenticate through Cafe's existing server sessions. Authenticated guests retain the same read-only chat access as other chat content. Unknown/cross-chat image bindings return no bytes, and hard-deletion tombstones fence reads immediately. Responses use no-store, nosniff, restrictive CSP and the existing browser API CORS headers.
 
-The renderer uses the selected environment's `fileRequest` transport: primary connections use cookies, saved servers use bearer headers, and secrets never appear in image URLs. Image and existing desktop-preview transfers share two active slots. Metadata reserves the image aspect ratio; bytes become a transient object URL with unmount/cancellation cleanup. Clicking an image opens the shared enlarged-image viewer used by assistant images, user attachments and composer previews. It starts fitted to the window, with Fit, original-size and zoom controls up to 800%. Wheel/trackpad pinch zoom retains the detail under the pointer; primary-pointer dragging pans within native scroll bounds, and touch retains native scrolling. Double-click toggles fit/original size. With the image viewport focused, `+`/`-` zoom, `0` fits, `1` selects original size and arrow keys pan an overflowing image. Gallery buttons and arrow keys outside the overflowing viewport navigate images; each selection starts fitted. Escape and backdrop/close controls dismiss the viewer. Failures show a compact unavailable state and Retry; they do not fail a provider turn. Images appear after the assistant message finishes streaming.
+The renderer uses the selected environment's `fileRequest` transport: primary connections use cookies, saved servers use bearer headers, and secrets never appear in image URLs. Image and existing desktop-preview transfers share two active slots. Metadata reserves the image aspect ratio; bytes become a transient object URL with unmount/cancellation cleanup. Clicking an image opens the shared enlarged-image viewer used by assistant images, user attachments and composer previews. It starts fitted to the window, with Fit, original-size and zoom controls up to 800%. Wheel/trackpad pinch zoom retains the detail under the pointer; primary-pointer dragging pans within native scroll bounds, and touch retains native scrolling. Double-click toggles fit/original size. With the image viewport focused, `+`/`-` zoom, `0` fits, `1` selects original size and unmodified arrow keys pan an overflowing image in bounded instant steps. Only the exact focused viewport consumes these scrolling keys; text selections, descendant controls and modified shortcuts are not intercepted. Gallery buttons and arrow keys outside the overflowing viewport navigate images; each selection starts fitted. An overflowing viewport retains its gallery-navigation fence at a pan boundary. Escape and backdrop/close controls dismiss the viewer. Failures show a compact unavailable state and Retry; they do not fail a provider turn. Images appear after the assistant message finishes streaming.
 
 Markdown image components and their paragraph/list/link ancestors retain their React identities across reply-text, theme, workspace/skill metadata and preview-callback updates. Loaded images keep the same DOM nodes, object URLs and measured geometry, preventing a routine update from collapsing an image-heavy row into placeholders and disturbing the virtualized scroll position. The current context still supplies fresh preview callbacks and ownership; an environment, chat, message or source change cancels the old read, releases its URL and fetches the new exact binding.
 
 ## Claude prompt lifecycle
 
-Cafe uses the pinned `@anthropic-ai/claude-agent-sdk` 0.3.295's supported preset append:
+Cafe uses the pinned `@anthropic-ai/claude-agent-sdk` 0.3.308's supported preset append:
 
 ```ts
 systemPrompt: {

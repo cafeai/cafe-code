@@ -4596,6 +4596,173 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "keeps opaque wakeup metadata subordinate to exact Claude command and result ownership",
+    () => {
+      const harness = makeHarness({ nativeVersion: "2.1.308", environment: {} });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events: ProviderRuntimeEvent[] = [];
+        const firstBoundary = yield* Deferred.make<void>();
+        const promotedBoundary = yield* Deferred.make<void>();
+        const lateBoundary = yield* Deferred.make<void>();
+        const completed = yield* Deferred.make<void>();
+        const boundaries = [firstBoundary, promotedBoundary, lateBoundary];
+        let boundaryIndex = 0;
+        yield* Stream.runForEach(adapter.streamEvents, (event) => {
+          events.push(event);
+          if (event.type === "turn.completed") return Deferred.succeed(completed, undefined);
+          if (event.type === "session.state.changed" && event.payload.reason === "status:active") {
+            const boundary = boundaries[boundaryIndex++];
+            if (boundary) return Deferred.succeed(boundary, undefined);
+          }
+          return Effect.void;
+        }).pipe(Effect.forkChild);
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        const turn = yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "original task",
+        });
+        yield* adapter.steerTurn({
+          threadId: session.threadId,
+          expectedTurnId: turn.turnId,
+          input: "owned queued follow-up",
+        });
+        const messages = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 2),
+        );
+        const firstUuid = messages[0]?.uuid;
+        const followUpUuid = messages[1]?.uuid;
+        if (!firstUuid || !followUpUuid) throw new Error("Expected UUID-stamped Claude prompts.");
+        const foreignUuid = "a4000000-0000-4000-8000-000000000001";
+        const nativeSessionId = "claude-session-opaque-wakeup";
+        assert.notEqual(firstUuid, followUpUuid);
+        assert.notEqual(firstUuid, foreignUuid);
+        assert.notEqual(followUpUuid, foreignUuid);
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          capabilities: ["msg_lifecycle_v1", "lifecycle_wakeup_source_v1"],
+          claude_code_version: "2.1.308",
+          session_id: nativeSessionId,
+          uuid: "b4000000-0000-4000-8000-000000000004",
+        } as unknown as SDKMessage);
+        // SDK 0.3.307 documents these field names, but the verified 0.3.308 Node
+        // declarations still omit command_lifecycle and their value grammar.
+        // These deliberately opaque sentinels are NOT claimed to be valid native
+        // scheduled-wakeup shapes. Even embedded known IDs must not override the
+        // outer command UUID, invent input, or become an acknowledgement.
+        // https://github.com/anthropics/claude-agent-sdk-typescript/releases/tag/v0.3.307
+        const opaqueMetadata = {
+          wakeup_source: { command_uuid: firstUuid, fixtureOnly: true },
+          scheduled_for: { command_uuid: followUpUuid, fixtureOnly: true },
+        };
+        for (const [commandUuid, uuid] of [
+          [firstUuid, "known-wakeup-start"],
+          [foreignUuid, "foreign-wakeup-start"],
+        ] as const) {
+          harness.query.emit({
+            type: "command_lifecycle",
+            command_uuid: commandUuid,
+            state: "started",
+            session_id: nativeSessionId,
+            uuid,
+            ...opaqueMetadata,
+          } as unknown as SDKMessage);
+        }
+        harness.query.emit({
+          ...makeSuccessfulClaudeResult(nativeSessionId),
+          uuid: "b4000000-0000-4000-8000-000000000005",
+          user_message_uuid: firstUuid,
+        } as SDKMessage);
+        // A neutral status frame follows the original FIFO stream handling. Its
+        // actual received event proves the preceding batch finished processing;
+        // mock emission or a scheduler yield would not establish that boundary.
+        harness.query.emit({
+          type: "system",
+          subtype: "status",
+          status: null,
+          session_id: nativeSessionId,
+          uuid: "b4000000-0000-4000-8000-000000000001",
+        } as SDKMessage);
+        yield* Deferred.await(firstBoundary);
+        assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+        assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 0);
+        assert.equal(events.filter((event) => event.type === "turn.completed").length, 0);
+
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: followUpUuid,
+          state: "started",
+          session_id: nativeSessionId,
+          uuid: "known-later-wakeup-start",
+          ...opaqueMetadata,
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: followUpUuid,
+          state: "completed",
+          session_id: nativeSessionId,
+          uuid: "known-later-wakeup-completed",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "status",
+          status: null,
+          session_id: nativeSessionId,
+          uuid: "b4000000-0000-4000-8000-000000000002",
+        } as SDKMessage);
+        yield* Deferred.await(promotedBoundary);
+        // The owned start must retire the OLD deferred result, not the current
+        // Cafe turn. Its terminal lifecycle alone is not the later result ACK.
+        assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+        assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 0);
+        assert.equal(events.filter((event) => event.type === "turn.completed").length, 0);
+        harness.query.emit({
+          ...makeSuccessfulClaudeResult(nativeSessionId),
+          uuid: "b4000000-0000-4000-8000-000000000006",
+          user_message_uuid: followUpUuid,
+        } as SDKMessage);
+        yield* Deferred.await(completed);
+        // The foreign started UUID is deliberately still uncompleted here. If
+        // metadata had minted queue authority, this exact result could not close.
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: foreignUuid,
+          state: "completed",
+          session_id: nativeSessionId,
+          uuid: "foreign-wakeup-completed",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "status",
+          status: null,
+          session_id: nativeSessionId,
+          uuid: "b4000000-0000-4000-8000-000000000003",
+        } as SDKMessage);
+        yield* Deferred.await(lateBoundary);
+        const snapshot = yield* adapter.readThread(session.threadId);
+        assert.equal(snapshot.turns.length, 1);
+        assert.equal(snapshot.turns[0]?.id, turn.turnId);
+        assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+        assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, undefined);
+        assert.equal(events.filter((event) => event.type === "turn.started").length, 1);
+        assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
+        assert.equal(harness.createInputs.length, 1);
+        assert.deepEqual(harness.query.interruptCalls, []);
+        assert.deepEqual(harness.query.cancelAsyncMessageCalls, []);
+        assert.equal(harness.query.closeCalls, 0);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("keeps the turn active when Claude reports another queued turn", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

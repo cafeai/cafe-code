@@ -37,9 +37,10 @@ The full dependency audit currently reports **zero critical** advisories after
 `proxy-addr` 2.0.8. Three high, one moderate and one low advisory remain in the
 previously recorded packages. None is suppressed by the new release gate.
 
-The Windows installer stages Codex 0.160.0 and Claude Code 2.1.295 from exact
-npm archive identities in `packaging/managed-providers/manifest.json`, including
-both Windows native dependency sets. Installation performs no registry request
+At the remediation checkpoint recorded here, the Windows installer staged Codex
+0.160.0 and Claude Code 2.1.295 from exact npm archive identities, including both
+Windows native dependency sets. See the [canonical managed-provider manifest](../packaging/managed-providers/manifest.json)
+for the current identities. Installation performs no registry request
 or package-manager execution. The Node preparation child cannot select a runtime
 or write preferences; the hidden PowerShell process retains the OS file guard
 through publication. A killed preparation leaves only an unselected generation.

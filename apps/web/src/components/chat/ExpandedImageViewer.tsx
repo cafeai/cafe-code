@@ -9,6 +9,10 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { useUiLocale } from "~/i18n";
+import {
+  isFocusedViewportArrowKey,
+  scrollViewportOnArrowKey,
+} from "../../lib/viewportKeyboardScroll";
 import { Button } from "../ui/button";
 import type { ExpandedImageItem } from "./ExpandedImagePreview";
 
@@ -226,6 +230,17 @@ export function ExpandedImageViewer({
         )}
         tabIndex={0}
         onKeyDown={(event) => {
+          if (scrollViewportOnArrowKey(event)) return;
+          if (
+            isFocusedViewportArrowKey(event) &&
+            (event.currentTarget.scrollWidth > event.currentTarget.clientWidth ||
+              event.currentTarget.scrollHeight > event.currentTarget.clientHeight)
+          ) {
+            // Preserve the image viewer's existing gallery fence at a pan
+            // boundary, without consuming the browser's parent-scroll action.
+            event.stopPropagation();
+            return;
+          }
           if (event.ctrlKey || event.metaKey || event.altKey) return;
           if (["+", "=", "-", "0", "1"].includes(event.key)) {
             event.preventDefault();
@@ -233,14 +248,6 @@ export function ExpandedImageViewer({
             if (event.key === "0") changeZoom("fit");
             else if (event.key === "1") changeZoom(1);
             else changeZoom(scale * (event.key === "-" ? 1 / ZOOM_STEP : ZOOM_STEP));
-          } else if (
-            event.key.startsWith("Arrow") &&
-            (event.currentTarget.scrollWidth > event.currentTarget.clientWidth ||
-              event.currentTarget.scrollHeight > event.currentTarget.clientHeight)
-          ) {
-            // A focused, zoomed viewport uses the browser's arrow-key scrolling;
-            // gallery keys remain available from the toolbar and surrounding UI.
-            event.stopPropagation();
           }
         }}
         onDoubleClick={(event) => {

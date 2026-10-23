@@ -1,6 +1,6 @@
 # Complete local verification
 
-Last updated: 2026-10-20 17:54:42 JST (UTC+0900)
+Last updated: 2026-10-23 21:58:14 JST (UTC+0900)
 
 Use the pinned standalone Node and Corepack Yarn. Dependencies and the native
 Chromium test browser must already be installed through the existing locked
@@ -113,7 +113,9 @@ With multiple slots, the known expensive Codex and server programs are admitted 
 all other programs retain discovery order. These are scheduling hints only, not
 stored timings, results or a selection rule. Every discovered program still runs,
 and a hint does not guarantee faster execution on a different machine.
-The canonical `yarn typecheck` retains the complete Turbo dependency graph, capped
+With local result reuse enabled, every discovered program must either execute
+or reuse an exact admitted prior success, with that distinction printed. The
+canonical `yarn typecheck` retains the complete Turbo dependency graph, capped
 at three tasks. Turbo dependencies may keep fewer than three compilers busy.
 Do not append another concurrency flag to that package script: Turbo refuses
 duplicates. To run that same graph serially, use `corepack yarn exec turbo run
@@ -166,10 +168,179 @@ is last. Any failed or cancelled child stops the sequence; process exit alone
 does not admit the next step before its stdio closes. A cancelled child returning
 zero still fails verification.
 
-`yarn test` retains its existing complete default meaning. Neither command uses
-affected-file selection or cached test results. Opt-in GPU stress, registry soak,
+`yarn test` retains its existing complete uncached default meaning. `verify:local`
+discovers the complete task set and can reuse qualified local exact-input success
+receipts as described below; it is not affected-file selection. Opt-in GPU stress, registry soak,
 live providers, native packaged smoke and release signing/notarization remain
 separate qualifications, not silently included or claimed by this command.
+
+## Local result reuse and fresh replay
+
+By default `verify:local` can reuse unchanged eligible workspace typechecks, workspace Node
+tasks and whole existing browser groups from a private checkout-bound directory
+under the canonical OS temporary directory on qualified POSIX storage. OS cleanup
+causes a cold run; unsafe home/checkout permissions are never changed to enable
+caching. Each hit explicitly says it reused a prior successful
+task and did not execute it freshly. It does not restore a browser realm, test
+state, provider session or application database. The first run must populate
+these receipts by actually completing tasks; old logs are never imported.
+
+For those eligible local POSIX tasks only, the inherited terminal-operation
+tracing field `CODEX_TOOL_CALL_ID` is removed from the actual frozen native child
+environment before it is fingerprinted. A new terminal tool call must not make
+this irrelevant caller identifier defeat otherwise identical local checks.
+This is not a hash-only omission: execution and fingerprinting use the same
+prepared environment. Explicit browser-step overrides remain literal. No other
+field is discarded, including similarly named fields; unsupported hooks/selectors,
+disabled/cheap/unknown tasks, `--fresh`, hosted CI/release and Windows retain their
+original environment. Caller `process.env`, providers and profiles are untouched.
+
+Fixed local-cache diagnostics distinguish pre-execution, reuse recheck and
+post-execution input admission, including content-key versus native-fence drift.
+Node failures separately report whether the exact executor fulfilled; a printed
+child duration alone is not success proof. Fingerprint refusal categories are
+content-free: raw environment, paths, hashes and received errors are not logged.
+Diagnostic observers cannot alter admission, equality or cancellation gates.
+
+Repeated producer instances share at most sixty-four process-local native-tool
+digests. Each reuse requires the exact canonical path and complete current
+native file identity, followed by the ordinary named recheck and final change
+fence. Source text, environment, open handles and successful task results are
+not shared by this memo; changed tools must be read again. This avoids repeated
+byte hashing of an unchanged large Node executable without increasing buffers,
+workers, heaps or deadlines. It does not establish a historical timeout's cause
+or replace actual cold/warm task-result qualification.
+
+Fingerprint fixtures retire new IO admission and drain their exact admitted
+observations before removing private files or resetting native-observation
+mocks. Native Git fixtures likewise join their owned children. The fixed macOS
+`xcrun --find git` lookup also joins its exact native `close` after the original
+callback result, including abort/error paths, under its unchanged invocation
+limits. A callback rejection does not prove that child has retired. Failure-only
+phase ledgers retain bounded fixed categories and finite counts/times, not paths,
+argv, environment, output or received errors. Independent invalidation, template
+and hook contracts have independent fixtures; their per-case deadlines and real
+native controls remain in force, not a single shared aggregate time guarantee.
+Independent synthetic output writes use small fixed batches, with every native
+write individually owned and the whole batch joined before the next real input
+snapshot. This changes only fixture IO scheduling: no observation is fabricated,
+and a rejected batch still drains its admitted writes before private-root cleanup.
+Qualified Yarn-wrapper fixtures overlap only their two independent preparation
+chains. Each chain retains its original directory, file-write and mode-change
+order; both whole chains and every native metadata operation are owned and
+drained before root removal, including the later executable-mode mutation.
+Entry-name and mode controls retain both real snapshots within their original
+per-case deadline. Fixed failure-only phases distinguish base setup, wrapper
+preparation and snapshots without attributing an unobserved historical delay.
+Null-device timestamp invariance is checked through the canonical pure identity
+policy and a full native input-admission control; device replacement negatives
+retain the actual held/named/final checks. This is policy-plus-consumer evidence,
+not a claim of two complete end-to-end inventory executions in that one case.
+
+The eligible server Node lane uses exact checked-in Git defaults so a result
+cannot silently depend on changing global/system config, default templates or
+per-user attributes/ignore files outside the input scope. Its frozen prepared
+environment is both fingerprinted and executed. The producer independently
+requires the finite include-free config, dot-only template and actual native
+null-device identity. Repository-local settings/hooks and explicit per-case
+overrides remain effective in synthetic repositories. Unknown ambient Git
+selectors or runtime preload/library hooks run unchanged and fresh; no real Git
+profile is read, copied or changed. Other workspaces, `--fresh` and canonical
+CI/release keep their original environment.
+The null-device identity excludes ordinary I/O timestamps, which can change
+without replacing the device; held/named/final namespace and device checks still
+apply. This does not weaken ordinary source/tool file-change detection.
+
+Input admission is not free. The local session limits reuse to the expensive
+server Node task, server/Codex typechecks, ordinary desktop/touch group and the two
+Mermaid security/family groups. Short and unknown task lanes run fresh without
+fingerprinting or receipt IO, because conservative input validation can cost
+more than executing them. All discovered programs/files/groups remain required;
+this policy never removes coverage or changes native inputs, workers or budgets.
+The eligibility policy is separate from input validity and should be reviewed
+when observed costs change, not tuned through elapsed-time test assertions.
+Web types bypass reuse rather than paying input admission for a known conservative
+miss: their broad source include overlaps omitted screenshot output namespaces.
+
+```sh
+nice -n 15 taskpolicy -b corepack yarn verify:local --fresh
+```
+
+Omit `taskpolicy -b` outside macOS. `--fresh` bypasses result reads AND writes,
+can be combined once with either concurrency option, and retains the original
+complete uncached Node graph. Formatting, lint, audit, actual Effect compiler
+qualification, private bridge preparation/copied-artifact checks and the final
+forced desktop build always execute fresh, even when every eligible task hits.
+CI/release entrypoints never enable this cache; hosted environments refuse it.
+Standalone `test:browser:local` remains fresh unless the explicit
+`--reuse-local-results` option is supplied.
+
+Keys bind actual source/configuration/dependency/tool bytes, task arguments,
+workspace/root, selected group, platform and effective environment. Source
+inventories include relevant new/untracked files and deletions, not just Git
+status. The input policy lives in `scripts/lib/local-verification-inputs.ts`:
+cross-workspace imports and explicit filesystem-read contracts matter. Browser
+inputs are deliberately conservative because global CSS/compiler dependencies
+can cross test-file boundaries; changing one browser file may invalidate other
+browser groups. A browser-only repair can still reuse unchanged Node workspaces.
+Changing input-policy/runner code, lockfiles, installed tools, patches or relevant
+configuration invalidates affected results. Known generated Yarn shim paths are
+represented only after binding their complete current bytes in an owner-controlled,
+non-group/world-writable directory; read-only public tool wrappers do not relax
+private receipt-storage permissions. Arbitrary environment or PATH changes are
+never discarded. No raw environment values enter receipts.
+This includes the exact qualified `yarn`/`node` entries referenced by
+`npm_execpath`/`npm_node_execpath`, not just `BERRY_BIN_FOLDER` and `PATH`.
+Their complete forwarding bytes, literal arguments and file modes remain bound;
+entry names remain distinct and external aliases do not normalize. Actual native
+paths remain change-fenced. Lifecycle and working-directory metadata stays
+literal, so a direct subcommand is not automatically an equivalent warm replay
+of the full `verify:local` invocation.
+
+Before a POSIX local type program launches freshly, including `--fresh` and an
+unavailable receipt store, retire only recognized default
+`tsconfig.tsbuildinfo` through held-file checks and a fresh private quarantine.
+This prevents old semantic metadata from hiding changed Effect diagnostics.
+Unknown, malformed or uncertain files are preserved and qualification refuses;
+custom build-info locations are not granted reusable success or automatically
+removed. `--fresh` bypasses the new result receipts, not every compiler-internal
+optimization. Actual compiler arguments and diagnostic rules stay unchanged;
+Windows retains its existing launcher. Ignored generated outputs do not
+change a source-directory fence, including when test screenshots or tool-temp
+directories are first created. Only the producer's explicit known output paths
+are omitted; selecting an excluded output as an import, type root or source-link
+target refuses reuse. The same declared workspace-output roles qualify ancestor
+envelopes before outputs exist: broad compiler includes, ambient roots and
+directory aliases overlapping them run fresh rather than attest a smaller
+filtered program. This also covers observed workspace-shaped source directories
+without manifests; installed dependency payloads remain bound separately.
+Bounded relevant-name inventories still bind
+additions/deletions, and selected files retain native content/change checks.
+These observations are not an atomic filesystem snapshot or a defense against
+malicious same-user transient edits while verification is running.
+
+Vitest's installed `node_modules/.vitest-cache` is a declared generated
+module-transform output, including when first created or rewritten by a parallel
+workspace. Same-named ordinary source/dependency data and custom cache paths
+remain bound. Result-receipt authentication does not authenticate Vitest's
+transformed cache payloads or prove their provenance; this retains the pinned
+runner's existing trusted-local behavior. `--fresh` bypasses result receipts,
+not Vitest's own transform reuse.
+
+Failed, cancelled, partially completed or uncertain tasks do not publish. Input
+drift during qualification refuses its result; corruption, unsafe ownership,
+unsupported input scopes or cache IO failures cause fresh execution, not skipped
+coverage. Prior completed tasks may survive a later graph failure. A reused
+result is prior local evidence, not a fresh host-health/GPU/installed-provider or
+release check. To diagnose nondeterminism, use `--fresh`.
+
+Receipts are bounded, private, authenticated, immutable and never remotely shared.
+The cache does not defend against malicious same-user code replacing the verifier
+or reading its key. Unknown/stale namespaces and crashed writer leases are not
+automatically deleted; they disable writes rather than authorizing lock stealing.
+Windows deliberately falls back to fresh execution until equivalent native ACL
+admission is qualified. No timing guarantee is implied. See the
+[partial successor decision](decisions/verified-local-result-cache.md).
 
 For browser-only iteration:
 
@@ -197,6 +368,32 @@ cancellation retain artifacts at the printed temporary path, because direct
 command closure alone does not prove every descendant retired. Observed
 replacement is retained instead of deleted. This private source-owned fixture
 is not protection against malicious same-user changes to the runner/quarantine.
+
+## Compiler responsiveness during native input
+
+Babel's asynchronous entrypoint still runs synchronous React compiler passes on
+the Vite coordinator. Cold compilation for one file must not occupy another
+file's native input deadline. Each active browser project's awaited global setup
+prepares the actual selected specifications in that same client environment,
+following its public import graph to a bounded complete closure. Transform errors
+propagate; Vite's failure-swallowing convenience warm-up and one-shot idle finder
+are not completion receipts. The preparation does not evaluate modules.
+
+Only inert compilation moves before test bodies. Fixture mounting, provider
+opening, native acquisition, locator queries, input and lifecycle readiness stay
+in their original scopes. There is no native utility warm-up, new worker,
+persistent cache, compiler/filter change, test-selection change or longer action
+deadline. The original application Vite/compiler configuration is unchanged.
+Preparation uses ordinary current in-memory transform results, never cached test
+success. A fresh graph walk owns each invocation and fails on missing results or
+finite-bound overflow. Initial-run qualification does not promise that watch-mode
+edits or runtime-computed imports cannot introduce later cold compilation.
+Cancellation received after setup registers fences further admission and joins
+the current transform; Vitest's public observer does not replay cancellation
+already issued before registration. Walk bounds do not cap allocations inside
+the existing compiler or Vite's own background preprocessing. Real Vite fixtures retain held
+transitive loading, cycles, changed-source failure and owned server retirement;
+native/full qualification remains required.
 
 ## Work reduction, not reduced coverage
 

@@ -44,6 +44,8 @@
     "vitest.browser.config.ts",
     "../../vitest.config.ts",
     "reactCompilerConfig.ts",
+    "browserCompilationReadiness.ts",
+    "browserCompilationSetup.ts",
     "test",
     "browser-test-policy.json",
     "vitest.stress.config.ts",

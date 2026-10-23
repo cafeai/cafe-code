@@ -512,8 +512,8 @@
   "Account usage": {
     "message": "Account usage",
     "locations": [
-      "apps/web/src/components/ProviderAccountQuotaDetails.tsx:113",
-      "apps/web/src/components/ProviderAccountQuotaDetails.tsx:119",
+      "apps/web/src/components/ProviderAccountQuotaDetails.tsx:114",
+      "apps/web/src/components/ProviderAccountQuotaDetails.tsx:120",
       "apps/web/src/lib/codexRateLimits.ts:189"
     ]
   },
@@ -2246,7 +2246,7 @@
   },
   "Claude limits are unavailable.": {
     "message": "Claude limits are unavailable.",
-    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:160"]
+    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:162"]
   },
   "Claude message delivery priority": {
     "message": "Claude message delivery priority",
@@ -2254,11 +2254,11 @@
   },
   "Claude reported no quota meters.": {
     "message": "Claude reported no quota meters.",
-    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:144"]
+    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:146"]
   },
   "Claude reported quota meters and extra usage": {
     "message": "Claude reported quota meters and extra usage",
-    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:126"]
+    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:128"]
   },
   "Claude summary": {
     "message": "Claude summary",
@@ -2424,8 +2424,8 @@
   "Close image preview": {
     "message": "Close image preview",
     "locations": [
-      "apps/web/src/components/chat/ExpandedImageDialog.tsx:86",
-      "apps/web/src/components/chat/ExpandedImageViewer.tsx:212"
+      "apps/web/src/components/chat/ExpandedImageDialog.tsx:100",
+      "apps/web/src/components/chat/ExpandedImageViewer.tsx:216"
     ]
   },
   "Close other tabs": {
@@ -3075,7 +3075,7 @@
     "locations": [
       "apps/web/src/components/ChatMarkdown.tsx:260",
       "apps/web/src/components/ChatMarkdown.tsx:265",
-      "apps/web/src/components/MermaidBlock.tsx:405",
+      "apps/web/src/components/MermaidBlock.tsx:407",
       "apps/web/src/components/chat/GlideSetupDialog.tsx:224",
       "apps/web/src/components/chat/MessageCopyButton.tsx:58",
       "apps/web/src/components/chat/MessageCopyButton.tsx:75",
@@ -3108,7 +3108,7 @@
     "message": "Copy",
     "locations": [
       "apps/desktop/src/window/DesktopWindow.ts:278",
-      "apps/web/src/components/MermaidBlock.tsx:406"
+      "apps/web/src/components/MermaidBlock.tsx:408"
     ]
   },
   "Copy Image": {
@@ -3128,7 +3128,7 @@
   },
   "Copy Mermaid source": {
     "message": "Copy Mermaid source",
-    "locations": ["apps/web/src/components/MermaidBlock.tsx:401"]
+    "locations": ["apps/web/src/components/MermaidBlock.tsx:403"]
   },
   "Copy Project Path": {
     "message": "Copy Project Path",
@@ -3739,11 +3739,11 @@
   },
   "Couldn''t copy. Use Source to select the code.": {
     "message": "Couldn''t copy. Use Source to select the code.",
-    "locations": ["apps/web/src/components/MermaidBlock.tsx:433"]
+    "locations": ["apps/web/src/components/MermaidBlock.tsx:435"]
   },
   "Couldn''t render this diagram. Showing its source.": {
     "message": "Couldn''t render this diagram. Showing its source.",
-    "locations": ["apps/web/src/components/MermaidBlock.tsx:443"]
+    "locations": ["apps/web/src/components/MermaidBlock.tsx:445"]
   },
   "Couldn''t save image": {
     "message": "Couldn''t save image",
@@ -4417,9 +4417,9 @@
   "Diagram": {
     "message": "Diagram",
     "locations": [
-      "apps/web/src/components/MermaidBlock.tsx:182",
-      "apps/web/src/components/MermaidBlock.tsx:379",
-      "apps/web/src/components/MermaidBlock.tsx:409"
+      "apps/web/src/components/MermaidBlock.tsx:183",
+      "apps/web/src/components/MermaidBlock.tsx:381",
+      "apps/web/src/components/MermaidBlock.tsx:411"
     ]
   },
   "Diagram unavailable. View or copy the source instead.": {
@@ -4428,7 +4428,7 @@
   },
   "Diagram zoom controls": {
     "message": "Diagram zoom controls",
-    "locations": ["apps/web/src/components/MermaidBlock.tsx:148"]
+    "locations": ["apps/web/src/components/MermaidBlock.tsx:149"]
   },
   "Dictate into any Mac app. Insert needs Accessibility permission.": {
     "message": "Dictate into any Mac app. Insert needs Accessibility permission.",
@@ -5217,7 +5217,7 @@
   },
   "Expand diagram": {
     "message": "Expand diagram",
-    "locations": ["apps/web/src/components/MermaidBlock.tsx:424"]
+    "locations": ["apps/web/src/components/MermaidBlock.tsx:426"]
   },
   "Expand plan": {
     "message": "Expand plan",
@@ -5229,7 +5229,7 @@
   },
   "Expand table": {
     "message": "Expand table",
-    "locations": ["apps/web/src/components/MarkdownTableViewer.tsx:308"]
+    "locations": ["apps/web/src/components/MarkdownTableViewer.tsx:310"]
   },
   "Expand {value0}": {
     "message": "Expand {value0}",
@@ -5240,27 +5240,27 @@
   },
   "Expanded Mermaid diagram": {
     "message": "Expanded Mermaid diagram",
-    "locations": ["apps/web/src/components/MermaidBlock.tsx:139"]
+    "locations": ["apps/web/src/components/MermaidBlock.tsx:140"]
   },
   "Expanded diagram; scroll or drag to pan": {
     "message": "Expanded diagram; scroll or drag to pan",
-    "locations": ["apps/web/src/components/MermaidBlock.tsx:195"]
+    "locations": ["apps/web/src/components/MermaidBlock.tsx:196"]
   },
   "Expanded image preview": {
     "message": "Expanded image preview",
-    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:81"]
+    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:95"]
   },
   "Expanded image; scroll to zoom or drag to pan": {
     "message": "Expanded image; scroll to zoom or drag to pan",
-    "locations": ["apps/web/src/components/chat/ExpandedImageViewer.tsx:221"]
+    "locations": ["apps/web/src/components/chat/ExpandedImageViewer.tsx:225"]
   },
   "Expanded table": {
     "message": "Expanded table",
-    "locations": ["apps/web/src/components/MarkdownTableViewer.tsx:169"]
+    "locations": ["apps/web/src/components/MarkdownTableViewer.tsx:170"]
   },
   "Expanded table; scroll to inspect": {
     "message": "Expanded table; scroll to inspect",
-    "locations": ["apps/web/src/components/MarkdownTableViewer.tsx:229"]
+    "locations": ["apps/web/src/components/MarkdownTableViewer.tsx:230"]
   },
   "Expired": {
     "message": "Expired",
@@ -5744,9 +5744,9 @@
   "Fit": {
     "message": "Fit",
     "locations": [
-      "apps/web/src/components/MarkdownTableViewer.tsx:186",
-      "apps/web/src/components/MermaidBlock.tsx:151",
-      "apps/web/src/components/chat/ExpandedImageViewer.tsx:172"
+      "apps/web/src/components/MarkdownTableViewer.tsx:187",
+      "apps/web/src/components/MermaidBlock.tsx:152",
+      "apps/web/src/components/chat/ExpandedImageViewer.tsx:176"
     ]
   },
   "Fix the expression above to continue editing visually.": {
@@ -6199,7 +6199,7 @@
   },
   "Image zoom controls": {
     "message": "Image zoom controls",
-    "locations": ["apps/web/src/components/chat/ExpandedImageViewer.tsx:169"]
+    "locations": ["apps/web/src/components/chat/ExpandedImageViewer.tsx:173"]
   },
   "Image-only follow-up": {
     "message": "Image-only follow-up",
@@ -6814,7 +6814,7 @@
   },
   "Loading session report…": {
     "message": "Loading session report…",
-    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:159"]
+    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:161"]
   },
   "Loading subagent history…": {
     "message": "Loading subagent history…",
@@ -7039,21 +7039,21 @@
   "Mermaid diagram": {
     "message": "Mermaid diagram",
     "locations": [
-      "apps/web/src/components/MermaidBlock.tsx:219",
-      "apps/web/src/components/MermaidBlock.tsx:476"
+      "apps/web/src/components/MermaidBlock.tsx:221",
+      "apps/web/src/components/MermaidBlock.tsx:478"
     ]
   },
   "Mermaid diagram preview; scroll to inspect": {
     "message": "Mermaid diagram preview; scroll to inspect",
-    "locations": ["apps/web/src/components/MermaidBlock.tsx:464"]
+    "locations": ["apps/web/src/components/MermaidBlock.tsx:466"]
   },
   "Mermaid source": {
     "message": "Mermaid source",
-    "locations": ["apps/web/src/components/MermaidBlock.tsx:455"]
+    "locations": ["apps/web/src/components/MermaidBlock.tsx:457"]
   },
   "Mermaid view": {
     "message": "Mermaid view",
-    "locations": ["apps/web/src/components/MermaidBlock.tsx:370"]
+    "locations": ["apps/web/src/components/MermaidBlock.tsx:372"]
   },
   "Message": {
     "message": "Message",
@@ -7564,7 +7564,7 @@
   },
   "Next image": {
     "message": "Next image",
-    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:114"]
+    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:128"]
   },
   "Next question": {
     "message": "Next question",
@@ -8470,7 +8470,7 @@
   },
   "Original size": {
     "message": "Original size",
-    "locations": ["apps/web/src/components/chat/ExpandedImageViewer.tsx:177"]
+    "locations": ["apps/web/src/components/chat/ExpandedImageViewer.tsx:181"]
   },
   "Original stays unchanged; workspace files are shared, not rewound.": {
     "message": "Original stays unchanged; workspace files are shared, not rewound.",
@@ -8898,7 +8898,7 @@
   },
   "Previous image": {
     "message": "Previous image",
-    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:99"]
+    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:113"]
   },
   "Previous question": {
     "message": "Previous question",
@@ -9365,7 +9365,7 @@
   },
   "Quota meters unavailable in this report.": {
     "message": "Quota meters unavailable in this report.",
-    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:135"]
+    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:137"]
   },
   "Rain": {
     "message": "Rain",
@@ -9862,7 +9862,7 @@
   },
   "Rendering diagram": {
     "message": "Rendering diagram",
-    "locations": ["apps/web/src/components/MermaidBlock.tsx:391"]
+    "locations": ["apps/web/src/components/MermaidBlock.tsx:393"]
   },
   "Reopen closed tab": {
     "message": "Reopen closed tab",
@@ -10003,8 +10003,8 @@
   "Reset": {
     "message": "Reset",
     "locations": [
-      "apps/web/src/components/MarkdownTableViewer.tsx:189",
-      "apps/web/src/components/MermaidBlock.tsx:154",
+      "apps/web/src/components/MarkdownTableViewer.tsx:190",
+      "apps/web/src/components/MermaidBlock.tsx:155",
       "apps/web/src/components/OnboardingScreen.tsx:680",
       "apps/web/src/components/chat/CodexContextWindowControl.tsx:232",
       "apps/web/src/components/chat/SubagentConcurrencyControl.tsx:288"
@@ -10739,7 +10739,7 @@
   },
   "Scroll to zoom. Drag to pan.": {
     "message": "Scroll to zoom. Drag to pan.",
-    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:122"]
+    "locations": ["apps/web/src/components/chat/ExpandedImageDialog.tsx:136"]
   },
   "Search": {
     "message": "Search",
@@ -11485,7 +11485,7 @@
   "Source": {
     "message": "Source",
     "locations": [
-      "apps/web/src/components/MermaidBlock.tsx:387",
+      "apps/web/src/components/MermaidBlock.tsx:389",
       "apps/web/src/components/chat/ProviderDiagnosticWorkEntry.tsx:430",
       "apps/web/src/providerDiagnostic.ts:466"
     ]
@@ -12035,13 +12035,13 @@
   "Table": {
     "message": "Table",
     "locations": [
-      "apps/web/src/components/MarkdownTableViewer.tsx:217",
-      "apps/web/src/components/MarkdownTableViewer.tsx:302"
+      "apps/web/src/components/MarkdownTableViewer.tsx:218",
+      "apps/web/src/components/MarkdownTableViewer.tsx:304"
     ]
   },
   "Table zoom controls": {
     "message": "Table zoom controls",
-    "locations": ["apps/web/src/components/MarkdownTableViewer.tsx:183"]
+    "locations": ["apps/web/src/components/MarkdownTableViewer.tsx:184"]
   },
   "Tablet": {
     "message": "Tablet",
@@ -14418,34 +14418,34 @@
   "Zoom in": {
     "message": "Zoom in",
     "locations": [
-      "apps/web/src/components/MarkdownTableViewer.tsx:209",
-      "apps/web/src/components/MermaidBlock.tsx:174",
-      "apps/web/src/components/chat/ExpandedImageViewer.tsx:201"
+      "apps/web/src/components/MarkdownTableViewer.tsx:210",
+      "apps/web/src/components/MermaidBlock.tsx:175",
+      "apps/web/src/components/chat/ExpandedImageViewer.tsx:205"
     ]
   },
   "Zoom level": {
     "message": "Zoom level",
     "locations": [
-      "apps/web/src/components/MarkdownTableViewer.tsx:202",
-      "apps/web/src/components/MermaidBlock.tsx:167",
-      "apps/web/src/components/chat/ExpandedImageViewer.tsx:194"
+      "apps/web/src/components/MarkdownTableViewer.tsx:203",
+      "apps/web/src/components/MermaidBlock.tsx:168",
+      "apps/web/src/components/chat/ExpandedImageViewer.tsx:198"
     ]
   },
   "Zoom out": {
     "message": "Zoom out",
     "locations": [
-      "apps/web/src/components/MarkdownTableViewer.tsx:194",
-      "apps/web/src/components/MermaidBlock.tsx:159",
-      "apps/web/src/components/chat/ExpandedImageViewer.tsx:186"
+      "apps/web/src/components/MarkdownTableViewer.tsx:195",
+      "apps/web/src/components/MermaidBlock.tsx:160",
+      "apps/web/src/components/chat/ExpandedImageViewer.tsx:190"
     ]
   },
   "Zoom to inspect. Scroll or drag empty space to pan.": {
     "message": "Zoom to inspect. Scroll or drag empty space to pan.",
-    "locations": ["apps/web/src/components/MarkdownTableViewer.tsx:172"]
+    "locations": ["apps/web/src/components/MarkdownTableViewer.tsx:173"]
   },
   "Zoom to inspect. Scroll or drag to pan.": {
     "message": "Zoom to inspect. Scroll or drag to pan.",
-    "locations": ["apps/web/src/components/MermaidBlock.tsx:142"]
+    "locations": ["apps/web/src/components/MermaidBlock.tsx:143"]
   },
   "accent color": {
     "message": "accent color",
@@ -15927,8 +15927,8 @@
   "{value0} quota": {
     "message": "{value0} quota",
     "locations": [
-      "apps/web/src/components/ProviderAccountQuotaDetails.tsx:17",
-      "apps/web/src/components/ProviderAccountQuotaDetails.tsx:173"
+      "apps/web/src/components/ProviderAccountQuotaDetails.tsx:175",
+      "apps/web/src/components/ProviderAccountQuotaDetails.tsx:18"
     ]
   },
   "{value0} restarted": {

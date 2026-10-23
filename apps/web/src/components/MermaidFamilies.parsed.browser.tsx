@@ -156,7 +156,7 @@ describe("new family pre-layout security admission", () => {
     },
   );
 
-  it.each([
+  it.for([
     {
       name: "journey task, section and distinct actors",
       source: (count: number) =>
@@ -206,8 +206,78 @@ describe("new family pre-layout security admission", () => {
       accepted: 8,
       rejected: 9,
     },
-  ])("counts $name before layout", async ({ source, accepted, rejected }) => {
-    expect(await admitsParsedFamily(source(accepted))).toBe(true);
-    expect(await admitsParsedFamily(source(rejected))).toBe(false);
-  });
+  ])(
+    "counts $name before layout",
+    async ({ source, accepted, rejected }, { signal, onTestFailed }) => {
+      type Invocation = "accepted" | "rejected";
+      type Phase =
+        | "start"
+        | "engine-entered"
+        | "engine-returned"
+        | "receiver-installed"
+        | "fixture-ready"
+        | "complete"
+        | "failed";
+      const started = performance.now();
+      const observations: {
+        readonly invocation: Invocation;
+        readonly phase: Phase;
+        readonly elapsedMs: number;
+      }[] = [];
+      const observe = (invocation: Invocation, phase: Phase) => {
+        if (observations.length >= 16) return;
+        const elapsed = performance.now() - started;
+        observations.push({
+          invocation,
+          phase,
+          elapsedMs: Number.isFinite(elapsed)
+            ? Math.min(3_600_000, Math.max(0, Math.round(elapsed)))
+            : 0,
+        });
+      };
+      // Diagnostics distinguish the two original invocations without retaining
+      // source, arbitrary identifiers, received errors or native result data.
+      // The exact public owner is captured before either native probe starts.
+      onTestFailed(() => {
+        console.error("Synthetic parsed-family boundary phases", { observations });
+      });
+      let invocation: Invocation = "accepted";
+      try {
+        observe("accepted", "start");
+        expect(
+          await admitsParsedFamily(
+            source(accepted),
+            "",
+            undefined,
+            undefined,
+            undefined,
+            (phase) => observe("accepted", phase),
+            true,
+            signal,
+          ),
+        ).toBe(true);
+        observe("accepted", "complete");
+        invocation = "rejected";
+        observe("rejected", "start");
+        expect(
+          await admitsParsedFamily(
+            source(rejected),
+            "",
+            undefined,
+            undefined,
+            undefined,
+            (phase) => observe("rejected", phase),
+            true,
+            signal,
+          ),
+        ).toBe(false);
+        observe("rejected", "complete");
+      } catch (error) {
+        observe(invocation, "failed");
+        // Preserve the original transport/parser assertion error and budget;
+        // observing an expired/retired invocation never becomes a refusal pass.
+        throw error;
+      }
+    },
+  );
 });

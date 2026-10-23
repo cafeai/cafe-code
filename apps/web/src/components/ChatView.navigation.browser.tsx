@@ -535,43 +535,165 @@ describe("ChatView full app (navigation)", () => {
     }
   });
 
-  it("hydrates the provider alongside a sticky claude model", async () => {
-    useComposerDraftStore.setState({
-      stickyModelSelectionByProvider: {
-        [ProviderInstanceId.make("claudeAgent")]: createModelSelection(
-          ProviderInstanceId.make("claudeAgent"),
-          "claude-opus-4-6",
-          [
-            { id: "effort", value: "max" },
-            { id: "fastMode", value: true },
-          ],
-        ),
-      },
-      stickyActiveProvider: ProviderInstanceId.make("claudeAgent"),
+  it("hydrates the provider alongside a sticky claude model", async ({
+    signal,
+    onTestFinished,
+    onTestFailed,
+  }) => {
+    type Step =
+      | "mount"
+      | "button-ready"
+      | "header-ready"
+      | "header-hover"
+      | "button-click"
+      | "route";
+    type Phase =
+      | `${Step}:${"start" | "complete"}`
+      | `mount:${"viewport" | "styles" | "render" | "websocket" | "bootstrap" | "layout"}`
+      | "sticky-assert:start"
+      | "sticky-assert:complete"
+      | "cleanup:start"
+      | "cleanup:complete";
+    const startedAt = performance.now();
+    const phases: { readonly phase: Phase; readonly elapsedMs: number }[] = [];
+    let recording = true;
+    let retired = false;
+    let mounting: ReturnType<typeof mountChatView> | undefined;
+    let mountCleanup: (() => Promise<void>) | undefined;
+    let cleanupPromise: Promise<void> | undefined;
+    const pendingOperations = new Set<Promise<unknown>>();
+    const recordPhase = (phase: Phase) => {
+      if (!recording || phases.length >= 32) return;
+      const elapsed = performance.now() - startedAt;
+      phases.push({
+        phase,
+        elapsedMs: Number.isFinite(elapsed)
+          ? Math.min(3_600_000, Math.max(0, Math.round(elapsed)))
+          : 0,
+      });
+    };
+    const assertActive = () => {
+      if (retired || signal.aborted)
+        throw new Error("The exact sticky-Claude navigation fixture was retired.");
+    };
+    const cleanup = () => {
+      // The public signal retires future actions synchronously, even when a
+      // native action or mount outlives the test body's unchanged deadline.
+      retired = true;
+      signal.removeEventListener("abort", onAbort);
+      return (cleanupPromise ??= (async () => {
+        recordPhase("cleanup:start");
+        try {
+          try {
+            await mounting;
+          } catch {
+            // The original mount await still owns its failure. Join it here
+            // without treating rejected rendering/bootstrap as readiness.
+          }
+          // Keep this exact fixture's controls alive until already-admitted
+          // native operations settle; a later fixture must not satisfy them.
+          await Promise.allSettled([...pendingOperations]);
+        } finally {
+          try {
+            await mountCleanup?.();
+          } finally {
+            recordPhase("cleanup:complete");
+            recording = false;
+          }
+        }
+      })());
+    };
+    const onAbort = () => {
+      // The registered finalizer joins and reports this same cleanup promise;
+      // the synchronous abort reaction must not create an unhandled tail.
+      void cleanup().catch(() => undefined);
+    };
+    const observe = async <T,>(step: Step, operation: () => PromiseLike<T>): Promise<T> => {
+      assertActive();
+      recordPhase(`${step}:start`);
+      const pending = Promise.resolve(operation());
+      pendingOperations.add(pending);
+      try {
+        const result = await pending;
+        assertActive();
+        recordPhase(`${step}:complete`);
+        return result;
+      } finally {
+        pendingOperations.delete(pending);
+      }
+    };
+    // Own retirement before the first mount/native await. Failure diagnostics
+    // contain only fixed phases and elapsed time, never DOM, URLs or errors.
+    onTestFinished(cleanup);
+    onTestFailed(() => {
+      console.error("Synthetic sticky-Claude navigation phases", { phases });
     });
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-user-sticky-claude-model-test" as MessageId,
-        targetText: "sticky claude model test",
-      }),
-    });
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
 
     try {
+      assertActive();
+      useComposerDraftStore.setState({
+        stickyModelSelectionByProvider: {
+          [ProviderInstanceId.make("claudeAgent")]: createModelSelection(
+            ProviderInstanceId.make("claudeAgent"),
+            "claude-opus-4-6",
+            [
+              { id: "effort", value: "max" },
+              { id: "fastMode", value: true },
+            ],
+          ),
+        },
+        stickyActiveProvider: ProviderInstanceId.make("claudeAgent"),
+      });
+
+      const mounted = await observe(
+        "mount",
+        () =>
+          (mounting = mountChatView({
+            viewport: DEFAULT_VIEWPORT,
+            snapshot: createSnapshotForTargetUser({
+              targetMessageId: "msg-user-sticky-claude-model-test" as MessageId,
+              targetText: "sticky claude model test",
+            }),
+            lifecycle: {
+              assertActive,
+              retire: cleanup,
+              ownCleanup: (cleanupMount) => {
+                mountCleanup = cleanupMount;
+              },
+              observePhase: (phase) => recordPhase(`mount:${phase}`),
+            },
+          })),
+      );
+
       const newThreadButton = page.getByTestId("new-thread-button");
-      await expect.element(newThreadButton).toBeInTheDocument();
+      await observe("button-ready", () => expect.element(newThreadButton).toBeInTheDocument());
 
-      await revealProjectThreadAction();
-      await newThreadButton.click();
+      // Preserve revealProjectThreadAction's exact original assertion and
+      // native hover locally so its intermediate await also has this case's
+      // retirement fence, without changing the helper's other consumers.
+      const hoverButton = page.getByTestId("new-thread-button");
+      await observe("header-ready", () => expect.element(hoverButton).toBeInTheDocument());
+      const header = hoverButton
+        .element()
+        .closest('[class~="group/project-header"]')
+        ?.querySelector('[data-sidebar="menu-button"]');
+      expect(header).not.toBeNull();
+      expect(header).not.toBeUndefined();
+      await observe("header-hover", () => page.elementLocator(header!).hover());
+      await observe("button-click", () => newThreadButton.click());
 
-      const newThreadPath = await waitForURL(
-        mounted.router,
-        (path) => UUID_ROUTE_RE.test(path),
-        "Route should have changed to a new sticky claude draft thread UUID.",
+      const newThreadPath = await observe("route", () =>
+        waitForURL(
+          mounted.router,
+          (path) => UUID_ROUTE_RE.test(path),
+          "Route should have changed to a new sticky claude draft thread UUID.",
+        ),
       );
       const newDraftId = draftIdFromPath(newThreadPath);
 
+      recordPhase("sticky-assert:start");
       expect(composerDraftFor(newDraftId)).toMatchObject({
         modelSelectionByProvider: {
           claudeAgent: createModelSelection(
@@ -585,8 +707,9 @@ describe("ChatView full app (navigation)", () => {
         },
         activeProvider: "claudeAgent",
       });
+      recordPhase("sticky-assert:complete");
     } finally {
-      await mounted.cleanup();
+      await cleanup();
     }
   });
 

@@ -1,7 +1,7 @@
 # Reactor fixture readiness
 
 Created: 2026-10-14 15:05:10 JST (UTC+0900)
-Last updated: 2026-10-20 16:25:50 JST (UTC+0900)
+Last updated: 2026-10-22 12:42:30 JST (UTC+0900)
 
 An orchestration dispatch receipt proves durable intent acceptance, not provider
 session opening, turn acceptance or completion of the later projection writes.
@@ -37,6 +37,25 @@ failed-start fallback cases. Observe the successful fake steer with its exact
 thread, message, turn and numeric-policy process tuple before starting the
 unchanged acceptance-activity poll. Refusal branches never await a successful
 receipt; their original errors, zero/once counts and no-recovery checks remain.
+When the refusal actually reaches the fake steer, observe that exact failed
+effect without handling or replacing its error. Earlier owner/generation
+refusals must not await a provider operation that they intentionally reject.
+
+Control-only goal fixtures likewise observe completion of the original goal
+effect before draining admitted work and starting their unchanged projection
+poll. First-set and replacement operations have separate receipts; the first
+cannot attest the later ordered clear/set. A subsequent unsupported turn still
+requires its own capability-preparation receipt, not the completed goal's proof.
+Shared send helpers route their Deferred observations through the same owned
+abort/join boundary, so hard-timeout cleanup cannot leave an external observer
+waiting in a retired fixture. Retirement never completes a provider receipt.
+
+An unlocalized enclosing timeout is not evidence of a particular slow phase or
+production defect. The identical-policy continuation fixture retains at most 32
+fixed phase names with monotonic elapsed times and reports them only on failure.
+Registration retires before later cases can append observations; no transcript,
+native state, filesystem path or received error is included. These observations
+do not change readiness, timers, input, retry behavior or any assertion.
 
 When a particular refusal path requires a successful selected-account capability
 read before deciding policy, its fixture may install a one-use receipt around
