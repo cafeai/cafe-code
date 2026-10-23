@@ -6,6 +6,8 @@ import { createRequire } from "node:module";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+// Read the fixed runtime's own API without feeding malformed data to the native decoder.
+import { constants as zlibConstants } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 
@@ -31,6 +33,16 @@ function readStringMap(value: unknown): Record<string, string> {
 }
 
 describe("repository toolchain policy", () => {
+  it("qualifies the standalone Brotli security fix without decoding untrusted input", () => {
+    // Node 24.22.1 cherry-picks CVE-2026-111497's fix while still reporting
+    // Brotli 1.2.0. The new error constant distinguishes that reviewed runtime
+    // from the vulnerable binary; a Brotli version-string check cannot do so.
+    const runtimeConstants = zlibConstants as typeof zlibConstants & {
+      readonly BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH?: number;
+    };
+    expect(runtimeConstants.BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH).toBe(-17);
+  });
+
   it("pins one exact Yarn and Node toolchain", () => {
     const rootPackage = readJson("package.json");
 

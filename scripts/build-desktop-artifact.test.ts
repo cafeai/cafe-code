@@ -433,14 +433,14 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       arch: "x64",
       fileName: `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-x64.zip`,
       sourceDirectoryName: `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-x64`,
-      sha256: "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
+      sha256: "d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5",
       url: `https://nodejs.org/dist/v${MANAGED_WINDOWS_NODE_VERSION}/node-v${MANAGED_WINDOWS_NODE_VERSION}-win-x64.zip`,
     });
     assert.deepStrictEqual(resolveManagedWindowsNodeArchive("arm64"), {
       arch: "arm64",
       fileName: `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-arm64.zip`,
       sourceDirectoryName: `node-v${MANAGED_WINDOWS_NODE_VERSION}-win-arm64`,
-      sha256: "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921",
+      sha256: "a0c807319fede24c4a0d8f84564c82a619bd313b16b10c007c383c2609e99171",
       url: `https://nodejs.org/dist/v${MANAGED_WINDOWS_NODE_VERSION}/node-v${MANAGED_WINDOWS_NODE_VERSION}-win-arm64.zip`,
     });
     assert.equal(resolveManagedWindowsNodeArchive("universal"), null);

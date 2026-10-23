@@ -59,16 +59,16 @@ const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
 export const MANAGED_WINDOWS_NODE_VERSION = REPOSITORY_NODE_VERSION;
 
 // Hashes are reviewed against Node's official versioned SHASUMS256.txt:
-// https://nodejs.org/dist/v24.21.0/SHASUMS256.txt
+// https://nodejs.org/dist/v24.22.1/SHASUMS256.txt
 // The explicit version key binds the canonical pin to a reviewed tuple; SHA256
 // cryptographically verifies those exact archive bytes. A pin-only update must
 // fail rather than silently reuse a previous release's hashes.
 export const MANAGED_WINDOWS_NODE_ARCHIVE_HASHES: Readonly<
   Record<string, Readonly<Record<"x64" | "arm64", string>>>
 > = {
-  "24.21.0": {
-    x64: "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
-    arm64: "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921",
+  "24.22.1": {
+    x64: "d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5",
+    arm64: "a0c807319fede24c4a0d8f84564c82a619bd313b16b10c007c383c2609e99171",
   },
 };
 

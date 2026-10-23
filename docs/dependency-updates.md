@@ -1,7 +1,7 @@
 # Dependency maintenance with Renovate
 
 Created: 2026-10-03 01:30:40 JST (UTC+0900)
-Last updated: 2026-10-22 04:49:25 JST (UTC+0900)
+Last updated: 2026-10-23
 
 Cafe is configured to use the Mend-hosted [Renovate GitHub App](https://github.com/apps/renovate)
 to propose dependency updates once activated. The checked-in repository policy is
@@ -133,8 +133,8 @@ qualification. Before merging a `Node.js LTS` proposal:
    arbitrary post-upgrade commands stay disabled. Coordinate major proposals
    with the declaration group and keep pending/incomplete updates unmerged.
 
-As of 2026-10-03, the standalone development pin is Node **24.21.0** (Krypton);
-Node 26.10.0 is still Current. Future LTS promotions remain eligible without
+As of 2026-10-23, the standalone development pin is Node **24.22.1** (Krypton),
+the October security release; Node 26 remains Current. Future LTS promotions remain eligible without
 editing a fixed major constraint. This is an update policy and review gate, not
 a guarantee that every release is installed instantly or that the bot has
 processed a hosted job. Both default-branch config and dev changes must be
@@ -149,6 +149,71 @@ not silently upgraded by this repository policy.
 Official references: [Node LTS-aware versioning](https://docs.renovatebot.com/modules/versioning/node/),
 [supported Node pin files](https://docs.renovatebot.com/node/),
 [Node declaration workaround](https://docs.renovatebot.com/presets-workarounds/#workaroundstypesnodeversioning).
+
+## Node2Shell review and standalone remediation
+
+The 2026-10-23 source review identifies **CVE-2026-111497** (Node2Shell), the
+native Brotli decoder memory-corruption issue described in the
+[Node security advisory](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)
+and [upstream Brotli fix](https://github.com/google/brotli/commit/0ed4268a4401abcb44720963).
+Node **24.22.1** is the fixed release on the current LTS line. Synchronize the
+canonical pin, mise, package engines, development container, managed-provider
+manifest and Arch minimum; use the reviewed Windows archive hashes from its
+[official checksums](https://nodejs.org/dist/v24.22.1/SHASUMS256.txt). The clean-room
+image retains Bookworm and its registry-verified immutable multi-platform digest.
+Node's backport still reports Brotli 1.2.0; that string alone cannot distinguish
+fixed from vulnerable runtimes. The existing toolchain suite also checks the
+fixed standalone runtime's new block-switch error constant without decoding
+malformed input.
+
+The relevant Cafe boundaries are:
+
+- `apps/server/src/provider/opencodeRuntime.ts` accepts an explicitly configured
+  external OpenCode server and creates the SDK client. Both provider inventory
+  discovery in `provider/Layers/OpenCodeProvider.ts` and ordinary session opening
+  in `provider/Layers/OpenCodeAdapter.ts` use that client. Its Node `fetch`
+  transport automatically decompresses Brotli responses before SDK JSON validation.
+  A malicious or compromised configured server can supply those bytes; cleartext
+  HTTP additionally permits an attacker on that connection to replace them.
+  The default empty server URL instead starts a local provider process.
+- The backend's `FetchHttpClient.layer` in `apps/server/src/server.ts` uses the
+  same Node response decoder. Relevant consumers include Bitbucket API calls
+  (an optional configured base URL), provider quota endpoints, provider update
+  registry checks and dictation HTTP calls. Most destinations are fixed trusted
+  HTTPS origins, so this is a conditional response-control boundary, not proof
+  that arbitrary unauthenticated Cafe clients can select a destination.
+- `packages/shared/src/applicationBuildVersion.ts` validates local compressed
+  build sidecars, and `apps/web/scripts/static-compression-cache.mjs` validates
+  private cached compression input. Both call the native Brotli decoder. An
+  attacker would need to supply an admitted local build/cache input. Output
+  limits and post-decode content checks remain required but do not repair a
+  memory-safety flaw inside the decoder.
+- The primary Node HTTP server and bounded readers in
+  `apps/server/src/httpBody.ts` consume raw request bytes. The HTTPS sibling
+  pipes those bytes without decoding, and MCP receives bounded request bytes.
+  This review found no automatic incoming Brotli-body decompressor on these
+  paths. WebSocket per-message compression is DEFLATE. Serving precompressed
+  `.br` assets sends existing bytes and does not invoke Node's Brotli decoder.
+
+**Desktop remains unresolved by this standalone update.** The repository-installed
+Electron 42.11.15 runtime reports Node 24.19.0 and uses that runtime for the backend
+and provider daemon in `ELECTRON_RUN_AS_NODE` mode. The published stable releases
+checked on 2026-10-23 are
+[42.11.18](https://github.com/electron/electron/releases/tag/v42.11.18),
+[43.8.3](https://github.com/electron/electron/releases/tag/v43.8.3),
+[44.9.3](https://github.com/electron/electron/releases/tag/v44.9.3) and
+[45.0.0](https://github.com/electron/electron/releases/tag/v45.0.0).
+Their official release metadata still names affected Node 24.19.0/24.22.0, and
+the reviewed tagged Node patch lists contain no Brotli fix backport. A newer
+Electron label alone therefore cannot close this issue. Keep the existing
+Electron pins until a fixed release can be independently reviewed and qualified;
+the existing Electron version/ABI qualification is not a Node2Shell security
+clearance. This update does not replace an installed app or its existing processes.
+
+This is a source and runtime-metadata review, not a memory-corruption or RCE
+reproduction. No exploit or malformed Brotli fixture is part of this change.
+Repository checks, native-host qualification and any later desktop release must
+be recorded as separate observed results.
 
 ## Security fixes and main/dev coverage
 

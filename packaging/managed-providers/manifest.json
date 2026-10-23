@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "node": "24.21.0",
+  "node": "24.22.1",
   "providers": {
     "codex": "0.164.0",
     "claude": "2.1.308"
