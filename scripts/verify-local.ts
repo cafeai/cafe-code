@@ -7,9 +7,18 @@ import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 
 const options = parseLocalVerificationArguments(process.argv.slice(2));
+const nodeSchedule =
+  options.testConcurrency === "ci"
+    ? "Node tests use the unchanged host-specific CI schedule and execute fresh"
+    : `Node test workspace concurrency ${options.testConcurrency} with at most two Vitest workers each`;
+const reusePolicy = options.fresh
+  ? "fresh results only (--fresh)"
+  : options.testConcurrency === "ci"
+    ? "eligible local type/browser exact-input success reuse enabled; each hit is labelled, not freshly executed"
+    : "eligible local type/Node/browser exact-input success reuse enabled; each hit is labelled, not freshly executed";
 Effect.runSync(
   Console.log(
-    `Complete local verification: all required local tasks; typecheck workspace concurrency ${options.typecheckConcurrency}; Node test workspace concurrency ${options.testConcurrency} with at most two Vitest workers each; ${options.fresh ? "fresh results only (--fresh)" : "local exact-input success reuse enabled; each hit is labelled, not freshly executed"}; no hosted result reuse. Final forced desktop build is always fresh and last.`,
+    `Complete local verification: all required local tasks; typecheck workspace concurrency ${options.typecheckConcurrency}; ${nodeSchedule}; ${reusePolicy}; no hosted result reuse. Final forced desktop build is always fresh and last.`,
   ),
 );
 await runTestPlan(localVerificationPlan(options));

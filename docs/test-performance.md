@@ -1,6 +1,6 @@
 # Complete local verification
 
-Last updated: 2026-10-23 21:58:14 JST (UTC+0900)
+Last updated: 2026-10-24 03:09:06 JST (UTC+0900)
 
 Use the pinned standalone Node and Corepack Yarn. Dependencies and the native
 Chromium test browser must already be installed through the existing locked
@@ -13,8 +13,11 @@ nice -n 15 corepack yarn verify:local
 For sustained work on macOS, use `nice -n 15 taskpolicy -b corepack yarn
 verify:local`. Windows uses `corepack yarn verify:local` without POSIX priority
 commands. Niceness does not bound memory or GPU work. Typechecking defaults to
-three workspaces; the Node test graph defaults to two independent workspaces,
-with at most two Vitest workers in each. Native browser groups and builds stay
+three workspaces. By default the Node phase uses the exact unchanged host-specific
+canonical CI plan, including its native runner worker policy, and runs fresh.
+It does not emulate implicit Turbo limits with a local constant. An explicit
+`--test-concurrency=1|2|3` instead selects the bounded local mode, with at most two
+Vitest workers per workspace and eligible per-workspace reuse. Native browser groups and builds stay
 sequential under their existing context, heap and deadline policy. The runner
 does not stop an existing app or provider.
 
@@ -33,7 +36,8 @@ guarantee. Smaller runners still need native hosted qualification. A larger heap
 alone does not add CPU parallelism, and no option guarantees a timing target.
 See the [scheduling decision](decisions/three-slot-typechecking.md).
 
-Node tests can separately use one, two or three simultaneous workspaces:
+For a resource-constrained machine, explicitly select one, two or three
+simultaneous Node workspaces instead of the default CI schedule:
 
 ```sh
 nice -n 15 corepack yarn verify:local --typecheck-concurrency=3 --test-concurrency=3
@@ -47,7 +51,11 @@ system, Cafe and providers, and reduce concurrency if the host shows pressure.
 The server keeps isolated forks and serial file execution inside its workspace;
 this option does not permit sharing database connections, ports or mutable
 fixture state. Browser and build stages do not overlap the Node stage, and their
-worker limits do not change. CI retains its existing host-specific test scheduling.
+worker limits do not change. CI retains its existing host-specific test scheduling;
+the normal local Node default now delegates to that same canonical plan. Only an
+explicit local override selects the separate bounded schedule. See the
+[scheduling decision](decisions/ci-matched-local-node-scheduling.md) for the cache
+boundary and qualification limits.
 On macOS/Linux, the canonical copied-native Codex client phase still runs alone
 after all other Node workspaces close. The local concurrency option applies to
 the preceding complete complementary graph, not across this isolation boundary.
@@ -252,7 +260,7 @@ without replacing the device; held/named/final namespace and device checks still
 apply. This does not weaken ordinary source/tool file-change detection.
 
 Input admission is not free. The local session limits reuse to the expensive
-server Node task, server/Codex typechecks, ordinary desktop/touch group and the two
+server Node task in explicit bounded local mode, server/Codex typechecks, ordinary desktop/touch group and the two
 Mermaid security/family groups. Short and unknown task lanes run fresh without
 fingerprinting or receipt IO, because conservative input validation can cost
 more than executing them. All discovered programs/files/groups remain required;
@@ -261,6 +269,10 @@ The eligibility policy is separate from input validity and should be reviewed
 when observed costs change, not tuned through elapsed-time test assertions.
 Web types bypass reuse rather than paying input admission for a known conservative
 miss: their broad source include overlaps omitted screenshot output namespaces.
+The normal default canonical Node graph runs fresh; a server-only receipt cannot
+attest that graph or silently remove a workspace from it. Type/browser receipt
+policy is unchanged. Use an explicit `--test-concurrency=2` when deliberately
+selecting the bounded per-workspace cached mode instead of CI scheduling parity.
 
 ```sh
 nice -n 15 taskpolicy -b corepack yarn verify:local --fresh

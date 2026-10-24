@@ -62,6 +62,82 @@ interface NativeTask {
   readonly release: () => void;
 }
 
+type NativeCachePhase =
+  | "fixture-ready"
+  | "first-run-entered"
+  | "first-spawned"
+  | "first-admitted"
+  | "first-ready"
+  | "cancel-requested"
+  | "first-released"
+  | "first-closed"
+  | "zero-close-confirmed"
+  | "cancellation-refused"
+  | "second-run-entered"
+  | "second-spawned"
+  | "second-ready"
+  | "second-released"
+  | "second-closed"
+  | "fresh-completed"
+  | "owners-admitted"
+  | "both-ready"
+  | "first-qualified"
+  | "second-refused"
+  | "reuse-entered"
+  | "reuse-completed";
+
+/** Observe existing await boundaries only. Counts are admitted native starts,
+ * not inferred ready/close success; the original assertions remain authority.
+ * Register before acquisition and stop recording synchronously on retirement,
+ * so a late owned close cannot append observations to a later fixture. */
+function observeNativeCachePhases(context: TestContext, kind: "cancel-zero" | "concurrent-close") {
+  const started = performance.now();
+  const phases: { phase: NativeCachePhase; count: number; elapsedMs: number }[] = [];
+  let retired = false;
+  let omitted = 0;
+  const retire = () => {
+    retired = true;
+  };
+  context.signal.addEventListener("abort", retire, { once: true });
+  context.onTestFinished(() => {
+    retire();
+    context.signal.removeEventListener("abort", retire);
+  });
+  context.onTestFailed(() => {
+    try {
+      // Only fixed source-owned phases and finite numbers are formatted. No
+      // native error, executable, argument, environment or output is inspected.
+      const summary = phases
+        .map(({ phase, count, elapsedMs }) => `${phase}:${count}:${elapsedMs}`)
+        .join(",");
+      process.stderr.write(
+        `Synthetic native-cache ${kind} phases (phase:count:ms; omitted=${omitted}): ${summary}\n`,
+      );
+    } catch {
+      /* Diagnostics never replace the original test or native error. */
+    }
+  });
+  return (phase: NativeCachePhase, count: number) => {
+    try {
+      if (retired || context.signal.aborted) return;
+      if (phases.length === 16) {
+        phases.shift();
+        omitted = Math.min(1_000_000, omitted + 1);
+      }
+      const elapsed = performance.now() - started;
+      phases.push({
+        phase,
+        count: Number.isFinite(count) ? Math.max(0, Math.min(2, Math.floor(count))) : 0,
+        elapsedMs: Number.isFinite(elapsed)
+          ? Math.max(0, Math.min(60_000, Math.floor(elapsed)))
+          : 0,
+      });
+    } catch {
+      /* A missing observation cannot alter execution, readiness or close. */
+    }
+  };
+}
+
 /** IPC holds the exact child before native close, without a sleep or a timer.
  * Every child runs the same pinned executable as this qualified test process.
  * Its empty environment cannot load NODE_OPTIONS hooks or provider settings. */
@@ -220,7 +296,10 @@ describe("local successful-task qualification", () => {
   });
 
   it("rejects cancellation even when the exact native child exits zero and cannot seed a hit", async (context) => {
+    const mark = observeNativeCachePhases(context, "cancel-zero");
+    let nativeStarts = 0;
     const native = nativeTasks(context);
+    mark("fixture-ready", nativeStarts);
     const { store, keys } = memoryStore();
     const controller = new AbortController();
     const cache = createLocalVerificationCache({
@@ -228,33 +307,48 @@ describe("local successful-task qualification", () => {
       fingerprint: async () => ({ key, fence }),
     });
     const admitted = deferred<NativeTask>();
+    mark("first-run-entered", nativeStarts);
     const run = native.track(
       cache.run(task, controller.signal, async () => {
         // The executor owns cancellation/close, not the cache coordinator. Model
         // a native task that acknowledges cancellation with a successful exit;
         // this remains a real zero exit on Windows as well as POSIX.
         const child = native.start(context.signal);
+        mark("first-spawned", ++nativeStarts);
         admitted.resolve(child);
         await child.closed;
+        mark("first-closed", nativeStarts);
       }),
     );
     const rejection = expect(run).rejects.toMatchObject({ reason: "cancelled" });
     const child = await admitted.promise;
+    mark("first-admitted", nativeStarts);
     await child.ready;
+    mark("first-ready", nativeStarts);
     controller.abort(new Error("Opaque abort reason must not be projected"));
+    mark("cancel-requested", nativeStarts);
     child.release();
+    mark("first-released", nativeStarts);
     await child.closed; // A real zero native close still cannot qualify cancellation.
+    mark("zero-close-confirmed", nativeStarts);
     await rejection;
+    mark("cancellation-refused", nativeStarts);
     expect(keys.size).toBe(0);
     expect(store.publish).not.toHaveBeenCalled();
+    mark("second-run-entered", nativeStarts);
     await native.track(
       cache.run(task, context.signal, async () => {
         const next = native.start(context.signal);
+        mark("second-spawned", ++nativeStarts);
         await next.ready;
+        mark("second-ready", nativeStarts);
         next.release();
+        mark("second-released", nativeStarts);
         await next.closed;
+        mark("second-closed", nativeStarts);
       }),
     );
+    mark("fresh-completed", nativeStarts);
     expect(native.count()).toBe(2);
   });
 
@@ -287,7 +381,10 @@ describe("local successful-task qualification", () => {
   });
 
   it("keeps concurrent exact-input executions independently owned until each real native close", async (context) => {
+    const mark = observeNativeCachePhases(context, "concurrent-close");
+    let nativeStarts = 0;
     const native = nativeTasks(context);
+    mark("fixture-ready", nativeStarts);
     const { store, keys } = memoryStore();
     const cache = createLocalVerificationCache({
       store,
@@ -295,16 +392,21 @@ describe("local successful-task qualification", () => {
     });
     const firstAdmission = deferred<NativeTask>();
     const secondAdmission = deferred<NativeTask>();
+    mark("first-run-entered", nativeStarts);
     const first = native.track(
       cache.run(task, context.signal, async () => {
         const child = native.start(context.signal);
+        mark("first-spawned", ++nativeStarts);
         firstAdmission.resolve(child);
         await child.closed;
+        mark("first-closed", nativeStarts);
       }),
     );
+    mark("second-run-entered", nativeStarts);
     const second = native.track(
       cache.run(task, context.signal, async () => {
         const child = native.start(context.signal, 1);
+        mark("second-spawned", ++nativeStarts);
         secondAdmission.resolve(child);
         await child.closed;
       }),
@@ -313,18 +415,26 @@ describe("local successful-task qualification", () => {
       firstAdmission.promise,
       secondAdmission.promise,
     ]);
+    mark("owners-admitted", nativeStarts);
     await Promise.all([successfulChild.ready, failedChild.ready]);
+    mark("both-ready", nativeStarts);
     expect(native.count()).toBe(2);
     expect(store.publish).not.toHaveBeenCalled();
     successfulChild.release();
+    mark("first-released", nativeStarts);
     expect((await first).status).toBe("fresh");
+    mark("first-qualified", nativeStarts);
     const rejected = expect(second).rejects.toBe(failedChild.failure);
     failedChild.release();
+    mark("second-released", nativeStarts);
     await rejected;
+    mark("second-refused", nativeStarts);
     expect(keys).toEqual(new Set([key]));
     expect(store.publish).toHaveBeenCalledTimes(1);
     const execute = vi.fn(async () => {});
+    mark("reuse-entered", nativeStarts);
     expect((await cache.run(task, context.signal, execute)).status).toBe("reused");
+    mark("reuse-completed", nativeStarts);
     expect(execute).not.toHaveBeenCalled();
   });
 

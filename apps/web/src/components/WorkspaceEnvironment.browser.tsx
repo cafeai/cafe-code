@@ -9,7 +9,7 @@ import {
   DEFAULT_CLIENT_SETTINGS,
   type ServerConfig,
 } from "@cafecode/contracts";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
 const fixture = vi.hoisted(() => ({
@@ -76,7 +76,11 @@ function Current() {
     </output>
   );
 }
+let retireSettingsThemeCase: (() => Promise<void>) | undefined;
 beforeEach(() => {
+  // A hook timeout does not grant a successor authority to reset stores while
+  // the exact earlier native action/unmount owner is still retiring.
+  if (retireSettingsThemeCase) throw new Error("Workspace theme fixture is still retiring");
   fixture.params = {};
   fixture.pathname = "/";
   fixture.navigate.mockReset();
@@ -98,6 +102,11 @@ beforeEach(() => {
     },
   });
   useComposerDraftStore.setState({ draftThreadsByThreadKey: {} });
+});
+afterEach(async () => {
+  // Join this same completion before the next case's store/global reset. A
+  // rejected cleanup keeps its lease rather than treating rejection as close.
+  await retireSettingsThemeCase?.();
 });
 
 function Catalog() {
@@ -226,48 +235,216 @@ it("loads branding with the selected server's session and discards late image re
   }
 });
 
-it("keeps Settings on its section when switching, isolates themes and returns to the selected server's Desk", async () => {
+it("keeps Settings on its section when switching, isolates themes and returns to the selected server's Desk", async (context) => {
   fixture.pathname = "/settings/appearance";
   const themeKey = "cafe-code:theme";
   const remoteThemeKey = `${themeKey}:server:remote`;
   const localTheme = localStorage.getItem(themeKey);
   const remoteTheme = localStorage.getItem(remoteThemeKey);
-  localStorage.setItem(themeKey, "light");
-  localStorage.removeItem(remoteThemeKey);
-  const historyBack = vi.spyOn(window.history, "back").mockImplementation(() => {});
-  const screen = await render(
-    <WorkspaceEnvironmentProvider>
-      <WorkspaceEnvironmentSelector />
-      <ThemeAndBack />
-    </WorkspaceEnvironmentProvider>,
-  );
+  type Phase =
+    | "render"
+    | "initial-theme"
+    | "remote-open"
+    | "remote-choice"
+    | "remote-theme"
+    | "use-light"
+    | "use-dark"
+    | "remote-back"
+    | "local-open"
+    | "local-choice"
+    | "local-theme"
+    | "local-back"
+    | "retirement"
+    | "unmount";
+  const started = performance.now();
+  const phases: { phase: Phase; state: "entered" | "settled"; count: number; elapsedMs: number }[] =
+    [];
+  let observationsRetired = false;
+  let retired = false;
+  let nativeStarts = 0;
+  let mountedScreen: Awaited<ReturnType<typeof render>> | undefined;
+  let pendingRender: ReturnType<typeof render> | undefined;
+  let cleanupPromise: Promise<void> | undefined;
+  let restoreHistoryBack: (() => void) | undefined;
+  let storagePrepared = false;
+  const pending = new Set<Promise<unknown>>();
+  const mark = (phase: Phase, state: "entered" | "settled") => {
+    try {
+      if (observationsRetired) return;
+      if (phases.length === 16) phases.shift();
+      const elapsed = performance.now() - started;
+      phases.push({
+        phase,
+        state,
+        count: Math.min(8, nativeStarts),
+        elapsedMs: Number.isFinite(elapsed)
+          ? Math.max(0, Math.min(60_000, Math.floor(elapsed)))
+          : 0,
+      });
+    } catch {
+      /* Fixed passive observations never replace a native/assertion failure. */
+    }
+  };
+  const assertActive = () => {
+    if (retired || context.signal.aborted) throw new Error("Workspace theme fixture retired");
+  };
+  const own = <T,>(phase: Phase, start: () => Promise<T>, native = false): Promise<T> => {
+    assertActive();
+    if (native) nativeStarts += 1;
+    mark(phase, "entered");
+    const result = start();
+    pending.add(result);
+    // Keep the original native promise/error. These reactions only account for
+    // its settlement; every caller fences again before its next continuation.
+    void result.then(
+      () => {
+        pending.delete(result);
+        if (!retired && !context.signal.aborted) mark(phase, "settled");
+      },
+      () => {
+        pending.delete(result);
+      },
+    );
+    return result;
+  };
+  const retire = () => {
+    if (retired) return;
+    retired = true;
+    mark("retirement", "entered");
+  };
+  const cleanup = (): Promise<void> => {
+    if (cleanupPromise) return cleanupPromise;
+    retire();
+    cleanupPromise = (async () => {
+      try {
+        // Keep the controls and captured globals intact until the exact render
+        // and original native calls settle. Never join the body/finalizer itself.
+        await Promise.allSettled([...pending]);
+        const acquired = pendingRender ? (await Promise.allSettled([pendingRender]))[0] : undefined;
+        const mounted =
+          mountedScreen ?? (acquired?.status === "fulfilled" ? acquired.value : undefined);
+        mark("unmount", "entered");
+        await mounted?.unmount();
+        mark("unmount", "settled");
+        restoreHistoryBack?.();
+        if (storagePrepared) {
+          if (localTheme === null) localStorage.removeItem(themeKey);
+          else localStorage.setItem(themeKey, localTheme);
+          if (remoteTheme === null) localStorage.removeItem(remoteThemeKey);
+          else localStorage.setItem(remoteThemeKey, remoteTheme);
+        }
+        mark("retirement", "settled");
+        if (retireSettingsThemeCase === cleanup) retireSettingsThemeCase = undefined;
+      } finally {
+        observationsRetired = true;
+        context.signal.removeEventListener("abort", retire);
+      }
+    })();
+    return cleanupPromise;
+  };
+  // Install public retirement/completion ownership before globals change or
+  // render starts. A late resolved render still belongs to cleanup, not a new case.
+  retireSettingsThemeCase = cleanup;
+  context.signal.addEventListener("abort", retire, { once: true });
+  context.onTestFinished(cleanup);
+  context.onTestFailed(() => {
+    try {
+      console.error(
+        `Synthetic workspace theme phases (phase:state:count:ms): ${phases.map(({ phase, state, count, elapsedMs }) => `${phase}:${state}:${count}:${elapsedMs}`).join(",")}`,
+      );
+    } catch {
+      /* No source, DOM, storage values, paths or raw errors enter diagnostics. */
+    }
+  });
+  if (context.signal.aborted) retire();
+  let bodyFailed = false;
   try {
-    await expect.element(screen.getByTestId("theme")).toHaveTextContent("light");
-    await screen.getByRole("combobox", { name: "Workspace server" }).click();
-    await page.getByRole("option", { name: "PC (offline)", exact: true }).click();
+    assertActive();
+    storagePrepared = true;
+    localStorage.setItem(themeKey, "light");
+    localStorage.removeItem(remoteThemeKey);
+    const historyBack = vi.spyOn(window.history, "back").mockImplementation(() => {});
+    restoreHistoryBack = () => historyBack.mockRestore();
+    pendingRender = own("render", () =>
+      render(
+        <WorkspaceEnvironmentProvider>
+          <WorkspaceEnvironmentSelector />
+          <ThemeAndBack />
+        </WorkspaceEnvironmentProvider>,
+      ),
+    );
+    const screen = await pendingRender;
+    assertActive();
+    mountedScreen = screen;
+    await own("initial-theme", () =>
+      expect.element(screen.getByTestId("theme")).toHaveTextContent("light"),
+    );
+    assertActive();
+    await own(
+      "remote-open",
+      () => screen.getByRole("combobox", { name: "Workspace server" }).click(),
+      true,
+    );
+    assertActive();
+    await own(
+      "remote-choice",
+      () => page.getByRole("option", { name: "PC (offline)", exact: true }).click(),
+      true,
+    );
+    assertActive();
     expect(fixture.navigate).not.toHaveBeenCalled();
-    await expect.element(screen.getByTestId("theme")).toHaveTextContent("dark");
-    await screen.getByRole("button", { name: "Use light" }).click();
-    await screen.getByRole("button", { name: "Use dark" }).click();
+    await own("remote-theme", () =>
+      expect.element(screen.getByTestId("theme")).toHaveTextContent("dark"),
+    );
+    assertActive();
+    await own("use-light", () => screen.getByRole("button", { name: "Use light" }).click(), true);
+    assertActive();
+    await own("use-dark", () => screen.getByRole("button", { name: "Use dark" }).click(), true);
+    assertActive();
     expect(localStorage.getItem(themeKey)).toBe("light");
     expect(localStorage.getItem(remoteThemeKey)).toBe("dark");
-    await screen.getByRole("button", { name: "Back", exact: true }).click();
+    await own(
+      "remote-back",
+      () => screen.getByRole("button", { name: "Back", exact: true }).click(),
+      true,
+    );
+    assertActive();
     expect(fixture.navigate).toHaveBeenCalledWith({ to: "/" });
     expect(historyBack).not.toHaveBeenCalled();
-    await screen.getByRole("combobox", { name: "Workspace server" }).click();
-    await page.getByRole("option", { name: "Local server", exact: true }).click();
-    await expect.element(screen.getByTestId("theme")).toHaveTextContent("light");
+    await own(
+      "local-open",
+      () => screen.getByRole("combobox", { name: "Workspace server" }).click(),
+      true,
+    );
+    assertActive();
+    await own(
+      "local-choice",
+      () => page.getByRole("option", { name: "Local server", exact: true }).click(),
+      true,
+    );
+    assertActive();
+    await own("local-theme", () =>
+      expect.element(screen.getByTestId("theme")).toHaveTextContent("light"),
+    );
+    assertActive();
     fixture.navigate.mockClear();
-    await screen.getByRole("button", { name: "Back", exact: true }).click();
+    await own(
+      "local-back",
+      () => screen.getByRole("button", { name: "Back", exact: true }).click(),
+      true,
+    );
+    assertActive();
     expect(historyBack).toHaveBeenCalledOnce();
     expect(fixture.navigate).not.toHaveBeenCalled();
+  } catch (error) {
+    bodyFailed = true;
+    throw error;
   } finally {
-    await screen.unmount();
-    historyBack.mockRestore();
-    if (localTheme === null) localStorage.removeItem(themeKey);
-    else localStorage.setItem(themeKey, localTheme);
-    if (remoteTheme === null) localStorage.removeItem(remoteThemeKey);
-    else localStorage.setItem(remoteThemeKey, remoteTheme);
+    try {
+      await cleanup();
+    } catch (error) {
+      if (!bodyFailed) throw error;
+    }
   }
 });
 

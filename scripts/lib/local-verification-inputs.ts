@@ -921,7 +921,12 @@ export function createLocalVerificationFingerprint(
       if (task.scope.kind === "typecheck") {
         if (
           options.configFilePath !== undefined &&
-          options.configFilePath !== join(root, workspace, "tsconfig.json")
+          // TypeScript spells Windows paths with forward slashes. Compare
+          // native absolute paths without rewriting POSIX backslashes or
+          // admitting an unexpected relative result through the process cwd.
+          (typeof options.configFilePath !== "string" ||
+            !isAbsolute(options.configFilePath) ||
+            resolve(options.configFilePath) !== join(root, workspace, "tsconfig.json"))
         )
           refuse();
         if (
@@ -1093,7 +1098,14 @@ export function createLocalVerificationFingerprint(
             if (isBuiltin(name)) continue;
             refuse();
           }
-          const target = actual(resolved.resolvedFileName);
+          // Resolver results use TypeScript's portable separators, whereas
+          // the bounded native inventory and alias names use host paths. A
+          // relative result is not evidence of an inventoried absolute input.
+          if (!isAbsolute(resolved.resolvedFileName)) {
+            diagnose(path, imported.pos, "outside-import");
+            refuse();
+          }
+          const target = actual(resolve(resolved.resolvedFileName));
           if (!inside(root, target) || !all.has(target)) {
             diagnose(path, imported.pos, "outside-import");
             refuse();

@@ -45,6 +45,7 @@ import {
 import { applyClientSettingsUpdated, getServerConfig } from "../rpc/serverState";
 import { useUiStateStore } from "../uiStateStore";
 import { createFollowUpQueuePersistence } from "./chat/followUpQueuePersistence";
+import { createChatViewCallerOwner } from "./chatViewCallerOwner.test.fixture";
 
 describe("ChatView full app (desk)", () => {
   registerChatViewBrowserHooks();
@@ -73,8 +74,68 @@ describe("ChatView full app (desk)", () => {
   };
   it.for([80, 100, 130] as const)(
     "uses sidebar navigation without tabs on narrow web clients at %i percent",
-    async (interfaceScalePercent, { signal, onTestFinished }) => {
+    async (interfaceScalePercent, { signal, onTestFinished, onTestFailed }) => {
+      type Phase =
+        | "await"
+        | "mount"
+        | "viewport"
+        | "styles"
+        | "render"
+        | "websocket"
+        | "bootstrap"
+        | "layout"
+        | "split"
+        | "compact"
+        | "snapshot"
+        | "sidebar"
+        | "selection"
+        | "selected-ready"
+        | "composer-press"
+        | "composer-focus"
+        | "character"
+        | "draft"
+        | "restore"
+        | "composer-pointerdown"
+        | "composer-pointerup"
+        | "composer-click"
+        | "retired"
+        | "unmount";
+      const started = performance.now();
+      const records: {
+        phase: Phase;
+        state: "entered" | "settled" | "observed";
+        ordinal: number;
+        elapsedMs: number;
+        trusted?: boolean;
+        targetExact?: boolean;
+      }[] = [];
+      let ordinal = 0;
+      let recording = true;
+      let selectedTarget: Element | undefined;
+      const mark = (
+        phase: Phase,
+        state: "entered" | "settled" | "observed",
+        native?: { trusted: boolean; targetExact: boolean },
+      ) => {
+        if (!recording) return;
+        try {
+          if (records.length === 16) records.shift();
+          const elapsed = performance.now() - started;
+          records.push({
+            phase,
+            state,
+            ordinal: Math.min(1_000_000, ordinal),
+            elapsedMs: Number.isFinite(elapsed)
+              ? Math.max(0, Math.min(60_000, Math.round(elapsed)))
+              : 0,
+            ...native,
+          });
+        } catch {
+          /* Passive observations cannot change the native action's result. */
+        }
+      };
       let retired = false;
+      let bodyFailed = false;
       let mounting: ReturnType<typeof mountChatView> | undefined;
       let mountCleanup: (() => Promise<void>) | undefined;
       let cleanupPromise: Promise<void> | undefined;
@@ -94,11 +155,40 @@ describe("ChatView full app (desk)", () => {
         // press, not from a later animation/physical-unmount schedule.
         if (sheet?.contains(event.target)) captured.sheet = sheet;
       };
+      const observeSelectedPress = (event: Event) => {
+        try {
+          if (
+            retired ||
+            !selectedTarget ||
+            !(event.target instanceof Node) ||
+            !selectedTarget.contains(event.target)
+          )
+            return;
+          const phase =
+            event.type === "pointerdown"
+              ? "composer-pointerdown"
+              : event.type === "pointerup"
+                ? "composer-pointerup"
+                : "composer-click";
+          mark(phase, "observed", {
+            trusted: event.isTrusted,
+            targetExact: event.target === selectedTarget,
+          });
+        } catch {
+          /* Never turn a diagnostic listener into an input handler. */
+        }
+      };
       const cleanup = () => {
+        mark("retired", "entered");
         retired = true;
         signal.removeEventListener("abort", onAbort);
         window.removeEventListener("pointerdown", captureOpenedSheet, true);
-        return (cleanupPromise ??= (async () => {
+        window.removeEventListener("pointerdown", observeSelectedPress, true);
+        window.removeEventListener("pointerup", observeSelectedPress, true);
+        window.removeEventListener("click", observeSelectedPress, true);
+        // Publish completion before starting disposal, including reentrant
+        // retirement. The body and cleanup never join their own promises.
+        return (cleanupPromise ??= Promise.resolve().then(async () => {
           try {
             try {
               await mounting;
@@ -115,20 +205,32 @@ describe("ChatView full app (desk)", () => {
             // mount's continuations. Keep its controls alive until admitted
             // native actions settle; destructive disposal before that drain
             // could remove an exact locator's target while it is resolving.
-            await mountCleanup?.();
+            mark("unmount", "entered");
+            try {
+              await mountCleanup?.();
+            } finally {
+              mark("unmount", "settled");
+              recording = false;
+            }
           }
-        })());
+        }));
       };
       const onAbort = () => {
         void cleanup().catch(() => undefined);
       };
-      const owned = async <T,>(operation: () => PromiseLike<T>): Promise<T> => {
+      const owned = async <T,>(
+        operation: () => PromiseLike<T>,
+        phase: Phase = "await",
+      ): Promise<T> => {
         assertActive();
+        ordinal += 1;
+        mark(phase, "entered");
         const pending = Promise.resolve(operation());
         pendingOperations.add(pending);
         try {
           const result = await pending;
           assertActive();
+          mark(phase, "settled");
           return result;
         } finally {
           pendingOperations.delete(pending);
@@ -137,8 +239,21 @@ describe("ChatView full app (desk)", () => {
       // Capture cleanup before the first mount await. The public signal fences
       // late input immediately; the finalizer joins disposal and admitted work.
       onTestFinished(cleanup);
+      onTestFailed(() => {
+        try {
+          console.error("Synthetic mobile Desk navigation phases", { records });
+        } catch {
+          /* Preserve the original failure without DOM or error text. */
+        }
+      });
       signal.addEventListener("abort", onAbort, { once: true });
       window.addEventListener("pointerdown", captureOpenedSheet, { capture: true, passive: true });
+      window.addEventListener("pointerdown", observeSelectedPress, {
+        capture: true,
+        passive: true,
+      });
+      window.addEventListener("pointerup", observeSelectedPress, { capture: true, passive: true });
+      window.addEventListener("click", observeSelectedPress, { capture: true, passive: true });
       if (signal.aborted) onAbort();
       try {
         assertActive();
@@ -159,7 +274,10 @@ describe("ChatView full app (desk)", () => {
                 ownCleanup: (cleanupMount) => {
                   mountCleanup = cleanupMount;
                 },
-                observePhase: assertActive,
+                observePhase: (phase) => {
+                  assertActive();
+                  mark(phase, "entered");
+                },
               },
               configureFixture: (next) => {
                 next.serverConfig = {
@@ -168,8 +286,9 @@ describe("ChatView full app (desk)", () => {
                 };
               },
             })),
+          "mount",
         );
-        await owned(splitChats);
+        await owned(splitChats, "split");
         useDeskStore.getState().dispatch({ type: "sidebarMode", mode: "desk" });
         useComposerDraftStore.getState().setPrompt(secondRef, "Keep my mobile draft");
         const editor = await owned(() =>
@@ -183,7 +302,7 @@ describe("ChatView full app (desk)", () => {
         );
         const layout = useDeskStore.getState().desk.layout;
         const groups = useDeskStore.getState().desk.groups;
-        await owned(() => mounted.setViewport(COMPACT_FOOTER_VIEWPORT));
+        await owned(() => mounted.setViewport(COMPACT_FOOTER_VIEWPORT), "compact");
         await owned(() =>
           vi.waitFor(() => {
             expect(document.querySelectorAll(".desk-pane")).toHaveLength(1);
@@ -204,10 +323,12 @@ describe("ChatView full app (desk)", () => {
         expect(page.getByTestId("composer-editor").element()).toBe(editor);
         expect(useDeskStore.getState().desk.layout).toBe(layout);
         expect(useDeskStore.getState().desk.groups).toBe(groups);
-        await owned(() =>
-          page.screenshot({
-            path: `../../../../.explorations/mobile-tabs/mobile-${interfaceScalePercent}.png`,
-          }),
+        await owned(
+          () =>
+            page.screenshot({
+              path: `../../../../.explorations/mobile-tabs/mobile-${interfaceScalePercent}.png`,
+            }),
+          "snapshot",
         );
 
         if (interfaceScalePercent === 100) {
@@ -224,10 +345,14 @@ describe("ChatView full app (desk)", () => {
           expect(page.getByTestId("composer-editor").element()).toBe(editor);
         }
 
-        await owned(() =>
-          page.getByRole("button", { name: "Toggle Sidebar", exact: true }).click(),
+        await owned(
+          () => page.getByRole("button", { name: "Toggle Sidebar", exact: true }).click(),
+          "sidebar",
         );
-        await owned(() => page.getByRole("button", { name: THREAD_TITLE, exact: true }).click());
+        await owned(
+          () => page.getByRole("button", { name: THREAD_TITLE, exact: true }).click(),
+          "selection",
+        );
         await owned(() =>
           expect
             .element(page.getByRole("heading", { name: THREAD_TITLE, exact: true }))
@@ -254,10 +379,11 @@ describe("ChatView full app (desk)", () => {
           }),
         );
         const selectedEditor = selectedComposer.element();
-        await owned(() => selectedComposer.click());
-        await owned(() => expect.element(selectedComposer).toHaveFocus());
+        selectedTarget = selectedEditor;
+        await owned(() => selectedComposer.click(), "composer-press");
+        await owned(() => expect.element(selectedComposer).toHaveFocus(), "composer-focus");
         expect(openedSheet.contains(document.activeElement)).toBe(false);
-        await owned(() => userEvent.keyboard("x"));
+        await owned(() => userEvent.keyboard("x"), "character");
         await owned(() =>
           vi.waitFor(() => {
             expect(selectedComposer.element()).toBe(selectedEditor);
@@ -272,7 +398,7 @@ describe("ChatView full app (desk)", () => {
         );
         expect(document.querySelectorAll(".desk-pane")).toHaveLength(1);
 
-        await owned(() => mounted.setViewport(WIDE_FOOTER_VIEWPORT));
+        await owned(() => mounted.setViewport(WIDE_FOOTER_VIEWPORT), "restore");
         await owned(() =>
           vi.waitFor(() => {
             expect(document.querySelectorAll(".desk-pane")).toHaveLength(2);
@@ -283,8 +409,15 @@ describe("ChatView full app (desk)", () => {
         expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([firstKey]);
         expect(useDeskStore.getState().desk.groups.g2?.tabs).toEqual([secondKey]);
         expect(wsRequests.some((body) => body.type === "thread.turn.interrupt")).toBe(false);
+      } catch (failure) {
+        bodyFailed = true;
+        throw failure;
       } finally {
-        await cleanup();
+        try {
+          await cleanup();
+        } catch (failure) {
+          if (!bodyFailed) throw failure;
+        }
       }
     },
   );
@@ -336,52 +469,60 @@ describe("ChatView full app (desk)", () => {
     }
   });
 
-  it.each(["project", "standalone"] as const)(
+  it.for(["project", "standalone"] as const)(
     "previews %s chat rows, keeps them on double-click and retains input when dismissed",
-    async (kind) => {
-      const initial = createSnapshotForTargetUser({
-        targetMessageId: MessageId.make("preview-chat-navigation"),
-        targetText: "Preview navigation fixture",
-      });
-      const snapshot = withSecondThread(initial);
-      const mounted = await mountChatView({
-        viewport: DEFAULT_VIEWPORT,
-        snapshot:
-          kind === "project"
-            ? snapshot
-            : {
-                ...snapshot,
-                threads: snapshot.threads.map((thread) => ({ ...thread, projectId: null })),
-              },
-      });
-      try {
+    async (kind, context) => {
+      const owner = createChatViewCallerOwner(context, mountChatView, { label: "desk-preview" });
+      await owner.run(async () => {
+        const initial = createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("preview-chat-navigation"),
+          targetText: "Preview navigation fixture",
+        });
+        const snapshot = withSecondThread(initial);
+        await owner.mount({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot:
+            kind === "project"
+              ? snapshot
+              : {
+                  ...snapshot,
+                  threads: snapshot.threads.map((thread) => ({ ...thread, projectId: null })),
+                },
+        });
         const firstRow = page.getByTestId(`thread-row-${THREAD_ID}`);
         const secondRow = page.getByTestId(`thread-row-${secondId}`);
         // Explicitly keep the first chat before browsing another one.
-        await firstRow.dblClick();
-        await secondRow.click();
-        await vi.waitFor(() =>
-          expect(useDeskStore.getState().desk.groups.g1?.previewTabKey).toBe(secondKey),
+        await owner.own("first-row", () => firstRow.dblClick());
+        await owner.own("second-row", () => secondRow.click());
+        await owner.own("preview", () =>
+          vi.waitFor(() =>
+            expect(useDeskStore.getState().desk.groups.g1?.previewTabKey).toBe(secondKey),
+          ),
         );
         const tab = page.getByRole("tab", { name: "Second Desk chat", exact: true });
-        await expect.element(tab).toHaveAttribute("data-preview", "true");
+        await owner.own("tab", () => expect.element(tab).toHaveAttribute("data-preview", "true"));
+        owner.assertActive();
         useComposerDraftStore.getState().setPrompt(secondRef, "Keep this unsent preview input");
-        await expect
-          .element(page.getByTestId("composer-editor"))
-          .toHaveTextContent("Keep this unsent preview input");
-        await firstRow.click();
-        await expect.element(tab).not.toBeInTheDocument();
+        await owner.own("draft", () =>
+          expect
+            .element(page.getByTestId("composer-editor"))
+            .toHaveTextContent("Keep this unsent preview input"),
+        );
+        await owner.own("first-row", () => firstRow.click());
+        await owner.own("tab", () => expect.element(tab).not.toBeInTheDocument());
         expect(useComposerDraftStore.getState().getComposerDraft(secondRef)?.prompt).toBe(
           "Keep this unsent preview input",
         );
         expect(useDeskStore.getState().desk.closed).toEqual([]);
-        await secondRow.dblClick();
-        await expect.element(tab).toHaveAttribute("data-preview", "false");
-        await expect
-          .element(page.getByTestId("composer-editor"))
-          .toHaveTextContent("Keep this unsent preview input");
-        await firstRow.click();
-        await expect.element(tab).toBeVisible();
+        await owner.own("second-row", () => secondRow.dblClick());
+        await owner.own("tab", () => expect.element(tab).toHaveAttribute("data-preview", "false"));
+        await owner.own("draft", () =>
+          expect
+            .element(page.getByTestId("composer-editor"))
+            .toHaveTextContent("Keep this unsent preview input"),
+        );
+        await owner.own("first-row", () => firstRow.click());
+        await owner.own("tab", () => expect.element(tab).toBeVisible());
         expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([firstKey, secondKey]);
         expect(
           wsRequests.some(
@@ -392,9 +533,7 @@ describe("ChatView full app (desk)", () => {
               request.type === "thread.deleted",
           ),
         ).toBe(false);
-      } finally {
-        await mounted.cleanup();
-      }
+      });
     },
   );
   it.for([
@@ -857,7 +996,7 @@ describe("ChatView full app (desk)", () => {
     },
   );
 
-  it("does not let a late message-fork acknowledgement navigate an inactive mounted pane", async () => {
+  it("does not let a late message-fork acknowledgement navigate an inactive mounted pane", async (testContext) => {
     const initial = createSnapshotForTargetUser({
       targetMessageId: MessageId.make("desk-fork-source"),
       targetText: "Fork source",
@@ -885,32 +1024,77 @@ describe("ChatView full app (desk)", () => {
     const pending = new Promise<{ sequence: number }>((resolve) => {
       release = resolve;
     });
-    const mounted = await mountChatView({
-      viewport: { ...DEFAULT_VIEWPORT, width: 1800 },
-      snapshot,
-      resolveRpc: (body) =>
-        body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
-          ? body.type === "thread.fork"
-            ? pending
-            : { sequence: 2 }
-          : undefined,
+    let ackReleased = false;
+    const releaseAck = () => {
+      if (ackReleased) return;
+      ackReleased = true;
+      release({ sequence: 2 });
+    };
+    let restoreDispatch: (() => void) | undefined;
+    let apiOverrideAcquired = false;
+    const owner = createChatViewCallerOwner(testContext, mountChatView, {
+      label: "desk-late-fork",
+      beforeDrain: releaseAck,
+      afterUnmount: () => {
+        // Native actions and the actual wire completion join before this exact
+        // mount is disposed. Only then restore overrides acquired by this case.
+        try {
+          restoreDispatch?.();
+        } finally {
+          if (apiOverrideAcquired) {
+            __resetEnvironmentApiOverridesForTests();
+            apiOverrideAcquired = false;
+          }
+        }
+      },
     });
-    const forks = () => wsRequests.filter((request) => request.type === "thread.fork");
-    const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
-    const dispatchCommand = api.orchestration.dispatchCommand;
-    let forkAcknowledged = false;
-    const dispatchSpy = vi
-      .spyOn(api.orchestration, "dispatchCommand")
-      .mockImplementation(async (command) => {
-        const result = await dispatchCommand(command);
-        if (command.type === "thread.fork") forkAcknowledged = true;
-        return result;
+    await owner.run(async () => {
+      const mounted = await owner.mount({
+        viewport: { ...DEFAULT_VIEWPORT, width: 1800 },
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? body.type === "thread.fork"
+              ? pending
+              : { sequence: 2 }
+            : undefined,
       });
-    // Observe completion of the actual wire call, not just release of the
-    // server fixture promise, before asserting that navigation stayed put.
-    __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, api);
-    try {
-      await splitChats();
+      const forks = () => wsRequests.filter((request) => request.type === "thread.fork");
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      const dispatchCommand = api.orchestration.dispatchCommand;
+      let forkAcknowledged = false;
+      const dispatchSpy = vi
+        .spyOn(api.orchestration, "dispatchCommand")
+        .mockImplementation(function (this: unknown, ...args) {
+          // Preserve the original async call/result/error and actual receiver.
+          // The owned duplicate joins its completion; it is not the API response.
+          let completion: ReturnType<typeof dispatchCommand> | undefined;
+          const joined = owner.own("ack", () => {
+            completion = (async () => {
+              const result = await dispatchCommand.apply(this, args);
+              if (args[0].type === "thread.fork") forkAcknowledged = true;
+              return result;
+            })();
+            return completion;
+          });
+          // Observe both duplicate outcomes without replacing the completion
+          // returned to the component. Only that original wire success sets the
+          // acknowledgement receipt above; cleanup release is not success.
+          void joined.then(
+            () => undefined,
+            () => undefined,
+          );
+          return completion ?? joined;
+        });
+      restoreDispatch = () => {
+        dispatchSpy.mockRestore();
+      };
+      // Observe completion of the actual wire call, not just release of the
+      // server fixture promise, before asserting that navigation stayed put.
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, api);
+      apiOverrideAcquired = true;
+      await owner.own("layout", () => splitChats());
+      owner.assertActive();
       useDeskStore.getState().dispatch({ type: "select", tabKey: firstKey });
       const sourcePane = page.getByRole("region", { name: "Main chat group", exact: true });
       const sourceEditor = sourcePane.getByTestId("composer-editor").element();
@@ -922,61 +1106,72 @@ describe("ChatView full app (desk)", () => {
       const action = sourcePane
         .getByTimelineMessageId(selectedMessageId)
         .getByRole("button", { name: "Fork from this message", exact: true });
-      await sourcePane.getByTimelineMessageId(selectedMessageId).hover();
-      await expect.element(action).toBeVisible();
+      await owner.own("input", () => sourcePane.getByTimelineMessageId(selectedMessageId).hover());
+      await owner.own("controls", () => expect.element(action).toBeVisible());
       expect(action.element().closest("[data-message-id]")?.getAttribute("data-message-id")).toBe(
         selectedMessageId,
       );
-      await action.click();
+      await owner.own("input", () => action.click());
       const confirm = page.getByRole("button", { name: "Create fork", exact: true });
-      await expect.element(confirm).toBeEnabled();
-      await confirm.click();
-      await vi.waitFor(() => expect(forks()).toHaveLength(1));
+      await owner.own("controls", () => expect.element(confirm).toBeEnabled());
+      await owner.own("send", () => confirm.click());
+      await owner.own("request", () => vi.waitFor(() => expect(forks()).toHaveLength(1)));
       expect(forks()[0]).toMatchObject({
         sourceThreadId: THREAD_ID,
         sourceMessageId: selectedMessageId,
       });
       // External navigation can activate another group while the modal is
       // pending; the source ChatView remains mounted in the split layout.
+      owner.assertActive();
       useDeskStore.getState().dispatch({ type: "select", tabKey: secondKey });
-      await vi.waitFor(() =>
-        expect(mounted.router.state.location.pathname).toBe(serverThreadPath(secondId)),
+      await owner.own("route", () =>
+        vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toBe(serverThreadPath(secondId)),
+        ),
       );
-      await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+      await owner.own("closed", () =>
+        expect.element(page.getByRole("dialog")).not.toBeInTheDocument(),
+      );
       expect(sourceEditor.isConnected).toBe(true);
       // Returning to the same mounted source must not reset its in-flight
       // guard just because the foreground-only confirmation was remounted.
+      owner.assertActive();
       useDeskStore.getState().dispatch({ type: "select", tabKey: firstKey });
-      await vi.waitFor(() =>
-        expect(mounted.router.state.location.pathname).toBe(serverThreadPath(THREAD_ID)),
+      await owner.own("route", () =>
+        vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toBe(serverThreadPath(THREAD_ID)),
+        ),
       );
-      await expect
-        .element(page.getByRole("button", { name: "Create fork", exact: true }))
-        .toBeDisabled();
-      await expect
-        .element(page.getByRole("button", { name: "Cancel", exact: true }))
-        .toBeDisabled();
+      await owner.own("controls", () =>
+        expect
+          .element(page.getByRole("button", { name: "Create fork", exact: true }))
+          .toBeDisabled(),
+      );
+      await owner.own("controls", () =>
+        expect.element(page.getByRole("button", { name: "Cancel", exact: true })).toBeDisabled(),
+      );
       expect(forks()).toHaveLength(1);
+      owner.assertActive();
       useDeskStore.getState().dispatch({ type: "select", tabKey: secondKey });
-      await vi.waitFor(() =>
-        expect(mounted.router.state.location.pathname).toBe(serverThreadPath(secondId)),
+      await owner.own("route", () =>
+        vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toBe(serverThreadPath(secondId)),
+        ),
       );
-      await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+      await owner.own("closed", () =>
+        expect.element(page.getByRole("dialog")).not.toBeInTheDocument(),
+      );
       const ownerBeforeAck = useDeskStore.getState().desk.activeGroupId;
-      release({ sequence: 2 });
-      await vi.waitFor(() => expect(forkAcknowledged).toBe(true));
-      await waitForLayout();
-      await waitForLayout();
+      releaseAck();
+      owner.mark("ack");
+      await owner.own("receipt", () => vi.waitFor(() => expect(forkAcknowledged).toBe(true)));
+      await owner.own("layout", () => waitForLayout());
+      await owner.own("layout", () => waitForLayout());
       expect(mounted.router.state.location.pathname).toBe(serverThreadPath(secondId));
       expect(useDeskStore.getState().desk.activeGroupId).toBe(ownerBeforeAck);
       expect(sourceEditor.isConnected).toBe(true);
       expect(forks()).toHaveLength(1);
-    } finally {
-      release({ sequence: 2 });
-      dispatchSpy.mockRestore();
-      await mounted.cleanup();
-      __resetEnvironmentApiOverridesForTests();
-    }
+    });
   });
 
   it("retains pending fork admission after closing and reopening the source pane", async () => {

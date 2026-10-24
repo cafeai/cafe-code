@@ -62,6 +62,7 @@ import { selectThreadByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { buildSubagentConcurrencyEditorKey } from "./chat/ChatComposer";
 import { createFollowUpQueuePersistence } from "./chat/followUpQueuePersistence";
+import { createChatViewCallerOwner } from "./chatViewCallerOwner.test.fixture";
 
 describe("ChatView full app (standalone)", () => {
   registerChatViewBrowserHooks();
@@ -1237,35 +1238,167 @@ describe("ChatView full app (standalone)", () => {
         await mounted.cleanup();
       }
     });
-    it.each(["no draft account", "disabled draft account", "missing draft account"] as const)(
+    it.for(["no draft account", "disabled draft account", "missing draft account"] as const)(
       "uses the retained session account consistently in the rail, editor and send when durable selection differs (%s)",
-      async (selection) => {
-        const original = policySnapshot(undefined, 12);
-        const base = {
-          ...original,
-          threads: original.threads.map((thread) => ({
-            ...thread,
-            modelSelection: createModelSelection(peer, "gpt-5"),
-          })),
+      async (selection, { signal, onTestFinished, onTestFailed }) => {
+        type Phase =
+          | "mount"
+          | "viewport"
+          | "styles"
+          | "render"
+          | "websocket"
+          | "bootstrap"
+          | "layout"
+          | "config"
+          | "draft"
+          | "rail"
+          | "more"
+          | "editor"
+          | "dialog"
+          | "close"
+          | "closed"
+          | "prompt"
+          | "send-target"
+          | "send"
+          | "command"
+          | "retired"
+          | "unmount";
+        const started = performance.now();
+        const phases: {
+          phase: Phase;
+          state: "entered" | "settled";
+          count: number;
+          elapsedMs: number;
+        }[] = [];
+        const pendingOperations = new Set<Promise<unknown>>();
+        let mounting: ReturnType<typeof mountChatView> | undefined;
+        let mountCleanup: (() => Promise<void>) | undefined;
+        let cleanupPromise: Promise<void> | undefined;
+        let retired = false;
+        let nativeStarts = 0;
+        const mark = (phase: Phase, state: "entered" | "settled") => {
+          try {
+            if (retired) return;
+            if (phases.length === 16) phases.shift();
+            const elapsed = performance.now() - started;
+            phases.push({
+              phase,
+              state,
+              count: Math.min(3, nativeStarts),
+              elapsedMs: Number.isFinite(elapsed)
+                ? Math.max(0, Math.min(60_000, Math.floor(elapsed)))
+                : 0,
+            });
+          } catch {
+            /* Passive fixed diagnostics cannot replace the original failure. */
+          }
         };
-        const mounted = await mountChatView({
-          viewport: WIDE_FOOTER_VIEWPORT,
-          snapshot: base,
-          configureFixture: (next) => {
-            configureLiveDefaults(next);
-            if (selection === "disabled draft account")
-              next.serverConfig = {
-                ...next.serverConfig,
-                providers: next.serverConfig.providers.map((provider) =>
-                  provider.instanceId === peer ? { ...provider, enabled: false } : provider,
-                ),
-              };
-          },
-          resolveRpc: (body) =>
-            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+        const assertActive = () => {
+          if (retired || signal.aborted)
+            throw new Error("The exact retained-account fixture was retired.");
+        };
+        const retire = () => {
+          if (retired) return;
+          mark("retired", "entered");
+          retired = true;
+          signal.removeEventListener("abort", retire);
+        };
+        const cleanup = (): Promise<void> => {
+          retire();
+          // Publish one completion before cleanup begins. The body and this
+          // finalizer are never pending operations, so neither can self-join.
+          return (cleanupPromise ??= Promise.resolve().then(async () => {
+            try {
+              try {
+                await mounting;
+              } catch {
+                // Only this duplicate join observes failure: the original
+                // mount await still rejects the test with its exact error.
+              }
+              await Promise.allSettled([...pendingOperations]);
+            } finally {
+              // The existing scoped mount owns late render acquisition and
+              // clears only its exact resolver/host after admitted input joins.
+              await mountCleanup?.();
+            }
+          }));
+        };
+        const owned = async <T,>(
+          phase: Phase,
+          operation: () => PromiseLike<T>,
+          native = false,
+        ): Promise<T> => {
+          assertActive();
+          if (native) nativeStarts += 1;
+          mark(phase, "entered");
+          const original = Promise.resolve(operation());
+          pendingOperations.add(original);
+          try {
+            const result = await original;
+            assertActive();
+            mark(phase, "settled");
+            return result;
+          } finally {
+            pendingOperations.delete(original);
+          }
+        };
+        // Own retirement before mount can mutate shared fixture state or yield.
+        // No extra input, readiness poll or allowance is introduced here.
+        onTestFinished(cleanup);
+        onTestFailed(() => {
+          try {
+            console.error("retained-account-fixture-diagnostic", { phases });
+          } catch {
+            /* Diagnostic delivery must preserve the original failure. */
+          }
         });
+        signal.addEventListener("abort", retire, { once: true });
+        if (signal.aborted) retire();
+        let bodyFailed = false;
         try {
-          await waitForServerConfigToApply();
+          assertActive();
+          const original = policySnapshot(undefined, 12);
+          const base = {
+            ...original,
+            threads: original.threads.map((thread) => ({
+              ...thread,
+              modelSelection: createModelSelection(peer, "gpt-5"),
+            })),
+          };
+          await owned(
+            "mount",
+            () =>
+              (mounting = mountChatView({
+                viewport: WIDE_FOOTER_VIEWPORT,
+                snapshot: base,
+                configureFixture: (next) => {
+                  configureLiveDefaults(next);
+                  if (selection === "disabled draft account")
+                    next.serverConfig = {
+                      ...next.serverConfig,
+                      providers: next.serverConfig.providers.map((provider) =>
+                        provider.instanceId === peer ? { ...provider, enabled: false } : provider,
+                      ),
+                    };
+                },
+                resolveRpc: (body) =>
+                  body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+                    ? { sequence: 2 }
+                    : undefined,
+                lifecycle: {
+                  assertActive,
+                  retire: cleanup,
+                  ownCleanup: (cleanupMount) => {
+                    mountCleanup = cleanupMount;
+                  },
+                  observePhase: (phase) => {
+                    assertActive();
+                    mark(phase, "entered");
+                  },
+                },
+              })),
+          );
+          await owned("config", () => waitForServerConfigToApply());
           if (selection === "no draft account") {
             expect(
               useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.activeProvider,
@@ -1278,46 +1411,79 @@ describe("ChatView full app (standalone)", () => {
             useComposerDraftStore
               .getState()
               .setModelSelection(THREAD_REF, createModelSelection(stale, "gpt-5"));
-            await vi.waitFor(() =>
-              expect(
-                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.activeProvider,
-              ).toBe(stale),
+            await owned("draft", () =>
+              vi.waitFor(() =>
+                expect(
+                  useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.activeProvider,
+                ).toBe(stale),
+              ),
             );
           }
           useUiStateStore.getState().setSessionRailDocked(true);
-          await vi.waitFor(() => {
-            expect(findSessionRail()?.textContent).toContain("Subagent limit: 12");
-            expect(findSessionRail()?.textContent).not.toContain("64");
-            expect(findSessionRail()?.textContent).not.toContain("→");
-          });
-          await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-          await page.getByRole("menuitem", { name: "Subagent limit…", exact: true }).click();
+          await owned("rail", () =>
+            vi.waitFor(() => {
+              expect(findSessionRail()?.textContent).toContain("Subagent limit: 12");
+              expect(findSessionRail()?.textContent).not.toContain("64");
+              expect(findSessionRail()?.textContent).not.toContain("→");
+            }),
+          );
+          await owned(
+            "more",
+            () => page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+            true,
+          );
+          await owned(
+            "editor",
+            () => page.getByRole("menuitem", { name: "Subagent limit…", exact: true }).click(),
+            true,
+          );
           const dialog = page.getByRole("dialog", { name: "Subagent limit", exact: true });
-          await expect.element(dialog).toBeVisible();
+          await owned("dialog", () => expect.element(dialog).toBeVisible());
           expect(dialog.element().textContent).toContain("Subagent limit: 12");
           expect(dialog.element().textContent).not.toContain("Subagent limit: 64");
-          await page.getByRole("button", { name: "Close", exact: true }).click();
-          await expect.element(dialog).not.toBeInTheDocument();
+          await owned(
+            "close",
+            () => page.getByRole("button", { name: "Close", exact: true }).click(),
+            true,
+          );
+          await owned("closed", () => expect.element(dialog).not.toBeInTheDocument());
           const prompt = "Send with the exact retained session account";
           useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
-          await vi.waitFor(() =>
-            expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
-              prompt,
+          await owned("prompt", () =>
+            vi.waitFor(() =>
+              expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+                prompt,
+              ),
             ),
           );
-          (await waitForSendButton()).click();
-          await vi.waitFor(() =>
-            expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
-              threadId: THREAD_ID,
-              modelSelection: { instanceId: account },
-              message: { text: prompt },
-            }),
+          const sendButton = await owned("send-target", () => waitForSendButton());
+          assertActive();
+          mark("send", "entered");
+          // Preserve the original synchronous DOM send; do not replay it or
+          // substitute another native command to manufacture a dispatch receipt.
+          sendButton.click();
+          mark("send", "settled");
+          await owned("command", () =>
+            vi.waitFor(() =>
+              expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+                threadId: THREAD_ID,
+                modelSelection: { instanceId: account },
+                message: { text: prompt },
+              }),
+            ),
           );
           const start = wsRequests.find((body) => body.type === "thread.turn.start");
           expect(start?.subagentLimits).not.toMatchObject({ codex: 12 });
           expect(start?.subagentLimits).not.toMatchObject({ codex: 64 });
+        } catch (failure) {
+          bodyFailed = true;
+          throw failure;
         } finally {
-          await mounted.cleanup();
+          try {
+            await cleanup();
+          } catch (failure) {
+            if (!bodyFailed) throw failure;
+          }
         }
       },
     );
@@ -2379,174 +2545,306 @@ describe("ChatView full app (standalone)", () => {
         }),
       );
     });
-    it.each([
+    it.for([
       { timing: "before ACK", reset: false },
       { timing: "after ACK", reset: true },
     ])(
       "never restores an obsolete limit over a newer canonical policy ($timing, reset=$reset)",
-      async ({ timing, reset }) => {
+      async ({ timing, reset }, context) => {
         let resolveAck!: (result: { sequence: number }) => void;
         const acknowledgement = new Promise<{ sequence: number }>((resolve) => {
           resolveAck = resolve;
         });
-        const requested = reset ? { claude: 8 } : { codex: 6, claude: 8 };
-        const mounted = await mountChatView({
-          viewport: DEFAULT_VIEWPORT,
-          snapshot: policySnapshot(),
-          configureFixture: configureLimitFixture,
-          resolveRpc: (body) =>
-            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
-              ? body.type === "thread.meta.update"
-                ? acknowledgement
-                : { sequence: 20 }
-              : undefined,
+        let ackReleased = false;
+        const releaseAck = () => {
+          if (ackReleased) return;
+          ackReleased = true;
+          resolveAck({ sequence: 2 });
+        };
+        const owner = createChatViewCallerOwner(context, mountChatView, {
+          label: "subagent-obsolete-ack",
+          beforeDrain: releaseAck,
         });
-        try {
-          await openPolicyEditor();
+        const openOwnedEditor = async () => {
+          // The same original native controls, fenced between their awaits.
+          await owner.own("controls", () =>
+            page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+          );
+          await owner.own("editor", () =>
+            page.getByRole("menuitem", { name: /^Subagent limit…/ }).click(),
+          );
+          await owner.own("editor", () =>
+            expect.element(page.getByRole("dialog", { name: "Subagent limit" })).toBeVisible(),
+          );
+        };
+        const requested = reset ? { claude: 8 } : { codex: 6, claude: 8 };
+        await owner.run(async () => {
+          await owner.mount({
+            viewport: DEFAULT_VIEWPORT,
+            snapshot: policySnapshot(),
+            configureFixture: configureLimitFixture,
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+                ? body.type === "thread.meta.update"
+                  ? acknowledgement
+                  : { sequence: 20 }
+                : undefined,
+          });
+          await openOwnedEditor();
+          const popup = page.getByRole("dialog", { name: "Subagent limit" }).element();
+          expect(popup.isConnected).toBe(true);
+          expect(popup.hasAttribute("data-open")).toBe(true);
           if (!reset)
-            await page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("6");
-          await page.getByRole("button", { name: reset ? "Reset" : "Save", exact: true }).click();
-          await vi.waitFor(() =>
-            expect(
-              wsRequests.find(
-                (body) =>
-                  body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
-                  body.type === "thread.meta.update",
-              ),
-            ).toMatchObject({ threadId: THREAD_ID, subagentLimits: requested }),
+            await owner.own("input", () =>
+              page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("6"),
+            );
+          await owner.own(reset ? "reset" : "save", () =>
+            page.getByRole("button", { name: reset ? "Reset" : "Save", exact: true }).click(),
+          );
+          await owner.own("request", () =>
+            vi.waitFor(() =>
+              expect(
+                wsRequests.find(
+                  (body) =>
+                    body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                    body.type === "thread.meta.update",
+                ),
+              ).toMatchObject({ threadId: THREAD_ID, subagentLimits: requested }),
+            ),
           );
           if (timing === "before ACK") {
+            owner.assertActive();
             publishPolicy(requested);
-            await waitForPolicy(requested);
+            await owner.own("canonical", () => waitForPolicy(requested));
           } else {
-            resolveAck({ sequence: 2 });
-            await vi.waitFor(() =>
-              expect(
-                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
-              ).toEqual(requested),
+            owner.assertActive();
+            releaseAck();
+            owner.mark("ack");
+            await owner.own("overlay", () =>
+              vi.waitFor(() =>
+                expect(
+                  useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+                ).toEqual(requested),
+              ),
             );
           }
           const newer = { codex: 9, claude: 8 };
+          owner.assertActive();
           publishPolicy(newer);
-          await waitForPolicy(newer);
-          if (timing === "before ACK") resolveAck({ sequence: 2 });
-          await vi.waitFor(() => {
-            expect(document.querySelector('[role="dialog"]')).toBeNull();
-            expect(
-              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
-            ).toBeUndefined();
-          });
-          await openPolicyEditor();
-          await expect
-            .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
-            .toHaveValue(9);
-          await page
-            .getByRole("dialog")
-            .getByRole("button", { name: "Close", exact: true })
-            .click();
-          useComposerDraftStore.getState().setPrompt(THREAD_REF, "Use the latest durable policy");
-          (await waitForSendButton()).click();
-          await vi.waitFor(() =>
-            expect(
-              wsRequests.find(
-                (body) =>
-                  body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
-                  body.type === "thread.turn.start",
-              ),
-            ).toMatchObject({ threadId: THREAD_ID, subagentLimits: newer }),
+          await owner.own("canonical", () => waitForPolicy(newer));
+          if (timing === "before ACK") {
+            releaseAck();
+            owner.mark("ack");
+          }
+          await owner.own("closed", () =>
+            vi.waitFor(() => {
+              // Retain this exact popup's semantic closure, not the duration of
+              // its exit painting. The original reopen/value/send below remain
+              // the real continuation proof; a closed attribute alone is not it.
+              if (popup.isConnected) {
+                expect(popup.hasAttribute("data-closed")).toBe(true);
+                expect(popup.hasAttribute("data-open")).toBe(false);
+              }
+              expect(document.querySelector('[role="dialog"][data-open]')).toBeNull();
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+              ).toBeUndefined();
+              expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual(
+                newer,
+              );
+            }),
           );
-        } finally {
-          resolveAck({ sequence: 2 });
-          await mounted.cleanup();
-        }
+          await openOwnedEditor();
+          await owner.own("value", () =>
+            expect
+              .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
+              .toHaveValue(9),
+          );
+          await owner.own("close", () =>
+            page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).click(),
+          );
+          owner.assertActive();
+          useComposerDraftStore.getState().setPrompt(THREAD_REF, "Use the latest durable policy");
+          const sendButton = await owner.own("send-target", () => waitForSendButton());
+          owner.assertActive();
+          sendButton.click();
+          owner.mark("send");
+          await owner.own("receipt", () =>
+            vi.waitFor(() =>
+              expect(
+                wsRequests.find(
+                  (body) =>
+                    body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                    body.type === "thread.turn.start",
+                ),
+              ).toMatchObject({ threadId: THREAD_ID, subagentLimits: newer }),
+            ),
+          );
+        });
       },
     );
-    it("does not install an overlay when the acknowledged policy already arrived", async () => {
+    it("does not install an overlay when the acknowledged policy already arrived", async (context) => {
       let resolveAck!: (result: { sequence: number }) => void;
       const acknowledgement = new Promise<{ sequence: number }>((resolve) => {
         resolveAck = resolve;
       });
-      const mounted = await mountChatView({
-        viewport: DEFAULT_VIEWPORT,
-        snapshot: policySnapshot(),
-        configureFixture: configureLimitFixture,
-        resolveRpc: (body) =>
-          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? acknowledgement : undefined,
+      let ackReleased = false;
+      const releaseAck = () => {
+        if (ackReleased) return;
+        ackReleased = true;
+        resolveAck({ sequence: 2 });
+      };
+      const owner = createChatViewCallerOwner(context, mountChatView, {
+        label: "subagent-already-canonical",
+        beforeDrain: releaseAck,
       });
-      try {
-        await openPolicyEditor();
-        await page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("6");
-        await page.getByRole("button", { name: "Save", exact: true }).click();
-        await vi.waitFor(() =>
-          expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
-        );
-        publishPolicy({ codex: 6, claude: 8 });
-        await waitForPolicy({ codex: 6, claude: 8 });
-        resolveAck({ sequence: 2 });
-        await vi.waitFor(() => {
-          expect(document.querySelector('[role="dialog"]')).toBeNull();
-          expect(
-            useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
-          ).toBeUndefined();
-        });
-      } finally {
-        resolveAck({ sequence: 2 });
-        await mounted.cleanup();
-      }
-    });
-    it.each([false, true])(
-      "preserves our newer ACK over earlier external projection until exact policy catches up (reset=%s)",
-      async (reset) => {
-        let resolveAck!: (result: { sequence: number }) => void;
-        const acknowledgement = new Promise<{ sequence: number }>((resolve) => {
-          resolveAck = resolve;
-        });
-        const requested = reset ? { claude: 8 } : { codex: 6, claude: 8 };
-        const mounted = await mountChatView({
+      await owner.run(async () => {
+        await owner.mount({
           viewport: DEFAULT_VIEWPORT,
           snapshot: policySnapshot(),
           configureFixture: configureLimitFixture,
           resolveRpc: (body) =>
-            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
-              ? body.type === "thread.meta.update"
-                ? acknowledgement
-                : { sequence: 4 }
-              : undefined,
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? acknowledgement : undefined,
         });
-        try {
-          await openPolicyEditor();
-          if (!reset)
-            await page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("6");
-          await page.getByRole("button", { name: reset ? "Reset" : "Save", exact: true }).click();
-          await vi.waitFor(() =>
+        await owner.own("controls", () =>
+          page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+        );
+        await owner.own("editor", () =>
+          page.getByRole("menuitem", { name: /^Subagent limit…/ }).click(),
+        );
+        await owner.own("editor", () =>
+          expect.element(page.getByRole("dialog", { name: "Subagent limit" })).toBeVisible(),
+        );
+        const popup = page.getByRole("dialog", { name: "Subagent limit" }).element();
+        expect(popup.isConnected).toBe(true);
+        expect(popup.hasAttribute("data-open")).toBe(true);
+        await owner.own("input", () =>
+          page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("6"),
+        );
+        await owner.own("save", () =>
+          page.getByRole("button", { name: "Save", exact: true }).click(),
+        );
+        await owner.own("request", () =>
+          vi.waitFor(() =>
             expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
-          );
-          publishPolicy({ codex: 9, claude: 8 }); // External commit at sequence2.
-          await waitForPolicy({ codex: 9, claude: 8 });
-          resolveAck({ sequence: 3 }); // Our save committed after that external update.
-          await vi.waitFor(() =>
+          ),
+        );
+        owner.assertActive();
+        publishPolicy({ codex: 6, claude: 8 });
+        await owner.own("canonical", () => waitForPolicy({ codex: 6, claude: 8 }));
+        releaseAck();
+        owner.mark("ack");
+        await owner.own("closed", () =>
+          vi.waitFor(() => {
+            // This case has no reopen action: prove only the exact acknowledged
+            // popup closed and no open replacement, not physical exit retirement.
+            if (popup.isConnected) {
+              expect(popup.hasAttribute("data-closed")).toBe(true);
+              expect(popup.hasAttribute("data-open")).toBe(false);
+            }
+            expect(document.querySelector('[role="dialog"][data-open]')).toBeNull();
             expect(
               useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
-            ).toEqual(requested),
+            ).toBeUndefined();
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({
+              codex: 6,
+              claude: 8,
+            });
+          }),
+        );
+      });
+    });
+    it.for([false, true])(
+      "preserves our newer ACK over earlier external projection until exact policy catches up (reset=%s)",
+      async (reset, context) => {
+        let resolveAck!: (result: { sequence: number }) => void;
+        const acknowledgement = new Promise<{ sequence: number }>((resolve) => {
+          resolveAck = resolve;
+        });
+        let ackReleased = false;
+        const releaseAck = () => {
+          if (ackReleased) return;
+          ackReleased = true;
+          resolveAck({ sequence: 3 });
+        };
+        const owner = createChatViewCallerOwner(context, mountChatView, {
+          label: "subagent-newer-ack",
+          beforeDrain: releaseAck,
+        });
+        const requested = reset ? { claude: 8 } : { codex: 6, claude: 8 };
+        await owner.run(async () => {
+          await owner.mount({
+            viewport: DEFAULT_VIEWPORT,
+            snapshot: policySnapshot(),
+            configureFixture: configureLimitFixture,
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+                ? body.type === "thread.meta.update"
+                  ? acknowledgement
+                  : { sequence: 4 }
+                : undefined,
+          });
+          await owner.own("controls", () =>
+            page.getByRole("button", { name: "More composer controls", exact: true }).click(),
           );
+          await owner.own("editor", () =>
+            page.getByRole("menuitem", { name: /^Subagent limit…/ }).click(),
+          );
+          await owner.own("editor", () =>
+            expect.element(page.getByRole("dialog", { name: "Subagent limit" })).toBeVisible(),
+          );
+          if (!reset)
+            await owner.own("input", () =>
+              page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("6"),
+            );
+          await owner.own(reset ? "reset" : "save", () =>
+            page.getByRole("button", { name: reset ? "Reset" : "Save", exact: true }).click(),
+          );
+          await owner.own("request", () =>
+            vi.waitFor(() =>
+              expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+            ),
+          );
+          owner.assertActive();
+          publishPolicy({ codex: 9, claude: 8 }); // External commit at sequence2.
+          await owner.own("canonical", () => waitForPolicy({ codex: 9, claude: 8 }));
+          releaseAck(); // Our save committed after that external update.
+          owner.mark("ack");
+          await owner.own("overlay", () =>
+            vi.waitFor(() =>
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+              ).toEqual(requested),
+            ),
+          );
+          owner.assertActive();
           useComposerDraftStore
             .getState()
             .setPrompt(THREAD_REF, "Use the acknowledged newer policy");
-          (await waitForSendButton()).click();
-          await vi.waitFor(() =>
-            expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
-              subagentLimits: requested,
-            }),
+          const sendButton = await owner.own("send-target", () => waitForSendButton());
+          owner.assertActive();
+          sendButton.click();
+          owner.mark("send");
+          await owner.own("receipt", () =>
+            vi.waitFor(() =>
+              expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+                subagentLimits: requested,
+              }),
+            ),
           );
+          owner.assertActive();
           publishPolicy(requested); // Exact thread snapshot reaches ACK sequence3.
-          await waitForPolicy(requested);
-          await vi.waitFor(() =>
-            expect(
-              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
-            ).toBeUndefined(),
+          await owner.own("canonical", () => waitForPolicy(requested));
+          await owner.own("overlay", () =>
+            vi.waitFor(() =>
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+              ).toBeUndefined(),
+            ),
           );
           // The other channel may still deliver its older policy. It must
           // not replace either the canonical value or its exact authority.
+          owner.assertActive();
           rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
             kind: "thread-upserted",
             sequence: 2,
@@ -2555,7 +2853,7 @@ describe("ChatView full app (standalone)", () => {
               subagentLimits: { codex: 9, claude: 8 },
             },
           });
-          await waitForLayout();
+          await owner.own("layout", () => waitForLayout());
           expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual(
             requested,
           );
@@ -2563,10 +2861,7 @@ describe("ChatView full app (standalone)", () => {
             useStore.getState().environmentStateById[LOCAL_ENVIRONMENT_ID]
               ?.subagentPolicySequenceByThreadId?.[THREAD_ID],
           ).toBe(3);
-        } finally {
-          resolveAck({ sequence: 3 });
-          await mounted.cleanup();
-        }
+        });
       },
     );
     it("does not retire an ACK bridge through another chat or an omission-only metadata event", async () => {
@@ -3355,10 +3650,20 @@ describe("ChatView full app (standalone)", () => {
     }
   });
 
-  it("captures the editor's group and promotes its first send without stealing a newer editor", async () => {
+  it("captures the editor's group and promotes its first send without stealing a newer editor", async (context) => {
     let release!: (value: { sequence: number }) => void;
     const pending = new Promise<{ sequence: number }>((resolve) => {
       release = resolve;
+    });
+    let startReleased = false;
+    const releaseStart = () => {
+      if (startReleased) return;
+      startReleased = true;
+      release({ sequence: 2 });
+    };
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "editor-promotion",
+      beforeDrain: releaseStart,
     });
     const firstSavedId = ThreadId.make("standalone-saved-one");
     const secondSavedId = ThreadId.make("standalone-saved-two");
@@ -3366,25 +3671,27 @@ describe("ChatView full app (standalone)", () => {
       addThreadToSnapshot(createProjectlessSnapshot(), firstSavedId),
       secondSavedId,
     );
-    const mounted = await mountChatView({
-      viewport: { ...DEFAULT_VIEWPORT, width: 1800, height: 1000 },
-      snapshot: {
-        ...withSaved,
-        threads: withSaved.threads.map((thread) => ({
-          ...thread,
-          projectId: null,
-          branch: null,
-          worktreePath: null,
-        })),
-      },
-      initialPath: "/",
-      configureFixture: configureStandaloneShortcut,
-      resolveRpc: (body) =>
-        body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand && body.type === "thread.turn.start"
-          ? pending
-          : undefined,
-    });
-    try {
+    await owner.run(async () => {
+      const mounted = await owner.mount({
+        viewport: { ...DEFAULT_VIEWPORT, width: 1800, height: 1000 },
+        snapshot: {
+          ...withSaved,
+          threads: withSaved.threads.map((thread) => ({
+            ...thread,
+            projectId: null,
+            branch: null,
+            worktreePath: null,
+          })),
+        },
+        initialPath: "/",
+        configureFixture: configureStandaloneShortcut,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+          body.type === "thread.turn.start"
+            ? pending
+            : undefined,
+      });
+      owner.assertActive();
       const desk = useDeskStore.getState();
       desk.dispatch({
         type: "open",
@@ -3398,16 +3705,18 @@ describe("ChatView full app (standalone)", () => {
       desk.dispatch({ type: "split", tabKey: secondKey, targetGroupId: "g1", edge: "right" });
       desk.dispatch({ type: "sidebarMode", mode: "desk" });
       const capturedGroup = useDeskStore.getState().desk.activeGroupId;
-      await waitForLayout();
+      await owner.own("layout", () => waitForLayout());
       // The Desk heading uses the same pending-editor flow and captures the
       // exact active group, not the saved chat visible in another pane.
       const deskNewChat = page.getByRole("button", {
         name: "New chat in active tab group",
         exact: true,
       });
-      await expect.element(deskNewChat).toBeVisible();
-      await deskNewChat.click();
-      await vi.waitFor(() => expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE));
+      await owner.own("editor", () => expect.element(deskNewChat).toBeVisible());
+      await owner.own("editor", () => deskNewChat.click());
+      await owner.own("route", () =>
+        vi.waitFor(() => expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE)),
+      );
       const first = draftIdFromPath(mounted.router.state.location.pathname);
       const firstThreadId = draftThreadIdFor(first);
       expect(useDeskStore.getState().draftEditors[first]?.groupId).toBe(capturedGroup);
@@ -3415,43 +3724,61 @@ describe("ChatView full app (standalone)", () => {
       expect(
         wsRequests.some((body) => body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
       ).toBe(false);
+      owner.assertActive();
       useComposerDraftStore.getState().setPrompt(first, "Send the first chat");
-      await waitForStandaloneComposerText("Send the first chat");
-      const firstPane = await waitForElement(
-        () => document.querySelector<HTMLElement>('.desk-pane[data-active="true"]'),
-        "First Desk pane missing",
+      await owner.own("prompt", () => waitForStandaloneComposerText("Send the first chat"));
+      const firstPane = await owner.own("send-target", () =>
+        waitForElement(
+          () => document.querySelector<HTMLElement>('.desk-pane[data-active="true"]'),
+          "First Desk pane missing",
+        ),
       );
+      owner.assertActive();
       firstPane.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')!.click();
-      await vi.waitFor(() =>
-        expect(
-          wsRequests.some(
-            (body) =>
-              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
-              body.type === "thread.turn.start",
-          ),
-        ).toBe(true),
+      owner.mark("send");
+      await owner.own("request", () =>
+        vi.waitFor(() =>
+          expect(
+            wsRequests.some(
+              (body) =>
+                body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                body.type === "thread.turn.start",
+            ),
+          ).toBe(true),
+        ),
       );
       const originalKey = deskTabKey({ kind: "server", threadRef: threadRefFor(firstSavedId) });
-      const originalTab = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll<HTMLButtonElement>("[data-desk-tab-key]")).find(
-            (tab) => tab.dataset.deskTabKey === originalKey,
-          ) ?? null,
-        "Saved standalone tab missing",
+      const originalTab = await owner.own("tab", () =>
+        waitForElement(
+          () =>
+            Array.from(document.querySelectorAll<HTMLButtonElement>("[data-desk-tab-key]")).find(
+              (tab) => tab.dataset.deskTabKey === originalKey,
+            ) ?? null,
+          "Saved standalone tab missing",
+        ),
       );
-      await userEvent.click(originalTab);
-      await vi.waitFor(() =>
-        expect(mounted.router.state.location.pathname).toBe(serverThreadPath(firstSavedId)),
+      await owner.own("tab", () => userEvent.click(originalTab));
+      await owner.own("route", () =>
+        vi.waitFor(() =>
+          expect(mounted.router.state.location.pathname).toBe(serverThreadPath(firstSavedId)),
+        ),
       );
       // The global shortcut observes the same exact first-send gate.
+      owner.assertActive();
       newChatShortcut();
-      await vi.waitFor(() => expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE));
+      owner.mark("draft");
+      await owner.own("route", () =>
+        vi.waitFor(() => expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE)),
+      );
       const newer = draftIdFromPath(mounted.router.state.location.pathname);
       expect(newer).not.toBe(first);
       expect(useDeskStore.getState().draftEditors[newer]?.groupId).toBe("g1");
+      owner.assertActive();
       useComposerDraftStore.getState().setPrompt(newer, "Newer composer survives");
-      await waitForStandaloneComposerText("Newer composer survives");
-      release({ sequence: 2 });
+      await owner.own("prompt", () => waitForStandaloneComposerText("Newer composer survives"));
+      releaseStart();
+      owner.mark("ack");
+      owner.assertActive();
       chatViewFixture.fixture.snapshot = addThreadToSnapshot(
         chatViewFixture.fixture.snapshot,
         firstThreadId,
@@ -3464,17 +3791,19 @@ describe("ChatView full app (standalone)", () => {
             : thread,
         ),
       };
-      await startPromotedServerThreadViaDomainEvent(firstThreadId);
-      await vi.waitFor(() => {
-        expect(useDeskStore.getState().desk.groups[capturedGroup]?.tabs).toContain(
-          deskTabKey({ kind: "server", threadRef: threadRefFor(firstThreadId) }),
-        );
-        expect(useDeskStore.getState().desk.groups[capturedGroup]?.activeTabKey).toBe(secondKey);
-        expect(useDeskStore.getState().desk.activeGroupId).toBe("g1");
-        expect(useDeskStore.getState().activeDraftId).toBe(newer);
-        expect(mounted.router.state.location.pathname).toBe(`/draft/${newer}`);
-      });
-      await waitForStandaloneComposerText("Newer composer survives");
+      await owner.own("snapshot", () => startPromotedServerThreadViaDomainEvent(firstThreadId));
+      await owner.own("receipt", () =>
+        vi.waitFor(() => {
+          expect(useDeskStore.getState().desk.groups[capturedGroup]?.tabs).toContain(
+            deskTabKey({ kind: "server", threadRef: threadRefFor(firstThreadId) }),
+          );
+          expect(useDeskStore.getState().desk.groups[capturedGroup]?.activeTabKey).toBe(secondKey);
+          expect(useDeskStore.getState().desk.activeGroupId).toBe("g1");
+          expect(useDeskStore.getState().activeDraftId).toBe(newer);
+          expect(mounted.router.state.location.pathname).toBe(`/draft/${newer}`);
+        }),
+      );
+      await owner.own("prompt", () => waitForStandaloneComposerText("Newer composer survives"));
       expect(useDeskStore.getState().desk.sidebarMode).toBe("desk");
       expect(
         wsRequests.filter(
@@ -3483,10 +3812,7 @@ describe("ChatView full app (standalone)", () => {
             body.type === "thread.turn.start",
         ),
       ).toHaveLength(1);
-    } finally {
-      release({ sequence: 2 });
-      await mounted.cleanup();
-    }
+    });
   });
 
   it("dispatches a persisted standalone follow-up with no project metadata", async () => {

@@ -1,5 +1,7 @@
 # Test suite policy
 
+Last updated: 2026-10-24 09:57:52 JST (UTC+0900)
+
 Required CI protects features: correct actions and values, retained user input,
 authorization, account/chat ownership, persistence, cancellation, history and
 exactly-once delivery. An assertion should explain a user-visible failure or a
@@ -38,10 +40,17 @@ Its explicitly requested exact-input local success reuse follows the separate
 receipt reads and writes. Canonical CI/release still executes uncached.
 `test:browser:local` discovers the complete browser domain with
 disjoint native groups and prepares only its real copied MCP bridge artifacts.
-Local Node tests default to two independent workspaces with at most two Vitest
-workers each; `--test-concurrency=1|2|3` changes only that workspace admission.
-Server file execution, fork isolation, native browser ordering and build limits
-remain unchanged. Typechecking has a separate bounded local option.
+Default local Node tests execute the exact unchanged host-specific canonical
+CI plan freshly, including its hardware-scaled native defaults. Do not guess
+an implicit Turbo limit or replace that complete graph with a server-only
+receipt. Explicit `--test-concurrency=1|2|3` selects the separate bounded local
+mode with at most two Vitest workers per workspace and eligible per-workspace
+reuse; that deliberate override is not CI scheduling parity. Type/browser
+exact-input reuse remains available. Monitor host headroom: niceness and a
+per-process heap ceiling do not bound aggregate memory. Server file execution,
+fork isolation, native browser ordering and build limits remain unchanged.
+Typechecking has a separate bounded local option. See the
+[default scheduling decision](decisions/ci-matched-local-node-scheduling.md).
 Typechecking defaults to three workspace compilers, as does the canonical CI
 command; its per-compiler heap ceiling is not an aggregate memory guarantee.
 See [local verification](test-performance.md) for commands, input-cache bounds
@@ -101,6 +110,43 @@ the shared controller's Node matrix; full-app numeric-save/reset journeys and
 native hook owner-retirement checks qualify the actual wiring.
 
 ## Assertions and fixtures
+
+Settings fixtures must implement each invoked settings-write contract with a
+typed fake, including client preferences when a provider reset or deletion also
+updates server settings. Seed synthetic data for both the affected instance and
+an unrelated instance; require the exact client patch, fulfilled original write
+result and resulting settings to remove only the target's preferences/favorites.
+An optimistic UI update or a caught missing-method error is not persistence
+proof. Preserve deliberate rejected-write tests as explicit failure cases rather
+than filling unrelated API methods or suppressing their diagnostics.
+
+Native HTTP fixtures register their public test-signal retirement and owned
+completion cleanup before the first asynchronous acquisition. Timeout must
+fence late continuations, cancel only admitted requests and response bodies,
+and join their actual native close before restoring global HTTP/environment
+state or releasing fixture ownership. An async body's `finally` alone does
+not own hard-timeout cleanup. Retain original assertions, inputs, request/test
+budgets and worker policy; cleanup is not another attempt or allowance.
+Scoped Effect child fixtures keep their existing adapter finalization owner.
+Failure-only diagnostics may observe a bounded set of fixed phases/counts,
+never request contents, environment, paths or raw errors. A completed phase
+does not prove an unobserved historical timeout's cause.
+
+Every Vitest 5 workspace selects its local or root configuration explicitly;
+parent-directory lookup is not configuration inheritance. Preserve the shared
+mock-history policy and native fixture assertions when selecting that config.
+
+Browser fixtures likewise own pending renders and original native operations
+before their first await. Public test-signal retirement closes admission
+synchronously; shared `afterEach` must join the same complete cleanup before
+resetting DOM, mocks, viewport or styles, because `onTestFinished` runs later.
+Join admitted operations before removing their exact targets; a late render
+must still be unmounted without publishing it into the next case's mount slot.
+Keep cleanup failures visible and replacement ownership fenced until actual
+settlement. Failure-only native phase receipts remain bounded, passive and
+content-free. A command finding an actionable target is not delivery or handler
+completion evidence, and a cleanup-time screenshot cannot explain an earlier
+native timeout. Preserve original input, assertions, workers and deadlines.
 
 Load inert Node fixture modules during collection, after any required synthetic
 globals and mock bindings are initialized. Framework transformation and module

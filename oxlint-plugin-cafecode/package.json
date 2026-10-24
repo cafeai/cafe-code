@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --config ../vitest.config.ts"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",

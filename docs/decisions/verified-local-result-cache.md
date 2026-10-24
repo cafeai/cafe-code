@@ -2,14 +2,18 @@
 
 Decision status: Accepted within the explicitly requested local cache scope
 Created: 2026-10-22 22:55:23 JST (UTC+0900)
-Last updated: 2026-10-23 21:58:14 JST (UTC+0900)
+Last updated: 2026-10-24 03:09:06 JST (UTC+0900)
 Decision authority: the human explicitly requested caching unchanged local
 verification work before the approved dev push.
 Implementation status: implemented with qualification requirements below;
 decision acceptance does not attest any particular suite run or timing target.
 Supersedes in part: [complete local verification](complete-local-verification.md),
 only its prohibition on local test/typecheck result reuse.
-Superseded by: None.
+Superseded in part by:
+[CI-matched default local Node scheduling](ci-matched-local-node-scheduling.md),
+only for the default Node admission/per-workspace reuse path. The decision and
+historical rationale below remain applicable to explicit bounded local mode;
+type/browser reuse and all receipt trust/ownership requirements are unchanged.
 
 ## Context and alternatives
 

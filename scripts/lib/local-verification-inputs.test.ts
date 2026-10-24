@@ -15,7 +15,7 @@ import {
 } from "node:fs/promises";
 // Host-native temporary paths are the tested input boundary.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import * as Schema from "effect/Schema";
@@ -59,6 +59,83 @@ const nullDevice = vi.hoisted(() => ({
   calls: 0,
 }));
 const selectedTool = vi.hoisted(() => ({ path: "", opens: 0, failNextOpen: false }));
+const typeScriptOutput = vi.hoisted(() => ({
+  configPath: "",
+  configRelative: "",
+  configSubstitutions: 0,
+  importer: "",
+  modulePath: "",
+  moduleRelative: "",
+  moduleSubstitutions: 0,
+}));
+vi.mock("typescript", async (importOriginal) => {
+  const native = await importOriginal<typeof ts & { readonly default?: typeof ts }>();
+  const original = native.default ?? native;
+  const methods = {
+    parseJsonConfigFileContent(...args: Parameters<typeof original.parseJsonConfigFileContent>) {
+      const parsed = original.parseJsonConfigFileContent(...args);
+      if (
+        typeScriptOutput.configPath !== "" &&
+        args[4] === typeScriptOutput.configPath &&
+        typeof parsed.options.configFilePath === "string" &&
+        isAbsolute(parsed.options.configFilePath) &&
+        resolve(parsed.options.configFilePath) === typeScriptOutput.configPath
+      ) {
+        typeScriptOutput.configSubstitutions += 1;
+        return {
+          ...parsed,
+          options: { ...parsed.options, configFilePath: typeScriptOutput.configRelative },
+        };
+      }
+      return parsed;
+    },
+    resolveModuleName(...args: Parameters<typeof original.resolveModuleName>) {
+      const result = original.resolveModuleName(...args);
+      const module = result.resolvedModule;
+      if (
+        typeScriptOutput.modulePath !== "" &&
+        args[1] === typeScriptOutput.importer &&
+        module !== undefined &&
+        isAbsolute(module.resolvedFileName) &&
+        resolve(module.resolvedFileName) === typeScriptOutput.modulePath
+      ) {
+        typeScriptOutput.moduleSubstitutions += 1;
+        return {
+          ...result,
+          resolvedModule: { ...module, resolvedFileName: typeScriptOutput.moduleRelative },
+        };
+      }
+      return result;
+    },
+  };
+  // Preserve the real public API/default except these two exact controlled
+  // return values. Some TS exports are nonconfigurable and cannot be spied on.
+  return { ...native, ...methods, default: { ...original, ...methods } };
+});
+type NativeInputPhase =
+  | "node-open-entered"
+  | "node-open-settled"
+  | "node-read-entered"
+  | "node-read-progress"
+  | "node-read-ended"
+  | "node-closed"
+  | "tool-open-entered"
+  | "tool-open-settled"
+  | "tool-read-entered"
+  | "tool-read-progress"
+  | "tool-read-ended"
+  | "tool-closed"
+  | "xcrun-entered"
+  | "xcrun-result"
+  | "xcrun-rejected"
+  | "xcrun-closed";
+const nativeInput = vi.hoisted(() => ({
+  root: "",
+  ordinal: 0,
+  record: undefined as
+    | ((phase: NativeInputPhase, ordinal?: number, bytes?: number, reads?: number) => void)
+    | undefined,
+}));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const native = await importOriginal<typeof import("node:fs/promises")>();
   return {
@@ -74,7 +151,83 @@ vi.mock("node:fs/promises", async (importOriginal) => {
           return Promise.reject(Object.freeze({ code: "EIO" }));
         }
       }
-      return native.open(...args);
+      const record = nativeInput.record;
+      const path = args[0];
+      const bucket =
+        record && typeof path === "string" && nativeInput.root !== ""
+          ? path === process.execPath
+            ? "node"
+            : path !== "/dev/null" &&
+                path !== nativeInput.root &&
+                !path.startsWith(`${nativeInput.root}${process.platform === "win32" ? "\\" : "/"}`)
+              ? "tool"
+              : undefined
+          : undefined;
+      const ordinal = bucket ? Math.min(1_000_000, ++nativeInput.ordinal) : 0;
+      if (bucket) record?.(`${bucket}-open-entered`, ordinal);
+      const pending = native.open(...args);
+      if (bucket && record) {
+        // Observe the real handle without substituting its object, arguments,
+        // receiver, returned promise, byte buffers or errors. Outside this
+        // private root the producer reads only its admitted native tools.
+        void pending.then(
+          (file) => {
+            try {
+              record(`${bucket}-open-settled`, ordinal);
+              let bytes = 0;
+              let reads = 0;
+              let nextProgress = 16 * 1024 ** 2;
+              const originalRead = file.read;
+              const originalClose = file.close;
+              const observedRead = new Proxy(originalRead, {
+                apply(target, receiver, argumentsList) {
+                  if (reads === 0) record(`${bucket}-read-entered`, ordinal);
+                  const result = Reflect.apply(target, receiver, argumentsList) as Promise<{
+                    bytesRead: number;
+                  }>;
+                  void result.then(
+                    ({ bytesRead }) => {
+                      reads = Math.min(1_000_000, reads + 1);
+                      bytes = Math.min(16 * 1024 ** 3, bytes + bytesRead);
+                      if (bytesRead === 0) record(`${bucket}-read-ended`, ordinal, bytes, reads);
+                      else if (bytes >= nextProgress) {
+                        record(`${bucket}-read-progress`, ordinal, bytes, reads);
+                        nextProgress = bytes + 16 * 1024 ** 2;
+                      }
+                    },
+                    () => undefined,
+                  );
+                  return result;
+                },
+              });
+              const observedClose = new Proxy(originalClose, {
+                apply(target, receiver, argumentsList) {
+                  const result = Reflect.apply(target, receiver, argumentsList) as Promise<void>;
+                  void result.then(
+                    () => {
+                      try {
+                        record(`${bucket}-closed`, ordinal, bytes, reads);
+                        if (file.read === observedRead) file.read = originalRead;
+                        if (file.close === observedClose) file.close = originalClose;
+                      } catch {
+                        /* Observation/restoration cannot reject the native close. */
+                      }
+                    },
+                    () => undefined,
+                  );
+                  return result;
+                },
+              });
+              file.read = observedRead;
+              file.close = observedClose;
+            } catch {
+              /* An unavailable observation never changes native open/result. */
+            }
+          },
+          () => undefined,
+        );
+      }
+      return pending;
     },
     // Only synthetic negatives substitute the fixed device's observation.
     // All real fixture/source/tool IO delegates to the original native API;
@@ -117,7 +270,120 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 
+vi.mock("node:child_process", async (importOriginal) => {
+  const native = await importOriginal<typeof import("node:child_process")>();
+  const { promisify } = await import("node:util");
+  const execute = promisify(native.execFile);
+  const observedExecute = function (this: unknown, ...args: unknown[]) {
+    const record =
+      args[0] === "/usr/bin/xcrun" &&
+      Array.isArray(args[1]) &&
+      args[1].length === 2 &&
+      args[1][0] === "--find" &&
+      args[1][1] === "git"
+        ? nativeInput.record
+        : undefined;
+    record?.("xcrun-entered");
+    // Delegate the actual custom promisifier and return its original promise:
+    // the production owner's exact .child, options and close join are intact.
+    const pending = Reflect.apply(execute, this, args) as ReturnType<typeof execute> & {
+      child: ReturnType<typeof native.spawn>;
+    };
+    if (record) {
+      pending.child.once("close", () => record("xcrun-closed"));
+      void pending.then(
+        () => record("xcrun-result"),
+        () => record("xcrun-rejected"),
+      );
+    }
+    return pending;
+  };
+  return {
+    ...native,
+    // The native function's custom-promisifier property can be nonconfigurable;
+    // do not mutate it or violate a Proxy get invariant while observing it.
+    execFile: Object.assign(
+      function (this: unknown, ...args: Parameters<typeof native.execFile>) {
+        return Reflect.apply(native.execFile, this, args) as ReturnType<typeof native.execFile>;
+      },
+      { [promisify.custom]: observedExecute },
+    ),
+  };
+});
+
+function observeNativeToolPhases(context: TestContext) {
+  const started = performance.now();
+  let retired = false;
+  let omitted = 0;
+  const phases: {
+    phase: NativeInputPhase;
+    elapsedMs: number;
+    ordinal: number;
+    bytes: number;
+    reads: number;
+  }[] = [];
+  const bounded = (value: number, maximum: number) =>
+    Number.isFinite(value) ? Math.max(0, Math.min(maximum, Math.floor(value))) : 0;
+  const record = (phase: NativeInputPhase, ordinal = 0, bytes = 0, reads = 0) => {
+    try {
+      if (retired) return;
+      if (phases.length === 16) {
+        phases.shift();
+        omitted = Math.min(1_000_000, omitted + 1);
+      }
+      phases.push({
+        phase,
+        elapsedMs: bounded(performance.now() - started, 60_000),
+        ordinal: bounded(ordinal, 1_000_000),
+        bytes: bounded(bytes, 16 * 1024 ** 3),
+        reads: bounded(reads, 1_000_000),
+      });
+    } catch {
+      /* Never give this diagnostic callback authority over native operations. */
+    }
+  };
+  nativeInput.root = "";
+  nativeInput.ordinal = 0;
+  nativeInput.record = record;
+  context.onTestFailed(() => {
+    try {
+      process.stderr.write(`Synthetic native-tool phases: ${encode({ phases, omitted })}\n`);
+    } catch {
+      /* Observations cannot replace the original native/test failure. */
+    }
+  });
+  return {
+    bindRoot(root: string) {
+      if (!retired && nativeInput.record === record) nativeInput.root = root;
+    },
+    retire() {
+      retired = true;
+      if (nativeInput.record === record) {
+        nativeInput.record = undefined;
+        nativeInput.root = "";
+      }
+    },
+  };
+}
+
+function relativeTypeScriptResult(path: string): string {
+  let candidate = relative(process.cwd(), path);
+  if (process.platform === "win32" && isAbsolute(candidate)) {
+    // A temp root can be on another local drive. Use that drive's native
+    // relative-path semantics without changing cwd, environment or volumes.
+    // UNC/other namespaces cannot supply this exact relative-result control.
+    const drive = parse(path).root.slice(0, 2);
+    if (!/^[a-zA-Z]:$/u.test(drive))
+      throw new Error("Synthetic TypeScript result requires a local drive");
+    candidate = drive + relative(resolve(drive), path);
+  }
+  return candidate;
+}
+
 async function fixture(context: TestContext, afterClosed?: () => void) {
+  // Install before acquisition; retire only after this owner's exact pending
+  // fingerprint/child/descriptor work drains, before the root can be removed.
+  const nativeObservation = observeNativeToolPhases(context);
   let retired = false;
   let ownedRoot: string | undefined;
   let acquisition: Promise<string> | undefined;
@@ -153,6 +419,7 @@ async function fixture(context: TestContext, afterClosed?: () => void) {
       // The null-device observation mock may retire only after the producer's
       // actual IO/abort finalizers have closed, not merely after test timeout.
       try {
+        nativeObservation.retire();
         afterClosed?.();
       } finally {
         if (ownedRoot) await rm(ownedRoot, { recursive: true, force: true });
@@ -170,6 +437,7 @@ async function fixture(context: TestContext, afterClosed?: () => void) {
   });
   const root = await acquisition;
   assertActive();
+  nativeObservation.bindRoot(root);
   const put = (name: string, value: string) =>
     own(async () => {
       const path = join(root, name);
@@ -989,6 +1257,66 @@ describe("local verification input evidence", () => {
       }),
     );
     expect(await f.fingerprint(task, context.signal)).toBeUndefined();
+  });
+
+  it("refuses an unexpected relative TypeScript config path even when native resolve would admit it", async (context) => {
+    const f = await fixture(context, () => {
+      typeScriptOutput.configPath = "";
+      typeScriptOutput.configRelative = "";
+      typeScriptOutput.configSubstitutions = 0;
+    });
+    const configPath = await f.put(
+      "apps/server/tsconfig.json",
+      encode({ extends: "../../tsconfig.base.json", files: ["src/entry.test.ts"] }),
+    );
+    const relativePath = relativeTypeScriptResult(configPath);
+    expect(isAbsolute(relativePath)).toBe(false);
+    expect(resolve(relativePath)).toBe(configPath);
+    typeScriptOutput.configPath = configPath;
+    typeScriptOutput.configRelative = relativePath;
+    const task: LocalVerificationTask = {
+      ...f.task,
+      cwd: join(f.root, "apps/server"),
+      scope: {
+        kind: "typecheck",
+        workspace: "apps/server",
+        compiler: join(f.root, "node_modules/typescript/lib/_tsc.js"),
+      },
+    };
+    expect(await f.fingerprint(task, context.signal)).toBeUndefined();
+    expect(typeScriptOutput.configSubstitutions).toBe(1);
+    expect(f.refusals.at(-1)).toMatchObject({
+      reason: "imports",
+      detail: { kind: "configuration" },
+    });
+    expect(f.store.authenticateEnvironment).not.toHaveBeenCalled();
+    expect(f.store.read).not.toHaveBeenCalled();
+    expect(f.store.publish).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unexpected relative TypeScript module result even when native resolve would admit it", async (context) => {
+    const f = await fixture(context, () => {
+      typeScriptOutput.importer = "";
+      typeScriptOutput.modulePath = "";
+      typeScriptOutput.moduleRelative = "";
+      typeScriptOutput.moduleSubstitutions = 0;
+    });
+    const modulePath = join(f.root, "apps/server/src/value.ts");
+    const relativePath = relativeTypeScriptResult(modulePath);
+    expect(isAbsolute(relativePath)).toBe(false);
+    expect(resolve(relativePath)).toBe(modulePath);
+    typeScriptOutput.importer = join(f.root, "apps/server/src/entry.test.ts");
+    typeScriptOutput.modulePath = modulePath;
+    typeScriptOutput.moduleRelative = relativePath;
+    expect(await f.snapshot()).toBeUndefined();
+    expect(typeScriptOutput.moduleSubstitutions).toBe(1);
+    expect(f.refusals.at(-1)).toMatchObject({
+      reason: "imports",
+      detail: { file: "apps/server/src/entry.test.ts", kind: "outside-import" },
+    });
+    expect(f.store.authenticateEnvironment).not.toHaveBeenCalled();
+    expect(f.store.read).not.toHaveBeenCalled();
+    expect(f.store.publish).not.toHaveBeenCalled();
   });
 
   it("refuses a broad workspace type program that reaches its omitted output descendants", async (context) => {

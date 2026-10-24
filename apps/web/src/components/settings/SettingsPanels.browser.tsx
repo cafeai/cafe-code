@@ -28,6 +28,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import type { ReactNode } from "react";
 import { getUiLocale, resolveUiLocale, setUiLocale } from "@cafecode/shared/i18n";
+import { applyClientSettingsPatch } from "@cafecode/shared/clientSettings";
 import { useEffect } from "react";
 import { useSettings } from "../../hooks/useSettings";
 import { useUiLocale } from "../../i18n";
@@ -736,7 +737,22 @@ function installFileSettingsNativeApi(config: ServerConfig) {
   return { getConfig, openSystemPromptFile, openPath, openInEditor, confirm };
 }
 
-function installProviderAccountSettings(config: ServerConfig) {
+function createClientSettingsUpdater(initial: ServerConfig["clientSettings"]) {
+  let currentPrivateClientSettings = initial;
+  // Account reset/deletion replaces these client-owned preference fields too.
+  // Return the complete private document using the same field-level contract.
+  return vi.fn<LocalApi["server"]["updateClientSettings"]>().mockImplementation(async (patch) => {
+    currentPrivateClientSettings = applyClientSettingsPatch(currentPrivateClientSettings, patch);
+    return currentPrivateClientSettings;
+  });
+}
+
+function installProviderAccountSettings(
+  config: ServerConfig,
+  updateClientSettings: LocalApi["server"]["updateClientSettings"] = createClientSettingsUpdater(
+    config.clientSettings,
+  ),
+) {
   const updateSettings = vi
     .fn<LocalApi["server"]["updateSettings"]>()
     .mockResolvedValue(config.settings);
@@ -745,7 +761,7 @@ function installProviderAccountSettings(config: ServerConfig) {
       getClientSettings: vi.fn().mockResolvedValue(null),
       setClientSettings: vi.fn().mockResolvedValue(undefined),
     },
-    server: { updateSettings },
+    server: { updateSettings, updateClientSettings },
   } as unknown as LocalApi;
   setServerConfigSnapshot(config);
   return updateSettings;
@@ -3181,7 +3197,15 @@ describe("settings panels", () => {
 
   it("shows the default Axiom account and preserves other accounts through disabling and reset", async () => {
     const base = createBaseServerConfig();
+    const targetId = ProviderInstanceId.make("axiom");
     const customId = ProviderInstanceId.make("axiom_custom");
+    const targetModelPreferences = {
+      hiddenModels: ["target-hidden"],
+      modelOrder: ["target-first"],
+    };
+    const otherModelPreferences = { hiddenModels: ["other-hidden"], modelOrder: ["other-first"] };
+    const targetFavorite = { provider: targetId, model: "target-favorite" };
+    const otherFavorite = { provider: customId, model: "other-favorite" };
     const custom = {
       driver: ProviderDriverKind.make("axiom"),
       enabled: false,
@@ -3193,8 +3217,17 @@ describe("settings panels", () => {
         ...base.settings,
         providerInstances: { ...base.settings.providerInstances, [customId]: custom },
       },
+      clientSettings: {
+        ...base.clientSettings,
+        providerModelPreferences: {
+          [targetId]: targetModelPreferences,
+          [customId]: otherModelPreferences,
+        },
+        favorites: [targetFavorite, otherFavorite],
+      },
     };
-    const updateSettings = installProviderAccountSettings(config);
+    const updateClientSettings = createClientSettingsUpdater(config.clientSettings);
+    const updateSettings = installProviderAccountSettings(config, updateClientSettings);
     mounted = await render(
       <AppAtomRegistryProvider>
         <ProviderSettingsPanel />
@@ -3214,6 +3247,7 @@ describe("settings panels", () => {
     await expect
       .element(page.getByRole("switch", { name: "Enable Axiom", exact: true }))
       .not.toBeChecked();
+    expect(updateClientSettings).not.toHaveBeenCalled();
     await page
       .getByRole("button", { name: "Reset Axiom provider settings to default", exact: true })
       .click();
@@ -3224,13 +3258,44 @@ describe("settings panels", () => {
     expect(updateSettings.mock.calls[1]?.[0].providerInstances).toEqual({ [customId]: custom });
     expect(updateSettings.mock.calls.every(([patch]) => !("providers" in patch))).toBe(true);
     expect(getServerConfig()?.settings.providerInstances[customId]).toEqual(custom);
+    const expectedClientPatch = {
+      providerModelPreferences: { [customId]: otherModelPreferences },
+      favorites: [otherFavorite],
+    };
+    const expectedFullClientSettings = { ...config.clientSettings, ...expectedClientPatch };
+    expect(updateClientSettings).toHaveBeenCalledExactlyOnceWith(expectedClientPatch);
+    await expect(updateClientSettings.mock.results[0]!.value).resolves.toEqual(
+      expectedFullClientSettings,
+    );
+    expect(getServerConfig()?.clientSettings).toEqual(expectedFullClientSettings);
   });
 
   it.each(["axiom_2", "axiom_personal"])(
     "adds and manages an Axiom account %s without legacy provider defaults",
     async (instanceId) => {
-      const config = createBaseServerConfig();
+      const base = createBaseServerConfig();
+      const targetId = ProviderInstanceId.make(instanceId);
+      const otherId = ProviderInstanceId.make("codex");
+      const targetModelPreferences = {
+        hiddenModels: ["target-hidden"],
+        modelOrder: ["target-first"],
+      };
+      const otherModelPreferences = { hiddenModels: ["other-hidden"], modelOrder: ["other-first"] };
+      const targetFavorite = { provider: targetId, model: "target-favorite" };
+      const otherFavorite = { provider: otherId, model: "other-favorite" };
+      const config = {
+        ...base,
+        clientSettings: {
+          ...base.clientSettings,
+          providerModelPreferences: {
+            [targetId]: targetModelPreferences,
+            [otherId]: otherModelPreferences,
+          },
+          favorites: [targetFavorite, otherFavorite],
+        },
+      };
       const codexInstance = { driver: ProviderDriverKind.make("codex"), enabled: true };
+      const updateClientSettings = createClientSettingsUpdater(config.clientSettings);
       const updateSettings = vi.fn<LocalApi["server"]["updateSettings"]>().mockResolvedValue({
         ...config.settings,
         providerInstances: config.settings.providerInstances,
@@ -3240,7 +3305,7 @@ describe("settings panels", () => {
           getClientSettings: vi.fn().mockResolvedValue(null),
           setClientSettings: vi.fn().mockResolvedValue(undefined),
         },
-        server: { updateSettings },
+        server: { updateSettings, updateClientSettings },
       } as unknown as LocalApi;
       setServerConfigSnapshot({
         ...config,
@@ -3303,6 +3368,7 @@ describe("settings panels", () => {
           [instanceId]: { ...axiomInstance, enabled: false },
         },
       });
+      expect(updateClientSettings).not.toHaveBeenCalled();
       await page
         .getByRole("button", { name: `Delete provider instance ${instanceId}`, exact: true })
         .click();
@@ -3316,6 +3382,16 @@ describe("settings panels", () => {
       });
       expect(updateSettings.mock.calls.every(([patch]) => !("providers" in patch))).toBe(true);
       expect(getServerConfig()?.settings.providers).toEqual(config.settings.providers);
+      const expectedClientPatch = {
+        providerModelPreferences: { [otherId]: otherModelPreferences },
+        favorites: [otherFavorite],
+      };
+      const expectedFullClientSettings = { ...config.clientSettings, ...expectedClientPatch };
+      expect(updateClientSettings).toHaveBeenCalledExactlyOnceWith(expectedClientPatch);
+      await expect(updateClientSettings.mock.results[0]!.value).resolves.toEqual(
+        expectedFullClientSettings,
+      );
+      expect(getServerConfig()?.clientSettings).toEqual(expectedFullClientSettings);
     },
   );
 

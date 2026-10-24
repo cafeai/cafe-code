@@ -1,6 +1,6 @@
 # Browser test input isolation
 
-Last updated: 2026-10-23 21:07:01 JST (UTC+0900)
+Last updated: 2026-10-24 08:17:53 JST (UTC+0900)
 
 Current suite design is governed by [Test suite policy](test-suite-policy.md).
 The October 16 overhaul retires the exact fluid inventory, sample commit-chart
@@ -433,6 +433,36 @@ controls. Normal completion,
 failure and hard timeout share that idempotent cleanup. Unscoped mount consumers
 retain their established behavior.
 
+Retained-account and manual-compaction callers use this same scoped ownership
+contract, including a mount that fails before returning its cleanup handle.
+Keep their original synchronous DOM Send activation where the journey uses it;
+an activation phase is not provider acceptance or dispatch completion. Their
+failure-only ledgers retain at most sixteen fixed finite phase/count/elapsed
+records and use the browser tester's console channel, never a Node-only stream.
+Preserve the primary body error if exact cleanup also rejects; shared retirement
+still observes that cleanup result under its existing settlement policy.
+
+Other full-app journeys share the test-only caller owner instead of copying
+that retirement protocol. Browser callers inject the existing scoped mount;
+inert Node controls inject a fake mount and never start the application or a
+provider. Each owner admits one exact mount and injects its own lifecycle, so a
+second mount or replacement cleanup handle cannot acquire an old owner's grant.
+Release the exact deliberately held acknowledgement before draining work that
+can depend on it. Restore an image-picker override or API spy only after the
+admitted work and exact mount disposal settle. Cleanup retains failures rather
+than treating a rejected disposal as success, while a primary body failure
+keeps its original identity. Synthetic lifetime controls qualify this ordering,
+not native browser event delivery or a historical timeout's cause.
+
+The late-fork journey owns the original dispatch completion separately from
+the native confirmation click: neither click completion nor releasing a held
+fake response proves that the wire call succeeded. Release that exact response
+before joining the dispatch, retain the success receipt only after its original
+promise resolves, and restore the acquired API spy only after exact unmount.
+Rail-docking journeys use the same owner without a held-response gate. Keep all
+original hover/click, docking, navigation and acknowledgement assertions;
+lifetime ownership does not grant input replay or a longer test allowance.
+
 The shared hook owns one exact scoped caller-retirement lease, admitted before
 mount mutation. Vitest's `afterEach` precedes `onTestFinished`, so the shared
 hook must join that same complete caller cleanup **before** clearing its RPC
@@ -563,11 +593,11 @@ Register exact-test retirement before mounting and join already-admitted native
 work before a later fixture can provide replacement controls. No forced focus,
 input replay, submission, motion-policy or deadline change qualifies this path.
 
-Context-policy ACK fixtures likewise retain the exact originally open editor.
+Context- and subagent-policy ACK fixtures likewise retain the exact originally open editor.
 An acknowledged close may disconnect that popup or leave its closed exit node;
 neither may remain open. Keep the exact canonical policy and absent stale draft
-overlay assertions, then reopen through the original native controls and verify
-the current value. A closed attribute by itself does not prove usable controls,
+overlay assertions, along with each journey's original native reopen, current-
+value and Send checks. A closed attribute by itself does not prove usable controls,
 and physical exit-animation removal is not acknowledgement-ordering evidence.
 Bind the deliberately held response to the exact metadata command and release
 it during owned retirement, without holding unrelated dispatches or changing
@@ -579,3 +609,23 @@ mounting, the original hover/click, route completion and saved-state assertions;
 retain only a finite fixed vocabulary and bounded elapsed/count scalars. A bare
 test deadline or a secondary screenshot-stability timeout does not establish
 which original await failed or prove a provider/default-selection defect.
+
+## Small-fixture timeout ownership
+
+Context-menu, heatmap, workspace-theme, quota-reset and scheduled-review
+fixtures register public test-signal retirement and completion cleanup before
+their first asynchronous acquisition. Keep an exact per-case owner through
+render, original native actions and unmount. Retirement fences new actions and
+post-await continuations synchronously; shared cleanup joins that owner's
+already-admitted work before replacing controls or resetting global state.
+Retain a late render separately so it cannot repopulate the next case's mount
+slot. No input replay, force, added readiness wait or deadline change is implied.
+
+Failure-only diagnostics retain at most sixteen fixed phase/count/elapsed or
+finite geometry observations per owner, never DOM/text, arbitrary identifiers,
+request contents or received errors. Passive trusted pointer receipts on the
+exact scheduled Review button distinguish dispatch from native actionability;
+successful fake-list results are separate observations, not click completion.
+Heatmap range/scroll observations explain only the current captured state.
+These lifetime repairs do not establish the causes of historical timeouts, and
+secondary screenshot failures are not original feature failures.

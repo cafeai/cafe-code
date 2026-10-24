@@ -1,8 +1,8 @@
 import "../../index.css";
 
 import type { UsageStatsDay } from "@cafecode/contracts";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render } from "vitest-browser-react";
+import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
+import { render as renderComponent } from "vitest-browser-react";
 import { page } from "vitest/browser";
 
 import { applyInterfaceScalePercent } from "../../interfaceScale";
@@ -35,71 +35,233 @@ function cell(day: string): HTMLElement {
   return requiredElement(`[data-activity-day="${day}"]`);
 }
 
-async function hoverCell(day: string): Promise<HTMLElement> {
+type HeatmapOperation = "render" | "rerender" | "viewport" | "hover" | "check";
+type HeatmapPhase =
+  | `${HeatmapOperation}-${"entered" | "settled"}`
+  | "scroll-write"
+  | "scroll"
+  | "resize"
+  | "retired";
+type HeatmapFixture = ReturnType<typeof createHeatmapFixture>;
+let activeFixture: HeatmapFixture | undefined;
+
+/** Keep the exact native targets alive until admitted work settles. In
+ * particular, a late render must not overwrite a later test's mounted root. */
+function createHeatmapFixture(context: TestContext) {
+  const originalViewport = { height: window.innerHeight, width: window.innerWidth };
+  const originalRootFontSize = document.documentElement.style.getPropertyValue("font-size");
+  const originalRootFontPriority = document.documentElement.style.getPropertyPriority("font-size");
+  const pending = new Set<Promise<unknown>>();
+  const started = performance.now();
+  const records: Array<{
+    phase: HeatmapPhase;
+    elapsedMs: number;
+    pending: number;
+    cells: number;
+    firstYear: number | null;
+    lastYear: number | null;
+    scrollLeft: number | null;
+    clientWidth: number | null;
+    scrollWidth: number | null;
+    targetConnected: boolean;
+    targetLeft: number | null;
+    targetWidth: number | null;
+  }> = [];
+  let mounted: Awaited<ReturnType<typeof renderComponent>> | null = null;
+  let scroller: HTMLElement | null = null;
+  let target: HTMLElement | null = null;
+  let resizeObserver: ResizeObserver | null = null;
+  let retired = false;
+  let completion: Promise<void> | undefined;
+  const finite = (value: number | undefined) =>
+    value !== undefined && Number.isFinite(value) ? Math.max(-1e9, Math.min(1e9, value)) : null;
+  const mark = (phase: HeatmapPhase) => {
+    if (retired) return;
+    // Diagnostics cannot reject an original render, input or assertion. Only
+    // validated numeric years leave this synthetic calendar; never date text.
+    try {
+      const rect = target?.getBoundingClientRect();
+      const days = selectedDays();
+      const year = (element: HTMLElement | undefined) => {
+        const day = element?.dataset.activityDay;
+        return day && /^\d{4}-\d{2}-\d{2}$/.test(day) ? Number(day.slice(0, 4)) : null;
+      };
+      if (records.length === 16) records.shift();
+      records.push({
+        phase,
+        elapsedMs: Math.max(0, finite(performance.now() - started) ?? 0),
+        pending: Math.min(pending.size, 1_000),
+        cells: Math.min(days.length, 1_000_000),
+        firstYear: year(days[0]),
+        lastYear: year(days.at(-1)),
+        scrollLeft: finite(scroller?.scrollLeft),
+        clientWidth: finite(scroller?.clientWidth),
+        scrollWidth: finite(scroller?.scrollWidth),
+        targetConnected: target?.isConnected ?? false,
+        targetLeft: finite(rect?.left),
+        targetWidth: finite(rect?.width),
+      });
+    } catch {
+      /* Passive evidence must not change the original operation. */
+    }
+  };
+  const onScroll = () => mark("scroll");
+  const assertActive = () => {
+    if (retired || context.signal.aborted) throw new Error("Activity heatmap fixture has retired.");
+  };
+  const observe = async <T,>(
+    phase: HeatmapOperation,
+    operation: () => PromiseLike<T>,
+  ): Promise<T> => {
+    assertActive();
+    mark(`${phase}-entered`);
+    const original = Promise.resolve(operation());
+    pending.add(original);
+    try {
+      const result = await original;
+      assertActive();
+      mark(`${phase}-settled`);
+      return result;
+    } finally {
+      pending.delete(original);
+    }
+  };
+  const retire = () => {
+    if (retired) return;
+    mark("retired");
+    retired = true;
+    context.signal.removeEventListener("abort", retire);
+    scroller?.removeEventListener("scroll", onScroll);
+    resizeObserver?.disconnect();
+  };
+  const cleanup = (): Promise<void> => {
+    retire();
+    // Publish the one completion before cleanup can reenter. A rejected cleanup
+    // retains this owner and cannot authorize a replacement fixture.
+    return (completion ??= Promise.resolve().then(async () => {
+      await Promise.allSettled([...pending]);
+      if (mounted) await mounted.unmount();
+      mounted = null;
+      document.body.innerHTML = "";
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+      if (originalRootFontSize) {
+        document.documentElement.style.setProperty(
+          "font-size",
+          originalRootFontSize,
+          originalRootFontPriority,
+        );
+      } else {
+        document.documentElement.style.removeProperty("font-size");
+      }
+      if (
+        window.innerWidth !== originalViewport.width ||
+        window.innerHeight !== originalViewport.height
+      ) {
+        await page.viewport(originalViewport.width, originalViewport.height);
+      }
+      if (activeFixture === fixture) activeFixture = undefined;
+    }));
+  };
+  const fixture = {
+    assertActive,
+    observe,
+    cleanup,
+    async render(...args: Parameters<typeof renderComponent>) {
+      return observe("render", async () => {
+        // Cleanup joins this exact acquisition even when the test aborts before
+        // render fulfills. The original caller still receives its real failure.
+        mounted = await renderComponent(...args);
+        assertActive();
+        try {
+          scroller = document.querySelector<HTMLElement>('[data-activity-heatmap-scroll="true"]');
+          scroller?.addEventListener("scroll", onScroll, { passive: true });
+          if (scroller) {
+            resizeObserver = new ResizeObserver(() => mark("resize"));
+            resizeObserver.observe(scroller);
+          }
+        } catch {
+          /* Observation is not a rendering prerequisite. */
+        }
+        return mounted;
+      });
+    },
+    scroll(element: HTMLElement, left: number) {
+      assertActive();
+      element.scrollLeft = left;
+      mark("scroll-write");
+    },
+    hover(element: HTMLElement) {
+      assertActive();
+      target = element;
+      return observe("hover", () => page.elementLocator(element).hover());
+    },
+  };
+  context.onTestFinished(cleanup);
+  context.onTestFailed(() => {
+    try {
+      console.error("activity-heatmap-fixture-diagnostic", { records });
+    } catch {
+      /* Diagnostic delivery must preserve the original failure. */
+    }
+  });
+  context.signal.addEventListener("abort", retire, { once: true });
+  if (context.signal.aborted) retire();
+  return fixture;
+}
+
+function currentFixture(): HeatmapFixture {
+  if (!activeFixture) throw new Error("Activity heatmap fixture is unavailable.");
+  activeFixture.assertActive();
+  return activeFixture;
+}
+
+async function hoverCell(fixture: HeatmapFixture, day: string): Promise<HTMLElement> {
   // A synthetic pointerover does not move Chromium's real pointer. Scrolling
   // a virtual calendar underneath that pointer can deliver a later trusted
   // pointerover for another day and correctly replace the synthetic tooltip.
   // Let Playwright wait for the target's layout stability and move the native
   // pointer to that exact cell, including historic cells that need scrolling.
-  await page.elementLocator(cell(day)).hover();
-  await vi.waitFor(() =>
-    expect(
-      document.querySelector('[role="tooltip"]')?.getAttribute("data-activity-tooltip-day"),
-    ).toBe(day),
+  await fixture.hover(cell(day));
+  await fixture.observe("check", () =>
+    vi.waitFor(() =>
+      expect(
+        document.querySelector('[role="tooltip"]')?.getAttribute("data-activity-tooltip-day"),
+      ).toBe(day),
+    ),
   );
   return requiredElement('[role="tooltip"]');
 }
 
 describe("ActivityHeatmap selected calendars", () => {
-  let mounted: Awaited<ReturnType<typeof render>> | null = null;
-  let originalViewport = { height: window.innerHeight, width: window.innerWidth };
-  let originalRootFontSize = "";
-  let originalRootFontPriority = "";
-
-  beforeEach(() => {
-    originalViewport = { height: window.innerHeight, width: window.innerWidth };
-    originalRootFontSize = document.documentElement.style.getPropertyValue("font-size");
-    originalRootFontPriority = document.documentElement.style.getPropertyPriority("font-size");
+  beforeEach((context) => {
+    if (activeFixture) throw new Error("The previous activity heatmap fixture still owns cleanup.");
+    activeFixture = createHeatmapFixture(context);
   });
 
   afterEach(async () => {
-    await mounted?.unmount();
-    mounted = null;
-    document.body.innerHTML = "";
-    vi.useRealTimers();
-    vi.restoreAllMocks();
-    if (originalRootFontSize) {
-      document.documentElement.style.setProperty(
-        "font-size",
-        originalRootFontSize,
-        originalRootFontPriority,
-      );
-    } else {
-      document.documentElement.style.removeProperty("font-size");
-    }
-    if (
-      window.innerWidth !== originalViewport.width ||
-      window.innerHeight !== originalViewport.height
-    ) {
-      await page.viewport(originalViewport.width, originalViewport.height);
-    }
+    await activeFixture?.cleanup();
   });
 
   it("hovers the requested day after scrolling moves the calendar under a stationary pointer", async () => {
-    mounted = await render(
+    const fixture = currentFixture();
+    await fixture.render(
       <ActivityHeatmap days={[]} bounds={{ startDay: "2022-01-01", endDay: "2026-07-21" }} />,
     );
-    expect((await hoverCell("2022-01-01")).textContent).toContain("No generating time");
+    expect((await hoverCell(fixture, "2022-01-01")).textContent).toContain("No generating time");
     const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
-    scroller.scrollLeft = scroller.scrollWidth;
-    await vi.waitFor(() =>
-      expect(document.querySelector('[data-activity-day="2026-07-21"]')).not.toBeNull(),
+    fixture.scroll(scroller, scroller.scrollWidth);
+    await fixture.observe("check", () =>
+      vi.waitFor(() =>
+        expect(document.querySelector('[data-activity-day="2026-07-21"]')).not.toBeNull(),
+      ),
     );
-    expect((await hoverCell("2026-07-21")).textContent).toContain("Jul 21, 2026");
+    expect((await hoverCell(fixture, "2026-07-21")).textContent).toContain("Jul 21, 2026");
   });
 
   it("fills sparse dates with zeroes and replaces today's fetched value exactly once", async () => {
-    mounted = await render(
+    const fixture = currentFixture();
+    await fixture.render(
       <ActivityHeatmap
         days={[
           activity("2026-03-07", 1_000_000),
@@ -121,13 +283,14 @@ describe("ActivityHeatmap selected calendars", () => {
       "2026-03-13",
       "2026-03-14",
     ]);
-    expect((await hoverCell("2026-03-14")).textContent).toContain("2s generating");
-    expect((await hoverCell("2026-03-10")).textContent).toContain("No generating time");
-    expect((await hoverCell("2026-03-08")).textContent).toContain("Sun");
+    expect((await hoverCell(fixture, "2026-03-14")).textContent).toContain("2s generating");
+    expect((await hoverCell(fixture, "2026-03-10")).textContent).toContain("No generating time");
+    expect((await hoverCell(fixture, "2026-03-08")).textContent).toContain("Sun");
   });
 
   it("shows all history older than 26 weeks and ignores activity in alignment padding", async () => {
-    mounted = await render(
+    const fixture = currentFixture();
+    await fixture.render(
       <ActivityHeatmap
         days={[
           activity("2021-12-31", 60_000),
@@ -142,36 +305,45 @@ describe("ActivityHeatmap selected calendars", () => {
     expect(requiredElement('[role="img"]').dataset.activityRangeDayCount).toBe("1663");
     expect(selectedDays().length).toBeLessThan(500);
     expect(selectedDays()[0]?.dataset.activityDay).toBe("2022-01-01");
-    expect((await hoverCell("2022-01-01")).textContent).toContain("1s generating");
+    expect((await hoverCell(fixture, "2022-01-01")).textContent).toContain("1s generating");
     expect(cell("2021-12-31").dataset.activityInRange).toBe("false");
     const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
-    scroller.scrollLeft = scroller.scrollWidth;
-    await vi.waitFor(() =>
-      expect(document.querySelector('[data-activity-day="2026-07-21"]')).not.toBeNull(),
+    fixture.scroll(scroller, scroller.scrollWidth);
+    await fixture.observe("check", () =>
+      vi.waitFor(() =>
+        expect(document.querySelector('[data-activity-day="2026-07-21"]')).not.toBeNull(),
+      ),
     );
     expect(selectedDays().at(-1)?.dataset.activityDay).toBe("2026-07-21");
     expect(cell("2026-07-22").dataset.activityInRange).toBe("false");
   });
 
   it("retains scroll position for live updates and resets it for a new selected range", async () => {
+    const fixture = currentFixture();
     const bounds = { startDay: "2022-01-01", endDay: "2026-07-21" };
-    mounted = await render(
+    const mounted = await fixture.render(
       <ActivityHeatmap days={[]} bounds={bounds} today={activity("2026-07-21", 1_000)} />,
     );
     const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
-    scroller.scrollLeft = scroller.scrollWidth;
-    await vi.waitFor(() =>
-      expect(document.querySelector('[data-activity-day="2026-07-21"]')).not.toBeNull(),
+    fixture.scroll(scroller, scroller.scrollWidth);
+    await fixture.observe("check", () =>
+      vi.waitFor(() =>
+        expect(document.querySelector('[data-activity-day="2026-07-21"]')).not.toBeNull(),
+      ),
     );
     const previousScrollLeft = scroller.scrollLeft;
-    expect((await hoverCell("2026-07-21")).textContent).toContain("1s generating");
-    await mounted.rerender(
-      <ActivityHeatmap days={[]} bounds={{ ...bounds }} today={activity("2026-07-21", 2_000)} />,
+    expect((await hoverCell(fixture, "2026-07-21")).textContent).toContain("1s generating");
+    await fixture.observe("rerender", () =>
+      mounted.rerender(
+        <ActivityHeatmap days={[]} bounds={{ ...bounds }} today={activity("2026-07-21", 2_000)} />,
+      ),
     );
     expect(scroller.scrollLeft).toBe(previousScrollLeft);
     expect(requiredElement('[role="tooltip"]').textContent).toContain("2s generating");
-    await mounted.rerender(
-      <ActivityHeatmap days={[]} bounds={{ startDay: "2026-07-15", endDay: "2026-07-21" }} />,
+    await fixture.observe("rerender", () =>
+      mounted.rerender(
+        <ActivityHeatmap days={[]} bounds={{ startDay: "2026-07-15", endDay: "2026-07-21" }} />,
+      ),
     );
     expect(selectedDays()).toHaveLength(7);
     expect(scroller.scrollLeft).toBe(0);
@@ -179,6 +351,7 @@ describe("ActivityHeatmap selected calendars", () => {
   });
 
   it("does not remap or rescan historical activity when only the live value changes", async () => {
+    const fixture = currentFixture();
     const days = [activity("0100-01-01", 5_000), activity("2026-07-21", 9_000)];
     const mapDays = vi.spyOn(days, "map");
     const originalIterator = Map.prototype[Symbol.iterator];
@@ -192,35 +365,40 @@ describe("ActivityHeatmap selected calendars", () => {
       return originalIterator.call(this);
     });
     const bounds = { startDay: "0100-01-01", endDay: "2026-07-21" };
-    mounted = await render(
+    const mounted = await fixture.render(
       <ActivityHeatmap days={days} bounds={bounds} today={activity("2026-07-21", 1_000)} />,
     );
     expect(historyScans).toBeGreaterThan(0);
     const initialScans = historyScans;
     const initialMappings = mapDays.mock.calls.length;
     const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
-    scroller.scrollLeft = scroller.scrollWidth;
-    await vi.waitFor(() =>
-      expect(document.querySelector('[data-activity-day="2026-07-21"]')).not.toBeNull(),
+    fixture.scroll(scroller, scroller.scrollWidth);
+    await fixture.observe("check", () =>
+      vi.waitFor(() =>
+        expect(document.querySelector('[data-activity-day="2026-07-21"]')).not.toBeNull(),
+      ),
     );
     for (const generatingMs of [2_000, 4_000, 10_000]) {
-      await mounted.rerender(
-        <ActivityHeatmap
-          days={days}
-          bounds={{ ...bounds }}
-          today={activity("2026-07-21", generatingMs)}
-        />,
+      await fixture.observe("rerender", () =>
+        mounted.rerender(
+          <ActivityHeatmap
+            days={days}
+            bounds={{ ...bounds }}
+            today={activity("2026-07-21", generatingMs)}
+          />,
+        ),
       );
     }
     expect(mapDays).toHaveBeenCalledTimes(initialMappings);
     expect(historyScans).toBe(initialScans);
-    expect((await hoverCell("2026-07-21")).textContent).toContain("10s generating");
+    expect((await hoverCell(fixture, "2026-07-21")).textContent).toContain("10s generating");
   });
 
   it("retains an exceptionally old valid history with bounded calendar allocation", async () => {
-    await page.viewport(320, 800);
+    const fixture = currentFixture();
+    await fixture.observe("viewport", () => page.viewport(320, 800));
     applyInterfaceScalePercent(130);
-    mounted = await render(
+    await fixture.render(
       <section className="min-w-0 p-4" style={{ width: "100%" }}>
         <ActivityHeatmap
           days={[activity("0000-01-01", 1_000), activity("2026-07-21", 3_000)]}
@@ -233,27 +411,33 @@ describe("ActivityHeatmap selected calendars", () => {
     expect(Number(calendar.dataset.activityRangeDayCount)).toBeGreaterThan(700_000);
     expect(selectedDays().length).toBeLessThan(200);
     expect(calendar.children.length).toBeLessThan(30);
-    expect((await hoverCell("0000-01-01")).textContent).toContain("1s generating");
+    expect((await hoverCell(fixture, "0000-01-01")).textContent).toContain("1s generating");
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
 
-    scroller.scrollLeft = scroller.scrollWidth / 2;
-    await vi.waitFor(() => {
-      const firstYear = Number(selectedDays()[0]?.dataset.activityDay?.slice(0, 4));
-      expect(firstYear).toBeGreaterThan(1_000);
-      expect(firstYear).toBeLessThan(1_030);
-    });
-    expect(selectedDays().length).toBeLessThan(200);
-    scroller.scrollLeft = scroller.scrollWidth;
-    await vi.waitFor(() =>
-      expect(document.querySelector('[data-activity-day="2026-07-21"]')).not.toBeNull(),
+    fixture.scroll(scroller, scroller.scrollWidth / 2);
+    await fixture.observe("check", () =>
+      vi.waitFor(() => {
+        const firstYear = Number(selectedDays()[0]?.dataset.activityDay?.slice(0, 4));
+        expect(firstYear).toBeGreaterThan(1_000);
+        expect(firstYear).toBeLessThan(1_030);
+      }),
     );
-    expect((await hoverCell("2026-07-21")).textContent).toContain("3s generating");
     expect(selectedDays().length).toBeLessThan(200);
-    scroller.scrollLeft = 0;
-    await vi.waitFor(() =>
-      expect(document.querySelector('[data-activity-day="0000-01-01"]')).not.toBeNull(),
+    fixture.scroll(scroller, scroller.scrollWidth);
+    await fixture.observe("check", () =>
+      vi.waitFor(() =>
+        expect(document.querySelector('[data-activity-day="2026-07-21"]')).not.toBeNull(),
+      ),
     );
-    expect((await hoverCell("0000-01-01")).textContent).toContain("1s generating");
+    expect((await hoverCell(fixture, "2026-07-21")).textContent).toContain("3s generating");
+    expect(selectedDays().length).toBeLessThan(200);
+    fixture.scroll(scroller, 0);
+    await fixture.observe("check", () =>
+      vi.waitFor(() =>
+        expect(document.querySelector('[data-activity-day="0000-01-01"]')).not.toBeNull(),
+      ),
+    );
+    expect((await hoverCell(fixture, "0000-01-01")).textContent).toContain("1s generating");
     expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
   });
 
@@ -263,9 +447,10 @@ describe("ActivityHeatmap selected calendars", () => {
     [768, 100],
     [768, 130],
   ] as const)("bounds long-history scrolling at %ipx and %i%% scale", async (width, scale) => {
-    await page.viewport(width, 800);
+    const fixture = currentFixture();
+    await fixture.observe("viewport", () => page.viewport(width, 800));
     applyInterfaceScalePercent(scale);
-    mounted = await render(
+    await fixture.render(
       <section
         data-heatmap-panel="true"
         className="min-w-0 rounded-xl border p-4"
@@ -288,9 +473,11 @@ describe("ActivityHeatmap selected calendars", () => {
     expect(scroller.scrollWidth).toBeGreaterThan(scroller.clientWidth);
     expect(getComputedStyle(scroller).overflowX).toBe("auto");
     // Scrolling reaches today's exact cell without creating document overflow.
-    scroller.scrollLeft = scroller.scrollWidth;
-    await vi.waitFor(() =>
-      expect(document.querySelector('[data-activity-day="2026-07-21"]')).not.toBeNull(),
+    fixture.scroll(scroller, scroller.scrollWidth);
+    await fixture.observe("check", () =>
+      vi.waitFor(() =>
+        expect(document.querySelector('[data-activity-day="2026-07-21"]')).not.toBeNull(),
+      ),
     );
     const lastCell = cell("2026-07-21").getBoundingClientRect();
     expect(lastCell.right).toBeLessThanOrEqual(scroller.getBoundingClientRect().right + 1);
@@ -303,7 +490,7 @@ describe("ActivityHeatmap selected calendars", () => {
       );
     });
     expect(visibleCell).toBeDefined();
-    const tooltip = await hoverCell(visibleCell!.dataset.activityDay!);
+    const tooltip = await hoverCell(fixture, visibleCell!.dataset.activityDay!);
     expect(tooltip.getBoundingClientRect().left).toBeGreaterThanOrEqual(
       scroller.getBoundingClientRect().left,
     );
@@ -316,9 +503,10 @@ describe("ActivityHeatmap selected calendars", () => {
   it.each([100] as const)(
     "keeps responsive calendars and legends inside a 320px panel at %i%% scale",
     async (scale) => {
-      await page.viewport(320, 800);
+      const fixture = currentFixture();
+      await fixture.observe("viewport", () => page.viewport(320, 800));
       applyInterfaceScalePercent(scale);
-      mounted = await render(
+      await fixture.render(
         <section
           data-heatmap-panel="true"
           className="min-w-0 rounded-xl border p-4"
@@ -334,18 +522,22 @@ describe("ActivityHeatmap selected calendars", () => {
       const panel = requiredElement('[data-heatmap-panel="true"]');
       const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
       const legend = requiredElement('[data-activity-heatmap-legend="true"]');
-      await vi.waitFor(() => {
-        expect(panel.scrollWidth).toBeLessThanOrEqual(panel.clientWidth + 1);
-        expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
-        expect(legend.getBoundingClientRect().width).toBeLessThanOrEqual(scroller.clientWidth + 1);
-      });
+      await fixture.observe("check", () =>
+        vi.waitFor(() => {
+          expect(panel.scrollWidth).toBeLessThanOrEqual(panel.clientWidth + 1);
+          expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
+          expect(legend.getBoundingClientRect().width).toBeLessThanOrEqual(
+            scroller.clientWidth + 1,
+          );
+        }),
+      );
       const first = cell("2026-07-05").getBoundingClientRect();
       expect(first.width).toBeGreaterThanOrEqual((14 * scale) / 100 - 0.1);
       expect(first.width).toBeLessThanOrEqual((24 * scale) / 100 + 0.1);
       if (scroller.scrollWidth > scroller.clientWidth + 1) {
-        scroller.scrollLeft = scroller.scrollWidth;
+        fixture.scroll(scroller, scroller.scrollWidth);
       }
-      const tooltip = await hoverCell("2026-10-03");
+      const tooltip = await hoverCell(fixture, "2026-10-03");
       expect(tooltip.textContent).toContain("2s generating");
       expect(tooltip.getBoundingClientRect().left).toBeGreaterThanOrEqual(
         scroller.getBoundingClientRect().left - 1,
@@ -358,9 +550,10 @@ describe("ActivityHeatmap selected calendars", () => {
   );
 
   it("adapts a responsive calendar on wide-to-narrow-to-wide resize and hovers exact cells", async () => {
-    await page.viewport(900, 800);
+    const fixture = currentFixture();
+    await fixture.observe("viewport", () => page.viewport(900, 800));
     applyInterfaceScalePercent(100);
-    mounted = await render(
+    await fixture.render(
       <section
         className="min-w-0 border p-4"
         style={{ width: "calc(100vw - 2rem)", margin: "1rem auto" }}
@@ -374,33 +567,37 @@ describe("ActivityHeatmap selected calendars", () => {
     );
     const calendar = requiredElement('[role="img"]');
     const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
-    await vi.waitFor(() =>
-      expect(cell("2026-10-03").getBoundingClientRect().width).toBeCloseTo(24, 1),
+    await fixture.observe("check", () =>
+      vi.waitFor(() => expect(cell("2026-10-03").getBoundingClientRect().width).toBeCloseTo(24, 1)),
     );
-    expect((await hoverCell("2026-10-03")).textContent).toContain("3s generating");
-    await page.viewport(320, 800);
-    await vi.waitFor(() => {
-      const size = cell("2026-10-03").getBoundingClientRect().width;
-      expect(size).toBeLessThan(24);
-      expect(size).toBeGreaterThanOrEqual(13.9);
-      // Resizing invalidates captured cell coordinates. A stale tooltip must
-      // disappear until the pointer deliberately enters a newly laid-out cell.
-      expect(document.querySelector('[role="tooltip"]')).toBeNull();
-      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
-    });
-    const narrowTooltip = await hoverCell("2026-10-03");
+    expect((await hoverCell(fixture, "2026-10-03")).textContent).toContain("3s generating");
+    await fixture.observe("viewport", () => page.viewport(320, 800));
+    await fixture.observe("check", () =>
+      vi.waitFor(() => {
+        const size = cell("2026-10-03").getBoundingClientRect().width;
+        expect(size).toBeLessThan(24);
+        expect(size).toBeGreaterThanOrEqual(13.9);
+        // Resizing invalidates captured cell coordinates. A stale tooltip must
+        // disappear until the pointer deliberately enters a newly laid-out cell.
+        expect(document.querySelector('[role="tooltip"]')).toBeNull();
+        expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth);
+      }),
+    );
+    const narrowTooltip = await hoverCell(fixture, "2026-10-03");
     expect(narrowTooltip.textContent).toContain("Oct 3, 2026");
     expect(narrowTooltip.getBoundingClientRect().right).toBeLessThanOrEqual(
       scroller.getBoundingClientRect().right + 1,
     );
-    await page.viewport(900, 800);
-    await vi.waitFor(() => {
-      expect(document.querySelector('[role="tooltip"]')).toBeNull();
-    });
+    await fixture.observe("viewport", () => page.viewport(900, 800));
+    await fixture.observe("check", () =>
+      vi.waitFor(() => {
+        expect(document.querySelector('[role="tooltip"]')).toBeNull();
+      }),
+    );
     expect(requiredElement('[role="img"]')).toBe(calendar);
     expect(requiredElement('[data-activity-heatmap-scroll="true"]')).toBe(scroller);
     expect(scroller.scrollLeft).toBe(0);
-    expect((await hoverCell("2026-10-03")).textContent).toContain("3s generating");
+    expect((await hoverCell(fixture, "2026-10-03")).textContent).toContain("3s generating");
   });
 
   it.each([
@@ -409,9 +606,10 @@ describe("ActivityHeatmap selected calendars", () => {
   ] as const)(
     "keeps a short responsive history compact from %s through %s",
     async (startDay, endDay) => {
-      await page.viewport(1_024, 800);
+      const fixture = currentFixture();
+      await fixture.observe("viewport", () => page.viewport(1_024, 800));
       applyInterfaceScalePercent(100);
-      mounted = await render(
+      await fixture.render(
         <section
           className="min-w-0 p-4"
           style={{ width: "calc(100vw - 2rem)", margin: "1rem auto" }}
@@ -428,7 +626,8 @@ describe("ActivityHeatmap selected calendars", () => {
   );
 
   it("keeps responsive virtualized history compact and preserves scroll on live updates", async () => {
-    await page.viewport(768, 800);
+    const fixture = currentFixture();
+    await fixture.observe("viewport", () => page.viewport(768, 800));
     applyInterfaceScalePercent(100);
     const bounds = { startDay: "2022-01-01", endDay: "2026-07-21" };
     const content = (generatingMs: number) => (
@@ -444,18 +643,20 @@ describe("ActivityHeatmap selected calendars", () => {
         />
       </section>
     );
-    mounted = await render(content(1_000));
+    const mounted = await fixture.render(content(1_000));
     const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
     expect(scroller.getAttribute("role")).toBe("region");
     expect(selectedDays().length).toBeLessThan(500);
     expect(scroller.scrollWidth).toBeGreaterThan(scroller.clientWidth);
-    scroller.scrollLeft = scroller.scrollWidth;
-    await vi.waitFor(() =>
-      expect(document.querySelector(`[data-activity-day="${bounds.endDay}"]`)).not.toBeNull(),
+    fixture.scroll(scroller, scroller.scrollWidth);
+    await fixture.observe("check", () =>
+      vi.waitFor(() =>
+        expect(document.querySelector(`[data-activity-day="${bounds.endDay}"]`)).not.toBeNull(),
+      ),
     );
     const previousScrollLeft = scroller.scrollLeft;
-    expect((await hoverCell(bounds.endDay)).textContent).toContain("1s generating");
-    await mounted.rerender(content(2_000));
+    expect((await hoverCell(fixture, bounds.endDay)).textContent).toContain("1s generating");
+    await fixture.observe("rerender", () => mounted.rerender(content(2_000)));
     expect(requiredElement('[data-activity-heatmap-scroll="true"]')).toBe(scroller);
     expect(scroller.scrollLeft).toBe(previousScrollLeft);
     expect(requiredElement('[role="tooltip"]').textContent).toContain("2s generating");
