@@ -1,6 +1,6 @@
 # Complete local verification
 
-Last updated: 2026-10-24 03:09:06 JST (UTC+0900)
+Last updated: 2026-10-24 11:47:21 JST (UTC+0900)
 
 Use the pinned standalone Node and Corepack Yarn. Dependencies and the native
 Chromium test browser must already be installed through the existing locked
@@ -229,6 +229,15 @@ phase ledgers retain bounded fixed categories and finite counts/times, not paths
 argv, environment, output or received errors. Independent invalidation, template
 and hook contracts have independent fixtures; their per-case deadlines and real
 native controls remain in force, not a single shared aggregate time guarantee.
+Input-policy fixtures do not depend on an installed Xcode metadata service. On
+macOS they bind a fixture-owned developer tree and route only that owner's exact
+fixed metadata request to an inert current-Node child, retaining the original
+environment, abort signal, limits and actual child-close join. Native file,
+selected-tool and null-device identity checks still run; malformed or foreign
+metadata must refuse without authenticating or publishing a receipt. This is
+synthetic metadata qualification, not evidence about the host's selected SDK.
+The independent fixed-command/argument/options and callback-versus-close
+controls retain the real production lookup contract unchanged.
 Independent synthetic output writes use small fixed batches, with every native
 write individually owned and the whole batch joined before the next real input
 snapshot. This changes only fixture IO scheduling: no observation is fabricated,

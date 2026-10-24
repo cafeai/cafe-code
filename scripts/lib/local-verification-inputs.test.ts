@@ -1,4 +1,6 @@
-// Fixtures own only inert temporary files; no compiler, browser or provider is launched.
+// Fixtures own inert temporary files and a bounded metadata-only Node peer.
+// They qualify input policy, not an ambient SDK; no compiler/browser/provider
+// is launched, and the production developer-tool lookup remains unchanged.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import {
   chmod,
@@ -59,6 +61,20 @@ const nullDevice = vi.hoisted(() => ({
   calls: 0,
 }));
 const selectedTool = vi.hoisted(() => ({ path: "", opens: 0, failNextOpen: false }));
+const fixtureGitMetadata = vi.hoisted(() => ({
+  owner: undefined as
+    | {
+        readonly signal: AbortSignal;
+        retired: boolean;
+        developer: string;
+        corepack: string;
+        git: string;
+        result: "owned" | "empty" | "relative" | "outside" | "missing";
+        invocations: number;
+        closed: number;
+      }
+    | undefined,
+}));
 const typeScriptOutput = vi.hoisted(() => ({
   configPath: "",
   configRelative: "",
@@ -125,6 +141,10 @@ type NativeInputPhase =
   | "tool-read-progress"
   | "tool-read-ended"
   | "tool-closed"
+  | "metadata-peer-entered"
+  | "metadata-peer-result"
+  | "metadata-peer-rejected"
+  | "metadata-peer-closed"
   | "xcrun-entered"
   | "xcrun-result"
   | "xcrun-rejected"
@@ -272,28 +292,81 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 vi.mock("node:child_process", async (importOriginal) => {
   const native = await importOriginal<typeof import("node:child_process")>();
-  const { promisify } = await import("node:util");
+  const { promisify, types } = await import("node:util");
   const execute = promisify(native.execFile);
+  const ownValue = (value: unknown, key: string): unknown =>
+    value !== null && typeof value === "object" && !types.isProxy(value)
+      ? Object.getOwnPropertyDescriptor(value, key)?.value
+      : undefined;
   const observedExecute = function (this: unknown, ...args: unknown[]) {
-    const record =
+    const exactLookup =
+      args.length === 3 &&
       args[0] === "/usr/bin/xcrun" &&
       Array.isArray(args[1]) &&
       args[1].length === 2 &&
       args[1][0] === "--find" &&
-      args[1][1] === "git"
-        ? nativeInput.record
+      args[1][1] === "git";
+    const record = exactLookup ? nativeInput.record : undefined;
+    const options = args[2];
+    const environment = ownValue(options, "env");
+    const candidate = fixtureGitMetadata.owner;
+    const routedOwner =
+      process.platform === "darwin" &&
+      exactLookup &&
+      candidate &&
+      !candidate.retired &&
+      !candidate.signal.aborted &&
+      candidate.git !== "" &&
+      ownValue(options, "signal") === candidate.signal &&
+      ownValue(options, "encoding") === "utf8" &&
+      ownValue(options, "shell") === false &&
+      ownValue(options, "timeout") === 5_000 &&
+      ownValue(options, "killSignal") === "SIGKILL" &&
+      ownValue(options, "maxBuffer") === 4_096 &&
+      ownValue(environment, "DEVELOPER_DIR") === candidate.developer &&
+      ownValue(environment, "COREPACK_ROOT") === candidate.corepack
+        ? candidate
         : undefined;
-    record?.("xcrun-entered");
-    // Delegate the actual custom promisifier and return its original promise:
-    // the production owner's exact .child, options and close join are intact.
-    const pending = Reflect.apply(execute, this, args) as ReturnType<typeof execute> & {
+    let nativeArgs = args;
+    if (routedOwner) {
+      // This input-policy fixture does not qualify an ambient Xcode SDK. Only
+      // the exact held owner's fixed lookup may use this synthetic metadata.
+      // Keep a REAL native peer and the ORIGINAL options object, signal,
+      // result promise, errors and .child; never synthesize native close.
+      const output =
+        routedOwner.result === "empty"
+          ? ""
+          : routedOwner.result === "relative"
+            ? "git"
+            : routedOwner.result === "outside"
+              ? process.execPath
+              : routedOwner.result === "missing"
+                ? join(routedOwner.developer, "missing-git")
+                : routedOwner.git;
+      nativeArgs = [
+        process.execPath,
+        ["-e", "process.stdout.write(process.argv[1] + '\\n');", output],
+        options,
+      ];
+      routedOwner.invocations += 1;
+    }
+    record?.(routedOwner ? "metadata-peer-entered" : "xcrun-entered");
+    // Every foreign, retired or nonmatching invocation still delegates the
+    // original command. The production helper retains its exact close join.
+    const pending = Reflect.apply(execute, this, nativeArgs) as ReturnType<typeof execute> & {
       child: ReturnType<typeof native.spawn>;
     };
+    if (routedOwner)
+      pending.child.once("close", () => {
+        routedOwner.closed += 1;
+      });
     if (record) {
-      pending.child.once("close", () => record("xcrun-closed"));
+      pending.child.once("close", () =>
+        record(routedOwner ? "metadata-peer-closed" : "xcrun-closed"),
+      );
       void pending.then(
-        () => record("xcrun-result"),
-        () => record("xcrun-rejected"),
+        () => record(routedOwner ? "metadata-peer-result" : "xcrun-result"),
+        () => record(routedOwner ? "metadata-peer-rejected" : "xcrun-rejected"),
       );
     }
     return pending;
@@ -381,6 +454,20 @@ function relativeTypeScriptResult(path: string): string {
 }
 
 async function fixture(context: TestContext, afterClosed?: () => void) {
+  if (fixtureGitMetadata.owner) throw new Error("Synthetic metadata fixture is still held");
+  const metadataOwner: NonNullable<(typeof fixtureGitMetadata)["owner"]> = {
+    signal: context.signal,
+    retired: false,
+    developer: "",
+    corepack: "",
+    git: "",
+    result: "owned",
+    invocations: 0,
+    closed: 0,
+  };
+  // Admit this exact routing owner before acquisition or any await. It cannot
+  // mint metadata after retirement, and is released only after native drain.
+  fixtureGitMetadata.owner = metadataOwner;
   // Install before acquisition; retire only after this owner's exact pending
   // fingerprint/child/descriptor work drains, before the root can be removed.
   const nativeObservation = observeNativeToolPhases(context);
@@ -390,6 +477,7 @@ async function fixture(context: TestContext, afterClosed?: () => void) {
   const pending = new Set<Promise<unknown>>();
   const retire = () => {
     retired = true;
+    metadataOwner.retired = true;
   };
   const assertActive = () => {
     if (retired || context.signal.aborted) throw new Error("Synthetic input fixture retired");
@@ -420,6 +508,7 @@ async function fixture(context: TestContext, afterClosed?: () => void) {
       // actual IO/abort finalizers have closed, not merely after test timeout.
       try {
         nativeObservation.retire();
+        if (fixtureGitMetadata.owner === metadataOwner) fixtureGitMetadata.owner = undefined;
         afterClosed?.();
       } finally {
         if (ownedRoot) await rm(ownedRoot, { recursive: true, force: true });
@@ -493,6 +582,17 @@ async function fixture(context: TestContext, afterClosed?: () => void) {
   const corepack = join(root, "tools/corepack");
   await put("tools/corepack/package.json", encode({ name: "corepack", version: "inert" }));
   await put("tools/corepack/dist/yarn.js", "// inert Corepack, never executed\n");
+  const developer = join(root, "tools/developer");
+  const git =
+    process.platform === "darwin"
+      ? await put("tools/developer/git", "#!/bin/sh\nexit 0\n")
+      : undefined;
+  if (git !== undefined) {
+    await ownPreparation(() => chmod(git, 0o700));
+    metadataOwner.developer = developer;
+    metadataOwner.corepack = corepack;
+    metadataOwner.git = git;
+  }
   await put("scripts/fixtures/local-verification-git.config", localVerificationGitConfiguration);
   await put("scripts/fixtures/local-verification-git-template/.gitkeep", "");
   const store = {
@@ -506,6 +606,7 @@ async function fixture(context: TestContext, afterClosed?: () => void) {
   } satisfies LocalVerificationReceiptStore;
   const environment = {
     PATH: [
+      ...(git !== undefined ? [dirname(git)] : []),
       dirname(process.execPath),
       process.platform === "win32" ? (process.env.SystemRoot ?? "C:\\Windows") : "/usr/bin",
       process.platform === "win32"
@@ -516,6 +617,7 @@ async function fixture(context: TestContext, afterClosed?: () => void) {
     COREPACK_ROOT: corepack,
     npm_execpath: yarn,
     NODE_OPTIONS: "--max-old-space-size=4096",
+    ...(process.platform === "darwin" ? { DEVELOPER_DIR: developer } : {}),
     ...localVerificationGitEnvironment(root),
   };
   const task: LocalVerificationTask = {
@@ -560,6 +662,14 @@ async function fixture(context: TestContext, afterClosed?: () => void) {
     createFileLink,
     ownPreparation,
     refusals,
+    metadataObservation: () => ({
+      invocations: metadataOwner.invocations,
+      closed: metadataOwner.closed,
+    }),
+    setMetadataResult(result: typeof metadataOwner.result) {
+      assertActive();
+      metadataOwner.result = result;
+    },
     snapshot: () => fingerprint(task, context.signal),
   };
 }
@@ -918,6 +1028,8 @@ describe("local verification input evidence", () => {
         // scalar; this real consumer proves all three named observations and
         // the unmodified held-descriptor checks admit that same policy.
         expect(nullDevice.calls).toBe(3);
+        if (process.platform === "darwin")
+          expect(f.metadataObservation()).toEqual({ invocations: 1, closed: 1 });
       } finally {
         nullDevice.mode = "native";
       }
@@ -965,6 +1077,24 @@ describe("local verification input evidence", () => {
         }
       }
       expect(f.store.authenticateEnvironment).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "refuses malformed and unowned developer Git metadata after its exact native peer closes",
+    async (context) => {
+      const f = await fixture(context);
+      for (const [index, result] of (
+        ["empty", "relative", "outside", "missing"] as const
+      ).entries()) {
+        f.setMetadataResult(result);
+        expect(await f.snapshot()).toBeUndefined();
+        expect(f.refusals.at(-1)?.reason).toBe("tools");
+        expect(f.metadataObservation()).toEqual({ invocations: index + 1, closed: index + 1 });
+        expect(f.store.authenticateEnvironment).not.toHaveBeenCalled();
+        expect(f.store.read).not.toHaveBeenCalled();
+        expect(f.store.publish).not.toHaveBeenCalled();
+      }
     },
   );
 
@@ -1348,7 +1478,11 @@ describe("local verification input evidence", () => {
     const parsed = ts.parseJsonConfigFileContent(broad, ts.sys, serverRoot, undefined, configPath);
     expect(parsed.errors).toEqual([]);
     expect(parsed.options.outDir).toBeUndefined();
-    expect(parsed.fileNames).toContain(output);
+    // TypeScript uses forward slashes on Windows; compare the same absolute
+    // native path without granting a relative result the fixture's cwd.
+    expect(
+      parsed.fileNames.map((fileName) => (isAbsolute(fileName) ? resolve(fileName) : undefined)),
+    ).toContain(output);
     expect(await f.fingerprint(task, context.signal)).toBeUndefined();
   });
 
@@ -1392,7 +1526,12 @@ describe("local verification input evidence", () => {
       parsed.options,
       ts.sys,
     );
-    expect(resolved.resolvedTypeReferenceDirective?.resolvedFileName).toBe(declaration);
+    const resolvedFileName = resolved.resolvedTypeReferenceDirective?.resolvedFileName;
+    expect(
+      resolvedFileName !== undefined && isAbsolute(resolvedFileName)
+        ? resolve(resolvedFileName)
+        : undefined,
+    ).toBe(declaration);
     expect(await f.fingerprint(task, context.signal)).toBeUndefined();
   });
 
