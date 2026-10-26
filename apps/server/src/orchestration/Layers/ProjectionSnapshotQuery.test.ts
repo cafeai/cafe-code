@@ -56,6 +56,23 @@ function captureThreadActivityStatements(sql: SqlClient.SqlClient) {
   return { sql: observed, statements };
 }
 
+function capturePostTerminalAcceptedSteerStatements(sql: SqlClient.SqlClient) {
+  const statements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+  const observed = new Proxy(sql, {
+    apply(target, thisArg, argumentsList) {
+      const statement = Reflect.apply(
+        target,
+        thisArg,
+        argumentsList,
+      ) as Statement.Statement<unknown>;
+      const compiled = statement.compile();
+      if (/WITH exact_accepted AS/u.test(compiled[0])) statements.push(compiled);
+      return statement;
+    },
+  });
+  return { sql: observed, statements };
+}
+
 const projectionSnapshotLayer = it.layer(
   OrchestrationProjectionSnapshotQueryLive.pipe(
     Layer.provideMerge(RepositoryIdentityResolverLive),
@@ -2944,6 +2961,85 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           WHERE thread_id = ${threadId}
             AND turn_id = ${turnId}
         `;
+
+        // Exercise the real startup prefilter, not a handwritten approximation
+        // of its evidence query. SQLite may otherwise choose the mature event
+        // stream as the outer relation for a correlated processing lookup and
+        // synchronously inspect every irrelevant event before finding no match.
+        // Keep the existing delayed-ACK/Stop facts unchanged: they remain an
+        // exact candidate for the later recovery owner to refuse or requeue.
+        const capturedAcceptedSteer = capturePostTerminalAcceptedSteerStatements(sql);
+        const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
+        const capturedAcceptedSteerLayer = Layer.fresh(
+          OrchestrationProjectionSnapshotQueryLive,
+        ).pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(SqlClient.SqlClient, capturedAcceptedSteer.sql),
+              Layer.succeed(RepositoryIdentityResolver, repositoryIdentityResolver),
+            ),
+          ),
+        );
+        const terminalCandidates = yield* Effect.gen(function* () {
+          const capturedSnapshotQuery = yield* ProjectionSnapshotQuery;
+          return yield* capturedSnapshotQuery.getPostTerminalStaleSteerCandidates([threadId]);
+        }).pipe(Effect.provide(capturedAcceptedSteerLayer));
+        assert.deepStrictEqual(terminalCandidates, [
+          {
+            _tag: "accepted",
+            threadId,
+            eventSequence: acceptedEvent.sequence,
+            intentSequence: intent.sequence,
+            intentCreatedAt,
+            activityId,
+            acceptedTurnId: turnId,
+            clientCorrelationId,
+            messageId,
+            acceptedAt,
+          },
+        ]);
+        assert.lengthOf(capturedAcceptedSteer.statements, 1);
+        const [candidateQuery, candidateParameters] = capturedAcceptedSteer.statements[0]!;
+        const candidatePlan = yield* sql.unsafe<{ readonly detail: string }>(
+          `EXPLAIN QUERY PLAN ${candidateQuery}`,
+          candidateParameters,
+        );
+        const candidatePlanText = candidatePlan.map((row) => row.detail).join("\n");
+        const processingRanges = candidatePlan.flatMap((row, index) =>
+          row.detail.includes(
+            "SEARCH processing USING INDEX idx_projection_thread_activities_thread_turn_kind_created_id",
+          )
+            ? [index]
+            : [],
+        );
+        const exactEventProbes = candidatePlan.flatMap((row, index) =>
+          row.detail.includes("SEARCH processing_event USING INDEX idx_orch_events_command_id")
+            ? [index]
+            : [],
+        );
+        assert.lengthOf(
+          processingRanges,
+          2,
+          `accepted recovery must first select each exact thread/turn activity range:\n${candidatePlanText}`,
+        );
+        assert.lengthOf(
+          exactEventProbes,
+          2,
+          `accepted recovery must authenticate each activity through its command identity:\n${candidatePlanText}`,
+        );
+        for (let index = 0; index < processingRanges.length; index += 1) {
+          assert.isAbove(
+            exactEventProbes[index]!,
+            processingRanges[index]!,
+            `accepted recovery scanned events before selecting the processing activity:\n${candidatePlanText}`,
+          );
+        }
+        assert.notInclude(candidatePlanText, "idx_orch_events_stream_sequence");
+        assert.isFalse(
+          candidatePlan.some((row) => /^SCAN processing_event(?:\s|$)/u.test(row.detail)),
+          `accepted recovery must not scan the orchestration event journal:\n${candidatePlanText}`,
+        );
+
         const terminalLookupStartedAt = performance.now();
         const terminalEvidence = yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
           exactAcceptedBarrier: {

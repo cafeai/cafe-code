@@ -1473,6 +1473,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
    * correlation must also carry the exact MessageId. That distinction keeps a
    * provider-authored partial observation from destroying Cafe's only durable
    * recovery candidate. Trusted recovered evidence may settle it directly.
+   *
+   * Both processing witnesses must start from the selected thread/turn activity
+   * range, then authenticate each candidate through its exact command-id index.
+   * An ordinary inner join lets SQLite reverse that order and walk the mature
+   * thread's entire event stream before applying the activity predicates. Since
+   * the native SQLite call is synchronous, that plan can starve HTTP readiness
+   * and WebSocket heartbeats even though all ownership predicates are correct.
+   * CROSS JOIN fixes the loop order; the existing indexes fix the two admitted
+   * lookup shapes. Do not replace either with a stream scan or drop any of the
+   * provenance predicates, including the deliberately different pruning rule.
    */
   const findPostTerminalAcceptedSteerCandidateRow = SqlSchema.findOne({
     Request: CodexSteerAcceptedBarrierCandidateLookupInput,
@@ -1540,7 +1550,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             EXISTS (
               SELECT 1
               FROM projection_thread_activities AS processing
-              INNER JOIN orchestration_events AS processing_event
+                INDEXED BY idx_projection_thread_activities_thread_turn_kind_created_id
+              CROSS JOIN orchestration_events AS processing_event
+                INDEXED BY idx_orch_events_command_id
                 ON processing_event.command_id =
                   'provider:codex:' || processing.thread_id || ':' ||
                   processing.activity_id || ':thread-activity-append:' ||
@@ -1592,7 +1604,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             EXISTS (
               SELECT 1
               FROM projection_thread_activities AS processing
-              INNER JOIN orchestration_events AS processing_event
+                INDEXED BY idx_projection_thread_activities_thread_turn_kind_created_id
+              CROSS JOIN orchestration_events AS processing_event
+                INDEXED BY idx_orch_events_command_id
                 ON processing_event.command_id =
                   'provider:codex:' || processing.thread_id || ':' ||
                   processing.activity_id || ':thread-activity-append:' ||
