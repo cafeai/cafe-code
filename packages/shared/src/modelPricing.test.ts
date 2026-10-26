@@ -109,6 +109,7 @@ describe("resolveModelRate", () => {
 
   it.each([
     ["gpt-6.1-sol", { input: 2, cachedInput: 0.1, cacheWrite: 2.5, output: 10 }],
+    ["gpt-6.1-terra", { input: 1, cachedInput: 0.05, cacheWrite: 1.25, output: 5 }],
     ["gpt-6-sol", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
     ["gpt-6-luna", { input: 0.1, cachedInput: 0.01, cacheWrite: 0.125, output: 0.5 }],
     ["gpt-5.6-sol", { input: 4, cachedInput: 0.4, cacheWrite: 5, output: 20 }],
@@ -338,5 +339,24 @@ describe("rollUpCost", () => {
     expect(current.unpricedTokens).toBe(0);
     expect(previous.cost - current.cost).toBeCloseTo(0.06, 6);
     expect(current.cacheSavings - previous.cacheSavings).toBeCloseTo(0.06, 6);
+  });
+
+  it("estimates Terra 6.1 usage at its own standard rate without inferring request tiers", () => {
+    // A lifetime aggregate cannot identify an individual long-context request,
+    // priority service tier or 12-hour cache write.
+    const counts = {
+      inputTokens: 1_000_000,
+      cachedInputTokens: 600_000,
+      cacheWriteInputTokens: 300_000,
+      outputTokens: 100_000,
+    };
+    const current = rollUpCost([{ ...counts, model: "gpt-6.1-terra" }]);
+    const previous = rollUpCost([{ ...counts, model: "gpt-5.6-terra" }]);
+    // 100k fresh + 600k reads + 300k writes + 100k output.
+    expect(current.cost).toBeCloseTo(0.1 + 0.03 + 0.375 + 0.5, 6);
+    expect(current.cacheSavings).toBeCloseTo(0.57 - 0.075, 6);
+    expect(current.pricedTokens).toBe(1_100_000);
+    expect(current.unpricedTokens).toBe(0);
+    expect(previous.cost - current.cost).toBeCloseTo(1.265, 6);
   });
 });

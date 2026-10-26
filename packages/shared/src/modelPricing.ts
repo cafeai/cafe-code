@@ -92,6 +92,11 @@ const BUNDLED_RATES: ReadonlyArray<readonly [prefix: string, rate: ModelRate]> =
   // Keep its exact family separate from older Sol and the generic GPT fallback;
   // service-tier and per-request long-context premiums remain excluded above.
   ["gpt-6.1-sol", { input: 2, cachedInput: 0.1, cacheWrite: 2.5, output: 10 }],
+  // Verified 2026-10-27: https://developers.openai.com/api/docs/models/gpt-6.1-terra
+  // This is the standard short-context rate with 30-minute cache writes.
+  // Individual long-context requests, service tiers and 12-hour cache writes
+  // cannot be reconstructed from aggregate usage and are not included here.
+  ["gpt-6.1-terra", { input: 1, cachedInput: 0.05, cacheWrite: 1.25, output: 5 }],
   // Released 2026-09-22; https://developers.openai.com/api/docs/pricing.
   // Keep distinct prefixes so new Sol/Luna usage cannot inherit GPT-5 rates.
   ["gpt-6-sol", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],

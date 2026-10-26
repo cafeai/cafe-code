@@ -949,6 +949,35 @@ const SOL_61_CODEX_MODEL: ServerProviderModel = {
     inputModalities: ["text", "image"],
   },
 };
+// The current Codex host advertises Terra's Low-through-Ultra controls.
+// Its account-specific default and paid tiers are not established by the API
+// model page: keep the effort unset and routing Standard until this particular
+// provider supplies a live catalogue. Live metadata remains authoritative.
+const TERRA_61_CODEX_MODEL: ServerProviderModel = {
+  slug: "gpt-6.1-terra",
+  name: "GPT-6.1-Terra",
+  isCustom: false,
+  capabilities: createModelCapabilities({
+    optionDescriptors: [
+      {
+        id: "reasoningEffort",
+        label: "Reasoning",
+        type: "select",
+        options: CODEX_ULTRA_REASONING_EFFORTS.map((effort) => ({
+          id: effort,
+          label: reasoningEffortLabel(effort),
+        })),
+      },
+      {
+        id: "serviceTier",
+        label: "Service tier",
+        type: "select",
+        currentValue: "default",
+        options: [{ id: "default", label: "Standard", isDefault: true }],
+      },
+    ],
+  }),
+};
 // Codex's published model guide (verified 2026-09-23) lists Sol's CLI efforts
 // through Ultra with Medium as default, and Luna through Max only:
 // https://learn.chatgpt.com/docs/models
@@ -978,6 +1007,7 @@ const LUNA_CODEX_MODEL: ServerProviderModel = {
 const KNOWN_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new Map([
   [ASTRA_CODEX_MODEL.slug, { ...ASTRA_CODEX_MODEL, isCustom: true }],
   [SOL_61_CODEX_MODEL.slug, { ...SOL_61_CODEX_MODEL, isCustom: true }],
+  [TERRA_61_CODEX_MODEL.slug, { ...TERRA_61_CODEX_MODEL, isCustom: true }],
   [SOL_CODEX_MODEL.slug, { ...SOL_CODEX_MODEL, isCustom: true }],
   [LUNA_CODEX_MODEL.slug, { ...LUNA_CODEX_MODEL, isCustom: true }],
 ]);
@@ -988,6 +1018,7 @@ const KNOWN_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new 
 const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
   ASTRA_CODEX_MODEL,
   SOL_61_CODEX_MODEL,
+  TERRA_61_CODEX_MODEL,
   SOL_CODEX_MODEL,
   LUNA_CODEX_MODEL,
   {

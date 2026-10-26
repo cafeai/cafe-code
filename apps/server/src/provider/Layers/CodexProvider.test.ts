@@ -771,6 +771,99 @@ describe("Codex picker model/list refresh", () => {
     },
   );
 
+  it("offers Terra without inventing a default effort or paid tier", () => {
+    const slug = "gpt-6.1-terra";
+    const models = fallbackCodexModelsFromSettings(decodeCodexSettings({ customModels: [slug] }));
+    const matching = models.filter((model) => model.slug === slug);
+    expect(matching).toHaveLength(1);
+    const row = matching[0]!;
+    expect(row).toMatchObject({ slug, name: "GPT-6.1-Terra", isCustom: false });
+    const descriptors = row.capabilities?.optionDescriptors ?? [];
+    expect(descriptors).toMatchObject([
+      {
+        id: "reasoningEffort",
+        options: ["low", "medium", "high", "xhigh", "max", "ultra"].map((id) => ({ id })),
+      },
+      {
+        id: "serviceTier",
+        currentValue: "default",
+        options: [{ id: "default", isDefault: true }],
+      },
+    ]);
+    const reasoning = descriptors.find((option) => option.id === "reasoningEffort");
+    expect(reasoning?.currentValue).toBeUndefined();
+    expect(
+      reasoning?.type === "select" && reasoning.options.some((option) => option.isDefault),
+    ).toBe(false);
+    expect(
+      buildProviderOptionSelectionsFromDescriptors(
+        getProviderOptionDescriptors({
+          caps: row.capabilities!,
+        }),
+      ),
+    ).toEqual([{ id: "serviceTier", value: "default" }]);
+    const retained = getProviderOptionDescriptors({
+      caps: row.capabilities!,
+      selections: [{ id: "serviceTier", value: "priority" }],
+    });
+    expect(retained.find((option) => option.id === "serviceTier")).toMatchObject({
+      currentValue: "priority",
+      options: [{ id: "default" }],
+    });
+    expect(buildProviderOptionSelectionsFromDescriptors(retained)).toContainEqual({
+      id: "serviceTier",
+      value: "priority",
+    });
+
+    // Account-native rows, including their own narrower options and tiers,
+    // replace the static fallback; an explicit custom row remains conservative.
+    const live = { slug, name: "Account Terra", isCustom: false, capabilities: null };
+    expect(finalizeCodexModelListRefresh([live], [slug])).toEqual([live]);
+    const other = { ...live, slug: "other" };
+    expect(finalizeCodexModelListRefresh([other], [])).toEqual([other]);
+    expect(finalizeCodexModelListRefresh([other], [slug])?.[1]).toEqual({
+      ...row,
+      isCustom: true,
+    });
+  });
+
+  it("preserves Terra's account-native options when they differ from fallback", async () => {
+    const client = makeModelListClient(() =>
+      Effect.succeed({
+        data: [
+          {
+            ...makeModel("gpt-6.1-terra"),
+            displayName: "GPT-6.1-Terra",
+            inputModalities: ["text"],
+            supportedReasoningEfforts: (["medium", "high"] as const).map((reasoningEffort) => ({
+              reasoningEffort,
+              description: reasoningEffort,
+            })),
+            serviceTiers: [{ id: "priority", name: "Fast", description: "Priority" }],
+          },
+        ],
+      }),
+    );
+    const discovered = await Effect.runPromise(requestAllCodexModelsWithClient(client));
+    const models = finalizeCodexModelListRefresh(discovered, ["gpt-6.1-terra"]);
+    expect(models).toEqual(discovered);
+    expect(models?.[0]?.capabilities).toMatchObject({
+      inputModalities: ["text"],
+      optionDescriptors: [
+        {
+          id: "reasoningEffort",
+          currentValue: "medium",
+          options: [{ id: "medium", isDefault: true }, { id: "high" }],
+        },
+        {
+          id: "serviceTier",
+          currentValue: "default",
+          options: [{ id: "default" }, { id: "priority" }],
+        },
+      ],
+    });
+  });
+
   it("keeps live Sol 6.1 defaults and narrower backend controls authoritative", async () => {
     const efforts = ["low", "medium", "high", "xhigh", "max"];
     const client = makeModelListClient(() =>
