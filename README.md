@@ -28,6 +28,11 @@ artifacts are unsigned; Windows may display a publisher or SmartScreen warning.
 Each release includes `SHA256SUMS.txt`. Other Linux formats and architectures
 are available only through local builds, not the published release set.
 
+Linux x64 users can also use the [user installer](docs/linux-packaging.md#install-or-update-with-cafe-code-up)
+to download and verify the latest stable AppImage, add a desktop entry, and
+install a `cafe-code` launcher. Run `cafe-code up` for subsequent updates.
+It installs under your home directory without `sudo`, Node or a source build.
+
 Packaged apps check for updates, but downloading and installing require your
 action. Windows and supported AppImage builds offer in-app installation.
 macOS releases through **0.2.0** require a manual DMG upgrade; current source

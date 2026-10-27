@@ -88,8 +88,8 @@ export default defineConfig([
     dts: false,
     checks: { pluginTimings: false },
   })),
-  // Glide is explicitly configured as its own stdio server. The kernel
-  // remains a separate disposable process; neither entry starts the Cafe app.
+  // The historical Glide MCP name is an authenticated bridge alias. The
+  // kernel remains a separate disposable process owned by the chat broker.
   ...Object.entries({
     "glide-mcp": "src/glide/entry.ts",
     "glide-worker": "src/glide/worker.ts",

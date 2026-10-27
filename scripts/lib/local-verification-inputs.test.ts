@@ -69,6 +69,8 @@ const fixtureGitMetadata = vi.hoisted(() => ({
         developer: string;
         corepack: string;
         git: string;
+        selection: string;
+        selectionResult: "owned" | "unowned" | "regular" | "missing";
         result: "owned" | "empty" | "relative" | "outside" | "missing";
         invocations: number;
         closed: number;
@@ -256,6 +258,31 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       path: Parameters<typeof native.lstat>[0],
       options: Parameters<typeof native.lstat>[1],
     ) {
+      const owner = fixtureGitMetadata.owner;
+      if (
+        process.platform === "darwin" &&
+        path === "/var/db/xcode_select_link" &&
+        owner &&
+        !owner.retired &&
+        !owner.signal.aborted &&
+        owner.selection !== ""
+      ) {
+        // This exact metadata-only fixture does not require or alter the
+        // workstation's global Xcode selection. Use its real private symlink
+        // and native bigint/type/change metadata, projecting only the modeled
+        // root uid. Explicit negatives still exercise the production uid/type
+        // refusals. All tool byte reads and held-descriptor fences stay native.
+        const selected =
+          owner.selectionResult === "regular"
+            ? owner.git
+            : owner.selectionResult === "missing"
+              ? `${owner.selection}-missing`
+              : owner.selection;
+        const stat = await native.lstat(selected, options);
+        return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, {
+          uid: owner.selectionResult === "unowned" ? 1n : 0n,
+        });
+      }
       if (path !== "/dev/null" || nullDevice.mode === "native") return native.lstat(path, options);
       nullDevice.calls += 1;
       if (nullDevice.mode === "regular" || nullDevice.mode === "symlink")
@@ -286,6 +313,23 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         });
       }
       return stat;
+    },
+    readlink(
+      path: Parameters<typeof native.readlink>[0],
+      options: Parameters<typeof native.readlink>[1],
+    ) {
+      const owner = fixtureGitMetadata.owner;
+      return native.readlink(
+        process.platform === "darwin" &&
+          path === "/var/db/xcode_select_link" &&
+          owner &&
+          !owner.retired &&
+          !owner.signal.aborted &&
+          owner.selection !== ""
+          ? owner.selection
+          : path,
+        options,
+      );
     },
   };
 });
@@ -461,6 +505,8 @@ async function fixture(context: TestContext, afterClosed?: () => void) {
     developer: "",
     corepack: "",
     git: "",
+    selection: "",
+    selectionResult: "owned",
     result: "owned",
     invocations: 0,
     closed: 0,
@@ -592,6 +638,9 @@ async function fixture(context: TestContext, afterClosed?: () => void) {
     metadataOwner.developer = developer;
     metadataOwner.corepack = corepack;
     metadataOwner.git = git;
+    const selection = join(root, "tools/xcode-select-link");
+    await ownPreparation(() => symlink(developer, selection));
+    metadataOwner.selection = selection;
   }
   await put("scripts/fixtures/local-verification-git.config", localVerificationGitConfiguration);
   await put("scripts/fixtures/local-verification-git-template/.gitkeep", "");
@@ -669,6 +718,10 @@ async function fixture(context: TestContext, afterClosed?: () => void) {
     setMetadataResult(result: typeof metadataOwner.result) {
       assertActive();
       metadataOwner.result = result;
+    },
+    setSelectionResult(result: typeof metadataOwner.selectionResult) {
+      assertActive();
+      metadataOwner.selectionResult = result;
     },
     snapshot: () => fingerprint(task, context.signal),
   };
@@ -1095,6 +1148,23 @@ describe("local verification input evidence", () => {
         expect(f.store.read).not.toHaveBeenCalled();
         expect(f.store.publish).not.toHaveBeenCalled();
       }
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "refuses missing, unowned and non-symlink synthetic developer selections before metadata lookup",
+    async (context) => {
+      const f = await fixture(context);
+      for (const result of ["missing", "unowned", "regular"] as const) {
+        f.setSelectionResult(result);
+        expect(await f.snapshot()).toBeUndefined();
+        expect(f.refusals.at(-1)?.reason).toBe("tools");
+        expect(f.metadataObservation()).toEqual({ invocations: 0, closed: 0 });
+        expect(f.store.authenticateEnvironment).not.toHaveBeenCalled();
+      }
+      f.setSelectionResult("owned");
+      expect(await f.snapshot(), encode(f.refusals)).toBeDefined();
+      expect(f.metadataObservation()).toEqual({ invocations: 1, closed: 1 });
     },
   );
 

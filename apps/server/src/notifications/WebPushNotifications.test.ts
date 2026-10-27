@@ -14,7 +14,7 @@ import * as Stream from "effect/Stream";
 import type * as Scope from "effect/Scope";
 import { describe, expect, it, vi } from "vitest";
 import { AuthSessionId } from "@cafecode/contracts/auth";
-import { ThreadId } from "@cafecode/contracts";
+import { EventId, ThreadId } from "@cafecode/contracts";
 import * as privateState from "./privateState.ts";
 import {
   SessionCredentialService,
@@ -46,8 +46,15 @@ const decodeJsonText = Schema.decodeUnknownSync(
   ),
 );
 const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const decodePushPayload = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ body: Schema.String, threadPath: Schema.String })),
+);
 
-const send = vi.hoisted(() => vi.fn(async () => ({ statusCode: 201 })));
+const send = vi.hoisted(() =>
+  vi.fn(async (_subscription: unknown, _payload: string, _options: unknown) => ({
+    statusCode: 201,
+  })),
+);
 const generateVAPIDKeys = vi.hoisted(() =>
   vi.fn(() => ({ publicKey: "public", privateKey: "private" })),
 );
@@ -77,6 +84,7 @@ async function fixture<E>(
       stateDir?: string,
     ) => Effect.Effect<WebPushNotificationsShape, WebPushNotificationsError>;
     complete: () => Effect.Effect<void>;
+    askForInput: (eventId?: string) => Effect.Effect<void>;
     revoke: () => Effect.Effect<void>;
     reactorStarts: () => { sessions: number; provider: number };
   }) => Effect.Effect<void, E, Scope.Scope>,
@@ -90,8 +98,9 @@ async function fixture<E>(
         Effect.gen(function* () {
           const changes = yield* PubSub.unbounded<SessionCredentialChange>();
           const completions = yield* PubSub.unbounded<{
-            type: "turn.completed";
+            type: "turn.completed" | "user-input.requested";
             threadId: ThreadId;
+            eventId?: EventId;
           }>();
           const active = new Set([owner.sessionId]);
           const reactorStarts = { sessions: 0, provider: 0 };
@@ -142,6 +151,12 @@ async function fixture<E>(
               PubSub.publish(completions, {
                 type: "turn.completed" as const,
                 threadId: ThreadId.make("fixture"),
+              }).pipe(Effect.asVoid),
+            askForInput: (eventId = "input-request-one") =>
+              PubSub.publish(completions, {
+                type: "user-input.requested",
+                threadId: ThreadId.make("fixture"),
+                eventId: EventId.make(eventId),
               }).pipe(Effect.asVoid),
             revoke: () =>
               withSessionAdmission(Effect.sync(() => active.clear())).pipe(
@@ -211,6 +226,49 @@ const assertUnavailable = (
   );
 
 describe("session-owned Web Push", () => {
+  it("persists independent input opt-in and suppresses replay without changing legacy completion delivery", async () => {
+    await fixture(({ service, restart, complete, askForInput }) =>
+      Effect.gen(function* () {
+        yield* service.getPublicKey();
+        yield* service.saveSubscription({ owner, subscription });
+        const inputSubscription = {
+          ...subscription,
+          endpoint: "https://push.example/input-only",
+          notifyOnCompletion: false,
+          notifyOnUserInput: true,
+          uiLocale: "ja" as const,
+        };
+        yield* service.saveSubscription({ owner, subscription: inputSubscription });
+        const restarted = yield* restart();
+        yield* restarted.start();
+        yield* Effect.yieldNow;
+        yield* askForInput();
+        yield* Effect.promise(() => vi.waitFor(() => expect(send).toHaveBeenCalledOnce()));
+        expect(send.mock.calls[0]?.[0]).toEqual({
+          endpoint: inputSubscription.endpoint,
+          keys: subscription.keys,
+        });
+        expect(decodePushPayload(send.mock.calls[0]?.[1])).toMatchObject({
+          body: "入力を待っています",
+          threadPath: "/fixture/fixture",
+        });
+        // Completion is a serial-consumer barrier after the duplicate input:
+        // by its observed delivery, the duplicate has been fully processed.
+        yield* askForInput();
+        yield* complete();
+        yield* Effect.promise(() => vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2)));
+        expect(send.mock.calls[1]?.[0]).toEqual(subscription);
+        expect(decodePushPayload(send.mock.calls[1]?.[1]).body).toBe("Finished running");
+        yield* askForInput("input-request-two");
+        yield* Effect.promise(() => vi.waitFor(() => expect(send).toHaveBeenCalledTimes(3)));
+        expect(send.mock.calls[2]?.[0]).toEqual({
+          endpoint: inputSubscription.endpoint,
+          keys: subscription.keys,
+        });
+      }),
+    );
+  });
+
   it("refuses oversized UTF-8 state before replacing the last restartable identity", async () => {
     await fixture(({ root, service, restart }) =>
       Effect.gen(function* () {

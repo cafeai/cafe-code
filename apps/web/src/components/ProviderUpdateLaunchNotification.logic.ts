@@ -215,9 +215,7 @@ export function getProviderUpdateInitialToastView(input: {
     description:
       input.oneClickProviders.length > 0
         ? uiText("Install the update now or review provider settings.")
-        : uiText("{providers} can be updated from provider settings.", {
-            providers: formatProviderList(input.updateProviders),
-          }),
+        : uiText("Review provider settings for manual update instructions."),
   };
 }
 

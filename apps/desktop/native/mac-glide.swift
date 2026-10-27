@@ -820,6 +820,7 @@ private final class GlideService {
   private var snapshots: [String: Snapshot] = [:]
   private var sessionIDs: Set<String> = []
   private var currentSession = "standalone"
+  private var visibilityVersion = false
   private var currentWindowID: CGWindowID?
   private var armedSession: String?
   private var menuGuard: GlideMenuGuard?
@@ -1471,9 +1472,9 @@ private final class GlideService {
     guard proofs.contains(where: { $0.native.id == server.id }), bounds.width <= 100_000, bounds.height <= 100_000 else { throw ObservationChanged() }
     return (proofs, bounds)
   }
-  private func capture(_ app: NSRunningApplication, window axWindow: AXUIElement?, server: NativeWindow, bounds: CGRect, captureWindow: SCWindow?, before stop: UInt64) async throws -> (String?, Int, Int) {
+  private func capture(_ app: NSRunningApplication, window axWindow: AXUIElement?, server: NativeWindow, bounds: CGRect, captureWindow: SCWindow?, before stop: UInt64) async throws -> (String?, Int, Int, String?) {
     let defaultWidth = max(1, Int(bounds.width)), defaultHeight = max(1, Int(bounds.height))
-    guard CGPreflightScreenCaptureAccess() else { return (nil, defaultWidth, defaultHeight) }
+    guard CGPreflightScreenCaptureAccess() else { return (nil, defaultWidth, defaultHeight, nil) }
     let window: SCWindow
     if let captureWindow { window = captureWindow }
     else { window = try await shareableWindow(app, id: server.id) }
@@ -1521,7 +1522,22 @@ private final class GlideService {
     }
     guard matchingWindow(try exactWindow(app, id: server.id), server),
       let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]), png.count <= 8 * 1024 * 1024 else { throw Failure("Screenshot changed ownership or exceeded its byte limit.") }
-    return ("data:image/png;base64," + png.base64EncodedString(), image.width, image.height)
+    // Derive the menu preview from this exact normalized capture. Opening the
+    // tray never asks ScreenCaptureKit for another image or reads another app.
+    var preview: String? = nil
+    if visibilityVersion {
+    let previewScale = min(1, min(240 / Double(image.width), 150 / Double(image.height)))
+    let pw = max(1, Int(Double(image.width) * previewScale)), ph = max(1, Int(Double(image.height) * previewScale))
+    if let space = CGColorSpace(name: CGColorSpace.sRGB),
+      let context = CGContext(data: nil, width: pw, height: ph, bitsPerComponent: 8, bytesPerRow: pw * 4, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+      context.interpolationQuality = .medium
+      context.draw(image, in: CGRect(x: 0, y: 0, width: pw, height: ph))
+      if let small = context.makeImage(), let jpeg = NSBitmapImageRep(cgImage: small).representation(using: .jpeg, properties: [.compressionFactor: 0.65]), jpeg.count <= 70 * 1024 {
+        preview = "data:image/jpeg;base64," + jpeg.base64EncodedString()
+      }
+    }
+    }
+    return ("data:image/png;base64," + png.base64EncodedString(), image.width, image.height, preview)
   }
 
   private func observationWindow(_ app: NSRunningApplication, includeScreenshot: Bool, stop: UInt64) async throws -> (AXUIElement?, NativeWindow, CGRect, SCWindow?) {
@@ -1625,11 +1641,11 @@ private final class GlideService {
       if depth < 32 { for child in children(element).reversed() { stack.append((child, depth + 1)) } }
     }
     if !stack.isEmpty { lines.append("[Accessibility tree truncated]") }
-    let screenshot: String?, width: Int, height: Int
+    let screenshot: String?, width: Int, height: Int, preview: String?
     if includeScreenshot {
       diagnostic("state.capture")
-      (screenshot, width, height) = try await capture(app, window: window, server: server, bounds: bounds, captureWindow: captureWindow, before: stop)
-    } else { (screenshot, width, height) = (nil, max(1, Int(bounds.width)), max(1, Int(bounds.height))) }
+      (screenshot, width, height, preview) = try await capture(app, window: window, server: server, bounds: bounds, captureWindow: captureWindow, before: stop)
+    } else { (screenshot, width, height, preview) = (nil, max(1, Int(bounds.width)), max(1, Int(bounds.height)), nil) }
     diagnostic("state.commit")
     guard valid(app, birth: birth) else { throw Failure("Application changed during observation. Request fresh state.") }
     guard matchingWindow(try exactWindow(app, id: id), server) else { throw ObservationChanged() }
@@ -1671,7 +1687,15 @@ private final class GlideService {
     if let menu = observedMenu { header += "\nActive menu: pid=\(menu.recipient.pid) window=\(menu.windowID) bounds=[\(menu.bounds.minX),\(menu.bounds.minY),\(menu.bounds.width),\(menu.bounds.height)]; AX bounds=[\(menu.axBounds.minX),\(menu.axBounds.minY),\(menu.axBounds.width),\(menu.axBounds.height)]." }
     if includeScreenshot && screenshot == nil { rendered = "[Screenshot unavailable: grant Screen Recording permission to the launching host.]\n" + rendered }
     if window == nil { rendered = "[Accessibility unavailable for this exact native window. No element indices were issued. Use getScreenshot and observed window coordinates; AX-only actions are unavailable.]\n" + rendered }
-    return ["app": path, "text": header + "\n" + rendered, "accessibilityAvailable": window != nil, "screenshot": screenshot.map { ["url": $0] } as Any? ?? NSNull(), "revision": revision, "pid": Int(app.processIdentifier), "windowId": Int(id), "bounds": ["x":bounds.minX,"y":bounds.minY,"width":bounds.width,"height":bounds.height], "screenshotWidth":width,"screenshotHeight":height,"capturedAt":ISO8601DateFormatter().string(from: Date())]
+    var result: [String: Any] = ["app": path, "text": header + "\n" + rendered, "accessibilityAvailable": window != nil, "screenshot": screenshot.map { ["url": $0] } as Any? ?? NSNull(), "revision": revision, "pid": Int(app.processIdentifier), "windowId": Int(id), "bounds": ["x":bounds.minX,"y":bounds.minY,"width":bounds.width,"height":bounds.height], "screenshotWidth":width,"screenshotHeight":height,"capturedAt":ISO8601DateFormatter().string(from: Date())]
+    // A source rebuild can coexist with an older running Cafe owner. Its
+    // strict observation decoder must retain the original wire shape.
+    if visibilityVersion {
+      result["windowTitle"] = String(server.title.prefix(4096))
+      result["processBirth"] = "\(birth.seconds):\(birth.microseconds)"
+      if let preview { result["screenshotPreview"] = preview }
+    }
+    return result
   }
 
   private func paste(_ input: [String: Any], _ app: NSRunningApplication) async throws {
@@ -2057,7 +2081,8 @@ private final class GlideService {
 
   private func execute(_ request: [String: Any]) async throws -> Any {
     diagnostic("native.dispatch")
-    guard Set(request.keys).isSubset(of: ["id", "method", "input", "timeout_ms", "sessionId", "receiptVersion"]), request["receiptVersion"] == nil || integer(request["receiptVersion"]) == 1, let method = request["method"] as? String, let input = request["input"] as? [String: Any], let timeout = integer(request["timeout_ms"]), timeout > 0, timeout <= 60_000 else { throw Failure("Invalid native request.") }
+    guard Set(request.keys).isSubset(of: ["id", "method", "input", "timeout_ms", "sessionId", "receiptVersion", "visibilityVersion"]), request["receiptVersion"] == nil || integer(request["receiptVersion"]) == 1, let method = request["method"] as? String, request["visibilityVersion"] == nil || (integer(request["visibilityVersion"]) == 1 && method == "get_app_state"), let input = request["input"] as? [String: Any], let timeout = integer(request["timeout_ms"]), timeout > 0, timeout <= 60_000 else { throw Failure("Invalid native request.") }
+    visibilityVersion = integer(request["visibilityVersion"]) == 1
     if let rawSession = request["sessionId"] {
       guard let value = rawSession as? String, value.count == 36, let uuid = UUID(uuidString: value) else { throw Failure("Invalid native session identity.") }
       currentSession = uuid.uuidString
@@ -2337,6 +2362,7 @@ private func retireGlideConnection(_ service: GlideService, _ authority: Connect
 private struct Main {
   @MainActor static func main() {
     let arguments = Array(CommandLine.arguments.dropFirst())
+    if arguments == ["--tray"] { runGlideTray(); return }
     if arguments.count == 2, arguments[0] == "--resolve-app" {
       NSApplication.shared.setActivationPolicy(.prohibited)
       guard let installed = try? installedApplication(arguments[1]),

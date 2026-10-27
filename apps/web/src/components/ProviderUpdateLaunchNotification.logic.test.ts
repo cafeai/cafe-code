@@ -272,7 +272,7 @@ describe("provider update launch notification logic", () => {
     });
   });
 
-  it("describes settings-only updates without one-click support", () => {
+  it("points to manual instructions when an update cannot be installed from Cafe", () => {
     const view = getProviderUpdateInitialToastView({
       updateProviders: [
         updateCandidate({ driver: driver("codex"), canUpdate: false }),
@@ -281,7 +281,7 @@ describe("provider update launch notification logic", () => {
       oneClickProviders: [],
     });
 
-    expect(view.description).toBe("Codex and Claude can be updated from provider settings.");
+    expect(view.description).toBe("Review provider settings for manual update instructions.");
   });
 
   it("uses server update state for running progress", () => {

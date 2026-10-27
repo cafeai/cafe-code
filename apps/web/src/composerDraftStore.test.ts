@@ -238,7 +238,7 @@ describe("composer file and queue edit durability", () => {
 
   it("persists an empty draft's computer-use choice without giving it to another draft or environment", () => {
     const store = useComposerDraftStore.getState();
-    store.setComputerUseEnabled(ref, true);
+    store.setComputerUseEnabled(ref, true, "7");
     store.clearComposerContent(ref);
     const options = useComposerDraftStore.persist.getOptions();
     const persisted = options.partialize!(useComposerDraftStore.getState());
@@ -246,6 +246,7 @@ describe("composer file and queue edit durability", () => {
       options.merge!(JSON.parse(JSON.stringify(persisted)), useComposerDraftStore.getState()),
     );
     expect(store.getComposerDraft(ref)?.computerUseEnabled).toBe(true);
+    expect(store.getComposerDraft(ref)?.computerUseRevision).toBe("7");
     expect(
       store.getComposerDraft(
         scopeThreadRef(TEST_ENVIRONMENT_ID, ThreadId.make("other-computer-draft")),
@@ -257,6 +258,7 @@ describe("composer file and queue edit durability", () => {
     ).not.toBe(true);
     store.setComputerUseEnabled(ref, false);
     expect(store.getComposerDraft(ref)?.computerUseEnabled).toBe(false);
+    expect(store.getComposerDraft(ref)?.computerUseRevision).toBeUndefined();
   });
 
   it.each([false, true])("round-trips an empty chat's %s web preference", (enabled) => {

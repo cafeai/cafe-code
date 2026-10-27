@@ -2,7 +2,7 @@ import "../../index.css";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
-import { ClaudeCommandWorkEntry, ClaudeSummaryWorkEntry } from "./ProviderOperationWorkEntry";
+import { ClaudeCommandWorkEntry, ProviderSummaryWorkEntry } from "./ProviderOperationWorkEntry";
 import type { ClaudeCommandInspection } from "./providerOperationVisibility";
 
 async function waitForExpandedPanelGeometry(row: HTMLElement) {
@@ -167,8 +167,9 @@ describe("inspectable received Claude operation text", () => {
   it("always shows received public summary text in full and updates it in place", async () => {
     mounted = await render(
       <div style={{ width: 430 }}>
-        <ClaudeSummaryWorkEntry
+        <ProviderSummaryWorkEntry
           summary={{
+            provider: "claudeAgent",
             text: "Checking the repository before editing.",
             truncated: false,
             status: "inProgress",
@@ -182,11 +183,12 @@ describe("inspectable received Claude operation text", () => {
       .toBeVisible();
     await expect.element(page.getByText("Updating…", { exact: true })).toBeVisible();
     // No disclosure: the summary is the row's content, not a hidden duplicate.
-    expect(document.querySelector("[data-claude-public-summary] button")).toBeNull();
+    expect(document.querySelector("[data-provider-public-summary] button")).toBeNull();
     await mounted.rerender(
       <div style={{ width: 430 }}>
-        <ClaudeSummaryWorkEntry
+        <ProviderSummaryWorkEntry
           summary={{
+            provider: "claudeAgent",
             text: "Checks complete.\nProceeding with the fix.",
             truncated: true,
             status: "completed",
@@ -209,6 +211,53 @@ describe("inspectable received Claude operation text", () => {
       await page.viewport(454, 900);
       await page.screenshot({
         path: `${screenshotDirectory}/summary-dark-430-130.png`,
+        fullPage: true,
+      });
+    }
+  });
+
+  it("labels OpenCode thinking separately and keeps an interrupted trace visibly partial", async () => {
+    mounted = await render(
+      <div style={{ width: 430 }}>
+        <ProviderSummaryWorkEntry
+          summary={{
+            provider: "opencode",
+            text: "The failing test mocks the clock.\nCheck the fixture first.",
+            truncated: true,
+            status: "failed",
+          }}
+        />
+      </div>,
+    );
+    await expect.element(page.getByText("OpenCode thinking", { exact: true })).toBeVisible();
+    expect(document.body.textContent).not.toContain("Claude summary");
+    await expect.element(page.getByText("Partial", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("Thinking truncated to the retained preview.", { exact: true }))
+      .toBeVisible();
+    expect(
+      document
+        .querySelector("[data-provider-public-summary]")
+        ?.getAttribute("data-provider-public-summary"),
+    ).toBe("opencode");
+    expect(document.querySelector("[data-summary-text]")?.textContent).toBe(
+      "The failing test mocks the clock.\nCheck the fixture first.",
+    );
+    // The trace is inert text: no disclosure, editor or action is rendered.
+    expect(document.querySelector("[data-provider-public-summary] button")).toBeNull();
+    const screenshotDirectory = import.meta.env.VITE_CLAUDE_OPERATION_SCREENSHOT_DIR;
+    if (typeof screenshotDirectory === "string" && screenshotDirectory.length > 0) {
+      document.documentElement.classList.remove("dark");
+      document.documentElement.style.fontSize = "80%";
+      await page.viewport(454, 600);
+      await page.screenshot({
+        path: `${screenshotDirectory}/opencode-thinking-light-430-80.png`,
+        fullPage: true,
+      });
+      document.documentElement.classList.add("dark");
+      document.documentElement.style.fontSize = "130%";
+      await page.screenshot({
+        path: `${screenshotDirectory}/opencode-thinking-dark-430-130.png`,
         fullPage: true,
       });
     }

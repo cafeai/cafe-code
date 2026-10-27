@@ -1,6 +1,7 @@
 import { act, useSyncExternalStore } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render } from "vitest-browser-react";
+import type { render } from "vitest-browser-react";
+import { ownNotificationFixture } from "./notificationFixture.test.fixture";
 import { EnvironmentId, ThreadId, TurnId, type ScopedThreadRef } from "@cafecode/contracts";
 import { getUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 
@@ -8,6 +9,7 @@ type FixtureThread = {
   readonly environmentId: EnvironmentId;
   readonly id: ThreadId;
   readonly title: string;
+  readonly hasPendingUserInput: boolean;
   readonly session: {
     readonly status: "running" | "ready";
     readonly activeTurnId: TurnId | null;
@@ -16,7 +18,7 @@ type FixtureThread = {
 
 const fixture = vi.hoisted(() => ({
   threads: [] as readonly FixtureThread[],
-  settings: { notificationsEnabled: true },
+  settings: { notificationsEnabled: true, userInputNotificationsEnabled: false },
   routeTarget: null as { readonly kind: "server"; readonly threadRef: ScopedThreadRef } | null,
   listeners: new Set<() => void>(),
   router: { navigate: vi.fn() },
@@ -30,6 +32,7 @@ const fixture = vi.hoisted(() => ({
     >(),
   notify: vi.fn(),
   notificationListener: vi.fn(),
+  clicks: new Set<(tag: string) => void>(),
 }));
 
 function useFixtureSnapshot<A>(read: () => A): A {
@@ -41,7 +44,7 @@ function useFixtureSnapshot<A>(read: () => A): A {
 
 // The component runs unchanged against synthetic shell/settings/router inputs.
 // Its real scheduled policy helper sees only this in-memory deferred API; the
-// browser Notification constructor is replaced before mount, never OS delivery.
+// native notification bridge is replaced before mount, never OS delivery.
 vi.mock("../environments/workspaceData", () => ({
   useWorkspaceSidebarThreads: () => useFixtureSnapshot(() => fixture.threads),
 }));
@@ -66,12 +69,14 @@ const turnId = TurnId.make("notification-turn-one");
 const laterTurnId = TurnId.make("notification-turn-two");
 const originalLocale = getUiLocale();
 let mounted: Awaited<ReturnType<typeof render>> | undefined;
+let owner: ReturnType<typeof ownNotificationFixture>;
 
 function runningThread(activeTurnId: TurnId = turnId): FixtureThread {
   return {
     environmentId,
     id: threadId,
     title: "Opaque thread 日本語 한국어 /{title}",
+    hasPendingUserInput: false,
     session: { status: "running", activeTurnId },
   };
 }
@@ -81,10 +86,12 @@ function settledThread(): FixtureThread {
 }
 
 async function publish(change: () => void) {
-  await act(async () => {
-    change();
-    for (const listener of fixture.listeners) listener();
-  });
+  await owner.run(() =>
+    act(async () => {
+      change();
+      for (const listener of fixture.listeners) listener();
+    }),
+  );
 }
 
 function pendingDecision() {
@@ -95,6 +102,7 @@ function pendingDecision() {
     resolve = complete;
   });
   fixture.policy.mockReturnValueOnce(promise);
+  owner.onRetire(() => resolve({ notify: false }));
   return {
     async finish(notify = true) {
       // Real promise resolution and React's settled commit boundary, not fake
@@ -107,10 +115,11 @@ function pendingDecision() {
   };
 }
 
-beforeEach(() => {
+beforeEach((context) => {
+  owner = ownNotificationFixture(context);
   setUiLocale("en");
   fixture.threads = [runningThread()];
-  fixture.settings = { notificationsEnabled: true };
+  fixture.settings = { notificationsEnabled: true, userInputNotificationsEnabled: false };
   fixture.routeTarget = null;
   fixture.listeners.clear();
   fixture.router.navigate.mockReset();
@@ -118,26 +127,25 @@ beforeEach(() => {
   fixture.readApi
     .mockReset()
     .mockReturnValue({ scheduledFollowups: { notification: fixture.policy } });
-  fixture.notify.mockReset();
+  fixture.notify.mockReset().mockResolvedValue("sent");
   fixture.notificationListener.mockReset();
+  fixture.clicks.clear();
   vi.spyOn(document, "hasFocus").mockReturnValue(false);
-  vi.stubGlobal(
-    "Notification",
-    class {
-      constructor(title: string, options?: NotificationOptions) {
-        fixture.notify(title, options);
-      }
-      addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
-        fixture.notificationListener(type, listener);
-      }
+  vi.stubGlobal("desktopBridge", {
+    showNotification: fixture.notify,
+    onNotificationClick: (listener: (tag: string) => void) => {
+      fixture.notificationListener(listener);
+      fixture.clicks.add(listener);
+      return () => fixture.clicks.delete(listener);
     },
-  );
+  });
 });
 
 afterEach(async () => {
-  await mounted?.unmount();
+  await owner.cleanup();
   mounted = undefined;
   expect(fixture.listeners.size).toBe(0);
+  expect(fixture.clicks.size).toBe(0);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   setUiLocale(originalLocale);
@@ -148,7 +156,7 @@ describe("desktop completion notification language lifetime", () => {
     "uses current %s when a delayed exact-turn policy resolves without re-admission",
     async (locale) => {
       const pending = pendingDecision();
-      mounted = await render(<DesktopNotificationWatcher />);
+      mounted = await owner.mount(<DesktopNotificationWatcher />);
       expect(fixture.policy).not.toHaveBeenCalled();
       await publish(() => {
         fixture.threads = [settledThread()];
@@ -159,11 +167,12 @@ describe("desktop completion notification language lifetime", () => {
 
       setUiLocale(locale);
       await pending.finish();
-      expect(fixture.notify).toHaveBeenCalledExactlyOnceWith(runningThread().title, {
+      expect(fixture.notify).toHaveBeenCalledExactlyOnceWith({
+        title: runningThread().title,
         body: uiText("Finished running", undefined, undefined, locale),
-        tag: `cafe-code-thread-${environmentId}-${threadId}`,
+        tag: `cafe-code-thread:${environmentId.length}:${environmentId}:${threadId}`,
       });
-      expect(fixture.notificationListener).toHaveBeenCalledTimes(1);
+      expect(fixture.clicks.size).toBe(1);
       expect(fixture.policy).toHaveBeenCalledTimes(1);
       setUiLocale(locale === "ja" ? "ko" : "ja");
       await publish(() => {
@@ -177,13 +186,13 @@ describe("desktop completion notification language lifetime", () => {
 
   it("does not deliver an unmounted candidate or notify an already settled baseline after remount", async () => {
     const pending = pendingDecision();
-    mounted = await render(<DesktopNotificationWatcher />);
+    mounted = await owner.mount(<DesktopNotificationWatcher />);
     await publish(() => {
       fixture.threads = [settledThread()];
     });
     expect(fixture.policy).toHaveBeenCalledTimes(1);
     await mounted.unmount();
-    mounted = await render(<DesktopNotificationWatcher />);
+    mounted = await owner.mount(<DesktopNotificationWatcher />);
     setUiLocale("ja");
     await pending.finish();
     expect(fixture.notify).not.toHaveBeenCalled();
@@ -198,7 +207,7 @@ describe("desktop completion notification language lifetime", () => {
         fixture.routeTarget = { kind: "server", threadRef: { environmentId, threadId } };
         vi.mocked(document.hasFocus).mockReturnValue(true);
       }
-      mounted = await render(<DesktopNotificationWatcher />);
+      mounted = await owner.mount(<DesktopNotificationWatcher />);
       await publish(() => {
         fixture.threads = [settledThread()];
       });
@@ -221,15 +230,16 @@ describe("desktop completion notification language lifetime", () => {
     "honors disabled notifications %s",
     async (when) => {
       const pending = pendingDecision();
-      if (when === "before-candidate") fixture.settings = { notificationsEnabled: false };
-      mounted = await render(<DesktopNotificationWatcher />);
+      if (when === "before-candidate")
+        fixture.settings = { ...fixture.settings, notificationsEnabled: false };
+      mounted = await owner.mount(<DesktopNotificationWatcher />);
       await publish(() => {
         fixture.threads = [settledThread()];
       });
       if (when === "before-delivery") {
         expect(fixture.policy).toHaveBeenCalledTimes(1);
         await publish(() => {
-          fixture.settings = { notificationsEnabled: false };
+          fixture.settings = { ...fixture.settings, notificationsEnabled: false };
         });
         setUiLocale("ja");
         await pending.finish();
@@ -242,7 +252,7 @@ describe("desktop completion notification language lifetime", () => {
 
   it("retires the old exact-turn candidate when a later turn is running", async () => {
     const pending = pendingDecision();
-    mounted = await render(<DesktopNotificationWatcher />);
+    mounted = await owner.mount(<DesktopNotificationWatcher />);
     await publish(() => {
       fixture.threads = [settledThread()];
     });
@@ -255,5 +265,66 @@ describe("desktop completion notification language lifetime", () => {
     expect(fixture.notify).not.toHaveBeenCalled();
     expect(fixture.policy).toHaveBeenCalledTimes(1);
     expect(fixture.router.navigate).not.toHaveBeenCalled();
+  });
+});
+
+describe("desktop input notifications", () => {
+  it("notifies once with completion disabled and opens the exact chat on click", async () => {
+    fixture.settings = { notificationsEnabled: false, userInputNotificationsEnabled: true };
+    const pending = pendingDecision();
+    mounted = await owner.mount(<DesktopNotificationWatcher />);
+    await publish(() => {
+      fixture.threads = [{ ...runningThread(), hasPendingUserInput: true }];
+    });
+    expect(fixture.policy).toHaveBeenCalledExactlyOnceWith({ threadId, turnId });
+    setUiLocale("ko");
+    await pending.finish();
+    expect(fixture.notify).toHaveBeenCalledExactlyOnceWith({
+      title: runningThread().title,
+      body: uiText("Waiting for your input", undefined, undefined, "ko"),
+      tag: `cafe-code-thread:${environmentId.length}:${environmentId}:${threadId}`,
+    });
+    await publish(() => {
+      fixture.threads = [{ ...runningThread(), hasPendingUserInput: true }];
+    });
+    expect(fixture.notify).toHaveBeenCalledOnce();
+    for (const onClick of fixture.clicks) onClick("foreign-tag");
+    expect(fixture.router.navigate).not.toHaveBeenCalled();
+    for (const onClick of fixture.clicks)
+      onClick(`cafe-code-thread:${environmentId.length}:${environmentId}:${threadId}`);
+    expect(fixture.router.navigate).toHaveBeenCalledExactlyOnceWith({
+      to: "/$environmentId/$threadId",
+      params: { environmentId, threadId },
+    });
+  });
+
+  it("retires a question answered before its policy read finishes", async () => {
+    fixture.settings = { notificationsEnabled: false, userInputNotificationsEnabled: true };
+    const pending = pendingDecision();
+    mounted = await owner.mount(<DesktopNotificationWatcher />);
+    await publish(() => {
+      fixture.threads = [{ ...runningThread(), hasPendingUserInput: true }];
+    });
+    expect(fixture.policy).toHaveBeenCalledOnce();
+    await publish(() => {
+      fixture.threads = [runningThread()];
+    });
+    await pending.finish();
+    expect(fixture.notify).not.toHaveBeenCalled();
+  });
+
+  it("honors input opt-out during a pending policy read", async () => {
+    fixture.settings = { notificationsEnabled: false, userInputNotificationsEnabled: true };
+    const pending = pendingDecision();
+    mounted = await owner.mount(<DesktopNotificationWatcher />);
+    await publish(() => {
+      fixture.threads = [{ ...runningThread(), hasPendingUserInput: true }];
+    });
+    expect(fixture.policy).toHaveBeenCalledOnce();
+    await publish(() => {
+      fixture.settings = { ...fixture.settings, userInputNotificationsEnabled: false };
+    });
+    await pending.finish();
+    expect(fixture.notify).not.toHaveBeenCalled();
   });
 });

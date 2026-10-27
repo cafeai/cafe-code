@@ -229,7 +229,7 @@ const CAFE_ACTIVITY_LABELS: Readonly<Record<string, Readonly<Record<string, stri
       return uiText("Provider turn interrupt restored after restart");
     },
     get "Provider turn interrupt completed"() {
-      return uiText("Provider turn interrupt completed");
+      return uiText("Response stopped");
     },
   },
   "provider.turn.interrupt.failed": {

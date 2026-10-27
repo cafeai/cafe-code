@@ -221,6 +221,7 @@ export interface WsRpcClient {
   };
   readonly scheduledFollowups: {
     readonly list: RpcUnaryMethod<typeof WS_METHODS.scheduledFollowupsList>;
+    readonly summary: RpcUnaryMethod<typeof WS_METHODS.scheduledFollowupsSummary>;
     readonly save: RpcUnaryMethod<typeof WS_METHODS.scheduledFollowupsSave>;
     readonly setStatus: RpcUnaryMethod<typeof WS_METHODS.scheduledFollowupsSetStatus>;
     readonly runNow: RpcUnaryMethod<typeof WS_METHODS.scheduledFollowupsRunNow>;
@@ -462,6 +463,8 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
     scheduledFollowups: {
       list: (input) =>
         transport.request((client) => client[WS_METHODS.scheduledFollowupsList](input)),
+      summary: (input) =>
+        transport.request((client) => client[WS_METHODS.scheduledFollowupsSummary](input)),
       save: (input) =>
         transport.request((client) => client[WS_METHODS.scheduledFollowupsSave](input)),
       setStatus: (input) =>

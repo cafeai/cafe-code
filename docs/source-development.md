@@ -111,6 +111,15 @@ Omitting the target refuses before inspecting a database. Its existing
 maintenance, database copying or compression service is introduced by profile
 separation. Do not use maintenance to import Production into Debug.
 
+## Saved environments
+
+Saved environments in Settings can be edited without a working connection. The
+edit dialog updates the name, IP address or hostname, and port on this device;
+it also contains the confirmed Delete action. Names stay local when reconnecting,
+and address changes keep the same environment identity and saved credential.
+Drag the row handles to reorder saved environments, or focus a handle and use
+Space, the arrow keys, and Space again. The order persists on this device.
+
 ## Diagnostic logging
 
 After building:
@@ -144,6 +153,21 @@ Cafe does not weaken that requirement or change home-directory permissions.
 Chat and backend startup remain available, but push operations fail explicitly.
 No replacement keys, subscription reset, background retry or delivery is admitted.
 Preserve the existing state for recovery; do not delete it to hide the warning.
+
+### Notification preferences
+
+Settings → Notifications has separate, opt-in controls for chat completion and
+structured user-input requests. Each preference defaults to off and is saved in
+client settings. Input notifications use a fixed localized message without
+question contents; clicking one opens its chat. The desktop app suppresses
+notifications for the currently focused chat and seeds its initial snapshot
+without announcing existing prompts. Answered prompts retire delayed desktop
+delivery. Browser Web Push stores both category preferences on the same private,
+authenticated subscription; legacy subscriptions retain completion delivery
+only. Disabling one category keeps the subscription while the other is enabled.
+Both categories retain the existing scheduled-follow-up notification policy and
+session revocation checks. Native OS delivery and closed-browser push delivery
+remain separate manual host checks from synthetic notification fixtures.
 
 ## Verification
 

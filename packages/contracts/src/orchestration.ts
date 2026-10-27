@@ -11,6 +11,7 @@ import {
 } from "./providerTaskControls.ts";
 import { MaxConcurrentSubagents, SubagentLimits } from "./subagentLimits.ts";
 import { CodexContextWindowOverride } from "./codexContextWindow.ts";
+import { GlideStopRevision } from "./glide.ts";
 import { ProviderDiagnosticSnapshot } from "./providerDiagnostic.ts";
 import { RepositoryIdentity } from "./environment.ts";
 import { CodexReviewTarget } from "./codexReview.ts";
@@ -1162,6 +1163,7 @@ const ThreadInteractionModeSetCommand = Schema.Struct({
 
 const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   computerUseEnabled: Schema.optional(Schema.Boolean),
+  computerUseRevision: Schema.optional(GlideStopRevision),
   projectId: Schema.NullOr(ProjectId),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,

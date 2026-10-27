@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
-import { ProviderInstanceId, ThreadId } from "@cafecode/contracts";
+import { ProviderInstanceId, ThreadId, TurnId } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
@@ -33,9 +33,13 @@ import {
 /** Actual copied stdio bridge -> native HTTP interpreter -> owner broker ->
  * real ESM worker -> shared native host. Only the OS peer is synthetic. No
  * provider, credentials, user app or permissions are used by this journey. */
-it.each(["local", "daemon", "supervisor", "desktop"] as const)(
-  "connects independent bridges through the complete managed Glide pipeline (%s)",
-  async (placement) => {
+it.each(
+  (["local", "daemon", "supervisor", "desktop"] as const).flatMap((placement) =>
+    ["glide-mcp-bridge.mjs", "glide-mcp.mjs"].map((entry) => ({ placement, entry })),
+  ),
+)(
+  "$entry enforces the chat grant through the complete Glide pipeline ($placement)",
+  async ({ placement, entry }) => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "glide-pipeline-")));
     const scope = await Effect.runPromise(Scope.make());
     const frontendConfig = {} as ServerConfigShape;
@@ -52,9 +56,11 @@ it.each(["local", "daemon", "supervisor", "desktop"] as const)(
     const held = Promise.withResolvers<unknown>();
     void held.promise.catch(() => undefined);
     const effects: { method: unknown; sessionId: unknown }[] = [];
+    const nativeOperations: unknown[] = [];
     const host = new GlideNativeHost(
       () => ({
         request: async (frame) => {
+          if (frame.method !== "retire_session") nativeOperations.push(frame.method);
           if (frame.method === "list_apps")
             return [{ name: "Fixture", bundleId: "fixture.editor", path: "/Fixture.app", pid: 10 }];
           if (frame.method === "get_app_state")
@@ -113,7 +119,10 @@ it.each(["local", "daemon", "supervisor", "desktop"] as const)(
       helperPath: "/synthetic/native-peer",
       nativeHost: host,
       mcpPort: address.port,
-      bridgeSource: fileURLToPath(new URL("../dist/glide-mcp-bridge.mjs", import.meta.url)),
+      bridgeSource: fileURLToPath(new URL(`../dist/${entry}`, import.meta.url)),
+      // AppKit is the only replaced display boundary; no real tray or desktop
+      // permission is needed for this owned Node/HTTP/worker qualification.
+      trayFactory: () => ({ publish: async () => undefined, close: async () => undefined }),
       readPolicy: async (threadId) =>
         policies.get(threadId) ?? { enabled: false, apps: [], fullAccess: true },
       initializePolicy: async (threadId) => {
@@ -185,7 +194,18 @@ it.each(["local", "daemon", "supervisor", "desktop"] as const)(
       expect((await run(a.client, "nodeRepl.write('should refuse')")).isError).toBe(true);
       await a.binding.activate();
       await b.binding.activate();
+      for (const [thread, binding] of [
+        ["chat-a", a.binding],
+        ["chat-b", b.binding],
+      ] as const)
+        binding.observeTurn?.({
+          type: "turn.started",
+          threadId: ThreadId.make(thread),
+          turnId: TurnId.make(`${thread}-turn`),
+        });
       expect((await run(a.client, "nodeRepl.write('still disabled')")).isError).toBe(true);
+      expect((await run(a.client, "await glide.listApps()")).isError).toBe(true);
+      expect(nativeOperations).toEqual([]);
       for (const thread of ["chat-a", "chat-b"])
         await runtime.operation(
           placement === "desktop"
@@ -240,6 +260,11 @@ it.each(["local", "daemon", "supervisor", "desktop"] as const)(
       ]);
       expect((await run(a.client, "nodeRepl.write('stopped')")).isError).toBe(true);
       a.binding.resume();
+      a.binding.observeTurn?.({
+        type: "turn.started",
+        threadId: ThreadId.make("chat-a"),
+        turnId: TurnId.make("chat-a-next-turn"),
+      });
       expect(
         JSON.stringify((await run(a.client, "nodeRepl.write(typeof counter)")).content),
       ).toContain("undefined");
@@ -247,7 +272,15 @@ it.each(["local", "daemon", "supervisor", "desktop"] as const)(
         kind: "control",
         input: { action: "configure", threadId: "chat-a", enabled: false, apps: [] },
       });
-      expect((await run(a.client, "nodeRepl.write('revoked')")).isError).toBe(true);
+      const beforeRevokedCalls = nativeOperations.length;
+      expect((await run(a.client, "await glide.listApps()")).isError).toBe(true);
+      expect((await run(a.client, "await glide.getApp('Fixture', {windowId:7})")).isError).toBe(
+        true,
+      );
+      expect(nativeOperations).toHaveLength(beforeRevokedCalls);
+      expect(
+        JSON.stringify((await run(b.client, "nodeRepl.write('other chat still enabled')")).content),
+      ).toContain("other chat still enabled");
       expect(effects).toHaveLength(1);
     } finally {
       await Promise.allSettled(clients.map((client) => client.close()));
@@ -260,6 +293,33 @@ it.each(["local", "daemon", "supervisor", "desktop"] as const)(
       await new Promise<void>((yes) => server.close(() => yes()));
       await Effect.runPromise(Scope.close(scope, Exit.void));
       await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+it.each(["glide-mcp.mjs", "glide-mcp-bridge.mjs"])(
+  "%s refuses an independent native runtime before MCP initialization",
+  async (entry) => {
+    // The pinned Node executable is an inert helper substitute: an old
+    // standalone server accepts its metadata without launching it during
+    // initialize. No desktop helper, user app or native permission is used.
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [
+        fileURLToPath(new URL(`../dist/${entry}`, import.meta.url)),
+        "--native-helper",
+        process.execPath,
+        "--allow-app",
+        "fixture.editor",
+      ],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      stderr: "pipe",
+    });
+    const client = new Client({ name: "glide-independent-runtime-refusal", version: "1" });
+    try {
+      await expect(client.connect(transport)).rejects.toThrow();
+    } finally {
+      await client.close();
     }
   },
 );

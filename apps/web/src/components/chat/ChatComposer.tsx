@@ -27,6 +27,7 @@ import type {
   ProviderDeliveryPriority,
   ResolvedKeybindingsConfig,
   RuntimeMode,
+  GlideThreadActivity,
   ScopedThreadRef,
   ServerProvider,
   SubagentLimits,
@@ -104,7 +105,11 @@ import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
 import { ComposerTaskProgress } from "./ComposerTaskProgress";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
-import { getComposerProviderState, renderProviderTraitsMenuContent } from "./composerProviderState";
+import {
+  getComposerProviderState,
+  getModelOptionsForModelChange,
+  renderProviderTraitsMenuContent,
+} from "./composerProviderState";
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import { SubagentConcurrencyControl } from "./SubagentConcurrencyControl";
 import { CodexContextWindowControl } from "./CodexContextWindowControl";
@@ -386,6 +391,7 @@ export interface ChatComposerHandle {
     deliveryPriority?: ProviderDeliveryPriority;
     axiomWebEnabled?: boolean;
     computerUseEnabled?: boolean;
+    computerUseRevision?: string;
     axiomMcpRevision?: number | undefined;
   };
 }
@@ -961,7 +967,11 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   ) => void;
   onSnoozeActivePendingUserInput: () => void;
 
-  onProviderModelSelect: (instanceId: ProviderInstanceId, model: string) => void;
+  onProviderModelSelect: (
+    instanceId: ProviderInstanceId,
+    model: string,
+    options?: ModelSelection["options"],
+  ) => void;
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
@@ -1023,7 +1033,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onShowSessionRail,
     scheduledFollowups,
     providerTasks,
-    activity,
+    activity: providerActivity,
     activityStartedAt,
     onFocusSessionRail,
     goalControlsSupported,
@@ -1204,6 +1214,29 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Ultra while dispatching that account's default Low effort after a refresh.
   // Exact lookup keeps display and outbound `ModelSelection` aligned.
   const selectedComposerModelOptions = composerModelOptions?.[selectedInstanceId];
+
+  const handleProviderModelSelect = useCallback(
+    (instanceId: ProviderInstanceId, model: string) => {
+      const entry = providerInstanceEntries.find(
+        (candidate) => candidate.instanceId === instanceId,
+      );
+      const currentOptions = composerModelOptions?.[instanceId];
+      const nextOptions = entry
+        ? getModelOptionsForModelChange({
+            provider: entry.driverKind,
+            model,
+            models: entry.snapshot.models,
+            modelOptions: currentOptions,
+          })
+        : currentOptions;
+      onProviderModelSelect(
+        instanceId,
+        model,
+        nextOptions !== currentOptions ? nextOptions : undefined,
+      );
+    },
+    [composerModelOptions, onProviderModelSelect, providerInstanceEntries],
+  );
 
   // Resolve the active instance's snapshot by `instanceId` so a custom
   // instance gets its own slash commands, skills, and model list — not
@@ -1733,6 +1766,33 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         : null,
     [activeThreadActivities, activityStartedAt],
   );
+  const [computerUseActivity, setComputerUseActivity] = useState<GlideThreadActivity>();
+  useEffect(() => {
+    setComputerUseActivity(undefined);
+  }, [environmentId, activeThreadId]);
+  const computerUseLabel =
+    computerUseActivity?.state === "capturing"
+      ? uiText("Taking screenshot", undefined, undefined, uiLocale)
+      : computerUseActivity?.state === "reading"
+        ? uiText("Reading text", undefined, undefined, uiLocale)
+        : computerUseActivity?.state === "acting"
+          ? uiText("Controlling window", undefined, undefined, uiLocale)
+          : computerUseActivity?.state === "stopping"
+            ? uiText("Stopping computer use…", undefined, undefined, uiLocale)
+            : computerUseActivity?.state === "unavailable"
+              ? uiText("Computer use status unavailable", undefined, undefined, uiLocale)
+              : null;
+  const activity = computerUseLabel
+    ? {
+        ...(providerActivity ?? { taskCount: 0, agentCount: 0, canInspect: false }),
+        attention: computerUseActivity?.state === "unavailable",
+        label:
+          computerUseLabel +
+          (computerUseActivity?.appName
+            ? ` · ${computerUseActivity.appName}${computerUseActivity.windowTitle ? ` — ${computerUseActivity.windowTitle}` : ""}`
+            : ""),
+      }
+    : providerActivity;
 
   // ------------------------------------------------------------------
   // Composer-local state
@@ -3528,6 +3588,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               computerUseEnabled:
                 useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
                   ?.computerUseEnabled === true,
+              ...(useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
+                ?.computerUseRevision !== undefined
+                ? {
+                    computerUseRevision: useComposerDraftStore
+                      .getState()
+                      .getComposerDraft(composerDraftTarget)!.computerUseRevision!,
+                  }
+                : {}),
             }
           : {}),
         ...(selectedProvider === "axiom"
@@ -4390,7 +4458,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     setIsComposerModelPickerOpen(open);
                   }}
                   onRequestModelsRefresh={requestProviderModelsRefresh}
-                  onInstanceModelChange={onProviderModelSelect}
+                  onInstanceModelChange={handleProviderModelSelect}
                 />
 
                 <CompactComposerControlsMenu
@@ -4431,10 +4499,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     threadId={isServerThread ? activeThreadId : null}
                     runtimeMode={runtimeMode}
                     draftEnabled={composerDraft.computerUseEnabled === true}
-                    onDraftEnabledChange={(enabled) =>
+                    draftRevision={composerDraft.computerUseRevision}
+                    onActivityChange={setComputerUseActivity}
+                    onDraftEnabledChange={(enabled, revision) =>
                       useComposerDraftStore
                         .getState()
-                        .setComputerUseEnabled(composerDraftTarget, enabled)
+                        .setComputerUseEnabled(composerDraftTarget, enabled, revision)
                     }
                     refreshKey={`${isSendBusy}:${activeThread?.session?.createdAt ?? ""}`}
                     disabled={

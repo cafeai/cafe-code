@@ -444,6 +444,19 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
       ),
   },
   {
+    id: "notifications.userInput",
+    path: "/settings/notifications",
+    kind: "setting",
+    title: (locale) => uiText("User input notifications", undefined, undefined, locale),
+    keywords: (locale) =>
+      uiText(
+        "alert, desktop notification, push, question, response",
+        undefined,
+        "settings search keywords",
+        locale,
+      ),
+  },
+  {
     id: "page:keybindings",
     path: "/settings/keybindings",
     kind: "page",

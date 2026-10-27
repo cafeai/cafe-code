@@ -54,6 +54,62 @@ function fixture() {
 }
 
 describe("shared Glide native host", () => {
+  it("publishes the real private thumbnail to the tray without returning it to the model", async () => {
+    const f = fixture();
+    const preview = "data:image/jpeg;base64,AA==";
+    const received: string[] = [];
+    const bridge = f.host.attach(randomUUID(), f.authorize, async (event) => {
+      if (event.phase === "observation" && event.observation.screenshotPreview)
+        received.push(event.observation.screenshotPreview);
+    });
+    try {
+      f.request.mockImplementation(async (frame) =>
+        frame.method === "list_apps"
+          ? [app]
+          : {
+              ...observation,
+              processBirth: "100:10",
+              windowTitle: "Notes",
+              screenshot: { url: "data:image/png;base64,AA==" },
+              screenshotPreview: preview,
+            },
+      );
+      const result = await bridge.invoke(observed, owner());
+      expect(received).toEqual([preview]);
+      expect(result).not.toHaveProperty("screenshotPreview");
+      expect(result).toMatchObject({ windowId: 7, windowTitle: "Notes" });
+    } finally {
+      await f.host.close();
+    }
+  });
+  it("waits for visible native activity and rechecks cancellation before capture dispatch", async () => {
+    const f = fixture();
+    const entered = Promise.withResolvers<void>();
+    const visible = Promise.withResolvers<void>();
+    const events: string[] = [];
+    const bridge = f.host.attach(randomUUID(), f.authorize, async (event) => {
+      events.push(event.phase);
+      if (event.phase === "start") {
+        entered.resolve();
+        await visible.promise;
+      }
+    });
+    try {
+      const result = bridge.invoke(observed, owner());
+      const refused = expect(result).rejects.toThrow();
+      await entered.promise;
+      expect(f.frames.filter((frame) => frame.method === "get_app_state")).toHaveLength(0);
+      await bridge.retire();
+      visible.resolve();
+      await refused;
+      await f.host.close();
+      expect(f.frames.filter((frame) => frame.method === "get_app_state")).toHaveLength(0);
+      expect(events).toEqual(["start", "end"]);
+    } finally {
+      visible.resolve();
+      await f.host.close();
+    }
+  });
   it("requires a fresh observation after an action reports an uncertain outcome", async () => {
     const f = fixture();
     const bridge = f.host.attach(randomUUID(), f.authorize);

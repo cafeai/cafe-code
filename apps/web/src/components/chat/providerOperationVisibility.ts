@@ -1,9 +1,17 @@
+import {
+  isPublicReasoningSummaryProvider,
+  type PublicReasoningSummaryProvider,
+} from "@cafecode/shared/providerWorkLog";
+
 /**
- * Only the explicitly projected Claude presentation contract is inspected.
- * Never turn an arbitrary saved provider object into a renderer disclosure:
- * raw results can contain file bodies, resource capabilities or signatures.
+ * Only explicitly projected presentation contracts are inspected: version-1
+ * public reasoning summaries from an admitted provider (Claude summaries and
+ * OpenCode thinking) and Claude command inspections. Never turn an arbitrary
+ * saved provider object into a renderer disclosure: raw results can contain
+ * file bodies, resource capabilities or signatures.
  */
-export interface ClaudePublicSummary {
+export interface ProviderPublicSummary {
+  readonly provider: PublicReasoningSummaryProvider;
   readonly text: string;
   readonly truncated: boolean;
   readonly status: "inProgress" | "completed" | "failed";
@@ -28,7 +36,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function status(value: unknown): ClaudePublicSummary["status"] | undefined {
+function status(value: unknown): ProviderPublicSummary["status"] | undefined {
   return value === "inProgress" || value === "completed" || value === "failed" ? value : undefined;
 }
 
@@ -80,12 +88,12 @@ export function mergeClaudeCommandInspections(
   };
 }
 
-export function readClaudePublicSummary(payload: unknown): ClaudePublicSummary | undefined {
+export function readProviderPublicSummary(payload: unknown): ProviderPublicSummary | undefined {
   const data = record(payload);
   if (
     data?.streamKind !== "reasoning_summary_text" ||
     data.summaryVersion !== 1 ||
-    data.provider !== "claudeAgent" ||
+    !isPublicReasoningSummaryProvider(data.provider) ||
     typeof data.itemId !== "string" ||
     !data.itemId.trim() ||
     typeof data.detail !== "string" ||
@@ -103,6 +111,7 @@ export function readClaudePublicSummary(payload: unknown): ClaudePublicSummary |
   const summaryStatus = status(data.status);
   if (!summaryStatus) return undefined;
   return {
+    provider: data.provider,
     text: summaryText.text,
     truncated: data.truncated === true || summaryText.truncated,
     status: summaryStatus,

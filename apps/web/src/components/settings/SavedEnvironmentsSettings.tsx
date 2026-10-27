@@ -2,6 +2,24 @@ import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
 import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { restrictToVerticalAxis, restrictToFirstScrollableAncestor } from "@dnd-kit/modifiers";
+import { CSS } from "@dnd-kit/utilities";
+import {
+  GripVerticalIcon,
+  PencilIcon,
   PlusIcon,
   RefreshCcwIcon,
   ServerIcon,
@@ -9,7 +27,7 @@ import {
   TriangleAlertIcon,
   UnplugIcon,
 } from "lucide-react";
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useId, useMemo, useState } from "react";
 import { SecondFactorInput } from "../auth/SecondFactorInput";
 
 import {
@@ -20,6 +38,11 @@ import {
 } from "~/environments/runtime/catalog";
 import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import { remoteEnvironmentErrorMessage } from "~/environments/remote/api";
+import {
+  applySavedEnvironmentEdit,
+  savedEnvironmentEditFields,
+  type SavedEnvironmentEdit,
+} from "~/environments/runtime/savedEnvironmentEdit";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -52,6 +75,7 @@ export interface SavedEnvironmentActions {
   readonly disconnect: typeof import("~/environments/runtime/service").disconnectSavedEnvironment;
   readonly reconnect: typeof import("~/environments/runtime/service").reconnectSavedEnvironment;
   readonly remove: typeof import("~/environments/runtime/service").removeSavedEnvironment;
+  readonly update: typeof import("~/environments/runtime/service").updateSavedEnvironment;
 }
 
 const DEFAULT_SAVED_ENVIRONMENT_ACTIONS: SavedEnvironmentActions = {
@@ -62,6 +86,8 @@ const DEFAULT_SAVED_ENVIRONMENT_ACTIONS: SavedEnvironmentActions = {
     (await import("~/environments/runtime/service")).reconnectSavedEnvironment(environmentId),
   remove: async (environmentId) =>
     (await import("~/environments/runtime/service")).removeSavedEnvironment(environmentId),
+  update: async (environmentId, input) =>
+    (await import("~/environments/runtime/service")).updateSavedEnvironment(environmentId, input),
 };
 
 function safeSavedEnvironmentHost(httpBaseUrl: string): string {
@@ -119,11 +145,26 @@ function SavedEnvironmentRow({
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
-  const [pendingAction, setPendingAction] = useState<"reconnect" | "disconnect" | "remove" | null>(
-    null,
-  );
+  const [pendingAction, setPendingAction] = useState<
+    "reconnect" | "disconnect" | "remove" | "update" | null
+  >(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [isRemoveDialogOpen, setIsRemoveDialogOpen] = useState(false);
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+  const [edit, setEdit] = useState<SavedEnvironmentEdit>({ label: "", host: "", port: "" });
+  const editId = useId();
+  const {
+    attributes,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id: record.environmentId,
+    disabled: pendingAction !== null || isEditDialogOpen,
+  });
 
   const isRetrying =
     runtime?.reconnectPhase === "attempting" || runtime?.reconnectPhase === "waiting";
@@ -132,7 +173,8 @@ function SavedEnvironmentRow({
   const isError = runtime?.connectionState === "error" || runtime?.reconnectPhase === "exhausted";
   const requiresAuth = runtime?.authState === "requires-auth";
   const versionMismatch = uiPresentation.resolveServerConfigVersionMismatch(runtime?.serverConfig);
-  const actionsDisabled = isConnecting || pendingAction !== null;
+  // Local editing and removal remain available during connection retries.
+  const actionsDisabled = pendingAction !== null;
   const displayLabel =
     record.label.trim() || uiText("Unnamed environment", undefined, undefined, uiLocale);
 
@@ -155,7 +197,7 @@ function SavedEnvironmentRow({
   }
 
   const runAction = async (action: "reconnect" | "disconnect" | "remove") => {
-    if (actionsDisabled) return;
+    if (actionsDisabled || (action !== "remove" && isConnecting)) return;
 
     setPendingAction(action);
     setActionError(null);
@@ -167,6 +209,7 @@ function SavedEnvironmentRow({
       } else {
         await actions.remove(record.environmentId);
         setIsRemoveDialogOpen(false);
+        setIsEditDialogOpen(false);
       }
     } catch {
       setActionError(
@@ -183,6 +226,36 @@ function SavedEnvironmentRow({
               undefined,
               uiLocale,
             ),
+      );
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
+  const saveEdit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (actionsDisabled) return;
+    setActionError(null);
+    try {
+      applySavedEnvironmentEdit(record, edit);
+    } catch {
+      setActionError(
+        uiText(
+          "Enter a name, a valid IP address or hostname, and a port between 1 and 65535.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
+      );
+      return;
+    }
+    setPendingAction("update");
+    try {
+      await actions.update(record.environmentId, edit);
+      setIsEditDialogOpen(false);
+    } catch {
+      setActionError(
+        uiText("Could not save this environment. Try again.", undefined, undefined, uiLocale),
       );
     } finally {
       setPendingAction(null);
@@ -206,9 +279,25 @@ function SavedEnvironmentRow({
       : null;
 
   return (
-    <div className={ITEM_ROW_CLASSNAME}>
+    <li
+      ref={setNodeRef}
+      className={`${ITEM_ROW_CLASSNAME} relative ${isDragging ? "z-10 bg-muted" : ""}`}
+      style={{ transform: CSS.Translate.toString(transform), transition }}
+    >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 flex-1 items-start gap-3">
+          <Button
+            ref={setActivatorNodeRef}
+            variant="ghost"
+            size="icon"
+            className="shrink-0 cursor-grab touch-none text-muted-foreground active:cursor-grabbing"
+            disabled={actionsDisabled || isEditDialogOpen}
+            {...attributes}
+            {...listeners}
+            aria-label={uiText("Reorder {value0}", { value0: displayLabel }, undefined, uiLocale)}
+          >
+            <GripVerticalIcon className="size-4" />
+          </Button>
           <div className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-muted text-muted-foreground">
             <ServerIcon className="size-4" />
           </div>
@@ -241,7 +330,7 @@ function SavedEnvironmentRow({
             {runtimeError ? (
               <span className="text-xs text-destructive-foreground">{runtimeError}</span>
             ) : null}
-            {actionError ? (
+            {actionError && !isEditDialogOpen ? (
               <span className="text-xs text-destructive-foreground">{actionError}</span>
             ) : null}
           </div>
@@ -254,7 +343,7 @@ function SavedEnvironmentRow({
                 <Button
                   variant="outline"
                   size="icon"
-                  disabled={actionsDisabled}
+                  disabled={actionsDisabled || isConnecting}
                   aria-label={
                     isConnected
                       ? uiText("Disconnect {value0}", { value0: displayLabel }, undefined, uiLocale)
@@ -285,68 +374,183 @@ function SavedEnvironmentRow({
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="text-muted-foreground hover:text-destructive"
+                  className="text-muted-foreground"
                   disabled={actionsDisabled}
                   aria-label={uiText(
-                    "Remove {value0}",
+                    "Edit {value0}",
                     { value0: displayLabel },
                     undefined,
                     uiLocale,
                   )}
                   onClick={() => {
                     setActionError(null);
-                    setIsRemoveDialogOpen(true);
+                    try {
+                      setEdit(savedEnvironmentEditFields(record));
+                    } catch {
+                      setEdit({ label: record.label, host: "", port: "" });
+                    }
+                    setIsEditDialogOpen(true);
                   }}
                 />
               }
             >
-              <TrashIcon className="size-4" />
+              <PencilIcon className="size-4" />
             </TooltipTrigger>
             <TooltipPopup>
-              {uiText("Remove saved environment", undefined, undefined, uiLocale)}
+              {uiText("Edit saved environment", undefined, undefined, uiLocale)}
             </TooltipPopup>
           </Tooltip>
         </div>
       </div>
 
-      <AlertDialog
-        open={isRemoveDialogOpen}
+      <Dialog
+        open={isEditDialogOpen}
         onOpenChange={(open) => {
-          if (pendingAction !== "remove") setIsRemoveDialogOpen(open);
+          if (!actionsDisabled) setIsEditDialogOpen(open);
         }}
       >
-        <AlertDialogPopup>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {uiText("Remove saved environment?", undefined, undefined, uiLocale)}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              <UiMessage
-                message="This removes <slot1></slot1> and its saved credential from this client."
-                slots={{ slot1: displayLabel }}
-              />
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogClose
-              render={<Button variant="outline" disabled={pendingAction !== null} />}
-            >
-              {uiText("Cancel", undefined, undefined, uiLocale)}
-            </AlertDialogClose>
-            <Button
-              variant="destructive"
-              disabled={pendingAction !== null}
-              aria-busy={pendingAction === "remove" || undefined}
-              onClick={() => void runAction("remove")}
-            >
-              <BusyButtonLabel busy={pendingAction === "remove"}>
-                {uiText("Remove", undefined, undefined, uiLocale)}
-              </BusyButtonLabel>
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogPopup>
-      </AlertDialog>
-    </div>
+        <DialogPopup showCloseButton={!actionsDisabled}>
+          <form onSubmit={(event) => void saveEdit(event)} className="flex min-h-0 flex-col">
+            <DialogHeader>
+              <DialogTitle>
+                {uiText("Edit saved environment", undefined, undefined, uiLocale)}
+              </DialogTitle>
+              <DialogDescription>
+                {uiText(
+                  "Update this environment's name and server address on this device.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogPanel className="space-y-4">
+              <div className="space-y-1.5">
+                <label htmlFor={`${editId}-name`} className="text-xs font-medium">
+                  {uiText("Name", undefined, undefined, uiLocale)}
+                </label>
+                <Input
+                  id={`${editId}-name`}
+                  value={edit.label}
+                  onChange={(event) => setEdit({ ...edit, label: event.target.value })}
+                  required
+                  disabled={actionsDisabled}
+                />
+              </div>
+              <div className="flex gap-3">
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <label htmlFor={`${editId}-host`} className="text-xs font-medium">
+                    {uiText("IP address or hostname", undefined, undefined, uiLocale)}
+                  </label>
+                  <Input
+                    id={`${editId}-host`}
+                    value={edit.host}
+                    onChange={(event) => setEdit({ ...edit, host: event.target.value })}
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    required
+                    disabled={actionsDisabled}
+                  />
+                </div>
+                <div className="w-24 space-y-1.5">
+                  <label htmlFor={`${editId}-port`} className="text-xs font-medium">
+                    {uiText("Port", undefined, undefined, uiLocale)}
+                  </label>
+                  <Input
+                    id={`${editId}-port`}
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={65535}
+                    step={1}
+                    value={edit.port}
+                    onChange={(event) => setEdit({ ...edit, port: event.target.value })}
+                    required
+                    disabled={actionsDisabled}
+                  />
+                </div>
+              </div>
+              {actionError ? (
+                <p role="alert" className="text-xs text-destructive-foreground">
+                  {actionError}
+                </p>
+              ) : null}
+            </DialogPanel>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="destructive"
+                className="sm:mr-auto"
+                disabled={actionsDisabled}
+                onClick={() => setIsRemoveDialogOpen(true)}
+              >
+                <TrashIcon className="size-4" />
+                {uiText("Delete", undefined, undefined, uiLocale)}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={actionsDisabled}
+                onClick={() => setIsEditDialogOpen(false)}
+              >
+                {uiText("Cancel", undefined, undefined, uiLocale)}
+              </Button>
+              <Button
+                type="submit"
+                disabled={actionsDisabled}
+                aria-busy={pendingAction === "update" || undefined}
+              >
+                <BusyButtonLabel busy={pendingAction === "update"}>
+                  {uiText("Save", undefined, undefined, uiLocale)}
+                </BusyButtonLabel>
+              </Button>
+            </DialogFooter>
+          </form>
+          <AlertDialog
+            open={isRemoveDialogOpen}
+            onOpenChange={(open) => {
+              if (pendingAction !== "remove") setIsRemoveDialogOpen(open);
+            }}
+          >
+            <AlertDialogPopup>
+              <AlertDialogHeader>
+                <AlertDialogTitle>
+                  {uiText("Remove saved environment?", undefined, undefined, uiLocale)}
+                </AlertDialogTitle>
+                <AlertDialogDescription>
+                  <UiMessage
+                    message="This removes <slot1></slot1> and its saved credential from this client."
+                    slots={{ slot1: displayLabel }}
+                  />
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              {actionError ? (
+                <p role="alert" className="px-6 text-xs text-destructive-foreground">
+                  {actionError}
+                </p>
+              ) : null}
+              <AlertDialogFooter>
+                <AlertDialogClose
+                  render={<Button variant="outline" disabled={pendingAction !== null} />}
+                >
+                  {uiText("Cancel", undefined, undefined, uiLocale)}
+                </AlertDialogClose>
+                <Button
+                  variant="destructive"
+                  disabled={pendingAction !== null}
+                  aria-busy={pendingAction === "remove" || undefined}
+                  onClick={() => void runAction("remove")}
+                >
+                  <BusyButtonLabel busy={pendingAction === "remove"}>
+                    {uiText("Remove", undefined, undefined, uiLocale)}
+                  </BusyButtonLabel>
+                </Button>
+              </AlertDialogFooter>
+            </AlertDialogPopup>
+          </AlertDialog>
+        </DialogPopup>
+      </Dialog>
+    </li>
   );
 }
 
@@ -632,10 +836,12 @@ export function SavedEnvironmentsSettings({
 
   const registryById = useSavedEnvironmentRegistryStore((state) => state.byId);
   const runtimeById = useSavedEnvironmentRuntimeStore((state) => state.byId);
-  const records = useMemo(
-    () => Object.values(registryById).sort((left, right) => left.label.localeCompare(right.label)),
-    [registryById],
+  const reorder = useSavedEnvironmentRegistryStore((state) => state.reorder);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
+  const records = useMemo(() => Object.values(registryById), [registryById]);
 
   return (
     <SettingsSection
@@ -648,14 +854,32 @@ export function SavedEnvironmentsSettings({
           {uiText("No remote servers paired.", undefined, undefined, uiLocale)}
         </p>
       ) : (
-        records.map((record) => (
-          <SavedEnvironmentRow
-            key={record.environmentId}
-            record={record}
-            runtime={runtimeById[record.environmentId]}
-            actions={actions}
-          />
-        ))
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          modifiers={[restrictToVerticalAxis, restrictToFirstScrollableAncestor]}
+          onDragEnd={({ active, over }) => {
+            const from = records.find((record) => record.environmentId === active.id);
+            const to = records.find((record) => record.environmentId === over?.id);
+            if (from && to) reorder(from.environmentId, to.environmentId);
+          }}
+        >
+          <SortableContext
+            items={records.map((record) => record.environmentId)}
+            strategy={verticalListSortingStrategy}
+          >
+            <ol aria-label={uiText("Saved environment order", undefined, undefined, uiLocale)}>
+              {records.map((record) => (
+                <SavedEnvironmentRow
+                  key={record.environmentId}
+                  record={record}
+                  runtime={runtimeById[record.environmentId]}
+                  actions={actions}
+                />
+              ))}
+            </ol>
+          </SortableContext>
+        </DndContext>
       )}
     </SettingsSection>
   );

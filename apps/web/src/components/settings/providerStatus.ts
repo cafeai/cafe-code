@@ -100,10 +100,14 @@ export function getProviderVersionLabel(version: string | null | undefined) {
 
 export function getProviderVersionAdvisoryPresentation(
   advisory: ServerProviderVersionAdvisory | undefined,
+  options: {
+    readonly oneClickAvailable?: boolean;
+  } = {},
 ): {
   readonly detail: string;
   readonly updateCommand: string | null;
   readonly emphasis: "normal" | "strong";
+  readonly canUpdate: boolean;
 } | null {
   if (!advisory || advisory.status === "current" || advisory.status === "unknown") {
     return null;
@@ -111,15 +115,19 @@ export function getProviderVersionAdvisoryPresentation(
 
   const version = advisory.latestVersion;
   const versionLabel = getProviderVersionLabel(version);
+  const canUpdate =
+    advisory.canUpdate && advisory.updateCommand !== null && options.oneClickAvailable !== false;
 
   return {
     // The popover title already says "Update available"; don't repeat it.
-    detail:
-      advisory.message ??
-      (versionLabel
-        ? uiText("Install {versionLabel}.", { versionLabel: versionLabel })
-        : uiText("Install the latest version.")),
+    detail: !canUpdate
+      ? uiText("Update this installation outside Cafe Code.")
+      : (advisory.message ??
+        (versionLabel
+          ? uiText("Install {versionLabel}.", { versionLabel: versionLabel })
+          : uiText("Install the latest version."))),
     updateCommand: advisory.updateCommand,
     emphasis: "normal" as const,
+    canUpdate,
   };
 }

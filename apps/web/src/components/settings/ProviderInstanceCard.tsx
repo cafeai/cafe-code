@@ -1133,6 +1133,7 @@ export function ProviderInstanceCard({
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
   const versionAdvisory = uiPresentation.getProviderVersionAdvisoryPresentation(
     liveProvider?.versionAdvisory,
+    { oneClickAvailable: !!onRunUpdate },
   );
   const updateCommand = versionAdvisory?.updateCommand ?? null;
   const FallbackIconComponent = driverOption?.icon;
@@ -1386,7 +1387,9 @@ export function ProviderInstanceCard({
                         "size-5 rounded-sm p-0",
                         versionAdvisory.emphasis === "strong"
                           ? "text-warning hover:text-warning"
-                          : "text-primary hover:text-primary",
+                          : versionAdvisory.canUpdate
+                            ? "text-primary hover:text-primary"
+                            : "text-muted-foreground hover:text-foreground",
                       )}
                       aria-label={uiText(
                         "Update available — view details",
@@ -1395,7 +1398,7 @@ export function ProviderInstanceCard({
                         uiLocale,
                       )}
                     >
-                      <ArrowUpCircleIcon className="size-3.5 animate-bounce [--cafe-bounce-duration:2.4s] [--cafe-bounce-steps:72] motion-reduce:animate-none" />
+                      <ArrowUpCircleIcon className="size-3.5" />
                     </Button>
                   }
                 />
@@ -1420,7 +1423,7 @@ export function ProviderInstanceCard({
                         {versionAdvisory.detail}
                       </p>
                     </div>
-                    {onRunUpdate ? (
+                    {onRunUpdate && versionAdvisory.canUpdate ? (
                       <Button
                         type="button"
                         size="xs"
@@ -1435,7 +1438,7 @@ export function ProviderInstanceCard({
                           : uiText("Update now", undefined, undefined, uiLocale)}
                       </Button>
                     ) : null}
-                    {onRunUpdate && updateCommand ? (
+                    {onRunUpdate && versionAdvisory.canUpdate && updateCommand ? (
                       <div className="flex items-center gap-2 text-2xs text-subtle-foreground">
                         <span aria-hidden className="h-px flex-1 bg-border-subtle" />
                         {uiText("or update manually", undefined, undefined, uiLocale)}
@@ -1761,7 +1764,7 @@ export function ProviderInstanceCard({
                   </div>
                   <p className="mt-2 text-xs text-muted-foreground">
                     {uiText(
-                      "Leave this off for private Debug Codex, Claude and Grok homes. Other drivers require explicit sharing. Provider executable updates are disabled in Debug because installations may be shared.",
+                      "Leave this off for private Debug Codex, Claude and Grok homes. Other drivers require explicit sharing. Provider executable updates can affect installations shared with Production.",
                       undefined,
                       undefined,
                       uiLocale,

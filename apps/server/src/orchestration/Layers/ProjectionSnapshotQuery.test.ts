@@ -6658,6 +6658,34 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             },
           },
           {
+            id: "opencode-thinking",
+            turn: "turn-opencode-thinking",
+            kind: "reasoning.summary",
+            payload: {
+              summaryVersion: 1,
+              provider: "opencode",
+              itemId: "prt_reasoning",
+              streamKind: "reasoning_summary_text",
+              detail: "Comparing fixtures",
+              truncated: false,
+              status: "completed",
+            },
+          },
+          {
+            id: "unadmitted-provider-summary",
+            turn: "turn-hidden",
+            kind: "reasoning.summary",
+            payload: {
+              summaryVersion: 1,
+              provider: "codex",
+              itemId: "codex-reasoning",
+              streamKind: "reasoning_summary_text",
+              detail: "Not an admitted provider",
+              truncated: false,
+              status: "completed",
+            },
+          },
+          {
             id: "malformed-summary",
             turn: "turn-hidden",
             kind: "reasoning.summary",
@@ -6802,6 +6830,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           turnIds: [
             "turn-bash-only",
             "turn-summary-only",
+            "turn-opencode-thinking",
             "turn-completed",
             "turn-astral",
             "turn-hidden",
@@ -6811,11 +6840,13 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           "turn-astral",
           "turn-bash-only",
           "turn-completed",
+          "turn-opencode-thinking",
           "turn-summary-only",
         ]);
         for (const turn of [
           "turn-bash-only",
           "turn-summary-only",
+          "turn-opencode-thinking",
           "turn-completed",
           "turn-astral",
           "turn-hidden",

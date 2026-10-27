@@ -1,6 +1,6 @@
 # Claude operation visibility
 
-Last updated: 2026-10-09 13:03:52 JST (UTC+0900)
+Last updated: 2026-10-27 00:16:00 PDT (UTC-0700)
 
 ## What the chat can show
 
@@ -8,7 +8,7 @@ Claude's received public updates belong in the operation history, not only its
 final answer. Ordinary assistant text keeps the existing message path. Readable
 thinking/progress blocks appear separately as **Claude summary** rows in the
 work log, in their received chronological position. Each row always shows its
-full retained text (bounded to 4,096 characters, with a note when truncated);
+full retained text (the latest 4,096 characters, with a note when truncated);
 there is no separate disclosure. A summary is not a final answer or proof that
 a tool succeeded.
 
@@ -37,16 +37,19 @@ separate.
 
 ## Bounds, privacy and history
 
-Public summaries retain at most 4,096 UTF-16 characters per block, with at most
-16 intermediate publications, one boundary completion and one final snapshot
-repair whose streamed prefix is proved. The adapter
+Public summaries retain the latest 4,096 UTF-16 characters per block, with one
+boundary completion and one final snapshot repair whose entire streamed prefix
+is proved, including text that has rolled out of the retained window. Live
+publication continues for the lifetime of the native block: neither filling
+the preview nor reaching a fixed number of updates can freeze it. The adapter
 admits at most 64 blocks per response segment and 16 active blocks. Source
 retirement/correlation witnesses are bounded and never evicted into fallback
 authority; exhausting them can suppress further summary admission for that
 canonical turn. Command inspection has its own exact native response witness;
 ordinary answer text, tools and provider work continue unchanged. Live updates
-coalesce over one second instead of appending a durable activity for every
-token. Exact native message/block identity
+coalesce over one second into the same activity instead of creating a work-log
+row for every token. Text size, active block count and refresh frequency remain
+bounded; there is no lifetime live-publication cutoff. Exact native message/block identity
 and streamed-prefix commitments prevent a snapshot from supplying a guessed
 suffix or replacing divergent received text. Replayed wrappers cannot duplicate
 a summary. Tool and terminal boundaries flush received partial summaries without
@@ -67,7 +70,9 @@ forward-only and does not rewrite old logs. It changes Cafe's diagnostic copy,
 not provider-owned conversation data or round-trip context.
 
 New summary and command inspection payloads require their exact version-1
-admission markers and trusted Claude provider provenance from ingestion.
+admission markers and trusted provider provenance from ingestion. OpenCode
+primary-session reasoning parts use the same summary contract and bounds,
+shown as **OpenCode thinking** rows; see the OpenCode section of `AGENTS.md`.
 Unmarked legacy rows, other providers and future versions never become an
 arbitrary inspection fallback. Older work logs can lack these admitted fields
 and cannot be reconstructed by a push. Bounded detail snapshots and historical expansion retain their existing

@@ -10020,6 +10020,100 @@ describe("ProviderRuntimeIngestion", () => {
     ).toBe(false);
   });
 
+  it("promotes marked OpenCode reasoning snapshots to one replace-in-place thinking row", async () => {
+    const harness = await createHarness();
+    const startedAt = "2026-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("opencode-thinking-turn"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: startedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-opencode-thinking"),
+      payload: {},
+    });
+    const markers = {
+      summaryVersion: 1,
+      streamKind: "reasoning_summary_text",
+      truncated: false,
+    } as const;
+    harness.emit({
+      type: "item.updated",
+      eventId: asEventId("opencode-thinking-live"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: startedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-opencode-thinking"),
+      itemId: asItemId("prt_reasoning_1"),
+      payload: {
+        itemType: "reasoning",
+        status: "inProgress",
+        title: "OpenCode thinking",
+        detail: "Reading the adapter",
+        data: markers,
+      },
+    });
+    const live = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "reasoning.summary"),
+    );
+    const liveRow = live.activities.find((activity) => activity.kind === "reasoning.summary");
+    expect(liveRow?.summary).toBe("OpenCode thinking");
+    expect(liveRow?.id.startsWith("opencode-summary:")).toBe(true);
+    // An unmarked OpenCode reasoning item (for example a raw native part) is
+    // not summary authority even from an admitted provider.
+    harness.emit({
+      type: "item.updated",
+      eventId: asEventId("opencode-unmarked"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: startedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-opencode-thinking"),
+      itemId: asItemId("prt_unmarked"),
+      payload: {
+        itemType: "reasoning",
+        detail: "not promoted",
+        data: { streamKind: "reasoning_text" },
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("opencode-thinking-final"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: startedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-opencode-thinking"),
+      itemId: asItemId("prt_reasoning_1"),
+      payload: {
+        itemType: "reasoning",
+        status: "completed",
+        title: "OpenCode thinking",
+        detail: "Reading the adapter; the delta path is missing a guard.",
+        data: markers,
+      },
+    });
+    const settled = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity) =>
+          activity.kind === "reasoning.summary" &&
+          (activity.payload as { status?: string }).status === "completed",
+      ),
+    );
+    const rows = settled.activities.filter((activity) => activity.kind === "reasoning.summary");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe(liveRow?.id);
+    expect(rows[0]?.createdAt).toBe(startedAt);
+    expect(rows[0]?.payload).toEqual({
+      summaryVersion: 1,
+      provider: "opencode",
+      itemId: "prt_reasoning_1",
+      streamKind: "reasoning_summary_text",
+      detail: "Reading the adapter; the delta path is missing a guard.",
+      status: "completed",
+      truncated: false,
+    });
+    expect(settled.messages).toHaveLength(0);
+  });
+
   it("retains bounded Claude summary snapshots separately from answers and keeps sanitized primary command starts", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

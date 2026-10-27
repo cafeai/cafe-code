@@ -4,6 +4,7 @@ import type {
   EnvironmentId,
   GlideControlInput,
   GlideControlResult,
+  GlideThreadActivity,
   RuntimeMode,
   ThreadId,
 } from "@cafecode/contracts";
@@ -25,7 +26,7 @@ import {
   glideSetupShouldPoll,
 } from "./glideSetup";
 
-type Read = { busy: boolean; reportErrors: boolean };
+type Read = { busy: boolean; reportErrors: boolean; action?: "status" | "activity" };
 
 export function GlideControl({
   environmentId,
@@ -33,6 +34,8 @@ export function GlideControl({
   runtimeMode,
   draftEnabled = false,
   onDraftEnabledChange,
+  onActivityChange,
+  draftRevision,
   refreshKey,
   disabled = false,
 }: {
@@ -40,7 +43,9 @@ export function GlideControl({
   threadId: ThreadId | null;
   runtimeMode: RuntimeMode;
   draftEnabled?: boolean;
-  onDraftEnabledChange?: (enabled: boolean) => void;
+  onDraftEnabledChange?: (enabled: boolean, revision?: string) => void;
+  onActivityChange?: (activity: GlideThreadActivity | undefined) => void;
+  draftRevision?: string | undefined;
   refreshKey?: string | boolean;
   disabled?: boolean;
 }) {
@@ -61,6 +66,12 @@ export function GlideControl({
   const applied = useRef(0);
   const mutating = useRef(false);
   const reading = useRef(false);
+  const draft = useRef({
+    enabled: draftEnabled,
+    revision: draftRevision,
+    change: onDraftEnabledChange,
+  });
+  draft.current = { enabled: draftEnabled, revision: draftRevision, change: onDraftEnabledChange };
 
   const request = useCallback(
     async (input: GlideControlInput, generation: number): Promise<GlideControlResult | null> => {
@@ -70,10 +81,28 @@ export function GlideControl({
       const value = await api.control(input);
       if (owner.current !== generation || sequence < applied.current) return null;
       applied.current = sequence;
-      setStatus(value);
+      setStatus((previous) =>
+        input.action === "activity" && previous
+          ? {
+              ...previous,
+              enabled: value.enabled,
+              paused: value.paused,
+              busy: value.busy,
+              activity: value.activity,
+              stopRevision: value.stopRevision,
+            }
+          : value,
+      );
+      if (
+        !threadId &&
+        draft.current.enabled &&
+        value.stopRevision !== undefined &&
+        (draft.current.revision ?? "0") !== value.stopRevision
+      )
+        draft.current.change?.(false);
       return value;
     },
-    [environmentId],
+    [environmentId, threadId],
   );
 
   const read = useCallback(
@@ -84,10 +113,17 @@ export function GlideControl({
       reading.current = true;
       if (mode.busy) setPending(true);
       try {
-        await request({ action: "status", ...(threadId ? { threadId } : {}) }, generation);
+        await request(
+          { action: mode.action ?? "status", ...(threadId ? { threadId } : {}) },
+          generation,
+        );
         if (owner.current === generation && mode.reportErrors) setError(false);
       } catch {
         if (owner.current === generation && mode.reportErrors) setError(true);
+        if (owner.current === generation && mode.action === "activity")
+          setStatus((previous) =>
+            previous ? { ...previous, activity: { state: "unavailable" } } : previous,
+          );
       } finally {
         if (owner.current === generation) {
           reading.current = false;
@@ -123,6 +159,18 @@ export function GlideControl({
   }, [environmentId, threadId, runtimeMode, refreshKey, read]);
 
   const granted = glidePermissionsGranted(status);
+  useEffect(() => {
+    onActivityChange?.(status?.activity);
+  }, [onActivityChange, status?.activity]);
+  useEffect(() => {
+    if (!(status?.enabled || (!threadId && draftEnabled))) return;
+    const generation = owner.current;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible")
+        void read(generation, { busy: false, reportErrors: false, action: "activity" });
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [status?.enabled, threadId, draftEnabled, read]);
   // Poll only while setup is open and incomplete. The timer belongs to this
   // effect, so closing, completing, unmounting or a chat change clears it.
   useEffect(() => {
@@ -198,8 +246,11 @@ export function GlideControl({
       else setSetupError(GLIDE_SETUP_ERROR.enable);
       return;
     }
-    onDraftEnabledChange?.(true);
-    setSetupOpen(false);
+    const value = await mutate({ action: "status" });
+    if (value && glidePermissionsGranted(value)) {
+      onDraftEnabledChange?.(true, value.stopRevision ?? "0");
+      setSetupOpen(false);
+    } else setSetupError(GLIDE_SETUP_ERROR.enable);
   };
 
   const enabled = threadId ? status?.enabled === true : draftEnabled;
@@ -272,7 +323,8 @@ export function GlideControl({
                   return;
                 }
                 if (threadId) void mutate({ action: "set-enabled", threadId, enabled: !enabled });
-                else onDraftEnabledChange?.(!enabled);
+                else if (enabled) onDraftEnabledChange?.(false);
+                else void enable();
               }}
             />
           }

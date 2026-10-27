@@ -117,6 +117,20 @@ describe("desktop preload capability boundary", () => {
     electron.invoke.mockResolvedValueOnce("cancelled");
     await expect(bridge.savePng(imageSave)).resolves.toBe("cancelled");
     expect(electron.invoke).toHaveBeenLastCalledWith(IpcChannels.SAVE_PNG_CHANNEL, imageSave);
+    const notification = { title: "Chat", body: "Finished running", tag: "chat-one" };
+    electron.invoke.mockResolvedValueOnce("sent");
+    await expect(bridge.showNotification?.(notification)).resolves.toBe("sent");
+    expect(electron.invoke).toHaveBeenLastCalledWith(
+      IpcChannels.SHOW_NOTIFICATION_CHANNEL,
+      notification,
+    );
+    const onClick = vi.fn();
+    const unsubscribe = bridge.onNotificationClick!(onClick);
+    const [channel, wrapped] = electron.on.mock.calls.at(-1)!;
+    for (const tag of [null, {}, "", "x".repeat(513), "chat-one"]) wrapped({}, tag);
+    expect(onClick).toHaveBeenCalledExactlyOnceWith("chat-one");
+    unsubscribe();
+    expect(electron.removeListener).toHaveBeenCalledWith(channel, wrapped);
   });
 
   it.each([false, undefined])(

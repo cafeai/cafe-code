@@ -236,6 +236,14 @@ environment, abort signal, limits and actual child-close join. Native file,
 selected-tool and null-device identity checks still run; malformed or foreign
 metadata must refuse without authenticating or publishing a receipt. This is
 synthetic metadata qualification, not evidence about the host's selected SDK.
+The fixture also routes only its live owner's exact
+`/var/db/xcode_select_link` observations to a real private temporary symlink,
+modeling only the root-owner uid scalar. A valid default macOS toolchain need
+not have that global selector entry. Missing, unowned and regular-file selector
+negatives still refuse before the metadata child starts; native bigint/type,
+selected-tool byte, held-descriptor, null-device and lifetime checks remain in
+force. The host selector is never created or changed. Production selection
+admission is unchanged and falls back to fresh verification when unsupported.
 The independent fixed-command/argument/options and callback-versus-close
 controls retain the real production lookup contract unchanged.
 Independent synthetic output writes use small fixed batches, with every native

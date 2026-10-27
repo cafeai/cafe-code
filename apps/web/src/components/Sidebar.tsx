@@ -225,6 +225,11 @@ import { deskTabKey } from "../deskModel";
 import { renameThread } from "../threadRename";
 import type { ThreadRouteTarget } from "../threadRoutes";
 import {
+  readScheduledFollowUpAtFrom,
+  useScheduledFollowUpAt,
+  useScheduledFollowupPresenceByEnvironment,
+} from "./chat/scheduledFollowupPresence";
+import {
   buildStandaloneCatalog,
   type StandaloneCatalogEntry,
 } from "./sidebar/standaloneNavigation.logic";
@@ -587,10 +592,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const isHighlighted = isActive || isSelected;
   const isThreadRunning =
     thread.session?.status === "running" && thread.session.activeTurnId != null;
+  const scheduledFollowUpAt = useScheduledFollowUpAt(thread.environmentId, thread.id);
   const threadStatus = resolveThreadStatusPill({
     thread: {
       ...thread,
       lastVisitedAt,
+      scheduledFollowUpAt,
     },
   });
   const pr = thread.projectId === null ? null : resolveThreadPr(thread.branch, gitStatus.data);
@@ -1019,6 +1026,11 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
             .map((entry) => state.threadLastVisitedAtById[entry.key] ?? null),
     ),
   );
+  const standaloneEnvironmentIds = useMemo(
+    () => [...new Set(entries.map((entry) => entry.thread.environmentId))],
+    [entries],
+  );
+  const scheduledPresence = useScheduledFollowupPresenceByEnvironment(standaloneEnvironmentIds);
   const hiddenSummary = useMemo(
     () =>
       expanded
@@ -1032,11 +1044,16 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
                   ...(lastVisitedAt !== null && lastVisitedAt !== undefined
                     ? { lastVisitedAt }
                     : {}),
+                  scheduledFollowUpAt: readScheduledFollowUpAtFrom(
+                    scheduledPresence,
+                    entry.thread.environmentId,
+                    entry.thread.id,
+                  ),
                 },
               });
             }),
           ),
-    [entries, expanded, hiddenLastVisitedAts, previewCount, uiPresentation],
+    [entries, expanded, hiddenLastVisitedAts, previewCount, scheduledPresence, uiPresentation],
   );
   const cancelRename = useCallback(() => {
     setRenamingThreadKey(null);
@@ -1658,6 +1675,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const sidebarThreadByKeyRef = useRef(sidebarThreadByKey);
   sidebarThreadByKeyRef.current = sidebarThreadByKey;
   const projectThreads = sidebarThreads;
+  const projectEnvironmentIds = useMemo(
+    () => project.memberProjects.map((member) => member.environmentId),
+    [project.memberProjects],
+  );
+  const scheduledPresence = useScheduledFollowupPresenceByEnvironment(projectEnvironmentIds);
   const projectExpanded = useUiStateStore(
     (state) => state.projectExpandedById[project.projectKey] ?? true,
   );
@@ -1747,6 +1769,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         thread: {
           ...thread,
           ...(lastVisitedAt !== null && lastVisitedAt !== undefined ? { lastVisitedAt } : {}),
+          scheduledFollowUpAt: readScheduledFollowUpAtFrom(
+            scheduledPresence,
+            thread.environmentId,
+            thread.id,
+          ),
         },
       });
     };
@@ -1764,7 +1791,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       projectStatus,
       visibleProjectThreads,
     };
-  }, [projectThreads, threadLastVisitedAts, threadSortOrder]);
+  }, [projectThreads, scheduledPresence, threadLastVisitedAts, threadSortOrder]);
 
   const pinnedCollapsedThread = useMemo(() => {
     const activeThreadKey = activeRouteThreadKey ?? undefined;
@@ -1801,6 +1828,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         thread: {
           ...thread,
           ...(lastVisitedAt !== null && lastVisitedAt !== undefined ? { lastVisitedAt } : {}),
+          scheduledFollowUpAt: readScheduledFollowUpAtFrom(
+            scheduledPresence,
+            thread.environmentId,
+            thread.id,
+          ),
         },
       });
     };
@@ -1840,6 +1872,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     projectBootstrapComplete,
     projectExpanded,
     projectThreads,
+    scheduledPresence,
     sidebarThreadPreviewCount,
     threadLastVisitedAts,
     visibleProjectThreads,

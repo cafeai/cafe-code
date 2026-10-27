@@ -11,20 +11,38 @@ import type { ClaudeSessionQuotaPresentation } from "../lib/claudeSessionQuota";
 
 type ClaudeQuotaMeter = NonNullable<ClaudeSessionQuotaPresentation["meters"]>[number];
 
-function ClaudeQuotaMeterRow({ meter }: { readonly meter: ClaudeQuotaMeter }) {
+function ClaudeQuotaMeterRow({
+  meter,
+  layout,
+}: {
+  readonly meter: ClaudeQuotaMeter;
+  readonly layout: "compact" | "popover" | "panel" | "settings";
+}) {
   const uiLocale = useUiLocale();
   return (
     <section
       aria-label={uiText("{value0} quota", { value0: meter.label }, undefined, uiLocale)}
-      className="min-w-0 space-y-1"
+      className={cn(
+        "min-w-0",
+        layout === "settings" ? "flex flex-wrap items-baseline gap-x-4 gap-y-1" : "space-y-1",
+      )}
       data-claude-quota-meter={meter.id}
     >
-      <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+      <div
+        className={cn(
+          "min-w-0 gap-x-3 gap-y-1",
+          layout === "settings"
+            ? "flex max-w-full flex-wrap items-baseline"
+            : "grid grid-cols-[minmax(0,1fr)_auto]",
+        )}
+      >
         <span>{meter.label}</span>
         <span className="font-medium text-foreground tabular-nums">{meter.value}</span>
       </div>
-      <UsageMeterBar percent={meter.remainingPercent} testId={`claude-${meter.id}`} />
-      {meter.reset ? <p className="text-2xs text-subtle-foreground">{meter.reset}</p> : null}
+      {layout === "panel" ? (
+        <UsageMeterBar percent={meter.remainingPercent} testId={`claude-${meter.id}`} />
+      ) : null}
+      {meter.reset ? <p className="min-w-0 max-w-full">{meter.reset}</p> : null}
       {meter.severity !== "normal" && meter.severity !== "unknown" ? <p>{meter.severity}</p> : null}
     </section>
   );
@@ -116,11 +134,8 @@ export function ProviderAccountQuotaDetails(props: {
         >
           {session ? (
             <>
-              <div className="label-overline">
-                {uiText("Account usage", undefined, undefined, uiLocale)}
-              </div>
               <div
-                className="focus-ring min-h-0 min-w-0 max-h-[40vh] space-y-3 overflow-y-auto rounded-sm"
+                className="focus-ring min-h-0 min-w-0 max-h-[40vh] space-y-2.5 overflow-y-auto rounded-sm"
                 data-account-quota-scroll
                 tabIndex={0}
                 onKeyDown={scrollViewportOnEndKey}
@@ -147,7 +162,7 @@ export function ProviderAccountQuotaDetails(props: {
                   </p>
                 ) : (
                   session.meters.map((meter) => (
-                    <ClaudeQuotaMeterRow key={meter.id} meter={meter} />
+                    <ClaudeQuotaMeterRow key={meter.id} meter={meter} layout={layout} />
                   ))
                 )}
                 {session.extraUsageSummary ? (

@@ -3,7 +3,7 @@
 Decision status: Accepted by the user's request to make provider errors readable
 Implementation status: Implemented; qualification boundary below
 Created: 2026-10-19 23:32:04 JST (UTC+0900)
-Last updated: 2026-10-19 23:32:04 JST (UTC+0900)
+Last updated: 2026-10-22 07:17:54 JST (UTC+0900)
 Extends: [Private provider retry/error details](private-provider-error-diagnostics.md)
 and [Provider errors stay out of chat popups](provider-error-popup-policy.md).
 Their capture, storage, ownership, private-reader and no-popup rules are unchanged.
@@ -44,6 +44,24 @@ so older renderers keep reading summaries. Older rows derive the same category
 from the admitted private copy after explicit expansion. A category selects
 fixed Cafe copy and navigation only; it grants no retry, recovery, permission
 or lifecycle authority. Unknown/future codes stay uncategorized.
+
+**Claude Stop.** A separate adapter correction handles the diagnostic-only
+`error_during_execution` returned by Claude after an ordinary Stop (upstream
+[SDK #366](https://github.com/anthropics/claude-agent-sdk-typescript/issues/366)
+and [SDK #405](https://github.com/anthropics/claude-agent-sdk-typescript/issues/405)).
+Only a successful native interrupt bound to the same query, Cafe turn, native
+session and submitted prompt witnesses qualifies the exact single internal
+summary with `stop_reason=null` or `tool_use`. The result becomes interrupted
+without an error message or provider-error row; the existing accepted-interrupt
+receipt displays as "Response stopped". Each result consumes this evidence,
+and a response revision fences a late receipt from qualifying a later segment.
+Pending/rejected interrupts, stale turns, foreign sessions/correlations,
+primary typed errors, reported API status, other terminal reasons and additional
+error text keep their original failure behavior. SDK 0.3.295 documents clean
+receipt-before-result ordering and the crash-result-before-receipt exception;
+that exception cannot borrow later acceptance. No request is replayed and the
+query remains open. Existing native diagnostic logging and historical error
+records are unchanged.
 
 **One row per failure.** Terminal echo folding judges completeness on the
 copied error object: a capture marker inside it (redaction, omission, cut)

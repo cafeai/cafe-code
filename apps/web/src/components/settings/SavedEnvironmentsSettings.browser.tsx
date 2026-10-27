@@ -1,8 +1,8 @@
 import "../../index.css";
 
 import { EnvironmentId } from "@cafecode/contracts";
-import { page } from "vitest/browser";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cdp, page, userEvent } from "vitest/browser";
+import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { render } from "vitest-browser-react";
 
 import {
@@ -19,6 +19,7 @@ const runtimeMocks = {
   reconnectSavedEnvironment: vi.fn(),
   disconnectSavedEnvironment: vi.fn(),
   removeSavedEnvironment: vi.fn(),
+  updateSavedEnvironment: vi.fn(),
 };
 
 const actions = {
@@ -26,6 +27,7 @@ const actions = {
   reconnect: runtimeMocks.reconnectSavedEnvironment,
   disconnect: runtimeMocks.disconnectSavedEnvironment,
   remove: runtimeMocks.removeSavedEnvironment,
+  update: runtimeMocks.updateSavedEnvironment,
 };
 
 function getDialogButton(role: "dialog" | "alertdialog", name: string): HTMLButtonElement {
@@ -43,38 +45,156 @@ function clickDialogButton(role: "dialog" | "alertdialog", name: string): void {
   getDialogButton(role, name).click();
 }
 
-describe("SavedEnvironmentsSettings", () => {
-  let mounted:
-    | (Awaited<ReturnType<typeof render>> & {
-        cleanup?: () => Promise<void>;
-        unmount?: () => Promise<void>;
-      })
-    | null = null;
+function ownSettingsFixture({ signal, onTestFinished }: TestContext) {
+  let retired = false;
+  let pendingRender: ReturnType<typeof render> | null = null;
+  let cleanupPromise: Promise<void> | null = null;
+  const nativeOperations = new Set<Promise<unknown>>();
+  const afterUnmount = new Set<() => void>();
+  let releasePointer: (() => Promise<void>) | null = null;
+  const host = document.createElement("div");
+  const assertActive = () => {
+    if (retired || signal.aborted) throw new Error("Saved environment fixture retired.");
+  };
+  const retire = () => {
+    retired = true;
+    signal.removeEventListener("abort", retire);
+  };
+  const cleanup = () => {
+    retire();
+    return (cleanupPromise ??= (async () => {
+      await Promise.allSettled([...nativeOperations]);
+      await releasePointer?.();
+      const view = await pendingRender?.catch(() => null);
+      await view?.unmount();
+      host.remove();
+      for (const release of afterUnmount) release();
+    })());
+  };
+  onTestFinished(cleanup);
+  signal.addEventListener("abort", retire, { once: true });
+  if (signal.aborted) retire();
+  return {
+    cleanup,
+    afterUnmount: (release: () => void) => afterUnmount.add(release),
+    async drag(source: HTMLElement, target: HTMLElement) {
+      const point = (element: HTMLElement) => {
+        const bounds = element.getBoundingClientRect();
+        let x = bounds.left + bounds.width / 2;
+        let y = bounds.top + bounds.height / 2;
+        let frame = window.frameElement;
+        while (frame) {
+          const node = frame as HTMLElement;
+          const rect = node.getBoundingClientRect();
+          x = rect.left + (x + node.clientLeft) * (rect.width / node.offsetWidth);
+          y = rect.top + (y + node.clientTop) * (rect.height / node.offsetHeight);
+          frame = frame.ownerDocument.defaultView?.frameElement ?? null;
+        }
+        return { x, y };
+      };
+      const start = point(source);
+      const end = point(target);
+      const input = cdp();
+      let releasePromise: Promise<void> | null = null;
+      const release = () =>
+        (releasePromise ??= input
+          .send("Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            ...end,
+            button: "left",
+            buttons: 0,
+            clickCount: 1,
+          })
+          .then(() => undefined));
+      releasePointer = release;
+      try {
+        await this.native(() =>
+          input.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...start }),
+        );
+        await this.native(() =>
+          input.send("Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            ...start,
+            button: "left",
+            buttons: 1,
+            clickCount: 1,
+          }),
+        );
+        await this.native(() =>
+          input.send("Input.dispatchMouseEvent", {
+            type: "mouseMoved",
+            x: start.x,
+            y: start.y + 10,
+            button: "left",
+            buttons: 1,
+          }),
+        );
+        await expect.element(source).toHaveAttribute("aria-pressed", "true");
+        for (let step = 1; step <= 8; step += 1) {
+          await this.native(() =>
+            input.send("Input.dispatchMouseEvent", {
+              type: "mouseMoved",
+              x: start.x + ((end.x - start.x) * step) / 8,
+              y: start.y + ((end.y - start.y) * step) / 8,
+              button: "left",
+              buttons: 1,
+            }),
+          );
+        }
+      } finally {
+        await release();
+      }
+    },
+    async mount() {
+      assertActive();
+      document.body.append(host);
+      pendingRender = render(<SavedEnvironmentsSettings actions={actions} />, { container: host });
+      const view = await pendingRender;
+      assertActive();
+      return view;
+    },
+    async native<T>(operation: () => Promise<T>) {
+      assertActive();
+      const pending = operation();
+      nativeOperations.add(pending);
+      try {
+        const result = await pending;
+        assertActive();
+        return result;
+      } finally {
+        nativeOperations.delete(pending);
+      }
+    },
+  };
+}
 
-  beforeEach(() => {
+describe("SavedEnvironmentsSettings", () => {
+  let fixture: ReturnType<typeof ownSettingsFixture>;
+
+  beforeEach((context) => {
+    fixture = ownSettingsFixture(context);
     resetSavedEnvironmentRegistryStoreForTests();
     resetSavedEnvironmentRuntimeStoreForTests();
     runtimeMocks.addSavedEnvironment.mockReset();
     runtimeMocks.reconnectSavedEnvironment.mockReset().mockResolvedValue(undefined);
     runtimeMocks.disconnectSavedEnvironment.mockReset().mockResolvedValue(undefined);
     runtimeMocks.removeSavedEnvironment.mockReset().mockResolvedValue(undefined);
+    runtimeMocks.updateSavedEnvironment.mockReset().mockResolvedValue(undefined);
   });
 
   afterEach(async () => {
-    const teardown = mounted?.cleanup ?? mounted?.unmount;
-    await teardown?.call(mounted).catch(() => {});
-    mounted = null;
+    await fixture.cleanup();
     document.body.innerHTML = "";
   });
 
   it("opens the add dialog and switches pairing methods", async () => {
-    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
+    await fixture.mount();
 
-    await page.getByRole("button", { name: "Add environment" }).click();
+    await fixture.native(() => page.getByRole("button", { name: "Add environment" }).click());
     await expect.element(page.getByRole("dialog")).toBeVisible();
     await expect.element(page.getByLabelText("Pairing URL")).toBeVisible();
 
-    await page.getByRole("button", { name: "Host + Code" }).click();
+    await fixture.native(() => page.getByRole("button", { name: "Host + Code" }).click());
     await expect.element(page.getByLabelText("Host")).toBeVisible();
     await expect.element(page.getByLabelText("Pairing code")).toBeVisible();
   });
@@ -86,15 +206,21 @@ describe("SavedEnvironmentsSettings", () => {
         resolveAdd = resolve;
       }),
     );
-    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
+    await fixture.mount();
 
-    await page.getByRole("button", { name: "Add environment" }).click();
+    await fixture.native(() => page.getByRole("button", { name: "Add environment" }).click());
     const dialog = page.getByRole("dialog");
-    await dialog.getByLabelText("Label (optional)").fill("My test environment");
-    await dialog
-      .getByLabelText("Pairing URL")
-      .fill("https://test.local/pair#token=secret-pairing-token");
-    await dialog.getByLabelText("Authenticator or recovery code").fill("123456");
+    await fixture.native(() =>
+      dialog.getByLabelText("Label (optional)").fill("My test environment"),
+    );
+    await fixture.native(() =>
+      dialog
+        .getByLabelText("Pairing URL")
+        .fill("https://test.local/pair#token=secret-pairing-token"),
+    );
+    await fixture.native(() =>
+      dialog.getByLabelText("Authenticator or recovery code").fill("123456"),
+    );
     const nativeDialog = document.querySelector<HTMLElement>('[role="dialog"]');
     const nativeFactorInput = nativeDialog?.querySelector<HTMLInputElement>("#env-second-factor");
     const nativePairingInput = Array.from(nativeDialog?.querySelectorAll("input") ?? []).find(
@@ -142,13 +268,15 @@ describe("SavedEnvironmentsSettings", () => {
     runtimeMocks.addSavedEnvironment.mockRejectedValueOnce(
       new Error("Rejected secret-pairing-token from https://test.local/pair"),
     );
-    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
+    await fixture.mount();
 
-    await page.getByRole("button", { name: "Add environment" }).click();
+    await fixture.native(() => page.getByRole("button", { name: "Add environment" }).click());
     const dialog = page.getByRole("dialog");
-    await dialog
-      .getByLabelText("Pairing URL")
-      .fill("https://test.local/pair#token=secret-pairing-token");
+    await fixture.native(() =>
+      dialog
+        .getByLabelText("Pairing URL")
+        .fill("https://test.local/pair#token=secret-pairing-token"),
+    );
     clickDialogButton("dialog", "Add environment");
 
     await expect
@@ -168,13 +296,13 @@ describe("SavedEnvironmentsSettings", () => {
         resolveAdd = resolve;
       }),
     );
-    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
-    await page.getByRole("button", { name: "Add environment" }).click();
-    await page.getByRole("button", { name: "Host + Password" }).click();
+    await fixture.mount();
+    await fixture.native(() => page.getByRole("button", { name: "Add environment" }).click());
+    await fixture.native(() => page.getByRole("button", { name: "Host + Password" }).click());
     const dialog = page.getByRole("dialog");
-    await dialog.getByLabelText("Host").fill("https://pc.example:3775");
+    await fixture.native(() => dialog.getByLabelText("Host").fill("https://pc.example:3775"));
     expect(document.querySelector("#env-username")).toBeNull();
-    await dialog.getByLabelText("Admin password").fill("admin-secret");
+    await fixture.native(() => dialog.getByLabelText("Admin password").fill("admin-secret"));
     const passwordInput = document.querySelector<HTMLInputElement>("#env-password");
     expect(passwordInput?.type).toBe("password");
     const submitButton = getDialogButton("dialog", "Add environment");
@@ -205,12 +333,12 @@ describe("SavedEnvironmentsSettings", () => {
     runtimeMocks.addSavedEnvironment.mockRejectedValue(
       new Error("Rejected admin-secret for PC user at https://pc.example/private"),
     );
-    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
-    await page.getByRole("button", { name: "Add environment" }).click();
-    await page.getByRole("button", { name: "Host + Password" }).click();
+    await fixture.mount();
+    await fixture.native(() => page.getByRole("button", { name: "Add environment" }).click());
+    await fixture.native(() => page.getByRole("button", { name: "Host + Password" }).click());
     const dialog = page.getByRole("dialog");
-    await dialog.getByLabelText("Host").fill("https://pc.example");
-    await dialog.getByLabelText("Admin password").fill("admin-secret");
+    await fixture.native(() => dialog.getByLabelText("Host").fill("https://pc.example"));
+    await fixture.native(() => dialog.getByLabelText("Admin password").fill("admin-secret"));
     clickDialogButton("dialog", "Add environment");
     await expect
       .element(
@@ -223,7 +351,7 @@ describe("SavedEnvironmentsSettings", () => {
     expect(document.body.textContent).not.toMatch(/admin-secret|PC user|\/private/);
     clickDialogButton("dialog", "Add environment");
     expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledOnce();
-    await dialog.getByLabelText("Admin password").fill("fresh-secret");
+    await fixture.native(() => dialog.getByLabelText("Admin password").fill("fresh-secret"));
     clickDialogButton("dialog", "Add environment");
     await vi.waitFor(() => {
       expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledTimes(2);
@@ -236,23 +364,27 @@ describe("SavedEnvironmentsSettings", () => {
   });
 
   it("discards login and pairing secrets when switching methods or closing", async () => {
-    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
-    await page.getByRole("button", { name: "Add environment" }).click();
+    await fixture.mount();
+    await fixture.native(() => page.getByRole("button", { name: "Add environment" }).click());
     const dialog = page.getByRole("dialog");
-    await dialog.getByLabelText("Pairing URL").fill("https://pc.example/pair#token=secret");
-    await page.getByRole("button", { name: "Host + Password" }).click();
-    await dialog.getByLabelText("Admin password").fill("admin-secret");
-    await page.getByRole("button", { name: "Pairing URL", exact: true }).click();
+    await fixture.native(() =>
+      dialog.getByLabelText("Pairing URL").fill("https://pc.example/pair#token=secret"),
+    );
+    await fixture.native(() => page.getByRole("button", { name: "Host + Password" }).click());
+    await fixture.native(() => dialog.getByLabelText("Admin password").fill("admin-secret"));
+    await fixture.native(() =>
+      page.getByRole("button", { name: "Pairing URL", exact: true }).click(),
+    );
     await expect.element(dialog.getByLabelText("Pairing URL")).toHaveValue("");
-    await page.getByRole("button", { name: "Host + Password" }).click();
+    await fixture.native(() => page.getByRole("button", { name: "Host + Password" }).click());
     await expect.element(dialog.getByLabelText("Admin password")).toHaveValue("");
-    await dialog.getByLabelText("Admin password").fill("second-secret");
-    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await fixture.native(() => dialog.getByLabelText("Admin password").fill("second-secret"));
+    await fixture.native(() => dialog.getByRole("button", { name: "Cancel" }).click());
     await vi.waitFor(() => {
       expect(document.querySelector('[role="dialog"]')).toBeNull();
     });
-    await page.getByRole("button", { name: "Add environment" }).click();
-    await page.getByRole("button", { name: "Host + Password" }).click();
+    await fixture.native(() => page.getByRole("button", { name: "Add environment" }).click());
+    await fixture.native(() => page.getByRole("button", { name: "Host + Password" }).click());
     await expect.element(page.getByLabelText("Admin password")).toHaveValue("");
     expect(runtimeMocks.addSavedEnvironment).not.toHaveBeenCalled();
   });
@@ -262,11 +394,11 @@ describe("SavedEnvironmentsSettings", () => {
     [1100, 780],
   ])("keeps login actions visible at %s × %s", async (width, height) => {
     const previous = { width: window.innerWidth, height: window.innerHeight };
-    await page.viewport(width, height);
+    await fixture.native(() => page.viewport(width, height));
     try {
-      mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
-      await page.getByRole("button", { name: "Add environment" }).click();
-      await page.getByRole("button", { name: "Host + Password" }).click();
+      await fixture.mount();
+      await fixture.native(() => page.getByRole("button", { name: "Add environment" }).click());
+      await fixture.native(() => page.getByRole("button", { name: "Host + Password" }).click());
       await vi.waitFor(() => {
         for (const name of ["Cancel", "Add environment"]) {
           const bounds = getDialogButton("dialog", name).getBoundingClientRect();
@@ -276,12 +408,14 @@ describe("SavedEnvironmentsSettings", () => {
           expect(bounds.right).toBeLessThanOrEqual(width);
         }
       });
-      await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+      await fixture.native(() =>
+        page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click(),
+      );
       await vi.waitFor(() => {
         expect(document.querySelector('[role="dialog"]')).toBeNull();
       });
     } finally {
-      await page.viewport(previous.width, previous.height);
+      await fixture.native(() => page.viewport(previous.width, previous.height));
     }
   });
 
@@ -299,14 +433,19 @@ describe("SavedEnvironmentsSettings", () => {
         },
       },
     });
-    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
+    await fixture.mount();
 
     await expect.element(page.getByText("My Remote Box")).toBeVisible();
     await expect.element(page.getByText("remote.local")).toBeVisible();
-    await page.getByRole("button", { name: "Reconnect My Remote Box" }).click();
+    await fixture.native(() =>
+      page.getByRole("button", { name: "Reconnect My Remote Box" }).click(),
+    );
     expect(runtimeMocks.reconnectSavedEnvironment).toHaveBeenCalledWith(environmentId);
 
-    await page.getByRole("button", { name: "Remove My Remote Box" }).click();
+    await fixture.native(() => page.getByRole("button", { name: "Edit My Remote Box" }).click());
+    await fixture.native(() =>
+      page.getByRole("dialog").getByRole("button", { name: "Delete", exact: true }).click(),
+    );
     await expect.element(page.getByRole("alertdialog")).toBeVisible();
     clickDialogButton("alertdialog", "Remove");
     expect(runtimeMocks.removeSavedEnvironment).toHaveBeenCalledWith(environmentId);
@@ -331,9 +470,198 @@ describe("SavedEnvironmentsSettings", () => {
       connectionState: "connected",
       authState: "authenticated",
     });
-    mounted = await render(<SavedEnvironmentsSettings actions={actions} />);
+    await fixture.mount();
 
-    await page.getByRole("button", { name: "Disconnect Connected server" }).click();
+    await fixture.native(() =>
+      page.getByRole("button", { name: "Disconnect Connected server" }).click(),
+    );
     expect(runtimeMocks.disconnectSavedEnvironment).toHaveBeenCalledWith(environmentId);
+  });
+
+  it("allows cancelling and confirming removal while an unreachable environment retries", async () => {
+    const environmentId = EnvironmentId.make("env-unreachable");
+    const connectedAt = "2026-10-25T00:00:00.000Z";
+    useSavedEnvironmentRegistryStore.getState().upsert({
+      environmentId,
+      label: "Unreachable server",
+      httpBaseUrl: "https://unreachable.example/",
+      wsBaseUrl: "wss://unreachable.example/",
+      createdAt: connectedAt,
+      lastConnectedAt: connectedAt,
+    });
+    useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
+      connectionState: "disconnected",
+      connectedAt,
+      reconnectPhase: "waiting",
+    });
+    await fixture.mount();
+
+    const editButton = page.getByRole("button", { name: "Edit Unreachable server" });
+    await expect.element(page.getByText("Reconnecting", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Reconnect Unreachable server" }))
+      .toBeDisabled();
+    await expect.element(editButton).toBeEnabled();
+    await fixture.native(() => editButton.click());
+    await fixture.native(() =>
+      page.getByRole("dialog").getByRole("button", { name: "Delete", exact: true }).click(),
+    );
+    await fixture.native(() =>
+      page.getByRole("alertdialog").getByRole("button", { name: "Cancel" }).click(),
+    );
+    await expect.element(page.getByRole("alertdialog")).not.toBeInTheDocument();
+    expect(runtimeMocks.removeSavedEnvironment).not.toHaveBeenCalled();
+
+    await fixture.native(() =>
+      page.getByRole("dialog").getByRole("button", { name: "Delete", exact: true }).click(),
+    );
+    useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
+      connectionState: "connecting",
+      reconnectPhase: "attempting",
+    });
+    await fixture.native(() =>
+      page.getByRole("alertdialog").getByRole("button", { name: "Remove", exact: true }).click(),
+    );
+
+    expect(runtimeMocks.removeSavedEnvironment).toHaveBeenCalledExactlyOnceWith(environmentId);
+    expect(runtimeMocks.reconnectSavedEnvironment).not.toHaveBeenCalled();
+    expect(runtimeMocks.disconnectSavedEnvironment).not.toHaveBeenCalled();
+    await expect.element(page.getByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("edits an unreachable environment and locks pending saves until local persistence completes", async () => {
+    const environmentId = EnvironmentId.make("offline-edit");
+    useSavedEnvironmentRegistryStore.getState().upsert({
+      environmentId,
+      label: "Offline box",
+      httpBaseUrl: "http://10.0.0.108:3774/",
+      wsBaseUrl: "ws://10.0.0.108:3774/",
+      createdAt: "2026-10-25T00:00:00.000Z",
+      lastConnectedAt: null,
+    });
+    useSavedEnvironmentRuntimeStore
+      .getState()
+      .patch(environmentId, { connectionState: "connecting", reconnectPhase: "attempting" });
+    let finish!: () => void;
+    runtimeMocks.updateSavedEnvironment.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    fixture.afterUnmount(() => finish());
+    try {
+      await fixture.mount();
+      await fixture.native(() => page.getByRole("button", { name: "Edit Offline box" }).click());
+      const dialog = page.getByRole("dialog");
+      await expect
+        .element(dialog.getByLabelText("Name", { exact: true }))
+        .toHaveValue("Offline box");
+      await expect
+        .element(dialog.getByLabelText("IP address or hostname"))
+        .toHaveValue("10.0.0.108");
+      await expect.element(dialog.getByLabelText("Port", { exact: true })).toHaveValue(3774);
+      await fixture.native(() => dialog.getByLabelText("Name", { exact: true }).fill("New box"));
+      await fixture.native(() =>
+        dialog.getByLabelText("IP address or hostname").fill("10.0.0.109"),
+      );
+      await fixture.native(() => dialog.getByLabelText("Port", { exact: true }).fill("3775"));
+      await fixture.native(() => dialog.getByRole("button", { name: "Save", exact: true }).click());
+      expect(runtimeMocks.updateSavedEnvironment).toHaveBeenCalledExactlyOnceWith(environmentId, {
+        label: "New box",
+        host: "10.0.0.109",
+        port: "3775",
+      });
+      await expect
+        .element(dialog.getByRole("button", { name: "Save", exact: true }))
+        .toBeDisabled();
+      await expect
+        .element(dialog.getByRole("button", { name: "Delete", exact: true }))
+        .toBeDisabled();
+      finish();
+      await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+      expect(runtimeMocks.removeSavedEnvironment).not.toHaveBeenCalled();
+      expect(runtimeMocks.reconnectSavedEnvironment).not.toHaveBeenCalled();
+    } finally {
+      finish();
+    }
+  });
+
+  it("discards cancelled edits and shows sanitized save failures without losing the form", async () => {
+    const environmentId = EnvironmentId.make("edit-failure");
+    useSavedEnvironmentRegistryStore.getState().upsert({
+      environmentId,
+      label: "Box",
+      httpBaseUrl: "https://box.example/",
+      wsBaseUrl: "wss://box.example/",
+      createdAt: "2026-10-25T00:00:00.000Z",
+      lastConnectedAt: null,
+    });
+    await fixture.mount();
+    await fixture.native(() => page.getByRole("button", { name: "Edit Box", exact: true }).click());
+    let dialog = page.getByRole("dialog");
+    await fixture.native(() => dialog.getByLabelText("Name", { exact: true }).fill("Discard me"));
+    await fixture.native(() => dialog.getByRole("button", { name: "Cancel", exact: true }).click());
+    await expect.element(dialog).not.toBeInTheDocument();
+    await fixture.native(() => page.getByRole("button", { name: "Edit Box", exact: true }).click());
+    dialog = page.getByRole("dialog");
+    await expect.element(dialog.getByLabelText("Name", { exact: true })).toHaveValue("Box");
+    await expect.element(dialog.getByLabelText("Port", { exact: true })).toHaveValue(443);
+    runtimeMocks.updateSavedEnvironment.mockRejectedValueOnce(new Error("secret storage payload"));
+    await fixture.native(() => dialog.getByRole("button", { name: "Save", exact: true }).click());
+    await expect
+      .element(dialog.getByRole("alert"))
+      .toHaveTextContent("Could not save this environment. Try again.");
+    expect(document.body.textContent).not.toContain("secret storage payload");
+    await expect.element(dialog.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+  });
+
+  it("reorders saved environments with native pointer dragging and keyboard controls", async () => {
+    const ids = ["first", "second", "third"].map((id) => EnvironmentId.make(id));
+    for (const [index, environmentId] of ids.entries()) {
+      useSavedEnvironmentRegistryStore.getState().upsert({
+        environmentId,
+        label: ["Zulu", "Alpha", "Middle"][index]!,
+        httpBaseUrl: `https://${environmentId}.example/`,
+        wsBaseUrl: `wss://${environmentId}.example/`,
+        createdAt: "2026-10-25T00:00:00.000Z",
+        lastConnectedAt: null,
+      });
+    }
+    await fixture.mount();
+    const order = () =>
+      Array.from(
+        document.querySelectorAll(
+          '[aria-label="Saved environment order"] [aria-roledescription="sortable"]',
+        ),
+      ).map((element) => element.getAttribute("aria-label"));
+    expect(order()).toEqual(["Reorder Zulu", "Reorder Alpha", "Reorder Middle"]);
+    await fixture.drag(
+      page.getByRole("button", { name: "Reorder Zulu", exact: true }).element() as HTMLElement,
+      page.getByRole("button", { name: "Reorder Middle", exact: true }).element() as HTMLElement,
+    );
+    await vi.waitFor(() =>
+      expect(order()).toEqual(["Reorder Alpha", "Reorder Middle", "Reorder Zulu"]),
+    );
+    expect(Object.keys(useSavedEnvironmentRegistryStore.getState().byId)).toEqual([
+      ids[1],
+      ids[2],
+      ids[0],
+    ]);
+    const handle = page.getByRole("button", { name: "Reorder Zulu", exact: true });
+    await fixture.native(() => handle.click());
+    await expect.element(handle).toHaveFocus();
+    await fixture.native(() => userEvent.keyboard("[Space]"));
+    await fixture.native(() => userEvent.keyboard("[ArrowUp]"));
+    await fixture.native(() => userEvent.keyboard("[Space]"));
+    await vi.waitFor(() =>
+      expect(order()).toEqual(["Reorder Alpha", "Reorder Zulu", "Reorder Middle"]),
+    );
+    expect(Object.keys(useSavedEnvironmentRegistryStore.getState().byId)).toEqual([
+      ids[1],
+      ids[0],
+      ids[2],
+    ]);
+    expect(runtimeMocks.updateSavedEnvironment).not.toHaveBeenCalled();
+    expect(runtimeMocks.removeSavedEnvironment).not.toHaveBeenCalled();
   });
 });

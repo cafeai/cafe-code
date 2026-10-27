@@ -665,6 +665,13 @@ body::after {
   block-size: 0.75rem;
   background: none;
 }
+/* Clock hands rotate about the face centre (SVG view-box coordinates). The
+   hour hand's static offset uses the independent `rotate` property so it
+   composes with the animated `transform`. */
+.thread-status-clock-hand {
+  transform-box: view-box;
+  transform-origin: 12px 12px;
+}
 .thread-status-dot-shell[data-visible="true"]:has([data-spinning="true"]) {
   inline-size: 0.75rem;
   margin-inline-end: 0.25rem;

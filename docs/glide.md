@@ -54,6 +54,78 @@ provider and release-signing evidence is tracked separately below.
    session retirement, access downgrade and owner replacement revoke the
    affected authority.
 
+The tools can remain listed while Computer use is off. Execution still requires
+the exact chat's enabled grant, Full access and current running turn. Both shipped
+MCP entry names use that same broker, including the historical `glide-mcp.mjs`
+name; command-line helper paths and app allowlists cannot authorize execution.
+
+## Menu bar visibility and stopping
+
+The macOS **Computer use** cursor icon appears only while a chat with computer
+use enabled is running. An open provider session or a saved permission alone
+does not keep it visible. Native turn completion, cancellation and session exit
+hide that chat's rows and discard its previews; another running chat keeps its
+own rows. Already admitted work retains stopping visibility until it drains.
+The popover closes and its icon disappears once Stop all completes or the last
+running chat finishes. Explicitly enabling Computer use in a running chat's
+composer restores the icon and opens the popover once; enabling an idle chat
+opens it when that chat next runs. Ordinary status refreshes do not reopen it.
+
+The popover retains the approved Claude design with a compact flat list of
+windows, the owning chat, last successful screenshot thumbnails with timestamps,
+and a pinned **Stop all** button. Rows without a capture use a small window icon;
+idle badges, repeated permission summaries and the footer explanation are omitted.
+The info button explains the on-demand capture policy. The gear opens this Mac's
+Screen Recording privacy settings;
+the composer's existing setup dialog still checks both native permissions.
+
+A filled accent dot means a screenshot or input operation is being dispatched;
+an outlined dot means text reading. Ready/idle access has no activity dot.
+**Capturing**, **Reading text**, **Controlling**,
+**Stopping** and **Status unavailable** are distinct states. The existing single
+activity line above the composer reflects the same owner-scoped activity. An
+old preview is dated historical data, never evidence of streaming or a current
+native input grant. Opening this menu or polling activity does not capture.
+
+The tray is a separate, exact owned native child of the provider owner, so it
+survives closing the Electron window or choosing **Leave Running**. Capture and
+input wait for the native status host's render acknowledgment, then repeat the
+original cancellation/deadline/grant checks. Losing the status host fences new
+admission and disables grants rather than permitting invisible computer use.
+**Open chat** uses a single server-minted navigation receipt for the local
+desktop's primary environment; stale row owners cannot open another chat.
+
+Row Stop disables that chat's durable grant. **Stop all** synchronously fences
+all bound generations, disables every saved grant in the current Cafe data
+profile in one SQLite transaction, and joins owned worker/native retirement.
+Only completed cleanup can publish a stopped state; failures remain unavailable.
+Future provider messages and resumes cannot restore access. A monotonic durable
+stop revision also refuses enable requests and first-send drafts that crossed
+Stop all. Explicitly turning it on again grants only the selected chat.
+
+Previews derive from the already normalized native screenshot, never a second
+capture. They remain in owner memory only: at most two 240×150 JPEG previews per
+chat, 96 KiB each, across at most 32 live/pending chat owners. Exact process-birth
+and window identifiers distinguish histories. Revocation and disposal remove
+that owner's images. No preview enters SQLite, provider logs or journals.
+The private tray uses bounded framed stdio, a nonpersistent WKWebView, fixed
+script-hash CSP, no network/navigation, and text-node rendering of window/chat
+names. It cannot enable grants or supply an app path or native execution target.
+Private observation metadata requires the broker's `visibilityVersion:1` opt-in.
+Rebuilding the helper preserves the original observation shape for older Cafe
+owners that are still running; no restart or session migration is performed.
+
+Opt-in native UI qualification (fixture data, no live provider/capture/input):
+
+```sh
+nice -n 10 node apps/desktop/scripts/test-glide-tray-native.mjs
+```
+
+This renders the actual AppKit/WKWebView panel, exercises its native open/stop
+events and unavailable/stopped states, and exports dark/light screenshots under
+`.explorations/computer-use-implementation/`. Windows/Linux remain unsupported
+for native Glide; synthetic grant/ownership tests still run on every host.
+
 The UI supports English, Japanese and Korean. The foreground app and
 pointer are preserved by the qualified background journey. Physical mouse or
 keyboard activity can interrupt a background operation; read fresh state before
@@ -381,7 +453,7 @@ available under execution saturation. Bodies, chunks, output and response
 lifetimes are bounded. Native readers may allocate before sizes are available;
 data limits are not total OS-memory guarantees.
 
-## Build and standalone development
+## Build and development qualification
 
 Building does not launch or restart Cafe:
 
@@ -391,37 +463,33 @@ nice -n 10 corepack yarn workspace @cafeai/cafe-code build:bundle
 ```
 
 The desktop build compiles all seven native sources. Server assets include
-`glide-worker.mjs`, standalone `glide-mcp.mjs` and managed
+`glide-worker.mjs`, the authenticated compatibility alias `glide-mcp.mjs` and
 `glide-mcp-bridge.mjs`. Trusted server code resolves source/packaged helper paths,
 never a renderer-provided executable. Release staging includes architecture-correct
 `Resources/mac-glide`, required by artifact audit. Existing Developer ID,
 hardened-runtime and notarization tooling signs Mach-O resources. A source build
 does not establish signed-release TCC/notarization acceptance.
 
-Standalone MCP remains available for isolated development, using its own
-connection-owned helper/worker instead of Cafe's shared host:
+Both MCP entries accept only the private connection file minted by Cafe for the
+owning provider session. The former standalone `--native-helper`, `--allow-app`
+and `--input-mode` arguments are refused before connecting. There is no shipped
+MCP mode that creates a separate worker/native host from caller-selected app
+grants. Existing standalone configurations must use Cafe's session connection;
+supplying a chat ID or model-selected app list cannot create permission.
 
-```json
-{
-  "command": "/absolute/path/to/node",
-  "args": [
-    "/absolute/path/to/cafe-code/apps/server/dist/glide-mcp.mjs",
-    "--native-helper",
-    "/absolute/path/to/cafe-code/apps/desktop/native/build/arm64/mac-glide",
-    "--input-mode",
-    "background",
-    "--allow-app",
-    "com.apple.TextEdit"
-  ]
-}
-```
+Explicit native development fixtures below retain their test-owned runtimes and
+helpers. These low-level components are trusted local code, not an OS sandbox.
+The chat switch controls Cafe's broker and MCP tools; a program already allowed
+arbitrary local execution can invoke native code or independent macOS automation
+outside that broker. Preventing that requires an OS-enforced process boundary.
+Do not run the separate `GlideMac.e2e.test.ts` foreground journey during
+uninterrupted human use.
 
-`--allow-app` repeats up to sixteen bundle IDs resolved to canonical paths.
-Apps must already be running. Background is default; explicit foreground mode
-may activate/raise the target and move the pointer. Do not run its separate
-`GlideMac.e2e.test.ts` foreground journey during uninterrupted human use.
-Standalone execution does not acquire Cafe's managed per-chat policy merely
-by sharing the facade.
+`GlideSessionPipeline.e2e.test.ts` qualifies both compiled MCP entry names through
+real copied stdio bridges, HTTP, the owner broker and ESM worker with synthetic
+native/tray peers. It covers disabled, enabled, stopped and revoked calls across
+local, daemon, supervisor and desktop placements, including zero native work on
+refusal and a still-enabled sibling chat. It does not capture or control user apps.
 
 ## Qualification and limits
 

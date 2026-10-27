@@ -317,6 +317,10 @@ export const ClientSettingsSchema = Schema.Struct({
   // (native notifications in the desktop app, Web Push in browsers). Off by
   // default; enabling may prompt for OS-level notification permission.
   notificationsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Independent opt-in for questions awaiting a response from this device.
+  userInputNotificationsEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
@@ -1133,6 +1137,7 @@ export const ClientSettingsPatch = Schema.Struct({
   onboardingCompleted: Schema.optionalKey(Schema.Boolean),
   dismissedFirstRunHints: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
   notificationsEnabled: Schema.optionalKey(Schema.Boolean),
+  userInputNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   interfaceScalePercent: Schema.optionalKey(InterfaceScalePercent),

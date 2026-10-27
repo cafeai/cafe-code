@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { awaitProcessShutdownEvidence } from "../../processShutdownObservation.ts";
-import { redactVisualizationNativePayload } from "../../visualizations/nativePrivacy.ts";
+import { redactVisualizationReceiptProofs } from "../../visualizations/nativePrivacy.ts";
 import { readMcpAppModelContext } from "../../mcpApps/owner.ts";
 import { readCodexAutoCompactTokenLimit } from "../codexContextWindowPolicy.ts";
 import type { SchedulingSessionBinding } from "../../scheduledFollowups/sessionRuntime.ts";
@@ -5237,11 +5237,12 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
   // valid native item and must never be fed back into that private wire path.
   // Project before reading received object properties so getters/proxies cannot
   // execute while this diagnostic's method is being selected.
-  const diagnosticPayload = redactCodexImageGenerationMetadata(input.payload);
+  const diagnosticPayload = redactVisualizationReceiptProofs(
+    redactCodexImageGenerationMetadata(input.payload),
+  );
   const payload = readRecord(diagnosticPayload);
   const method = payload ? readString(payload.method) : undefined;
   if (
-    method === "item/mcpToolCall/progress" ||
     method === "mcpServer/resource/read" ||
     method === "mcpServer/tool/call" ||
     (!method && payload && ("result" in payload || "error" in payload))
@@ -5303,13 +5304,6 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
       // trusted classifier. Preserve only the fixed failure kind and stage.
       return { stage: input.stage, diagnosticClass: "protocol-decode-failure-redacted" };
   }
-  const privateCopy = redactVisualizationNativePayload(diagnosticPayload);
-  if (privateCopy !== diagnosticPayload)
-    return {
-      diagnosticClass: "private-visualization-redacted",
-      stage: input.stage,
-      ...(method ? { method } : {}),
-    };
   if (
     method === "error" ||
     method === "turn/completed" ||
@@ -5322,8 +5316,8 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
         stage: input.stage,
         diagnosticClass: "native-error-decode-failure-redacted",
       };
-    // Visualization filtering must precede this decoded lifecycle mapper:
-    // old native turns can retain item payloads outside its error projection.
+    // Receipt proofs were removed before selecting this lifecycle mapper;
+    // retained tool activity keeps its original names, inputs and results.
     return { method, params: redactCodexFailureDiagnosticPayload(method, payload?.params) };
   }
   if (

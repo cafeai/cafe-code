@@ -19,7 +19,7 @@ import {
 } from "../../visualizations/sessionRuntime.ts";
 import {
   claimVisualizationNativeItem,
-  redactVisualizationNativePayload,
+  redactVisualizationReceiptProofs,
 } from "../../visualizations/nativePrivacy.ts";
 import { registerMcpAppOwner } from "../../mcpApps/owner.ts";
 import {
@@ -45,6 +45,7 @@ import {
   validCodexContextWindowOverride,
   type CanonicalRequestType,
   type CodexSettings,
+  type ModelSelection,
   EventId,
   MessageId,
   ProviderDriverKind,
@@ -540,6 +541,10 @@ class CodexTransportPolicyFileError extends Data.TaggedError("CodexTransportPoli
 export interface CodexAdapterLiveOptions {
   /** Exact owning instance's cached catalogue; never runs metadata or paid probes. */
   readonly getModels?: () => Effect.Effect<
+    ReadonlyArray<import("@cafecode/contracts").ServerProviderModel>
+  >;
+  /** Bounded model/list refresh owned by this exact instance, without starting a turn. */
+  readonly refreshModels?: () => Effect.Effect<
     ReadonlyArray<import("@cafecode/contracts").ServerProviderModel>
   >;
   /** Cached owning-driver status only; this getter must never launch a probe. */
@@ -2135,7 +2140,6 @@ function reconcileCodexAuthRecoveryLifecycle(
 
 /** Preserve privacy when old provider history contains retired private MCP tools. */
 export function redactArchivedToolPayload<T>(value: T, depth = 0): T {
-  if (depth === 0) value = redactVisualizationNativePayload(value);
   if (depth > 32) return "[Archived tool payload omitted]" as T;
   if (Array.isArray(value)) {
     const copy = value.map((v) => redactArchivedToolPayload(v, depth + 1));
@@ -2171,24 +2175,10 @@ export function redactArchivedToolPayload<T>(value: T, depth = 0): T {
 }
 
 export function redactArchivedToolEvent(event: ProviderEvent): ProviderEvent {
-  if (event.method === "item/mcpToolCall/progress") {
-    // Progress lacks the tool/server descriptor needed to classify private
-    // Apps reliably (and can precede completion). Keep identity, not raw text.
-    const native = readRecordValue(event.payload);
-    const { message: _message, textDelta: _textDelta, ...safe } = event;
-    return {
-      ...safe,
-      payload: {
-        threadId: native?.threadId,
-        turnId: native?.turnId,
-        itemId: native?.itemId,
-        message: "MCP operation is running.",
-      },
-    };
-  }
-  const payload = redactArchivedToolPayload(event.payload);
-  if (payload === event.payload) return event;
-  const { message: _message, textDelta: _textDelta, ...safe } = event;
+  const publicEvent = redactVisualizationReceiptProofs(event);
+  const payload = redactArchivedToolPayload(publicEvent.payload);
+  if (payload === publicEvent.payload) return publicEvent;
+  const { message: _message, textDelta: _textDelta, ...safe } = publicEvent;
   return { ...safe, payload };
 }
 
@@ -2199,7 +2189,9 @@ function projectCodexThreadTurns(
     // This is the public history copy, not the native snapshot used to decode,
     // resume or fork. A file-only image deliberately loses its private native
     // reference without manufacturing an inline result or filesystem right.
-    const projected = redactCodexImageGenerationMetadata(turn.items);
+    const projected = redactVisualizationReceiptProofs(
+      redactCodexImageGenerationMetadata(turn.items),
+    );
     return {
       id: turn.id,
       items: Array.isArray(projected) ? redactArchivedToolPayload(projected) : [],
@@ -5281,6 +5273,25 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   options?: CodexAdapterLiveOptions,
 ) {
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("codex");
+  const getRequestModels = Effect.fn("CodexAdapter.getRequestModels")(function* (
+    selection: ModelSelection | undefined,
+  ) {
+    const models = options?.getModels ? yield* options.getModels() : undefined;
+    const program = getModelSelectionStringOptionValue(selection, "cyberAccessProgram");
+    // The picker and detached daemon own independent catalogues. Before
+    // refusing an explicit level missing from this owner's cached catalogue,
+    // ask its bounded model/list path once and validate that exact result.
+    // Ordinary requests, Off, malformed levels and foreign accounts stay inert.
+    if (
+      selection?.instanceId === boundInstanceId &&
+      (program === "daybreakBlue" || program === "daybreakRed") &&
+      resolveCodexDaybreak(selection, boundInstanceId, models).error &&
+      options?.refreshModels
+    ) {
+      return yield* options.refreshModels();
+    }
+    return models;
+  });
   // Capture one admitted own scalar for this immutable adapter owner. An
   // inherited setting or accessor cannot supply opening policy, and later
   // config-object mutation cannot make usage describe a different request.
@@ -5563,7 +5574,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           });
         }
 
-        const advertisedModels = options?.getModels ? yield* options.getModels() : undefined;
+        const advertisedModels = yield* getRequestModels(input.modelSelection);
         const daybreak = resolveCodexDaybreak(
           input.modelSelection,
           boundInstanceId,
@@ -6103,6 +6114,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 if (isCodexResponsesWebsocketFallbackEvent(event)) {
                   yield* disableResponsesWebsocketsFromEvent(event);
                 }
+                if (sessions.get(input.threadId)?.subagentRuntimeId === event.subagentRuntimeId) {
+                  for (const lifecycle of runtimeEvents) glideBinding?.observeTurn?.(lifecycle);
+                }
                 const enqueued = yield* Queue.offerAll(runtimeEventQueue, runtimeEvents).pipe(
                   Effect.as(true),
                   Effect.catchCause((cause) =>
@@ -6436,9 +6450,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     // No ordinary composer override is supported by review/start; do not even
     // validate a draft tier as if it were going to be submitted here.
     const advertisedModels =
-      input.codexReview === undefined && options?.getModels
-        ? yield* options.getModels()
-        : undefined;
+      input.codexReview === undefined ? yield* getRequestModels(input.modelSelection) : undefined;
     const daybreak =
       input.codexReview === undefined
         ? resolveCodexDaybreak(input.modelSelection, boundInstanceId, advertisedModels)

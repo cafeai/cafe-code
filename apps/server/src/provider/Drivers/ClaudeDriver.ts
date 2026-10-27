@@ -56,7 +56,6 @@ import {
   makePackageManagedProviderMaintenanceResolver,
   normalizeCommandPath,
   resolveProviderMaintenanceCapabilitiesEffect,
-  makeManualOnlyProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
 import { resolveProviderRuntimeEnvironment } from "../managedProviderRuntime.ts";
 import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
@@ -185,17 +184,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         resolveEnvironment,
       );
       const maintenanceCapabilities =
-        serverConfig.dataProfile === "debug"
-          ? makeManualOnlyProviderMaintenanceCapabilities({
-              provider: DRIVER_KIND,
-              packageName: UPDATE_DEFINITION.npmPackageName,
-            })
-          : effectiveConfig.runtimeSource === "bundled"
-            ? runtime.maintenanceCapabilities
-            : yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-                binaryPath: effectiveConfig.binaryPath,
-                env: effectiveEnvironment,
-              });
+        effectiveConfig.runtimeSource === "bundled"
+          ? runtime.maintenanceCapabilities
+          : yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+              binaryPath: effectiveConfig.binaryPath,
+              env: effectiveEnvironment,
+            });
       const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig);
       let observedCliVersion: string | null = null;
       const stampInstanceIdentity = withInstanceIdentity({

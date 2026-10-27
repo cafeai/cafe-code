@@ -4,7 +4,7 @@ import { uiText, type UiLocale } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
 import { FileAttachmentPill } from "./FileAttachmentPill";
 import { TurnConfigurationWorkEntry } from "./TurnConfigurationWorkEntry";
-import { ClaudeCommandWorkEntry, ClaudeSummaryWorkEntry } from "./ProviderOperationWorkEntry";
+import { ClaudeCommandWorkEntry, ProviderSummaryWorkEntry } from "./ProviderOperationWorkEntry";
 import { ProviderDiagnosticWorkEntry } from "./ProviderDiagnosticWorkEntry";
 import type { ProviderDiagnosticAction } from "../../providerDiagnostic";
 import {
@@ -3819,7 +3819,7 @@ const OrdinaryWorkEntryRow = memo(function OrdinaryWorkEntryRow(props: {
   if (props.workEntry.turnConfiguration)
     return <TurnConfigurationWorkEntry configuration={props.workEntry.turnConfiguration} />;
   if (props.workEntry.publicSummary)
-    return <ClaudeSummaryWorkEntry summary={props.workEntry.publicSummary} />;
+    return <ProviderSummaryWorkEntry summary={props.workEntry.publicSummary} />;
   return <OrdinaryWorkEntryContent {...props} />;
 });
 

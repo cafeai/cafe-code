@@ -5,7 +5,7 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, it, vi } from "@effect/vitest";
 import * as EffectAcpErrors from "effect-acp/errors";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -455,6 +455,12 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       let activations = 0,
         disposals = 0,
         binds = 0;
+      const completed = Promise.withResolvers<void>();
+      const observeTurn = vi.fn(
+        (event: { type: string; threadId: ThreadId; turnId?: TurnId | undefined }) => {
+          if (event.type === "turn.completed") completed.resolve();
+        },
+      );
       const release = installGlideSessionRuntime({
         bind: async (identity) => {
           assert.deepEqual(identity, {
@@ -475,6 +481,7 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
             },
             cancel: async () => {},
             resume: () => {},
+            observeTurn,
           };
         },
         operation: async () => {
@@ -483,7 +490,13 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       });
       yield* Effect.addFinalizer(() => Effect.sync(release));
       const adapter = yield* makeGrokAdapter(decodeGrokSettings({}), {
-        makeRuntime: fixture.makeRuntime,
+        makeRuntime: (input) =>
+          fixture.makeRuntime(input).pipe(
+            Effect.map((runtime) => ({
+              ...runtime,
+              prompt: () => Effect.succeed({ stopReason: "end_turn" as const }),
+            })),
+          ),
         sessionCredentials: testSessionCredentials,
         instanceId: instance,
       });
@@ -505,6 +518,18 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       );
       assert.equal(fixture.launches[0]!.permissionMode, "default");
       assert.equal(fixture.launches[0]!.sandboxProfile, "read-only");
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "Exercise the synthetic Glide lifecycle.",
+      });
+      yield* Effect.promise(() => completed.promise);
+      assert.deepEqual(
+        observeTurn.mock.calls.map(([event]) => [event.type, event.threadId, event.turnId]),
+        [
+          ["turn.started", threadId, turn.turnId],
+          ["turn.completed", threadId, turn.turnId],
+        ],
+      );
       yield* adapter.stopSession(threadId);
       assert.equal(disposals, 2);
     }),

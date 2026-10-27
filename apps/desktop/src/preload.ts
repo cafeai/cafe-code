@@ -109,6 +109,14 @@ if (process.isMainFrame === true) {
     copyText: (text: string) => ipcRenderer.invoke(IpcChannels.COPY_TEXT_CHANNEL, text),
     copyPng: (png) => ipcRenderer.invoke(IpcChannels.COPY_PNG_CHANNEL, png),
     savePng: (input) => ipcRenderer.invoke(IpcChannels.SAVE_PNG_CHANNEL, input),
+    showNotification: (input) => ipcRenderer.invoke(IpcChannels.SHOW_NOTIFICATION_CHANNEL, input),
+    onNotificationClick: (listener) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, tag: unknown) => {
+        if (typeof tag === "string" && tag.length > 0 && tag.length <= 512) listener(tag);
+      };
+      ipcRenderer.on(IpcChannels.NOTIFICATION_CLICK_CHANNEL, wrapped);
+      return () => ipcRenderer.removeListener(IpcChannels.NOTIFICATION_CLICK_CHANNEL, wrapped);
+    },
     onMenuAction: (listener) => {
       const wrappedListener = (_event: Electron.IpcRendererEvent, action: unknown) => {
         if (typeof action !== "string") return;

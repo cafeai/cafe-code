@@ -18,6 +18,7 @@ import {
  * @module ClaudeAdapterLive
  */
 import { createHash, randomUUID } from "node:crypto";
+import { isClaudeStoppedExecutionResult } from "../claudeTurnInterruption.ts";
 // Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { constants as fsConstants, lstatSync, realpathSync, unlinkSync } from "node:fs";
@@ -26,7 +27,7 @@ import { constants as fsConstants, lstatSync, realpathSync, unlinkSync } from "n
 import { lstat, open, opendir } from "node:fs/promises";
 
 import {
-  VisualizationNativePrivacy,
+  redactVisualizationReceiptProofs,
   ClaudeVisualizationCompletionObserver,
 } from "../../visualizations/nativePrivacy.ts";
 import {
@@ -564,6 +565,10 @@ interface ClaudeTurnState {
    * into one Work Log row instead of showing the same failure twice.
    */
   failureDiagnostic?: ClaudeFailureDiagnostic | undefined;
+  /** Accepted Stop belongs only to this native response and its submitted inputs. */
+  acceptedInterrupt?:
+    | { readonly sessionId: string; readonly promptUuids: ReadonlySet<string> }
+    | undefined;
   readonly pendingAssistantSnapshots: Array<AssistantTextBlockState>;
   readonly reportedAssistantSnapshotKeys: Set<string>;
   readonly capturedProposedPlanKeys: Set<string>;
@@ -619,7 +624,6 @@ interface ClaudePublicSummaryBlock {
   publishedTruncated?: boolean;
   closed: boolean;
   completed: boolean;
-  intermediatePublications: number;
   terminalPublications: number;
   snapshotSeen: boolean;
   flushFiber?: Fiber.Fiber<void, never> | undefined;
@@ -771,6 +775,8 @@ interface ClaudeSessionContext {
   sdkStreamEnded: boolean;
   /** Changes at iterator ingress, before asynchronous normalization. */
   sdkMessageRevision: number;
+  /** Received-result fence: a late interrupt receipt cannot qualify another response. */
+  sdkResultRevision: number;
   /** Native close threw; never admit another owner until explicit recovery. */
   queryClosureUncertain: boolean;
   /** A rewind's exact-exit requirement survives later explicit stop attempts. */
@@ -791,7 +797,6 @@ interface ClaudeSessionContext {
   readonly visualizationBinding: VisualizationSessionBinding | undefined;
   readonly glideBinding?: GlideSessionBinding | undefined;
   readonly archivedToolPrivacy?: ArchivedToolPayloadRedactor | undefined;
-  readonly visualizationPrivacy?: VisualizationNativePrivacy | undefined;
   readonly visualizationCompletion?: ClaudeVisualizationCompletionObserver | undefined;
   readonly runFork: RuntimeFork;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
@@ -2620,8 +2625,8 @@ function knownClaudePromptUuids(
   }
 
   const known = new Set<string>();
-  // The response-limit path may qualify a result against its exact admitted
-  // witnesses after a terminal command lifecycle already retired the input.
+  // Response-limit and accepted-Stop paths may qualify a result against their
+  // exact witnesses after a terminal command lifecycle retired the input.
   // Ordinary prompt bookkeeping always consults only the live ownership map.
   const admittedUuids = responseLimitPromptUuids ?? context.promptLifecycleByUuid;
   const admit = (value: unknown) => {
@@ -4603,6 +4608,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     event: ProviderRuntimeEvent,
   ): Effect.Effect<void> => {
+    context.glideBinding?.observeTurn?.(event);
     const binding =
       event.type === "task.started" ||
       event.type === "task.progress" ||
@@ -4946,7 +4952,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         (block.publishedText === displayText && block.publishedTruncated === block.text.truncated))
     )
       return;
-    if (!terminalStatus && block.intermediatePublications >= 16) return;
     if (terminalStatus && block.terminalPublications >= 2) return;
     if (
       !terminalStatus &&
@@ -4959,7 +4964,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (terminalStatus) {
       block.completed = true;
       block.terminalPublications += 1;
-    } else block.intermediatePublications += 1;
+    }
     const stamp = yield* makeEventStamp();
     yield* offerRuntimeEvent(context, {
       ...stamp,
@@ -5033,7 +5038,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         text: makeClaudePublicSummaryText(),
         closed: false,
         completed: false,
-        intermediatePublications: 0,
         terminalPublications: 0,
         snapshotSeen: false,
       };
@@ -5045,7 +5049,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* publishPublicSummary(context, block);
     } else if (
       !block.flushFiber &&
-      block.intermediatePublications < 16 &&
       (block.publishedText !== claudePublicSummaryDisplayText(block.text.text) ||
         block.publishedTruncated !== block.text.truncated)
     ) {
@@ -7074,9 +7077,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
+    const acceptedInterrupt = context.turnState?.acceptedInterrupt;
+    if (context.turnState) {
+      context.turnState.acceptedInterrupt = undefined;
+    }
     yield* reportClaudeFastModeStatus(context, message);
 
-    const status = turnStatusFromResult(message);
+    const interruptedPromptUuids = knownClaudePromptUuids(
+      context,
+      message,
+      acceptedInterrupt?.promptUuids,
+    );
+    const stoppedExecution = isClaudeStoppedExecutionResult(
+      message,
+      acceptedInterrupt !== undefined &&
+        acceptedInterrupt.sessionId === message.session_id &&
+        (interruptedPromptUuids === undefined || interruptedPromptUuids.length > 0),
+      context.turnState?.primaryAssistantError !== undefined || context.authFailureSeen,
+    );
+    // A Cafe turn can contain several native response segments. Never let an
+    // earlier Stop reclassify a queued follow-up's result on the same query.
+    const status = stoppedExecution ? "interrupted" : turnStatusFromResult(message);
     const resultErrors = "errors" in message && Array.isArray(message.errors) ? message.errors : [];
     const authFailure = isClaudeAuthFailureResult(message);
     if (status === "failed" && context.turnState) {
@@ -7101,7 +7122,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       (resultPromptUuids === undefined || resultPromptUuids.length > 0) &&
       !authFailure;
     const errorMessage =
-      status !== "completed"
+      status !== "completed" && !stoppedExecution
         ? responseLimitFailure
           ? CLAUDE_RESPONSE_LIMIT_MESSAGE
           : (resultPrimaryError(message) ?? resultErrors[0] ?? "Claude turn failed.")
@@ -8992,8 +9013,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         );
       }
     }
-    const privateMessage =
-      context.visualizationPrivacy?.redact(stripped.message) ?? stripped.message;
+    const privateMessage = redactVisualizationReceiptProofs(stripped.message);
     const message = context.archivedToolPrivacy?.redact(privateMessage) ?? privateMessage;
     // Capture before the legacy ordinary-message path may adopt a session id.
     // A foreign or pre-init tool cannot turn that later adoption into evidence
@@ -9294,6 +9314,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 } else {
                   context.inFlightSdkMessageCount += 1;
                   context.sdkMessageRevision += 1;
+                  if (message.value.type === "result") context.sdkResultRevision += 1;
                   if (isClaudePriorityTurnBoundaryMessage(message.value)) {
                     context.inFlightSdkTurnBoundaryCount += 1;
                   }
@@ -10555,6 +10576,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         inFlightSdkTurnBoundaryCount: 0,
         sdkStreamEnded: false,
         sdkMessageRevision: 0,
+        sdkResultRevision: 0,
         queryClosureUncertain: false,
         rewindRetirementUncertain: false,
         promptQueue,
@@ -10568,7 +10590,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         visualizationBinding,
         archivedToolPrivacy: new ArchivedToolPayloadRedactor(),
         glideBinding,
-        visualizationPrivacy: new VisualizationNativePrivacy(),
         visualizationCompletion: new ClaudeVisualizationCompletionObserver(),
         runFork,
         streamFiber: undefined,
@@ -11245,10 +11266,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const context = yield* requireSession(threadId);
       if (_turnId === undefined || context.turnState?.turnId === _turnId)
         yield* cancelGlideSession(context.glideBinding);
+      const interruptedTurn =
+        _turnId === undefined || context.turnState?.turnId === _turnId
+          ? context.turnState
+          : undefined;
+      const interruptedSessionId = context.resumeSessionId;
+      const interruptedPromptUuids = new Set(context.promptLifecycleByUuid.keys());
+      const interruptedResultRevision = context.sdkResultRevision;
       const receipt = yield* Effect.tryPromise({
         try: () => context.query.interrupt(),
         catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),
       });
+      // SDK 0.3.295 documents that a clean interrupt receipt precedes its
+      // result; crash results may arrive first and remain failures. A failed
+      // request, stale turn or replaced query cannot mint accepted Stop proof.
+      if (
+        interruptedTurn !== undefined &&
+        interruptedSessionId !== undefined &&
+        !context.stopped &&
+        sessions.get(threadId) === context &&
+        context.turnState === interruptedTurn &&
+        context.sdkResultRevision === interruptedResultRevision &&
+        context.resumeSessionId === interruptedSessionId
+      ) {
+        interruptedTurn.acceptedInterrupt = {
+          sessionId: interruptedSessionId,
+          promptUuids: interruptedPromptUuids,
+        };
+      }
 
       // Claude Code 2.1.205+ returns UUIDs for queued inputs that survive an
       // interrupt. Cancel only UUIDs Cafe submitted: the receipt can include

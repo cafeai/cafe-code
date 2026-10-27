@@ -751,7 +751,13 @@ const makeWsRpcLayer = (
               yield* requireComputerUseOwner();
               yield* Effect.tryPromise({
                 try: () =>
-                  glideOperation({ kind: "initialize-thread", threadId: command.threadId }),
+                  glideOperation({
+                    kind: "initialize-thread",
+                    threadId: command.threadId,
+                    ...(bootstrap.createThread?.computerUseRevision !== undefined
+                      ? { stopRevision: bootstrap.createThread.computerUseRevision }
+                      : {}),
+                  }),
                 catch: (cause) =>
                   toDispatchCommandError(cause, "Could not enable computer use for the new chat."),
               });
@@ -2120,6 +2126,7 @@ const makeWsRpcLayer = (
             "rpc.aggregate": "server",
           }),
         [WS_METHODS.scheduledFollowupsList]: (input) => scheduledFollowups.list(input),
+        [WS_METHODS.scheduledFollowupsSummary]: (_input) => scheduledFollowups.summary(),
         [WS_METHODS.scheduledFollowupsSave]: (input) =>
           ownerScheduleMutation(scheduledFollowups.save(input)),
         [WS_METHODS.scheduledFollowupsSetStatus]: (input) =>

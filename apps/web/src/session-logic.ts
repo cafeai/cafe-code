@@ -39,10 +39,10 @@ import { visualizationEntryIdentity } from "./components/visualizations/visualiz
 import { readTurnConfiguration, presentTurnConfiguration } from "./turnConfiguration";
 import {
   readClaudeCommandInspection,
-  readClaudePublicSummary,
+  readProviderPublicSummary,
   mergeClaudeCommandInspections,
   type ClaudeCommandInspection,
-  type ClaudePublicSummary,
+  type ProviderPublicSummary,
 } from "./components/chat/providerOperationVisibility";
 
 import {
@@ -109,7 +109,7 @@ export interface WorkLogEntry {
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
   /** Explicit bounded public presentation, never arbitrary native payloads. */
-  publicSummary?: ClaudePublicSummary;
+  publicSummary?: ProviderPublicSummary;
   commandInspection?: ClaudeCommandInspection;
   /** Public occurrence metadata only; private JSON is read after expansion. */
   providerDiagnostic?: ProviderDiagnosticWorkLogRecord;
@@ -724,7 +724,7 @@ export function deriveWorkLogEntries(
       (activity) =>
         activity.kind !== "reasoning.summary" ||
         (asTrimmedString(asRecord(activity.payload)?.itemId) !== null &&
-          readClaudePublicSummary(activity.payload) !== undefined),
+          readProviderPublicSummary(activity.payload) !== undefined),
     )
     .filter(
       (activity) => activity.kind !== "task.started" || isUserVisibleTaskStartedActivity(activity),
@@ -1232,10 +1232,16 @@ function toDerivedWorkLogEntry(
     activityKind: activity.kind,
   };
   const publicSummary =
-    activity.kind === "reasoning.summary" ? readClaudePublicSummary(payload) : undefined;
+    activity.kind === "reasoning.summary" ? readProviderPublicSummary(payload) : undefined;
   if (publicSummary) {
-    entry.label = "Claude summary";
-    entry.displayLabel = uiText("Claude summary");
+    // The plain label stays canonical English for transcript copy/search.
+    if (publicSummary.provider === "opencode") {
+      entry.label = "OpenCode thinking";
+      entry.displayLabel = uiText("OpenCode thinking");
+    } else {
+      entry.label = "Claude summary";
+      entry.displayLabel = uiText("Claude summary");
+    }
     entry.tone = "info";
     entry.publicSummary = publicSummary;
     entry.detail = publicSummary.text;

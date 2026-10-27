@@ -42,6 +42,7 @@ import {
   CODEX_STEER_WAIT_MESSAGE,
   CODEX_TURN_RUNNING_MESSAGE,
   HIDDEN_PROVIDER_WARNING_MESSAGES,
+  PUBLIC_REASONING_SUMMARY_PROVIDERS,
 } from "@cafecode/shared/providerWorkLog";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -709,6 +710,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   // SQLite length counts Unicode scalars; JS presentation bounds UTF-16 units.
   // The common ASCII/BMP path is constant work. Only an astral-containing near-
   // limit row needs a bounded walk, stopped as soon as 4,097 units are reached.
+  // Provenance comes from the same application-owned constant ingestion uses;
+  // these are literal code identifiers, never received values.
+  const summaryProviders = PUBLIC_REASONING_SUMMARY_PROVIDERS.map(
+    (provider) => `'${provider}'`,
+  ).join(",");
   const summaryUtf16Bound = `(CASE WHEN length(${summaryDetail}) > 4096 THEN 0 WHEN length(${summaryDetail}) <= 2048 OR ${summaryDetail} NOT GLOB ('*[' || char(65536) || '-' || char(1114111) || ']*') THEN 1 ELSE (WITH RECURSIVE summary_source(detail) AS (SELECT ${summaryDetail}), summary_units(position,total) AS (VALUES(0,0) UNION ALL SELECT position+1,total+CASE WHEN unicode(substr(detail,position+1,1)) > 65535 THEN 2 ELSE 1 END FROM summary_units,summary_source WHERE position < length(detail) AND total <= 4096) SELECT max(total) <= 4096 FROM summary_units) END)`;
   const historicalWorkLogActivityPredicate = sql.and([
     "kind != 'context-window.updated'",
@@ -727,7 +733,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     "kind != 'provider.async-questions'",
     "summary != 'Checkpoint captured'",
     "(kind != 'tool.started' OR json_extract(payload_json, '$.itemType') = 'context_compaction' OR (json_extract(payload_json, '$.itemType') = 'command_execution' AND json_extract(payload_json, '$.data.toolName') = 'Bash' AND json_type(payload_json, '$.data.commandInspectionVersion') IN ('integer', 'real') AND json_extract(payload_json, '$.data.commandInspectionVersion') = 1 AND json_extract(payload_json, '$.data.inspectionProvider') = 'claudeAgent'))",
-    `(kind != 'reasoning.summary' OR (json_type(payload_json, '$.summaryVersion') IN ('integer', 'real') AND json_extract(payload_json, '$.summaryVersion') = 1 AND json_extract(payload_json, '$.provider') = 'claudeAgent' AND json_extract(payload_json, '$.streamKind') = 'reasoning_summary_text' AND json_type(payload_json, '$.itemId') = 'text' AND length(trim(json_extract(payload_json, '$.itemId'), ${ecmaTrimCharacters})) > 0 AND json_type(payload_json, '$.detail') = 'text' AND length(trim(${summaryDetail}, ${ecmaTrimCharacters})) > 0 AND instr(${summaryDetail},char(0)) = 0 AND ${summaryDetail} NOT GLOB ${unsafeSummaryPattern} AND ${summaryUtf16Bound} AND json_type(payload_json, '$.truncated') IN ('true', 'false') AND json_extract(payload_json, '$.status') IN ('inProgress', 'completed', 'failed')))`,
+    `(kind != 'reasoning.summary' OR (json_type(payload_json, '$.summaryVersion') IN ('integer', 'real') AND json_extract(payload_json, '$.summaryVersion') = 1 AND json_extract(payload_json, '$.provider') IN (${summaryProviders}) AND json_extract(payload_json, '$.streamKind') = 'reasoning_summary_text' AND json_type(payload_json, '$.itemId') = 'text' AND length(trim(json_extract(payload_json, '$.itemId'), ${ecmaTrimCharacters})) > 0 AND json_type(payload_json, '$.detail') = 'text' AND length(trim(${summaryDetail}, ${ecmaTrimCharacters})) > 0 AND instr(${summaryDetail},char(0)) = 0 AND ${summaryDetail} NOT GLOB ${unsafeSummaryPattern} AND ${summaryUtf16Bound} AND json_type(payload_json, '$.truncated') IN ('true', 'false') AND json_extract(payload_json, '$.status') IN ('inProgress', 'completed', 'failed')))`,
     "NOT (kind IN ('task.started', 'task.progress', 'task.completed') AND json_type(payload_json, '$.subagent') IS NOT NULL)",
     // GLOB is case-sensitive, matching the renderer's exact startsWith check.
     // SQLite LIKE would also hide ordinary lower/mixed-case provider output.

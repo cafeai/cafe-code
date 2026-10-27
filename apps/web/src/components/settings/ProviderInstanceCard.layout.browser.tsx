@@ -156,6 +156,7 @@ function cardFixture(kind: "minimal" | "multiple" | "login", realistic: boolean)
     onRestartRuntime: vi.fn<() => void>(),
     onLogIn: vi.fn<() => void>(),
     onDelete: vi.fn<() => void>(),
+    onRunUpdate: undefined as (() => void) | undefined,
   };
 }
 
@@ -238,6 +239,7 @@ async function mountCards(
           onRestartRuntime={fixture.kind === "minimal" ? undefined : fixture.onRestartRuntime}
           onLogIn={fixture.kind === "login" ? fixture.onLogIn : undefined}
           onDelete={fixture.kind === "multiple" ? fixture.onDelete : undefined}
+          onRunUpdate={fixture.onRunUpdate}
           hiddenModels={[]}
           favoriteModels={[]}
           modelOrder={[]}
@@ -272,6 +274,60 @@ it("replaces cached signed-in identity with Not signed in and exposes Log in aft
   expect(fixture.onLogIn).toHaveBeenCalledTimes(1);
   expect(api.ensureLocalApi).not.toHaveBeenCalled();
 });
+
+it.each(["debug", "production"] as const)(
+  "dispatches a qualified Claude update in %s",
+  async (profile) => {
+    api.dataProfile = profile;
+    const onRunUpdate = vi.fn();
+    const fixture = cardFixture("minimal", true);
+    fixture.onRunUpdate = onRunUpdate;
+    fixture.instance = { ...fixture.instance, driver: ProviderDriverKind.make("claudeAgent") };
+    fixture.provider = {
+      ...fixture.provider,
+      driver: fixture.instance.driver,
+      version: "2.1.301",
+      versionAdvisory: {
+        status: "behind_latest",
+        currentVersion: "2.1.301",
+        latestVersion: "2.1.302",
+        checkedAt,
+        canUpdate: true,
+        updateCommand: "claude update",
+        message: "Install the update now or review provider settings.",
+      },
+    };
+    await mountCards(700, 100, true, [fixture]);
+    await page
+      .getByRole("button", { name: "Update available — view details", exact: true })
+      .click();
+    await expect
+      .element(
+        page.getByText("Install the update now or review provider settings.", { exact: true }),
+      )
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Update now", exact: true }))
+      .toBeEnabled();
+    expect(onRunUpdate).not.toHaveBeenCalled();
+    if (profile === "debug" && import.meta.env.VITE_PROVIDER_SCREENSHOTS === "1") {
+      const wasDark = document.documentElement.classList.contains("dark");
+      document.documentElement.classList.add("dark");
+      try {
+        await page.screenshot({
+          element: document.querySelector<HTMLElement>('[data-slot="popover-popup"]')!,
+          path: "../../../../../.explorations/claude-provider-minimal/debug-update.png",
+        });
+      } finally {
+        if (!wasDark) document.documentElement.classList.remove("dark");
+      }
+    }
+    await expect.element(page.getByText("claude update", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Update now", exact: true }).click();
+    expect(onRunUpdate).toHaveBeenCalledTimes(1);
+    expect(fixture.onRestartRuntime).not.toHaveBeenCalled();
+  },
+);
 
 function expectNoHorizontalOverflow(element: HTMLElement) {
   expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);

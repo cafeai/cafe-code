@@ -1,6 +1,6 @@
 # Debug and Production data
 
-Last updated: 2026-10-20 22:11:35 JST (UTC+0900)
+Last updated: 2026-10-23 07:39:42 JST (UTC+0900)
 
 Source desktop builds and repository development launchers use a separate,
 persistent Debug profile. Installed packaged releases retain their existing
@@ -94,9 +94,13 @@ selectors: `CODEX_HOME` for Codex, `HOME` plus `CLAUDE_CONFIG_DIR` for Claude,
 and `GROK_HOME` for Grok. Login is an explicit user action, not a background
 credential import.
 
-Provider executables may be shared with Production. Cafe-managed provider
-maintenance is refused in Debug, rather than silently updating/uninstalling a
-shared installation. Native provider behavior outside Cafe's supported controls
+Provider executables may be shared with Production. User-requested provider
+updates use the same installation detection, update command, serialization and
+version verification in Debug and Production. An update from either profile can
+therefore change the executable used by both. Bundled runtimes and installations
+without a supported updater retain their existing update restrictions. Provider
+account homes, sign-in and history remain profile-local unless shared-state
+consent is enabled. Native provider behavior outside Cafe's supported controls
 is not an OS sandbox guarantee.
 
 Do not copy a live Production SQLite/WAL, secret store, browser profile, daemon

@@ -356,10 +356,53 @@ it("leads a fresh draft into its own saved choice without a server mutation", as
   await button().click();
   await expect.element(page.getByText("Computer use is ready")).toBeVisible();
   await page.getByRole("button", { name: "Turn on for this chat" }).click();
-  expect(onDraftEnabledChange).toHaveBeenCalledExactlyOnceWith(true);
+  await expect.poll(() => onDraftEnabledChange.mock.calls).toEqual([[true, "0"]]);
   await expect.element(dialog()).not.toBeInTheDocument();
   expect(fixture.control.mock.calls.every(([input]) => input.action === "status")).toBe(true);
   expect(fixture.control.mock.calls.every(([input]) => !("threadId" in input))).toBe(true);
+});
+
+it("reflects Stop all through an inert activity read without probing permissions again", async () => {
+  const onActivityChange = vi.fn();
+  fixture.control.mockImplementation(async (input) =>
+    input.action === "activity"
+      ? { ...state, enabled: false, stopRevision: "1", activity: { state: "stopped" } }
+      : { ...state, enabled: true, stopRevision: "0", activity: { state: "ready" } },
+  );
+  await render(
+    <GlideControl
+      environmentId={environmentId}
+      threadId={threadId}
+      runtimeMode="full-access"
+      onActivityChange={onActivityChange}
+    />,
+  );
+  await expect.element(button()).toHaveAttribute("aria-pressed", "true");
+  await expect.element(button()).toHaveAttribute("aria-pressed", "false");
+  expect(fixture.control.mock.calls.filter(([input]) => input.action === "status")).toHaveLength(1);
+  expect(
+    fixture.control.mock.calls.some(
+      ([input]) => input.action === "activity" && input.threadId === threadId,
+    ),
+  ).toBe(true);
+  expect(onActivityChange).toHaveBeenCalledWith({ state: "stopped" });
+});
+
+it("clears a stale draft grant after Stop all instead of silently renewing it", async () => {
+  const change = vi.fn();
+  fixture.control.mockResolvedValue({ ...state, stopRevision: "3" });
+  await render(
+    <GlideControl
+      environmentId={environmentId}
+      threadId={null}
+      runtimeMode="full-access"
+      draftEnabled
+      draftRevision="2"
+      onDraftEnabledChange={change}
+    />,
+  );
+  await expect.poll(() => change.mock.calls).toEqual([[false]]);
+  expect(fixture.control.mock.calls.every(([input]) => input.action === "status")).toBe(true);
 });
 
 it("retires a late toggle acknowledgement when the chat changes", async () => {

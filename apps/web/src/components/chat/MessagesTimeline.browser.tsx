@@ -490,6 +490,39 @@ it("allows explicit historical close/reopen after reconnect without eagerly rest
   }
 });
 
+it("shows an accepted Stop without a provider-error badge or private diagnostic reader", async () => {
+  const intro = buildAssistantTimelineEntry();
+  const turnId = intro.message.turnId!;
+  const receipt = {
+    id: EventId.make("accepted-stop-receipt"),
+    turnId,
+    createdAt: "2026-04-13T12:00:01.000Z",
+    sequence: 1,
+    kind: "provider.turn.interrupt.completed",
+    summary: "Provider turn interrupt completed",
+    tone: "info" as const,
+    payload: {},
+  };
+  const screen = await render(
+    <MessagesTimeline
+      {...buildProps()}
+      activeProvider={ProviderDriverKind.make("claudeAgent")}
+      timelineEntries={deriveTimelineEntries(
+        [intro.message],
+        [],
+        deriveWorkLogEntries([receipt], turnId),
+      )}
+    />,
+  );
+  try {
+    await expect.element(page.getByText("Response stopped", { exact: true })).toBeVisible();
+    expect(document.body.textContent).not.toContain("Provider error");
+    expect(document.querySelector("[data-provider-diagnostic]")).toBeNull();
+  } finally {
+    await screen.unmount();
+  }
+});
+
 it("keeps a retained provider failure discoverable while historical work and private diagnostics are collapsed", async () => {
   const threadId = ThreadId.make("diagnostic-historical-chat");
   const turnId = TurnId.make("diagnostic-historical-turn");
@@ -756,7 +789,7 @@ it("renders public summaries and inspectable command work separately from ordina
     expect(document.querySelectorAll("[data-claude-command-inspection]")).toHaveLength(1);
     expect(intro.message.text).toBe("I will check the existing implementation.");
     const history = document.querySelector('[data-testid="legend-list"]')!;
-    const summary = history.querySelector("[data-claude-public-summary]")!;
+    const summary = history.querySelector("[data-provider-public-summary]")!;
     const command = history.querySelector("[data-claude-command-inspection]")!;
     expect(
       summary.compareDocumentPosition(command) & Node.DOCUMENT_POSITION_FOLLOWING,

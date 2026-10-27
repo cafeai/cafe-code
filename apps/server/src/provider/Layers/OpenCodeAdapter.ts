@@ -18,6 +18,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
@@ -40,6 +41,16 @@ import {
 } from "../fileAttachmentPrompt.ts";
 import { ServerConfig } from "../../config.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import {
+  PUBLIC_REASONING_SUMMARY_ACTIVE_BLOCKS,
+  PUBLIC_REASONING_SUMMARY_BLOCKS,
+  PUBLIC_REASONING_SUMMARY_CHARS,
+  PUBLIC_REASONING_SUMMARY_INTERVAL_MS,
+  PUBLIC_REASONING_SUMMARY_STREAM_KIND,
+  PUBLIC_REASONING_SUMMARY_VERSION,
+  publicReasoningSummaryDisplayText,
+  publicReasoningSummaryTail,
+} from "../publicReasoningSummary.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -123,6 +134,39 @@ interface OpenCodeManualCompaction {
   readonly controller: AbortController;
 }
 
+interface OpenCodeInterruption {
+  readonly turnId: TurnId;
+  nativeIdleObserved: boolean;
+}
+
+/**
+ * Retired native reasoning part ids. OpenCode re-delivers whole parts through
+ * `message.updated`, so a completed part must not reopen as a new row in a
+ * later turn. FIFO-bounded; an evicted ancient id is the only exception.
+ */
+const OPENCODE_RETIRED_REASONING_PART_IDS = 1_024;
+
+/**
+ * One primary-session OpenCode reasoning part, presented as a bounded thinking
+ * row through the shared public reasoning summary contract. Only the retained
+ * display window is kept here; the adapter already owns the full part text.
+ */
+interface OpenCodeReasoningBlock {
+  readonly partId: string;
+  /** Canonical turn that first observed the part; never borrowed by a later turn. */
+  readonly turnId: TurnId;
+  /** Stable activity time so replace-in-place updates cannot move the row. */
+  readonly startedAt: string | undefined;
+  displayText: string;
+  truncated: boolean;
+  publishedText: string | undefined;
+  publishedTruncated: boolean | undefined;
+  completed: boolean;
+  /** Trailing-edge coalescing timer; terminal publication interrupts it first. */
+  flushFiber: Fiber.Fiber<void, never> | undefined;
+  flushToken: object | undefined;
+}
+
 interface OpenCodeSessionContext {
   session: ProviderSession;
   readonly client: OpencodeClient;
@@ -135,8 +179,13 @@ interface OpenCodeSessionContext {
   readonly partById: Map<string, Part>;
   readonly emittedTextByPartId: Map<string, string>;
   readonly completedAssistantPartIds: Set<string>;
+  /** Thinking rows of the active turn, bounded per turn and cleared at its end. */
+  readonly reasoningBlocks: Map<string, OpenCodeReasoningBlock>;
+  readonly retiredReasoningPartIds: Set<string>;
   readonly turns: Array<OpenCodeTurnSnapshot>;
   manualCompaction?: OpenCodeManualCompaction;
+  /** Retain the stopped generation until ordered native idle then busy edges. */
+  interruption?: OpenCodeInterruption;
   activeTurnId: TurnId | undefined;
   activeAgent: string | undefined;
   activeVariant: string | undefined;
@@ -604,6 +653,166 @@ export function makeOpenCodeAdapter(
 
     const emit = (event: ProviderRuntimeEvent) =>
       Queue.offer(runtimeEvents, event).pipe(Effect.asVoid);
+
+    const retireReasoningPart = (context: OpenCodeSessionContext, partId: string) => {
+      const retired = context.retiredReasoningPartIds;
+      retired.delete(partId);
+      retired.add(partId);
+      if (retired.size > OPENCODE_RETIRED_REASONING_PART_IDS) {
+        const oldest = retired.values().next().value;
+        if (oldest !== undefined) retired.delete(oldest);
+      }
+    };
+
+    /**
+     * Publish one replace-in-place thinking snapshot through the shared public
+     * reasoning summary contract. Live snapshots are coalesced, with bounded
+     * text and active block counts rather than a lifetime refresh cutoff. The
+     * terminal snapshot is published once and first retires the pending timer,
+     * so an older in-progress snapshot can never land after the settled one.
+     */
+    const publishReasoningBlock = Effect.fn("publishReasoningBlock")(function* (
+      context: OpenCodeSessionContext,
+      block: OpenCodeReasoningBlock,
+      terminalStatus?: "completed" | "failed",
+    ) {
+      if (block.completed) return;
+      if (terminalStatus) {
+        block.completed = true;
+        retireReasoningPart(context, block.partId);
+        const pending = block.flushFiber;
+        block.flushFiber = undefined;
+        block.flushToken = undefined;
+        if (pending) yield* Fiber.interrupt(pending);
+      } else if (
+        block.publishedText === block.displayText &&
+        block.publishedTruncated === block.truncated
+      ) {
+        return;
+      }
+      // Whitespace-only or encrypted-only reasoning has nothing to disclose.
+      if (block.displayText.length === 0) return;
+      block.publishedText = block.displayText;
+      block.publishedTruncated = block.truncated;
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId: block.turnId,
+          itemId: block.partId,
+          createdAt: block.startedAt,
+        })),
+        type: terminalStatus ? "item.completed" : "item.updated",
+        payload: {
+          itemType: "reasoning",
+          status: terminalStatus ?? "inProgress",
+          title: "OpenCode thinking",
+          detail: block.displayText,
+          data: {
+            summaryVersion: PUBLIC_REASONING_SUMMARY_VERSION,
+            streamKind: PUBLIC_REASONING_SUMMARY_STREAM_KIND,
+            truncated: block.truncated,
+          },
+        },
+        // Deliberately no raw native event: reasoning part metadata can carry
+        // provider signatures or encrypted reasoning content.
+      });
+    });
+
+    /**
+     * Track the latest full text of a primary-session reasoning part. Child
+     * sessions are already filtered by session id. Only a part first observed
+     * while a canonical turn is active becomes a row, bound to that turn; a
+     * part seen with no active turn or beyond the per-turn bounds is retired so
+     * a later `message.updated` cannot attach it to a different turn. Native
+     * completion (`time.end`) or the turn boundary settles each row once.
+     */
+    const observeReasoningPart = Effect.fn("observeReasoningPart")(function* (
+      context: OpenCodeSessionContext,
+      part: Extract<Part, { type: "reasoning" }>,
+      text: string,
+      turnId: TurnId | undefined,
+    ) {
+      if (context.retiredReasoningPartIds.has(part.id)) return;
+      let block = context.reasoningBlocks.get(part.id);
+      if (!block) {
+        let active = 0;
+        for (const entry of context.reasoningBlocks.values()) if (!entry.completed) active += 1;
+        if (
+          !turnId ||
+          context.reasoningBlocks.size >= PUBLIC_REASONING_SUMMARY_BLOCKS ||
+          active >= PUBLIC_REASONING_SUMMARY_ACTIVE_BLOCKS
+        ) {
+          retireReasoningPart(context, part.id);
+          return;
+        }
+        block = {
+          partId: part.id,
+          turnId,
+          startedAt: isoFromEpochMs(part.time.start) ?? (yield* nowIso),
+          displayText: "",
+          truncated: false,
+          publishedText: undefined,
+          publishedTruncated: undefined,
+          completed: false,
+          flushFiber: undefined,
+          flushToken: undefined,
+        };
+        context.reasoningBlocks.set(part.id, block);
+      }
+      if (block.completed || block.turnId !== turnId) return;
+      // SDK 1.18.3 compatibility events carry full reasoning parts plus text
+      // deltas. Keep their newest window moving until native time.end, with
+      // the same trimmed/control-stripped presentation on live and final rows.
+      block.displayText = publicReasoningSummaryDisplayText(
+        publicReasoningSummaryTail(text),
+      ).trim();
+      block.truncated = text.length > PUBLIC_REASONING_SUMMARY_CHARS;
+      if (part.time.end !== undefined) {
+        yield* publishReasoningBlock(context, block, "completed");
+        return;
+      }
+      if (block.publishedText === undefined) {
+        // The first disclosed text appears immediately; later edits coalesce.
+        yield* publishReasoningBlock(context, block);
+        return;
+      }
+      if (
+        block.flushFiber ||
+        (block.publishedText === block.displayText && block.publishedTruncated === block.truncated)
+      )
+        return;
+      const exactBlock = block;
+      const token = {};
+      exactBlock.flushToken = token;
+      exactBlock.flushFiber = yield* Effect.sleep(PUBLIC_REASONING_SUMMARY_INTERVAL_MS).pipe(
+        Effect.andThen(
+          Effect.suspend(() =>
+            // An old timer cannot publish a row its turn already settled.
+            context.reasoningBlocks.get(exactBlock.partId) === exactBlock
+              ? publishReasoningBlock(context, exactBlock)
+              : Effect.void,
+          ),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (exactBlock.flushToken !== token) return;
+            exactBlock.flushToken = undefined;
+            exactBlock.flushFiber = undefined;
+          }),
+        ),
+        Effect.forkIn(context.sessionScope),
+      );
+    });
+
+    /** Settle every thinking row of the ending turn before its terminal event. */
+    const settleReasoningBlocks = Effect.fn("settleReasoningBlocks")(function* (
+      context: OpenCodeSessionContext,
+      status: "completed" | "failed",
+    ) {
+      const blocks = [...context.reasoningBlocks.values()];
+      context.reasoningBlocks.clear();
+      for (const block of blocks) yield* publishReasoningBlock(context, block, status);
+    });
     const finishManualCompaction = Effect.fn("finishManualCompaction")(function* (
       context: OpenCodeSessionContext,
       operation: OpenCodeManualCompaction,
@@ -614,6 +823,7 @@ export function makeOpenCodeAdapter(
       if (context.manualCompaction !== operation || (yield* Ref.get(context.stopped))) return;
       delete context.manualCompaction;
       context.activeTurnId = undefined;
+      yield* settleReasoningBlocks(context, state === "completed" ? "completed" : "failed");
       const message =
         state === "failed"
           ? "OpenCode compaction failed. Try again when the provider is available."
@@ -652,6 +862,42 @@ export function makeOpenCodeAdapter(
       });
     });
 
+    const settleInterruptedTurn = Effect.fn("settleInterruptedTurn")(function* (
+      context: OpenCodeSessionContext,
+      turnId: TurnId,
+    ) {
+      if (
+        context.activeTurnId !== turnId ||
+        sessions.get(context.session.threadId) !== context ||
+        (yield* Ref.get(context.stopped))
+      )
+        return;
+      context.interruption ??= { turnId, nativeIdleObserved: false };
+      const compaction = context.manualCompaction;
+      if (compaction) {
+        yield* finishManualCompaction(context, compaction, "interrupted");
+        compaction.controller.abort();
+        return;
+      }
+      // Claim this terminal edge before any timer joins or event publication.
+      // A native notification and the HTTP abort receipt may race; neither may
+      // publish twice or clear a newer turn admitted during asynchronous work.
+      context.activeTurnId = undefined;
+      context.activeAgent = undefined;
+      context.activeVariant = undefined;
+      yield* updateProviderSession(
+        context,
+        { status: "ready" },
+        { clearActiveTurnId: true, clearLastError: true },
+      );
+      yield* settleReasoningBlocks(context, "failed");
+      yield* emit({
+        ...(yield* buildEventBase({ threadId: context.session.threadId, turnId })),
+        type: "turn.aborted",
+        payload: { reason: "OpenCode generation was interrupted." },
+      });
+    });
+
     const writeNativeEvent = (
       threadId: ThreadId,
       event: {
@@ -679,6 +925,7 @@ export function makeOpenCodeAdapter(
         return;
       }
       const turnId = context.activeTurnId;
+      yield* settleReasoningBlocks(context, "failed");
       yield* updateProviderSession(context, { status: "closed" }, { clearActiveTurnId: true });
       // Emit lifecycle events BEFORE tearing down the scope. Both call sites
       // run this inside a fiber forked via `Effect.forkIn(context.sessionScope)`;
@@ -762,6 +1009,10 @@ export function makeOpenCodeAdapter(
             delta: deltaToEmit,
           },
         });
+      }
+
+      if (part.type === "reasoning") {
+        yield* observeReasoningPart(context, part, latestText, turnId);
       }
 
       if (
@@ -873,6 +1124,14 @@ export function makeOpenCodeAdapter(
               ...existingPart,
               text: nextText,
             });
+          }
+          if (existingPart.type === "reasoning") {
+            yield* observeReasoningPart(
+              context,
+              { ...existingPart, text: nextText },
+              nextText,
+              turnId,
+            );
           }
           yield* emit({
             ...(yield* buildEventBase({
@@ -1036,6 +1295,18 @@ export function makeOpenCodeAdapter(
 
         case "session.status": {
           if (event.properties.status.type === "busy") {
+            // SDK 1.18.3 / upstream 127bdb30: processor cancellation publishes
+            // MessageAbortedError + idle, and the runner may publish idle again
+            // before the abort HTTP response. SSE can lag that response and the
+            // next local send. Only idle followed by a new busy edge retires
+            // the old cancellation witness; an old queued busy is insufficient.
+            if (
+              context.interruption?.nativeIdleObserved &&
+              turnId !== context.interruption.turnId
+            ) {
+              delete context.interruption;
+            }
+            if (!turnId) break;
             yield* updateProviderSession(context, {
               status: "running",
               activeTurnId: turnId,
@@ -1056,8 +1327,17 @@ export function makeOpenCodeAdapter(
             break;
           }
 
+          if (event.properties.status.type === "idle" && context.interruption) {
+            context.interruption.nativeIdleObserved = true;
+            if (!context.manualCompaction) {
+              yield* settleInterruptedTurn(context, context.interruption.turnId);
+            }
+            break;
+          }
+
           if (event.properties.status.type === "idle" && turnId && !context.manualCompaction) {
             context.activeTurnId = undefined;
+            yield* settleReasoningBlocks(context, "completed");
             yield* updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
             yield* emit({
               ...(yield* buildEventBase({
@@ -1075,6 +1355,14 @@ export function makeOpenCodeAdapter(
         }
 
         case "session.error": {
+          // OpenCode reports ordinary cancellation through the error channel.
+          // Match only the typed native discriminant, never upstream prose or
+          // the mere fact that Stop is in flight. Other errors remain failures.
+          if (event.properties.error?.name === "MessageAbortedError") {
+            const interruptedTurnId = context.interruption?.turnId ?? context.activeTurnId;
+            if (interruptedTurnId) yield* settleInterruptedTurn(context, interruptedTurnId);
+            break;
+          }
           if (context.manualCompaction) {
             const operation = context.manualCompaction;
             operation.controller.abort();
@@ -1084,6 +1372,7 @@ export function makeOpenCodeAdapter(
           const message = sessionErrorMessage(event.properties.error);
           const activeTurnId = context.activeTurnId;
           context.activeTurnId = undefined;
+          yield* settleReasoningBlocks(context, "failed");
           yield* updateProviderSession(
             context,
             {
@@ -1390,6 +1679,8 @@ export function makeOpenCodeAdapter(
           emittedTextByPartId: new Map(),
           messageRoleById: new Map(),
           completedAssistantPartIds: new Set(),
+          reasoningBlocks: new Map(),
+          retiredReasoningPartIds: new Set(),
           turns: [],
           activeTurnId: undefined,
           activeAgent: undefined,
@@ -1531,6 +1822,8 @@ export function makeOpenCodeAdapter(
       const agent = getModelSelectionStringOptionValue(modelSelection, "agent");
       const variant = getModelSelectionStringOptionValue(modelSelection, "variant");
 
+      // A turn that never reached a native boundary cannot lend its rows.
+      yield* settleReasoningBlocks(context, "failed");
       context.activeTurnId = turnId;
       context.activeAgent = agent ?? (input.interactionMode === "plan" ? "plan" : undefined);
       context.activeVariant = variant;
@@ -1576,6 +1869,7 @@ export function makeOpenCodeAdapter(
             context.activeTurnId = undefined;
             context.activeAgent = undefined;
             context.activeVariant = undefined;
+            yield* settleReasoningBlocks(context, "failed");
             yield* updateProviderSession(
               context,
               {
@@ -1701,30 +1995,32 @@ export function makeOpenCodeAdapter(
             issue: "This Stop request no longer belongs to the active OpenCode turn.",
           });
         }
-        if (!activeTurnId && !compaction) return;
-        yield* runOpenCodeSdk("session.abort", () =>
-          context.client.session.abort({ sessionID: context.openCodeSessionId }),
-        ).pipe(Effect.mapError(toRequestError));
-        if (compaction) {
-          yield* finishManualCompaction(context, compaction, "interrupted");
-          compaction.controller.abort();
-          return;
-        }
-        // Native idle or a replacement may have won while abort was awaited.
-        // A late Stop receipt must not settle a subsequent turn's output.
-        if (context.activeTurnId !== activeTurnId || sessions.get(threadId) !== context) return;
-        if (activeTurnId) {
-          yield* emit({
-            ...(yield* buildEventBase({
-              threadId,
-              turnId: activeTurnId,
-            })),
-            type: "turn.aborted",
-            payload: {
-              reason: "Interrupted by user.",
-            },
-          });
-        }
+        const interruptedTurnId = activeTurnId ?? compaction?.turnId;
+        if (!interruptedTurnId) return;
+        const interruption: OpenCodeInterruption = {
+          turnId: interruptedTurnId,
+          nativeIdleObserved: false,
+        };
+        context.interruption = interruption;
+        yield* runOpenCodeSdk("session.abort", (signal) =>
+          context.client.session.abort({ sessionID: context.openCodeSessionId }, { signal }),
+        ).pipe(
+          Effect.mapError(toRequestError),
+          Effect.tapError(() =>
+            Effect.sync(() => {
+              // A rejected request alone proves no cancellation. Native evidence
+              // that already settled this turn must retain its echo fence.
+              if (
+                context.interruption === interruption &&
+                context.activeTurnId === interruptedTurnId
+              ) {
+                delete context.interruption;
+              }
+            }),
+          ),
+        );
+        // Native cancellation/idle or replacement may already have settled it.
+        yield* settleInterruptedTurn(context, interruptedTurnId);
       },
     );
 

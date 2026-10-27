@@ -43,6 +43,24 @@ function activity(
 }
 
 describe("work-log presentation localization boundary", () => {
+  it("presents an accepted Stop as a quiet response-stopped receipt", () => {
+    const receipt = {
+      ...activity("provider.turn.interrupt.completed", "Provider turn interrupt completed"),
+      tone: "info" as const,
+    };
+    const [row] = deriveWorkLogEntries([receipt], undefined);
+    expect(row).toMatchObject({
+      label: "Provider turn interrupt completed",
+      displayLabel: "translated:Response stopped",
+      tone: "info",
+    });
+    expect(row?.providerDiagnostic).toBeUndefined();
+    expect(receipt.summary).toBe("Provider turn interrupt completed");
+    expect(
+      cafeWorkLogDisplayLabel(activity("runtime.error", "Provider turn interrupt completed")),
+    ).toBeUndefined();
+  });
+
   it.each([
     ["provider.turn.steer.delivery-attempted", "Steer delivery attempted"],
     ["provider.turn.steer.accepted", "Steer accepted"],

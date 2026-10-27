@@ -227,35 +227,105 @@ const makeTestRunner = (registry: ProviderRegistryShape) =>
   ProviderMaintenanceRunner.make().pipe(Effect.provideService(ProviderRegistry, registry));
 
 describe("providerMaintenanceRunner", () => {
-  it.effect(
-    "refuses Debug updates before capability lookup, refresh, network or process work",
-    () => {
-      let lookups = 0;
-      let spawns = 0;
-      let requests = 0;
+  for (const dataProfile of ["debug", "production"] as const) {
+    it.effect(`runs the qualified native Claude updater in ${dataProfile}`, () => {
+      const lookups: Array<{ instanceId: ProviderInstanceId; provider: ProviderDriverKind }> = [];
+      const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
+      const refreshed: ProviderInstanceId[] = [];
       return Effect.gen(function* () {
         const config = yield* ServerConfig;
-        const { registry, updateStatesRef } = yield* makeRegistry();
+        const { registry, updateStatesRef } = yield* makeRegistry(baseClaudeProvider);
         const updater = yield* makeTestRunner({
           ...registry,
-          getProviderMaintenanceCapabilitiesForInstance: () =>
+          getProviderMaintenanceCapabilitiesForInstance: (instanceId, provider) =>
             Effect.sync(() => {
-              lookups += 1;
-              return lifecycleFor(CODEX_DRIVER);
+              lookups.push({ instanceId, provider });
+              return makeProviderMaintenanceCapabilities({
+                provider,
+                packageName: "@anthropic-ai/claude-code",
+                updateExecutable: "claude",
+                updateArgs: ["update"],
+                updateLockKey: "claude-native",
+              });
             }),
-        }).pipe(Effect.provideService(ServerConfig, { ...config, dataProfile: "debug" }));
-        const result = yield* updater.updateProvider(CODEX_DRIVER).pipe(Effect.result);
+          refreshInstance: (instanceId) => {
+            refreshed.push(instanceId);
+            return registry.refreshInstance(instanceId);
+          },
+        }).pipe(Effect.provideService(ServerConfig, { ...config, dataProfile }));
+        const result = yield* updater.updateProvider({
+          provider: CLAUDE_DRIVER,
+          instanceId: CLAUDE_INSTANCE_ID,
+        });
+        assert.deepStrictEqual(lookups, [
+          { instanceId: CLAUDE_INSTANCE_ID, provider: CLAUDE_DRIVER },
+        ]);
+        assert.deepStrictEqual(calls, [{ command: "claude", args: ["update"] }]);
+        assert.deepStrictEqual(refreshed, [CLAUDE_INSTANCE_ID]);
+        assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
+        assert.deepStrictEqual(
+          (yield* Ref.get(updateStatesRef)).map((state) => state.status),
+          ["queued", "running", "succeeded"],
+        );
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            ServerConfig.layerTest(process.cwd(), {
+              prefix: `cafe-${dataProfile}-maintenance-test-`,
+            }),
+            latestVersionHttpClient("0.0.0"),
+            mockSpawnerLayer((command, args) => {
+              calls.push({ command, args });
+              return { stdout: "updated" };
+            }),
+          ).pipe(Layer.provide(NodeServices.layer)),
+        ),
+      );
+    });
+
+    it.effect(`refuses unsupported installations in ${dataProfile} before update work`, () => {
+      let spawns = 0;
+      let requests = 0;
+      let refreshes = 0;
+      return Effect.gen(function* () {
+        const config = yield* ServerConfig;
+        const { registry, updateStatesRef } = yield* makeRegistry(baseClaudeProvider);
+        const updater = yield* makeTestRunner({
+          ...registry,
+          getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
+            Effect.succeed(
+              makeProviderMaintenanceCapabilities({
+                provider,
+                packageName: "@anthropic-ai/claude-code",
+                updateExecutable: null,
+                updateArgs: [],
+                updateLockKey: null,
+              }),
+            ),
+          refreshInstance: (instanceId) => {
+            refreshes += 1;
+            return registry.refreshInstance(instanceId);
+          },
+        }).pipe(Effect.provideService(ServerConfig, { ...config, dataProfile }));
+        const result = yield* updater.updateProvider(CLAUDE_DRIVER).pipe(Effect.result);
         assert.strictEqual(result._tag, "Failure");
-        if (result._tag === "Failure") assert.include(result.failure.reason, "disabled in Debug");
-        assert.strictEqual(lookups, 0);
+        if (result._tag === "Failure")
+          assert.strictEqual(
+            result.failure.reason,
+            "This provider does not support one-click updates.",
+          );
         assert.strictEqual(spawns, 0);
         assert.strictEqual(requests, 0);
+        assert.strictEqual(refreshes, 0);
         assert.deepStrictEqual(yield* Ref.get(updateStatesRef), []);
       }).pipe(
         Effect.scoped,
         Effect.provide(
           Layer.mergeAll(
-            ServerConfig.layerTest(process.cwd(), { prefix: "cafe-debug-maintenance-test-" }),
+            ServerConfig.layerTest(process.cwd(), {
+              prefix: `cafe-${dataProfile}-unsupported-maintenance-test-`,
+            }),
             mockSpawnerLayer(() => {
               spawns += 1;
               return {};
@@ -264,14 +334,14 @@ describe("providerMaintenanceRunner", () => {
               HttpClient.HttpClient,
               HttpClient.make(() => {
                 requests += 1;
-                return Effect.die("Unexpected Debug update request");
+                return Effect.die("Unexpected unsupported installation update request");
               }),
             ),
           ).pipe(Layer.provide(NodeServices.layer)),
         ),
       );
-    },
-  );
+    });
+  }
   it.effect("runs the allowlisted provider update command and records success", () => {
     const calls: Array<{ command: string; args: ReadonlyArray<string> }> = [];
     return Effect.gen(function* () {

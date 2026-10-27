@@ -45,7 +45,6 @@ import {
   makePackageManagedProviderMaintenanceResolver,
   normalizeCommandPath,
   resolveProviderMaintenanceCapabilitiesEffect,
-  makeManualOnlyProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
 const decodeOpenCodeSettings = Schema.decodeSync(OpenCodeSettings);
 
@@ -131,16 +130,10 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies OpenCodeSettings;
-      const maintenanceCapabilities =
-        serverConfig.dataProfile === "debug"
-          ? makeManualOnlyProviderMaintenanceCapabilities({
-              provider: DRIVER_KIND,
-              packageName: "opencode-ai",
-            })
-          : yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-              binaryPath: effectiveConfig.binaryPath,
-              env: processEnv,
-            });
+      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+        binaryPath: effectiveConfig.binaryPath,
+        env: processEnv,
+      });
 
       const adapter = yield* makeOpenCodeAdapter(effectiveConfig, {
         instanceId,

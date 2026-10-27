@@ -2,34 +2,47 @@ import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
 import { memo } from "react";
-import { MessageSquareTextIcon, TerminalIcon } from "lucide-react";
+import { BrainIcon, MessageSquareTextIcon, TerminalIcon } from "lucide-react";
 import type { TimestampFormat } from "@cafecode/contracts/settings";
 import { formatElapsed } from "../../session-logic";
 import { formatTimestamp } from "../../timestampFormat";
+import { cn } from "~/lib/utils";
 import { InspectableWorkEntry } from "./InspectableWorkEntry";
 import {
   compactCommandPreview,
   type ClaudeCommandInspection,
-  type ClaudePublicSummary,
+  type ProviderPublicSummary,
 } from "./providerOperationVisibility";
 
 /**
- * Public summaries stay separate from canonical assistant prose and answers.
- * The text is already bounded (4,096 characters) and is the whole point of
- * the row, so it is always shown in full: a disclosure would only repeat it.
+ * Public summaries (Claude) and thinking (OpenCode) stay separate from
+ * canonical assistant prose and answers. The text is already bounded (4,096
+ * characters) and is the whole point of the row, so it is always shown in
+ * full: a disclosure would only repeat it. OpenCode thinking can be raw model
+ * reasoning rather than a summary, so it reads as secondary, muted text, like
+ * OpenCode's own terminal UI.
  */
-export const ClaudeSummaryWorkEntry = memo(function ClaudeSummaryWorkEntry(props: {
-  readonly summary: ClaudePublicSummary;
+export const ProviderSummaryWorkEntry = memo(function ProviderSummaryWorkEntry(props: {
+  readonly summary: ProviderPublicSummary;
 }) {
   const uiLocale = useUiLocale();
+  const thinking = props.summary.provider === "opencode";
 
   return (
-    <div className="rounded-lg px-1 py-1" data-claude-public-summary="true">
+    <div className="rounded-lg px-1 py-1" data-provider-public-summary={props.summary.provider}>
       <div className="flex items-center gap-2 text-xs leading-5 text-muted-foreground">
         <span className="flex size-5 shrink-0 items-center justify-center">
-          <MessageSquareTextIcon className="size-3" aria-hidden />
+          {thinking ? (
+            <BrainIcon className="size-3" aria-hidden />
+          ) : (
+            <MessageSquareTextIcon className="size-3" aria-hidden />
+          )}
         </span>
-        <span>{uiText("Claude summary", undefined, undefined, uiLocale)}</span>
+        <span>
+          {thinking
+            ? uiText("OpenCode thinking", undefined, undefined, uiLocale)
+            : uiText("Claude summary", undefined, undefined, uiLocale)}
+        </span>
         {props.summary.status === "inProgress" ? (
           <span className="text-subtle-foreground">
             {uiText("Updating…", undefined, undefined, uiLocale)}
@@ -41,14 +54,19 @@ export const ClaudeSummaryWorkEntry = memo(function ClaudeSummaryWorkEntry(props
         ) : null}
       </div>
       <p
-        className="pl-7 text-xs leading-5 whitespace-pre-wrap wrap-break-word text-chat-foreground"
+        className={cn(
+          "pl-7 text-xs leading-5 whitespace-pre-wrap wrap-break-word",
+          thinking ? "text-muted-foreground" : "text-chat-foreground",
+        )}
         data-summary-text="true"
       >
         {props.summary.text}
       </p>
       {props.summary.truncated ? (
         <p className="pl-7 text-2xs text-muted-foreground">
-          {uiText("Summary truncated to the retained preview.", undefined, undefined, uiLocale)}
+          {thinking
+            ? uiText("Thinking truncated to the retained preview.", undefined, undefined, uiLocale)
+            : uiText("Summary truncated to the retained preview.", undefined, undefined, uiLocale)}
         </p>
       ) : null}
     </div>

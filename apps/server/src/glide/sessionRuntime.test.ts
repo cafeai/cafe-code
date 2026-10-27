@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { ProviderInstanceId, ThreadId } from "@cafecode/contracts";
+import { ProviderInstanceId, ThreadId, TurnId } from "@cafecode/contracts";
 import { readBridgeConnection } from "../mcp/localBridge.ts";
 import { GlideNativeHost } from "./nativeHost.ts";
 import {
@@ -16,6 +16,8 @@ import {
 } from "./sessionRuntime.ts";
 import { GlideExecutionError } from "./runtime.ts";
 import { unknownActionReceipt } from "./protocol.ts";
+import type { GlideTrayEvent } from "./tray.ts";
+import type { GlideTraySnapshot } from "./activity.ts";
 
 const identity = {
   threadId: ThreadId.make("glide-fixture"),
@@ -42,14 +44,45 @@ async function fixture() {
     throw new Error("No native child is allowed in this fixture.");
   });
   const host = new GlideNativeHost(nativeFactory);
+  let stopRevision = 0;
+  let trayEvent: ((event: GlideTrayEvent) => void) | undefined;
+  let trayFailure: (() => void) | undefined;
+  const tray = {
+    publish: vi.fn(async (_snapshot: GlideTraySnapshot) => undefined),
+    close: vi.fn(async () => undefined),
+  };
+  const writePolicy = vi.fn(
+    async (
+      _id: string,
+      next: { enabled: boolean; apps: readonly string[]; desktop?: boolean },
+      revision?: string,
+    ) => {
+      if (revision !== undefined && revision !== String(stopRevision))
+        throw new Error("Stale grant");
+      policy = { ...policy, ...next, desktop: next.desktop === true };
+    },
+  );
+  const stopAllPolicies = vi.fn(async () => {
+    stopRevision++;
+    policy = { ...policy, enabled: false, desktop: false };
+  });
   const runtime = makeGlideSessionRuntime({
     helperPath: "/synthetic/helper",
+    trayFactory: (_path, event, failure) => {
+      trayEvent = event;
+      trayFailure = failure;
+      return tray;
+    },
     bridgeSource,
     mcpPort: 12345,
     nativeHost: host,
     readPolicy: async () => policy,
-    writePolicy: async (_id, next) => {
-      policy = { ...policy, ...next, desktop: next.desktop === true };
+    writePolicy,
+    readStopRevision: async () => String(stopRevision),
+    stopAllPolicies,
+    initializePolicy: async (_id, revision) => {
+      if (revision !== String(stopRevision)) throw new Error("Stale draft");
+      policy = { ...policy, enabled: true, desktop: true };
     },
     status,
     runtimeFactory: () => {
@@ -69,7 +102,20 @@ async function fixture() {
     kernels,
     token,
     nativeFactory,
+    start: async (
+      binding: GlideSessionBinding,
+      threadId = identity.threadId,
+      turnId = "fixture-turn",
+    ) => {
+      binding.observeTurn?.({ type: "turn.started", threadId, turnId: TurnId.make(turnId) });
+      await runtime.operation({ kind: "control", input: { action: "status", threadId } });
+    },
+    stopAllPolicies,
     status,
+    tray,
+    writePolicy,
+    trayEvent: (event: GlideTrayEvent) => trayEvent?.(event),
+    trayFailure: () => trayFailure?.(),
     policy: (next: Partial<typeof policy>) => {
       policy = { ...policy, ...next };
     },
@@ -83,12 +129,395 @@ async function fixture() {
   };
 }
 describe("Cafe Glide session authority", () => {
+  it("keeps the status visible until an admitted cell drains after its exact turn finishes", async () => {
+    const f = await fixture();
+    const entered = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    let running: Promise<unknown> | undefined;
+    try {
+      f.policy({ enabled: true, apps: ["fixture.editor"] });
+      const binding = (await f.runtime.bind(identity))!;
+      await binding.activate();
+      await f.start(binding);
+      const token = await f.token(binding);
+      await f.runtime.operation({ kind: "execute", token, input: { code: "prepare" } });
+      f.kernels[0]!.execute.mockImplementationOnce(async () => {
+        entered.resolve();
+        await release.promise;
+        return { content: [] };
+      });
+      running = f.runtime.operation({
+        kind: "execute",
+        token,
+        input: { code: "held admitted cell" },
+      });
+      await entered.promise;
+      binding.observeTurn?.({
+        type: "turn.completed",
+        threadId: identity.threadId,
+        turnId: TurnId.make("fixture-turn"),
+      });
+      await f.runtime.operation({ kind: "control", input: { action: "status" } });
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].rows[0]?.state).toBe("stopping");
+      await expect(
+        f.runtime.operation({ kind: "execute", token, input: { code: "late cell" } }),
+      ).rejects.toThrow();
+      release.resolve();
+      await running;
+      await f.runtime.operation({ kind: "control", input: { action: "status" } });
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].rows).toEqual([]);
+    } finally {
+      release.resolve();
+      await running;
+      await f.cleanup();
+    }
+  });
+  it("shows only running turns, retires idle previews and refuses idle execution without disabling the saved grant", async () => {
+    const f = await fixture();
+    try {
+      f.policy({ enabled: true, apps: ["fixture.editor"] });
+      const binding = (await f.runtime.bind(identity))!;
+      await binding.activate();
+      const token = await f.token(binding);
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].rows).toEqual([]);
+      const execute = () =>
+        f.runtime.operation({ kind: "execute", token, input: { code: "cell" } });
+      await expect(execute()).rejects.toThrow();
+      await f.start(binding, identity.threadId, "first");
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].rows).toHaveLength(1);
+      await execute();
+      await f.start(binding, identity.threadId, "second");
+      binding.observeTurn?.({
+        type: "turn.completed",
+        threadId: identity.threadId,
+        turnId: TurnId.make("first"),
+      });
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].rows).toHaveLength(1);
+      binding.observeTurn?.({
+        type: "turn.completed",
+        threadId: identity.threadId,
+        turnId: TurnId.make("second"),
+      });
+      const status = await f.runtime.operation({
+        kind: "control",
+        input: { action: "status", threadId: identity.threadId },
+      });
+      expect(status).toMatchObject({ enabled: true, connected: true });
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].rows).toEqual([]);
+      await expect(execute()).rejects.toThrow();
+      expect(f.kernels[0]!.execute).toHaveBeenCalledOnce();
+      expect(f.writePolicy).not.toHaveBeenCalled();
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it("keeps another running chat visible and ignores a retired owner's lifecycle", async () => {
+    const f = await fixture();
+    try {
+      f.policy({ enabled: true, apps: ["fixture.editor"] });
+      const old = (await f.runtime.bind(identity))!;
+      await old.activate();
+      await f.start(old);
+      const otherId = ThreadId.make("other-running-chat");
+      const other = (await f.runtime.bind({ ...identity, threadId: otherId }))!;
+      await other.activate();
+      await f.start(other, otherId);
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].rows).toHaveLength(2);
+      const next = (await f.runtime.bind(identity))!;
+      await next.activate();
+      await f.start(next, identity.threadId, "replacement-turn");
+      old.observeTurn?.({ type: "session.exited", threadId: identity.threadId });
+      next.observeTurn?.({
+        type: "turn.completed",
+        threadId: otherId,
+        turnId: TurnId.make("replacement-turn"),
+      });
+      other.observeTurn?.({ type: "session.exited", threadId: otherId });
+      await f.runtime.operation({ kind: "control", input: { action: "status" } });
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].rows).toHaveLength(1);
+      await expect(
+        f.runtime.operation({
+          kind: "execute",
+          token: await f.token(next),
+          input: { code: "current" },
+        }),
+      ).resolves.toBeDefined();
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it("reopens only from explicit composer enable and keeps idle enabled chats hidden until their next running turn", async () => {
+    const f = await fixture();
+    try {
+      f.policy({ enabled: true, apps: ["fixture.editor"] });
+      f.status.mockResolvedValue({ accessibility: true, screenRecording: true, apps: [] });
+      const binding = (await f.runtime.bind(identity))!;
+      await binding.activate();
+      await f.start(binding);
+      await f.runtime.operation({ kind: "control", input: { action: "stop-all" } });
+      expect(f.tray.publish.mock.calls.at(-1)?.[0]).toMatchObject({ state: "stopped", rows: [] });
+      const enable = () =>
+        f.runtime.operation({
+          kind: "control",
+          input: { action: "set-enabled", enabled: true, threadId: identity.threadId },
+        });
+      await expect(enable()).resolves.toMatchObject({ enabled: true, paused: false });
+      expect(f.tray.publish.mock.calls.at(-1)?.[0]).toMatchObject({ state: "ready", reveal: 1 });
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].rows).toHaveLength(1);
+      await expect(
+        f.runtime.operation({
+          kind: "execute",
+          token: await f.token(binding),
+          input: { code: "explicitly resumed" },
+        }),
+      ).resolves.toBeDefined();
+      binding.observeTurn?.({
+        type: "turn.completed",
+        threadId: identity.threadId,
+        turnId: TurnId.make("fixture-turn"),
+      });
+      await enable();
+      expect(f.tray.publish.mock.calls.at(-1)?.[0]).toMatchObject({ reveal: 2, rows: [] });
+      await f.start(binding, identity.threadId, "next-turn");
+      expect(f.tray.publish.mock.calls.at(-1)?.[0]).toMatchObject({ reveal: 2 });
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].rows).toHaveLength(1);
+      await f.runtime.operation({ kind: "control", input: { action: "status" } });
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].reveal).toBe(2);
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it("requires a successful durable global stop before any chat can enable again after a storage failure", async () => {
+    const f = await fixture();
+    try {
+      f.policy({ enabled: true, apps: ["fixture.editor"] });
+      const binding = (await f.runtime.bind(identity))!;
+      await binding.activate();
+      await f.start(binding);
+      f.stopAllPolicies.mockRejectedValueOnce(new Error("Synthetic transaction failure"));
+      await expect(
+        f.runtime.operation({ kind: "control", input: { action: "stop-all" } }),
+      ).rejects.toThrow();
+      await expect(
+        f.runtime.operation({
+          kind: "initialize-thread",
+          threadId: "stale-storage-draft",
+          stopRevision: "0",
+        }),
+      ).rejects.toThrow();
+      f.status.mockResolvedValue({ accessibility: true, screenRecording: true, apps: [] });
+      await expect(
+        f.runtime.operation({
+          kind: "control",
+          input: { action: "set-enabled", threadId: identity.threadId, enabled: true },
+        }),
+      ).rejects.toThrow();
+      expect(f.writePolicy).not.toHaveBeenCalled();
+      await f.runtime.operation({ kind: "control", input: { action: "stop-all" } });
+      await expect(
+        f.runtime.operation({
+          kind: "control",
+          input: { action: "set-enabled", threadId: identity.threadId, enabled: true },
+        }),
+      ).resolves.toMatchObject({ enabled: true });
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it("retains stopping evidence until exact disposal closes and preserves a replacement owner's row", async () => {
+    const f = await fixture();
+    const entered = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    try {
+      f.policy({ enabled: true, apps: ["fixture.editor"] });
+      const old = (await f.runtime.bind(identity))!;
+      await old.activate();
+      await f.start(old);
+      await f.runtime.operation({
+        kind: "execute",
+        token: await f.token(old),
+        input: { code: "prepare" },
+      });
+      f.kernels[0]!.close.mockImplementation(async () => {
+        entered.resolve();
+        await release.promise;
+      });
+      const closing = old.dispose();
+      await entered.promise;
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].rows[0]?.state).toBe("stopping");
+      const replacement = (await f.runtime.bind(identity))!;
+      await replacement.activate();
+      await f.start(replacement);
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].rows.map((row) => row.state)).toEqual([
+        "stopping",
+        "ready",
+      ]);
+      release.resolve();
+      await closing;
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].rows.map((row) => row.state)).toEqual(["ready"]);
+      await expect(
+        f.runtime.operation({
+          kind: "execute",
+          token: await f.token(replacement),
+          input: { code: "new owner" },
+        }),
+      ).resolves.toBeDefined();
+    } finally {
+      release.resolve();
+      await f.cleanup();
+    }
+  });
+  it("keeps incomplete retirement unavailable through repeated Stop all and explicit enable", async () => {
+    const f = await fixture();
+    try {
+      f.policy({ enabled: true, apps: ["fixture.editor"] });
+      const binding = (await f.runtime.bind(identity))!;
+      await binding.activate();
+      await f.start(binding);
+      await f.runtime.operation({
+        kind: "execute",
+        token: await f.token(binding),
+        input: { code: "prepare" },
+      });
+      f.kernels[0]!.close.mockRejectedValueOnce(new Error("Synthetic owned close failure"));
+      await expect(
+        f.runtime.operation({ kind: "control", input: { action: "stop-all" } }),
+      ).rejects.toThrow();
+      await expect(
+        f.runtime.operation({ kind: "control", input: { action: "stop-all" } }),
+      ).rejects.toThrow();
+      f.status.mockResolvedValue({ accessibility: true, screenRecording: true, apps: [] });
+      await expect(
+        f.runtime.operation({
+          kind: "control",
+          input: { action: "set-enabled", threadId: identity.threadId, enabled: true },
+        }),
+      ).rejects.toThrow();
+      expect(f.tray.publish.mock.calls.at(-1)?.[0].state).toBe("unavailable");
+      expect(f.writePolicy).not.toHaveBeenCalled();
+    } finally {
+      await expect(f.cleanup()).rejects.toThrow();
+    }
+  });
+  it("fences queued admission before joining native retirement and keeps grants off across resume and new bindings", async () => {
+    const f = await fixture();
+    const entered = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    try {
+      f.policy({ enabled: true, apps: ["fixture.editor"] });
+      const binding = (await f.runtime.bind(identity))!;
+      await binding.activate();
+      await f.start(binding);
+      const token = await f.token(binding);
+      await f.runtime.operation({ kind: "execute", token, input: { code: "prepare" } });
+      f.kernels[0]!.close.mockImplementation(async () => {
+        entered.resolve();
+        await release.promise;
+      });
+      const stopped = f.runtime.operation({ kind: "control", input: { action: "stop-all" } });
+      await entered.promise;
+      binding.resume();
+      await expect(
+        f.runtime.operation({ kind: "execute", token, input: { code: "blocked" } }),
+      ).rejects.toThrow();
+      expect(f.tray.publish.mock.calls.some(([snapshot]) => snapshot.state === "stopping")).toBe(
+        true,
+      );
+      release.resolve();
+      await stopped;
+      expect(f.tray.publish.mock.calls.at(-1)?.[0]).toMatchObject({ state: "stopped", rows: [] });
+      await expect(
+        f.runtime.operation({
+          kind: "initialize-thread",
+          threadId: "stale-draft",
+          stopRevision: "0",
+        }),
+      ).rejects.toThrow();
+      const replacement = (await f.runtime.bind({
+        ...identity,
+        threadId: ThreadId.make("replacement"),
+      }))!;
+      await replacement.activate();
+      await f.start(replacement, ThreadId.make("replacement"));
+      replacement.resume();
+      await expect(
+        f.runtime.operation({
+          kind: "execute",
+          token: await f.token(replacement),
+          input: { code: "still blocked" },
+        }),
+      ).rejects.toThrow();
+      f.status.mockResolvedValue({ accessibility: true, screenRecording: true, apps: [] });
+      await f.runtime.operation({
+        kind: "control",
+        input: { action: "set-enabled", threadId: identity.threadId, enabled: true },
+      });
+      binding.resume();
+      await expect(
+        f.runtime.operation({ kind: "execute", token, input: { code: "explicit grant" } }),
+      ).resolves.toBeDefined();
+    } finally {
+      release.resolve();
+      await f.cleanup();
+    }
+  });
+  it("rejects an enable held across Stop all before its durable publication", async () => {
+    const f = await fixture();
+    const entered = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    try {
+      f.status.mockImplementationOnce(async () => {
+        entered.resolve();
+        await release.promise;
+        return { accessibility: true, screenRecording: true, apps: [] };
+      });
+      const enabling = f.runtime.operation({
+        kind: "control",
+        input: { action: "set-enabled", threadId: identity.threadId, enabled: true },
+      });
+      const refused = expect(enabling).rejects.toThrow();
+      await entered.promise;
+      await f.runtime.operation({ kind: "control", input: { action: "stop-all" } });
+      release.resolve();
+      await refused;
+      expect(f.writePolicy).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      await f.cleanup();
+    }
+  });
+  it("revokes access on status-host failure and exposes only server-minted current-owner navigation", async () => {
+    const f = await fixture();
+    try {
+      f.policy({ enabled: true, apps: ["fixture.editor"] });
+      const binding = (await f.runtime.bind(identity))!;
+      await binding.activate();
+      await f.start(binding);
+      const token = await f.token(binding);
+      await f.runtime.operation({ kind: "execute", token, input: { code: "prepare" } });
+      const row = f.tray.publish.mock.calls.at(-1)![0].rows[0]!;
+      f.trayEvent({ type: "open-chat", owner: row.owner });
+      expect(
+        await f.runtime.operation({ kind: "control", input: { action: "activity" } }),
+      ).toMatchObject({ navigation: { threadId: identity.threadId } });
+      f.trayFailure();
+      await f.runtime.operation({ kind: "control", input: { action: "stop-all" } });
+      binding.resume();
+      await expect(
+        f.runtime.operation({ kind: "execute", token, input: { code: "hidden capture" } }),
+      ).rejects.toThrow();
+      expect(f.kernels[0]!.close).toHaveBeenCalledOnce();
+    } finally {
+      await f.cleanup();
+    }
+  });
   it("preserves bounded owned cancellation receipts inside the authenticated JSON result", async () => {
     const f = await fixture();
     try {
       f.policy({ enabled: true, apps: ["fixture.editor"] });
       const binding = (await f.runtime.bind(identity))!;
       await binding.activate();
+      await f.start(binding);
       const token = await f.token(binding);
       await f.runtime.operation({ kind: "execute", token, input: { code: "prepare" } });
       const receipt = unknownActionReceipt(
@@ -149,6 +578,7 @@ describe("Cafe Glide session authority", () => {
     try {
       const binding = (await f.runtime.bind(identity))!;
       await binding.activate();
+      await f.start(binding);
       const token = await f.token(binding);
       const toggle = (enabled: boolean) =>
         f.runtime.operation({
@@ -193,6 +623,7 @@ describe("Cafe Glide session authority", () => {
         });
       await expect(execute()).rejects.toThrow("Glide");
       await binding.activate();
+      await f.start(binding);
       await expect(execute()).rejects.toThrow("Glide");
       expect(f.kernels).toHaveLength(0);
       f.policy({ enabled: true, apps: ["fixture.editor"], fullAccess: false });
@@ -213,11 +644,13 @@ describe("Cafe Glide session authority", () => {
       f.policy({ enabled: true, apps: ["fixture.editor"] });
       const old = (await f.runtime.bind(identity))!;
       await old.activate();
+      await f.start(old);
       const token = await f.token(old);
       await f.runtime.operation({ kind: "execute", token, input: { code: "old" } });
       const next = (await f.runtime.bind(identity))!,
         stale = (await f.runtime.bind(identity))!;
       await next.activate();
+      await f.start(next);
       await expect(stale.activate()).rejects.toThrow("Glide");
       await expect(
         f.runtime.operation({ kind: "execute", token, input: { code: "stale" } }),
@@ -241,6 +674,7 @@ describe("Cafe Glide session authority", () => {
       f.policy({ enabled: true, apps: ["fixture.editor"] });
       const binding = (await f.runtime.bind(identity))!;
       await binding.activate();
+      await f.start(binding);
       const token = await f.token(binding);
       const execute = () =>
         f.runtime.operation({ kind: "execute", token, input: { code: "cell" } });
@@ -248,6 +682,7 @@ describe("Cafe Glide session authority", () => {
       await binding.cancel();
       await expect(execute()).rejects.toThrow("Glide");
       binding.resume();
+      await f.start(binding, identity.threadId, "next-turn");
       await execute();
       await f.runtime.operation({
         kind: "control",
@@ -274,6 +709,7 @@ describe("Cafe Glide session authority", () => {
     try {
       const binding = (await f.runtime.bind({ ...identity, runtimeMode: "approval-required" }))!;
       await binding.activate();
+      await f.start(binding);
       const token = await f.token(binding);
       f.policy({ fullAccess: false, enabled: true, apps: ["fixture.editor"] });
       await expect(
@@ -298,6 +734,7 @@ describe("Cafe Glide session authority", () => {
           threadId: ThreadId.make(`owned-${index}`),
         }))!;
         await binding.activate();
+        await f.start(binding, ThreadId.make(`owned-${index}`));
         sessions.push({ binding, token: await f.token(binding) });
       }
       const run = (index: number) =>
@@ -336,6 +773,7 @@ async function setup(status: () => Promise<unknown>) {
   const nativeStatus = vi.fn(status);
   const runtime = makeGlideSessionRuntime({
     helperPath: "/synthetic/helper",
+    trayFactory: () => ({ publish: async () => undefined, close: async () => undefined }),
     bridgeSource,
     mcpPort: 12345,
     nativeHost: new GlideNativeHost(() => {

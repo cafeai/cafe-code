@@ -72,6 +72,10 @@ const VapidKeyPair = Schema.Struct({
 
 export const WebPushSubscriptionInput = Schema.Struct({
   uiLocale: Schema.optionalKey(Schema.Literals(["en", "ja", "ko"])),
+  // Legacy endpoints retain completion delivery only; questions require an
+  // explicit opt-in on the exact authenticated subscription.
+  notifyOnCompletion: Schema.optionalKey(Schema.Boolean),
+  notifyOnUserInput: Schema.optionalKey(Schema.Boolean),
   endpoint: Schema.String.check(Schema.isMaxLength(4096)),
   keys: Schema.Struct({
     p256dh: Schema.String.check(Schema.isMaxLength(1024)),
@@ -115,6 +119,10 @@ export function withWebPushSubscriptionLocale<T extends WebPushSubscriptionInput
 
 export function webPushCompletionBody(locale: WebPushSubscriptionInput["uiLocale"]): string {
   return uiText("Finished running", undefined, undefined, locale ?? "en");
+}
+
+export function webPushUserInputBody(locale: WebPushSubscriptionInput["uiLocale"]): string {
+  return uiText("Waiting for your input", undefined, undefined, locale ?? "en");
 }
 
 const WebPushState = Schema.Struct({
@@ -451,7 +459,10 @@ const initializeWebPushNotifications = Effect.gen(function* () {
       ),
     );
 
-  const notifyTurnCompleted = Effect.fn("notifyTurnCompleted")(function* (threadId: ThreadId) {
+  const notifyThread = Effect.fn("notifyThread")(function* (
+    threadId: ThreadId,
+    kind: "completion" | "user-input",
+  ) {
     const state = yield* Ref.get(stateRef);
     const vapid = state.vapid;
     if (vapid === null || state.subscriptions.length === 0) {
@@ -466,14 +477,21 @@ const initializeWebPushNotifications = Effect.gen(function* () {
     const descriptor = yield* serverEnvironment.getDescriptor;
     const staleSubscriptions = new Set<StoredWebPushSubscription>();
     yield* Effect.forEach(
-      state.subscriptions,
+      state.subscriptions.filter((subscription) =>
+        kind === "user-input"
+          ? subscription.notifyOnUserInput === true
+          : subscription.notifyOnCompletion !== false,
+      ),
       (subscription) =>
         Effect.gen(function* () {
           // Every recipient selects an isolated bundled translator; changing
           // one browser's language never mutates shared server presentation.
           const payload = yield* encodeWebPushPayload({
             title: shell.value.title,
-            body: webPushCompletionBody(subscription.uiLocale),
+            body:
+              kind === "user-input"
+                ? webPushUserInputBody(subscription.uiLocale)
+                : webPushCompletionBody(subscription.uiLocale),
             tag: `cafe-code-thread-${threadId}`,
             threadPath: `/${descriptor.environmentId}/${threadId}`,
           }).pipe(
@@ -508,6 +526,9 @@ const initializeWebPushNotifications = Effect.gen(function* () {
   });
 
   const start: WebPushNotificationsShape["start"] = Effect.fn("start")(function* () {
+    // Daemon journal catch-up can replay an input event. Bound suppression to
+    // recent immutable event IDs instead of retaining an entire chat history.
+    const recentInputEvents = new Set<string>();
     yield* Effect.forkScoped(
       Stream.runForEach(sessions.streamChanges, () =>
         reconcileOwners.pipe(
@@ -525,8 +546,15 @@ const initializeWebPushNotifications = Effect.gen(function* () {
     );
     yield* Effect.forkScoped(
       Stream.runForEach(providerService.streamEvents, (event) => {
-        if (event.type !== "turn.completed") {
+        if (event.type !== "turn.completed" && event.type !== "user-input.requested") {
           return Effect.void;
+        }
+        if (event.type === "user-input.requested") {
+          if (recentInputEvents.has(event.eventId)) return Effect.void;
+          recentInputEvents.add(event.eventId);
+          if (recentInputEvents.size > 512) {
+            recentInputEvents.delete(recentInputEvents.values().next().value!);
+          }
         }
         return scheduledFollowups
           .notification(
@@ -536,13 +564,18 @@ const initializeWebPushNotifications = Effect.gen(function* () {
           .pipe(
             Effect.catch(() => Effect.succeed({ notify: true })),
             Effect.flatMap(({ notify }) =>
-              notify ? notifyTurnCompleted(ThreadId.make(String(event.threadId))) : Effect.void,
+              notify
+                ? notifyThread(
+                    ThreadId.make(String(event.threadId)),
+                    event.type === "user-input.requested" ? "user-input" : "completion",
+                  )
+                : Effect.void,
             ),
             Effect.catchCause((cause) => {
               if (Cause.hasInterruptsOnly(cause)) {
                 return Effect.failCause(cause);
               }
-              return Effect.logWarning("web push reactor failed to process turn completion", {
+              return Effect.logWarning("web push reactor failed to process thread notification", {
                 threadId: event.threadId,
                 cause: Cause.pretty(cause),
               });

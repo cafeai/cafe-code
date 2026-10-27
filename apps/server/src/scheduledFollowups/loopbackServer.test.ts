@@ -25,6 +25,7 @@ const testServices = Layer.mergeAll(
   ServerConfig.layerTest(process.cwd(), process.cwd()),
   Layer.succeed(ScheduledFollowups, {
     list: unused,
+    summary: unused,
     save: unused,
     setStatus: unused,
     runNow: unused,

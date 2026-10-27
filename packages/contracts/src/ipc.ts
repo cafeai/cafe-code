@@ -29,6 +29,10 @@ import type {
 } from "./git.ts";
 import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
 import type { SavePngInput, SavePngResult } from "./imageExport.ts";
+import type {
+  DesktopNotificationInput,
+  DesktopNotificationResult,
+} from "./desktopNotifications.ts";
 import type { VisualizationDesktopBridge } from "./visualizationHost.ts";
 import type {
   VisualizationListInput,
@@ -487,6 +491,9 @@ export interface DesktopBridge extends VisualizationDesktopBridge {
   copyPng: (png: Uint8Array) => Promise<void>;
   /** The renderer supplies bytes and a basename, never a filesystem destination. */
   savePng: (input: SavePngInput) => Promise<SavePngResult>;
+  /** Optional for older desktop shells; never fall back to browser permission defaults. */
+  showNotification?: (input: DesktopNotificationInput) => Promise<DesktopNotificationResult>;
+  onNotificationClick?: (listener: (tag: string) => void) => () => void;
   onMenuAction: (listener: (action: string) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
@@ -624,6 +631,10 @@ export interface EnvironmentApi {
     list: (
       input: import("./scheduledFollowups.ts").ScheduledFollowupListInput,
     ) => Promise<import("./scheduledFollowups.ts").ScheduledFollowupListResult>;
+    /** Navigation presence only; absent on older backends and fixtures. */
+    summary?: (
+      input: import("./scheduledFollowups.ts").ScheduledFollowupSummaryInput,
+    ) => Promise<import("./scheduledFollowups.ts").ScheduledFollowupSummaryResult>;
     save: (
       input: import("./scheduledFollowups.ts").ScheduledFollowupSaveInput,
     ) => Promise<import("./scheduledFollowups.ts").ScheduledFollowupRecord>;

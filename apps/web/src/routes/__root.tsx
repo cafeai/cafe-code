@@ -70,6 +70,7 @@ import {
   startEnvironmentConnectionService,
 } from "../environments/runtime";
 import { configureClientTracing } from "../observability/clientTracing";
+import { GlideTrayNavigation } from "../components/GlideTrayNavigation";
 import {
   applyCafeBackgroundAnimations,
   clearCafeBackgroundAnimations,
@@ -182,6 +183,7 @@ function RootRouteView() {
       <PowerSaveBlockerSync />
       {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
       {primaryEnvironmentAuthenticated ? <DesktopNotificationWatcher /> : null}
+      {primaryEnvironmentAuthenticated ? <GlideTrayNavigation /> : null}
       <CommandPalette>
         <AppSidebarLayout>
           <Outlet />

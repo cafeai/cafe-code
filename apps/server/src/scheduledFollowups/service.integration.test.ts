@@ -739,6 +739,27 @@ describe("scheduled follow-up real-SQL service", () => {
     expect((await h.read(threadId)).schedules[0]?.state).toBe("active");
   });
 
+  it("summarizes only enabled upcoming schedules for navigation", async () => {
+    const h = await harness();
+    const threadId = await h.createThread("thread-1");
+    const proposedThreadId = await h.createThread("thread-2");
+    expect((await h.run(h.service.summary())).threads).toEqual([]);
+    const schedule = await h.run(h.service.save({ ...draft, threadId }));
+    await h.run(h.service.save({ ...draft, threadId: proposedThreadId }, "agent"));
+    expect((await h.run(h.service.summary())).threads).toEqual([
+      { threadId, nextRunAt: schedule.nextRunAt },
+    ]);
+    await h.run(
+      h.service.setStatus({
+        threadId,
+        id: schedule.id,
+        expectedRevision: schedule.revision,
+        state: "paused",
+      }),
+    );
+    expect((await h.run(h.service.summary())).threads).toEqual([]);
+  });
+
   it("claims once across independent scheduler instances sharing the database", async () => {
     const h = await harness();
     const threadId = await h.createThread("thread-1");

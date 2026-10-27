@@ -1,7 +1,7 @@
 # Debug data is a complete startup profile
 
 Created: 2026-10-18 18:13:32 JST (UTC+0900)
-Last updated: 2026-10-19 01:24:06 JST (UTC+0900)
+Last updated: 2026-10-23 07:39:42 JST (UTC+0900)
 Decision status: accepted for implementation by the user's explicit request.
 Implementation status: source implemented; local synthetic feature checks passed.
 Verification scope: local synthetic feature checks; complete default/CI and native/live qualification are not claimed.
@@ -78,8 +78,10 @@ state requires explicit shared-state consent; no claim of private native state
 is inferred from a Cafe account row. Claude's custom launch arguments and
 external cloud/profile selectors require deliberate sharing because private
 home relocation does not qualify those extra state-selection mechanisms.
-Cafe maintenance cannot mutate shared
-provider installations in Debug.
+User-requested provider executable updates use the same qualified installer flow
+in Debug and Production. The executable installation can be shared across
+profiles; account homes, credentials and histories retain their separate
+profile policy. Unsupported or bundled installations do not gain an updater.
 
 ## Lifecycle consequences
 

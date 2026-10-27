@@ -27,7 +27,13 @@ import {
   SubagentRuntimeId,
 } from "@cafecode/contracts";
 import { readCafeCodeEnv } from "@cafecode/shared/compatEnv";
-import { claudePublicSummaryDisplayText } from "../../provider/claudePublicSummary.ts";
+import {
+  isPublicReasoningSummaryProvider,
+  PUBLIC_REASONING_SUMMARY_CHARS,
+  PUBLIC_REASONING_SUMMARY_STREAM_KIND,
+  PUBLIC_REASONING_SUMMARY_VERSION,
+  publicReasoningSummaryDisplayText,
+} from "../../provider/publicReasoningSummary.ts";
 import { normalizeCodexAsyncQuestions } from "@cafecode/shared/codexAsyncQuestions";
 import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
 import * as Cache from "effect/Cache";
@@ -652,42 +658,48 @@ function runtimeEventToActivities(
   })();
   if (
     (event.type === "item.updated" || event.type === "item.completed") &&
-    event.provider === "claudeAgent" &&
+    isPublicReasoningSummaryProvider(event.provider) &&
     event.payload.itemType === "reasoning" &&
     event.itemId !== undefined &&
     event.turnId !== undefined
   ) {
+    const provider = event.provider;
     const data = readUnknownRecord(event.payload.data);
     const status = event.payload.status ?? "inProgress";
-    // Only the adapter's bounded disclosed-summary contract is promoted.
-    // Generic reasoning/content deltas and other providers remain unchanged.
+    // Only an admitted adapter's bounded disclosed-summary contract is
+    // promoted (Claude public summaries and OpenCode primary-session reasoning
+    // parts). Generic reasoning/content deltas and other providers remain
+    // unchanged, so a raw provider structure never becomes a summary by shape.
     if (
-      data?.summaryVersion !== 1 ||
-      data.streamKind !== "reasoning_summary_text" ||
+      data?.summaryVersion !== PUBLIC_REASONING_SUMMARY_VERSION ||
+      data.streamKind !== PUBLIC_REASONING_SUMMARY_STREAM_KIND ||
       typeof data.truncated !== "boolean" ||
       typeof event.payload.detail !== "string" ||
       event.payload.detail.trim().length === 0 ||
-      event.payload.detail.length > 4_096 ||
-      claudePublicSummaryDisplayText(event.payload.detail) !== event.payload.detail ||
+      event.payload.detail.length > PUBLIC_REASONING_SUMMARY_CHARS ||
+      publicReasoningSummaryDisplayText(event.payload.detail) !== event.payload.detail ||
       (status !== "inProgress" && status !== "completed" && status !== "failed")
     )
       return [];
+    // Each (turn, item) maps to one replace-in-place activity. Claude keeps its
+    // original id prefix so already persisted summaries continue to update.
+    const activityIdPrefix = provider === "claudeAgent" ? "claude-summary" : `${provider}-summary`;
     return [
       {
         id: EventId.make(
-          `claude-summary:${Crypto.createHash("sha256")
+          `${activityIdPrefix}:${Crypto.createHash("sha256")
             .update(encodeJsonString([event.turnId, event.itemId]), "utf8")
             .digest("hex")}`,
         ),
         createdAt: event.createdAt,
         tone: "info",
         kind: "reasoning.summary",
-        summary: "Claude summary",
+        summary: provider === "claudeAgent" ? "Claude summary" : "OpenCode thinking",
         payload: {
-          summaryVersion: 1,
-          provider: "claudeAgent",
+          summaryVersion: PUBLIC_REASONING_SUMMARY_VERSION,
+          provider,
           itemId: event.itemId,
-          streamKind: "reasoning_summary_text",
+          streamKind: PUBLIC_REASONING_SUMMARY_STREAM_KIND,
           detail: event.payload.detail,
           status,
           truncated: data.truncated,

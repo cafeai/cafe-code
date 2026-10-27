@@ -116,6 +116,9 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   queueEditingItemId: Schema.optionalKey(Schema.String),
   axiomWebEnabled: Schema.optionalKey(Schema.Boolean),
   computerUseEnabled: Schema.optionalKey(Schema.Boolean),
+  computerUseRevision: Schema.optionalKey(
+    Schema.String.check(Schema.isPattern(/^(0|[1-9][0-9]{0,15})$/)),
+  ),
   axiomMcpRevision: Schema.optionalKey(
     Schema.Number.check(
       Schema.isInt(),
@@ -245,6 +248,7 @@ export interface ComposerThreadDraftState {
   axiomWebEnabled?: boolean | undefined;
   /** Unsent chat's computer-use choice; first-send bootstrap owns its grant. */
   computerUseEnabled?: boolean | undefined;
+  computerUseRevision?: string | undefined;
   axiomMcpRevision?: number | undefined;
   images: ComposerImageAttachment[];
   files: ComposerFileAttachment[];
@@ -434,7 +438,11 @@ interface ComposerDraftStoreState {
   clearDraftThread: (threadRef: ComposerThreadTarget) => void;
   setStickyModelSelection: (modelSelection: ModelSelection | null | undefined) => void;
   setPrompt: (threadRef: ComposerThreadTarget, prompt: string) => void;
-  setComputerUseEnabled: (threadRef: ComposerThreadTarget, enabled: boolean) => void;
+  setComputerUseEnabled: (
+    threadRef: ComposerThreadTarget,
+    enabled: boolean,
+    revision?: string,
+  ) => void;
   setAxiomMcpRevision: (
     threadRef: ComposerThreadTarget,
     revision: number,
@@ -1755,6 +1763,10 @@ function normalizePersistedDraftsByThreadId(
       ...(typeof draftCandidate.computerUseEnabled === "boolean"
         ? { computerUseEnabled: draftCandidate.computerUseEnabled }
         : {}),
+      ...(typeof draftCandidate.computerUseRevision === "string" &&
+      /^(0|[1-9][0-9]{0,15})$/.test(draftCandidate.computerUseRevision)
+        ? { computerUseRevision: draftCandidate.computerUseRevision }
+        : {}),
       ...(draftCandidate.queueEditingItemId &&
       typeof draftCandidate.axiomMcpRevision === "number" &&
       Number.isSafeInteger(draftCandidate.axiomMcpRevision) &&
@@ -1862,6 +1874,9 @@ function partializeComposerDraftStoreState(
       ...(draft.axiomWebEnabled !== undefined ? { axiomWebEnabled: draft.axiomWebEnabled } : {}),
       ...(draft.computerUseEnabled !== undefined
         ? { computerUseEnabled: draft.computerUseEnabled }
+        : {}),
+      ...(draft.computerUseRevision !== undefined
+        ? { computerUseRevision: draft.computerUseRevision }
         : {}),
       ...(draft.queueEditingItemId && draft.axiomMcpRevision !== undefined
         ? { axiomMcpRevision: draft.axiomMcpRevision }
@@ -2109,6 +2124,9 @@ function toHydratedThreadDraft(
       : {}),
     ...(persistedDraft.computerUseEnabled !== undefined
       ? { computerUseEnabled: persistedDraft.computerUseEnabled }
+      : {}),
+    ...(persistedDraft.computerUseRevision !== undefined
+      ? { computerUseRevision: persistedDraft.computerUseRevision }
       : {}),
     ...(persistedDraft.queueEditingItemId && persistedDraft.axiomMcpRevision !== undefined
       ? { axiomMcpRevision: persistedDraft.axiomMcpRevision }
@@ -2646,16 +2664,24 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             };
           });
         },
-        setComputerUseEnabled: (threadRef, enabled) => {
+        setComputerUseEnabled: (threadRef, enabled, revision) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef);
           if (!threadKey) return;
           set((state) => {
             const current = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
-            if ((current.computerUseEnabled === true) === enabled) return state;
+            if (
+              (current.computerUseEnabled === true) === enabled &&
+              current.computerUseRevision === revision
+            )
+              return state;
             return {
               draftsByThreadKey: {
                 ...state.draftsByThreadKey,
-                [threadKey]: { ...current, computerUseEnabled: enabled },
+                [threadKey]: {
+                  ...current,
+                  computerUseEnabled: enabled,
+                  computerUseRevision: enabled ? revision : undefined,
+                },
               },
             };
           });

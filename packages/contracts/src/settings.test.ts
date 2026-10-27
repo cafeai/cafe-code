@@ -126,6 +126,19 @@ describe("client settings", () => {
     expect(() => decodeClientSettingsPatch({ showDeskTabs: "hidden" })).toThrow();
   });
 
+  it("keeps input notifications opt-in and independent of completion notifications", () => {
+    expect(decodeClientSettings({ notificationsEnabled: true }).userInputNotificationsEnabled).toBe(
+      false,
+    );
+    expect(decodeClientSettings({ userInputNotificationsEnabled: true }).notificationsEnabled).toBe(
+      false,
+    );
+    expect(decodeClientSettingsPatch({ userInputNotificationsEnabled: true })).toEqual({
+      userInputNotificationsEnabled: true,
+    });
+    expect(() => decodeClientSettingsPatch({ userInputNotificationsEnabled: "true" })).toThrow();
+  });
+
   it("defaults power-save blocking to off", () => {
     expect(DEFAULT_CLIENT_SETTINGS.powerSaveBlockerMode).toBe(DEFAULT_POWER_SAVE_BLOCKER_MODE);
     expect(decodeClientSettings({}).powerSaveBlockerMode).toBe("off");

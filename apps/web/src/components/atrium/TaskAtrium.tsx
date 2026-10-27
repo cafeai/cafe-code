@@ -28,7 +28,7 @@ import { isElectron } from "../../env";
 import { retainThreadDetailSubscription } from "../../environments/runtime/service";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { Skeleton } from "../ui/skeleton";
-import { ThreadStatusLabel } from "../ThreadStatusIndicators";
+import { ThreadStatusLabel } from "../ThreadStatusLabel";
 import {
   getThreadStatusPill,
   resolveThreadStatusPill,

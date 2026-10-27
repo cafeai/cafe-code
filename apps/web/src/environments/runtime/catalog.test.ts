@@ -11,6 +11,7 @@ import {
   useSavedEnvironmentRegistryStore,
   useSavedEnvironmentRuntimeStore,
   waitForSavedEnvironmentRegistryHydration,
+  listSavedEnvironmentRecords,
 } from "./catalog";
 
 const unresolvedRegistryRead = () => {
@@ -76,6 +77,48 @@ describe("environment runtime catalog stores", () => {
     resetSavedEnvironmentRuntimeStoreForTests();
 
     expect(useSavedEnvironmentRuntimeStore.getState().byId).toEqual({});
+  });
+
+  it("persists dragged order through metadata updates, additions and rehydration", async () => {
+    let persisted: readonly PersistedSavedEnvironmentRecord[] = [];
+    window.nativeApi!.persistence.setSavedEnvironmentRegistry = async (records) => {
+      persisted = records;
+    };
+    window.nativeApi!.persistence.getSavedEnvironmentRegistry = async () => persisted;
+    const record = (id: string, label: string): PersistedSavedEnvironmentRecord => ({
+      environmentId: EnvironmentId.make(id),
+      label,
+      httpBaseUrl: "https://box.example/",
+      wsBaseUrl: "wss://box.example/",
+      createdAt: "2026-10-25T00:00:00.000Z",
+      lastConnectedAt: null,
+    });
+    const a = record("server-a", "A");
+    const b = record("server-b", "B");
+    const c = record("server-c", "C");
+    const store = useSavedEnvironmentRegistryStore.getState();
+    store.upsert(a);
+    store.upsert(b);
+    store.upsert(c);
+    store.reorder(c.environmentId, a.environmentId);
+    store.markConnected(c.environmentId, "2026-10-26T00:00:00.000Z");
+    store.rename(c.environmentId, "Z");
+    store.upsert(record("server-d", "D"));
+    expect(persisted.map((entry) => entry.environmentId)).toEqual([
+      c.environmentId,
+      a.environmentId,
+      b.environmentId,
+      "server-d",
+    ]);
+    resetSavedEnvironmentRegistryStoreForTests();
+    await waitForSavedEnvironmentRegistryHydration();
+    expect(listSavedEnvironmentRecords().map((entry) => entry.environmentId)).toEqual(
+      persisted.map((entry) => entry.environmentId),
+    );
+    store.reorder(c.environmentId, EnvironmentId.make("removed"));
+    expect(listSavedEnvironmentRecords().map((entry) => entry.environmentId)).toEqual(
+      persisted.map((entry) => entry.environmentId),
+    );
   });
 
   it("does not throw when local api lookup fails during registry persistence", async () => {

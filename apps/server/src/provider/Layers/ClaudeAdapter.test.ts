@@ -30,6 +30,7 @@ import type {
   SDKAssistantMessage,
   SDKControlInterruptResponse,
   SDKMessage,
+  SDKResultError,
   SDKResultSuccess,
   SDKSystemMessage,
   SDKUserMessage,
@@ -123,6 +124,8 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
   public interruptResponse: SDKControlInterruptResponse | undefined;
+  public interruptFailure: unknown = undefined;
+  public beforeInterruptResponse: (() => Promise<void>) | undefined;
   public cancelAsyncMessageResult = true;
   public closeCalls = 0;
   public waitForExitCalls = 0;
@@ -172,6 +175,8 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly interrupt = async (): Promise<SDKControlInterruptResponse | undefined> => {
     this.interruptCalls.push(undefined);
+    if (this.interruptFailure !== undefined) throw this.interruptFailure;
+    await this.beforeInterruptResponse?.();
     return this.interruptResponse;
   };
 
@@ -270,6 +275,17 @@ function makeSuccessfulClaudeResult(sessionId: string): SDKResultSuccess {
     permission_denials: [],
     session_id: sessionId,
     uuid: "00000000-0000-4000-8000-000000000000",
+  };
+}
+
+function makeStoppedClaudeResult(sessionId: string, stopReason: null | "tool_use"): SDKResultError {
+  const { result: _result, ...base } = makeSuccessfulClaudeResult(sessionId);
+  return {
+    ...base,
+    subtype: "error_during_execution",
+    is_error: true,
+    errors: [`[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=${stopReason}`],
+    stop_reason: stopReason,
   };
 }
 
@@ -2435,6 +2451,9 @@ describe("ClaudeAdapterLive", () => {
         };
         const activate = vi.fn(async () => {}),
           dispose = vi.fn(async () => {});
+        const observeTurn = vi.fn(
+          (_event: { type: string; threadId: ThreadId; turnId?: TurnId | undefined }) => {},
+        );
         const bind = vi.fn(async (identity: unknown) => {
           assert.deepEqual(identity, {
             threadId: THREAD_ID,
@@ -2447,6 +2466,7 @@ describe("ClaudeAdapterLive", () => {
             launch,
             activate,
             dispose,
+            observeTurn,
             cancel: async () => {},
             resume: () => {},
           };
@@ -2468,6 +2488,27 @@ describe("ClaudeAdapterLive", () => {
           alwaysLoad: true,
         });
         assert.equal(harness.createInputs[0]!.options.permissionMode, "default");
+        const turn = yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "Exercise the synthetic Glide lifecycle.",
+        });
+        const completed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        harness.query.emit(makeSuccessfulClaudeResult("synthetic-glide-native-session"));
+        yield* Fiber.join(completed);
+        assert.deepEqual(
+          observeTurn.mock.calls
+            .filter(([event]) => event.type === "turn.started" || event.type === "turn.completed")
+            .map(([event]) => [event.type, event.threadId, event.turnId]),
+          [
+            ["turn.started", THREAD_ID, turn.turnId],
+            ["turn.completed", THREAD_ID, turn.turnId],
+          ],
+        );
         yield* adapter.stopSession(THREAD_ID);
         yield* adapter.stopAll();
         assert.equal(dispose.mock.calls.length, 1);
@@ -6623,6 +6664,145 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  for (const stopReason of [null, "tool_use"] as const) {
+    for (const stop of [
+      "accepted",
+      "missing",
+      "rejected",
+      "stale-turn",
+      "foreign-session",
+      "foreign-input",
+      "late-acceptance",
+    ] as const) {
+      it.effect(`handles diagnostic-only ${stopReason} results after ${stop} Stop`, () => {
+        return Effect.gen(function* () {
+          const loggerEntered = yield* Deferred.make<void>();
+          const releaseLogger = yield* Deferred.make<void>();
+          let holdResult = false;
+          yield* Effect.addFinalizer(() => Deferred.succeed(releaseLogger, undefined));
+          const harness = makeHarness({
+            nativeEventLogger: {
+              filePath: "memory://claude-stop-result-fixture",
+              write: () =>
+                holdResult
+                  ? Deferred.succeed(loggerEntered, undefined).pipe(
+                      Effect.andThen(Deferred.await(releaseLogger)),
+                    )
+                  : Effect.void,
+              close: () => Effect.void,
+            },
+          });
+          yield* Effect.gen(function* () {
+            const adapter = yield* ClaudeAdapter;
+            const started = yield* Deferred.make<void>();
+            const eventsFiber = yield* adapter.streamEvents.pipe(
+              Stream.tap((event) =>
+                event.type === "thread.started"
+                  ? Deferred.succeed(started, undefined)
+                  : Effect.void,
+              ),
+              Stream.takeUntil((event) => event.type === "turn.completed"),
+              Stream.runCollect,
+              Effect.forkChild,
+            );
+            const session = yield* adapter.startSession({
+              threadId: THREAD_ID,
+              provider: ProviderDriverKind.make("claudeAgent"),
+              runtimeMode: "full-access",
+            });
+            const turn = yield* adapter.sendTurn({
+              threadId: session.threadId,
+              input: "hello",
+              attachments: [],
+            });
+            const [prompt] = yield* Effect.promise(() =>
+              readPromptMessages(harness.getLastCreateQueryInput(), 1),
+            );
+            if (!prompt?.uuid) throw new Error("Expected the submitted prompt UUID.");
+            const nativeSessionId = "00000000-0000-4000-8000-000000000001";
+            emitWorkflowFixtureInit(harness.query, "2.1.295", nativeSessionId);
+            yield* Deferred.await(started);
+            harness.query.interruptResponse = { still_queued: [prompt.uuid] };
+            if (stop === "rejected") harness.query.interruptFailure = new Error("Stop rejected");
+            const emitResult = () =>
+              harness.query.emit({
+                ...makeStoppedClaudeResult(
+                  stop === "foreign-session"
+                    ? "00000000-0000-4000-8000-000000000099"
+                    : nativeSessionId,
+                  stopReason,
+                ),
+                ...(stop === "foreign-input"
+                  ? { user_message_uuid: "00000000-0000-4000-8000-000000000099" }
+                  : {}),
+              });
+            if (stop === "late-acceptance") {
+              harness.query.beforeInterruptResponse = async () => {
+                holdResult = true;
+                emitResult();
+                await Effect.runPromise(Deferred.await(loggerEntered));
+              };
+            }
+            if (stop !== "missing") {
+              const interrupted = yield* adapter
+                .interruptTurn(
+                  session.threadId,
+                  stop === "stale-turn" ? TurnId.make("foreign-turn") : turn.turnId,
+                )
+                .pipe(Effect.result);
+              assert.equal(interrupted._tag, stop === "rejected" ? "Failure" : "Success");
+            }
+            if (stop === "late-acceptance") yield* Deferred.succeed(releaseLogger, undefined);
+            else emitResult();
+            const events = Array.from(yield* Fiber.join(eventsFiber));
+            const terminal = events.find((event) => event.type === "turn.completed");
+            assert.equal(terminal?.type, "turn.completed");
+            if (terminal?.type !== "turn.completed") return;
+            assert.equal(terminal.turnId, turn.turnId);
+            assert.equal(terminal.payload.state, stop === "accepted" ? "interrupted" : "failed");
+            if (stop === "accepted") {
+              assert.equal(terminal.payload.errorMessage, undefined);
+              assert.equal(terminal.diagnostic, undefined);
+              assert.equal(
+                events.some((event) => event.type === "runtime.error"),
+                false,
+              );
+              assert.equal(harness.query.closeCalls, 0);
+              assert.equal(harness.createInputs.length, 1);
+              const next = yield* adapter.sendTurn({
+                threadId: session.threadId,
+                input: "continue",
+                attachments: [],
+              });
+              assert.notEqual(next.turnId, turn.turnId);
+              assert.equal(harness.createInputs.length, 1);
+              const nextCompleted = yield* adapter.streamEvents.pipe(
+                Stream.filter((event) => event.type === "turn.completed"),
+                Stream.runHead,
+                Effect.forkChild,
+              );
+              harness.query.emit(makeStoppedClaudeResult(nativeSessionId, stopReason));
+              const nextTerminal = yield* Fiber.join(nextCompleted);
+              assert.equal(nextTerminal._tag, "Some");
+              if (nextTerminal._tag === "Some" && nextTerminal.value.type === "turn.completed") {
+                assert.equal(nextTerminal.value.turnId, next.turnId);
+                assert.equal(nextTerminal.value.payload.state, "failed");
+              }
+            } else {
+              assert.equal(
+                events.some((event) => event.type === "runtime.error"),
+                true,
+              );
+            }
+          }).pipe(
+            Effect.ensuring(Deferred.succeed(releaseLogger, undefined)),
+            Effect.provide(harness.layer),
+          );
+        }).pipe(Effect.provideService(Random.Random, makeDeterministicRandomService()));
+      });
+    }
+  }
 
   it.effect("treats user-aborted Claude results as interrupted without a runtime error", () => {
     const harness = makeHarness();
@@ -18062,100 +18242,160 @@ describe("ClaudeAdapterLive", () => {
     },
   );
 
-  it.effect("coalesces live public summaries and preserves the received prefix on Stop", () => {
-    const harness = makeHarness();
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      const initial = yield* Deferred.make<void>();
-      const live = yield* Deferred.make<void>();
-      const events: ProviderRuntimeEvent[] = [];
-      const collected = yield* adapter.streamEvents.pipe(
-        Stream.takeUntil((event) => event.type === "turn.completed"),
-        Stream.runForEach((event) =>
-          Effect.gen(function* () {
-            events.push(event);
-            if (event.type === "item.updated" && event.payload.itemType === "reasoning") {
-              if (event.payload.detail === "a") yield* Deferred.succeed(initial, undefined);
-              if (event.payload.detail === "ab") yield* Deferred.succeed(live, undefined);
-            }
-          }),
-        ),
-        Effect.forkChild,
-      );
-      yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
-      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Inspect", attachments: [] });
-      const sessionId = "sdk-summary-live";
-      const base = makeClaudeResponseLimitAssistant({ sessionId, text: "Answer intro" });
-      harness.query.emit(base);
-      const emit = (event: unknown, uuid: string) =>
-        harness.query.emit({
-          type: "stream_event",
-          session_id: sessionId,
-          parent_tool_use_id: null,
-          uuid,
-          event,
-        } as unknown as SDKMessage);
-      emit(
-        { type: "message_start", message: { ...base.message, id: "api-live", content: [] } },
-        "live-start",
-      );
-      emit(
-        { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "a" } },
-        "live-a",
-      );
-      yield* Deferred.await(initial);
-      emit(
-        { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "b" } },
-        "live-b",
-      );
-      yield* Effect.yieldNow;
-      yield* Effect.yieldNow;
-      yield* TestClock.adjust(1_000);
-      yield* Deferred.await(live);
-      for (let index = 0; index < 32; index += 1) {
+  it.effect(
+    "keeps coalesced public summaries live beyond the refresh and text limits until Stop",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const initial = yield* Deferred.make<void>();
+        const live = yield* Deferred.make<void>();
+        const rolling = yield* Deferred.make<void>();
+        const latest = yield* Deferred.make<void>();
+        const events: ProviderRuntimeEvent[] = [];
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              events.push(event);
+              if (event.type === "item.updated" && event.payload.itemType === "reasoning") {
+                if (event.payload.detail === "a") yield* Deferred.succeed(initial, undefined);
+                if (event.payload.detail === "ab") yield* Deferred.succeed(live, undefined);
+                if (event.payload.detail === "x".repeat(4_096))
+                  yield* Deferred.succeed(rolling, undefined);
+                if (event.payload.detail?.endsWith(" latest progress"))
+                  yield* Deferred.succeed(latest, undefined);
+              }
+            }),
+          ),
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Inspect", attachments: [] });
+        const sessionId = "sdk-summary-live";
+        const base = makeClaudeResponseLimitAssistant({ sessionId, text: "Answer intro" });
+        harness.query.emit(base);
+        const emit = (event: unknown, uuid: string) =>
+          harness.query.emit({
+            type: "stream_event",
+            session_id: sessionId,
+            parent_tool_use_id: null,
+            uuid,
+            event,
+          } as unknown as SDKMessage);
+        emit(
+          { type: "message_start", message: { ...base.message, id: "api-live", content: [] } },
+          "live-start",
+        );
+        emit(
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "a" },
+          },
+          "live-a",
+        );
+        yield* Deferred.await(initial);
+        emit(
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "b" },
+          },
+          "live-b",
+        );
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(1_000);
+        yield* Deferred.await(live);
+        for (let index = 0; index < 32; index += 1) {
+          emit(
+            {
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "thinking_delta", thinking: "c" },
+            },
+            `live-c-${index}`,
+          );
+          yield* Effect.yieldNow;
+          yield* Effect.yieldNow;
+          yield* TestClock.adjust(1_000);
+        }
+        const liveSummaries = events.filter(
+          (event): event is Extract<ProviderRuntimeEvent, { type: "item.updated" }> =>
+            event.type === "item.updated" && event.payload.itemType === "reasoning",
+        );
+        assert.equal(liveSummaries.length, 34);
+        assert.equal(liveSummaries.at(-1)?.payload.detail, "ab" + "c".repeat(32));
+        emit(
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: "x".repeat(5_000) },
+          },
+          "live-large",
+        );
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(1_000);
+        yield* Deferred.await(rolling);
+        emit(
+          {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "thinking_delta", thinking: " latest progress" },
+          },
+          "live-latest",
+        );
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(1_000);
+        yield* Deferred.await(latest);
         emit(
           {
             type: "content_block_delta",
             index: 0,
             delta: { type: "thinking_delta", thinking: "c" },
           },
-          `live-c-${index}`,
+          "live-c",
         );
         yield* Effect.yieldNow;
         yield* Effect.yieldNow;
-        yield* TestClock.adjust(1_000);
-      }
-      emit(
-        { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "c" } },
-        "live-c",
-      );
-      yield* Effect.yieldNow;
-      yield* Effect.yieldNow;
-      yield* adapter.stopSession(THREAD_ID);
-      yield* Fiber.join(collected);
-      const summaries = events.filter(
-        (
-          event,
-        ): event is Extract<ProviderRuntimeEvent, { type: "item.updated" | "item.completed" }> =>
-          (event.type === "item.updated" || event.type === "item.completed") &&
-          event.payload.itemType === "reasoning",
-      );
-      assert.equal(summaries.at(-1)?.payload.detail, "ab" + "c".repeat(33));
-      assert.equal(summaries.filter((event) => event.type === "item.updated").length <= 16, true);
-      assert.equal(summaries.at(-1)?.payload.status, "failed");
-      assert.equal(
-        events.find((event) => event.type === "turn.completed")?.payload.state,
-        "interrupted",
-      );
-      assert.equal(
-        events.some(
-          (event) =>
-            event.type === "content.delta" && event.payload.streamKind !== "assistant_text",
-        ),
-        false,
-      );
-    }).pipe(Effect.provide(harness.layer));
-  });
+        yield* adapter.stopSession(THREAD_ID);
+        yield* Fiber.join(collected);
+        const summaries = events.filter(
+          (
+            event,
+          ): event is Extract<ProviderRuntimeEvent, { type: "item.updated" | "item.completed" }> =>
+            (event.type === "item.updated" || event.type === "item.completed") &&
+            event.payload.itemType === "reasoning",
+        );
+        assert.equal(summaries.at(-1)?.payload.detail, "x".repeat(4_079) + " latest progressc");
+        assert.equal(summaries.filter((event) => event.type === "item.updated").length, 36);
+        assert.equal(
+          summaries.every((event) => (event.payload.detail?.length ?? 0) <= 4_096),
+          true,
+        );
+        assert.deepEqual(summaries.at(-1)?.payload.data, {
+          summaryVersion: 1,
+          streamKind: "reasoning_summary_text",
+          truncated: true,
+        });
+        assert.equal(summaries.at(-1)?.payload.status, "failed");
+        assert.equal(
+          events.find((event) => event.type === "turn.completed")?.payload.state,
+          "interrupted",
+        );
+        assert.equal(
+          events.some(
+            (event) =>
+              event.type === "content.delta" && event.payload.streamKind !== "assistant_text",
+          ),
+          false,
+        );
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   for (const scenario of [
     "snapshot-only",

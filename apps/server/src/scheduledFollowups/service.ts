@@ -16,6 +16,8 @@ import {
   SCHEDULED_FOLLOWUP_MAX_SCHEDULES_PER_THREAD,
   type ScheduledFollowupHistoryResult,
   type ScheduledFollowupListResult,
+  type ScheduledFollowupSummaryResult,
+  SCHEDULED_FOLLOWUP_SUMMARY_MAX_THREADS,
   type OrchestrationThreadShell,
   type ThreadId,
   type TurnId,
@@ -54,6 +56,8 @@ export interface ScheduledFollowupsShape {
     input: ScheduledFollowupListInput,
     authority?: SchedulingSessionAuthority,
   ) => Operation<ScheduledFollowupListResult>;
+  /** Owner navigation presence: chats with an enabled upcoming occurrence. */
+  readonly summary: () => Operation<ScheduledFollowupSummaryResult>;
   readonly save: (
     input: ScheduledFollowupSaveInput,
     source?: "owner" | "agent",
@@ -272,6 +276,26 @@ export const makeScheduledFollowups = Effect.gen(function* () {
           return { schedules: yield* Effect.forEach(rows, record), backendOnline: true as const };
         }),
       ),
+    );
+
+  // Uses the (state,next_run_at) due index and returns only identities and
+  // times, so polling navigation never reads instructions or run history.
+  // Earliest occurrences win the bound; later ones simply show no clock.
+  const summary: ScheduledFollowupsShape["summary"] = () =>
+    publicBoundary(
+      Effect.gen(function* () {
+        const rows = yield* sql<{ thread_id: string; next_run_at: string }>`
+          SELECT thread_id, MIN(next_run_at) AS next_run_at FROM scheduled_followups
+          WHERE state = 'active' AND next_run_at IS NOT NULL
+          GROUP BY thread_id ORDER BY next_run_at, thread_id
+          LIMIT ${SCHEDULED_FOLLOWUP_SUMMARY_MAX_THREADS}`;
+        return {
+          threads: rows.map((row) => ({
+            threadId: row.thread_id as ThreadId,
+            nextRunAt: row.next_run_at,
+          })),
+        };
+      }),
     );
 
   const save: ScheduledFollowupsShape["save"] = (raw, source = "owner", authority) =>
@@ -798,6 +822,7 @@ export const makeScheduledFollowups = Effect.gen(function* () {
     );
   return {
     list,
+    summary,
     save,
     setStatus,
     runNow,

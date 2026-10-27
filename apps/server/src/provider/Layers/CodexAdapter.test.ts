@@ -1758,6 +1758,105 @@ const validationLayer = it.layer(
 
 validationLayer("CodexAdapterLive validation", (it) => {
   it.effect(
+    "refreshes an independent owner's missing Daybreak catalogue before opening or sending and revalidates refusals without submission",
+    () =>
+      Effect.gen(function* () {
+        for (const program of ["daybreakBlue", "daybreakRed"] as const) {
+          const factory = makeRuntimeFactory();
+          const instanceId = ProviderInstanceId.make(`codex-${program.toLowerCase()}`);
+          const threadId = asThreadId(`independent-catalogue-${program}`);
+          let cachedModels: readonly ServerProviderModel[] = [];
+          let discoveredModels = advertisedTierModels;
+          const refreshModels = vi.fn(() =>
+            Effect.sync(() => {
+              cachedModels = discoveredModels;
+              return cachedModels;
+            }),
+          );
+          const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
+            instanceId,
+            makeRuntime: factory.factory,
+            getModels: () => Effect.sync(() => cachedModels),
+            refreshModels,
+          });
+          const selection = (value: string | boolean, account = instanceId) =>
+            createModelSelection(account, program, [{ id: "cyberAccessProgram", value }]);
+          yield* adapter.startSession({
+            threadId,
+            runtimeMode: "approval-required",
+            modelSelection: selection(program),
+          });
+          assert.equal(refreshModels.mock.calls.length, 1);
+          const runtime = factory.lastRuntime!;
+          assert.equal(factory.factory.mock.calls.length, 1);
+          yield* adapter.sendTurn({
+            threadId,
+            input: "Advertised",
+            modelSelection: selection(program),
+          });
+          assert.equal(refreshModels.mock.calls.length, 1);
+          assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0].cyberAccessProgram, program);
+
+          cachedModels = [];
+          yield* adapter.sendTurn({
+            threadId,
+            input: "Refresh before send",
+            modelSelection: selection(program),
+          });
+          assert.equal(refreshModels.mock.calls.length, 2);
+          assert.equal(runtime.sendTurnImpl.mock.calls[1]?.[0].cyberAccessProgram, program);
+
+          cachedModels = [];
+          discoveredModels = [];
+          const refusedTurn = yield* Effect.exit(
+            adapter.sendTurn({
+              threadId,
+              input: "Unavailable",
+              modelSelection: selection(program),
+            }),
+          );
+          assert.equal(refusedTurn._tag, "Failure");
+          assert.equal(refreshModels.mock.calls.length, 3);
+          assert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+          const refusedOpening = yield* Effect.exit(
+            adapter.startSession({
+              threadId: asThreadId(`unavailable-opening-${program}`),
+              runtimeMode: "approval-required",
+              modelSelection: selection(program),
+            }),
+          );
+          assert.equal(refusedOpening._tag, "Failure");
+          assert.equal(refreshModels.mock.calls.length, 4);
+          assert.equal(factory.factory.mock.calls.length, 1);
+
+          for (const value of [true, "future-program"] as const) {
+            const invalid = yield* Effect.exit(
+              adapter.sendTurn({ threadId, input: "Invalid", modelSelection: selection(value) }),
+            );
+            assert.equal(invalid._tag, "Failure");
+          }
+          assert.equal(refreshModels.mock.calls.length, 4);
+          assert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+          yield* adapter.sendTurn({
+            threadId,
+            input: "Off",
+            modelSelection: selection("standard"),
+          });
+          yield* adapter.sendTurn({ threadId, input: "Omitted" });
+          yield* adapter.sendTurn({
+            threadId,
+            input: "Foreign selection",
+            modelSelection: selection(program, ProviderInstanceId.make("another-codex-account")),
+          });
+          assert.equal(refreshModels.mock.calls.length, 4);
+          assert.deepEqual(
+            runtime.sendTurnImpl.mock.calls.slice(2).map(([input]) => input.cyberAccessProgram),
+            ["standard", undefined, undefined],
+          );
+        }
+      }).pipe(Effect.scoped),
+  );
+  it.effect(
     "routes exact Daybreak levels and explicit Off and rejects unavailable levels before send",
     () =>
       Effect.gen(function* () {
@@ -4352,80 +4451,106 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("maps Codex MCP and dynamic-tool identity and arguments into work-log detail", () =>
-    Effect.gen(function* () {
-      const { adapter, runtime } = yield* startLifecycleRuntime();
-      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
-        Stream.runCollect,
-        Effect.forkChild,
-      );
+  it.effect(
+    "preserves connected-app tool identity, arguments and actual MCP progress in the work log",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const eventsFiber = yield* Stream.take(adapter.streamEvents, 3).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
 
-      yield* runtime.emit({
-        id: asEventId("evt-mcp-tool-started"),
-        kind: "notification",
-        provider: ProviderDriverKind.make("codex"),
-        createdAt: "2026-01-01T00:00:00.000Z",
-        method: "item/started",
-        threadId: asThreadId("thread-1"),
-        turnId: asTurnId("turn-1"),
-        itemId: asItemId("mcp-tool-1"),
-        payload: {
-          threadId: "provider-thread-1",
-          turnId: "turn-1",
-          startedAtMs: 1_767_225_600_000,
-          item: {
-            type: "mcpToolCall",
-            id: "mcp-tool-1",
-            server: "openaiDeveloperDocs",
-            tool: "search_openai_docs",
-            arguments: {
-              query: "current Responses API tools",
-              apiKey: "sk-example-secret-value-1234567890",
+        yield* runtime.emit({
+          id: asEventId("evt-mcp-tool-started"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "item/started",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("mcp-tool-1"),
+          payload: {
+            threadId: "provider-thread-1",
+            turnId: "turn-1",
+            startedAtMs: 1_767_225_600_000,
+            item: {
+              type: "mcpToolCall",
+              id: "mcp-tool-1",
+              server: "openaiDeveloperDocs",
+              tool: "search_openai_docs",
+              appContext: {
+                connectorId: "developer-docs",
+                appName: "Developer docs",
+                actionName: "Search documentation",
+              },
+              arguments: {
+                query: "current Responses API tools",
+                apiKey: "sk-example-secret-value-1234567890",
+              },
+              status: "inProgress",
             },
-            status: "inProgress",
           },
-        },
-      } satisfies ProviderEvent);
-      yield* runtime.emit({
-        id: asEventId("evt-dynamic-tool-started"),
-        kind: "notification",
-        provider: ProviderDriverKind.make("codex"),
-        createdAt: "2026-01-01T00:00:01.000Z",
-        method: "item/started",
-        threadId: asThreadId("thread-1"),
-        turnId: asTurnId("turn-1"),
-        itemId: asItemId("dynamic-tool-1"),
-        payload: {
-          threadId: "provider-thread-1",
-          turnId: "turn-1",
-          startedAtMs: 1_767_225_601_000,
-          item: {
-            type: "dynamicToolCall",
-            id: "dynamic-tool-1",
-            namespace: "workspace",
-            tool: "read_file",
-            arguments: { path: "/workspace/README.md" },
-            status: "inProgress",
+        } satisfies ProviderEvent);
+        yield* runtime.emit({
+          id: asEventId("evt-dynamic-tool-started"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+          method: "item/started",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("dynamic-tool-1"),
+          payload: {
+            threadId: "provider-thread-1",
+            turnId: "turn-1",
+            startedAtMs: 1_767_225_601_000,
+            item: {
+              type: "dynamicToolCall",
+              id: "dynamic-tool-1",
+              namespace: "workspace",
+              tool: "read_file",
+              arguments: { path: "/workspace/README.md" },
+              status: "inProgress",
+            },
           },
-        },
-      } satisfies ProviderEvent);
+        } satisfies ProviderEvent);
 
-      const events = Array.from(yield* Fiber.join(eventsFiber));
-      assert.equal(events[0]?.type, "item.started");
-      assert.equal(events[0]?.payload.itemType, "mcp_tool_call");
-      assert.equal(events[0]?.payload.title, "MCP tool call");
-      assert.equal(
-        events[0]?.payload.detail,
-        'openaiDeveloperDocs.search_openai_docs: {"query":"current Responses API tools","apiKey":"[redacted]"}',
-      );
-      assert.equal(events[1]?.type, "item.started");
-      assert.equal(events[1]?.payload.itemType, "dynamic_tool_call");
-      assert.equal(events[1]?.payload.title, "Tool call");
-      assert.equal(
-        events[1]?.payload.detail,
-        'workspace.read_file: {"path":"/workspace/README.md"}',
-      );
-    }),
+        yield* runtime.emit({
+          id: asEventId("evt-mcp-tool-progress"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:02.000Z",
+          method: "item/mcpToolCall/progress",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("mcp-tool-1"),
+          payload: {
+            threadId: "provider-thread-1",
+            turnId: "turn-1",
+            itemId: "mcp-tool-1",
+            message: "Found three documentation pages",
+          },
+        } satisfies ProviderEvent);
+
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        assert.equal(events[0]?.type, "item.started");
+        assert.equal(events[0]?.payload.itemType, "mcp_tool_call");
+        assert.equal(events[0]?.payload.title, "MCP tool call");
+        assert.equal(
+          events[0]?.payload.detail,
+          'openaiDeveloperDocs.search_openai_docs: {"query":"current Responses API tools","apiKey":"[redacted]"}',
+        );
+        assert.equal(events[1]?.type, "item.started");
+        assert.equal(events[1]?.payload.itemType, "dynamic_tool_call");
+        assert.equal(events[1]?.payload.title, "Tool call");
+        assert.equal(
+          events[1]?.payload.detail,
+          'workspace.read_file: {"path":"/workspace/README.md"}',
+        );
+        assert.equal(events[2]?.type, "tool.progress");
+        assert.equal(events[2]?.payload.summary, "Found three documentation pages");
+      }),
   );
 
   it.effect("maps effective Codex thread settings without persisting sensitive fields", () =>
@@ -9691,6 +9816,9 @@ it.effect(
           activate: vi.fn(async () => {}),
           cancel: vi.fn(async () => {}),
           resume: vi.fn(() => {}),
+          observeTurn: vi.fn(
+            (_event: { type: string; threadId: ThreadId; turnId?: TurnId | undefined }) => {},
+          ),
           dispose: vi.fn(async () => {}),
         }));
         let nextBinding = 0;
@@ -9733,6 +9861,47 @@ it.effect(
         yield* adapter.sendTurn({ threadId: second, input: "owned turn" });
         assert.equal(bindings[1]!.resume.mock.calls.length, 1);
         assert.equal(bindings[0]!.resume.mock.calls.length, 0);
+        const lifecycle = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) => event.type === "turn.started" || event.type === "turn.completed",
+          ),
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        for (const completed of [false, true]) {
+          yield* factory.runtimes[1]!.emit({
+            id: asEventId(`glide-lifecycle-${completed}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: second,
+            turnId: asTurnId("turn-1"),
+            createdAt: "2026-10-21T12:00:00.000Z",
+            method: completed ? "turn/completed" : "turn/started",
+            payload: {
+              threadId: "provider-thread-1",
+              turn: {
+                id: "turn-1",
+                items: [],
+                status: completed ? "completed" : "inProgress",
+                error: null,
+              },
+            },
+          });
+        }
+        yield* Fiber.join(lifecycle);
+        assert.deepEqual(
+          bindings[1]!.observeTurn.mock.calls.map(([event]) => [
+            event.type,
+            event.threadId,
+            event.turnId,
+          ]),
+          [
+            ["turn.started", second, asTurnId("turn-1")],
+            ["turn.completed", second, asTurnId("turn-1")],
+          ],
+        );
+        assert.equal(bindings[0]!.observeTurn.mock.calls.length, 0);
         yield* adapter.interruptTurn(second);
         assert.equal(bindings[1]!.cancel.mock.calls.length, 1);
         assert.equal(bindings[1]!.dispose.mock.calls.length, 2);

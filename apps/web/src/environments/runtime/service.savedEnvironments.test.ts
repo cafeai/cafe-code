@@ -402,7 +402,7 @@ describe("saved environment startup", () => {
     const registryListener = mockSavedEnvironmentRegistrySubscribe.mock.calls[0]?.[0];
     expect(registryListener).toBeTypeOf("function");
 
-    registryListener?.();
+    registryListener?.({ byId: { [savedRecord.environmentId]: savedRecord } }, { byId: {} });
     finishHydration();
     await tokenReadStarted;
     expect(mockReadSavedEnvironmentBearerToken).toHaveBeenCalledTimes(1);
@@ -419,5 +419,40 @@ describe("saved environment startup", () => {
 
     stop();
     await resetEnvironmentServiceForTests();
+  });
+
+  it("does not reconnect disconnected servers when names or ordering change", async () => {
+    const {
+      startEnvironmentConnectionService,
+      disconnectSavedEnvironment,
+      readEnvironmentConnection,
+    } = await import("./service");
+    const stop = startEnvironmentConnectionService(new QueryClient());
+    await vi.waitFor(() =>
+      expect(readEnvironmentConnection(savedRecord.environmentId)).not.toBeNull(),
+    );
+    await disconnectSavedEnvironment(savedRecord.environmentId);
+    mockReadSavedEnvironmentBearerToken.mockClear();
+    mockCreateEnvironmentConnection.mockClear();
+    const other = {
+      ...savedRecord,
+      environmentId: EnvironmentId.make("another-remote"),
+      label: "Other",
+    };
+    const previous = {
+      byId: { [savedRecord.environmentId]: savedRecord, [other.environmentId]: other },
+    };
+    const next = {
+      byId: {
+        [other.environmentId]: other,
+        [savedRecord.environmentId]: { ...savedRecord, label: "My box" },
+      },
+    };
+    const registryListener = mockSavedEnvironmentRegistrySubscribe.mock.calls[0]![0];
+    await registryListener(next, previous);
+    expect(mockReadSavedEnvironmentBearerToken).not.toHaveBeenCalled();
+    expect(mockCreateEnvironmentConnection).not.toHaveBeenCalled();
+    expect(readEnvironmentConnection(savedRecord.environmentId)).toBeNull();
+    stop();
   });
 });

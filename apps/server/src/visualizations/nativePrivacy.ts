@@ -8,26 +8,6 @@ import { randomUUID } from "node:crypto";
 
 export const isVisualizationServer = (value: unknown): value is string =>
   typeof value === "string" && /^cafe-visualizations-[A-Za-z0-9_-]{22}$/.test(value);
-export const isVisualizationTool = (value: unknown): value is string =>
-  typeof value === "string" &&
-  /^mcp__cafe-visualizations-[A-Za-z0-9_-]{22}__(?:preview|publish)_visualization$/.test(value);
-export const isPrivateMcpItem = (value: unknown): boolean => {
-  const item = ownRecord(value);
-  return (
-    item?.type === "mcpToolCall" &&
-    (isVisualizationServer(item.server) ||
-      item.mcpAppUi != null ||
-      item.mcpAppResourceUri != null ||
-      item.appContext != null)
-  );
-};
-const nativeIdentifier = (value: unknown): string | undefined =>
-  typeof value === "string" && value.length > 0 && value.length <= 200 ? value : undefined;
-const nativeIndex = (value: unknown): number | undefined =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 4096
-    ? value
-    : undefined;
-
 /** Received own data only. Missing/null parent denotes primary SDK traffic;
  * malformed, inherited and accessor identities never acquire primary rights. */
 export function readVisualizationClaudeParent(
@@ -53,150 +33,56 @@ export function readVisualizationClaudeParent(
   return { type: "child", id };
 }
 
-/**
- * Private native observations precede this copy. The copy is the only value
- * allowed into normal mapping, native journals, history hydration and debug.
- * Redaction is deliberately more conservative than completion authority: a
- * claimed UI descriptor need not be trusted to justify hiding its payload.
+const isVisualizationReceipt = (value: unknown): value is Record<string, unknown> => {
+  const record = ownRecord(value);
+  return (
+    record?.version === 1 &&
+    record.purpose === "cafe-visualization-receipt" &&
+    record.toolName === "publish_visualization"
+  );
+};
+
+/** Preserve tool activity, including App metadata and generated source. Only
+ * Cafe's internal invocation proof is omitted from activity/history/log copies.
+ * Observe the original receipt for native completion before making this copy.
+ * The publisher emits the same receipt as structured data and JSON text; Claude
+ * also delivers that JSON directly in tool_result.content. No stream identity
+ * or parent attribution is needed to remove this one explicit authority field.
  */
-export function redactVisualizationNativePayload<T>(value: T): T {
+export function redactVisualizationReceiptProofs<T>(value: T): T {
   let remaining = 50_000;
   const visit = (current: unknown, depth: number): unknown => {
-    if (--remaining < 0 || depth > 32) return "[Private visualization payload omitted]";
+    if (--remaining < 0 || depth > 32) return "[Tool payload exceeds inspection bounds]";
+    if (typeof current === "string") {
+      // Match the same finite JSON receipt envelope as the completion reader.
+      // Ordinary text/JSON remains byte-for-byte unchanged.
+      if (current.length > 8192 || !current.includes("cafe-visualization-receipt")) return current;
+      const parsed = readBoundedMcpAppJson(current, 8192);
+      if (!parsed.ok || !isVisualizationReceipt(parsed.value)) return current;
+      const next = visit(parsed.value, depth + 1);
+      return next === parsed.value ? current : JSON.stringify(next);
+    }
     if (Array.isArray(current)) {
-      if (current.length > remaining) return "[Private visualization payload omitted]";
+      if (current.length > remaining) return "[Tool payload exceeds inspection bounds]";
       const next = current.map((entry) => visit(entry, depth + 1));
       return next.every((entry, index) => entry === current[index]) ? current : next;
     }
     const record = ownRecord(current);
     if (!record) return current;
-    if (isPrivateMcpItem(record)) {
-      // Do not retain server URI, tool arguments, HTML, received errors, result
-      // metadata or invocation proof. The compact artifact is a separate read.
-      return {
-        id: nativeIdentifier(record.id),
-        type: "mcpToolCall",
-        server: "Private visualization",
-        tool: "Visualization",
-        status:
-          typeof record.status === "string" &&
-          ["inProgress", "completed", "failed"].includes(record.status)
-            ? record.status
-            : "unknown",
-        arguments: {},
-        result: null,
-        error: record.error ? { message: "Visualization operation failed." } : null,
-      };
-    }
+    const receipt = isVisualizationReceipt(record);
     let changed = false;
     const copy: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     for (const [key, entry] of Object.entries(record)) {
+      if (receipt && key === "proof") {
+        changed = true;
+        continue;
+      }
       copy[key] = visit(entry, depth + 1);
       changed ||= copy[key] !== entry;
     }
     return changed ? copy : current;
   };
   return visit(value, 0) as T;
-}
-
-/** Bounded Claude native ID/index correlation. Overflow hides unknown results
- * instead of evicting an identity and leaking its later content. It never
- * establishes publication authority, which needs the exact session binding. */
-export class VisualizationNativePrivacy {
-  private readonly toolIds = new Set<string>();
-  private readonly streaming = new Set<string>();
-  private overflow = false;
-  redact<T>(value: T): T {
-    let remaining = 50_000;
-    const visit = (
-      current: unknown,
-      depth: number,
-      inheritedParent: string | null | undefined,
-    ): unknown => {
-      if (--remaining < 0 || depth > 32) return "[Private visualization payload omitted]";
-      if (Array.isArray(current)) {
-        if (current.length > remaining) return "[Private visualization payload omitted]";
-        const next = current.map((entry) => visit(entry, depth + 1, inheritedParent));
-        return next.every((entry, index) => entry === current[index]) ? current : next;
-      }
-      const record = ownRecord(current);
-      if (!record) return current;
-      // SDK stream indexes are local to the parent tool query. A child stop
-      // with the same index must never unmask the root's next private delta.
-      let parent = inheritedParent;
-      if (Object.hasOwn(record, "parent_tool_use_id")) {
-        if (record.parent_tool_use_id === null) parent = null;
-        else if (
-          typeof record.parent_tool_use_id === "string" &&
-          record.parent_tool_use_id.length > 0 &&
-          record.parent_tool_use_id.length <= 200
-        )
-          parent = record.parent_tool_use_id;
-        // An unowned malformed frame must remain private, but it is not a
-        // visualization identity-table overflow. Poisoning the entire session
-        // here would suppress later valid ordinary tool results. Keep unknown
-        // parent authority local unless this frame actually carries a private
-        // tool/stream whose future results cannot be correlated safely.
-        else parent = undefined;
-      }
-      const toolKey = (id: string) => JSON.stringify([parent, id]);
-      const index = nativeIndex(record.index);
-      const streamKey =
-        index === undefined || parent === undefined ? undefined : JSON.stringify([parent, index]);
-      if (record.type === "tool_use" && isVisualizationTool(record.name)) {
-        if (parent !== undefined && typeof record.id === "string" && record.id.length <= 200) {
-          if (this.toolIds.size < 4096) this.toolIds.add(toolKey(record.id));
-          else this.overflow = true;
-        } else this.overflow = true;
-        return {
-          type: "tool_use",
-          id: nativeIdentifier(record.id),
-          name: "Visualization",
-          input: {},
-        };
-      }
-      if (
-        record.type === "tool_result" &&
-        (parent === undefined ||
-          this.overflow ||
-          (typeof record.tool_use_id === "string" && this.toolIds.has(toolKey(record.tool_use_id))))
-      )
-        return {
-          type: "tool_result",
-          tool_use_id: nativeIdentifier(record.tool_use_id),
-          content: "[Private visualization result omitted]",
-          is_error: record.is_error === true,
-        };
-      if (
-        record.type === "content_block_start" &&
-        isVisualizationTool(ownRecord(record.content_block)?.name)
-      ) {
-        if (streamKey !== undefined && this.streaming.size < 4096) this.streaming.add(streamKey);
-        else this.overflow = true;
-      }
-      if (
-        record.type === "content_block_delta" &&
-        (parent === undefined ||
-          this.overflow ||
-          (streamKey !== undefined && this.streaming.has(streamKey)))
-      )
-        return {
-          type: "content_block_delta",
-          index: nativeIndex(record.index),
-          delta: { type: "input_json_delta", partial_json: "" },
-        };
-      if (record.type === "content_block_stop" && streamKey !== undefined)
-        this.streaming.delete(streamKey);
-      let changed = false;
-      const copy: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-      for (const [key, entry] of Object.entries(record)) {
-        copy[key] = visit(entry, depth + 1, parent);
-        changed ||= copy[key] !== entry;
-      }
-      return changed ? copy : current;
-    };
-    return visit(value, 0, null) as T;
-  }
 }
 
 /** Read a tiny receipt only; never recursively search arbitrary tool content.

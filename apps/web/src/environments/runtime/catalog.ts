@@ -32,6 +32,7 @@ interface SavedEnvironmentRegistryStore extends SavedEnvironmentRegistryState {
   readonly remove: (environmentId: EnvironmentId) => void;
   readonly markConnected: (environmentId: EnvironmentId, connectedAt: string) => void;
   readonly rename: (environmentId: EnvironmentId, label: string) => void;
+  readonly reorder: (environmentId: EnvironmentId, targetId: EnvironmentId) => void;
   readonly reset: () => void;
 }
 
@@ -169,6 +170,19 @@ export const useSavedEnvironmentRegistryStore = create<SavedEnvironmentRegistryS
       persistSavedEnvironmentRegistryState(byId);
       return { byId };
     }),
+  reorder: (environmentId, targetId) =>
+    set((state) => {
+      const records = Object.values(state.byId);
+      const from = records.findIndex((record) => record.environmentId === environmentId);
+      const to = records.findIndex((record) => record.environmentId === targetId);
+      if (from < 0 || to < 0 || from === to) return state;
+      const [record] = records.splice(from, 1);
+      records.splice(to, 0, record!);
+      // Registry persistence is an ordered array on both desktop and browser.
+      const byId = Object.fromEntries(records.map((entry) => [entry.environmentId, entry]));
+      persistSavedEnvironmentRegistryState(byId);
+      return { byId };
+    }),
   reset: () => {
     persistSavedEnvironmentRegistryState({});
     set({
@@ -190,9 +204,7 @@ export function waitForSavedEnvironmentRegistryHydration(): Promise<void> {
 }
 
 export function listSavedEnvironmentRecords(): ReadonlyArray<SavedEnvironmentRecord> {
-  return Object.values(useSavedEnvironmentRegistryStore.getState().byId).toSorted((left, right) =>
-    left.label.localeCompare(right.label),
-  );
+  return Object.values(useSavedEnvironmentRegistryStore.getState().byId);
 }
 
 export function getSavedEnvironmentRecord(

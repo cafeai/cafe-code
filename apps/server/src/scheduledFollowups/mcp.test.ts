@@ -33,6 +33,7 @@ async function withClient<A>(
   const service: ScheduledFollowupsShape = {
     save: vi.fn(() => Effect.succeed({ state: "pending_confirmation" } as ScheduledFollowupRecord)),
     list: vi.fn(() => Effect.succeed({ schedules: [], backendOnline: true as const })),
+    summary: vi.fn(() => Effect.die("MCP must not read navigation summaries")),
     setStatus: vi.fn(() => Effect.succeed({ state: "paused" } as ScheduledFollowupRecord)),
     runNow: vi.fn(() => Effect.die("MCP must not run schedules")),
     history: vi.fn(() => Effect.succeed({ runs: [], nextCursor: null })),

@@ -84,6 +84,11 @@ function makeLiveEventFeed() {
       waiter?.({ value: undefined, done: true });
       waiter = undefined;
     },
+    isDrained() {
+      // The adapter requests another SSE value only after handling the prior
+      // one. A waiting read with an empty queue proves native dispatch drained.
+      return pending.length === 0 && waiter !== undefined;
+    },
     stream(replay: ReadonlyArray<unknown>): AsyncIterable<unknown> {
       pending.unshift(...replay);
       const iterator: AsyncIterator<unknown> = {
@@ -384,6 +389,19 @@ beforeEach(async () => {
 
 const advanceTestClock = (ms: number) =>
   TestClock.adjust(`${ms} millis`).pipe(Effect.andThen(Effect.yieldNow));
+
+async function waitForOpenCodeEventDrain(feed: ReturnType<typeof makeLiveEventFeed>) {
+  for (let attempt = 0; attempt < 200 && !feed.isDrained(); attempt += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal(feed.isDrained(), true);
+}
+
+const drainOpenCodeEvents = (feed: ReturnType<typeof makeLiveEventFeed>) =>
+  Effect.gen(function* () {
+    yield* Effect.promise(() => waitForOpenCodeEventDrain(feed));
+    yield* Effect.yieldNow;
+  });
 
 it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
   it.effect(
@@ -851,6 +869,242 @@ it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
+  for (const ordering of [
+    "before-abort-response",
+    "after-abort-response",
+    "idle-first",
+    "native-only",
+  ] as const) {
+    it.effect(`classifies native message aborts as interruption (${ordering})`, () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId(`thread-opencode-stop-${ordering}`);
+        const sessionID = "http://127.0.0.1:9999/session";
+        const feed = makeLiveEventFeed();
+        runtimeMock.state.liveEvents = feed;
+        const events: ProviderRuntimeEvent[] = [];
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.runForEach((event) => Effect.sync(() => events.push(event))),
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+        });
+        const { turnId } = yield* adapter.sendTurn({ threadId, input: "Work until stopped" });
+        const aborted = {
+          type: "session.error",
+          properties: {
+            sessionID,
+            error: { name: "MessageAbortedError", data: { message: "private-abort-body" } },
+          },
+        };
+        const idle = {
+          type: "session.status",
+          properties: { sessionID, status: { type: "idle" } },
+        };
+        if (ordering === "before-abort-response" || ordering === "idle-first") {
+          runtimeMock.state.onAbort = async () => {
+            feed.push(...(ordering === "idle-first" ? [idle, aborted] : [aborted, idle]));
+            await waitForOpenCodeEventDrain(feed);
+          };
+        }
+        if (ordering !== "native-only") yield* adapter.interruptTurn(threadId, turnId);
+        if (ordering === "after-abort-response" || ordering === "native-only")
+          feed.push(aborted, idle);
+        // Repeated abort/idle notifications must not add another terminal edge.
+        feed.push(aborted, idle);
+        yield* drainOpenCodeEvents(feed);
+        const terminal = events.filter(
+          (event) => event.type === "turn.aborted" || event.type === "turn.completed",
+        );
+        assert.deepEqual(
+          terminal.map((event) => [event.type, event.turnId]),
+          [["turn.aborted", turnId]],
+        );
+        assert.equal(
+          events.some((event) => event.type === "runtime.error"),
+          false,
+        );
+        const session = (yield* adapter.listSessions())[0];
+        assert.equal(session?.status, "ready");
+        assert.equal(session?.activeTurnId, undefined);
+        assert.equal(session?.lastError, undefined);
+        assert.doesNotMatch(encodeFixtureJson(events), /private-abort-body/);
+        yield* adapter.interruptTurn(threadId);
+        assert.equal(runtimeMock.state.abortCalls.length, ordering === "native-only" ? 0 : 1);
+      }),
+    );
+  }
+
+  it.effect(
+    "keeps late abort and idle echoes on the stopped turn until the next native busy edge",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-stop-echo");
+        const sessionID = "http://127.0.0.1:9999/session";
+        const feed = makeLiveEventFeed();
+        runtimeMock.state.liveEvents = feed;
+        const events: ProviderRuntimeEvent[] = [];
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.runForEach((event) => Effect.sync(() => events.push(event))),
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+        });
+        const first = yield* adapter.sendTurn({ threadId, input: "First work" });
+        yield* adapter.interruptTurn(threadId, first.turnId);
+        const next = yield* adapter.sendTurn({ threadId, input: "Continue with new work" });
+        const aborted = {
+          type: "session.error",
+          properties: {
+            sessionID,
+            error: { name: "MessageAbortedError", data: { message: "Aborted" } },
+          },
+        };
+        const idle = {
+          type: "session.status",
+          properties: { sessionID, status: { type: "idle" } },
+        };
+        const busy = {
+          type: "session.status",
+          properties: { sessionID, status: { type: "busy" } },
+        };
+        // The stream can still be draining the previous turn's initial busy,
+        // aborted error, processor idle and runner idle after HTTP Stop returned.
+        feed.push(busy, aborted, idle, aborted, idle);
+        yield* drainOpenCodeEvents(feed);
+        assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, next.turnId);
+        assert.equal((yield* adapter.listSessions())[0]?.status, "running");
+        assert.equal(
+          events.some((event) => event.type === "runtime.error"),
+          false,
+        );
+        assert.deepEqual(
+          events.filter((event) => event.type === "turn.aborted").map((event) => event.turnId),
+          [first.turnId],
+        );
+        // A genuine abort of the next native generation is still an interruption.
+        feed.push(busy, aborted, idle);
+        yield* drainOpenCodeEvents(feed);
+        assert.deepEqual(
+          events.filter((event) => event.type === "turn.aborted").map((event) => event.turnId),
+          [first.turnId, next.turnId],
+        );
+        assert.equal(
+          events.some((event) => event.type === "runtime.error"),
+          false,
+        );
+        assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+      }),
+  );
+
+  for (const errorName of ["ProviderAuthError", "UnknownError"] as const) {
+    it.effect(`preserves genuine provider errors during Stop (${errorName})`, () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId(`thread-opencode-stop-error-${errorName}`);
+        const sessionID = "http://127.0.0.1:9999/session";
+        const feed = makeLiveEventFeed();
+        runtimeMock.state.liveEvents = feed;
+        const events: ProviderRuntimeEvent[] = [];
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.runForEach((event) => Effect.sync(() => events.push(event))),
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+        });
+        const { turnId } = yield* adapter.sendTurn({ threadId, input: "Run" });
+        runtimeMock.state.onAbort = async () => {
+          feed.push(
+            {
+              type: "session.error",
+              properties: {
+                sessionID,
+                error: {
+                  name: errorName,
+                  data: { providerID: "fixture", message: "Aborted private-provider-body" },
+                },
+              },
+            },
+            { type: "session.status", properties: { sessionID, status: { type: "idle" } } },
+          );
+          await waitForOpenCodeEventDrain(feed);
+        };
+        yield* adapter.interruptTurn(threadId, turnId);
+        yield* drainOpenCodeEvents(feed);
+        assert.equal(events.filter((event) => event.type === "runtime.error").length, 1);
+        assert.equal(
+          events.some((event) => event.type === "turn.aborted"),
+          false,
+        );
+        assert.equal(
+          events.some(
+            (event) =>
+              event.type === "turn.completed" &&
+              event.turnId === turnId &&
+              event.payload.state === "failed",
+          ),
+          true,
+        );
+        assert.equal((yield* adapter.listSessions())[0]?.status, "error");
+        assert.doesNotMatch(encodeFixtureJson(events), /private-provider-body/);
+      }),
+    );
+  }
+
+  it.effect(
+    "preserves an active turn when the abort request fails without native cancellation",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-stop-request-failed");
+        const feed = makeLiveEventFeed();
+        runtimeMock.state.liveEvents = feed;
+        const events: ProviderRuntimeEvent[] = [];
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.runForEach((event) => Effect.sync(() => events.push(event))),
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+        });
+        const { turnId } = yield* adapter.sendTurn({ threadId, input: "Run" });
+        runtimeMock.state.onAbort = async () => {
+          throw new Error("private-abort-request-failure");
+        };
+        const rejected = yield* Effect.exit(adapter.interruptTurn(threadId, turnId));
+        assert.equal(Exit.isFailure(rejected), true);
+        assert.equal(
+          events.some((event) => event.type === "turn.aborted" || event.type === "turn.completed"),
+          false,
+        );
+        assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turnId);
+        feed.push({
+          type: "session.status",
+          properties: { sessionID: "http://127.0.0.1:9999/session", status: { type: "idle" } },
+        });
+        yield* drainOpenCodeEvents(feed);
+        const terminal = events.find((event) => event.type === "turn.completed");
+        assert.equal(terminal?.type === "turn.completed" && terminal.payload.state, "completed");
+        assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+      }),
+  );
+
   it.effect(
     "classifies native session errors without publishing or logging raw provider responses",
     () =>
@@ -1038,36 +1292,80 @@ it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       }),
   );
 
-  it.effect("interrupts manual compaction and ignores a late HTTP completion", () =>
-    Effect.gen(function* () {
-      const adapter = yield* OpenCodeAdapter;
-      const threadId = asThreadId("compact-interrupt");
-      yield* adapter.startSession({
-        provider: ProviderDriverKind.make("opencode"),
-        threadId,
-        runtimeMode: "full-access",
-        modelSelection: { instanceId: ProviderInstanceId.make("opencode"), model: "openai/gpt-5" },
-      });
-      let finish!: (value: { data: boolean }) => void;
-      let signal: AbortSignal | undefined;
-      runtimeMock.state.summarize = (_input, value) => {
-        signal = value;
-        return new Promise((resolve) => {
-          finish = resolve;
+  it.effect(
+    "interrupts manual compaction through native abort notifications and ignores a late HTTP completion",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("compact-interrupt");
+        const feed = makeLiveEventFeed();
+        runtimeMock.state.liveEvents = feed;
+        const events: ProviderRuntimeEvent[] = [];
+        const interrupted = yield* Deferred.make<void>();
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              events.push(event);
+              if (event.type === "turn.completed") yield* Deferred.succeed(interrupted, undefined);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("opencode"),
+            model: "openai/gpt-5",
+          },
         });
-      };
-      yield* adapter.compactThread!(threadId);
-      yield* Effect.yieldNow;
-      yield* adapter.interruptTurn(threadId);
-      assert.equal(signal?.aborted, true);
-      assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
-      const sent = yield* adapter.sendTurn({ threadId, input: "continue" });
-      finish({ data: true });
-      yield* Effect.promise(() => Promise.resolve());
-      yield* Effect.yieldNow;
-      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, sent.turnId);
-      assert.equal((yield* adapter.listSessions())[0]?.status, "running");
-    }),
+        let finish!: (value: { data: boolean }) => void;
+        let signal: AbortSignal | undefined;
+        runtimeMock.state.summarize = (_input, value) => {
+          signal = value;
+          return new Promise((resolve) => {
+            finish = resolve;
+          });
+        };
+        yield* adapter.compactThread!(threadId);
+        yield* Effect.yieldNow;
+        runtimeMock.state.onAbort = async () => {
+          feed.push(
+            {
+              type: "session.error",
+              properties: {
+                sessionID: "http://127.0.0.1:9999/session",
+                error: { name: "MessageAbortedError", data: { message: "Aborted" } },
+              },
+            },
+            {
+              type: "session.status",
+              properties: { sessionID: "http://127.0.0.1:9999/session", status: { type: "idle" } },
+            },
+          );
+          await waitForOpenCodeEventDrain(feed);
+        };
+        yield* adapter.interruptTurn(threadId);
+        yield* Deferred.await(interrupted);
+        assert.equal(signal?.aborted, true);
+        assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+        const terminal = events.filter((event) => event.type === "turn.completed");
+        assert.equal(terminal.length, 1);
+        assert.equal(terminal[0]?.payload.state, "interrupted");
+        assert.equal(
+          events.some((event) => event.type === "runtime.error"),
+          false,
+        );
+        const sent = yield* adapter.sendTurn({ threadId, input: "continue" });
+        finish({ data: true });
+        yield* Effect.promise(() => Promise.resolve());
+        yield* Effect.yieldNow;
+        assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, sent.turnId);
+        assert.equal((yield* adapter.listSessions())[0]?.status, "running");
+        runtimeMock.state.onAbort = null;
+      }),
   );
 
   it.effect("reports compaction failures without exposing raw provider errors", () =>
@@ -1566,6 +1864,289 @@ it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       if (completed?.type === "item.completed") {
         assert.equal(completed.payload.detail, "A BBonus");
       }
+    }),
+  );
+
+  it.effect(
+    "publishes bounded, coalesced OpenCode thinking rows and settles them at native completion or Stop",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-thinking");
+        const sessionID = "http://127.0.0.1:9999/session";
+        const feed = makeLiveEventFeed();
+        runtimeMock.state.liveEvents = feed;
+        const received: ProviderRuntimeEvent[] = [];
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId),
+          Stream.runForEach((event) => Effect.sync(() => received.push(event))),
+          Effect.forkChild,
+        );
+        type ReasoningItemEvent = Extract<
+          ProviderRuntimeEvent,
+          { type: "item.updated" | "item.completed" }
+        >;
+        const reasoningEvents = () =>
+          received.filter(
+            (event): event is ReasoningItemEvent =>
+              (event.type === "item.updated" || event.type === "item.completed") &&
+              event.payload.itemType === "reasoning",
+          );
+        // The SSE generator and runtime queue settle on real macrotasks.
+        const settle = Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)));
+        const waitFor = (predicate: () => boolean) =>
+          Effect.gen(function* () {
+            for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) yield* settle;
+            assert.equal(predicate(), true);
+          });
+
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const { turnId } = yield* adapter.sendTurn({
+          threadId,
+          input: "Why does the test fail?",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("opencode"),
+            model: "openai/gpt-5",
+          },
+        });
+        const part = {
+          id: "prt_reasoning_1",
+          sessionID,
+          messageID: "msg-thinking",
+          type: "reasoning",
+          text: "",
+          metadata: { openai: { reasoningEncryptedContent: "never-disclosed" } },
+          time: { start: 1_700_000_000_000 },
+        };
+        feed.push(
+          {
+            type: "message.updated",
+            properties: { sessionID, info: { id: "msg-thinking", role: "assistant" } },
+          },
+          { type: "message.part.updated", properties: { sessionID, part, time: 1 } },
+          {
+            type: "message.part.delta",
+            properties: {
+              sessionID,
+              messageID: "msg-thinking",
+              partID: part.id,
+              field: "text",
+              delta: "Checking the",
+            },
+          },
+        );
+        // The first disclosed text is published immediately.
+        yield* waitFor(() => reasoningEvents().length === 1);
+        feed.push({
+          type: "message.part.delta",
+          properties: {
+            sessionID,
+            messageID: "msg-thinking",
+            partID: part.id,
+            field: "text",
+            delta: " fixture",
+          },
+        });
+        yield* waitFor(() =>
+          received.some(
+            (event) => event.type === "content.delta" && event.payload.delta === " fixture",
+          ),
+        );
+        // Later edits coalesce behind the one-second interval.
+        assert.equal(reasoningEvents().length, 1);
+        yield* advanceTestClock(1_000);
+        yield* waitFor(() => reasoningEvents().length === 2);
+        feed.push({
+          type: "message.part.updated",
+          properties: {
+            sessionID,
+            part: {
+              ...part,
+              text: "Checking the fixture.\n",
+              time: { start: part.time.start, end: 2 },
+            },
+            time: 2,
+          },
+        });
+        yield* waitFor(() => reasoningEvents().length === 3);
+        // Re-delivering the whole message cannot reopen a settled row.
+        feed.push({
+          type: "message.updated",
+          properties: { sessionID, info: { id: "msg-thinking", role: "assistant" } },
+        });
+        const oversized = {
+          ...part,
+          id: "prt_reasoning_2",
+          text: "x".repeat(5_000),
+          time: { start: 1_700_000_000_500 },
+        };
+        feed.push({
+          type: "message.part.updated",
+          properties: { sessionID, part: oversized, time: 3 },
+        });
+        yield* waitFor(() => reasoningEvents().length === 4);
+        // Stop settles the unfinished trace as partial before the abort.
+        yield* adapter.interruptTurn(threadId, turnId);
+        yield* waitFor(() => received.some((event) => event.type === "turn.aborted"));
+
+        const events = reasoningEvents();
+        assert.deepEqual(
+          events.map((event) => [
+            event.type,
+            event.itemId,
+            event.payload.status,
+            event.payload.detail?.length,
+          ]),
+          [
+            ["item.updated", "prt_reasoning_1", "inProgress", "Checking the".length],
+            ["item.updated", "prt_reasoning_1", "inProgress", "Checking the fixture".length],
+            ["item.completed", "prt_reasoning_1", "completed", "Checking the fixture.".length],
+            ["item.updated", "prt_reasoning_2", "inProgress", 4_096],
+            ["item.completed", "prt_reasoning_2", "failed", 4_096],
+          ],
+        );
+        assert.equal(events[2]?.payload.detail, "Checking the fixture.");
+        for (const event of events) {
+          assert.equal(event.turnId, turnId);
+          // Raw native parts (and their encrypted metadata) never travel along:
+          // only the admitted presentation fields are emitted.
+          assert.equal(event.raw, undefined);
+          assert.deepEqual(Object.keys(event.payload).sort(), [
+            "data",
+            "detail",
+            "itemType",
+            "status",
+            "title",
+          ]);
+        }
+        // The native part start (1_700_000_000_000 ms) keeps the row in place.
+        assert.equal(events[0]?.createdAt, "2023-11-14T22:13:20.000Z");
+        assert.deepEqual(events[0]?.payload.data, {
+          summaryVersion: 1,
+          streamKind: "reasoning_summary_text",
+          truncated: false,
+        });
+        assert.deepEqual(events[4]?.payload.data, {
+          summaryVersion: 1,
+          streamKind: "reasoning_summary_text",
+          truncated: true,
+        });
+        const abortedIndex = received.findIndex((event) => event.type === "turn.aborted");
+        assert.ok(received.indexOf(events[4]!) < abortedIndex);
+      }),
+  );
+
+  it.effect("keeps thinking live beyond sixteen refreshes and the retained text window", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-long-thinking");
+      const sessionID = "http://127.0.0.1:9999/session";
+      const feed = makeLiveEventFeed();
+      runtimeMock.state.liveEvents = feed;
+      const received: ProviderRuntimeEvent[] = [];
+      yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.runForEach((event) => Effect.sync(() => received.push(event))),
+        Effect.forkChild,
+      );
+      const snapshots = () =>
+        received.filter(
+          (event): event is Extract<ProviderRuntimeEvent, { type: "item.updated" }> =>
+            event.type === "item.updated" && event.payload.itemType === "reasoning",
+        );
+      const settle = Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)));
+      const waitFor = (predicate: () => boolean) =>
+        Effect.gen(function* () {
+          for (let attempt = 0; attempt < 200 && !predicate(); attempt += 1) yield* settle;
+          assert.equal(predicate(), true);
+        });
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const { turnId } = yield* adapter.sendTurn({
+        threadId,
+        input: "Inspect a long operation",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("opencode"),
+          model: "openai/gpt-5",
+        },
+      });
+      const part = {
+        id: "prt_long_thinking",
+        sessionID,
+        messageID: "msg-long-thinking",
+        type: "reasoning",
+        text: "First",
+        time: { start: 1_700_000_000_000 },
+      };
+      feed.push(
+        {
+          type: "message.updated",
+          properties: { sessionID, info: { id: part.messageID, role: "assistant" } },
+        },
+        { type: "message.part.updated", properties: { sessionID, part, time: 1 } },
+      );
+      yield* waitFor(() => snapshots().length === 1);
+      let fullText = part.text;
+      const deltas = [
+        ...Array.from({ length: 20 }, (_, index) => ` step-${index}`),
+        " x".repeat(3_000),
+        " latest progress",
+      ];
+      for (const [index, delta] of deltas.entries()) {
+        fullText += delta;
+        feed.push({
+          type: "message.part.delta",
+          properties: {
+            sessionID,
+            messageID: part.messageID,
+            partID: part.id,
+            field: "text",
+            delta,
+          },
+        });
+        yield* waitFor(() =>
+          received.some((event) => event.type === "content.delta" && event.payload.delta === delta),
+        );
+        // No per-token publication; each changed window arrives on its timer.
+        assert.equal(snapshots().length, index + 1);
+        yield* advanceTestClock(1_000);
+        yield* waitFor(() => snapshots().length === index + 2);
+        const snapshot = snapshots().at(-1)!;
+        assert.equal(snapshot.payload.detail, fullText.slice(-4_096).trim());
+        assert.deepEqual(snapshot.payload.data, {
+          summaryVersion: 1,
+          streamKind: "reasoning_summary_text",
+          truncated: fullText.length > 4_096,
+        });
+        assert.equal(snapshot.turnId, turnId);
+        assert.equal(snapshot.itemId, part.id);
+        assert.equal(snapshot.createdAt, "2023-11-14T22:13:20.000Z");
+        assert.equal(snapshot.raw, undefined);
+      }
+      // These updates must arrive while the native block is still open.
+      assert.equal(
+        received.some((event) => event.type === "item.completed"),
+        false,
+      );
+      yield* adapter.interruptTurn(threadId, turnId);
+      yield* waitFor(() => received.some((event) => event.type === "turn.aborted"));
+      const settled = received.find(
+        (event) => event.type === "item.completed" && event.payload.itemType === "reasoning",
+      );
+      assert.equal(
+        settled?.type === "item.completed" && settled.payload.detail,
+        fullText.slice(-4_096).trim(),
+      );
+      assert.ok(
+        received.indexOf(settled!) < received.findIndex((event) => event.type === "turn.aborted"),
+      );
     }),
   );
 

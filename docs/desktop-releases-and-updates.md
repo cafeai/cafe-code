@@ -7,7 +7,10 @@ notarized; Windows and Linux artifacts remain unsigned. Stable tags use
 `vX.Y.Z`; nightly tags use `vX.Y.Z-nightly.YYYYMMDD.N` with `N >= 1`. The release workflow builds
 Windows x64 NSIS, macOS arm64/x64 DMG plus updater ZIP, and Linux x64 AppImage.
 Published Linux artifacts are limited to x64 AppImage; local Debian and Arch
-build helpers are documented in [Linux packaging](linux-packaging.md).
+build helpers and the `cafe-code up` user installer are documented in
+[Linux packaging](linux-packaging.md). The installer verifies a tag-bound
+release SHA-256 and retains a writable, versionless AppImage path compatible
+with the in-app updater; it never launches or restarts the application.
 
 Normal CI is the release quality gate. The exact source commit runs the same reusable
 CI workflow as dev/main, including Node tests, browser checks and desktop builds.

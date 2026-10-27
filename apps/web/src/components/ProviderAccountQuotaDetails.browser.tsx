@@ -16,7 +16,8 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     mounted = undefined;
   });
 
-  it("swaps the weekly allowance with the selected model and keeps extra usage inline", async () => {
+  it("keeps each settings allowance and reset together while switching the selected model", async () => {
+    await page.viewport(1100, 800);
     const report: ProviderSessionQuotaReport = {
       source: "claude-cli",
       observedAt: new Date().toISOString(),
@@ -57,6 +58,7 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     };
     mounted = await render(
       <ProviderAccountQuotaDetails
+        layout="settings"
         selectedModel="claude-sonnet-5-5"
         sessionQuota={{ status: "available", report }}
       />,
@@ -64,6 +66,12 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     await expect.element(page.getByText("43% left", { exact: true })).toBeVisible();
     await expect.element(page.getByText("82% left", { exact: true })).toBeVisible();
     await expect.element(page.getByText("Weekly", { exact: true })).toBeVisible();
+    const session = page.getByRole("region", { name: "Session window quota", exact: true });
+    const weekly = page.getByRole("region", { name: "Weekly quota", exact: true });
+    await expect.element(session.getByText("43% left", { exact: true })).toBeVisible();
+    await expect.element(session.getByText("Resets:", { exact: false })).toBeVisible();
+    await expect.element(weekly.getByText("82% left", { exact: true })).toBeVisible();
+    await expect.element(weekly.getByText("Resets:", { exact: false })).toBeVisible();
     await expect.element(page.getByText("Weekly · Fable", { exact: true })).not.toBeInTheDocument();
     await expect.element(page.getByText("25% of extra usage used", { exact: true })).toBeVisible();
     const text = document.querySelector("[data-claude-session-quota]")!.textContent!;
@@ -80,8 +88,21 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     await expect
       .element(page.getByRole("button", { name: "Details", exact: true }))
       .not.toBeInTheDocument();
+    if (import.meta.env.VITE_PROVIDER_SCREENSHOTS === "1") {
+      const wasDark = document.documentElement.classList.contains("dark");
+      document.documentElement.classList.add("dark");
+      try {
+        await page.screenshot({
+          element: document.querySelector<HTMLElement>("[data-claude-session-quota]")!,
+          path: "../../../../.explorations/claude-provider-minimal/usage-settings.png",
+        });
+      } finally {
+        if (!wasDark) document.documentElement.classList.remove("dark");
+      }
+    }
     await mounted.rerender(
       <ProviderAccountQuotaDetails
+        layout="settings"
         selectedModel="claude-fable-5-1"
         sessionQuota={{ status: "available", report }}
       />,
@@ -92,6 +113,7 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     await expect.element(page.getByText("Weekly", { exact: true })).not.toBeInTheDocument();
     await mounted.rerender(
       <ProviderAccountQuotaDetails
+        layout="settings"
         selectedModel="claude-opus-5-5"
         sessionQuota={{ status: "available", report }}
       />,

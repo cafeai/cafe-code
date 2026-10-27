@@ -5,6 +5,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as TestSqliteClient from "../persistence/TestSqliteClient.ts";
 import migration from "../persistence/Migrations/100_GlideThreadPreferences.ts";
 import desktopMigration from "../persistence/Migrations/101_GlideDesktopPermission.ts";
+import stopAllMigration from "../persistence/Migrations/102_GlideStopAll.ts";
 import { makeGlidePolicyStore } from "./policyStore.ts";
 
 it.layer(TestSqliteClient.layerMemory())("Glide durable app grants", (it) => {
@@ -17,6 +18,7 @@ it.layer(TestSqliteClient.layerMemory())("Glide durable app grants", (it) => {
         yield* sql`CREATE TABLE hard_deleted_threads(thread_id TEXT PRIMARY KEY)`;
         yield* migration;
         yield* desktopMigration;
+        yield* stopAllMigration;
         yield* sql`INSERT INTO projection_threads VALUES ('owned','full-access',NULL),('other','full-access',NULL)`;
         const store = yield* makeGlidePolicyStore;
         assert.deepEqual(yield* store.read("owned"), {
@@ -91,6 +93,7 @@ it.layer(TestSqliteClient.layerMemory())("Glide durable desktop grants", (it) =>
         yield* migration;
         yield* sql`INSERT INTO glide_thread_preferences VALUES ('legacy',1,'["fixture.editor"]')`;
         yield* desktopMigration;
+        yield* stopAllMigration;
         yield* sql`INSERT INTO projection_threads VALUES ('owned','full-access',NULL),('other','full-access',NULL),('legacy','full-access',NULL)`;
         const store = yield* makeGlidePolicyStore;
         assert.deepEqual(yield* store.read("legacy"), {
@@ -138,6 +141,44 @@ it.layer(TestSqliteClient.layerMemory())("Glide durable desktop grants", (it) =>
               .pipe(Effect.exit),
           ),
         );
+      }),
+  );
+});
+
+it.layer(TestSqliteClient.layerMemory())("Glide global stop", (it) => {
+  it.effect(
+    "globally disables saved grants and refuses stale first-send and enable revisions",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`CREATE TABLE projection_threads(thread_id TEXT PRIMARY KEY, runtime_mode TEXT, deleted_at TEXT)`;
+        yield* sql`CREATE TABLE hard_deleted_threads(thread_id TEXT PRIMARY KEY)`;
+        yield* migration;
+        yield* desktopMigration;
+        yield* stopAllMigration;
+        yield* sql`INSERT INTO projection_threads VALUES ('first','full-access',NULL),('saved','full-access',NULL),('draft','full-access',NULL)`;
+        const store = yield* makeGlidePolicyStore;
+        const revision = yield* store.revision;
+        yield* store.initialize("first", revision);
+        yield* store.write("saved", { enabled: true, apps: ["fixture.editor"] }, revision);
+        yield* store.stopAll();
+        const reopened = yield* makeGlidePolicyStore;
+        assert.strictEqual(yield* reopened.revision, "1");
+        assert.isFalse((yield* reopened.read("first")).enabled);
+        assert.isFalse((yield* reopened.read("saved")).enabled);
+        assert.isTrue(
+          Exit.isFailure(yield* reopened.initialize("draft", revision).pipe(Effect.exit)),
+        );
+        assert.isTrue(
+          Exit.isFailure(
+            yield* reopened
+              .write("saved", { enabled: true, apps: [], desktop: true }, revision)
+              .pipe(Effect.exit),
+          ),
+        );
+        yield* reopened.initialize("draft", "1");
+        assert.isTrue((yield* reopened.read("draft")).enabled);
+        assert.isFalse((yield* reopened.read("saved")).enabled);
       }),
   );
 });

@@ -36,6 +36,8 @@ import { ProviderSessionQuotaInput, ProviderSessionQuotaResult } from "./provide
 import {
   ScheduledFollowupListInput,
   ScheduledFollowupListResult,
+  ScheduledFollowupSummaryInput,
+  ScheduledFollowupSummaryResult,
   ScheduledFollowupSaveInput,
   ScheduledFollowupRecord,
   ScheduledFollowupSetStatusInput,
@@ -249,6 +251,7 @@ export const WS_METHODS = {
   // Usage stats
   usageStatsGet: "usageStats.get",
   scheduledFollowupsList: "scheduledFollowups.list",
+  scheduledFollowupsSummary: "scheduledFollowups.summary",
   scheduledFollowupsSave: "scheduledFollowups.save",
   scheduledFollowupsSetStatus: "scheduledFollowups.setStatus",
   scheduledFollowupsRunNow: "scheduledFollowups.runNow",
@@ -813,6 +816,11 @@ export const WsRpcGroup = RpcGroup.make(
   Rpc.make(WS_METHODS.scheduledFollowupsList, {
     payload: ScheduledFollowupListInput,
     success: ScheduledFollowupListResult,
+    error: ScheduledFollowupError,
+  }),
+  Rpc.make(WS_METHODS.scheduledFollowupsSummary, {
+    payload: ScheduledFollowupSummaryInput,
+    success: ScheduledFollowupSummaryResult,
     error: ScheduledFollowupError,
   }),
   Rpc.make(WS_METHODS.scheduledFollowupsSave, {

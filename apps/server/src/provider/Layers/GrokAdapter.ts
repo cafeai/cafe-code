@@ -770,6 +770,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           status: "ready",
           updatedAt,
         };
+        liveCtx.glideBinding?.observeTurn?.({
+          type: "turn.completed",
+          threadId,
+          turnId: settleTurnId,
+        });
         if (options?.emitTurnCompletion === false) {
           return;
         }
@@ -2075,6 +2080,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 updatedAt: yield* nowIso,
                 ...(displayModel ? { model: displayModel } : {}),
               };
+              ctx.glideBinding?.observeTurn?.({
+                type: "turn.started",
+                threadId: input.threadId,
+                turnId,
+              });
 
               yield* offerRuntimeEvent({
                 type: "turn.started",
@@ -2297,6 +2307,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   updatedAt: completedAt,
                   ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
                 };
+                ctx.glideBinding?.observeTurn?.({
+                  type: "turn.completed",
+                  threadId: input.threadId,
+                  turnId: prepared.turnId,
+                });
                 const completedStopReason = completedStopReasonFromPromptResponse(result);
                 yield* offerRuntimeEvent({
                   type: "turn.completed",

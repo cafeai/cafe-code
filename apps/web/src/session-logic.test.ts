@@ -1150,6 +1150,58 @@ describe("deriveWorkLogEntries", () => {
     ).toEqual([]);
   });
 
+  it("labels OpenCode thinking rows by provenance and keeps them distinct from tool rows", () => {
+    const entries = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "opencode-thinking",
+          turnId: "turn-a",
+          sequence: 1,
+          kind: "reasoning.summary",
+          tone: "info",
+          createdAt: "2026-10-09T00:00:01.000Z",
+          summary: "OpenCode thinking",
+          payload: {
+            itemId: "prt_reasoning",
+            streamKind: "reasoning_summary_text",
+            summaryVersion: 1,
+            provider: "opencode",
+            detail: "Comparing the two fixtures.",
+            status: "completed",
+            truncated: false,
+          },
+        }),
+        makeActivity({
+          id: "opencode-codex-shape",
+          turnId: "turn-a",
+          sequence: 2,
+          kind: "reasoning.summary",
+          payload: {
+            itemId: "other",
+            streamKind: "reasoning_summary_text",
+            summaryVersion: 1,
+            provider: "codex",
+            detail: "Not an admitted provider",
+            status: "completed",
+            truncated: false,
+          },
+        }),
+      ],
+      undefined,
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: "opencode-thinking",
+      label: "OpenCode thinking",
+      toolCallId: "prt_reasoning",
+      publicSummary: {
+        provider: "opencode",
+        text: "Comparing the two fixtures.",
+        status: "completed",
+      },
+    });
+  });
+
   it("retains a live Claude command with description and merges received output/status/observed timing", () => {
     const command = (id: string, kind: string, second: number, payload: Record<string, unknown>) =>
       makeActivity({

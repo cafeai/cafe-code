@@ -57,7 +57,12 @@ async function ensureServiceWorkerRegistration(): Promise<ServiceWorkerRegistrat
  * store the subscription server-side. Throws with a user-presentable message
  * on any failure so the settings toggle can surface it and revert.
  */
-export async function enableWebPushNotifications(): Promise<void> {
+export async function enableWebPushNotifications(
+  preferences: { readonly notifyOnCompletion: boolean; readonly notifyOnUserInput: boolean } = {
+    notifyOnCompletion: true,
+    notifyOnUserInput: false,
+  },
+): Promise<void> {
   const support = getWebPushSupport();
   if (!support.supported) {
     throw new Error(describeUnsupported(support.reason));
@@ -81,6 +86,7 @@ export async function enableWebPushNotifications(): Promise<void> {
   const { publicKey } = (await keyResponse.json()) as { publicKey: string };
 
   const registration = await ensureServiceWorkerRegistration();
+  const existing = await registration.pushManager.getSubscription();
   const subscription = await registration.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: urlBase64ToUint8Array(publicKey).buffer as ArrayBuffer,
@@ -90,12 +96,16 @@ export async function enableWebPushNotifications(): Promise<void> {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      subscription: { ...subscription.toJSON(), uiLocale: getUiLocale() },
+      subscription: { ...subscription.toJSON(), uiLocale: getUiLocale(), ...preferences },
       label: navigator.userAgent.slice(0, 120),
     }),
   });
   if (!storeResponse.ok) {
-    await subscription.unsubscribe().catch(() => {});
+    // Updating one notification category must not destroy a previously working
+    // subscription if saving the new preference is refused.
+    if (existing?.endpoint !== subscription.endpoint) {
+      await subscription.unsubscribe().catch(() => {});
+    }
     throw new Error(uiText("The server rejected the push subscription."));
   }
 }

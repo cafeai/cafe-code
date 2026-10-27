@@ -1,7 +1,7 @@
 # Decision: Configured-origin Apps and one-use browser-frame consent
 
 Decision status: Accepted current design; implemented
-Last updated: 2026-10-13 22:28:00 JST (UTC+0900)
+Last updated: 2026-10-27
 Decision authority: the user explicitly requests direct chat embedding, enables
 visualization MCP only under Full access, asks that earlier feature decisions be
 rewritten to this model, and authorizes pushing this current changeset.
@@ -18,7 +18,17 @@ Publish immutable source and original bounded input/result privately without pre
 
 A server-minted short action grant identifies exact thread/artifact/revision/browser frame/token and current Full access. Legacy wire leaseId means that frame ID, not a native process. Configured-origin tool/resource/link/message operations require one-use30-second consent, consume it before dispatch, and recheck current provider/catalogue/schema/ownership. readOnlyHint grants nothing. Replacement/expiry/access loss and lost acknowledgements never authorize another operation.
 
-Strict JSON bounds are128KiB actualUTF-8/depth16/4096lexicaltokens; private outer-envelope/HTTP bounds remain separate. Frame routing checks exactWindowProxy/srcdoc; it is not protection against the admitted same-origin code using parent authority. Private original JSON remains outside ordinary history/debug. No general network/MCP proxy or App permission to install/change OS settings is added.
+Strict JSON bounds are128KiB actualUTF-8/depth16/4096lexicaltokens; private outer-envelope/HTTP bounds remain separate. Frame routing checks exactWindowProxy/srcdoc; it is not protection against the admitted same-origin code using parent authority. No general network/MCP proxy or App permission to install/change OS settings is added.
+
+The user's 2026-10-27 instruction removes blanket visualization/App tool-activity
+anonymization. Preserve actual service/tool identity, App metadata, inputs,
+results, errors and progress in the ordinary activity/history path. An App
+descriptor or connected-account attribution does not make those fields secret.
+Omit only Cafe's internal visualization receipt proof in structured/JSON-text
+copies, after exact native completion observation; retain existing credential
+filters. The artifact store and source/JSON inspection remain owner-bound, and
+raw/unclassified protocol diagnostics keep their separate existing policy.
+Previously anonymized stored records are not retroactively reconstructed.
 
 ## Security, compatibility and failure consequences
 

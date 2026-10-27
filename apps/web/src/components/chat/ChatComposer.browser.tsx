@@ -249,10 +249,13 @@ async function mountComposer(width: number, overrides: Partial<ChatComposerProps
     onPreviousActivePendingUserInputQuestion: vi.fn(),
     onChangeActivePendingUserInputCustomAnswer: vi.fn(),
     onSnoozeActivePendingUserInput: vi.fn(),
-    onProviderModelSelect: (instanceId, model) => {
+    onProviderModelSelect: (instanceId, model, options) => {
       useComposerDraftStore
         .getState()
-        .setModelSelection(props.composerDraftTarget, createModelSelection(instanceId, model));
+        .setModelSelection(
+          props.composerDraftTarget,
+          createModelSelection(instanceId, model, options),
+        );
     },
     toggleInteractionMode: vi.fn(),
     handleRuntimeModeChange: vi.fn(),
@@ -424,6 +427,103 @@ describe("provider-specific composer menu actions", () => {
     expect(fixture.onStartCodeReview).not.toHaveBeenCalled();
   });
 
+  it("saves Daybreak Off when switching to an unsupported model and keeps it Off when switching back", async () => {
+    const instanceId = ProviderInstanceId.make("codex");
+    const effort = {
+      id: "reasoningEffort",
+      label: "Reasoning",
+      type: "select" as const,
+      currentValue: "high",
+      options: [{ id: "high", label: "High" }],
+    };
+    const statuses = providers.map((entry) =>
+      entry.instanceId === instanceId
+        ? {
+            ...entry,
+            models: [
+              {
+                slug: "blue-capable-model",
+                name: "Blue capable model",
+                isCustom: false,
+                capabilities: createModelCapabilities({
+                  optionDescriptors: [
+                    effort,
+                    {
+                      id: "cyberAccessProgram",
+                      label: "Daybreak",
+                      type: "select",
+                      currentValue: "standard",
+                      options: [
+                        { id: "standard", label: "Off" },
+                        { id: "daybreakBlue", label: "Blue" },
+                      ],
+                    },
+                  ],
+                }),
+              },
+              {
+                slug: "standard-model",
+                name: "Standard model",
+                isCustom: false,
+                capabilities: createModelCapabilities({ optionDescriptors: [effort] }),
+              },
+            ],
+          }
+        : entry,
+    );
+    const activeThread = thread();
+    activeThread.modelSelection = createModelSelection(instanceId, "blue-capable-model", [
+      { id: "reasoningEffort", value: "high" },
+      { id: "cyberAccessProgram", value: "daybreakBlue" },
+    ]);
+    await using fixture = await mountComposer(1100, {
+      providerStatuses: statuses,
+      activeThread,
+      activeThreadModelSelection: activeThread.modelSelection,
+    });
+    expect(
+      fixture.composerRef.current?.getSendContext().selectedModelSelection.options,
+    ).toContainEqual({ id: "cyberAccessProgram", value: "daybreakBlue" });
+    const selectModel = async (name: string, slug: string) => {
+      const trigger = fixture.host.querySelector<HTMLElement>(
+        '[data-chat-provider-model-picker="true"]',
+      )!;
+      await page.elementLocator(trigger).click();
+      await page.getByRole("button", { name: "Codex personal", exact: true }).click();
+      await page.getByText(name, { exact: true }).click();
+      await vi.waitFor(() =>
+        expect(fixture.composerRef.current?.getSendContext().selectedModelSelection.model).toBe(
+          slug,
+        ),
+      );
+      await expect.element(page.elementLocator(trigger)).toHaveAttribute("aria-expanded", "false");
+    };
+    const offOptions = [
+      { id: "reasoningEffort", value: "high" },
+      { id: "cyberAccessProgram", value: "standard" },
+    ];
+    await selectModel("Standard model", "standard-model");
+    expect(
+      useComposerDraftStore.getState().getComposerDraft(fixture.props.composerDraftTarget)
+        ?.modelSelectionByProvider[instanceId]?.options,
+    ).toEqual(offOptions);
+    expect(fixture.composerRef.current?.getSendContext().selectedModelSelection.options).toEqual(
+      offOptions,
+    );
+    await selectModel("Blue capable model", "blue-capable-model");
+    expect(fixture.composerRef.current?.getSendContext().selectedModelSelection.options).toEqual(
+      offOptions,
+    );
+    await page.getByRole("button", { name: "More composer controls", exact: true }).click();
+    await expect
+      .element(page.getByRole("menuitemradio", { name: "Off", exact: true }))
+      .toHaveAttribute("aria-checked", "true");
+    await expect
+      .element(page.getByRole("menuitemradio", { name: "Blue", exact: true }))
+      .toHaveAttribute("aria-checked", "false");
+    expect(fixture.onSend).not.toHaveBeenCalled();
+  });
+
   it.each(["draft", "server"] as const)(
     "opens Claude account limits from the %s composer before sending a prompt",
     async (routeKind) => {
@@ -479,7 +579,7 @@ describe("provider-specific composer menu actions", () => {
   );
 
   it("enables computer use before the first message, retains the exact draft choice, and starts another draft off", async () => {
-    const control = vi.fn(async (_input: unknown) => ({
+    const state: GlideControlResult = {
       available: true,
       connected: false,
       enabled: false,
@@ -491,7 +591,11 @@ describe("provider-specific composer menu actions", () => {
       apps: [],
       runningApps: [],
       message: "Background desktop control",
-    }));
+      stopRevision: "7",
+    };
+    const control = vi
+      .fn(async (_input: { action: string; threadId?: string }) => state)
+      .mockResolvedValueOnce({ ...state, stopRevision: "6" });
     __setEnvironmentApiOverrideForTests(environmentId, {
       glide: { control },
     } as unknown as EnvironmentApi);
@@ -509,7 +613,16 @@ describe("provider-specific composer menu actions", () => {
       await button.click();
       await expect.element(button).toHaveAttribute("aria-pressed", "true");
       expect(fixture.composerRef.current?.getSendContext().computerUseEnabled).toBe(true);
-      expect(control.mock.calls.map(([input]) => input)).toEqual([{ action: "status" }]);
+      expect(fixture.composerRef.current?.getSendContext().computerUseRevision).toBe("7");
+      expect(
+        control.mock.calls.filter(([input]) => input.action === "status").length,
+      ).toBeGreaterThanOrEqual(2);
+      expect(
+        control.mock.calls.every(
+          ([input]) =>
+            ["status", "activity"].includes(input.action) && input.threadId === undefined,
+        ),
+      ).toBe(true);
       expect(fixture.onSend).not.toHaveBeenCalled();
       await fixture.update({ isSendBusy: true });
       await expect.element(button).toBeDisabled();
@@ -525,6 +638,9 @@ describe("provider-specific composer menu actions", () => {
       expect(fixture.composerRef.current?.getSendContext().computerUseEnabled).toBe(false);
       expect(useComposerDraftStore.getState().getComposerDraft(draftRef)?.computerUseEnabled).toBe(
         true,
+      );
+      expect(useComposerDraftStore.getState().getComposerDraft(draftRef)?.computerUseRevision).toBe(
+        "7",
       );
     } finally {
       __resetEnvironmentApiOverridesForTests();
