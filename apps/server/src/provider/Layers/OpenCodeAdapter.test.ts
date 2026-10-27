@@ -11,23 +11,38 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as TestClock from "effect/testing/TestClock";
 import { beforeEach, vi } from "vitest";
+import type { PermissionRuleset } from "@opencode-ai/sdk/v2";
+import * as Deferred from "effect/Deferred";
 
 import {
   OpenCodeSettings,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderRuntimeEvent,
   ThreadId,
+  TurnId,
 } from "@cafecode/contracts";
 import { createModelSelection } from "@cafecode/shared/model";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
+import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
+import { ProviderService } from "../Services/ProviderService.ts";
+import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
+import { makeProviderServiceLive } from "./ProviderService.ts";
+import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
+import { ProviderSessionRuntimeRepositoryLive } from "../../persistence/Layers/ProviderSessionRuntime.ts";
+import { makeSqlitePersistenceLive } from "../../persistence/Layers/Sqlite.ts";
+import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import type { OpenCodeAdapterShape } from "../Services/OpenCodeAdapter.ts";
 import {
   OpenCodeRuntime,
   OpenCodeRuntimeError,
+  buildOpenCodePermissionRules,
   type OpenCodeRuntimeShape,
 } from "../opencodeRuntime.ts";
 import {
@@ -42,6 +57,55 @@ class OpenCodeAdapter extends Context.Service<OpenCodeAdapter, OpenCodeAdapterSh
 ) {}
 
 const asThreadId = (value: string): ThreadId => ThreadId.make(value);
+const encodeFixtureJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeFixtureJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+
+/**
+ * Optional SSE stream for cases whose events must arrive after a turn starts.
+ * The fixed `subscribedEvents` replay is delivered first. A hand-written
+ * iterator (not an async generator) lets `return()` settle a pending read
+ * immediately, so stopping the session never waits for another event.
+ */
+function makeLiveEventFeed() {
+  const pending: unknown[] = [];
+  let waiter: ((result: IteratorResult<unknown>) => void) | undefined;
+  let closed = false;
+  return {
+    push(...events: unknown[]) {
+      for (const event of events) {
+        const next = waiter;
+        waiter = undefined;
+        if (next) next({ value: event, done: false });
+        else pending.push(event);
+      }
+    },
+    end() {
+      closed = true;
+      waiter?.({ value: undefined, done: true });
+      waiter = undefined;
+    },
+    stream(replay: ReadonlyArray<unknown>): AsyncIterable<unknown> {
+      pending.unshift(...replay);
+      const iterator: AsyncIterator<unknown> = {
+        next: () =>
+          closed
+            ? Promise.resolve({ value: undefined, done: true })
+            : pending.length > 0
+              ? Promise.resolve({ value: pending.shift(), done: false })
+              : new Promise((resolve) => {
+                  waiter = resolve;
+                }),
+        return: () => {
+          closed = true;
+          waiter?.({ value: undefined, done: true });
+          waiter = undefined;
+          return Promise.resolve({ value: undefined, done: true });
+        },
+      };
+      return { [Symbol.asyncIterator]: () => iterator };
+    },
+  };
+}
 
 type MessageEntry = {
   info: {
@@ -51,39 +115,72 @@ type MessageEntry = {
   parts: Array<unknown>;
 };
 
+type NativeSession = {
+  id: string;
+  directory: string;
+  permission: PermissionRuleset;
+  parentID?: string;
+};
+
 const runtimeMock = {
   state: {
     startCalls: [] as string[],
     sessionCreateUrls: [] as string[],
     authHeaders: [] as Array<string | null>,
     abortCalls: [] as string[],
+    onAbort: null as (() => Promise<void>) | null,
     closeCalls: [] as string[],
     revertCalls: [] as Array<{ sessionID: string; messageID?: string }>,
     promptCalls: [] as Array<unknown>,
     summarizeCalls: [] as Array<unknown>,
+    nativeSessions: new Map<string, NativeSession>(),
+    getCalls: [] as Array<{ sessionID: string; directory?: string }>,
+    updateCalls: [] as Array<{
+      sessionID: string;
+      directory?: string;
+      permission: PermissionRuleset;
+    }>,
+    statuses: {} as Record<string, { type: "busy" | "idle" | "retry" }>,
+    getSession: null as
+      | ((sessionID: string, signal?: AbortSignal) => Promise<NativeSession | undefined>)
+      | null,
+    updateError: null as Error | null,
+    ignorePermissionUpdate: false,
     summarize: ((_input: unknown, _signal?: AbortSignal) => Promise.resolve({ data: true })) as (
       input: unknown,
       signal?: AbortSignal,
     ) => Promise<{ data: boolean }>,
     promptAsyncError: null as Error | null,
     closeError: null as Error | null,
+    onClose: null as (() => void) | null,
     messages: [] as MessageEntry[],
     subscribedEvents: [] as unknown[],
+    liveEvents: null as ReturnType<typeof makeLiveEventFeed> | null,
   },
   reset() {
     this.state.startCalls.length = 0;
     this.state.sessionCreateUrls.length = 0;
     this.state.authHeaders.length = 0;
     this.state.abortCalls.length = 0;
+    this.state.onAbort = null;
     this.state.closeCalls.length = 0;
     this.state.revertCalls.length = 0;
     this.state.promptCalls.length = 0;
     this.state.summarizeCalls.length = 0;
+    this.state.nativeSessions.clear();
+    this.state.getCalls.length = 0;
+    this.state.updateCalls.length = 0;
+    this.state.statuses = {};
+    this.state.getSession = null;
+    this.state.updateError = null;
+    this.state.ignorePermissionUpdate = false;
     this.state.summarize = () => Promise.resolve({ data: true });
     this.state.promptAsyncError = null;
     this.state.closeError = null;
+    this.state.onClose = null;
     this.state.messages = [];
     this.state.subscribedEvents = [];
+    this.state.liveEvents = null;
   },
 };
 
@@ -95,6 +192,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           runtimeMock.state.closeCalls.push(url);
+          runtimeMock.state.onClose?.();
           if (runtimeMock.state.closeError) {
             throw runtimeMock.state.closeError;
           }
@@ -115,6 +213,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
           runtimeMock.state.closeCalls.push(url);
+          runtimeMock.state.onClose?.();
           if (runtimeMock.state.closeError) {
             throw runtimeMock.state.closeError;
           }
@@ -127,18 +226,49 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       };
     }),
   runOpenCodeCommand: () => Effect.succeed({ stdout: "", stderr: "", code: 0 }),
-  createOpenCodeSdkClient: ({ baseUrl, serverPassword }) =>
+  createOpenCodeSdkClient: ({ baseUrl, serverPassword, directory }) =>
     ({
       session: {
-        create: async () => {
+        create: async ({ permission }: { permission: PermissionRuleset }) => {
           runtimeMock.state.sessionCreateUrls.push(baseUrl);
           runtimeMock.state.authHeaders.push(
             serverPassword ? `Basic ${btoa(`opencode:${serverPassword}`)}` : null,
           );
-          return { data: { id: `${baseUrl}/session` } };
+          const data = { id: `${baseUrl}/session`, directory, permission };
+          runtimeMock.state.nativeSessions.set(data.id, data);
+          return { data };
+        },
+        get: async (
+          input: { sessionID: string; directory?: string },
+          options?: { signal?: AbortSignal },
+        ) => {
+          runtimeMock.state.getCalls.push(input);
+          return {
+            data: runtimeMock.state.getSession
+              ? await runtimeMock.state.getSession(input.sessionID, options?.signal)
+              : runtimeMock.state.nativeSessions.get(input.sessionID),
+          };
+        },
+        status: async () => ({ data: runtimeMock.state.statuses }),
+        update: async (input: {
+          sessionID: string;
+          directory?: string;
+          permission: PermissionRuleset;
+        }) => {
+          runtimeMock.state.updateCalls.push(input);
+          if (runtimeMock.state.updateError) throw runtimeMock.state.updateError;
+          const previous = runtimeMock.state.nativeSessions.get(input.sessionID);
+          if (!previous || runtimeMock.state.ignorePermissionUpdate) return { data: previous };
+          const data = {
+            ...previous,
+            permission: [...previous.permission, ...input.permission],
+          };
+          runtimeMock.state.nativeSessions.set(data.id, data);
+          return { data };
         },
         abort: async ({ sessionID }: { sessionID: string }) => {
           runtimeMock.state.abortCalls.push(sessionID);
+          await runtimeMock.state.onAbort?.();
         },
         summarize: (input: unknown, options?: { signal?: AbortSignal }) => {
           runtimeMock.state.summarizeCalls.push(input);
@@ -172,11 +302,9 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       },
       event: {
         subscribe: async () => ({
-          stream: (async function* () {
-            for (const event of runtimeMock.state.subscribedEvents) {
-              yield event;
-            }
-          })(),
+          stream: runtimeMock.state.liveEvents
+            ? runtimeMock.state.liveEvents.stream(runtimeMock.state.subscribedEvents)
+            : makeLiveEventFeed().stream(runtimeMock.state.subscribedEvents),
         }),
       },
     }) as unknown as ReturnType<OpenCodeRuntimeShape["createOpenCodeSdkClient"]>,
@@ -258,6 +386,568 @@ const advanceTestClock = (ms: number) =>
   TestClock.adjust(`${ms} millis`).pipe(Effect.andThen(Effect.yieldNow));
 
 it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
+  it.effect(
+    "persists the native session through SQLite close and a fresh Cafe provider service",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "cafe-opencode-restart-" });
+        const repositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+          Layer.provide(makeSqlitePersistenceLive(path.join(tempDir, "runtime.sqlite"))),
+        );
+        const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(repositoryLayer));
+        const generation = () =>
+          makeProviderServiceLive().pipe(
+            Layer.provide(
+              Layer.effect(
+                ProviderAdapterRegistry,
+                Effect.map(makeOpenCodeAdapter(openCodeAdapterTestSettings), (adapter) =>
+                  makeAdapterRegistryMock({ [ProviderDriverKind.make("opencode")]: adapter }),
+                ),
+              ),
+            ),
+            Layer.provide(directoryLayer),
+            Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+          );
+        const threadId = asThreadId("thread-opencode-durable-restart");
+        const instanceId = ProviderInstanceId.make("opencode");
+        const initial = yield* Effect.gen(function* () {
+          const service = yield* ProviderService;
+          return yield* service.startSession(threadId, {
+            threadId,
+            providerInstanceId: instanceId,
+            runtimeMode: "full-access",
+            cwd: process.cwd(),
+            modelSelection: createModelSelection(instanceId, "openai/gpt-5"),
+          });
+        }).pipe(Effect.provide(generation()));
+        const readBinding = Effect.gen(function* () {
+          const directory = yield* ProviderSessionDirectory;
+          return Option.getOrThrow(yield* directory.getBinding(threadId));
+        }).pipe(Effect.provide(directoryLayer));
+        const stopped = yield* readBinding;
+        assert.equal(stopped.status, "stopped");
+        assert.deepEqual(stopped.resumeCursor, initial.resumeCursor);
+
+        yield* Effect.gen(function* () {
+          const service = yield* ProviderService;
+          const resumed = yield* service.startSession(threadId, {
+            threadId,
+            providerInstanceId: instanceId,
+            runtimeMode: "full-access",
+            modelSelection: createModelSelection(instanceId, "anthropic/claude-sonnet-4-5"),
+          });
+          assert.deepEqual(resumed.resumeCursor, initial.resumeCursor);
+          yield* service.sendTurn({
+            threadId,
+            input: "Continue after restarting Cafe",
+            modelSelection: createModelSelection(instanceId, "anthropic/claude-sonnet-4-5"),
+          });
+        }).pipe(Effect.provide(generation()));
+        assert.equal(runtimeMock.state.sessionCreateUrls.length, 1);
+        assert.equal(runtimeMock.state.getCalls.length, 1);
+        assert.deepEqual(runtimeMock.state.promptCalls, [
+          {
+            sessionID: "http://127.0.0.1:9999/session",
+            model: { providerID: "anthropic", modelID: "claude-sonnet-4-5" },
+            parts: [{ type: "text", text: "Continue after restarting Cafe" }],
+          },
+        ]);
+        runtimeMock.state.nativeSessions.clear();
+        const unavailable = yield* Effect.exit(
+          Effect.gen(function* () {
+            const service = yield* ProviderService;
+            return yield* service.startSession(threadId, {
+              threadId,
+              providerInstanceId: instanceId,
+              runtimeMode: "full-access",
+            });
+          }).pipe(Effect.provide(generation())),
+        );
+        assert.equal(Exit.isFailure(unavailable), true);
+        assert.equal(runtimeMock.state.sessionCreateUrls.length, 1);
+        assert.deepEqual((yield* readBinding).resumeCursor, initial.resumeCursor);
+      }),
+  );
+
+  it.effect(
+    "reopens the exact saved native session after adapter replacement and changes model in place",
+    () =>
+      Effect.gen(function* () {
+        const first = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-restart");
+        const initial = yield* first.startSession({
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const resumeCursor = decodeFixtureJson(encodeFixtureJson(initial.resumeCursor)) as Record<
+          string,
+          unknown
+        >;
+        assert.deepEqual(resumeCursor, {
+          schemaVersion: 1,
+          sessionId: "http://127.0.0.1:9999/session",
+          threadId,
+          instanceId: "opencode",
+          directory: process.cwd(),
+          serverUrl: "http://127.0.0.1:9999",
+        });
+        yield* first.sendTurn({
+          threadId,
+          input: "Remember the existing conversation",
+          modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+        });
+        yield* first.stopAll();
+
+        const replacement = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings);
+        const resumed = yield* replacement.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          resumeCursor,
+        });
+        const next = yield* replacement.sendTurn({
+          threadId,
+          input: "Continue",
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("opencode"),
+            "anthropic/claude-sonnet-4-5",
+          ),
+        });
+        assert.deepEqual(resumed.resumeCursor, resumeCursor);
+        assert.deepEqual(next.resumeCursor, resumeCursor);
+        assert.equal(runtimeMock.state.sessionCreateUrls.length, 1);
+        assert.deepEqual(runtimeMock.state.getCalls, [
+          {
+            sessionID: resumeCursor.sessionId,
+            directory: process.cwd(),
+          },
+        ]);
+        assert.equal(runtimeMock.state.updateCalls.length, 0);
+        assert.deepEqual(runtimeMock.state.promptCalls, [
+          {
+            sessionID: resumeCursor.sessionId,
+            model: { providerID: "openai", modelID: "gpt-5" },
+            parts: [{ type: "text", text: "Remember the existing conversation" }],
+          },
+          {
+            sessionID: resumeCursor.sessionId,
+            model: { providerID: "anthropic", modelID: "claude-sonnet-4-5" },
+            parts: [{ type: "text", text: "Continue" }],
+          },
+        ]);
+      }),
+  );
+
+  it.effect(
+    "reapplies and verifies a stricter permission mode without replacing native history",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-permission-resume");
+        const initial = yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+        yield* adapter.stopAll();
+        const resumed = yield* adapter.startSession({
+          threadId,
+          runtimeMode: "approval-required",
+          resumeCursor: initial.resumeCursor,
+        });
+        assert.equal(resumed.runtimeMode, "approval-required");
+        assert.equal(runtimeMock.state.sessionCreateUrls.length, 1);
+        assert.deepEqual(runtimeMock.state.updateCalls, [
+          {
+            sessionID: "http://127.0.0.1:9999/session",
+            directory: process.cwd(),
+            permission: buildOpenCodePermissionRules("approval-required"),
+          },
+        ]);
+        yield* adapter.stopAll();
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "approval-required",
+          resumeCursor: resumed.resumeCursor,
+        });
+        assert.equal(runtimeMock.state.updateCalls.length, 1);
+      }),
+  );
+
+  for (const failure of [
+    "missing session",
+    "different session",
+    "different directory",
+    "child session",
+    "busy session",
+    "retrying session",
+    "lookup error",
+    "permission error",
+    "unconfirmed permission",
+  ]) {
+    it.effect(`preserves saved history without a blank fallback after ${failure}`, () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-resume-refusal");
+        const initial = yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+        yield* adapter.stopAll();
+        const sessionId = "http://127.0.0.1:9999/session";
+        const stored = runtimeMock.state.nativeSessions.get(sessionId)!;
+        switch (failure) {
+          case "missing session":
+            runtimeMock.state.nativeSessions.delete(sessionId);
+            break;
+          case "different session":
+            stored.id = "another-session";
+            break;
+          case "different directory":
+            stored.directory = "/another-workspace";
+            break;
+          case "child session":
+            stored.parentID = "another-session";
+            break;
+          case "busy session":
+            runtimeMock.state.statuses[sessionId] = { type: "busy" };
+            break;
+          case "retrying session":
+            runtimeMock.state.statuses[sessionId] = { type: "retry" };
+            break;
+          case "lookup error":
+            runtimeMock.state.getSession = () =>
+              Promise.reject(new Error("private-provider-response"));
+            break;
+          case "permission error":
+            runtimeMock.state.updateError = new Error("private-provider-response");
+            break;
+          case "unconfirmed permission":
+            runtimeMock.state.ignorePermissionUpdate = true;
+            break;
+        }
+        const result = yield* Effect.exit(
+          adapter.startSession({
+            threadId,
+            runtimeMode: "approval-required",
+            resumeCursor: initial.resumeCursor,
+          }),
+        );
+        assert.equal(Exit.isFailure(result), true);
+        if (Exit.isFailure(result))
+          assert.doesNotMatch(String(result.cause), /private-provider-response/);
+        assert.equal(runtimeMock.state.sessionCreateUrls.length, 1);
+        assert.equal(runtimeMock.state.closeCalls.length, 2);
+        assert.equal(runtimeMock.state.abortCalls.length, 1);
+        assert.equal(runtimeMock.state.promptCalls.length, 0);
+        assert.deepEqual(yield* adapter.listSessions(), []);
+      }),
+    );
+  }
+
+  it.effect(
+    "rejects malformed and foreign resume identities before retiring a live session or performing native I/O",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-bound-resume");
+        const initial = yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+        const cursor = initial.resumeCursor as Record<string, unknown>;
+        for (const resumeCursor of [
+          {},
+          [],
+          "legacy-unknown",
+          { ...cursor, schemaVersion: 2 },
+          { ...cursor, threadId: "another-chat" },
+          { ...cursor, instanceId: "another-opencode" },
+          { ...cursor, directory: "/another-workspace" },
+          { ...cursor, serverUrl: "https://another-server.invalid" },
+          { ...cursor, sessionId: "" },
+          { ...cursor, sessionId: "x".repeat(513) },
+        ]) {
+          const result = yield* Effect.exit(
+            adapter.startSession({ threadId, runtimeMode: "full-access", resumeCursor }),
+          );
+          assert.equal(Exit.isFailure(result), true);
+          assert.deepEqual(yield* adapter.listSessions(), [initial]);
+        }
+        assert.equal(runtimeMock.state.sessionCreateUrls.length, 1);
+        assert.equal(runtimeMock.state.getCalls.length, 0);
+        assert.equal(runtimeMock.state.abortCalls.length, 0);
+        assert.equal(runtimeMock.state.closeCalls.length, 0);
+      }),
+  );
+
+  it.effect("cancels a held resume lookup and closes its connection before returning", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-cancelled-resume");
+      const initial = yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+      yield* adapter.stopAll();
+      const entered = yield* Deferred.make<void>();
+      const cancelled = yield* Deferred.make<void>();
+      runtimeMock.state.getSession = (_sessionId, signal) => {
+        return new Promise((_resolve, reject) => {
+          const onAbort = () => {
+            Effect.runSync(Deferred.succeed(cancelled, undefined));
+            reject(new Error("private-cancelled-provider-response"));
+          };
+          if (signal?.aborted) onAbort();
+          else signal?.addEventListener("abort", onAbort, { once: true });
+          Effect.runSync(Deferred.succeed(entered, undefined));
+        });
+      };
+      const pending = yield* adapter
+        .startSession({ threadId, runtimeMode: "full-access", resumeCursor: initial.resumeCursor })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(pending);
+      yield* Deferred.await(cancelled);
+      assert.equal(runtimeMock.state.closeCalls.length, 2);
+      assert.equal(runtimeMock.state.sessionCreateUrls.length, 1);
+      assert.equal(runtimeMock.state.promptCalls.length, 0);
+      assert.equal(runtimeMock.state.updateCalls.length, 0);
+      assert.deepEqual(yield* adapter.listSessions(), []);
+    }),
+  );
+
+  it.effect("refuses a concurrent resume without aborting the winning native session", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-concurrent-resume");
+      const initial = yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+      yield* adapter.stopAll();
+      const entered = yield* Deferred.make<void>();
+      const gate = Promise.withResolvers<NativeSession | undefined>();
+      const saved = runtimeMock.state.nativeSessions.get("http://127.0.0.1:9999/session");
+      yield* Effect.addFinalizer(() => Effect.sync(() => gate.resolve(saved)));
+      runtimeMock.state.getSession = () => {
+        Effect.runSync(Deferred.succeed(entered, undefined));
+        return gate.promise;
+      };
+      const pending = yield* adapter
+        .startSession({ threadId, runtimeMode: "full-access", resumeCursor: initial.resumeCursor })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      const duplicate = yield* Effect.exit(
+        adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          resumeCursor: initial.resumeCursor,
+        }),
+      );
+      assert.equal(Exit.isFailure(duplicate), true);
+      assert.equal(runtimeMock.state.getCalls.length, 1);
+      assert.equal(runtimeMock.state.abortCalls.length, 1);
+      yield* Effect.sync(() => gate.resolve(saved));
+      const resumed = yield* Fiber.join(pending);
+      assert.deepEqual(resumed.resumeCursor, initial.resumeCursor);
+      assert.equal(runtimeMock.state.abortCalls.length, 1);
+      assert.equal(runtimeMock.state.sessionCreateUrls.length, 1);
+    }),
+  );
+
+  it.effect("joins native retirement before reopening the same saved session", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-retirement-resume");
+      const initial = yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+      const entered = yield* Deferred.make<void>();
+      const openingEntered = yield* Deferred.make<void>();
+      const gate = Promise.withResolvers<void>();
+      yield* Effect.addFinalizer(() => Effect.sync(() => gate.resolve()));
+      runtimeMock.state.onAbort = () => {
+        Effect.runSync(Deferred.succeed(entered, undefined));
+        return gate.promise;
+      };
+      const stopping = yield* adapter.stopSession(threadId).pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      const opening = yield* Deferred.succeed(openingEntered, undefined).pipe(
+        Effect.andThen(
+          adapter.startSession({
+            threadId,
+            runtimeMode: "full-access",
+            resumeCursor: initial.resumeCursor,
+          }),
+        ),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(openingEntered);
+      yield* Effect.yieldNow;
+      assert.equal(runtimeMock.state.getCalls.length, 0);
+      assert.equal(runtimeMock.state.closeCalls.length, 0);
+      assert.equal(runtimeMock.state.abortCalls.length, 1);
+      yield* Effect.sync(() => gate.resolve());
+      yield* Fiber.join(stopping);
+      const resumed = yield* Fiber.join(opening);
+      assert.deepEqual(resumed.resumeCursor, initial.resumeCursor);
+      assert.equal(runtimeMock.state.getCalls.length, 1);
+      assert.equal(runtimeMock.state.closeCalls.length, 1);
+      assert.equal(runtimeMock.state.abortCalls.length, 1);
+      assert.deepEqual(yield* adapter.listSessions(), [resumed]);
+    }),
+  );
+
+  it.effect("retires a connection whose event stream ends and keeps its resume identity", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-ended-stream");
+      const feed = makeLiveEventFeed();
+      runtimeMock.state.liveEvents = feed;
+      const closed = yield* Deferred.make<void>();
+      const exited = yield* Deferred.make<void>();
+      runtimeMock.state.onClose = () => Effect.runSync(Deferred.succeed(closed, undefined));
+      const received: ProviderRuntimeEvent[] = [];
+      yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            received.push(event);
+            if (event.type === "session.exited") yield* Deferred.succeed(exited, undefined);
+          }),
+        ),
+        Effect.forkChild,
+      );
+      const initial = yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+      feed.end();
+      yield* Deferred.await(closed);
+      yield* Deferred.await(exited);
+      if (yield* adapter.hasSession(threadId)) yield* adapter.stopSession(threadId);
+      assert.equal(yield* adapter.hasSession(threadId), false);
+      assert.equal(runtimeMock.state.sessionCreateUrls.length, 1);
+      assert.equal(runtimeMock.state.abortCalls.length, 1);
+      assert.equal(received.filter((event) => event.type === "session.exited").length, 1);
+      assert.equal(
+        received.some(
+          (event) =>
+            event.type === "runtime.error" &&
+            /stream ended unexpectedly/.test(event.payload.message),
+        ),
+        true,
+      );
+      runtimeMock.state.liveEvents = null;
+      const resumed = yield* adapter.startSession({
+        threadId,
+        runtimeMode: "full-access",
+        resumeCursor: initial.resumeCursor,
+      });
+      assert.deepEqual(resumed.resumeCursor, initial.resumeCursor);
+      assert.equal(runtimeMock.state.sessionCreateUrls.length, 1);
+    }),
+  );
+
+  it.effect("rejects a stale Stop before aborting a newer active turn", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-opencode-stale-stop");
+      yield* adapter.startSession({
+        threadId,
+        runtimeMode: "full-access",
+        modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+      });
+      const sent = yield* adapter.sendTurn({ threadId, input: "Current work" });
+      const stale = yield* Effect.exit(
+        adapter.interruptTurn(threadId, TurnId.make("previous-turn")),
+      );
+      assert.equal(Exit.isFailure(stale), true);
+      assert.equal(runtimeMock.state.abortCalls.length, 0);
+      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, sent.turnId);
+      yield* adapter.interruptTurn(threadId, sent.turnId);
+      assert.equal(runtimeMock.state.abortCalls.length, 1);
+    }),
+  );
+
+  it.effect(
+    "classifies native session errors without publishing or logging raw provider responses",
+    () =>
+      Effect.gen(function* () {
+        const feed = makeLiveEventFeed();
+        runtimeMock.state.liveEvents = feed;
+        const nativeRecords: unknown[] = [];
+        const adapter = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings, {
+          nativeEventLogger: {
+            filePath: "fixture-native-events.ndjson",
+            write: (record) =>
+              Effect.sync(() => {
+                nativeRecords.push(record);
+              }),
+            close: () => Effect.void,
+          },
+        });
+        const observed = yield* Deferred.make<void>();
+        const received: ProviderRuntimeEvent[] = [];
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              received.push(event);
+              if (event.type === "runtime.error") yield* Deferred.succeed(observed, undefined);
+            }),
+          ),
+          Effect.forkChild,
+        );
+        const threadId = asThreadId("thread-opencode-private-error");
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+        });
+        const turn = yield* adapter.sendTurn({ threadId, input: "Continue" });
+        feed.push({
+          type: "session.error",
+          properties: {
+            sessionID: "http://127.0.0.1:9999/session",
+            error: {
+              name: "ProviderAuthError",
+              data: {
+                providerID: "fixture",
+                message: "private-fixture-secret",
+                headers: { authorization: "private-fixture-secret" },
+              },
+            },
+          },
+        });
+        yield* Deferred.await(observed);
+        assert.doesNotMatch(encodeFixtureJson(received), /private-fixture-secret/);
+        assert.doesNotMatch(encodeFixtureJson(nativeRecords), /private-fixture-secret/);
+        assert.equal(
+          received.some(
+            (event) =>
+              event.type === "turn.completed" &&
+              event.turnId === turn.turnId &&
+              event.payload.state === "failed",
+          ),
+          true,
+        );
+        assert.match((yield* adapter.listSessions())[0]?.lastError ?? "", /authentication failed/);
+      }),
+  );
+
+  it.effect(
+    "refuses private image paths for a separately hosted OpenCode server before paid input",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-remote-image");
+        yield* adapter.startSession({
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+        });
+        const rejected = yield* Effect.exit(
+          adapter.sendTurn({
+            threadId,
+            input: "Inspect image",
+            attachments: [
+              {
+                type: "image",
+                id: "not-dereferenced",
+                name: "image.png",
+                mimeType: "image/png",
+                sizeBytes: 1,
+              },
+            ],
+          }),
+        );
+        assert.equal(Exit.isFailure(rejected), true);
+        assert.equal(runtimeMock.state.promptCalls.length, 0);
+        assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+      }),
+  );
+
   it.effect(
     "adds management MCP only to the chat-owned OpenCode server and cleans it up on stop",
     () =>
@@ -599,15 +1289,18 @@ it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       if (error._tag !== "ProviderAdapterRequestError") {
         throw new Error("Unexpected error type");
       }
-      assert.equal(error.detail, "prompt failed");
+      assert.equal(
+        error.detail,
+        "OpenCode request failed. Check the provider configuration and server availability.",
+      );
       assert.equal(
         error.message,
-        "Provider adapter request failed (opencode) for session.promptAsync: prompt failed",
+        "Provider adapter request failed (opencode) for session.promptAsync: OpenCode request failed. Check the provider configuration and server availability.",
       );
       assert.equal(sessions.length, 1);
       assert.equal(sessions[0]?.status, "ready");
       assert.equal(sessions[0]?.activeTurnId, undefined);
-      assert.equal(sessions[0]?.lastError, "prompt failed");
+      assert.equal(sessions[0]?.lastError, error.detail);
     }),
   );
 
@@ -681,6 +1374,10 @@ it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         modelSelection: createModelSelection(
           ProviderInstanceId.make("opencode_zen"),
           "anthropic/claude-sonnet-4-5",
+          [
+            { id: "agent", value: "github-copilot" },
+            { id: "variant", value: "high" },
+          ],
         ),
       });
 
@@ -695,6 +1392,8 @@ it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           providerID: "anthropic",
           modelID: "claude-sonnet-4-5",
         },
+        agent: "github-copilot",
+        variant: "high",
         parts: [{ type: "text", text: "Fix it" }],
       });
     }).pipe(Effect.provide(adapterLayer));

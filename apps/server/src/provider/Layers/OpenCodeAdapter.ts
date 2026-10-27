@@ -15,14 +15,22 @@ import {
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Queue from "effect/Queue";
 import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import type { OpencodeClient, Part, PermissionRequest, QuestionRequest } from "@opencode-ai/sdk/v2";
+import type {
+  OpencodeClient,
+  Part,
+  PermissionRequest,
+  PermissionRuleset,
+  QuestionRequest,
+} from "@opencode-ai/sdk/v2";
 import { getModelSelectionStringOptionValue } from "@cafecode/shared/model";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -56,6 +64,47 @@ import {
 import * as Option from "effect/Option";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
+
+const ResumeIdentifier = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512));
+const ResumeDirectory = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192));
+const OpenCodeResume = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  sessionId: ResumeIdentifier,
+  threadId: ThreadId,
+  instanceId: ProviderInstanceId,
+  directory: ResumeDirectory,
+  serverUrl: Schema.NullOr(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192))),
+});
+const decodeOpenCodeResume = Schema.decodeUnknownEffect(OpenCodeResume);
+
+function hasPermissionSuffix(actual: PermissionRuleset | undefined, expected: PermissionRuleset) {
+  return (
+    Array.isArray(actual) &&
+    actual.length >= expected.length &&
+    expected.every((rule, index) => {
+      const received = actual[actual.length - expected.length + index];
+      return (
+        received?.permission === rule.permission &&
+        received.pattern === rule.pattern &&
+        received.action === rule.action
+      );
+    })
+  );
+}
+
+// Resume failures must preserve the saved identity, never start a blank session
+// or expose an external server's response/error (which may contain credentials).
+const runOpenCodeResumeSdk = <A>(operation: string, request: (signal: AbortSignal) => Promise<A>) =>
+  runOpenCodeSdk(operation, request).pipe(
+    Effect.mapError(
+      () =>
+        new OpenCodeRuntimeError({
+          operation,
+          detail:
+            "The saved OpenCode session could not be reopened. Check the original OpenCode server and data profile before retrying.",
+        }),
+    ),
+  );
 
 interface OpenCodeTurnSnapshot {
   readonly id: TurnId;
@@ -97,6 +146,7 @@ interface OpenCodeSessionContext {
    * so concurrent callers can race the transition safely via `getAndSet`.
    */
   readonly stopped: Ref.Ref<boolean>;
+  readonly retirementDone: Deferred.Deferred<void, ProviderAdapterProcessError>;
   /**
    * Sole lifecycle handle for the session. Closing this scope:
    *   - aborts the `AbortController` registered as a finalizer
@@ -404,11 +454,22 @@ function sessionErrorMessage(error: unknown): string {
   if (!error || typeof error !== "object") {
     return "OpenCode session failed.";
   }
-  const data = "data" in error && error.data && typeof error.data === "object" ? error.data : null;
-  const message = data && "message" in data ? data.message : null;
-  return typeof message === "string" && message.trim().length > 0
-    ? message
-    : "OpenCode session failed.";
+  switch ("name" in error ? error.name : undefined) {
+    case "ProviderAuthError":
+      return "OpenCode provider authentication failed. Check the selected provider's credentials.";
+    case "ContextOverflowError":
+      return "OpenCode exceeded the model's context limit. Compact the conversation or select a model with a larger context window.";
+    case "MessageOutputLengthError":
+      return "OpenCode reached the model's output limit.";
+    case "MessageAbortedError":
+      return "OpenCode generation was interrupted.";
+    case "StructuredOutputError":
+      return "OpenCode could not produce the required output format.";
+    case "ContentFilterError":
+      return "OpenCode's provider declined the request under its content policy.";
+    default:
+      return "OpenCode session failed. Check the provider configuration and server availability.";
+  }
 }
 
 function updateProviderSession(
@@ -438,27 +499,51 @@ function updateProviderSession(
   });
 }
 
+const closeOpenCodeContext = (context: OpenCodeSessionContext) =>
+  Effect.gen(function* () {
+    context.manualCompaction?.controller.abort();
+
+    // Best-effort remote abort. The scope close below tears down the local
+    // handles (event-pump fiber, server-exit fiber, event-subscribe fetch),
+    // but we still want to tell OpenCode that this session is done.
+    yield* runOpenCodeSdk("session.abort", () =>
+      context.client.session.abort({ sessionID: context.openCodeSessionId }),
+    ).pipe(Effect.ignore({ log: true }));
+
+    // Closing the session scope interrupts every fiber forked into it and
+    // runs each finalizer we registered — the `AbortController.abort()` call,
+    // the child-process termination, etc.
+    yield* Scope.close(context.sessionScope, Exit.void);
+  }).pipe(
+    Effect.catchCause(() =>
+      Effect.fail(
+        new ProviderAdapterProcessError({
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          detail:
+            "OpenCode session cleanup could not be confirmed. Preserve its recovery state before retrying.",
+        }),
+      ),
+    ),
+    Effect.uninterruptible,
+  );
+
 const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
   context: OpenCodeSessionContext,
+  onClosed: Effect.Effect<void> = Effect.void,
 ) {
-  // Race-safe one-shot: first caller flips the flag, everyone else no-ops.
+  // A second caller must join the original abort/close. Returning early would
+  // let that old abort reach a newly resumed owner of the same native session.
   if (yield* Ref.getAndSet(context.stopped, true)) {
+    yield* Deferred.await(context.retirementDone);
     return false;
   }
-
-  context.manualCompaction?.controller.abort();
-
-  // Best-effort remote abort. The scope close below tears down the local
-  // handles (event-pump fiber, server-exit fiber, event-subscribe fetch),
-  // but we still want to tell OpenCode that this session is done.
-  yield* runOpenCodeSdk("session.abort", () =>
-    context.client.session.abort({ sessionID: context.openCodeSessionId }),
-  ).pipe(Effect.ignore({ log: true }));
-
-  // Closing the session scope interrupts every fiber forked into it and
-  // runs each finalizer we registered — the `AbortController.abort()` call,
-  // the child-process termination, etc.
-  yield* Scope.close(context.sessionScope, Exit.void);
+  yield* updateProviderSession(context, { status: "closed" }, { clearActiveTurnId: true });
+  yield* closeOpenCodeContext(context).pipe(
+    Effect.andThen(onClosed),
+    Effect.onExit((exit) => Deferred.done(context.retirementDone, exit).pipe(Effect.asVoid)),
+    Effect.uninterruptible,
+  );
   return true;
 });
 
@@ -470,6 +555,7 @@ export function makeOpenCodeAdapter(
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("opencode");
     const serverConfig = yield* ServerConfig;
     const openCodeRuntime = yield* OpenCodeRuntime;
+    const adapterScope = yield* Scope.Scope;
     const nativeEventLogger =
       options?.nativeEventLogger ??
       (options?.nativeEventLogPath !== undefined
@@ -483,6 +569,7 @@ export function makeOpenCodeAdapter(
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
     const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const sessions = new Map<ThreadId, OpenCodeSessionContext>();
+    const startingSessions = new Set<ThreadId>();
 
     // Layer-level finalizer: when the adapter layer shuts down, stop every
     // session. Each session's `Scope.close` tears down its spawned OpenCode
@@ -493,8 +580,7 @@ export function makeOpenCodeAdapter(
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
         const contexts = [...sessions.values()];
-        sessions.clear();
-        // `ignoreCause` swallows both typed failures (none here) and defects
+        // `ignoreCause` swallows typed failures and defects
         // from throwing scope finalizers so a sibling's death can't interrupt
         // the remaining cleanups.
         yield* Effect.forEach(
@@ -502,6 +588,10 @@ export function makeOpenCodeAdapter(
           (context) => Effect.ignoreCause(stopOpenCodeContext(context)),
           { concurrency: "unbounded", discard: true },
         );
+        for (const context of contexts) {
+          if (sessions.get(context.session.threadId) === context)
+            sessions.delete(context.session.threadId);
+        }
         // Close the logger AFTER session teardown so any final lifecycle
         // events emitted during shutdown still get written. `close` flushes
         // the `Logger.batched` window and closes each per-thread
@@ -589,7 +679,7 @@ export function makeOpenCodeAdapter(
         return;
       }
       const turnId = context.activeTurnId;
-      sessions.delete(context.session.threadId);
+      yield* updateProviderSession(context, { status: "closed" }, { clearActiveTurnId: true });
       // Emit lifecycle events BEFORE tearing down the scope. Both call sites
       // run this inside a fiber forked via `Effect.forkIn(context.sessionScope)`;
       // closing that scope triggers the fiber-interrupt finalizer, so any
@@ -617,13 +707,19 @@ export function makeOpenCodeAdapter(
           exitKind: "error",
         },
       }).pipe(Effect.ignore);
-      // Inline the teardown that `stopOpenCodeContext` would do; we can't
-      // delegate to it because our `getAndSet` above already flipped the
-      // one-shot guard, so the call would no-op.
-      yield* runOpenCodeSdk("session.abort", () =>
-        context.client.session.abort({ sessionID: context.openCodeSessionId }),
-      ).pipe(Effect.ignore({ log: true }));
-      yield* Scope.close(context.sessionScope, Exit.void);
+      // Cleanup belongs to the adapter, outside the session scope whose
+      // finalizers interrupt this watcher. Keep the retiring context findable
+      // until native abort and close finish, so resume can join that exact work.
+      yield* closeOpenCodeContext(context).pipe(
+        Effect.onExit((exit) => Deferred.done(context.retirementDone, exit).pipe(Effect.asVoid)),
+        Effect.tap(() =>
+          Effect.sync(() => {
+            if (sessions.get(context.session.threadId) === context)
+              sessions.delete(context.session.threadId);
+          }),
+        ),
+        Effect.forkIn(adapterScope),
+      );
     });
 
     /** Emit content.delta and item.completed events for an assistant text part. */
@@ -712,7 +808,21 @@ export function makeOpenCodeAdapter(
           providerThreadId: context.openCodeSessionId,
           type: event.type,
           ...(turnId ? { turnId } : {}),
-          payload: event,
+          payload:
+            event.type === "session.error"
+              ? {
+                  type: event.type,
+                  properties: {
+                    sessionID: context.openCodeSessionId,
+                    message: sessionErrorMessage(event.properties.error),
+                  },
+                }
+              : event.type === "session.status" && event.properties.status.type === "retry"
+                ? {
+                    type: event.type,
+                    properties: { sessionID: context.openCodeSessionId, status: "retry" },
+                  }
+                : event,
         },
       });
 
@@ -937,12 +1047,10 @@ export function makeOpenCodeAdapter(
               ...(yield* buildEventBase({
                 threadId: context.session.threadId,
                 turnId,
-                raw: event,
               })),
               type: "runtime.warning",
               payload: {
-                message: event.properties.status.message,
-                detail: event.properties.status,
+                message: "OpenCode is retrying the current request.",
               },
             });
             break;
@@ -989,7 +1097,6 @@ export function makeOpenCodeAdapter(
               ...(yield* buildEventBase({
                 threadId: context.session.threadId,
                 turnId: activeTurnId,
-                raw: event,
               })),
               type: "turn.completed",
               payload: {
@@ -1001,13 +1108,11 @@ export function makeOpenCodeAdapter(
           yield* emit({
             ...(yield* buildEventBase({
               threadId: context.session.threadId,
-              raw: event,
             })),
             type: "runtime.error",
             payload: {
               message,
               class: "provider_error",
-              detail: event.properties.error,
             },
           });
           break;
@@ -1056,12 +1161,12 @@ export function makeOpenCodeAdapter(
             if (eventsAbortController.signal.aborted || (yield* Ref.get(context.stopped))) {
               return;
             }
-            if (Exit.isFailure(exit)) {
-              yield* emitUnexpectedExit(
-                context,
-                openCodeRuntimeErrorDetail(Cause.squash(exit.cause)),
-              );
-            }
+            yield* emitUnexpectedExit(
+              context,
+              Exit.isFailure(exit)
+                ? "OpenCode event stream failed. Reconnect to resume the saved conversation."
+                : "OpenCode event stream ended unexpectedly. Reconnect to resume the saved conversation.",
+            );
           }),
         ),
         Effect.forkIn(context.sessionScope),
@@ -1082,21 +1187,50 @@ export function makeOpenCodeAdapter(
       }
     });
 
-    const startSession: OpenCodeAdapterShape["startSession"] = Effect.fn("startSession")(
+    const startSessionUnlocked: OpenCodeAdapterShape["startSession"] = Effect.fn("startSession")(
       function* (input) {
         const binaryPath = openCodeSettings.binaryPath;
         const serverUrl = openCodeSettings.serverUrl;
         const serverPassword = openCodeSettings.serverPassword;
         const directory = input.cwd ?? serverConfig.cwd;
+        const resume =
+          input.resumeCursor == null
+            ? undefined
+            : yield* decodeOpenCodeResume(input.resumeCursor).pipe(
+                Effect.mapError(
+                  () =>
+                    new ProviderAdapterValidationError({
+                      provider: PROVIDER,
+                      operation: "startSession",
+                      issue:
+                        "The saved OpenCode session identity is invalid. No replacement session was created.",
+                    }),
+                ),
+              );
+        const resumeServerUrl = serverUrl?.trim() || null;
+        if (
+          resume &&
+          (resume.threadId !== input.threadId ||
+            resume.instanceId !== boundInstanceId ||
+            resume.directory !== directory ||
+            resume.serverUrl !== resumeServerUrl)
+        ) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue:
+              "The saved OpenCode session belongs to a different chat, provider instance, server or working directory. No replacement session was created.",
+          });
+        }
         const existing = sessions.get(input.threadId);
         if (existing) {
           yield* stopOpenCodeContext(existing);
           sessions.delete(input.threadId);
         }
 
-        const started = yield* Effect.gen(function* () {
-          const sessionScope = yield* Scope.make();
-          const startedExit = yield* Effect.exit(
+        const started = yield* Effect.acquireUseRelease(
+          Scope.make(),
+          (sessionScope) =>
             Effect.gen(function* () {
               // The runtime binds the server's lifetime to the Scope.Scope
               // we provide below — closing `sessionScope` kills the child
@@ -1124,47 +1258,110 @@ export function makeOpenCodeAdapter(
                 directory,
                 ...(server.external && serverPassword ? { serverPassword } : {}),
               });
-              const openCodeSession = yield* runOpenCodeSdk("session.create", () =>
-                client.session.create({
-                  title: `Cafe Code ${input.threadId}`,
-                  permission: buildOpenCodePermissionRules(input.runtimeMode),
-                }),
-              );
+              // OpenCode persists native messages independently of its serve
+              // process. Reopen the exact id with the pinned v2 compatibility
+              // API; a missing/unreachable session must not silently lose history.
+              // Reviewed against SDK 1.18.3 and upstream 127bdb30784d508cc556c71a0f32b508a3061517.
+              const permission = buildOpenCodePermissionRules(input.runtimeMode);
+              let openCodeSession = resume
+                ? yield* runOpenCodeResumeSdk("session.get", (signal) =>
+                    client.session.get({ sessionID: resume.sessionId, directory }, { signal }),
+                  )
+                : yield* runOpenCodeSdk("session.create", (signal) =>
+                    client.session.create(
+                      {
+                        title: `Cafe Code ${input.threadId}`,
+                        permission,
+                      },
+                      { signal },
+                    ),
+                  );
               if (!openCodeSession.data) {
                 return yield* new OpenCodeRuntimeError({
-                  operation: "session.create",
-                  detail: "OpenCode session.create returned no session payload.",
+                  operation: resume ? "session.get" : "session.create",
+                  detail: resume
+                    ? "The saved OpenCode session is unavailable. No replacement session was created."
+                    : "OpenCode session.create returned no session payload.",
                 });
               }
+              if (resume) {
+                if (
+                  openCodeSession.data.id !== resume.sessionId ||
+                  openCodeSession.data.directory !== directory ||
+                  openCodeSession.data.parentID !== undefined
+                ) {
+                  return yield* new OpenCodeRuntimeError({
+                    operation: "session.get",
+                    detail:
+                      "OpenCode returned a different session or working directory. No replacement session was created.",
+                  });
+                }
+                const status = yield* runOpenCodeResumeSdk("session.status", (signal) =>
+                  client.session.status({ directory }, { signal }),
+                );
+                // Native idle entries are removed from the status map. Busy or
+                // retrying external sessions cannot admit another Cafe owner.
+                const nativeStatus = status.data?.[resume.sessionId];
+                if (!status.data || (nativeStatus !== undefined && nativeStatus?.type !== "idle")) {
+                  return yield* new OpenCodeRuntimeError({
+                    operation: "session.status",
+                    detail:
+                      "The saved OpenCode session is not idle. Wait for its current work before retrying.",
+                  });
+                }
+                if (!hasPermissionSuffix(openCodeSession.data.permission, permission)) {
+                  openCodeSession = yield* runOpenCodeResumeSdk("session.update", (signal) =>
+                    client.session.update(
+                      { sessionID: resume.sessionId, directory, permission },
+                      { signal },
+                    ),
+                  );
+                  // Native update appends rules and evaluates the last match.
+                  // Verify the final policy, including after a more privileged
+                  // prior session; never echo or replay the saved transcript.
+                  if (
+                    openCodeSession.data?.id !== resume.sessionId ||
+                    openCodeSession.data.directory !== directory ||
+                    !hasPermissionSuffix(openCodeSession.data.permission, permission)
+                  ) {
+                    return yield* new OpenCodeRuntimeError({
+                      operation: "session.update",
+                      detail:
+                        "OpenCode could not confirm this session's current Cafe permission policy. No replacement session was created.",
+                    });
+                  }
+                }
+              }
+              const resumeCursor = yield* decodeOpenCodeResume({
+                schemaVersion: 1,
+                sessionId: openCodeSession.data.id,
+                threadId: input.threadId,
+                instanceId: boundInstanceId,
+                directory,
+                serverUrl: resumeServerUrl,
+              }).pipe(
+                Effect.mapError(
+                  () =>
+                    new OpenCodeRuntimeError({
+                      operation: resume ? "session.get" : "session.create",
+                      detail: "OpenCode returned an invalid session identity.",
+                    }),
+                ),
+              );
               return {
                 sessionScope,
                 server,
                 client,
                 openCodeSession: openCodeSession.data,
+                resumeCursor,
               };
-            }).pipe(Effect.provideService(Scope.Scope, sessionScope)),
-          );
-          if (Exit.isFailure(startedExit)) {
-            yield* Scope.close(sessionScope, Exit.void).pipe(Effect.ignore);
-            return yield* toProcessError(input.threadId, Cause.squash(startedExit.cause));
-          }
-          return startedExit.value;
-        });
-
-        // Guard against a concurrent startSession call that may have raced
-        // and already inserted a session while we were awaiting async work.
-        const raceWinner = sessions.get(input.threadId);
-        if (raceWinner) {
-          // Another call won the race – clean up the session we just created
-          // (including the remote SDK session) and return the existing one.
-          yield* runOpenCodeSdk("session.abort", () =>
-            started.client.session.abort({
-              sessionID: started.openCodeSession.id,
-            }),
-          ).pipe(Effect.ignore);
-          yield* Scope.close(started.sessionScope, Exit.void).pipe(Effect.ignore);
-          return raceWinner.session;
-        }
+            }).pipe(
+              Effect.provideService(Scope.Scope, sessionScope),
+              Effect.mapError((cause) => toProcessError(input.threadId, cause)),
+            ),
+          (sessionScope, exit) =>
+            Exit.isFailure(exit) ? Scope.close(sessionScope, Exit.void) : Effect.void,
+        );
 
         const createdAt = yield* nowIso;
         const session: ProviderSession = {
@@ -1174,7 +1371,9 @@ export function makeOpenCodeAdapter(
           runtimeMode: input.runtimeMode,
           cwd: directory,
           ...(input.modelSelection ? { model: input.modelSelection.model } : {}),
+          ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
           threadId: input.threadId,
+          resumeCursor: started.resumeCursor,
           createdAt,
           updatedAt: createdAt,
         };
@@ -1196,6 +1395,7 @@ export function makeOpenCodeAdapter(
           activeAgent: undefined,
           activeVariant: undefined,
           stopped: yield* Ref.make(false),
+          retirementDone: yield* Deferred.make<void, ProviderAdapterProcessError>(),
           sessionScope: started.sessionScope,
         };
         sessions.set(input.threadId, context);
@@ -1220,6 +1420,26 @@ export function makeOpenCodeAdapter(
       },
     );
 
+    const startSession: OpenCodeAdapterShape["startSession"] = (input) =>
+      Effect.suspend(() => {
+        // Concurrent resumes target the same native id. A losing startup must
+        // never abort that id and thereby stop the winner's work.
+        if (startingSessions.has(input.threadId)) {
+          return Effect.fail(
+            new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue:
+                "This OpenCode chat is already starting. Wait for its current startup before retrying.",
+            }),
+          );
+        }
+        startingSessions.add(input.threadId);
+        return startSessionUnlocked(input).pipe(
+          Effect.ensuring(Effect.sync(() => startingSessions.delete(input.threadId))),
+        );
+      });
+
     const sendTurn: OpenCodeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
       const context = ensureSessionContext(sessions, input.threadId);
       if (context.manualCompaction) {
@@ -1232,6 +1452,7 @@ export function makeOpenCodeAdapter(
       const turnId = TurnId.make(`opencode-turn-${yield* Random.nextUUIDv4}`);
       const modelSelection =
         input.modelSelection ??
+        context.session.modelSelection ??
         (context.session.model
           ? { instanceId: boundInstanceId, model: context.session.model }
           : undefined);
@@ -1263,6 +1484,17 @@ export function makeOpenCodeAdapter(
           provider: PROVIDER,
           operation: "sendTurn",
           issue: "File attachments require a locally managed OpenCode runtime.",
+        });
+      }
+      if (
+        openCodeSettings.serverUrl.trim().length > 0 &&
+        input.attachments?.some((attachment) => attachment.type === "image")
+      ) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "sendTurn",
+          issue:
+            "Image attachments require a locally managed OpenCode runtime. The configured server cannot read this backend's private image files.",
         });
       }
       const fileManifest = yield* Effect.tryPromise({
@@ -1308,6 +1540,7 @@ export function makeOpenCodeAdapter(
           status: "running",
           activeTurnId: turnId,
           model: modelSelection?.model ?? context.session.model,
+          ...(modelSelection ? { modelSelection } : {}),
         },
         { clearLastError: true },
       );
@@ -1321,14 +1554,17 @@ export function makeOpenCodeAdapter(
         },
       });
 
-      yield* runOpenCodeSdk("session.promptAsync", () =>
-        context.client.session.promptAsync({
-          sessionID: context.openCodeSessionId,
-          model: parsedModel,
-          ...(context.activeAgent ? { agent: context.activeAgent } : {}),
-          ...(context.activeVariant ? { variant: context.activeVariant } : {}),
-          parts: [...(text ? [{ type: "text" as const, text }] : []), ...fileParts],
-        }),
+      yield* runOpenCodeSdk("session.promptAsync", (signal) =>
+        context.client.session.promptAsync(
+          {
+            sessionID: context.openCodeSessionId,
+            model: parsedModel,
+            ...(context.activeAgent ? { agent: context.activeAgent } : {}),
+            ...(context.activeVariant ? { variant: context.activeVariant } : {}),
+            parts: [...(text ? [{ type: "text" as const, text }] : []), ...fileParts],
+          },
+          { signal },
+        ),
       ).pipe(
         Effect.mapError(toRequestError),
         // On failure: clear active-turn state, flip the session back to ready
@@ -1366,6 +1602,7 @@ export function makeOpenCodeAdapter(
       return {
         threadId: input.threadId,
         turnId,
+        resumeCursor: context.session.resumeCursor,
       };
     });
 
@@ -1456,6 +1693,15 @@ export function makeOpenCodeAdapter(
       function* (threadId, turnId) {
         const context = ensureSessionContext(sessions, threadId);
         const compaction = context.manualCompaction;
+        const activeTurnId = context.activeTurnId;
+        if (turnId !== undefined && turnId !== activeTurnId) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "interruptTurn",
+            issue: "This Stop request no longer belongs to the active OpenCode turn.",
+          });
+        }
+        if (!activeTurnId && !compaction) return;
         yield* runOpenCodeSdk("session.abort", () =>
           context.client.session.abort({ sessionID: context.openCodeSessionId }),
         ).pipe(Effect.mapError(toRequestError));
@@ -1464,11 +1710,14 @@ export function makeOpenCodeAdapter(
           compaction.controller.abort();
           return;
         }
-        if (turnId ?? context.activeTurnId) {
+        // Native idle or a replacement may have won while abort was awaited.
+        // A late Stop receipt must not settle a subsequent turn's output.
+        if (context.activeTurnId !== activeTurnId || sessions.get(threadId) !== context) return;
+        if (activeTurnId) {
           yield* emit({
             ...(yield* buildEventBase({
               threadId,
-              turnId: turnId ?? context.activeTurnId,
+              turnId: activeTurnId,
             })),
             type: "turn.aborted",
             payload: {
@@ -1529,20 +1778,21 @@ export function makeOpenCodeAdapter(
             threadId,
           });
         }
-        const stopped = yield* stopOpenCodeContext(context);
-        sessions.delete(threadId);
-        if (!stopped) {
-          return;
-        }
-        yield* emit({
-          ...(yield* buildEventBase({ threadId })),
-          type: "session.exited",
-          payload: {
-            reason: "Session stopped.",
-            recoverable: false,
-            exitKind: "graceful",
-          },
-        });
+        yield* stopOpenCodeContext(
+          context,
+          Effect.gen(function* () {
+            yield* emit({
+              ...(yield* buildEventBase({ threadId })),
+              type: "session.exited",
+              payload: {
+                reason: "Session stopped.",
+                recoverable: false,
+                exitKind: "graceful",
+              },
+            });
+          }),
+        );
+        if (sessions.get(threadId) === context) sessions.delete(threadId);
       },
     );
 
@@ -1603,16 +1853,19 @@ export function makeOpenCodeAdapter(
     const stopAll: OpenCodeAdapterShape["stopAll"] = () =>
       Effect.gen(function* () {
         const contexts = [...sessions.values()];
-        sessions.clear();
-        // `stopOpenCodeContext` is typed as never-failing — SDK aborts are
-        // already `Effect.ignore`'d inside it. `ignoreCause` here also
-        // swallows defects from throwing finalizers so one bad close can't
+        // Retiring entries remain findable until native close finishes, so
+        // a concurrent reopen joins them. `ignoreCause` also swallows
+        // defects from throwing finalizers so one bad close can't
         // interrupt the sibling fibers. Same pattern as the layer finalizer.
         yield* Effect.forEach(
           contexts,
           (context) => Effect.ignoreCause(stopOpenCodeContext(context)),
           { concurrency: "unbounded", discard: true },
         );
+        for (const context of contexts) {
+          if (sessions.get(context.session.threadId) === context)
+            sessions.delete(context.session.threadId);
+        }
       });
 
     return {

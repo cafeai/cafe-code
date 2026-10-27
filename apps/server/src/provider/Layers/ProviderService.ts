@@ -3498,7 +3498,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       threadId: input.threadId,
       operation,
       // Compaction must operate on the materialized conversation, never
-      // create an empty replacement (OpenCode has no native resume path yet).
+      // create or recover a replacement merely to perform this control action.
       allowRecovery: false,
     });
     if (
