@@ -1,8 +1,12 @@
 # Decision: CI-matched default local Node scheduling
 
 Decision status: Accepted for the explicitly requested local scheduling change
+Superseded in part on 2026-10-28: the default local Node admission policy is now
+described by [bounded local Node scheduling](bounded-local-node-scheduling.md).
+The explicitly selected canonical CI lane and the historical decision below
+remain documented without changing their earlier authority or evidence.
 Created: 2026-10-24 03:09:06 JST (UTC+0900)
-Last updated: 2026-10-24 03:09:06 JST (UTC+0900)
+Last updated: 2026-10-28 10:51:33 JST (UTC+0900)
 Decision authority: the human explicitly required leaving CI scheduling unchanged
 and making local scheduling match it.
 Implementation status: implemented; resulting-source qualification is required.

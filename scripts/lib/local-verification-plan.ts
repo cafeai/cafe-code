@@ -9,11 +9,11 @@ export interface LocalVerificationOptions {
   readonly fresh?: boolean;
 }
 
-/** Keep the local opt-in separate from selection or skipping. In particular,
+/** Keep local scheduling separate from selection or skipping. In particular,
  * duplicate options cannot silently override a previously reviewed limit. */
 export function parseLocalVerificationArguments(args: readonly string[]): LocalVerificationOptions {
   let typecheckConcurrency: 1 | 2 | 3 = 3;
-  let testConcurrency: LocalVerificationOptions["testConcurrency"] = "ci";
+  let testConcurrency: LocalVerificationOptions["testConcurrency"] = 2;
   let hasTypecheckOption = false;
   let hasTestOption = false;
   let fresh = false;
@@ -35,16 +35,24 @@ export function parseLocalVerificationArguments(args: readonly string[]): LocalV
     }
     if (
       !hasTestOption &&
-      (arg === "--test-concurrency=1" ||
+      (arg === "--test-concurrency=ci" ||
+        arg === "--test-concurrency=1" ||
         arg === "--test-concurrency=2" ||
         arg === "--test-concurrency=3")
     ) {
-      testConcurrency = arg === "--test-concurrency=1" ? 1 : arg === "--test-concurrency=2" ? 2 : 3;
+      testConcurrency =
+        arg === "--test-concurrency=ci"
+          ? "ci"
+          : arg === "--test-concurrency=1"
+            ? 1
+            : arg === "--test-concurrency=2"
+              ? 2
+              : 3;
       hasTestOption = true;
       continue;
     }
     throw new Error(
-      "Complete local verification accepts --fresh, --typecheck-concurrency=1, =2 or =3 and --test-concurrency=1, =2 or =3 once each; selection and skip arguments are not supported.",
+      "Complete local verification accepts --fresh, --typecheck-concurrency=1, =2 or =3 and --test-concurrency=ci, =1, =2 or =3 once each; selection and skip arguments are not supported.",
     );
   }
   return { typecheckConcurrency, testConcurrency, ...(fresh ? { fresh: true } : {}) };
@@ -52,15 +60,15 @@ export function parseLocalVerificationArguments(args: readonly string[]): LocalV
 
 /** Complete local qualification: each required task is either freshly executed
  * or reuses an authenticated prior success for its exact reviewed inputs.
- * Typechecking defaults to three workspaces. The default Node graph uses the
- * unchanged host-specific CI plan and executes fresh, not a partial-workspace
- * receipt. Only an explicit local limit enables bounded per-workspace reuse;
- * its existing two-worker policy and server isolation remain unchanged.
+ * Typechecking defaults to three workspaces. The complete Node graph defaults
+ * to two admitted local workspaces with at most two workers each. Eligible
+ * exact-input results may be reused; --fresh bypasses reuse. Explicit CI mode
+ * executes the unchanged host-specific CI plan fresh, never a partial receipt.
  * Children inherit the caller's low priority.
  * Native browser contexts retain their separate sequential owners.
  * The forced desktop build is deliberately last, even on a warm checkout. */
 export function localVerificationPlan(
-  options: LocalVerificationOptions = { typecheckConcurrency: 3, testConcurrency: "ci" },
+  options: LocalVerificationOptions = { typecheckConcurrency: 3, testConcurrency: 2 },
   platform: NodeJS.Platform = process.platform,
 ): readonly TestStep[] {
   const typecheckConcurrency = options.typecheckConcurrency;
@@ -100,7 +108,7 @@ export function localVerificationPlan(
       // leak it into tests, browser processes, build outputs or the shipped app.
       env: { NODE_OPTIONS: "--max-old-space-size=4096" },
     },
-    ...(testConcurrency === "ci" || options.fresh
+    ...(testConcurrency === "ci"
       ? nodes
       : nodes.map((step, index) => ({
           name: step.name,

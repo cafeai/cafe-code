@@ -328,6 +328,192 @@ describe("local cached Node workspace ownership", () => {
     }
   });
 
+  it("drains earlier owners and holds exclusive barriers across cache admission and recheck", async (context) => {
+    const first = gate(),
+      second = gate(),
+      both = gate(),
+      firstClosed = gate();
+    const serverEntered = gate(),
+      serverRecheck = gate();
+    const scriptsEntered = gate(),
+      scriptsAdmission = gate();
+    const controller = new AbortController();
+    const admitted: string[] = [];
+    const active = new Set<string>();
+    const overlaps: string[] = [];
+    const cache: LocalVerificationCache = {
+      async run(task, _signal, execute) {
+        const name = task.id.slice("node:".length);
+        admitted.push(name);
+        active.add(name);
+        if ((name === "server" || name === "scripts") && active.size !== 1) overlaps.push(name);
+        if (active.has("server") && active.size !== 1) overlaps.push("server");
+        if (active.has("scripts") && active.size !== 1) overlaps.push("scripts");
+        try {
+          if (name === "scripts") {
+            scriptsEntered.release();
+            await scriptsAdmission.promise;
+          }
+          await execute();
+          if (name === "server") {
+            serverEntered.release();
+            await serverRecheck.promise;
+          }
+          return { status: "fresh", message: "Synthetic complete owner." };
+        } finally {
+          active.delete(name);
+          if (name === "first") firstClosed.release();
+        }
+      },
+    };
+    let pending: Promise<void> | undefined;
+    const retire = () => {
+      controller.abort();
+      first.release();
+      second.release();
+      both.release();
+      firstClosed.release();
+      serverEntered.release();
+      serverRecheck.release();
+      scriptsEntered.release();
+      scriptsAdmission.release();
+    };
+    context.signal.addEventListener("abort", retire, { once: true });
+    context.onTestFinished(async () => {
+      retire();
+      if (pending) await Promise.allSettled([pending]);
+      context.signal.removeEventListener("abort", retire);
+    });
+    pending = runLocalNodeTestPrograms(
+      import.meta.dirname,
+      [
+        { name: "first", location: "first" },
+        { name: "second", location: "second" },
+        { name: "server", location: "apps/server" },
+        { name: "middle", location: "middle" },
+        { name: "scripts", location: "scripts" },
+        { name: "last", location: "last" },
+      ],
+      2,
+      controller.signal,
+      cache,
+      async (steps) => {
+        const name = steps[0]!.name.slice("Node tests ".length);
+        if (active.has("first") && active.has("second")) both.release();
+        if (name === "first") await first.promise;
+        if (name === "second") await second.promise;
+      },
+    );
+    try {
+      await both.promise;
+      if (context.signal.aborted) return;
+      first.release();
+      await firstClosed.promise;
+      if (context.signal.aborted) return;
+      expect(admitted).toEqual(["first", "second"]);
+      second.release();
+      await serverEntered.promise;
+      if (context.signal.aborted) return;
+      expect(admitted).toEqual(["first", "second", "server"]);
+      serverRecheck.release();
+      await scriptsEntered.promise;
+      if (context.signal.aborted) return;
+      expect(admitted).toEqual(["first", "second", "server", "middle", "scripts"]);
+      scriptsAdmission.release();
+      await pending;
+      expect(admitted).toEqual(["first", "second", "server", "middle", "scripts", "last"]);
+      expect(overlaps).toEqual([]);
+    } finally {
+      first.release();
+      second.release();
+      serverRecheck.release();
+      scriptsAdmission.release();
+      await Promise.allSettled([pending]);
+    }
+  });
+
+  it("continues later barriers after ordinary failures without dropping workspaces", async () => {
+    const admitted: string[] = [];
+    await expect(
+      runLocalNodeTestPrograms(
+        import.meta.dirname,
+        [
+          { name: "first", location: "first" },
+          { name: "server", location: "apps/server" },
+          { name: "middle", location: "middle" },
+          { name: "scripts", location: "scripts" },
+          { name: "last", location: "last" },
+        ],
+        2,
+        new AbortController().signal,
+        undefined,
+        async (steps) => {
+          const name = steps[0]!.name.slice("Node tests ".length);
+          admitted.push(name);
+          if (name === "server" || name === "scripts") throw new Error("Synthetic failure");
+        },
+      ),
+    ).rejects.toThrow("3/5");
+    expect(admitted).toEqual(["first", "server", "middle", "scripts", "last"]);
+  });
+
+  it("fences later admission on cancellation while joining the held exclusive owner", async (context) => {
+    const entered = gate(),
+      release = gate();
+    const controller = new AbortController();
+    const admitted: string[] = [];
+    let settled = false;
+    let pending: Promise<void> | undefined;
+    const retire = () => {
+      controller.abort();
+      entered.release();
+      release.release();
+    };
+    context.signal.addEventListener("abort", retire, { once: true });
+    context.onTestFinished(async () => {
+      retire();
+      if (pending) await Promise.allSettled([pending]);
+      context.signal.removeEventListener("abort", retire);
+    });
+    pending = runLocalNodeTestPrograms(
+      import.meta.dirname,
+      [
+        { name: "server", location: "apps/server" },
+        { name: "later", location: "later" },
+      ],
+      2,
+      controller.signal,
+      undefined,
+      async (steps) => {
+        admitted.push(steps[0]!.name);
+        entered.release();
+        await release.promise;
+      },
+    );
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    try {
+      await entered.promise;
+      if (context.signal.aborted) return;
+      controller.abort();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(admitted).toEqual(["Node tests server"]);
+      release.release();
+      await expect(pending).rejects.toThrow("incomplete");
+      expect(admitted).toEqual(["Node tests server"]);
+    } finally {
+      retire();
+      await Promise.allSettled([pending]);
+    }
+  });
+
   it("does not execute a reused workspace and retains every required task", async () => {
     const taskIds: string[] = [];
     const executed: string[] = [];

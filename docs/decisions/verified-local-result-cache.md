@@ -1,8 +1,11 @@
 # Decision: exact-input local verification success reuse
 
 Decision status: Accepted within the explicitly requested local cache scope
+Default-local-Node admission was subsequently revised by
+[bounded local Node scheduling](bounded-local-node-scheduling.md); the receipt
+trust/ownership requirements and historical decision below remain unchanged.
 Created: 2026-10-22 22:55:23 JST (UTC+0900)
-Last updated: 2026-10-24 03:09:06 JST (UTC+0900)
+Last updated: 2026-10-28 10:51:33 JST (UTC+0900)
 Decision authority: the human explicitly requested caching unchanged local
 verification work before the approved dev push.
 Implementation status: implemented with qualification requirements below;

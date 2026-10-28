@@ -130,8 +130,10 @@ export async function discoverLocalNodeTestPrograms(
 
 /** Each exact Turbo invocation has one workspace and its original two-worker
  * cap. The outer bounded queue replaces only Turbo's independent-workspace
- * admission, not Vitest file isolation or native ownership. Its POSIX Codex tail
- * is selected by the caller only after every complementary owner has closed. */
+ * admission, not Vitest file isolation or native ownership. The server and
+ * scripts workspaces each hold an exclusive barrier, including cache admission
+ * and final rechecks, so their native-heavy work cannot overlap another owner.
+ * Its POSIX Codex tail starts only after every complementary owner has closed. */
 export async function runLocalNodeTestPrograms(
   root: string,
   programs: readonly LocalNodeTestProgram[],
@@ -152,8 +154,8 @@ export async function runLocalNodeTestPrograms(
   let next = 0;
   let completed = 0;
   const failures: string[] = [];
-  const worker = async () => {
-    while (!signal.aborted && next < programs.length) {
+  const worker = async (end: number) => {
+    while (!signal.aborted && next < end) {
       const program = programs[next++]!;
       const args = [
         "test",
@@ -228,7 +230,22 @@ export async function runLocalNodeTestPrograms(
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, programs.length) }, worker));
+  // Preserve discovery order. Drain each contiguous ordinary group before an
+  // exclusive owner, and drain that entire owner (including cache rechecks)
+  // before admitting any later workspace. Failures do not stop later groups;
+  // cancellation fences admission after all already-owned work settles.
+  const exclusive = (program: LocalNodeTestProgram) =>
+    program.location === "apps/server" || program.location === "scripts";
+  while (!signal.aborted && next < programs.length) {
+    const start = next;
+    let end = start + 1;
+    if (!exclusive(programs[start]!)) {
+      while (end < programs.length && !exclusive(programs[end]!)) end += 1;
+    }
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, end - start) }, () => worker(end)),
+    );
+  }
   if (signal.aborted || failures.length !== 0 || completed !== programs.length)
     throw new Error(
       `Local Node qualification incomplete (${completed}/${programs.length} workspace tasks completed; ${failures.length} failed).`,

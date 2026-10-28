@@ -1,6 +1,6 @@
 # Test suite policy
 
-Last updated: 2026-10-24 09:57:52 JST (UTC+0900)
+Last updated: 2026-10-28 10:42:43 JST (UTC+0900)
 
 Required CI protects features: correct actions and values, retained user input,
 authorization, account/chat ownership, persistence, cancellation, history and
@@ -40,17 +40,19 @@ Its explicitly requested exact-input local success reuse follows the separate
 receipt reads and writes. Canonical CI/release still executes uncached.
 `test:browser:local` discovers the complete browser domain with
 disjoint native groups and prepares only its real copied MCP bridge artifacts.
-Default local Node tests execute the exact unchanged host-specific canonical
-CI plan freshly, including its hardware-scaled native defaults. Do not guess
-an implicit Turbo limit or replace that complete graph with a server-only
-receipt. Explicit `--test-concurrency=1|2|3` selects the separate bounded local
-mode with at most two Vitest workers per workspace and eligible per-workspace
-reuse; that deliberate override is not CI scheduling parity. Type/browser
-exact-input reuse remains available. Monitor host headroom: niceness and a
+Default local Node tests execute the complete bounded local graph with two
+workspace owners and at most two Vitest workers each. Eligible per-workspace
+exact-input reuse is labelled; a server-only receipt never replaces the graph.
+Server and scripts each hold an exclusive workspace barrier through cache
+admission, execution and rechecks, including when `--fresh` disables reuse.
+`--test-concurrency=1|2|3` selects a bounded workspace limit, while
+`--test-concurrency=ci` selects the exact unchanged host-specific canonical CI
+Node plan freshly, including its hardware-scaled defaults. The bounded local
+schedule is not CI parity. Type/browser exact-input reuse remains available. Monitor host headroom: niceness and a
 per-process heap ceiling do not bound aggregate memory. Server file execution,
 fork isolation, native browser ordering and build limits remain unchanged.
 Typechecking has a separate bounded local option. See the
-[default scheduling decision](decisions/ci-matched-local-node-scheduling.md).
+[default scheduling decision](decisions/bounded-local-node-scheduling.md).
 Typechecking defaults to three workspace compilers, as does the canonical CI
 command; its per-compiler heap ceiling is not an aggregate memory guarantee.
 See [local verification](test-performance.md) for commands, input-cache bounds

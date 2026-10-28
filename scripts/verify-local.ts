@@ -10,7 +10,7 @@ const options = parseLocalVerificationArguments(process.argv.slice(2));
 const nodeSchedule =
   options.testConcurrency === "ci"
     ? "Node tests use the unchanged host-specific CI schedule and execute fresh"
-    : `Node test workspace concurrency ${options.testConcurrency} with at most two Vitest workers each`;
+    : `bounded local Node tests: workspace concurrency ${options.testConcurrency}, at most two Vitest workers each, exclusive server/scripts barriers; not CI scheduling parity`;
 const reusePolicy = options.fresh
   ? "fresh results only (--fresh)"
   : options.testConcurrency === "ci"

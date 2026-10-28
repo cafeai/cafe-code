@@ -7,9 +7,11 @@ import {
 import { nodeTestPlan, type TestStep } from "./test-run-plan.ts";
 
 const isTypecheck = (step: TestStep) => step.args.some((arg) => arg.endsWith("typecheck-local.ts"));
+const isLocalNode = (step: TestStep) =>
+  step.args.some((arg) => arg.endsWith("node-tests-local.ts"));
 
-// Existing bounded complete-graph controls exercise an explicit two-workspace
-// all-fresh replay. The default CI-parity lane is qualified separately below.
+// Complete-graph controls exercise the bounded two-workspace all-fresh replay.
+// The explicitly selected CI-parity lane is qualified separately below.
 const localVerificationPlan = (
   options: LocalVerificationOptions = { typecheckConcurrency: 3, testConcurrency: 2 },
   platform: NodeJS.Platform = process.platform,
@@ -40,7 +42,7 @@ describe("complete local verification", () => {
     expect(steps.at(-1)?.args).not.toContain("--reuse-local-results");
     expect(parseLocalVerificationArguments(["--fresh"])).toEqual({
       typecheckConcurrency: 3,
-      testConcurrency: "ci",
+      testConcurrency: 2,
       fresh: true,
     });
     expect(() => parseLocalVerificationArguments(["--fresh", "--fresh"])).toThrow(
@@ -48,10 +50,12 @@ describe("complete local verification", () => {
     );
   });
   it.each(["darwin", "linux", "win32"] as const)(
-    "uses the exact unchanged CI Node plan by default, including with --fresh, on %s",
+    "uses the exact unchanged CI Node plan when explicitly selected, including with --fresh, on %s",
     (platform) => {
       for (const fresh of [false, true]) {
-        const options = parseLocalVerificationArguments(fresh ? ["--fresh"] : []);
+        const options = parseLocalVerificationArguments(
+          fresh ? ["--test-concurrency=ci", "--fresh"] : ["--test-concurrency=ci"],
+        );
         const steps = completePlan(options, platform);
         const nodes = steps.filter((step) => step.args[0] === "test");
         expect(nodes).toEqual(nodeTestPlan(platform));
@@ -78,6 +82,34 @@ describe("complete local verification", () => {
     },
   );
   it.each(["darwin", "linux", "win32"] as const)(
+    "selects the complete bounded two-workspace plan by default on %s",
+    (platform) => {
+      const defaults = parseLocalVerificationArguments([]);
+      const explicit = parseLocalVerificationArguments(["--test-concurrency=2"]);
+      expect(defaults).toEqual(explicit);
+      expect(completePlan(defaults, platform)).toEqual(completePlan(explicit, platform));
+      expect(completePlan()).toEqual(completePlan(defaults));
+      const nodes = completePlan(defaults, platform).filter((step) =>
+        step.args.some((arg) => arg.endsWith("node-tests-local.ts")),
+      );
+      expect(nodes).toHaveLength(platform === "win32" ? 1 : 2);
+      expect(nodes[0]!.args).toContain("--phase=main");
+      expect(nodes[0]!.args).toContain("--concurrency=2");
+      if (platform !== "win32") {
+        expect(nodes[1]!.args).toContain("--phase=codex-tail");
+        expect(nodes[1]!.args).toContain("--concurrency=1");
+      }
+      const fresh = completePlan(parseLocalVerificationArguments(["--fresh"]), platform);
+      expect(fresh.filter(isLocalNode)).toEqual(
+        nodes.map((step) => ({
+          ...step,
+          args: step.args.filter((arg) => arg !== "--reuse-local-results"),
+        })),
+      );
+      expect(fresh.every((step) => !step.args.includes("--reuse-local-results"))).toBe(true);
+    },
+  );
+  it.each(["darwin", "linux", "win32"] as const)(
     "retains explicit bounded per-workspace reuse and the all-fresh override on %s",
     (platform) => {
       for (const testConcurrency of [1, 2, 3] as const) {
@@ -97,8 +129,11 @@ describe("complete local verification", () => {
         }
         for (const node of nodes) expect(node.args).toContain("--reuse-local-results");
         const fresh = completePlan({ ...options, fresh: true }, platform);
-        expect(fresh.filter((step) => step.args[0] === "test")).toEqual(
-          nodeTestPlan(platform, { concurrency: testConcurrency }),
+        expect(fresh.filter(isLocalNode)).toEqual(
+          nodes.map((step) => ({
+            ...step,
+            args: step.args.filter((arg) => arg !== "--reuse-local-results"),
+          })),
         );
         expect(fresh.every((step) => !step.args.includes("--reuse-local-results"))).toBe(true);
         expect(steps.at(-1)?.args).toEqual(["build:desktop", "--force", "--concurrency=1"]);
@@ -116,19 +151,17 @@ describe("complete local verification", () => {
   });
   it("runs the whole uncached Node graph with two workspace owners and bounded workers", () => {
     const steps = localVerificationPlan();
-    const node = steps.find((step) => step.args[0] === "test");
+    const node = steps.find(isLocalNode);
     expect(node?.args).toContain("--concurrency=2");
-    expect(node?.args).toContain("--maxWorkers=2");
-    expect(steps.filter((step) => step.args[0] === "test")).toEqual(
-      nodeTestPlan(process.platform, { concurrency: 2 }),
-    );
+    expect(node?.args).toContain("--phase=main");
+    expect(node?.args).not.toContain("--reuse-local-results");
     expect(steps.find(isTypecheck)?.args).toContain("--concurrency=3");
   });
 
   it("requires complete native browser qualification before a forced final build", () => {
     const steps = localVerificationPlan();
     const browser = steps.findIndex((step) => step.args[0] === "test:browser:local");
-    expect(browser).toBeGreaterThan(steps.findIndex((step) => step.args[0] === "test"));
+    expect(browser).toBeGreaterThan(steps.findIndex(isLocalNode));
     expect(browser).toBeLessThan(steps.length - 1);
     expect(steps.at(-1)?.args).toEqual(["build:desktop", "--force", "--concurrency=1"]);
     expect(steps.find(isTypecheck)?.env).toEqual({
@@ -156,9 +189,8 @@ describe("complete local verification", () => {
         `--concurrency=${typecheckConcurrency}`,
       ]);
       expect(typecheck.env).toEqual({ NODE_OPTIONS: "--max-old-space-size=4096" });
-      const node = steps.find((step) => step.args[0] === "test")!;
+      const node = steps.find(isLocalNode)!;
       expect(node.args).toContain("--concurrency=2");
-      expect(node.args).toContain("--maxWorkers=2");
       expect(steps.at(-1)?.args).toEqual(["build:desktop", "--force", "--concurrency=1"]);
       expect(steps.some((step) => step.args[0] === "test:browser:local")).toBe(true);
       expect(
@@ -169,16 +201,16 @@ describe("complete local verification", () => {
     },
   );
 
-  it("defaults to three compilers and the unchanged CI Node schedule, retaining either independent override", () => {
+  it("defaults to three compilers and two local Node workspaces, retaining either independent override", () => {
     expect(parseLocalVerificationArguments([])).toEqual({
       typecheckConcurrency: 3,
-      testConcurrency: "ci",
+      testConcurrency: 2,
     });
     for (const typecheckConcurrency of [1, 2, 3] as const)
       expect(
         parseLocalVerificationArguments([`--typecheck-concurrency=${typecheckConcurrency}`]),
-      ).toEqual({ typecheckConcurrency, testConcurrency: "ci" });
-    for (const testConcurrency of [1, 2, 3] as const)
+      ).toEqual({ typecheckConcurrency, testConcurrency: 2 });
+    for (const testConcurrency of ["ci", 1, 2, 3] as const)
       expect(parseLocalVerificationArguments([`--test-concurrency=${testConcurrency}`])).toEqual({
         typecheckConcurrency: 3,
         testConcurrency,
@@ -197,14 +229,28 @@ describe("complete local verification", () => {
           expect(options).toEqual({ typecheckConcurrency, testConcurrency });
           const steps = localVerificationPlan(options);
           expect(steps.find(isTypecheck)?.args).toContain(`--concurrency=${typecheckConcurrency}`);
-          const node = steps.find((step) => step.args[0] === "test")!;
+          const node = steps.find(isLocalNode)!;
           expect(node.args).toContain(`--concurrency=${testConcurrency}`);
-          expect(node.args).toContain("--maxWorkers=2");
           expect(steps.find((step) => step.args[0] === "test:browser:local")?.args).toEqual([
             "test:browser:local",
           ]);
           expect(steps.at(-1)?.args).toEqual(["build:desktop", "--force", "--concurrency=1"]);
         }
+      }
+    }
+  });
+
+  it("accepts the CI schedule and independent typecheck override in either order", () => {
+    for (const typecheckConcurrency of [1, 2, 3] as const) {
+      const args = [`--typecheck-concurrency=${typecheckConcurrency}`, "--test-concurrency=ci"];
+      for (const ordered of [args, [...args].reverse()]) {
+        const options = parseLocalVerificationArguments(ordered);
+        expect(options).toEqual({ typecheckConcurrency, testConcurrency: "ci" });
+        const steps = completePlan(options);
+        expect(steps.find(isTypecheck)?.args).toContain(`--concurrency=${typecheckConcurrency}`);
+        expect(steps.filter((step) => step.args[0] === "test")).toEqual(
+          nodeTestPlan(process.platform),
+        );
       }
     }
   });
@@ -217,13 +263,12 @@ describe("complete local verification", () => {
           { typecheckConcurrency: 1, testConcurrency: concurrency },
           platform,
         );
-        const nodes = steps.filter((step) => step.args[0] === "test");
+        const nodes = steps.filter(isLocalNode);
         expect(nodes).toHaveLength(2);
-        expect(nodes[0]!.args).toContain("--filter=!effect-codex-app-server");
+        expect(nodes[0]!.args).toContain("--phase=main");
         expect(nodes[0]!.args).toContain(`--concurrency=${concurrency}`);
-        expect(nodes[1]!.args).toContain("--filter=effect-codex-app-server");
+        expect(nodes[1]!.args).toContain("--phase=codex-tail");
         expect(nodes[1]!.args).toContain("--concurrency=1");
-        for (const node of nodes) expect(node.args).toContain("--maxWorkers=2");
         expect(steps.indexOf(nodes[1]!)).toBeLessThan(
           steps.findIndex((step) => step.args[0] === "test:browser:local"),
         );
@@ -243,7 +288,10 @@ describe("complete local verification", () => {
       ["--typecheck-concurrency=3", "--typecheck-concurrency=3"],
       ["--typecheck-concurrency=3", "--typecheck-concurrency=1"],
       ["--test-concurrency=0"],
-      ["--test-concurrency=ci"],
+      ["--test-concurrency=CI"],
+      ["--test-concurrency=ci", "--test-concurrency=ci"],
+      ["--test-concurrency=ci", "--test-concurrency=2"],
+      ["--test-concurrency=2", "--test-concurrency=ci"],
       ["--test-concurrency=4"],
       ["--test-concurrency=02"],
       ["--test-concurrency=3.0"],

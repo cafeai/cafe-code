@@ -1,13 +1,16 @@
 # Verification decision index
 
-Last updated: 2026-10-24 03:09:06 JST (UTC+0900)
+Last updated: 2026-10-28 10:42:43 JST (UTC+0900)
 
 This index covers verification decisions; independent feature decisions remain
 in this directory.
 
+- [Bounded local Node scheduling](bounded-local-node-scheduling.md): two local
+  workspace owners by default, explicit unchanged CI scheduling, and qualified
+  exact-input reuse only on eligible local tasks.
 - [CI-matched default local Node scheduling](ci-matched-local-node-scheduling.md):
-  unchanged canonical CI Node steps by default; explicit bounded local mode
-  retains per-workspace reuse, while type/browser reuse remains available.
+  historical prior default; its explicit canonical CI lane and the rest of its
+  ownership and evidence limits remain in force.
 - [Complete local work reduction](complete-local-verification.md): active except
   for its superseded typecheck scheduling/default, CI-exclusion and local
   result-cache prohibition and default Node scheduling portions.
