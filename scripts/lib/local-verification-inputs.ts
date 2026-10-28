@@ -1243,8 +1243,7 @@ export function createLocalVerificationFingerprint(
           try {
             stat = await lstat(candidate, { bigint: true });
           } catch (error) {
-            if (isMissingOrNotDirectory(error))
-              continue;
+            if (isMissingOrNotDirectory(error)) continue;
             // EPERM/EACCES/unknown native observation is not proof that native
             // execution would skip this candidate and choose a later binary.
             refuse();

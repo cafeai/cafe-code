@@ -389,11 +389,7 @@ vi.mock("node:child_process", async (importOriginal) => {
               : routedOwner.result === "missing"
                 ? join(routedOwner.developer, "missing-git")
                 : routedOwner.git;
-      nativeArgs = [
-        "/usr/bin/printf",
-        ["%s\n", output],
-        options,
-      ];
+      nativeArgs = ["/usr/bin/printf", ["%s\n", output], options];
       routedOwner.invocations += 1;
     }
     record?.(routedOwner ? "metadata-peer-entered" : "xcrun-entered");
