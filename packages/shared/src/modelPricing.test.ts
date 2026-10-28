@@ -10,6 +10,57 @@ import {
 
 const RATE: ModelRate = { input: 10, cachedInput: 1, cacheWrite: 12, output: 50 };
 
+describe("Claude cache-write duration pricing", () => {
+  const entry = {
+    provider: "claudeAgent",
+    model: "claude-opus-5-5",
+    inputTokens: 1_000_000,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 1_000_000,
+    cacheWrite5mInputTokens: 200_000,
+    cacheWrite1hInputTokens: 300_000,
+    outputTokens: 0,
+  };
+
+  it("prices only verified one-hour writes at the one-hour rate", () => {
+    const result = rollUpCost([entry]);
+    expect(result.cost).toBeCloseTo(0.7 * 5 + 0.3 * 8);
+    expect(result.cacheSavings).toBeCloseTo(4 - result.cost);
+    expect(result.unknownCacheWriteTokens).toBe(500_000);
+    expect(result.pricedTokens).toBe(1_000_000);
+  });
+
+  it("keeps older custom write overrides authoritative for both durations", () => {
+    const result = rollUpCost([entry], { "claude-opus": RATE });
+    expect(result.cost).toBe(12);
+    expect(result.cacheSavings).toBe(-2);
+    expect(result.unknownCacheWriteTokens).toBe(500_000);
+  });
+
+  it("does not apply Claude TTL rates to other providers or native reported costs", () => {
+    expect(rollUpCost([{ ...entry, provider: "codex" }]).cost).toBe(5);
+    const reported = rollUpCost([
+      { ...entry, reportedCost: { microusd: "123456", tokens: 1_000_000 } },
+    ]);
+    expect(reported.cost).toBe(0.123456);
+    expect(reported.cacheSavings).toBe(0);
+    expect(reported.unknownCacheWriteTokens).toBeUndefined();
+  });
+
+  it("treats absent or malformed duration detail as unknown", () => {
+    for (const detail of [
+      { cacheWrite5mInputTokens: undefined, cacheWrite1hInputTokens: undefined },
+      { cacheWrite5mInputTokens: 900_000, cacheWrite1hInputTokens: 300_000 },
+      { cacheWrite5mInputTokens: 1, cacheWrite1hInputTokens: -1 },
+      { cacheWrite5mInputTokens: 1, cacheWrite1hInputTokens: 0.5 },
+    ]) {
+      const result = rollUpCost([{ ...entry, ...detail }]);
+      expect(result.cost).toBe(5);
+      expect(result.unknownCacheWriteTokens).toBe(1_000_000);
+    }
+  });
+});
+
 describe("native reported costs", () => {
   const counts = {
     inputTokens: 100,
@@ -55,6 +106,12 @@ describe("native reported costs", () => {
 });
 
 describe("resolveModelRate", () => {
+  it("does not interpret inherited object properties as pricing overrides", () => {
+    expect(resolveModelRate("constructor", {})).toBeUndefined();
+    expect(resolveModelRate("toString", {})).toBeUndefined();
+    expect(resolveModelRate("constructor", { constructor: RATE })).toBe(RATE);
+  });
+
   it("matches a bundled family by prefix so dated releases inherit it", () => {
     const dated = resolveModelRate("claude-opus-4-5-20260101");
     expect(dated).toBeDefined();

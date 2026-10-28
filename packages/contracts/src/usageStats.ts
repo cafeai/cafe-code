@@ -67,6 +67,9 @@ export const UsageStatsTokenBreakdownEntry = Schema.Struct({
   provider: ProviderDriverKind,
   model: UsageStatsModel,
   reportedCost: Schema.optional(UsageStatsReportedCost),
+  // Known subsets only; missing historical detail is the remaining write total.
+  cacheWrite5mInputTokens: Schema.optional(NonNegativeInt),
+  cacheWrite1hInputTokens: Schema.optional(NonNegativeInt),
   ...UsageStatsTokenCountFields,
 });
 export type UsageStatsTokenBreakdownEntry = typeof UsageStatsTokenBreakdownEntry.Type;

@@ -782,7 +782,13 @@ function UsageCostMetrics({
                     undefined,
                     undefined,
                     uiLocale,
-                  )}
+                  )}{" "}
+              {uiText(
+                "Claude estimates cannot account for provider-side custom pricing or fallback after a refusal.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </InfoTip>
           </div>
           <div
@@ -791,6 +797,16 @@ function UsageCostMetrics({
           >
             {formatUsd(costDisplay)}
           </div>
+          {view.rollup.unknownCacheWriteTokens !== undefined && (
+            <p className="mt-1 text-xs text-muted-foreground" data-usage-unknown-cache-ttl>
+              {uiText(
+                "Cache-write duration is unknown for {tokens} tokens; the estimate uses the regular cache-write rate for those tokens.",
+                { tokens: formatFullTokenCount(view.rollup.unknownCacheWriteTokens) },
+                undefined,
+                uiLocale,
+              )}
+            </p>
+          )}
 
           <div className="mt-5 flex flex-col gap-3">
             {view.providers.length === 0 ? (

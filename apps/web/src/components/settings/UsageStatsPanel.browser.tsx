@@ -1918,6 +1918,7 @@ describe("UsageStatsPanel", () => {
     expect(requiredElement('[data-usage-cost-chart-label="true"]').textContent).toBe("Daily cost");
     const estimateNote = await tooltipTextFor(infoTipTrigger("About estimated cost"));
     expect(estimateNote).toContain("Excludes long-context and speed-tier adjustments");
+    expect(estimateNote).toContain("provider-side custom pricing or fallback after a refusal");
     expect(estimateNote).not.toContain("Add your own in Settings");
 
     const providerCosts = Array.from(
@@ -2020,6 +2021,9 @@ describe("UsageStatsPanel", () => {
       .element(page.getByText("Cache writes cost more than reads have saved"))
       .toBeVisible();
     await expect.element(page.getByText("Net cache savings", { exact: true })).toBeVisible();
+    expect(requiredElement("[data-usage-unknown-cache-ttl]").textContent).toContain(
+      "Cache-write duration is unknown for 1,000,000 tokens",
+    );
   });
 
   it("renders the full billion-scale counter above its shorthand", async () => {

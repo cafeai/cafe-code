@@ -6,16 +6,102 @@ import * as os from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type TestContext } from "vitest";
 import { DebugDataProfileError, prepareDebugDataProfile } from "./dataProfileStorage.ts";
 
 describe("Debug storage admission", () => {
   let root: string;
+  let activeOwner: { root: string; retire: () => void; settled: Promise<void> } | undefined;
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), "cafe-profile-"));
   });
   afterEach(async () => {
-    await fs.rm(root, { recursive: true, force: true });
+    const owner = activeOwner;
+    if (owner) {
+      // onTestFinished runs after afterEach. Retire and join the exact body
+      // here before its private directory can be removed or reused.
+      owner.retire();
+      await owner.settled;
+      activeOwner = undefined;
+    }
+    await fs.rm(owner?.root ?? root, { recursive: true, force: true });
+  });
+
+  function runOwned(
+    context: TestContext,
+    body: (root: string, step: <T>(operation: () => Promise<T>) => Promise<T>) => Promise<void>,
+  ): Promise<void> {
+    const ownedRoot = root;
+    let retired = context.signal.aborted;
+    const retire = () => {
+      retired = true;
+    };
+    const check = () => {
+      if (retired || context.signal.aborted) throw new Error("Profile fixture retired");
+    };
+    const step = async <T>(operation: () => Promise<T>): Promise<T> => {
+      check();
+      try {
+        const result = await operation();
+        check();
+        return result;
+      } catch (error) {
+        check();
+        throw error;
+      }
+    };
+    context.signal.addEventListener("abort", retire, { once: true });
+    // Defer the body until ownership and both cleanup paths are registered.
+    const work = Promise.resolve().then(() => {
+      check();
+      return body(ownedRoot, step);
+    });
+    const settled = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    activeOwner = { root: ownedRoot, retire, settled };
+    context.onTestFinished(async () => {
+      retire();
+      await settled;
+      context.signal.removeEventListener("abort", retire);
+    });
+    return work;
+  }
+
+  it("retires an admitted filesystem operation before starting its next step", async (context) => {
+    let release!: () => void;
+    let enter!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    // A real timeout must release the synthetic hold before afterEach joins it.
+    context.signal.addEventListener("abort", () => release(), { once: true });
+    const work = runOwned(context, async (ownedRoot, step) => {
+      await step(async () => {
+        enter();
+        await held;
+      });
+      await step(() => fs.writeFile(path.join(ownedRoot, "late"), "must not be written"));
+    });
+    try {
+      await entered;
+      const owner = activeOwner!;
+      owner.retire();
+      let joined = false;
+      void owner.settled.then(() => {
+        joined = true;
+      });
+      await Promise.resolve();
+      expect(joined).toBe(false);
+    } finally {
+      release();
+    }
+    await expect(work).rejects.toThrow("Profile fixture retired");
+    await expect(fs.stat(path.join(root, "late"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("keeps real SQLite histories, WAL ownership and schema versions independent", async () => {
@@ -97,31 +183,37 @@ describe("Debug storage admission", () => {
     expect(await fs.readdir(root)).toEqual([]);
   });
 
-  it.each(["server-signing-key.bin", "provider-environment-fixture.bin"])(
+  it.for(["server-signing-key.bin", "provider-environment-fixture.bin"])(
     "refuses linked secret metadata without reading or changing the target: %s",
-    async (name) => {
-      const original = path.join(root, "production-secret");
-      await fs.writeFile(original, "private sentinel", { mode: 0o600 });
-      await prepareDebugDataProfile(root);
-      const linked = path.join(root, ".debug", "userdata", "secrets", name);
-      await fs.link(original, linked);
-      await expect(prepareDebugDataProfile(root)).rejects.toBeInstanceOf(DebugDataProfileError);
-      expect(await fs.readFile(original, "utf8")).toBe("private sentinel");
-      expect((await fs.stat(linked)).nlink).toBe(2);
-    },
+    (name, context) =>
+      runOwned(context, async (root, step) => {
+        const original = path.join(root, "production-secret");
+        await step(() => fs.writeFile(original, "private sentinel", { mode: 0o600 }));
+        await step(() => prepareDebugDataProfile(root));
+        const linked = path.join(root, ".debug", "userdata", "secrets", name);
+        await step(() => fs.link(original, linked));
+        await expect(step(() => prepareDebugDataProfile(root))).rejects.toBeInstanceOf(
+          DebugDataProfileError,
+        );
+        expect(await step(() => fs.readFile(original, "utf8"))).toBe("private sentinel");
+        expect((await step(() => fs.stat(linked))).nlink).toBe(2);
+      }),
   );
 
-  it.each(["keybindings.json", "system-prompt.md", "tls/server-cert.pem"])(
+  it.for(["keybindings.json", "system-prompt.md", "tls/server-cert.pem"])(
     "refuses linked configuration before its consumer can read production bytes: %s",
-    async (name) => {
-      const original = path.join(root, "production-config");
-      await fs.writeFile(original, "production sentinel", { mode: 0o600 });
-      await prepareDebugDataProfile(root);
-      const linked = path.join(root, ".debug", "userdata", ...name.split("/"));
-      await fs.link(original, linked);
-      await expect(prepareDebugDataProfile(root)).rejects.toBeInstanceOf(DebugDataProfileError);
-      expect(await fs.readFile(original, "utf8")).toBe("production sentinel");
-      expect((await fs.stat(linked)).nlink).toBe(2);
-    },
+    (name, context) =>
+      runOwned(context, async (root, step) => {
+        const original = path.join(root, "production-config");
+        await step(() => fs.writeFile(original, "production sentinel", { mode: 0o600 }));
+        await step(() => prepareDebugDataProfile(root));
+        const linked = path.join(root, ".debug", "userdata", ...name.split("/"));
+        await step(() => fs.link(original, linked));
+        await expect(step(() => prepareDebugDataProfile(root))).rejects.toBeInstanceOf(
+          DebugDataProfileError,
+        );
+        expect(await step(() => fs.readFile(original, "utf8"))).toBe("production sentinel");
+        expect((await step(() => fs.stat(linked))).nlink).toBe(2);
+      }),
   );
 });

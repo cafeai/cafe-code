@@ -267,6 +267,56 @@ layer("UsageStatsRepository", (it) => {
   });
 
   it.effect(
+    "preserves unknown writes and rejects later duration reclassification across days",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* UsageStatsRepository;
+        yield* clearUsageStats;
+        const snapshot = (
+          revision: number,
+          writes: number,
+          five: number,
+          hour: number,
+        ): UsageAccountingSnapshot => ({
+          ...accounting(revision, writes),
+          models: [
+            {
+              ...accounting(revision, writes).models[0]!,
+              cacheWriteInputTokens: writes,
+              cacheWrite5mInputTokens: five,
+              cacheWrite1hInputTokens: hour,
+            },
+          ],
+        });
+        const record = (value: UsageAccountingSnapshot, day: string) =>
+          repository.recordAccountingSnapshot({
+            provider: CLAUDE,
+            snapshot: value,
+            day,
+            enabled: true,
+          });
+        const legacy: UsageAccountingSnapshot = {
+          ...accounting(1, 100),
+          models: [{ ...accounting(1, 100).models[0]!, cacheWriteInputTokens: 100 }],
+        };
+        yield* record(legacy, "2026-09-05");
+        assert.isTrue(
+          Exit.isFailure(yield* Effect.exit(record(snapshot(2, 100, 0, 10), "2026-09-06"))),
+        );
+        const valid = snapshot(2, 110, 0, 10);
+        yield* record(valid, "2026-09-06");
+        assert.deepEqual(yield* record(valid, "2026-09-06"), []);
+        const rows = yield* repository.listTokenBreakdownDays;
+        assert.equal(rows.length, 2);
+        assert.equal(rows[0]?.cacheWriteInputTokens, 100);
+        assert.isUndefined(rows[0]?.cacheWrite5mInputTokens);
+        assert.isUndefined(rows[0]?.cacheWrite1hInputTokens);
+        assert.equal(rows[1]?.cacheWriteInputTokens, 10);
+        assert.equal(rows[1]?.cacheWrite1hInputTokens, 10);
+      }),
+  );
+
+  it.effect(
     "commits cumulative accounting checkpoints with daily/model deltas and ignores repeated or stale revisions",
     () =>
       Effect.gen(function* () {

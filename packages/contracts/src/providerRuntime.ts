@@ -437,12 +437,17 @@ export const UsageAccountingModel = Schema.Struct({
   inputTokens: UsageAccountingCount,
   cachedInputTokens: UsageAccountingCount,
   cacheWriteInputTokens: UsageAccountingCount,
+  // Optional known subsets; omitted historical observations remain unknown.
+  cacheWrite5mInputTokens: Schema.optional(UsageAccountingCount),
+  cacheWrite1hInputTokens: Schema.optional(UsageAccountingCount),
   outputTokens: UsageAccountingCount,
   reasoningOutputTokens: UsageAccountingCount,
 }).check(
   Schema.makeFilter(
     (row) =>
       row.cachedInputTokens <= row.inputTokens - row.cacheWriteInputTokens &&
+      (row.cacheWrite5mInputTokens ?? 0) <=
+        row.cacheWriteInputTokens - (row.cacheWrite1hInputTokens ?? 0) &&
       row.reasoningOutputTokens <= row.outputTokens,
     { expected: "cache and reasoning counters contained in their input/output totals" },
   ),

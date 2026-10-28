@@ -132,6 +132,18 @@ function addTokens(
     inputTokens: sum.inputTokens + row.inputTokens,
     cachedInputTokens: sum.cachedInputTokens + row.cachedInputTokens,
     cacheWriteInputTokens: sum.cacheWriteInputTokens + row.cacheWriteInputTokens,
+    ...(sum.cacheWrite5mInputTokens !== undefined || row.cacheWrite5mInputTokens !== undefined
+      ? {
+          cacheWrite5mInputTokens:
+            (sum.cacheWrite5mInputTokens ?? 0) + (row.cacheWrite5mInputTokens ?? 0),
+        }
+      : {}),
+    ...(sum.cacheWrite1hInputTokens !== undefined || row.cacheWrite1hInputTokens !== undefined
+      ? {
+          cacheWrite1hInputTokens:
+            (sum.cacheWrite1hInputTokens ?? 0) + (row.cacheWrite1hInputTokens ?? 0),
+        }
+      : {}),
     outputTokens: sum.outputTokens + row.outputTokens,
     reasoningOutputTokens: sum.reasoningOutputTokens + row.reasoningOutputTokens,
     ...(sum.reportedCost !== undefined || row.reportedCost !== undefined
@@ -228,6 +240,12 @@ export function selectUsageRange(
             inputTokens: row.inputTokens,
             cachedInputTokens: row.cachedInputTokens,
             cacheWriteInputTokens: row.cacheWriteInputTokens,
+            ...(row.cacheWrite5mInputTokens !== undefined
+              ? { cacheWrite5mInputTokens: row.cacheWrite5mInputTokens }
+              : {}),
+            ...(row.cacheWrite1hInputTokens !== undefined
+              ? { cacheWrite1hInputTokens: row.cacheWrite1hInputTokens }
+              : {}),
             outputTokens: row.outputTokens,
             reasoningOutputTokens: row.reasoningOutputTokens,
             ...(row.reportedCost !== undefined ? { reportedCost: row.reportedCost } : {}),

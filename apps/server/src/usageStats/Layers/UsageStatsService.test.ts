@@ -395,6 +395,38 @@ const accountingModel = (
 
 describe("UsageStatsService", () => {
   it.effect(
+    "retains known cache duration subsets in daily and lifetime breakdowns after rehydration",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          const snapshot: UsageAccountingSnapshot = {
+            scopeId: "10000000-0000-4000-8000-000000000008",
+            revision: 1,
+            completeness: "complete",
+            models: [
+              {
+                ...accountingModel(100, 5),
+                cacheWriteInputTokens: 80,
+                cacheWrite5mInputTokens: 20,
+                cacheWrite1hInputTokens: 30,
+              },
+            ],
+          };
+          yield* harness.service.recordAccounting(CLAUDE, snapshot, 0);
+          const first = yield* harness.service.get;
+          assert.equal(first.tokenBreakdown[0]?.cacheWriteInputTokens, 80);
+          assert.equal(first.tokenBreakdown[0]?.cacheWrite5mInputTokens, 20);
+          assert.equal(first.tokenBreakdownDays?.[0]?.cacheWrite1hInputTokens, 30);
+          const rebuilt = yield* harness.rebuildService;
+          yield* rebuilt.recordAccounting(CLAUDE, snapshot, 0);
+          const second = yield* rebuilt.get;
+          assert.equal(second.tokenBreakdown[0]?.cacheWrite5mInputTokens, 20);
+          assert.equal(second.tokenBreakdownDays?.[0]?.cacheWrite1hInputTokens, 30);
+          assert.equal(second.tokenBreakdown[0]?.cacheWriteInputTokens, 80);
+        }),
+      ),
+  );
+  it.effect(
     "hydrates exact Axiom costs after restart and counts settled requests independently of context",
     () =>
       withHarness((harness) =>

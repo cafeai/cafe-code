@@ -31,6 +31,29 @@ const rates = {
 };
 
 describe("dailyUsageCost", () => {
+  it("prices each day's proven Claude cache duration independently", () => {
+    const base = row("2026-09-04", "claude-opus-5-5");
+    const result = dailyUsageCost({
+      days: [day("2026-09-04"), day("2026-09-05")],
+      tokenBreakdownDays: [
+        {
+          ...base,
+          outputTokens: 0,
+          cacheWriteInputTokens: 1_000_000,
+          cacheWrite5mInputTokens: 1_000_000,
+        },
+        {
+          ...base,
+          day: "2026-09-05",
+          outputTokens: 0,
+          cacheWriteInputTokens: 1_000_000,
+          cacheWrite1hInputTokens: 1_000_000,
+        },
+      ],
+    });
+    expect(result.map((entry) => entry.cost)).toEqual([5, 8]);
+  });
+
   it("uses each day's effective models rather than a lifetime blended rate", () => {
     const result = dailyUsageCost(
       {

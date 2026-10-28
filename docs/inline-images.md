@@ -66,7 +66,7 @@ Markdown image components and their paragraph/list/link ancestors retain their R
 
 ## Claude prompt lifecycle
 
-Cafe uses the pinned `@anthropic-ai/claude-agent-sdk` 0.3.308's supported preset append:
+Cafe uses the pinned `@anthropic-ai/claude-agent-sdk` 0.3.311's supported preset append:
 
 ```ts
 systemPrompt: {

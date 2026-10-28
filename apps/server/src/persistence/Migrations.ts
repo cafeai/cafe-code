@@ -124,6 +124,7 @@ import Migration0099 from "./Migrations/099_UsageAndCompactionReconciliation.ts"
 import Migration0100 from "./Migrations/100_GlideThreadPreferences.ts";
 import Migration0101 from "./Migrations/101_GlideDesktopPermission.ts";
 import Migration0102 from "./Migrations/102_GlideStopAll.ts";
+import Migration0103 from "./Migrations/103_UsageCacheDurations.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -242,6 +243,7 @@ export const migrationEntries = [
   [100, "GlideThreadPreferences", Migration0100],
   [101, "GlideDesktopPermission", Migration0101],
   [102, "GlideStopAll", Migration0102],
+  [103, "UsageCacheDurations", Migration0103],
 ] as const;
 
 export const makeMigrationLoader = (

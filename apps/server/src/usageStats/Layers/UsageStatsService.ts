@@ -85,6 +85,8 @@ const isNominalSqlError = (error: unknown): error is PersistenceSqlError =>
 
 type TokenCounts = Record<UsageTokenField, number> & {
   reportedCost?: { microusd: string; tokens: number } | undefined;
+  cacheWrite5mInputTokens?: number | undefined;
+  cacheWrite1hInputTokens?: number | undefined;
 };
 
 const zeroCounts = (): TokenCounts => ({
@@ -414,6 +416,12 @@ const makeUsageStatsService = Effect.gen(function* () {
       models.set(model, entry);
     }
     addCounts(entry, counts);
+    if (counts.cacheWrite5mInputTokens)
+      entry.cacheWrite5mInputTokens =
+        (entry.cacheWrite5mInputTokens ?? 0) + counts.cacheWrite5mInputTokens;
+    if (counts.cacheWrite1hInputTokens)
+      entry.cacheWrite1hInputTokens =
+        (entry.cacheWrite1hInputTokens ?? 0) + counts.cacheWrite1hInputTokens;
     addReportedCost(entry, counts);
     tokenBreakdownSnapshotDirty = true;
     if (day !== undefined) {
@@ -433,6 +441,12 @@ const makeUsageStatsService = Effect.gen(function* () {
         dailyModels.set(model, dailyCounts);
       }
       addCounts(dailyCounts, counts);
+      if (counts.cacheWrite5mInputTokens)
+        dailyCounts.cacheWrite5mInputTokens =
+          (dailyCounts.cacheWrite5mInputTokens ?? 0) + counts.cacheWrite5mInputTokens;
+      if (counts.cacheWrite1hInputTokens)
+        dailyCounts.cacheWrite1hInputTokens =
+          (dailyCounts.cacheWrite1hInputTokens ?? 0) + counts.cacheWrite1hInputTokens;
       addReportedCost(dailyCounts, counts);
       tokenBreakdownDaySnapshotDirty = true;
     }
@@ -517,6 +531,8 @@ const makeUsageStatsService = Effect.gen(function* () {
       for (const row of rows) {
         const counts = zeroCounts();
         for (const field of USAGE_TOKEN_FIELDS) counts[field] = row[field];
+        counts.cacheWrite5mInputTokens = row.cacheWrite5mInputTokens ?? 0;
+        counts.cacheWrite1hInputTokens = row.cacheWrite1hInputTokens ?? 0;
         if (row.reportedCost !== undefined) counts.reportedCost = row.reportedCost;
         addTokenBreakdownTotal(row.provider, row.model, counts, row.day);
       }

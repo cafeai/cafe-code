@@ -339,7 +339,7 @@
   },
   "About partial estimate": {
     "message": "About partial estimate",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:839"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:855"]
   },
   "About reloading": {
     "message": "About reloading",
@@ -407,11 +407,11 @@
   },
   "About time spent generating": {
     "message": "About time spent generating",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:973"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:989"]
   },
   "About unattributed usage": {
     "message": "About unattributed usage",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1015"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1031"]
   },
   "About unsandboxed checks": {
     "message": "About unsandboxed checks",
@@ -1343,7 +1343,7 @@
   },
   "Axiom reports settled costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.": {
     "message": "Axiom reports settled costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:931"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:947"]
   },
   "Axiom verification": {
     "message": "Axiom verification",
@@ -1578,6 +1578,10 @@
     "message": "Cache writes",
     "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:674"]
   },
+  "Cache-write duration is unknown for {tokens} tokens; the estimate uses the regular cache-write rate for those tokens.": {
+    "message": "Cache-write duration is unknown for {tokens} tokens; the estimate uses the regular cache-write rate for those tokens.",
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:802"]
+  },
   "Cached attestation report": {
     "message": "Cached attestation report",
     "locations": ["apps/web/src/components/chat/AxiomSecurityControl.tsx:247"]
@@ -1586,7 +1590,7 @@
     "message": "Cached input",
     "locations": [
       "apps/web/src/components/settings/UsageCostSection.tsx:657",
-      "apps/web/src/components/settings/UsageCostSection.tsx:896"
+      "apps/web/src/components/settings/UsageCostSection.tsx:912"
     ]
   },
   "Cafe Code": {
@@ -2254,6 +2258,10 @@
   "Claude commands unavailable. Reopen to retry, or type one.": {
     "message": "Claude commands unavailable. Reopen to retry, or type one.",
     "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4092"]
+  },
+  "Claude estimates cannot account for provider-side custom pricing or fallback after a refusal.": {
+    "message": "Claude estimates cannot account for provider-side custom pricing or fallback after a refusal.",
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:786"]
   },
   "Claude home folder": {
     "message": "Claude home folder",
@@ -3337,20 +3345,20 @@
       "apps/web/src/components/settings/UsageCostSection.tsx:700",
       "apps/web/src/components/settings/UsageCostSection.tsx:767",
       "apps/web/src/components/settings/UsageCostSection.tsx:78",
-      "apps/web/src/components/settings/UsageCostSection.tsx:961"
+      "apps/web/src/components/settings/UsageCostSection.tsx:977"
     ]
   },
   "Cost (USD)": {
     "message": "Cost (USD)",
     "locations": [
-      "apps/web/src/components/settings/UsageCostSection.tsx:1152",
+      "apps/web/src/components/settings/UsageCostSection.tsx:1168",
       "apps/web/src/components/settings/UsageCostSection.tsx:766",
       "apps/web/src/components/settings/settingsSearchIndex.ts:661"
     ]
   },
   "Cost quality": {
     "message": "Cost quality",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1085"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1101"]
   },
   "Could not add provider": {
     "message": "Could not add provider",
@@ -4064,7 +4072,7 @@
   },
   "Daily cost": {
     "message": "Daily cost",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:820"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:836"]
   },
   "Daily generating time for the last few months; brighter cells mean more time.": {
     "message": "Daily generating time for the last few months; brighter cells mean more time.",
@@ -4076,7 +4084,7 @@
   },
   "Daily tokens": {
     "message": "Daily tokens",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:821"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:837"]
   },
   "Daily usage: {value0}": {
     "message": "Daily usage: {value0}",
@@ -5242,7 +5250,7 @@
   },
   "Estimates from recorded usage; may be incomplete.<slot1></slot1>": {
     "message": "Estimates from recorded usage; may be incomplete.<slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1127"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1143"]
   },
   "Event receipt ID": {
     "message": "Event receipt ID",
@@ -7216,7 +7224,7 @@
       "apps/web/src/components/chat/AxiomSecurityControl.tsx:257",
       "apps/web/src/components/chat/ScheduledFollowupEditor.tsx:707",
       "apps/web/src/components/chat/ScheduledFollowupNotices.tsx:332",
-      "apps/web/src/components/settings/UsageCostSection.tsx:958"
+      "apps/web/src/components/settings/UsageCostSection.tsx:974"
     ]
   },
   "Model Picker: Jump: {index}": {
@@ -7497,7 +7505,7 @@
   },
   "Net cache savings": {
     "message": "Net cache savings",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:922"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:938"]
   },
   "Network access": {
     "message": "Network access",
@@ -8008,7 +8016,7 @@
   },
   "No usage by model in this period.": {
     "message": "No usage by model in this period.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:798"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:814"]
   },
   "No usage in this period": {
     "message": "No usage in this period",
@@ -8116,7 +8124,7 @@
     "message": "Not recorded",
     "locations": [
       "apps/web/src/components/settings/UsageCostSection.tsx:296",
-      "apps/web/src/components/settings/UsageCostSection.tsx:926"
+      "apps/web/src/components/settings/UsageCostSection.tsx:942"
     ]
   },
   "Not signed in": {
@@ -8145,7 +8153,7 @@
   },
   "Nothing recorded in this period.": {
     "message": "Nothing recorded in this period.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:993"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1009"]
   },
   "Notification permission was denied. Allow notifications for this site in your browser settings, then try again.": {
     "message": "Notification permission was denied. Allow notifications for this site in your browser settings, then try again.",
@@ -8625,7 +8633,7 @@
     "locations": [
       "apps/web/src/components/atrium/TaskAtrium.tsx:1385",
       "apps/web/src/components/settings/UsageCostSection.tsx:680",
-      "apps/web/src/components/settings/UsageCostSection.tsx:907"
+      "apps/web/src/components/settings/UsageCostSection.tsx:923"
     ]
   },
   "Output not recorded.": {
@@ -8755,7 +8763,7 @@
   },
   "Partial estimate<slot1></slot1>": {
     "message": "Partial estimate<slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:834"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:850"]
   },
   "Partial read": {
     "message": "Partial read",
@@ -8837,7 +8845,7 @@
   },
   "Per-model time is unavailable on this server.": {
     "message": "Per-model time is unavailable on this server.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1054"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1070"]
   },
   "Permission duration": {
     "message": "Permission duration",
@@ -9058,7 +9066,7 @@
   },
   "Priced": {
     "message": "Priced",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1090"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1106"]
   },
   "Priced share covers recorded tokens only; interrupted requests may not report all usage, so this is not a complete billing record. Codex subagent usage includes only observed increments after a baseline; earlier child usage is not backfilled, and child tokens do not increase the main chat’s context-window meter.": {
     "message": "Priced share covers recorded tokens only; interrupted requests may not report all usage, so this is not a complete billing record. Codex subagent usage includes only observed increments after a baseline; earlier child usage is not backfilled, and child tokens do not increase the main chat’s context-window meter.",
@@ -9120,7 +9128,7 @@
   },
   "Processed tokens": {
     "message": "Processed tokens",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:889"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:905"]
   },
   "Processed: {tokens}": {
     "message": "Processed: {tokens}",
@@ -9726,7 +9734,7 @@
   },
   "Recorded costs and estimates may be incomplete.<slot1></slot1>": {
     "message": "Recorded costs and estimates may be incomplete.<slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1122"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1138"]
   },
   "Recycle Bin emptied": {
     "message": "Recycle Bin emptied",
@@ -11293,7 +11301,7 @@
   },
   "Show all {value0} models": {
     "message": "Show all {value0} models",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1072"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1088"]
   },
   "Show an image in the sidebar.": {
     "message": "Show an image in the sidebar.",
@@ -11332,7 +11340,7 @@
   },
   "Show fewer models": {
     "message": "Show fewer models",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1071"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1087"]
   },
   "Show full error": {
     "message": "Show full error",
@@ -13133,7 +13141,7 @@
   },
   "Time recorded since ": {
     "message": "Time recorded since ",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1050"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1066"]
   },
   "Time spent generating": {
     "message": "Time spent generating",
@@ -13141,7 +13149,7 @@
   },
   "Time spent generating<slot1></slot1>": {
     "message": "Time spent generating<slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:968"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:984"]
   },
   "Time unavailable": {
     "message": "Time unavailable",
@@ -13211,7 +13219,7 @@
     "locations": [
       "apps/web/src/components/chat/ThreadGoalControl.tsx:390",
       "apps/web/src/components/settings/UsageCostSection.tsx:84",
-      "apps/web/src/components/settings/UsageCostSection.tsx:964"
+      "apps/web/src/components/settings/UsageCostSection.tsx:980"
     ]
   },
   "Tokens generated": {
@@ -13537,7 +13545,7 @@
   },
   "Unattributed usage": {
     "message": "Unattributed usage",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1012"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1028"]
   },
   "Unavailable": {
     "message": "Unavailable",
@@ -13567,7 +13575,7 @@
     "message": "Uncached input",
     "locations": [
       "apps/web/src/components/settings/UsageCostSection.tsx:663",
-      "apps/web/src/components/settings/UsageCostSection.tsx:902"
+      "apps/web/src/components/settings/UsageCostSection.tsx:918"
     ]
   },
   "Uncommitted changes": {
@@ -13632,8 +13640,8 @@
   "Unpriced": {
     "message": "Unpriced",
     "locations": [
-      "apps/web/src/components/settings/UsageCostSection.tsx:1027",
-      "apps/web/src/components/settings/UsageCostSection.tsx:1103",
+      "apps/web/src/components/settings/UsageCostSection.tsx:1043",
+      "apps/web/src/components/settings/UsageCostSection.tsx:1119",
       "apps/web/src/components/settings/UsageCostSection.tsx:212",
       "apps/web/src/components/settings/UsageCostSection.tsx:278"
     ]
@@ -13901,7 +13909,7 @@
   },
   "Usage recorded without a provider or model, such as older history. It''s counted but not priced.": {
     "message": "Usage recorded without a provider or model, such as older history. It''s counted but not priced.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1017"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1033"]
   },
   "Usage reset result": {
     "message": "Usage reset result",
@@ -13913,7 +13921,7 @@
   },
   "Usage without a daily model rate is left out of the daily cost.": {
     "message": "Usage without a daily model rate is left out of the daily cost.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:841"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:857"]
   },
   "Usage · all chats": {
     "message": "Usage · all chats",
@@ -16325,9 +16333,9 @@
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1393",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1495",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1509",
-      "apps/web/src/components/settings/UsageCostSection.tsx:1039",
-      "apps/web/src/components/settings/UsageCostSection.tsx:1094",
-      "apps/web/src/components/settings/UsageCostSection.tsx:1107",
+      "apps/web/src/components/settings/UsageCostSection.tsx:1055",
+      "apps/web/src/components/settings/UsageCostSection.tsx:1110",
+      "apps/web/src/components/settings/UsageCostSection.tsx:1123",
       "apps/web/src/components/settings/UsageCostSection.tsx:265"
     ]
   },
