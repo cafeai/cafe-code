@@ -314,36 +314,120 @@ it("requires Full access, then opens setup on first click without enabling or op
   await expect.element(button()).toHaveAttribute("aria-pressed", "false");
 });
 
-it("marks each permission complete as native polling confirms it, then enables the exact chat", async () => {
-  fixture.control
-    .mockResolvedValueOnce(missing)
-    .mockResolvedValueOnce(missing)
-    .mockResolvedValueOnce({ ...missing, accessibility: true })
-    .mockResolvedValueOnce({ ...missing, accessibility: true, screenRecording: true })
-    .mockResolvedValueOnce({
-      ...missing,
-      accessibility: true,
-      screenRecording: true,
-      enabled: true,
-    })
-    .mockResolvedValue({ ...missing, accessibility: true, screenRecording: true, enabled: true });
-  await render(
-    <GlideControl environmentId={environmentId} threadId={threadId} runtimeMode="full-access" />,
+it("marks each permission complete as native polling confirms it, then enables the exact chat", async ({
+  signal,
+  onTestFinished,
+}) => {
+  // Reads observe a stable native snapshot. A focus/status/activity poll must
+  // neither consume a future permission grant nor stand in for user consent.
+  let nativeStatus: GlideControlResult = { ...missing };
+  const replies = new Set<Promise<GlideControlResult>>();
+  fixture.control.mockImplementation(
+    (input: { action: string; threadId?: ThreadId; enabled?: boolean }) => {
+      if (input.action === "set-enabled" && input.threadId === threadId && input.enabled === true)
+        nativeStatus = { ...nativeStatus, enabled: true };
+      const reply = Promise.resolve({ ...nativeStatus });
+      replies.add(reply);
+      void reply.then(() => replies.delete(reply));
+      return reply;
+    },
   );
-  await expect.element(button()).toBeEnabled();
-  await button().click();
-  await expect.element(dialog()).toBeVisible();
-  await expect.poll(() => permissionState("accessibility"), { timeout: 5_000 }).toBe("granted");
-  await expect.poll(() => permissionState("screen-recording")).toBe("missing");
-  await expect.poll(() => permissionState("screen-recording"), { timeout: 5_000 }).toBe("granted");
-  await expect.element(page.getByText("Computer use is ready")).toBeVisible();
-  const statusReads = fixture.control.mock.calls.length;
-  await page.getByRole("button", { name: "Turn on for this chat" }).click();
-  await expect.element(dialog()).not.toBeInTheDocument();
-  await expect.element(button()).toHaveAttribute("aria-pressed", "true");
-  expect(fixture.control.mock.calls.slice(statusReads).map(([input]) => input)).toEqual([
-    { action: "set-enabled", threadId, enabled: true },
-  ]);
+
+  let retired = false;
+  let rendering: ReturnType<typeof render> | undefined;
+  let cleanupPromise: Promise<void> | undefined;
+  const pending = new Set<Promise<unknown>>();
+  const assertActive = () => {
+    if (retired || signal.aborted) throw new Error("The Glide control fixture was retired.");
+  };
+  const cleanup = () => {
+    retired = true;
+    return (cleanupPromise ??= (async () => {
+      try {
+        const view = await rendering?.catch(() => undefined);
+        // Keep native input targets mounted until their original operations
+        // settle, then retire polling before the shared mock can be reset.
+        await Promise.allSettled(pending);
+        await view?.unmount();
+        await Promise.allSettled(replies);
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+    })());
+  };
+  const onAbort = () => {
+    void cleanup().catch(() => undefined);
+  };
+  const owned = async <T,>(operation: () => PromiseLike<T>): Promise<T> => {
+    assertActive();
+    const result = Promise.resolve(operation());
+    pending.add(result);
+    try {
+      const value = await result;
+      assertActive();
+      return value;
+    } finally {
+      pending.delete(result);
+    }
+  };
+  activeScopedCleanup = cleanup;
+  onTestFinished(cleanup);
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) onAbort();
+
+  let bodyFailed = false;
+  try {
+    assertActive();
+    rendering = render(
+      <GlideControl environmentId={environmentId} threadId={threadId} runtimeMode="full-access" />,
+    );
+    await owned(() => rendering!);
+    await owned(() => expect.element(button()).toBeEnabled());
+    await owned(() => button().click());
+    await owned(() => expect.element(dialog()).toBeVisible());
+    expect(permissionState("accessibility")).toBe("missing");
+    expect(permissionState("screen-recording")).toBe("missing");
+    nativeStatus = { ...nativeStatus, accessibility: true };
+    await owned(() =>
+      expect.poll(() => permissionState("accessibility"), { timeout: 5_000 }).toBe("granted"),
+    );
+    await owned(() => expect.poll(() => permissionState("screen-recording")).toBe("missing"));
+    // Only after observing the first independent grant do later native polls
+    // receive the second grant. No scheduling speed can skip the missing state.
+    nativeStatus = { ...nativeStatus, screenRecording: true };
+    await owned(() =>
+      expect.poll(() => permissionState("screen-recording"), { timeout: 5_000 }).toBe("granted"),
+    );
+    await owned(() => expect.element(page.getByText("Computer use is ready")).toBeVisible());
+    expect(fixture.control.mock.calls.some(([input]) => input.action === "set-enabled")).toBe(
+      false,
+    );
+    await owned(() => page.getByRole("button", { name: "Turn on for this chat" }).click());
+    await owned(() => expect.element(dialog()).not.toBeInTheDocument());
+    await owned(() => expect.element(button()).toHaveAttribute("aria-pressed", "true"));
+    // Status/activity reads can legitimately interleave with the native click.
+    // Preserve exact ordered mutation authority instead of a last-call position.
+    expect(
+      fixture.control.mock.calls
+        .map(([input]) => input)
+        .filter((input) => input.action !== "status" && input.action !== "activity"),
+    ).toEqual([{ action: "set-enabled", threadId, enabled: true }]);
+    for (const [input] of fixture.control.mock.calls) {
+      if (input.action === "status" || input.action === "activity")
+        expect(input).toEqual({ action: input.action, threadId });
+    }
+  } catch (failure) {
+    bodyFailed = true;
+    throw failure;
+  } finally {
+    try {
+      await cleanup();
+    } catch (failure) {
+      // afterEach/onTestFinished retain and join a failed exact cleanup; do not
+      // replace the original assertion failure with a second cleanup error.
+      if (!bodyFailed) throw failure;
+    }
+  }
 });
 
 it("stops polling when setup is dismissed and leaves the chat off", async () => {
