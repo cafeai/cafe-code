@@ -209,7 +209,8 @@ function createAmbianceFixture(context: TestContext): AmbianceFixture {
           recorder.method,
         );
         if (
-          current?.value !== recorder.wrapper ||
+          current === undefined ||
+          current.value !== recorder.wrapper ||
           current.configurable !== recorder.original.configurable ||
           current.enumerable !== recorder.original.enumerable ||
           current.writable !== recorder.original.writable
