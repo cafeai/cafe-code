@@ -83,6 +83,9 @@ then closes each desktop/touch, ordinary-motion, reduced-motion, Mermaid and
 export invocation before opening the next. The isolated MCP bridge and inline
 visualization qualification retain their ordering. Install Chromium first with
 the web workspace's `test:browser:install` command if it is absent locally.
+The complete local Mermaid family group also serializes its files, preserving
+all cases, native contexts and original deadlines; the canonical CI plan remains
+unchanged.
 
 Both runners write timing-only JSON to `.logs/test-timings/` and print the
 slowest files. CI retains that exact directory on success or failure. Reports

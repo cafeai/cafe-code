@@ -2,22 +2,20 @@ import "../index.css";
 import { describe, expect, it } from "vitest";
 import { installMermaidFamilyCleanup } from "./mermaidFamilyCleanup.test.fixture";
 import { MERMAID_FAMILY_FIXTURES } from "./mermaidFamilies.test.fixture";
-import { admitsParsedFamily } from "./mermaidFamilyProbe.test.fixture";
+import { admitsParsedFamily, ownedParsedFamilyProbe } from "./mermaidFamilyProbe.test.fixture";
 
 installMermaidFamilyCleanup();
 
 describe("new family pre-layout security admission", () => {
-  it("does not accept an unfamiliar info version database", async () => {
-    expect(await admitsParsedFamily("info")).toBe(true);
+  it("does not accept an unfamiliar info version database", async ({ signal }) => {
+    const probe = ownedParsedFamilyProbe(signal);
+    expect(await probe("info")).toBe(true);
     expect(
-      await admitsParsedFamily(
-        "info",
-        "diagram.db = { ...diagram.db, getVersion: () => '13.0.0' }; ",
-      ),
+      await probe("info", "diagram.db = { ...diagram.db, getVersion: () => '13.0.0' }; "),
     ).toBe(false);
   });
 
-  it.each([
+  it.for([
     {
       family: "journey",
       mutation: "diagram.db.getTasks = () => null;",
@@ -134,15 +132,20 @@ describe("new family pre-layout security admission", () => {
           "const native = diagram.db.getRules.bind(diagram.db); diagram.db.getRules = () => { const value = native(); value[0].definition = { type: 'sequence', elements: [] }; value[0].definition.elements = [value[0].definition]; return value; };",
       }),
     ),
-  ])("fails closed before layout for changed $family parsed data", async ({ family, mutation }) => {
-    const fixture = MERMAID_FAMILY_FIXTURES.find((entry) => entry.family === family)!;
-    expect(await admitsParsedFamily(fixture.source)).toBe(true);
-    expect(await admitsParsedFamily(fixture.source, mutation)).toBe(false);
-  });
+  ])(
+    "fails closed before layout for changed $family parsed data",
+    async ({ family, mutation }, { signal }) => {
+      const probe = ownedParsedFamilyProbe(signal);
+      const fixture = MERMAID_FAMILY_FIXTURES.find((entry) => entry.family === family)!;
+      expect(await probe(fixture.source)).toBe(true);
+      expect(await probe(fixture.source, mutation)).toBe(false);
+    },
+  );
 
-  it.each(["swimlane-beta", "agentflow-beta", "usecase-beta"])(
+  it.for(["swimlane-beta", "agentflow-beta", "usecase-beta"])(
     "refuses aggregate rank amplification in the real %s parsed contract",
-    async (family) => {
+    async (family, { signal }) => {
+      const probe = ownedParsedFamilyProbe(signal);
       const fixture = MERMAID_FAMILY_FIXTURES.find((entry) => entry.family === family)!;
       const getter = family === "usecase-beta" ? "getRelationships" : "getData";
       const edges = family === "usecase-beta" ? "value" : "value.edges";
@@ -151,8 +154,8 @@ describe("new family pre-layout security admission", () => {
       const mutation = `const native = diagram.db.${getter}.bind(diagram.db);
         diagram.db.${getter} = () => { const value = native(); const edges = ${edges};
         edges[0].minlen = 125; edges[1].minlen = 126; return value; };`;
-      expect(await admitsParsedFamily(fixture.source)).toBe(true);
-      expect(await admitsParsedFamily(fixture.source, mutation)).toBe(false);
+      expect(await probe(fixture.source)).toBe(true);
+      expect(await probe(fixture.source, mutation)).toBe(false);
     },
   );
 

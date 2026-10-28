@@ -139,6 +139,27 @@ export async function admitsParsedFamily(
   });
 }
 
+/** Bind every probe in a test case to that case's own retirement signal. */
+export function ownedParsedFamilyProbe(signal: AbortSignal) {
+  return (
+    source: string,
+    parsedMutation = "",
+    parserFixtureSource?: string,
+    expectedNativeStateCalls?: number,
+    expectedNativeParserCalls?: number,
+  ) =>
+    admitsParsedFamily(
+      source,
+      parsedMutation,
+      parserFixtureSource,
+      expectedNativeStateCalls,
+      expectedNativeParserCalls,
+      undefined,
+      true,
+      signal,
+    );
+}
+
 /** Observe the production output adapters after real native parsing and
  * rendering. Mutations below are static synthetic test code, never received
  * diagram source. The ordinary opaque document, CSP and one-use port remain
@@ -146,7 +167,9 @@ export async function admitsParsedFamily(
 export async function renderNativeFamilyOutput(
   family: "eventmodeling" | "info",
   outputMutation = "",
+  signal?: AbortSignal,
 ): Promise<string | null> {
+  if (signal?.aborted) throw new Error("Family output probe fixture retired");
   const source =
     family === "info"
       ? "info"
@@ -187,6 +210,7 @@ export async function renderNativeFamilyOutput(
     source,
     theme: "light",
     kind: "Native diagram-output probe",
+    ...(signal ? { signal } : {}),
     bootstrapObservation: { nonce, admitSourceOnReady: true },
     invocation: outputMutation ? "mutation" : "baseline",
     readResult: (data) => {

@@ -8,7 +8,11 @@ import {
   runMermaidProbe,
   type MermaidProbeBootstrapPhase,
 } from "./mermaidProbe.test.fixture";
-import { admitsParsedFamily } from "./mermaidFamilyProbe.test.fixture";
+import {
+  admitsParsedFamily,
+  ownedParsedFamilyProbe,
+  renderNativeFamilyOutput,
+} from "./mermaidFamilyProbe.test.fixture";
 import { createMermaidFamilyProbeDocument } from "./mermaidFamilyDocument.test.fixture";
 import { installMermaidFamilyCleanup } from "./mermaidFamilyCleanup.test.fixture";
 
@@ -84,6 +88,20 @@ function expectRetiredProbe(frame: HTMLIFrameElement, ports: readonly unknown[])
 }
 
 describe("Mermaid family probe qualification", () => {
+  it("rejects a retired test owner before either family probe allocates a frame", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const create = vi.spyOn(document, "createElement");
+    const channels = vi.spyOn(globalThis, "MessageChannel");
+    const probe = ownedParsedFamilyProbe(controller.signal);
+    await expect(probe("info")).rejects.toThrow("Family admission probe fixture retired");
+    await expect(renderNativeFamilyOutput("info", "", controller.signal)).rejects.toThrow(
+      "Family output probe fixture retired",
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(channels).not.toHaveBeenCalled();
+  });
+
   it.for(["before setup", "during observer registration"] as const)(
     "rejects an exact owner aborted %s without appending a frame",
     async (timing, { onTestFinished }) => {
@@ -469,7 +487,7 @@ describe("Mermaid family probe qualification", () => {
     );
   });
 
-  it.each([
+  it.for([
     {
       name: "observes the initialized native receiver while its exact load callback is withheld",
       admitSourceOnReady: false,
@@ -478,7 +496,7 @@ describe("Mermaid family probe qualification", () => {
       name: "admits the initialized native receiver without releasing its held generic load callback",
       admitSourceOnReady: true,
     },
-  ])("$name", async ({ admitSourceOnReady }) => {
+  ])("$name", async ({ admitSourceOnReady }, { signal }) => {
     const phases: MermaidProbeBootstrapPhase[] = [];
     let markReady: (() => void) | undefined;
     const ready = new Promise<void>((resolve) => {
@@ -514,6 +532,7 @@ describe("Mermaid family probe qualification", () => {
         if (phase === "fixture-ready") markReady?.();
       },
       admitSourceOnReady,
+      signal,
     );
     let released = false;
     try {
@@ -561,7 +580,7 @@ describe("Mermaid family probe qualification", () => {
     }
   });
 
-  it.each([
+  it.for([
     {
       name: "ignores foreign, stale and malformed startup observations before the real load",
       admitSourceOnReady: false,
@@ -570,7 +589,7 @@ describe("Mermaid family probe qualification", () => {
       name: "refuses generic load and unqualified terminal markers as Family source authority",
       admitSourceOnReady: true,
     },
-  ])("$name", async ({ admitSourceOnReady }) => {
+  ])("$name", async ({ admitSourceOnReady }, { signal }) => {
     const phases: MermaidProbeBootstrapPhase[] = [];
     const send = vi.spyOn(MessagePort.prototype, "postMessage");
     const close = vi.spyOn(MessagePort.prototype, "close");
@@ -603,6 +622,7 @@ describe("Mermaid family probe qualification", () => {
       undefined,
       (phase) => phases.push(phase),
       admitSourceOnReady,
+      signal,
     );
     const foreignPort = new MessageChannel();
     const ownedWindow = probe.frame.contentWindow;
@@ -719,7 +739,9 @@ describe("Mermaid family probe qualification", () => {
     }
   });
 
-  it("preserves native progress across synchronous reservation and queued duplicate startup callbacks", async () => {
+  it("preserves native progress across synchronous reservation and queued duplicate startup callbacks", async ({
+    signal,
+  }) => {
     const close = vi.spyOn(MessagePort.prototype, "close");
     const nativeSend = MessagePort.prototype.postMessage;
     const reenter: { invoke?: () => void } = {};
@@ -747,6 +769,7 @@ describe("Mermaid family probe qualification", () => {
       undefined,
       () => undefined,
       true,
+      signal,
     );
     const load = probe.frame.onload;
     const ownedWindow = probe.frame.contentWindow;
@@ -800,7 +823,7 @@ describe("Mermaid family probe qualification", () => {
     }
   });
 
-  it.each([
+  it.for([
     {
       name: "refuses an exact queued startup marker at the unchanged absolute deadline",
       admitSourceOnReady: false,
@@ -816,7 +839,7 @@ describe("Mermaid family probe qualification", () => {
       admitSourceOnReady: true,
       terminal: true,
     },
-  ])("$name", async ({ admitSourceOnReady, terminal }) => {
+  ])("$name", async ({ admitSourceOnReady, terminal }, { signal }) => {
     const now = vi.spyOn(performance, "now").mockReturnValue(0);
     const phases: MermaidProbeBootstrapPhase[] = [];
     const close = vi.spyOn(MessagePort.prototype, "close");
@@ -826,6 +849,7 @@ describe("Mermaid family probe qualification", () => {
       undefined,
       (phase) => phases.push(phase),
       admitSourceOnReady,
+      signal,
     );
     const load = probe.frame.onload;
     probe.frame.onload = null;
@@ -863,15 +887,17 @@ describe("Mermaid family probe qualification", () => {
     expectRetiredProbe(probe.frame, close.mock.contexts);
   });
 
-  it("uses fresh frames, nonces, IDs and ports for consecutive exact source requests", async () => {
+  it("uses fresh frames, nonces, IDs and ports for consecutive exact source requests", async ({
+    signal,
+  }) => {
     const close = vi.spyOn(MessagePort.prototype, "close");
     const reply = `port.postMessage({ id, svg: ${JSON.stringify(probeSentinel)} });`;
-    const first = startSyntheticProbe(reply, "first synthetic source");
+    const first = startSyntheticProbe(reply, "first synthetic source", undefined, false, signal);
     expect(first.frame.getAttribute("sandbox")).toBe("allow-scripts");
     expect(await first.result).toBe(true);
     const firstPorts = close.mock.contexts.slice();
     expectRetiredProbe(first.frame, firstPorts);
-    const second = startSyntheticProbe(reply, "second synthetic source");
+    const second = startSyntheticProbe(reply, "second synthetic source", undefined, false, signal);
     expect(await second.result).toBe(true);
     const secondPorts = close.mock.contexts.slice(2);
     expectRetiredProbe(second.frame, secondPorts);
@@ -881,14 +907,20 @@ describe("Mermaid family probe qualification", () => {
     for (const port of secondPorts) expect(firstPorts).not.toContain(port);
   });
 
-  it("accepts only an explicit content-free refusal as a negative result", async () => {
+  it("accepts only an explicit content-free refusal as a negative result", async ({ signal }) => {
     const close = vi.spyOn(MessagePort.prototype, "close");
-    const probe = startSyntheticProbe("port.postMessage({ id, failed: true });");
+    const probe = startSyntheticProbe(
+      "port.postMessage({ id, failed: true });",
+      undefined,
+      undefined,
+      false,
+      signal,
+    );
     expect(await probe.result).toBe(false);
     expectRetiredProbe(probe.frame, close.mock.contexts);
   });
 
-  it.each([
+  it.for([
     ["a matching ID without a result", "{ id }"],
     ["a false failure flag", "{ id, failed: false }"],
     ["a non-string SVG", "{ id, svg: 17 }"],
@@ -898,19 +930,29 @@ describe("Mermaid family probe qualification", () => {
       `{ id, failed: true, svg: ${JSON.stringify(probeSentinel)} }`,
     ],
     ["private failure fields", "{ id, failed: true, error: 'private synthetic parser content' }"],
-  ])("rejects %s and retires its exact probe", async (_name, response) => {
+  ] as const)("rejects %s and retires its exact probe", async ([_name, response], { signal }) => {
     const close = vi.spyOn(MessagePort.prototype, "close");
-    const probe = startSyntheticProbe(`port.postMessage(${response});`);
+    const probe = startSyntheticProbe(
+      `port.postMessage(${response});`,
+      undefined,
+      undefined,
+      false,
+      signal,
+    );
     await expect(probe.result).rejects.toThrow(
       "received an invalid result (baseline; phase request-sent)",
     );
     expectRetiredProbe(probe.frame, close.mock.contexts);
   });
 
-  it("reports only a fixed phase received on the exact probe port", async () => {
+  it("reports only a fixed phase received on the exact probe port", async ({ signal }) => {
     const close = vi.spyOn(MessagePort.prototype, "close");
     const probe = startSyntheticProbe(
       "port.postMessage({ id, probePhase: 'parser-entered' }); port.postMessage({ id, failed: false });",
+      undefined,
+      undefined,
+      false,
+      signal,
     );
     await expect(probe.result).rejects.toThrow(
       "received an invalid result (baseline; phase parser-entered)",
@@ -918,17 +960,25 @@ describe("Mermaid family probe qualification", () => {
     expectRetiredProbe(probe.frame, close.mock.contexts);
   });
 
-  it("keeps repeated native phase observations separate from the parser-count oracle", async () => {
+  it("keeps repeated native phase observations separate from the parser-count oracle", async ({
+    signal,
+  }) => {
     const close = vi.spyOn(MessagePort.prototype, "close");
     const probe = startSyntheticProbe(
       `for (const probePhase of ['parser-entered', 'parser-returned', 'parser-entered', 'parser-returned', 'render-entered', 'render-returned']) port.postMessage({ id, probePhase });
        port.postMessage({ id, failed: true });`,
+      undefined,
+      undefined,
+      false,
+      signal,
     );
     expect(await probe.result).toBe(false);
     expectRetiredProbe(probe.frame, close.mock.contexts);
   });
 
-  it("refuses a queued valid reply at the absolute deadline before timer delivery", async () => {
+  it("refuses a queued valid reply at the absolute deadline before timer delivery", async ({
+    signal,
+  }) => {
     // Only this synthetic peer's monotonic clock is controlled. Its actual
     // ten-second callback stays pending, proving that a queued result cannot
     // gain extra allowance merely by being dispatched before that callback.
@@ -953,6 +1003,10 @@ describe("Mermaid family probe qualification", () => {
     });
     const probe = startSyntheticProbe(
       `port.postMessage({ id, svg: ${JSON.stringify(probeSentinel)} });`,
+      undefined,
+      undefined,
+      false,
+      signal,
     );
     await expect(probe.result).rejects.toThrow("did not reply (baseline; phase request-sent)");
     expectRetiredProbe(probe.frame, close.mock.contexts);
@@ -963,7 +1017,9 @@ describe("Mermaid family probe qualification", () => {
     expect(clear).toHaveBeenCalledWith(timer.value);
   });
 
-  it("fences queued load and response callbacks after a source-send exception", async () => {
+  it("fences queued load and response callbacks after a source-send exception", async ({
+    signal,
+  }) => {
     const close = vi.spyOn(MessagePort.prototype, "close");
     const retired: { port?: MessagePort; onmessage: MessagePort["onmessage"] } = {
       onmessage: null,
@@ -977,6 +1033,10 @@ describe("Mermaid family probe qualification", () => {
     });
     const probe = startSyntheticProbe(
       `port.postMessage({ id, svg: ${JSON.stringify(probeSentinel)} });`,
+      undefined,
+      undefined,
+      false,
+      signal,
     );
     const queuedLoad = probe.frame.onload;
     await expect(probe.result).rejects.toThrow("send failed (baseline; phase frame-loaded)");
@@ -992,10 +1052,18 @@ describe("Mermaid family probe qualification", () => {
     expect(close).toHaveBeenCalledTimes(2);
   });
 
-  it("retires a frame error before load without transferring or sending source", async () => {
+  it("retires a frame error before load without transferring or sending source", async ({
+    signal,
+  }) => {
     const close = vi.spyOn(MessagePort.prototype, "close");
     const send = vi.spyOn(MessagePort.prototype, "postMessage");
-    const probe = startSyntheticProbe("port.postMessage({ id, failed: true });");
+    const probe = startSyntheticProbe(
+      "port.postMessage({ id, failed: true });",
+      undefined,
+      undefined,
+      false,
+      signal,
+    );
     const queuedLoad = probe.frame.onload;
     probe.frame.dispatchEvent(new Event("error"));
     await expect(probe.result).rejects.toThrow(
@@ -1006,24 +1074,40 @@ describe("Mermaid family probe qualification", () => {
     expectRetiredProbe(probe.frame, close.mock.contexts);
   });
 
-  it("retires a message deserialization error without accepting a negative result", async () => {
+  it("retires a message deserialization error without accepting a negative result", async ({
+    signal,
+  }) => {
     const close = vi.spyOn(MessagePort.prototype, "close");
     vi.spyOn(MessagePort.prototype, "postMessage").mockImplementation(function (this: MessagePort) {
       this.dispatchEvent(new MessageEvent("messageerror"));
     });
-    const probe = startSyntheticProbe("port.postMessage({ id, failed: true });");
+    const probe = startSyntheticProbe(
+      "port.postMessage({ id, failed: true });",
+      undefined,
+      undefined,
+      false,
+      signal,
+    );
     await expect(probe.result).rejects.toThrow("message failed (baseline; phase frame-loaded)");
     expectRetiredProbe(probe.frame, close.mock.contexts);
   });
 
-  it("keeps one ten-second allowance after construction and fences a late load", async () => {
+  it("keeps one ten-second allowance after construction and fences a late load", async ({
+    signal,
+  }) => {
     // Advance only the isolated helper's original timer. This is not a retry,
     // an increased native-renderer deadline or a browser/media override.
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const close = vi.spyOn(MessagePort.prototype, "close");
       const send = vi.spyOn(MessagePort.prototype, "postMessage");
-      const probe = startSyntheticProbe("port.postMessage({ id, failed: true });");
+      const probe = startSyntheticProbe(
+        "port.postMessage({ id, failed: true });",
+        undefined,
+        undefined,
+        false,
+        signal,
+      );
       const queuedLoad = probe.frame.onload;
       const rejected = expect(probe.result).rejects.toThrow(
         "did not reply (baseline; phase document-constructed)",

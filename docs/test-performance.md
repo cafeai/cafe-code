@@ -461,7 +461,9 @@ repository-identity tests retain the real resolver. Fresh databases and reactor
 scopes are not shared or cached.
 
 Mermaid family qualification is split by rendering, transport, parsed data,
-output and pre-parser allocation responsibilities. Each actual probe still
+output and pre-parser allocation responsibilities. Complete local qualification
+serializes these files with `--fileParallelism=false`, retaining the two-worker
+cap, all files and unchanged native budgets; CI scheduling remains unchanged. Each actual probe still
 mints its own nonce, invocation, opaque document, port and parser realm. Only
 immutable engine/receiver instrumentation segments are prepared once per
 isolated module; source, admission and render results are never reused.

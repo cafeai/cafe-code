@@ -265,6 +265,22 @@ sources unchanged; this test-lifetime ownership does not alter production
 admission, contexts, worker caps or deadlines. A DOM marker sweep is not evidence
 that an outstanding helper's callbacks and transferred ports have retired.
 
+## Local Mermaid family scheduling
+
+Complete local browser qualification admits the Mermaid family files serially
+with `--fileParallelism=false` while retaining the existing two-worker cap and
+every file. Probes retain their independent opaque documents and keep their
+original probe and outer deadlines, inputs and sandbox policy. The canonical CI
+browser plan is unchanged. A bootstrap deadline that expired before the first
+marker is an observed startup failure, not proof of its underlying cause.
+
+Parsed, allocation and native-output family cases capture their public test
+signal before the first probe; baseline and mutation invocations share that
+exact owner. Probe qualification cases retain their deliberate controller-owned
+cancellation scenarios. Retirement closes the exact frame, ports, timer and
+listeners and fences a later continuation before another native acquisition.
+The independent production rendering fixtures retain their existing lifetime.
+
 ## Native Mermaid family startup readiness
 
 The additional family probes construct fresh opaque documents containing the

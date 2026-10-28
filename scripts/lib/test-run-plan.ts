@@ -101,10 +101,12 @@ export function browserTestPlan(
             "Mermaid security",
             selection?.mermaidSecurityFiles ?? browserPolicy.mermaidSecurityFiles,
           ),
-          browser(
-            "Mermaid families",
-            selection?.mermaidFamilyFiles ?? browserPolicy.mermaidFamilyFiles,
-          ),
+          browser("Mermaid families", [
+            ...(selection?.mermaidFamilyFiles ?? browserPolicy.mermaidFamilyFiles),
+            // Local family files exercise independent native engines. Serialize
+            // their admission without changing the per-probe budgets or CI plan.
+            ...(completeLocal ? ["--fileParallelism=false"] : []),
+          ]),
           browser(
             "Diagram and table PNG",
             selection?.imageExportFiles ?? browserPolicy.imageExportFiles,

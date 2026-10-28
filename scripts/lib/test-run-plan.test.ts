@@ -31,7 +31,10 @@ describe("native test plans", () => {
     (platform) => {
       const steps = browserTestPlan(platform);
       const testSteps = steps.filter((step) => step.args.includes("test:browser"));
-      for (const step of testSteps) expect(step.args).toContain("--maxWorkers=2");
+      for (const step of testSteps) {
+        expect(step.args).toContain("--maxWorkers=2");
+        expect(step.args).not.toContain("--fileParallelism=false");
+      }
       const index = (selector: string) => steps.findIndex((step) => step.args.includes(selector));
       expect(index("--project=touch")).toBe(index("--project=desktop"));
       expect(index("--project=visualization-fluid-motion")).toBeGreaterThan(
@@ -61,6 +64,7 @@ describe("native test plans", () => {
   );
   it("keeps Linux's complete desktop selection and one separate invocation per motion policy", () => {
     const steps = browserTestPlan("linux");
+    expect(steps.every((step) => !step.args.includes("--fileParallelism=false"))).toBe(true);
     const main = steps.find((step) => step.args.includes("--project=desktop"))!;
     expect(main.args.some((arg) => arg.endsWith(".browser.tsx"))).toBe(false);
     for (const project of ["visualization-fluid-motion", "context-reduced-motion"])
@@ -98,6 +102,17 @@ describe("native test plans", () => {
         expect(step.args).toContain("--maxWorkers=2");
         expect(step.args.some((arg) => arg.startsWith("--exclude"))).toBe(false);
       }
+      const family = browserSteps.find((step) => step.name === "Mermaid families")!;
+      expect(family.args).toEqual(
+        expect.arrayContaining([
+          ...selection.mermaidFamilyFiles,
+          "--fileParallelism=false",
+          "--maxWorkers=2",
+        ]),
+      );
+      expect(browserSteps.filter((step) => step.args.includes("--fileParallelism=false"))).toEqual([
+        family,
+      ]);
       const ordinary = browserSteps.find((step) => step.args.includes("--project=desktop"))!;
       expect(ordinary.args).toEqual(
         expect.arrayContaining([...selection.desktopFiles, ...selection.touchFiles]),
