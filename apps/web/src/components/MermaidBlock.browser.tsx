@@ -86,13 +86,21 @@ function browserPoint(point: { x: number; y: number }) {
   return { x, y };
 }
 
+// A hard deadline does not unwind a pending browser operation. The next
+// fixture must not reset shared controls until this exact owner has retired.
+let activeChartCleanup: (() => Promise<void>) | undefined;
 beforeEach(async () => {
+  if (activeChartCleanup) throw new Error("Previous Mermaid chart fixture is still retiring.");
   await page.viewport(1100, 800);
   mocks.render.mockReset().mockResolvedValue(diagram());
   mocks.copy.mockReset().mockResolvedValue(undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  if (activeChartCleanup) {
+    await activeChartCleanup();
+    activeChartCleanup = undefined;
+  }
   vi.restoreAllMocks();
   applyInterfaceScalePercent(100);
   document.documentElement.classList.remove("dark");
@@ -616,58 +624,102 @@ describe("Mermaid block", () => {
 
   it.for(REAL_CHARTS.map((chart) => ({ ...chart, theme: "dark" as const, scale: 100 })))(
     "retains real $name source, copy and expanded controls",
-    async ({ source, label, theme, scale }, { onTestFinished }) => {
+    async ({ source, label, theme, scale }, { signal, onTestFinished, onTestFailed }) => {
       let nativeInputOwner: HTMLElement | null = null;
-      const nativeInput = observeNativeInput("mermaid-family", () => nativeInputOwner);
-      // The passive observer belongs to this invocation even if a hard test
-      // deadline retires it before an awaited render or input command returns.
-      onTestFinished(nativeInput.retire);
+      let nativeObserver: ReturnType<typeof observeNativeInput> | undefined;
       let retired = false;
       let ownedHost: HTMLDivElement | undefined;
       let screen: Awaited<ReturnType<typeof render>> | undefined;
       let pendingRender: ReturnType<typeof render> | undefined;
       let cleanupPromise: Promise<void> | undefined;
       let retireKeyboardObservation: (() => void) | undefined;
+      let bodyFailed = false;
+      // This exact body owns every admitted operation, including native mouse
+      // release. Cleanup joins it before unmounting any target or restoring
+      // shared mocks; its finally resolves before awaiting that same cleanup.
+      const bodyDone = deferred<void>();
+      const copied = deferred<void>();
+      let phase = "setup";
       const requireActive = () => {
-        nativeInput.assertActive();
-        if (retired) throw new Error("Mermaid chart fixture already retired");
+        nativeObserver?.assertActive();
+        if (retired || signal.aborted) throw new Error("Mermaid chart fixture already retired");
       };
       const cleanup = () => {
         if (cleanupPromise) return cleanupPromise;
         retired = true;
-        nativeInput.retire();
-        retireKeyboardObservation?.();
         cleanupPromise = (async () => {
+          let retirementFailed = false;
+          let retirementFailure: unknown;
           try {
-            // Join only this invocation's admitted render before unmounting.
-            // A hard deadline need not unwind the suspended async test body.
-            const ownedScreen = screen ?? (await pendingRender);
+            if (signal.aborted) nativeObserver?.fail();
+            nativeObserver?.retire();
+          } catch (error) {
+            retirementFailed = true;
+            retirementFailure = error;
+          }
+          try {
+            retireKeyboardObservation?.();
+          } catch (error) {
+            if (!retirementFailed) retirementFailure = error;
+            retirementFailed = true;
+          }
+          await bodyDone.promise;
+          try {
+            const ownedScreen = screen ?? (await pendingRender?.catch(() => undefined));
             await ownedScreen?.unmount();
-          } finally {
+            // A failed unmount or observer retirement retains the exact host and
+            // active lease. Do not reuse shared mocks against an uncertain owner.
+            if (retirementFailed) throw retirementFailure;
             ownedHost?.remove();
+            signal.removeEventListener("abort", onAbort);
+          } finally {
+            // The abandoned copy must settle only after this owner's unmount
+            // attempt; it is never awaited while bodyDone is still pending.
+            copied.resolve(undefined);
+            await copied.promise;
           }
         })();
         return cleanupPromise;
       };
-      // Capture this test's context and cleanup before the first yield. Late
-      // continuations must not register against a later test's global context.
+      const onAbort = () => {
+        void cleanup().catch(() => undefined);
+      };
+      activeChartCleanup = cleanup;
+      signal.addEventListener("abort", onAbort, { once: true });
       onTestFinished(cleanup);
-      await page.viewport(390, 700);
-      requireActive();
-      applyInterfaceScalePercent(scale);
-      document.documentElement.classList.toggle("dark", theme === "dark");
-      const host = document.createElement("div");
-      ownedHost = host;
-      host.className = "chat-markdown";
-      host.style.width = "min(100%, 19rem)";
-      document.body.append(host);
-      // Retain the existing lifecycle test double, but give chart cases a
-      // fresh real service and its ordinary opaque-origin sandbox. This also
-      // exercises parent admission and sanitized image publication; Mermaid
-      // itself is never evaluated in this test document's application realm.
-      mocks.render.mockImplementation(createMermaidRenderService(renderInMermaidSandbox));
+      onTestFailed(() => {
+        // Fixed, bounded progress only: never copy SVG, source, paths or errors.
+        try {
+          console.info("mermaid-real-chart-phase", { phase });
+        } catch {
+          /* Preserve the original test failure. */
+        }
+      });
+      if (signal.aborted) onAbort();
       try {
         requireActive();
+        const nativeInput = observeNativeInput("mermaid-family", () => nativeInputOwner);
+        nativeObserver = nativeInput;
+        phase = "viewport";
+        await page.viewport(390, 700);
+        requireActive();
+        applyInterfaceScalePercent(scale);
+        document.documentElement.classList.toggle("dark", theme === "dark");
+        const host = document.createElement("div");
+        ownedHost = host;
+        host.className = "chat-markdown";
+        host.style.width = "min(100%, 19rem)";
+        document.body.append(host);
+        // Retain the existing lifecycle test double, but give chart cases a
+        // fresh real service and its ordinary opaque-origin sandbox. This also
+        // exercises parent admission and sanitized image publication; Mermaid
+        // itself is never evaluated in this test document's application realm.
+        mocks.render.mockImplementation(createMermaidRenderService(renderInMermaidSandbox));
+        // Hold exactly this source copy until the original native click has
+        // returned, preserving the real feedback timer rather than racing it.
+        mocks.copy.mockReturnValueOnce(copied.promise);
+        requireActive();
+        phase = "render";
         pendingRender = render(<MermaidBlock code={source} complete theme={theme} />, {
           container: host,
         });
@@ -676,16 +728,19 @@ describe("Mermaid block", () => {
         // Keep the established 30-second browser test deadline. As in the real
         // preview harness, bound cold bundle/sandbox readiness separately from
         // the remaining source, geometry and native-input checks.
+        phase = "preview";
         await vi.waitFor(() => expect(host.querySelector(".mermaid-preview img")).not.toBeNull(), {
           timeout: 20_000,
         });
         requireActive();
         const image = host.querySelector<HTMLImageElement>(".mermaid-preview img")!;
+        phase = "decode";
         await image.decode();
         requireActive();
         expect(image.naturalWidth).toBeGreaterThan(0);
         expect(image.naturalHeight).toBeGreaterThan(0);
         const imageUrl = image.src;
+        phase = "fetch";
         const response = await fetch(imageUrl);
         requireActive();
         const svg = await response.text();
@@ -710,19 +765,24 @@ describe("Mermaid block", () => {
           .element(page.getByRole("button", { name: "Diagram", exact: true }))
           .toHaveAttribute("aria-pressed", "true");
         requireActive();
+        phase = "source";
         await page.getByRole("button", { name: "Source", exact: true }).click();
         requireActive();
         expect(host.querySelector(".mermaid-source code")?.textContent).toBe(source);
         expect(host.scrollWidth).toBeLessThanOrEqual(host.clientWidth + 1);
+        phase = "copy";
         await page.getByRole("button", { name: "Copy Mermaid source" }).click();
         requireActive();
         expect(mocks.copy).toHaveBeenCalledExactlyOnceWith(source);
+        expect(page.getByText("Copied", { exact: true }).query()).toBeNull();
+        copied.resolve(undefined);
         await expect.element(page.getByText("Copied", { exact: true })).toBeVisible();
         requireActive();
         await page.getByRole("button", { name: "Diagram", exact: true }).click();
         requireActive();
         expect(host.querySelector<HTMLImageElement>(".mermaid-preview img")!.src).toBe(imageUrl);
 
+        phase = "expand";
         await page.getByRole("button", { name: "Expand diagram" }).click();
         requireActive();
         await expect
@@ -740,6 +800,7 @@ describe("Mermaid block", () => {
         requireActive();
         expect(popup.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth + 1);
         expect(popup.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight + 1);
+        phase = "zoom";
         await page.getByRole("button", { name: "Reset", exact: true }).click();
         requireActive();
         expect(document.querySelector(".mermaid-zoom-value")?.textContent).toBe("100%");
@@ -831,6 +892,7 @@ describe("Mermaid block", () => {
         window.addEventListener("focus", recordKeyboardFocus, true);
         window.addEventListener("blur", recordKeyboardFocus, true);
         try {
+          phase = "keyboard";
           nativeInput.mark("before-activation");
           await page
             .getByRole("region", { name: "Expanded diagram; scroll or drag to pan" })
@@ -879,16 +941,19 @@ describe("Mermaid block", () => {
         const input: CDPSession = cdp();
         await input.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...start });
         requireActive();
-        await input.send("Input.dispatchMouseEvent", {
-          type: "mousePressed",
-          ...start,
-          button: "left",
-          buttons: 1,
-          clickCount: 1,
-        });
+        // The outer body-completion lease includes this whole press/release
+        // pair; a late admitted press can never outlive its native release.
+        let pressed = false;
         try {
-          // Keep the original release in finally if the admitted press returns
-          // only after this invocation's completion has retired it.
+          phase = "pan";
+          await input.send("Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            ...start,
+            button: "left",
+            buttons: 1,
+            clickCount: 1,
+          });
+          pressed = true;
           requireActive();
           await input.send("Input.dispatchMouseEvent", {
             type: "mouseMoved",
@@ -903,15 +968,17 @@ describe("Mermaid block", () => {
           });
           requireActive();
         } finally {
-          await input.send("Input.dispatchMouseEvent", {
-            type: "mouseReleased",
-            ...end,
-            button: "left",
-            buttons: 0,
-            clickCount: 1,
-          });
+          if (pressed)
+            await input.send("Input.dispatchMouseEvent", {
+              type: "mouseReleased",
+              ...end,
+              button: "left",
+              buttons: 0,
+              clickCount: 1,
+            });
         }
         requireActive();
+        phase = "close";
         await page.getByRole("button", { name: "Fit", exact: true }).click();
         requireActive();
         await vi.waitFor(() => {
@@ -927,10 +994,20 @@ describe("Mermaid block", () => {
         requireActive();
         nativeInput.complete();
       } catch (error) {
-        nativeInput.fail();
+        bodyFailed = true;
+        nativeObserver?.fail();
         throw error;
       } finally {
-        await cleanup();
+        bodyDone.resolve(undefined);
+        // The shared afterEach still reports the exact failed cleanup. Preserve
+        // the original body error when both it and cleanup fail.
+        if (bodyFailed) {
+          try {
+            await cleanup();
+          } catch {
+            /* afterEach joins and reports cleanup. */
+          }
+        } else await cleanup();
       }
     },
   );
