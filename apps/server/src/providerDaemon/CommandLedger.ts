@@ -1,5 +1,4 @@
 // Private recovery bindings retain only a process-keyed commitment, never prompt/token bytes.
-// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   ProviderDaemonRpcEnvelope,

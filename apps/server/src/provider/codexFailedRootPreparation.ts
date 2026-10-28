@@ -1,6 +1,5 @@
 // The native crypto boundary binds private recovery capabilities; none of its
 // inputs or random secrets may be copied into public events or diagnostics.
-// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { ProviderSendTurnInput } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
