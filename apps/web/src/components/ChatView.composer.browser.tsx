@@ -87,8 +87,13 @@ import { describe, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { failBrowserWsRpc } from "../../test/wsRpcHarness";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { deskTabKey } from "../deskModel";
 import { useDeskStore } from "../deskStore";
-import { __setEnvironmentApiOverrideForTests, readEnvironmentApi } from "../environmentApi";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+  readEnvironmentApi,
+} from "../environmentApi";
 import { selectThreadByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
@@ -152,6 +157,473 @@ describe("ChatView full app (composer)", () => {
       ),
     };
   };
+  const createConnectingStopSnapshot = (runtimeId: string | null): OrchestrationReadModel => {
+    const base = createSnapshotForTargetUser({
+      targetMessageId: MessageId.make("connecting-stop-target"),
+      targetText: "Preserved conversation before provider opening",
+      history: "essential",
+    });
+    return {
+      ...base,
+      threads: base.threads.map((thread) => ({
+        ...thread,
+        latestTurn: {
+          turnId: TurnId.make("connecting-stop-failed-root"),
+          state: "error",
+          requestedAt: isoAt(2_000),
+          startedAt: isoAt(2_001),
+          completedAt: isoAt(2_002),
+          assistantMessageId: null,
+        },
+        session: {
+          ...thread.session!,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          status: "starting",
+          activeTurnId: null,
+          subagentRuntimeId: runtimeId,
+          updatedAt: isoAt(2_003),
+        },
+        activities: [],
+      })),
+    };
+  };
+
+  it("keeps connecting Stop and draft ownership independent across two real chat panes", async (context) => {
+    const base = createConnectingStopSnapshot(null);
+    const first = base.threads[0]!;
+    const secondId = ThreadId.make("connecting-stop-other-chat");
+    const secondRef = scopeThreadRef(LOCAL_ENVIRONMENT_ID, secondId);
+    const firstKey = deskTabKey({ kind: "server", threadRef: THREAD_REF });
+    const secondTarget = { kind: "server" as const, threadRef: secondRef };
+    const secondKey = deskTabKey(secondTarget);
+    const snapshot: OrchestrationReadModel = {
+      ...base,
+      threads: [
+        first,
+        {
+          ...first,
+          id: secondId,
+          title: "Other connecting chat",
+          messages: [],
+          latestTurn: {
+            ...first.latestTurn!,
+            turnId: TurnId.make("connecting-stop-other-failed-root"),
+          },
+          session: { ...first.session!, threadId: secondId },
+        },
+      ],
+    };
+    let resolveFirst!: (value: { sequence: number }) => void;
+    let resolveSecond!: (value: { sequence: number }) => void;
+    const firstReply = new Promise<{ sequence: number }>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondReply = new Promise<{ sequence: number }>((resolve) => {
+      resolveSecond = resolve;
+    });
+    let firstReleased = false;
+    let secondReleased = false;
+    const releaseFirst = () => {
+      if (firstReleased) return;
+      firstReleased = true;
+      resolveFirst({ sequence: snapshot.snapshotSequence + 1 });
+    };
+    const releaseSecond = () => {
+      if (secondReleased) return;
+      secondReleased = true;
+      resolveSecond({ sequence: snapshot.snapshotSequence + 2 });
+    };
+    let restoreDispatch: (() => void) | undefined;
+    let apiOverrideAcquired = false;
+    const acknowledged = new Set<ThreadId>();
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "composer-opening-stop",
+      beforeDrain: () => {
+        releaseFirst();
+        releaseSecond();
+      },
+      afterUnmount: () => {
+        try {
+          restoreDispatch?.();
+        } finally {
+          if (apiOverrideAcquired) {
+            __resetEnvironmentApiOverridesForTests();
+            apiOverrideAcquired = false;
+          }
+        }
+      },
+    });
+    await owner.run(async () => {
+      await owner.mount({
+        viewport: { ...DEFAULT_VIEWPORT, width: 2100 },
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+          body.type === "thread.session.stop"
+            ? body.threadId === THREAD_ID
+              ? firstReply
+              : body.threadId === secondId
+                ? secondReply
+                : undefined
+            : undefined,
+      });
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      const dispatchCommand = api.orchestration.dispatchCommand;
+      const dispatchSpy = vi
+        .spyOn(api.orchestration, "dispatchCommand")
+        .mockImplementation(function (this: unknown, ...args) {
+          // Own the actual wire completion separately from the native click and
+          // held response. Releasing a fake reply is not an acknowledgement.
+          let completion: ReturnType<typeof dispatchCommand> | undefined;
+          const joined = owner.own("ack", () => {
+            completion = (async () => {
+              const result = await dispatchCommand.apply(this, args);
+              if (args[0].type === "thread.session.stop") acknowledged.add(args[0].threadId);
+              return result;
+            })();
+            return completion;
+          });
+          void joined.then(
+            () => undefined,
+            () => undefined,
+          );
+          return completion ?? joined;
+        });
+      restoreDispatch = () => dispatchSpy.mockRestore();
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, api);
+      apiOverrideAcquired = true;
+      owner.assertActive();
+      const dispatch = useDeskStore.getState().dispatch;
+      dispatch({ type: "keepOpen", tabKey: firstKey });
+      dispatch({ type: "open", target: secondTarget });
+      dispatch({ type: "split", tabKey: secondKey, targetGroupId: "g1", edge: "right" });
+      await owner.own("layout", () =>
+        vi.waitFor(() =>
+          expect(document.querySelectorAll('[data-testid="composer-editor"]')).toHaveLength(2),
+        ),
+      );
+      const secondGroup = Object.values(useDeskStore.getState().desk.groups).find(
+        (group) => group.id !== "g1",
+      )!;
+      const firstPane = page.getByRole("region", { name: "Main chat group", exact: true });
+      const secondPane = page.getByRole("region", {
+        name: `${secondGroup.name} chat group`,
+        exact: true,
+      });
+      owner.assertActive();
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep first unsent instruction");
+      useComposerDraftStore.getState().setPrompt(secondRef, "Keep second unsent instruction");
+      await owner.own("prompt", () =>
+        expect
+          .element(firstPane.getByTestId("composer-editor"))
+          .toHaveTextContent("Keep first unsent instruction"),
+      );
+      await owner.own("prompt", () =>
+        expect
+          .element(secondPane.getByTestId("composer-editor"))
+          .toHaveTextContent("Keep second unsent instruction"),
+      );
+      const firstStop = firstPane.getByRole("button", { name: "Stop", exact: true });
+      const secondStop = secondPane.getByRole("button", { name: "Stop", exact: true });
+      await owner.own("controls", () => expect.element(firstStop).toBeEnabled());
+      await owner.own("input", () => firstStop.dblClick());
+      const stops = () =>
+        wsRequests.filter(
+          (request) =>
+            request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            request.type === "thread.session.stop",
+        );
+      await owner.own("request", () =>
+        vi.waitFor(() => expect(stops().map((request) => request.threadId)).toEqual([THREAD_ID])),
+      );
+      await owner.own("controls", () => expect.element(firstStop).toBeDisabled());
+      expect(acknowledged.has(THREAD_ID)).toBe(false);
+      await owner.own("controls", () => expect.element(secondStop).toBeEnabled());
+      await owner.own("input", () => secondStop.click());
+      await owner.own("request", () =>
+        vi.waitFor(() =>
+          expect(stops().map((request) => request.threadId)).toEqual([THREAD_ID, secondId]),
+        ),
+      );
+      await owner.own("controls", () => expect.element(secondStop).toBeDisabled());
+      owner.assertActive();
+      releaseFirst();
+      await owner.own("ack", () =>
+        vi.waitFor(() => expect(acknowledged.has(THREAD_ID)).toBe(true)),
+      );
+      await owner.own("controls", () => expect.element(firstStop).toBeEnabled());
+      await owner.own("controls", () => expect.element(secondStop).toBeDisabled());
+      expect(acknowledged.has(secondId)).toBe(false);
+      expect(stops()).toHaveLength(2);
+      expect(
+        wsRequests.some(
+          (request) =>
+            request.type === "thread.turn.start" || request.type === "thread.turn.interrupt",
+        ),
+      ).toBe(false);
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+        "Keep first unsent instruction",
+      );
+      expect(useComposerDraftStore.getState().getComposerDraft(secondRef)?.prompt).toBe(
+        "Keep second unsent instruction",
+      );
+      owner.assertActive();
+      releaseSecond();
+      await owner.own("ack", () => vi.waitFor(() => expect(acknowledged.has(secondId)).toBe(true)));
+      await owner.own("controls", () => expect.element(secondStop).toBeEnabled());
+    });
+  });
+
+  it("uses ordinary turn interrupt after the same connecting owner accepts a running root", async (context) => {
+    const snapshot = createConnectingStopSnapshot(SUBAGENT_RUNTIME_ID);
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "composer-stop-accepted",
+    });
+    await owner.run(async () => {
+      await owner.mount({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: snapshot.snapshotSequence + 2 }
+            : undefined,
+      });
+      await owner.own("controls", () =>
+        expect.element(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled(),
+      );
+      const acceptedTurnId = TurnId.make("connecting-stop-accepted-root");
+      const source = snapshot.threads[0]!;
+      const accepted = {
+        ...source,
+        latestTurn: {
+          ...source.latestTurn!,
+          turnId: acceptedTurnId,
+          state: "running" as const,
+          requestedAt: isoAt(2_004),
+          startedAt: isoAt(2_005),
+          completedAt: null,
+        },
+        session: {
+          ...source.session!,
+          status: "running" as const,
+          activeTurnId: acceptedTurnId,
+          updatedAt: isoAt(2_005),
+        },
+        updatedAt: isoAt(2_005),
+      };
+      owner.assertActive();
+      const sequence = snapshot.snapshotSequence + 1;
+      chatViewFixture.fixture.snapshot = {
+        ...snapshot,
+        snapshotSequence: sequence,
+        threads: [accepted],
+      };
+      rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+        kind: "snapshot",
+        snapshot: { snapshotSequence: sequence, thread: accepted },
+      });
+      await owner.own("canonical", () =>
+        vi.waitFor(() => {
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.session?.activeTurnId).toBe(
+            acceptedTurnId,
+          );
+          expect(
+            selectThreadByRef(useStore.getState(), THREAD_REF)?.session?.subagentRuntimeId,
+          ).toBe(SUBAGENT_RUNTIME_ID);
+        }),
+      );
+      const stop = page.getByRole("button", { name: "Stop generation", exact: true });
+      await owner.own("controls", () => expect.element(stop).toBeEnabled());
+      await owner.own("input", () => stop.click());
+      await owner.own("request", () =>
+        vi.waitFor(() => {
+          const commands = wsRequests.filter(
+            (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+          );
+          expect(commands.filter((request) => request.type === "thread.turn.interrupt")).toEqual([
+            expect.objectContaining({ threadId: THREAD_ID, turnId: acceptedTurnId }),
+          ]);
+          expect(
+            commands.some(
+              (request) =>
+                request.type === "thread.session.stop" || request.type === "thread.turn.start",
+            ),
+          ).toBe(false);
+        }),
+      );
+    });
+  });
+
+  it("keeps an accepted preparation Stop disabled without a live session or losing the draft", async (context) => {
+    const base = createConnectingStopSnapshot(null);
+    const failedRoot = base.threads[0]!.latestTurn!.turnId;
+    const marker = (
+      intent: number,
+      phase: "preparing" | "uncertain" | "retired",
+      sequence: number,
+    ) => ({
+      id: EventId.make(`server:codex-preparation:${intent}:0:${phase}`),
+      kind: "runtime.warning" as const,
+      tone: "info" as const,
+      summary: "Synthetic session preparation",
+      turnId: failedRoot,
+      createdAt: isoAt(2_004 + sequence),
+      sequence,
+      payload: {
+        recovery: "codex-transient-preparation",
+        phase,
+        recoveryIntentSequence: intent,
+        sourceEventSequence: 41,
+        preparationSequence: 0,
+        observedWaits: 0,
+      },
+    });
+    const initialMarker = marker(42, "preparing", 43);
+    const source = {
+      ...base.threads[0]!,
+      // The old native context has already retired, while its separately
+      // budgeted preparation still owns opening. A session-derived spinner
+      // must not be required for the human's durable Stop control.
+      session: null,
+      activities: [initialMarker],
+    };
+    const snapshot: OrchestrationReadModel = {
+      ...base,
+      snapshotSequence: 44,
+      threads: [source],
+    };
+    let resolveStop!: (value: { sequence: number }) => void;
+    const stopReply = new Promise<{ sequence: number }>((resolve) => {
+      resolveStop = resolve;
+    });
+    let released = false;
+    const releaseStop = () => {
+      if (released) return;
+      released = true;
+      resolveStop({ sequence: 45 });
+    };
+    let restoreDispatch: (() => void) | undefined;
+    let apiOverrideAcquired = false;
+    let acknowledged = false;
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "composer-preparation-stop",
+      beforeDrain: releaseStop,
+      afterUnmount: () => {
+        try {
+          restoreDispatch?.();
+        } finally {
+          if (apiOverrideAcquired) {
+            __resetEnvironmentApiOverridesForTests();
+            apiOverrideAcquired = false;
+          }
+        }
+      },
+    });
+    await owner.run(async () => {
+      await owner.mount({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+          body.type === "thread.session.stop" &&
+          body.threadId === THREAD_ID
+            ? stopReply
+            : undefined,
+      });
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      const dispatchCommand = api.orchestration.dispatchCommand;
+      const dispatchSpy = vi
+        .spyOn(api.orchestration, "dispatchCommand")
+        .mockImplementation(function (this: unknown, ...args) {
+          // Retain the original wire completion. Resolving the held response
+          // alone does not establish that the Stop acknowledgement arrived.
+          let completion: ReturnType<typeof dispatchCommand> | undefined;
+          const joined = owner.own("ack", () => {
+            completion = (async () => {
+              const result = await dispatchCommand.apply(this, args);
+              if (args[0].type === "thread.session.stop") acknowledged = true;
+              return result;
+            })();
+            return completion;
+          });
+          void joined.then(
+            () => undefined,
+            () => undefined,
+          );
+          return completion ?? joined;
+        });
+      restoreDispatch = () => dispatchSpy.mockRestore();
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, api);
+      apiOverrideAcquired = true;
+      owner.assertActive();
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep this unsent preparation draft");
+      const editor = page.getByTestId("composer-editor");
+      const stop = page.getByRole("button", { name: "Stop recovery", exact: true });
+      await owner.own("prompt", () =>
+        expect.element(editor).toHaveTextContent("Keep this unsent preparation draft"),
+      );
+      await owner.own("controls", () => expect.element(stop).toBeEnabled());
+      await owner.own("input", () => stop.dblClick());
+      const commands = () =>
+        wsRequests.filter((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand);
+      await owner.own("request", () =>
+        vi.waitFor(() =>
+          expect(commands()).toEqual([
+            expect.objectContaining({ type: "thread.session.stop", threadId: THREAD_ID }),
+          ]),
+        ),
+      );
+      expect(acknowledged).toBe(false);
+      await owner.own("controls", () => expect.element(stop).toBeDisabled());
+      owner.assertActive();
+      releaseStop();
+      await owner.own("ack", () => vi.waitFor(() => expect(acknowledged).toBe(true)));
+      await owner.own("controls", () => expect.element(stop).toBeDisabled());
+
+      const publish = (activities: typeof source.activities, sequence: number) => {
+        owner.assertActive();
+        const thread = { ...source, activities };
+        chatViewFixture.fixture.snapshot = {
+          ...snapshot,
+          snapshotSequence: sequence,
+          threads: [thread],
+        };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence: sequence, thread },
+        });
+      };
+      // Progress for this same preparation cannot reopen an accepted Stop.
+      // The marker remains observational and does not attest native closure.
+      publish([initialMarker, marker(42, "uncertain", 46)], 47);
+      await owner.own("canonical", () =>
+        vi.waitFor(() => {
+          const current = selectThreadByRef(useStore.getState(), THREAD_REF);
+          expect(current?.session).toBeNull();
+          expect(current?.activities.at(-1)?.id).toBe("server:codex-preparation:42:0:uncertain");
+        }),
+      );
+      await owner.own("controls", () => expect.element(stop).toBeDisabled());
+      expect(commands()).toHaveLength(1);
+
+      const retired = marker(42, "retired", 48);
+      publish([initialMarker, retired], 49);
+      await owner.own("controls", () => expect.element(stop).not.toBeInTheDocument());
+      // A distinct current intent supplies its own usable Stop; the prior
+      // accepted intent must not permanently disable controls for this chat.
+      publish([initialMarker, retired, marker(50, "preparing", 51)], 52);
+      await owner.own("controls", () => expect.element(stop).toBeEnabled());
+      await owner.own("prompt", () =>
+        expect.element(editor).toHaveTextContent("Keep this unsent preparation draft"),
+      );
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+        "Keep this unsent preparation draft",
+      );
+      expect(commands()).toEqual([
+        expect.objectContaining({ type: "thread.session.stop", threadId: THREAD_ID }),
+      ]);
+    });
+  });
   it.each(["light", "dark"] as const)(
     "uses only a compact notice for exact pending recovery without dismissing failures in %s mode",
     async (theme) => {

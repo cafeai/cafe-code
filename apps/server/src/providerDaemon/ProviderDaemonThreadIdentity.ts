@@ -12,8 +12,12 @@ export function providerDaemonRequestThreadIds(
   request: ProviderDaemonRpcRequest,
 ): ReadonlyArray<ThreadId> {
   switch (request.method) {
+    case "prepareFailedRootRecovery":
+      return [request.payload.request.threadId];
     case "startSession":
     case "sendTurn":
+    case "readFailedRootRecovery":
+    case "cancelFailedRootRecovery":
     case "steerTurn":
     case "manageMcp":
     case "readSecurity":

@@ -34,6 +34,9 @@ import type {
   ProviderSnoozeUserInputInput,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
+  ProviderPrepareFailedRootRecoveryInput,
+  ProviderReadFailedRootRecoveryInput,
+  ProviderFailedRootRecoveryPreparation,
   ProviderSession,
   ProviderSessionForkDiscardInput,
   ProviderSessionForkInput,
@@ -118,6 +121,20 @@ export interface ProviderServiceShape {
   readonly sendTurn: (
     input: ProviderSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
+
+  /** Private zero-paid cold preparation; optional only for legacy service implementations. */
+  readonly prepareFailedRootRecovery?: (
+    input: ProviderPrepareFailedRootRecoveryInput,
+  ) => Effect.Effect<ProviderFailedRootRecoveryPreparation, ProviderServiceError>;
+
+  /** Read one exact native preparation without submitting or reopening anything. */
+  readonly readFailedRootRecovery?: (
+    input: ProviderReadFailedRootRecoveryInput,
+  ) => Effect.Effect<ProviderFailedRootRecoveryPreparation, ProviderServiceError>;
+  /** Exact private preparation cancellation, distinct from human whole-chat Stop. */
+  readonly cancelFailedRootRecovery?: (
+    input: ProviderReadFailedRootRecoveryInput,
+  ) => Effect.Effect<void, ProviderServiceError>;
 
   /**
    * Steer a currently running provider turn.

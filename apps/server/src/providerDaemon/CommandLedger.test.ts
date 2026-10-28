@@ -33,6 +33,197 @@ const stopRequest = {
 } satisfies ProviderDaemonRpcRequestValue;
 
 describe("ProviderDaemonCommandLedger", () => {
+  it("binds private recovery without persisting prompt or capability and refuses prepare replay", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const ownerKey = "synthetic-private-recovery";
+        const ledger = yield* makeProviderDaemonCommandLedger({ ownerKey });
+        const calls = yield* Ref.make(0);
+        const secret = "a".repeat(64);
+        const continuation = "b".repeat(64);
+        const prompt = "private-recovery-prompt-canary";
+        const request = {
+          method: "prepareFailedRootRecovery" as const,
+          commandId: "10000000-0000-4000-8000-000000000001",
+          payload: {
+            attemptId: "synthetic-attempt",
+            preparationSequence: 1,
+            continuationToken: continuation,
+            request: {
+              threadId: ThreadId.make("private-thread"),
+              input: prompt,
+              expectedFailedRoot: {
+                turnId: TurnId.make("private-root"),
+                providerThreadId: "private-history",
+                subagentRuntimeId: SubagentRuntimeId.make("10000000-0000-4000-8000-000000000003"),
+                providerInstanceId: ProviderInstanceId.make("codex"),
+                observedAt: "2026-10-19T01:00:00.000Z",
+                restartSession: true as const,
+              },
+            },
+          },
+        } satisfies ProviderDaemonRpcRequestValue;
+        const outcome = { ok: true as const, value: { state: "prepared", permit: secret } };
+        const execute = Ref.update(calls, (n) => n + 1).pipe(Effect.as(outcome));
+        expect(yield* ledger.runOnce(request, execute)).toEqual(outcome);
+        expect(yield* ledger.runOnce(request, execute)).toMatchObject({
+          ok: false,
+          error: { tag: "ProviderDaemonPrivateRecoveryLookupRequired" },
+        });
+        expect(
+          yield* ledger.runOnce(
+            {
+              ...request,
+              payload: {
+                ...request.payload,
+                request: { ...request.payload.request, input: "different" },
+              },
+            },
+            execute,
+          ),
+        ).toMatchObject({ ok: false, error: { tag: "ProviderDaemonCommandIdentityMismatch" } });
+        for (const changed of [
+          {
+            ...request,
+            payload: {
+              ...request.payload,
+              request: { ...request.payload.request, threadId: ThreadId.make("foreign-thread") },
+            },
+          },
+          {
+            ...request,
+            payload: {
+              ...request.payload,
+              request: {
+                ...request.payload.request,
+                expectedFailedRoot: {
+                  ...request.payload.request.expectedFailedRoot,
+                  providerInstanceId: ProviderInstanceId.make("foreign-account"),
+                },
+              },
+            },
+          },
+          {
+            ...stopRequest,
+            commandId: request.commandId,
+            payload: { threadId: request.payload.request.threadId },
+          },
+        ])
+          expect(yield* ledger.runOnce(changed, execute)).toMatchObject({
+            ok: false,
+            error: { tag: "ProviderDaemonCommandIdentityMismatch" },
+          });
+        const ordinaryCommand = {
+          ...stopRequest,
+          commandId: "10000000-0000-4000-8000-000000000004",
+        };
+        expect(
+          yield* ledger.runOnce(
+            ordinaryCommand,
+            Effect.succeed({ ok: true as const, value: null }),
+          ),
+        ).toMatchObject({ ok: true });
+        expect(
+          yield* ledger.runOnce({ ...request, commandId: ordinaryCommand.commandId }, execute),
+        ).toMatchObject({ ok: false, error: { tag: "ProviderDaemonCommandIdentityMismatch" } });
+        const paid = {
+          method: "sendTurn" as const,
+          commandId: "10000000-0000-4000-8000-000000000002",
+          payload: {
+            ...request.payload.request,
+            preparedFailedRootRecovery: {
+              attemptId: "synthetic-attempt",
+              preparationSequence: 1,
+              requestCommitment: "c".repeat(64),
+              permit: secret,
+            },
+          },
+        } satisfies ProviderDaemonRpcRequestValue;
+        const paidAck = {
+          ok: true as const,
+          value: {
+            threadId: paid.payload.threadId,
+            turnId: TurnId.make("paid-turn"),
+            resumeCursor: { opaqueSecret: secret },
+          },
+        };
+        const paidExecute = Ref.update(calls, (n) => n + 1).pipe(Effect.as(paidAck));
+        expect(yield* ledger.runOnce(paid, paidExecute)).toEqual(paidAck);
+        expect(yield* ledger.runOnce(paid, paidExecute)).toMatchObject({
+          ok: false,
+          error: { tag: "ProviderDaemonPrivateRecoveryOutcomeUnknown" },
+        });
+        expect(
+          yield* ledger.runOnce(
+            {
+              ...paid,
+              payload: {
+                ...paid.payload,
+                preparedFailedRootRecovery: {
+                  ...paid.payload.preparedFailedRootRecovery,
+                  permit: "d".repeat(64),
+                },
+              },
+            },
+            paidExecute,
+          ),
+        ).toMatchObject({ ok: false, error: { tag: "ProviderDaemonCommandIdentityMismatch" } });
+        const cancel = {
+          method: "cancelFailedRootRecovery" as const,
+          commandId: "10000000-0000-4000-8000-000000000005",
+          payload: {
+            threadId: request.payload.request.threadId,
+            attemptId: "synthetic-attempt",
+            requestCommitment: "c".repeat(64),
+          },
+        } satisfies ProviderDaemonRpcRequestValue;
+        const cancelExecute = Ref.update(calls, (n) => n + 1).pipe(
+          Effect.as({ ok: true as const, value: null }),
+        );
+        expect(yield* ledger.runOnce(cancel, cancelExecute)).toMatchObject({ ok: true });
+        expect(yield* ledger.runOnce(cancel, cancelExecute)).toMatchObject({
+          ok: false,
+          error: { tag: "ProviderDaemonPrivateRecoveryOutcomeUnknown" },
+        });
+        expect(
+          yield* ledger.runOnce(
+            {
+              ...cancel,
+              payload: { ...cancel.payload, threadId: ThreadId.make("foreign-thread") },
+            },
+            cancelExecute,
+          ),
+        ).toMatchObject({ ok: false, error: { tag: "ProviderDaemonCommandIdentityMismatch" } });
+        expect(
+          yield* ledger.runOnce({ ...request, commandId: cancel.commandId }, execute),
+        ).toMatchObject({ ok: false, error: { tag: "ProviderDaemonCommandIdentityMismatch" } });
+        const sql = yield* SqlClient.SqlClient;
+        const rows = yield* sql<{
+          request_json: string;
+          response_json: string | null;
+          error_json: string | null;
+        }>`SELECT request_json, response_json, error_json FROM provider_daemon_commands WHERE command_id LIKE ${`${ownerKey}:%`}`;
+        const snapshot = yield* ledger.snapshot;
+        expect(JSON.stringify(snapshot)).not.toContain("paid-turn");
+        const stored = JSON.stringify({ rows, snapshot });
+        for (const value of [prompt, secret, continuation, "c".repeat(64), "private-history"])
+          expect(stored).not.toContain(value);
+        expect(
+          rows.filter((row) => row.request_json.startsWith("private-recovery-v1:")),
+        ).toHaveLength(3);
+        const restarted = yield* makeProviderDaemonCommandLedger({
+          ownerKey,
+          recoverAbandonedOnStartup: false,
+        });
+        expect(yield* restarted.runOnce(request, execute)).toMatchObject({
+          ok: false,
+          error: { tag: "ProviderDaemonCommandIdentityMismatch" },
+        });
+        expect(yield* Ref.get(calls)).toBe(3);
+      }).pipe(Effect.scoped, Effect.provide(SqlitePersistenceTest)),
+    );
+  });
+
   it("binds cold-send refusal receipts to exact input and failure identity in both directions", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {

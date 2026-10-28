@@ -21,6 +21,9 @@ import type {
   ProviderSecurityNativeRefreshInput,
   ProviderSecurityResult,
   ProviderSendTurnInput,
+  ProviderPrepareFailedRootRecoveryInput,
+  ProviderReadFailedRootRecoveryInput,
+  ProviderFailedRootRecoveryPreparation,
   ProviderSession,
   ServerProviderDeviceLoginEvent,
   ProviderSessionForkInput,
@@ -54,6 +57,8 @@ export interface ProviderAdapterCapabilities {
   readonly subagentPolicyContinuation?: boolean;
   /** This Cafe owner atomically retires the exact failed root before cold resume. */
   readonly codexFailedRootRestart?: boolean;
+  /** Private, separately budgeted zero-paid preparation and one-use paid admission. */
+  readonly codexPhasedFailedRootRecovery?: boolean;
   /**
    * Declares how changing a model or its provider-owned traits is applied.
    * `restart-resume` preserves the native conversation while atomically
@@ -190,6 +195,20 @@ export interface ProviderAdapterShape<TError> {
   readonly sendTurn: (
     input: ProviderSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, TError>;
+
+  /** Never submits input: only prepares one exact failed-root continuation. */
+  readonly prepareFailedRootRecovery?: (
+    input: ProviderPrepareFailedRootRecoveryInput,
+  ) => Effect.Effect<ProviderFailedRootRecoveryPreparation, TError>;
+
+  /** Exact private reconciliation; absence never creates replacement authority. */
+  readonly readFailedRootRecovery?: (
+    input: ProviderReadFailedRootRecoveryInput,
+  ) => Effect.Effect<ProviderFailedRootRecoveryPreparation, TError>;
+  /** Revoke only this exact private preparation, never another current owner. */
+  readonly cancelFailedRootRecovery?: (
+    input: ProviderReadFailedRootRecoveryInput,
+  ) => Effect.Effect<void, TError>;
 
   /**
    * Steer an active provider turn without starting a new turn.

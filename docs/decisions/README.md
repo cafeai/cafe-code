@@ -1,6 +1,6 @@
 # Verification decision index
 
-Last updated: 2026-10-28 10:42:43 JST (UTC+0900)
+Last updated: 2026-10-28 20:21:41 JST (UTC+0900)
 
 This index covers verification decisions; independent feature decisions remain
 in this directory.
@@ -23,3 +23,11 @@ in this directory.
 - [Provider daemon update retirement](provider-daemon-update-retirement.md):
   exact-owner preparation, explicit active-work consent and native exit before
   installing a different app build; adopted/unknown owners remain protected.
+
+Related provider lifecycle decision:
+
+- [Phased Codex failed-root recovery](codex-phased-failed-root-recovery.md):
+  private zero-paid preparation, exact joined ownership and one-use paid
+  submission; unknown paid acknowledgments never permit resend. This accepted
+  successor keeps source implementation, exact-source qualification and
+  live-runtime adoption separate from the preserved predecessor evidence.

@@ -324,6 +324,222 @@ const makeProviderDaemonServerTestLayer = (providerService: ProviderServiceShape
 const providerDaemonServerTestLayer = makeProviderDaemonServerTestLayer(mockProviderService);
 
 describe("ProviderDaemonServer", () => {
+  it.effect("preserves ordinary opaque cursor data and strips unrelated unknown extras", () => {
+    const seen: unknown[] = [];
+    const service: ProviderServiceShape = {
+      ...mockProviderService,
+      startSession: (_threadId, input) =>
+        Effect.sync(() => {
+          seen.push(input);
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ProviderValidationError({
+                operation: "startSession",
+                issue: "Synthetic refusal.",
+              }),
+            ),
+          ),
+        ),
+      sendTurn: (input) =>
+        Effect.sync(() => {
+          seen.push(input);
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ProviderValidationError({ operation: "sendTurn", issue: "Synthetic refusal." }),
+            ),
+          ),
+        ),
+    };
+    return Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+      });
+      const opaque = {
+        permit: "ordinary-value",
+        attemptId: "ordinary-attempt",
+        entries: Array.from({ length: 5000 }, (_, index) => index),
+      };
+      const requests = [
+        {
+          method: "startSession",
+          commandId: "ordinary-cursor-command-0000000000001",
+          payload: {
+            threadId: "ordinary-thread",
+            provider: "codex",
+            runtimeMode: "full-access",
+            resumeCursor: opaque,
+          },
+        },
+        {
+          method: "sendTurn",
+          commandId: "ordinary-extra-command-0000000000001",
+          payload: {
+            threadId: "ordinary-thread",
+            input: "ordinary input",
+            extra: { deeper: { continuationToken: "unknown-field-secret" } },
+          },
+        },
+      ];
+      for (const body of requests) {
+        const response = yield* Effect.promise(() =>
+          fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${TEST_TOKEN}`, "content-type": "application/json" },
+            body: JSON.stringify(body),
+          }),
+        );
+        assert.equal(response.status, 400);
+        yield* Effect.promise(() => response.text());
+      }
+      assert.equal(seen.length, 2);
+      assert.deepEqual((seen[0] as { resumeCursor: unknown }).resumeCursor, opaque);
+      assert.notProperty(seen[1] as object, "extra");
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql`SELECT request_json FROM provider_daemon_commands`;
+      assert.notInclude(JSON.stringify(rows), "unknown-field-secret");
+    }).pipe(Effect.scoped, Effect.provide(makeProviderDaemonServerTestLayer(service)));
+  });
+
+  it.effect("redacts malformed private recovery before RPC validation and diagnostics", () =>
+    Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+      });
+      const secret = "malformed-private-secret-canary";
+      const prompt = "malformed-private-prompt-canary";
+      const validSecret = "a".repeat(64);
+      const digest = "c".repeat(64);
+      const requests = [
+        {
+          method: "prepareFailedRootRecovery",
+          commandId: secret,
+          payload: { continuationToken: secret, request: { input: prompt } },
+        },
+        {
+          method: "sendTurn",
+          commandId: secret,
+          payload: { preparedFailedRootRecovery: { permit: secret }, input: prompt },
+        },
+        {
+          method: "unrecognized",
+          payload: { preparedFailedRootRecovery: { permit: secret }, input: prompt },
+        },
+        {
+          method: "sendTurn",
+          commandId: "10000000-0000-4000-8000-000000000013",
+          payload: {
+            attemptId: "spoof",
+            preparationSequence: 1,
+            continuationToken: secret,
+            request: { threadId: "synthetic-thread", input: prompt },
+          },
+        },
+        {
+          method: "unrecognized",
+          payload: { attemptId: "spoof", requestCommitment: digest, input: prompt },
+        },
+        {
+          method: "sendTurn",
+          commandId: "10000000-0000-4000-8000-000000000015",
+          continuationToken: secret,
+          payload: { threadId: "synthetic-thread", input: prompt },
+        },
+        {
+          method: "sendTurn",
+          commandId: "10000000-0000-4000-8000-000000000009",
+          payload: {
+            threadId: "synthetic-thread",
+            preparedFailedRootRecovery: null,
+            input: prompt,
+          },
+        },
+        {
+          method: "steerTurn",
+          commandId: "10000000-0000-4000-8000-000000000010",
+          payload: {
+            threadId: "synthetic-thread",
+            input: prompt,
+            preparedFailedRootRecovery: { permit: secret },
+          },
+        },
+        { method: "readFailedRootRecovery", payload: { requestCommitment: secret, input: prompt } },
+        {
+          method: "cancelFailedRootRecovery",
+          payload: { requestCommitment: secret, input: prompt },
+        },
+        {
+          method: "prepareFailedRootRecovery",
+          commandId: "10000000-0000-4000-8000-000000000011",
+          payload: {
+            attemptId: "synthetic",
+            preparationSequence: 1,
+            continuationToken: validSecret,
+            request: {
+              threadId: "synthetic-thread",
+              input: prompt,
+              expectedFailedRoot: {
+                turnId: "synthetic-root",
+                providerThreadId: "synthetic-history",
+                subagentRuntimeId: "10000000-0000-4000-8000-000000000012",
+                providerInstanceId: "codex",
+                observedAt: "2026-10-19T01:00:00.000Z",
+                restartSession: true,
+              },
+            },
+          },
+        },
+      ];
+      for (const body of requests) {
+        const response = yield* Effect.promise(() =>
+          fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${TEST_TOKEN}`, "content-type": "application/json" },
+            body: JSON.stringify(body),
+          }),
+        );
+        assert.equal(response.status, 400);
+        const text = yield* Effect.promise(() => response.text());
+        assert.notInclude(text, secret);
+        assert.notInclude(text, prompt);
+        assert.notInclude(text, validSecret);
+        assert.notInclude(text, digest);
+      }
+      const broken = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${TEST_TOKEN}`, "content-type": "application/json" },
+          body: `{ "method": "prepareFailedRootRecovery", "secret": "${secret}"`,
+        }),
+      );
+      assert.equal(broken.status, 400);
+      const brokenText = yield* Effect.promise(() => broken.text());
+      assert.notInclude(brokenText, secret);
+      const healthResponse = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {
+          headers: { authorization: `Bearer ${TEST_TOKEN}` },
+        }),
+      );
+      const health = yield* Effect.promise(() => healthResponse.text());
+      assert.notInclude(health, secret);
+      assert.notInclude(health, prompt);
+      assert.notInclude(health, validSecret);
+      assert.notInclude(health, digest);
+      const sql = yield* SqlClient.SqlClient;
+      const rows =
+        yield* sql`SELECT request_json, response_json, error_json FROM provider_daemon_commands`;
+      assert.notInclude(JSON.stringify(rows), secret);
+      assert.notInclude(JSON.stringify(rows), prompt);
+      assert.notInclude(JSON.stringify(rows), validSecret);
+      assert.notInclude(JSON.stringify(rows), digest);
+    }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer)),
+  );
+
   for (const profile of ["production", "debug", undefined] as const) {
     it.effect(
       `echoes only actual admitted ${profile ?? "legacy-unknown"} profile in native health and liveness`,

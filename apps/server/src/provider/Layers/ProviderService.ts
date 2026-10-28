@@ -29,6 +29,8 @@ import {
   ProviderSessionForkResult,
   ProviderSnoozeUserInputInput,
   ProviderSendTurnInput,
+  ProviderPrepareFailedRootRecoveryInput,
+  ProviderReadFailedRootRecoveryInput,
   ProviderSessionStartInput,
   ProviderPrepareConversationRollbackInput,
   ProviderConversationRewindIdentity,
@@ -256,6 +258,46 @@ const decodeInputOrValidationError = <S extends Schema.Top>(input: {
         }),
     ),
   );
+};
+
+const decodePrivateInputOrValidationError = <S extends Schema.Top>(input: {
+  readonly operation: string;
+  readonly schema: S;
+  readonly payload: unknown;
+}) =>
+  Effect.suspend(() => Schema.decodeUnknownEffect(input.schema)(input.payload)).pipe(
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.failCause(
+            Cause.map(
+              cause,
+              () =>
+                new ProviderValidationError({
+                  operation: input.operation,
+                  issue: "The private Codex recovery request is invalid.",
+                }),
+            ),
+          )
+        : Effect.fail(
+            new ProviderValidationError({
+              operation: input.operation,
+              // Schema issue formatters retain offending private values and
+              // accessor defects can retain arbitrary caller data. Neither may
+              // cross this local private boundary as a message or nested cause.
+              issue: "The private Codex recovery request is invalid.",
+            }),
+          ),
+    ),
+  );
+
+const hasPrivatePreparedSend = (input: unknown): boolean => {
+  try {
+    return input !== null && typeof input === "object" && "preparedFailedRootRecovery" in input;
+  } catch {
+    // A proxy which prevents field inspection is rejected through the opaque
+    // private decoder; it must not escape into the ordinary schema formatter.
+    return true;
+  }
 };
 
 const decodeProviderSubagentDetailBody = Schema.decodeUnknownEffect(
@@ -1441,7 +1483,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           adapters,
           ([, adapter]) =>
             Effect.gen(function* () {
-              if (yield* adapter.hasSession(input.threadId)) {
+              if (
+                adapter.capabilities.codexPhasedFailedRootRecovery === true ||
+                (yield* adapter.hasSession(input.threadId))
+              ) {
                 yield* adapter.stopSession(input.threadId);
               }
             }).pipe(Effect.exit),
@@ -1837,16 +1882,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const stopStaleSessionsForThread = Effect.fn("stopStaleSessionsForThread")(function* (input: {
     readonly threadId: ThreadId;
     readonly currentInstanceId: ProviderInstanceId;
+    readonly alreadyRetired?: ReadonlySet<ProviderInstanceId>;
   }) {
     const currentAdapters = yield* getAdapterEntries;
     yield* Effect.forEach(
       currentAdapters,
       ([instanceId, adapter]) =>
-        instanceId === input.currentInstanceId
+        instanceId === input.currentInstanceId || input.alreadyRetired?.has(instanceId) === true
           ? Effect.void
           : Effect.gen(function* () {
               const hasSession = yield* adapter.hasSession(input.threadId);
-              if (!hasSession) {
+              if (!hasSession && adapter.capabilities.codexPhasedFailedRootRecovery !== true) {
                 return;
               }
 
@@ -1863,6 +1909,30 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       { discard: true },
     );
   });
+
+  const retireUnlistedPhasedPreparations = (input: {
+    readonly threadId: ThreadId;
+    readonly currentInstanceId: ProviderInstanceId;
+  }) =>
+    Effect.gen(function* () {
+      const retired = new Set<ProviderInstanceId>();
+      const adapters = yield* getAdapterEntries;
+      for (const [instanceId, adapter] of adapters) {
+        if (
+          instanceId === input.currentInstanceId ||
+          adapter.capabilities.codexPhasedFailedRootRecovery !== true ||
+          (yield* adapter.hasSession(input.threadId))
+        )
+          continue;
+        // A provider switch must revoke the old private preparation before the
+        // replacement opens, even in its no-runtime inventory gap. This is exact
+        // chat control, not a process scan or an instruction to stop other chats.
+        // Failure deliberately prevents a competing replacement constructor.
+        yield* adapter.stopSession(input.threadId);
+        retired.add(instanceId);
+      }
+      return retired;
+    });
 
   const startSession: ProviderServiceShape["startSession"] = Effect.fn("startSession")(
     function* (threadId, rawInput) {
@@ -1983,6 +2053,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             ? { codexContextWindowOverride: effectiveContextWindowOverride }
             : {}),
         } satisfies ProviderSessionStartInput;
+        const retiredUnlistedPhased = yield* retireUnlistedPhasedPreparations({
+          threadId,
+          currentInstanceId: resolvedInstanceId,
+        });
         const recoveredFromRejectedResumeCursor = yield* Ref.make(false);
         const session = yield* adapter.startSession(startInput).pipe(
           Effect.catch((error) => {
@@ -2034,6 +2108,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* stopStaleSessionsForThread({
           threadId,
           currentInstanceId: resolvedInstanceId,
+          alreadyRetired: retiredUnlistedPhased,
         });
         const usedRejectedResumeCursorRecovery = yield* Ref.get(recoveredFromRejectedResumeCursor);
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
@@ -2394,7 +2469,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         );
 
   const sendTurn: ProviderServiceShape["sendTurn"] = Effect.fn("sendTurn")(function* (rawInput) {
-    const parsed = yield* decodeInputOrValidationError({
+    const parsed = yield* (
+      hasPrivatePreparedSend(rawInput)
+        ? decodePrivateInputOrValidationError
+        : decodeInputOrValidationError
+    )({
       operation: "ProviderService.sendTurn",
       schema: ProviderSendTurnInput,
       payload: rawInput,
@@ -2515,7 +2594,23 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           expected: input.expectedSubagentPolicySession,
         });
       }
-      if (input.expectedFailedRoot !== undefined) {
+      if (
+        input.preparedFailedRootRecovery !== undefined &&
+        (input.expectedFailedRoot?.restartSession !== true ||
+          input.expectedFailedRoot.providerInstanceId !== routed.instanceId ||
+          input.expectedFailedRoot.observedAt === undefined ||
+          routed.adapter.provider !== "codex" ||
+          !routed.isActive ||
+          routed.adapter.capabilities.codexPhasedFailedRootRecovery !== true)
+      )
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "The private Codex recovery owner is not supported or no longer current.",
+        );
+      if (
+        input.expectedFailedRoot !== undefined &&
+        input.preparedFailedRootRecovery === undefined
+      ) {
         const expected = input.expectedFailedRoot;
         const failure = activeSession?.codexRootTurnFailure;
         // This check uses only fresh adapter inventory, never the durable
@@ -2637,7 +2732,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "ProviderService.sendTurn",
         );
       const turn = yield* routed.adapter.sendTurn({
-        ...input,
+        // The private permit commits the literal decoded request. Ordinary
+        // normalization must not change an omitted empty attachments field
+        // after that commitment was issued.
+        ...(input.preparedFailedRootRecovery === undefined ? input : parsed),
         ...(input.expectedCompletedRootTurnId === undefined &&
         input.expectedFailedRoot === undefined &&
         input.allowActiveTurnSteerFallback !== false &&
@@ -3118,7 +3216,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.kind": routed.adapter.provider,
           "provider.thread_id": input.threadId,
         });
-        if (routed.isActive) {
+        if (routed.isActive || routed.adapter.capabilities.codexPhasedFailedRootRecovery === true) {
           yield* routed.adapter.stopSession(routed.threadId);
         }
         yield* directory.upsert({
@@ -3466,6 +3564,81 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       );
     }
   }).pipe(Effect.forkScoped);
+
+  const prepareFailedRootRecovery: NonNullable<ProviderServiceShape["prepareFailedRootRecovery"]> =
+    Effect.fn("prepareFailedRootRecovery")(function* (rawInput) {
+      const input = yield* decodePrivateInputOrValidationError({
+        operation: "ProviderService.prepareFailedRootRecovery",
+        schema: ProviderPrepareFailedRootRecoveryInput,
+        payload: rawInput,
+      });
+      const routed = yield* resolveRoutableSession({
+        threadId: input.request.threadId,
+        operation: "ProviderService.prepareFailedRootRecovery",
+        allowRecovery: false,
+        requiredProvider: ProviderDriverKind.make("codex"),
+      });
+      if (
+        input.request.expectedFailedRoot?.restartSession !== true ||
+        input.request.expectedFailedRoot.providerInstanceId !== routed.instanceId ||
+        input.request.expectedFailedRoot.observedAt === undefined ||
+        routed.adapter.capabilities.codexPhasedFailedRootRecovery !== true ||
+        routed.adapter.prepareFailedRootRecovery === undefined ||
+        routed.adapter.readFailedRootRecovery === undefined ||
+        routed.adapter.cancelFailedRootRecovery === undefined
+      )
+        return yield* toValidationError(
+          "ProviderService.prepareFailedRootRecovery",
+          "The exact provider owner does not support private phased Codex recovery.",
+        );
+      return yield* routed.adapter.prepareFailedRootRecovery(input);
+    });
+  const readFailedRootRecovery: NonNullable<ProviderServiceShape["readFailedRootRecovery"]> =
+    Effect.fn("readFailedRootRecovery")(function* (rawInput) {
+      const input = yield* decodePrivateInputOrValidationError({
+        operation: "ProviderService.readFailedRootRecovery",
+        schema: ProviderReadFailedRootRecoveryInput,
+        payload: rawInput,
+      });
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.readFailedRootRecovery",
+        allowRecovery: false,
+        requiredProvider: ProviderDriverKind.make("codex"),
+      });
+      if (
+        routed.adapter.capabilities.codexPhasedFailedRootRecovery !== true ||
+        routed.adapter.readFailedRootRecovery === undefined
+      )
+        return yield* toValidationError(
+          "ProviderService.readFailedRootRecovery",
+          "The exact provider owner does not support private phased Codex recovery.",
+        );
+      return yield* routed.adapter.readFailedRootRecovery(input);
+    });
+  const cancelFailedRootRecovery: NonNullable<ProviderServiceShape["cancelFailedRootRecovery"]> =
+    Effect.fn("cancelFailedRootRecovery")(function* (rawInput) {
+      const input = yield* decodePrivateInputOrValidationError({
+        operation: "ProviderService.cancelFailedRootRecovery",
+        schema: ProviderReadFailedRootRecoveryInput,
+        payload: rawInput,
+      });
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.cancelFailedRootRecovery",
+        allowRecovery: false,
+        requiredProvider: ProviderDriverKind.make("codex"),
+      });
+      if (
+        routed.adapter.capabilities.codexPhasedFailedRootRecovery !== true ||
+        routed.adapter.cancelFailedRootRecovery === undefined
+      )
+        return yield* toValidationError(
+          "ProviderService.cancelFailedRootRecovery",
+          "The exact provider owner does not support private phased Codex recovery.",
+        );
+      return yield* routed.adapter.cancelFailedRootRecovery(input);
+    });
 
   const getCapabilities: ProviderServiceShape["getCapabilities"] = (instanceId) =>
     Effect.gen(function* () {
@@ -4106,11 +4279,54 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         effect: compactThread(input),
       }),
     sendTurn: (input) =>
-      whileThreadAcceptsProviderWork({
-        operation: "ProviderService.sendTurn",
-        threadId: input.threadId,
-        effect: sendTurn(input),
-      }),
+      hasPrivatePreparedSend(input)
+        ? decodePrivateInputOrValidationError({
+            operation: "ProviderService.sendTurn",
+            schema: ProviderSendTurnInput,
+            payload: input,
+          }).pipe(
+            Effect.flatMap((parsed) =>
+              whileThreadAcceptsProviderWork({
+                operation: "ProviderService.sendTurn",
+                threadId: parsed.threadId,
+                effect: sendTurn(parsed),
+              }),
+            ),
+          )
+        : whileThreadAcceptsProviderWork({
+            operation: "ProviderService.sendTurn",
+            threadId: input.threadId,
+            effect: sendTurn(input),
+          }),
+    prepareFailedRootRecovery: (input) =>
+      decodePrivateInputOrValidationError({
+        operation: "ProviderService.prepareFailedRootRecovery",
+        schema: ProviderPrepareFailedRootRecoveryInput,
+        payload: input,
+      }).pipe(
+        Effect.flatMap((parsed) =>
+          whileThreadAcceptsProviderWork({
+            operation: "ProviderService.prepareFailedRootRecovery",
+            threadId: parsed.request.threadId,
+            effect: prepareFailedRootRecovery(parsed),
+          }),
+        ),
+      ),
+    readFailedRootRecovery: (input) =>
+      decodePrivateInputOrValidationError({
+        operation: "ProviderService.readFailedRootRecovery",
+        schema: ProviderReadFailedRootRecoveryInput,
+        payload: input,
+      }).pipe(
+        Effect.flatMap((parsed) =>
+          whileThreadAcceptsProviderWork({
+            operation: "ProviderService.readFailedRootRecovery",
+            threadId: parsed.threadId,
+            effect: readFailedRootRecovery(parsed),
+          }),
+        ),
+      ),
+    cancelFailedRootRecovery: (input) => cancelFailedRootRecovery(input),
     steerTurn: (input) =>
       whileThreadAcceptsProviderWork({
         operation: "ProviderService.steerTurn",

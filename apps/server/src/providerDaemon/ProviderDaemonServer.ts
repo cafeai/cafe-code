@@ -1025,6 +1025,33 @@ const executeRpcRequest = (
       return providerService.discardSessionFork(request.payload);
     case "sendTurn":
       return providerService.sendTurn(request.payload);
+    case "prepareFailedRootRecovery":
+      return providerService.prepareFailedRootRecovery
+        ? providerService.prepareFailedRootRecovery(request.payload)
+        : Effect.fail(
+            new ProviderValidationError({
+              operation: "prepareFailedRootRecovery",
+              issue: "Private recovery is unavailable.",
+            }),
+          );
+    case "readFailedRootRecovery":
+      return providerService.readFailedRootRecovery
+        ? providerService.readFailedRootRecovery(request.payload)
+        : Effect.fail(
+            new ProviderValidationError({
+              operation: "readFailedRootRecovery",
+              issue: "Private recovery is unavailable.",
+            }),
+          );
+    case "cancelFailedRootRecovery":
+      return providerService.cancelFailedRootRecovery
+        ? providerService.cancelFailedRootRecovery(request.payload)
+        : Effect.fail(
+            new ProviderValidationError({
+              operation: "cancelFailedRootRecovery",
+              issue: "Private recovery is unavailable.",
+            }),
+          );
     case "steerTurn":
       return providerService.steerTurn(request.payload);
     case "loginProvider":
@@ -2002,7 +2029,22 @@ export const runProviderDaemonServer = (
             writeJson(response, 401, { error: "unauthorized" });
             return;
           }
-          const rawBody = await readJsonBody(request);
+          // Parsing errors can quote raw JSON. At this point no trustworthy
+          // method is available, so never reflect a malformed RPC body into
+          // diagnostics or response text, even before private-method routing.
+          let rawBody: unknown;
+          try {
+            rawBody = await readJsonBody(request);
+          } catch {
+            writeJson(response, 400, {
+              ok: false,
+              error: {
+                tag: "ProviderValidationError",
+                message: "Provider request is unavailable or invalid.",
+              },
+            });
+            return;
+          }
           const rpcStartedAtMs = performance.now();
           const privateInteractionRequest =
             rawBody !== null &&
@@ -2010,36 +2052,105 @@ export const runProviderDaemonServer = (
             ((rawBody as { method?: unknown }).method === "manageMcp" ||
               (rawBody as { method?: unknown }).method === "respondToInteraction" ||
               (rawBody as { method?: unknown }).method === "resolveInteractionUrl");
+          // Detect private payloads before schema decoding: malformed values
+          // and unknown methods must never echo a token or original prompt in
+          // validation errors, diagnostics or durable command receipts.
+          const privateRecoveryRequest = (() => {
+            if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody))
+              return false;
+            const body = rawBody as Record<string, unknown>;
+            if (
+              body["method"] === "prepareFailedRootRecovery" ||
+              body["method"] === "readFailedRootRecovery" ||
+              body["method"] === "cancelFailedRootRecovery"
+            )
+              return true;
+            // Only reserve protocol fields at their actual envelope/payload
+            // positions. Declared opaque user options and resume cursors may
+            // legitimately contain the same words at arbitrary depth.
+            const reserved = [
+              "preparedFailedRootRecovery",
+              "continuationToken",
+              "requestCommitment",
+              "preparationSequence",
+              "attemptId",
+              "permit",
+            ];
+            const payload = body["payload"];
+            return (
+              reserved.some((key) => Object.hasOwn(body, key)) ||
+              (payload !== null &&
+                typeof payload === "object" &&
+                !Array.isArray(payload) &&
+                reserved.some((key) => Object.hasOwn(payload, key)))
+            );
+          })();
+          const privateRecoveryError: ProviderDaemonRpcEnvelope = {
+            ok: false,
+            error: {
+              tag: "ProviderPrivateRecoveryUnavailable",
+              message: "Private recovery is unavailable or uncertain.",
+            },
+          };
           let rpcMethod: ProviderDaemonRpcRequestValue["method"] | null = null;
           let rpcCommandId: string | undefined;
           let envelope: ProviderDaemonRpcEnvelope;
           try {
             envelope = await runProviderEffect(
               decodeRpcRequest(rawBody).pipe(
-                Effect.tap((rpcRequest) =>
-                  Effect.sync(() => {
-                    rpcMethod = rpcRequest.method;
-                    rpcCommandId = requestCommandId(rpcRequest);
-                  }),
-                ),
-                Effect.flatMap((rpcRequest) =>
-                  commandLedger.runOnce(
+                // No decoder error may reflect received input, even if a
+                // future private shape is disguised as an ordinary method.
+                Effect.map((rpcRequest) => ({ valid: true as const, rpcRequest })),
+                Effect.catch(() => Effect.succeed({ valid: false as const })),
+                Effect.flatMap((decoded) => {
+                  if (!decoded.valid)
+                    return Effect.succeed({
+                      ok: false as const,
+                      error: {
+                        tag: "ProviderValidationError",
+                        message: "Provider request is unavailable or invalid.",
+                      },
+                    });
+                  const rpcRequest = decoded.rpcRequest;
+                  rpcMethod = rpcRequest.method;
+                  rpcCommandId = privateRecoveryRequest ? undefined : requestCommandId(rpcRequest);
+                  if (
+                    privateRecoveryRequest &&
+                    rpcRequest.method !== "prepareFailedRootRecovery" &&
+                    rpcRequest.method !== "readFailedRootRecovery" &&
+                    rpcRequest.method !== "cancelFailedRootRecovery" &&
+                    !(
+                      rpcRequest.method === "sendTurn" &&
+                      rpcRequest.payload.preparedFailedRootRecovery !== undefined
+                    )
+                  )
+                    return Effect.succeed(privateRecoveryError);
+                  return commandLedger.runOnce(
                     rpcRequest,
                     executeRpcRequest(providerService, rpcRequest, purgeThread).pipe(
                       Effect.map((value): ProviderDaemonRpcEnvelope => ({
                         ok: true,
                         value: value === undefined ? null : value,
                       })),
-                      Effect.catch((error) => Effect.succeed(toRpcError(error, rpcRequest))),
+                      Effect.catch((error) =>
+                        Effect.succeed(
+                          privateRecoveryRequest
+                            ? privateRecoveryError
+                            : toRpcError(error, rpcRequest),
+                        ),
+                      ),
                     ),
-                  ),
+                  );
+                }),
+                Effect.catch((error) =>
+                  Effect.succeed(privateRecoveryRequest ? privateRecoveryError : toRpcError(error)),
                 ),
-                Effect.catch((error) => Effect.succeed(toRpcError(error))),
               ),
             );
           } catch (error) {
-            envelope = toRpcError(error);
+            envelope = privateRecoveryRequest ? privateRecoveryError : toRpcError(error);
           }
+          if (privateRecoveryRequest && !envelope.ok) envelope = privateRecoveryError;
           // Schema decoders and unexpected adapter defects can echo input.
           // Redact before metrics/logs, including failures before method decode.
           if (privateInteractionRequest && !envelope.ok)

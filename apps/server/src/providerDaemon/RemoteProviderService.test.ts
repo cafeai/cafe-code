@@ -30,6 +30,7 @@ import {
   guardRemoteProviderThreadOperation,
   guardRemoteCodexContextWindowStart,
   guardRemoteCodexFailedRootRestart,
+  guardRemoteCodexPhasedRecovery,
   isRetryableProviderDaemonControlError,
   isVoidProviderDaemonRpcMethod,
   ProviderDaemonRpcResponseError,
@@ -992,6 +993,109 @@ describe("RemoteProviderService", () => {
     const decoded = JSON.parse(bodies[0] ?? "null") as { readonly commandId?: unknown };
     assert.equal(typeof decoded.commandId, "string");
   });
+
+  it("never transport-replays private recovery requests after a reset", async () => {
+    const config = { httpBaseUrl: "http://127.0.0.1:3774", token: "synthetic-test-capability" };
+    const request = { threadId: ThreadId.make("thread-private"), input: "private prompt" };
+    const secret = "a".repeat(64);
+    const commitment = "b".repeat(64);
+    const requests = [
+      {
+        method: "prepareFailedRootRecovery" as const,
+        payload: { attemptId: "attempt", preparationSequence: 0, request },
+      },
+      {
+        method: "readFailedRootRecovery" as const,
+        payload: {
+          threadId: request.threadId,
+          attemptId: "attempt",
+          requestCommitment: commitment,
+        },
+      },
+      {
+        method: "cancelFailedRootRecovery" as const,
+        payload: {
+          threadId: request.threadId,
+          attemptId: "attempt",
+          requestCommitment: commitment,
+        },
+      },
+      {
+        method: "sendTurn" as const,
+        payload: {
+          ...request,
+          preparedFailedRootRecovery: {
+            attemptId: "attempt",
+            preparationSequence: 0,
+            requestCommitment: commitment,
+            permit: secret,
+          },
+        },
+      },
+    ];
+    for (const item of requests) {
+      let calls = 0;
+      let observed: unknown;
+      try {
+        await requestProviderDaemonRpcJsonWithStableRetry(config, item, async () => {
+          calls++;
+          throw Object.assign(new Error("synthetic reset"), { code: "ECONNRESET" });
+        });
+      } catch (error) {
+        observed = error;
+      }
+      assert.instanceOf(observed, Error);
+      assert.equal(calls, 1);
+    }
+  });
+
+  it.effect("refuses phased recovery before delivery without the exact advertised capability", () =>
+    Effect.gen(function* () {
+      const account = ProviderInstanceId.make("exact-private-account");
+      const request = {
+        threadId: ThreadId.make("exact-private-thread"),
+        expectedFailedRoot: {
+          turnId: TurnId.make("exact-private-root"),
+          providerThreadId: "exact-history",
+          subagentRuntimeId: SubagentRuntimeId.make("00000000-0000-4000-8000-000000000088"),
+          providerInstanceId: account,
+          observedAt: "2026-10-14T06:00:00.000Z",
+          restartSession: true as const,
+        },
+      };
+      let calls = 0;
+      const delivered = Effect.sync(() => ++calls);
+      for (const value of [undefined, false] as const) {
+        const result = yield* Effect.exit(
+          guardRemoteCodexPhasedRecovery({
+            request,
+            readCapabilities: (owner) => {
+              assert.equal(owner, account);
+              return Effect.succeed({
+                sessionModelSwitch: "in-session" as const,
+                liveSteer: "supported" as const,
+                codexPhasedFailedRootRecovery: value,
+              });
+            },
+            effect: delivered,
+          }),
+        );
+        assert.isTrue(Exit.isFailure(result));
+      }
+      assert.equal(calls, 0);
+      yield* guardRemoteCodexPhasedRecovery({
+        request,
+        readCapabilities: () =>
+          Effect.succeed({
+            sessionModelSwitch: "in-session" as const,
+            liveSteer: "supported" as const,
+            codexPhasedFailedRootRecovery: true,
+          }),
+        effect: delivered,
+      });
+      assert.equal(calls, 1);
+    }),
+  );
 
   it("does not retry timeouts or failures that are not connection resets", async () => {
     let attempts = 0;

@@ -50,7 +50,7 @@ import { readTurnConfiguration } from "./turnConfiguration";
 import { readWorkflowTaskPresentation } from "./workflowTaskActivity";
 import { subagentLimitsEqual } from "./subagentConcurrency";
 import { threadForkPrefix } from "./lib/threadForkPrefix";
-import { isCurrentCodexRecoveryMarker } from "./codexRecovery";
+import { isCurrentCodexRecoveryMarker, latestCodexPreparationMarker } from "./codexRecovery";
 import { compareActivityWindowOrder } from "./activityOrder";
 const isProviderDriverKindValue = Schema.is(ProviderDriverKind);
 const isRuntimeSubagentPresentation = Schema.is(RuntimeSubagentPresentation);
@@ -1429,6 +1429,12 @@ function retainThreadActivityWindow(
     isCurrentCodexRecoveryMarker(activity, currentTurnId ?? null, session),
   );
   if (latestRecovery) retainedIds.add(latestRecovery.id);
+
+  // A cold preparation may retire the old native runtime before opening the
+  // replacement. Keep one bounded current-turn preparation observation,
+  // including its terminal marker, without claiming native-owner evidence.
+  const latestPreparation = latestCodexPreparationMarker(ordered, currentTurnId ?? null);
+  if (latestPreparation) retainedIds.add(latestPreparation.activity.id);
 
   const retainedSubagentIdentities = new Set<string>();
   const latestSubagentLifecycleByKey = new Map<string, OrchestrationThreadActivity>();

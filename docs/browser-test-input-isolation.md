@@ -1,6 +1,6 @@
 # Browser test input isolation
 
-Last updated: 2026-10-28 15:59:40 JST (UTC+0900)
+Last updated: 2026-10-28 17:40:13 JST (UTC+0900)
 
 Current suite design is governed by [Test suite policy](test-suite-policy.md).
 The October 16 overhaul retires the exact fluid inventory, sample commit-chart
@@ -487,6 +487,18 @@ promise resolves, and restore the acquired API spy only after exact unmount.
 Rail-docking journeys use the same owner without a held-response gate. Keep all
 original hover/click, docking, navigation and acknowledgement assertions;
 lifetime ownership does not grant input replay or a longer test allowance.
+
+Detached-review restoration and independent Desk rails use that same caller
+owner before mount and retain their original gestures, docking and geometry
+assertions. The selected delivery and controls-menu composer fixtures register
+their own public-signal owner before viewport or render acquisition, retaining
+a late view, QueryClient, host and previous viewport for exact cleanup. Shared
+`afterEach` joins that owner before resetting drafts, mocks or locale; an
+unproved unmount or viewport restoration keeps the lease and blocks a new
+fixture. Own each existing animation completion independently and fence helper
+continuations before subsequent native input. These lifetime repairs preserve
+original inputs, tables and deadlines and do not establish a historical
+timeout cause.
 
 The Atrium replacement journey also admits its caller owner before mounting.
 It joins the original native actions and exact unmount before restoring the

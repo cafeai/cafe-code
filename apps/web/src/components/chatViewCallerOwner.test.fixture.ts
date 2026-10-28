@@ -16,7 +16,12 @@ const labels = [
   "reconnect-exhaustion",
   "desk-preview",
   "desk-late-fork",
+  "desk-review-restoration",
+  "desk-context-rail",
   "composer-rail-docking",
+  "composer-opening-stop",
+  "composer-stop-accepted",
+  "composer-preparation-stop",
   "navigation-atrium",
 ] as const;
 export type ChatViewCallerLabel = (typeof labels)[number];

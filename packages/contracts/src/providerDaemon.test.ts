@@ -18,6 +18,89 @@ import {
   WindowsProcessIdentity,
 } from "./providerDaemon.ts";
 
+it("keeps private phased recovery tokens and status shapes finite across the daemon codec", () => {
+  const decodeRequest = Schema.decodeUnknownSync(ProviderDaemonRpcRequest);
+  const decodePreparation = Schema.decodeUnknownSync(
+    ProviderDaemonRpcResultByMethod.prepareFailedRootRecovery,
+  );
+  const common = {
+    threadId: "thread-private",
+    attemptId: "attempt-private",
+    requestCommitment: "a".repeat(64),
+    preparationSequence: 0,
+  };
+  const prepared = {
+    ...common,
+    state: "prepared",
+    phase: "prepared",
+    providerInstanceId: "codex",
+    recoverySession: {
+      previousSubagentRuntimeId: "10000000-0000-4000-8000-000000000001",
+      subagentRuntimeId: "10000000-0000-4000-8000-000000000002",
+      providerThreadId: "history-private",
+    },
+    permit: "b".repeat(64),
+  };
+  assert.deepEqual(decodePreparation(prepared), prepared);
+  for (const bad of [
+    { ...prepared, permit: "short" },
+    { ...prepared, permit: "B".repeat(64) },
+    { ...prepared, permit: `${"b".repeat(64)}\n` },
+    { ...prepared, requestCommitment: "x".repeat(64) },
+    { ...prepared, preparationSequence: -1 },
+    { ...prepared, preparationSequence: Number.MAX_SAFE_INTEGER + 1 },
+    { ...common, state: "consumed", phase: "retired" },
+  ])
+    assert.throws(() => decodePreparation(bad));
+  const payload = {
+    attemptId: "attempt-private",
+    preparationSequence: 0,
+    request: { threadId: "thread-private", input: "synthetic" },
+  };
+  assert.deepEqual(
+    decodeRequest({
+      method: "prepareFailedRootRecovery",
+      commandId: "10000000-0000-4000-8000-000000000001",
+      payload,
+    }),
+    {
+      method: "prepareFailedRootRecovery",
+      commandId: "10000000-0000-4000-8000-000000000001",
+      payload,
+    },
+  );
+  assert.throws(() =>
+    decodeRequest({
+      method: "prepareFailedRootRecovery",
+      commandId: "10000000-0000-4000-8000-000000000001",
+      payload: { ...payload, continuationToken: "bad" },
+    }),
+  );
+  const cancellation = {
+    threadId: payload.request.threadId,
+    attemptId: payload.attemptId,
+    requestCommitment: "c".repeat(64),
+  };
+  assert.deepEqual(
+    decodeRequest({
+      method: "cancelFailedRootRecovery",
+      commandId: "10000000-0000-4000-8000-000000000002",
+      payload: cancellation,
+    }),
+    {
+      method: "cancelFailedRootRecovery",
+      commandId: "10000000-0000-4000-8000-000000000002",
+      payload: cancellation,
+    },
+  );
+  assert.throws(() =>
+    decodeRequest({
+      method: "cancelFailedRootRecovery",
+      payload: { ...cancellation, requestCommitment: "bad" },
+    }),
+  );
+});
+
 const OWNERSHIP_ID = "9a90b48d-868f-4614-ae9c-66d50293d52b";
 const decodeDaemonLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
 

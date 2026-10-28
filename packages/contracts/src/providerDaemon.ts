@@ -38,6 +38,9 @@ import {
   ProviderSessionForkResult,
   ProviderSnoozeUserInputInput,
   ProviderSendTurnInput,
+  ProviderPrepareFailedRootRecoveryInput,
+  ProviderReadFailedRootRecoveryInput,
+  ProviderFailedRootRecoveryPreparation,
   ProviderSession,
   ProviderSessionStartInput,
   ProviderSteerTurnInput,
@@ -512,6 +515,8 @@ export const ProviderDaemonAdapterCapabilities = Schema.Struct({
   // Missing on legacy owners must fail closed: silently dropping a restart
   // guard could otherwise reuse the unhealthy session or stop newer work.
   codexFailedRootRestart: Schema.optional(Schema.Boolean),
+  // Only this exact authenticated daemon can admit private phased recovery.
+  codexPhasedFailedRootRecovery: Schema.optional(Schema.Boolean),
   sessionModelSwitch: Schema.Literals(["in-session", "restart-resume", "unsupported"]),
   liveSteer: Schema.Literals(["supported", "unsupported"]),
   // Optional on the wire so a newly built desktop can still interrogate an
@@ -617,6 +622,20 @@ export const ProviderDaemonRpcRequest = Schema.Union([
     method: Schema.Literal("sendTurn"),
     commandId: Schema.optional(ProviderDaemonCommandId),
     payload: ProviderSendTurnInput,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("prepareFailedRootRecovery"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderPrepareFailedRootRecoveryInput,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("readFailedRootRecovery"),
+    payload: ProviderReadFailedRootRecoveryInput,
+  }),
+  Schema.Struct({
+    method: Schema.Literal("cancelFailedRootRecovery"),
+    commandId: Schema.optional(ProviderDaemonCommandId),
+    payload: ProviderReadFailedRootRecoveryInput,
   }),
   Schema.Struct({
     method: Schema.Literal("forkSession"),
@@ -758,6 +777,9 @@ export const ProviderDaemonRpcResultByMethod = {
   forkSession: ProviderSessionForkResult,
   discardSessionFork: Schema.Void,
   sendTurn: ProviderTurnStartResult,
+  prepareFailedRootRecovery: ProviderFailedRootRecoveryPreparation,
+  readFailedRootRecovery: ProviderFailedRootRecoveryPreparation,
+  cancelFailedRootRecovery: Schema.Void,
   steerTurn: ProviderTurnSteerResult,
   loginProvider: ServerProviderLoginResult,
   manageMcp: ProviderMcpResult,

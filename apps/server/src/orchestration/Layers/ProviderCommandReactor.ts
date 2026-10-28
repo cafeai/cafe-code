@@ -59,6 +59,8 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { hasLiveProviderRuntimeOwner } from "../../provider/providerRuntimeOwnerEvidence.ts";
 import { sessionLifecycleSnapshot, isSupersededSessionLifecycle } from "../sessionLifecycle.ts";
 import { getCodexRootTurnCompletion } from "../../provider/codexRootTurnCompletion.ts";
+import * as Exit from "effect/Exit";
+import { codexFailedRootPreparationCommitment } from "../../provider/codexFailedRootPreparation.ts";
 import { matchesSubagentPolicySession } from "../../provider/subagentPolicyContinuation.ts";
 import { makeProviderSessionTitle } from "../../provider/providerSessionTitle.ts";
 import {
@@ -6005,7 +6007,10 @@ const make = Effect.gen(function* () {
       if (!threadMatches(thread)) return;
       if (
         (yield* providerService.getCapabilities(transient.providerInstanceId))
-          .codexFailedRootRestart !== true
+          .codexPhasedFailedRootRecovery !== true ||
+        providerService.prepareFailedRootRecovery === undefined ||
+        providerService.readFailedRootRecovery === undefined ||
+        providerService.cancelFailedRootRecovery === undefined
       ) {
         // An older authenticated owner must not silently use retained-session
         // recovery. No provider call or immutable paid attempt is made here.
@@ -6181,6 +6186,195 @@ const make = Effect.gen(function* () {
       )
         return;
       const claimSequence = winner[0]!.sequence;
+      const prepareAndSend = Effect.gen(function* () {
+        const prepare = providerService.prepareFailedRootRecovery!;
+        const read = providerService.readFailedRootRecovery!;
+        const requestCommitment = codexFailedRootPreparationCommitment(
+          claimOwnerId,
+          prepared.request,
+        );
+        const lookup = { threadId, attemptId: claimOwnerId, requestCommitment };
+        const currentIntent = (current: OrchestrationThread | undefined) =>
+          current !== undefined &&
+          current.archivedAt === null &&
+          current.deletedAt === null &&
+          current.modelSelection.instanceId === transient.providerInstanceId &&
+          current.runtimeMode === thread?.runtimeMode &&
+          current.latestTurn?.turnId === recovery.turnId &&
+          current.latestTurn.state === "error";
+        let sequence = 0;
+        let phase: import("@cafecode/contracts").ProviderFailedRootRecoveryPreparation | undefined;
+        let observedPhase = "";
+        let pollAttempt = 0;
+        const report = (next: string, count: number) =>
+          Effect.gen(function* () {
+            if (observedPhase === next) return;
+            observedPhase = next;
+            const now = DateTime.formatIso(yield* DateTime.now);
+            const id = `server:codex-preparation:${event.sequence}:${sequence}:${next}`;
+            yield* orchestrationEngine.dispatch({
+              type: "thread.activity.append",
+              commandId: CommandId.make(id),
+              threadId,
+              activity: {
+                id: EventId.make(id),
+                kind: "runtime.warning",
+                tone: "info",
+                summary:
+                  next === "retryable"
+                    ? "Codex recovery will retry its session preparation"
+                    : next === "retired"
+                      ? "Codex recovery preparation is no longer pending"
+                      : "Codex recovery is preparing its session",
+                turnId: recovery.turnId,
+                // Bounded fixed phases/counters are observational. Never copy
+                // the private commitment, capability, input or native identity.
+                payload: {
+                  recovery: "codex-transient-preparation",
+                  phase: next,
+                  recoveryIntentSequence: event.sequence,
+                  sourceEventSequence: recovery.sourceEventSequence,
+                  preparationSequence: sequence,
+                  observedWaits: Math.min(30, count),
+                },
+                createdAt: now,
+              },
+              createdAt: now,
+            });
+          });
+        return yield* Effect.gen(function* () {
+          yield* report("preparing", pollAttempt);
+          if (!(yield* permitted()) || !currentIntent(yield* resolveThread(threadId)))
+            return undefined;
+          const first = yield* Effect.exit(
+            prepare({
+              attemptId: claimOwnerId,
+              preparationSequence: sequence,
+              request: prepared.request,
+            }),
+          );
+          if (Exit.isSuccess(first)) phase = first.value;
+          // Any missing preparation ACK is reconciled through an inert exact
+          // lookup. Preparation cannot pay by construction, but absence is not
+          // proof that it failed or permission to invoke another mutation.
+          while (true) {
+            if (!(yield* permitted()) || !currentIntent(yield* resolveThread(threadId)))
+              return undefined;
+            if (phase && phase.preparationSequence < sequence) phase = undefined;
+            if (
+              phase &&
+              (phase.threadId !== threadId ||
+                phase.attemptId !== claimOwnerId ||
+                phase.requestCommitment !== requestCommitment ||
+                phase.preparationSequence !== sequence)
+            )
+              return yield* new ProviderAdapterRequestError({
+                provider: "Codex",
+                method: "session/prepare",
+                detail: "The private Codex recovery observation did not match its attempt.",
+              });
+            if (phase?.state === "prepared") {
+              const owner = phase;
+              const live = (yield* providerService.listSessions()).find(
+                (entry) => entry.threadId === threadId,
+              );
+              if (
+                live?.provider !== "codex" ||
+                live.providerInstanceId !== transient.providerInstanceId ||
+                live.subagentRuntimeId !== owner.recoverySession.subagentRuntimeId ||
+                owner.providerInstanceId !== transient.providerInstanceId ||
+                owner.recoverySession.previousSubagentRuntimeId !== transient.subagentRuntimeId ||
+                owner.recoverySession.providerThreadId !==
+                  prepared.request.expectedFailedRoot?.providerThreadId ||
+                live.status !== "ready" ||
+                live.activeTurnId !== undefined ||
+                !(yield* permitted()) ||
+                !currentIntent(yield* resolveThread(threadId))
+              ) {
+                // Never abandon a prepared permit silently. An owner mismatch
+                // is not authority to send or retry; retire only the exact
+                // private reservation and retain an honest uncertain marker.
+                // A concurrent explicit control is handled by the existing
+                // finalizer, which records retirement instead.
+                if ((yield* permitted()) && currentIntent(yield* resolveThread(threadId))) {
+                  yield* report("uncertain", pollAttempt);
+                  yield* providerService.cancelFailedRootRecovery!(lookup).pipe(
+                    Effect.catchCause((cause) =>
+                      Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.void,
+                    ),
+                  );
+                }
+                return undefined;
+              }
+              return yield* sendPreparedProviderTurn({
+                ...prepared,
+                request: {
+                  ...prepared.request,
+                  preparedFailedRootRecovery: {
+                    attemptId: claimOwnerId,
+                    preparationSequence: sequence,
+                    requestCommitment,
+                    permit: owner.permit,
+                  },
+                },
+              }).pipe(Effect.timeout("30 seconds"));
+            }
+            if (phase?.state === "consumed") {
+              yield* report("uncertain", pollAttempt);
+              return undefined;
+            }
+            if (phase?.state === "retired") {
+              yield* report("retired", pollAttempt);
+              return undefined;
+            }
+            yield* report(
+              phase?.state === "unavailable" ? "uncertain" : (phase?.state ?? "uncertain"),
+              pollAttempt,
+            );
+            const delay = codexTransientRecoveryDelayMs(
+              Math.min(30, pollAttempt),
+              yield* Random.next,
+            );
+            pollAttempt = Math.min(30, pollAttempt + 1);
+            yield* Effect.sleep(delay);
+            if (!(yield* permitted()) || !currentIntent(yield* resolveThread(threadId)))
+              return undefined;
+            if (phase?.state === "retryable") {
+              if (!Number.isSafeInteger(sequence + 1)) return undefined;
+              sequence += 1;
+              yield* report("preparing", pollAttempt);
+              if (!(yield* permitted()) || !currentIntent(yield* resolveThread(threadId)))
+                return undefined;
+              const retry = yield* Effect.exit(
+                prepare({
+                  attemptId: claimOwnerId,
+                  preparationSequence: sequence,
+                  request: prepared.request,
+                  continuationToken: phase.continuationToken,
+                }),
+              );
+              phase = Exit.isSuccess(retry) ? retry.value : undefined;
+            } else {
+              const observed = yield* Effect.exit(read(lookup));
+              phase = Exit.isSuccess(observed) ? observed.value : undefined;
+            }
+          }
+        }).pipe(
+          Effect.onExit((outcome) =>
+            Effect.gen(function* () {
+              // Terminal manual controls revoke the recovery intent independently
+              // of whether native opening cleanup has joined. A missing paid ACK
+              // instead remains uncertain and never becomes a resend witness.
+              if (!(yield* permitted()) || !currentIntent(yield* resolveThread(threadId))) {
+                yield* providerService.cancelFailedRootRecovery!(lookup).pipe(
+                  Effect.catchCause(() => Effect.void),
+                );
+                yield* report("retired", pollAttempt);
+              } else if (Exit.isFailure(outcome)) yield* report("uncertain", pollAttempt);
+            }),
+          ),
+        );
+      });
       // The immutable claim is consumed even on timeout/unknown ACK. Native's
       // final semaphore checks exact failed root/generation again before I/O.
       const inFlight = { intentSequence: event.sequence, cancel: Effect.void };
@@ -6196,73 +6390,7 @@ const make = Effect.gen(function* () {
           transientRecoverySubmissions.get(threadId) !== inFlight
         )
           return;
-        return yield* sendPreparedProviderTurn(prepared).pipe(
-          Effect.timeout("30 seconds"),
-          Effect.catchCause((cause) =>
-            Effect.gen(function* () {
-              const refusal = readCodexFailedRootRetirementRefusal(cause);
-              if (refusal === undefined) return yield* Effect.failCause(cause);
-              // This catch surrounds provider submission alone. Errors after an
-              // ACK, teardown, opening, timeout or unknown transport delivery
-              // cannot enter it with an authenticated pre-retirement witness.
-              // Preserve both the old consumed claim and its exact no-submit
-              // outcome before allowing a distinct, one-use next claim.
-              const refusedAt = DateTime.formatIso(yield* DateTime.now);
-              const receiptId = codexFailedRootRetryRefusalCommandId(event.sequence, claimSequence);
-              const nextPreparationAttempt = saturateRuntimeRecoveryAttempt(
-                Math.max(
-                  preparationAttempt + 1,
-                  retryState.status === "refused" ? retryState.nextPreparationAttempt + 1 : 1,
-                ),
-              );
-              yield* orchestrationEngine.dispatch({
-                type: "thread.activity.append",
-                commandId: CommandId.make(receiptId),
-                threadId,
-                activity: {
-                  id: EventId.make(receiptId),
-                  kind: "runtime.warning",
-                  tone: "info",
-                  summary: "Codex recovery was not submitted; retrying safely",
-                  turnId: recovery.turnId,
-                  payload: {
-                    recovery: "codex-transient-continuation-unsubmitted",
-                    recoveryIntentSequence: event.sequence,
-                    sourceEventSequence: recovery.sourceEventSequence,
-                    attemptOwnerId,
-                    claimCommandId: attemptCommandId,
-                    claimOwnerId,
-                    requestCommitment,
-                    nativeConversationCommitment: codexRecoveryConversationCommitment({
-                      threadId,
-                      providerInstanceId: transient.providerInstanceId,
-                      providerThreadId: prepared.request.expectedFailedRoot!.providerThreadId,
-                    }),
-                    providerInstanceId: transient.providerInstanceId,
-                    subagentRuntimeId: transient.subagentRuntimeId,
-                    sessionUpdatedAt: recovery.sessionUpdatedAt,
-                    failedRootRetirementRefusal: refusal,
-                    nextPreparationAttempt,
-                  },
-                  createdAt: refusedAt,
-                },
-                createdAt: refusedAt,
-              });
-              if (
-                transientRecoverySubmissions.get(threadId) === inFlight &&
-                (yield* permitted()) &&
-                threadMatches(yield* resolveThread(threadId))
-              )
-                yield* scheduleTransientRecoveryWait(
-                  event,
-                  saturateRuntimeRecoveryAttempt(
-                    transient.retryAttempt + nextPreparationAttempt - 1,
-                  ),
-                  nextPreparationAttempt,
-                );
-              return undefined;
-            }),
-          ),
+        return yield* prepareAndSend.pipe(
           Effect.flatMap((turn) =>
             Effect.gen(function* () {
               if (turn === undefined) return;
@@ -6522,7 +6650,13 @@ const make = Effect.gen(function* () {
       // The queued explicit Stop can then close the owned native context/tree.
       transientRecoverySubmissions.set(threadId, inFlight);
       const sending = yield* Effect.forkScoped(submission);
-      inFlight.cancel = Fiber.interrupt(sending).pipe(Effect.asVoid);
+      // The subscriber only signals this exact child. The serial worker below
+      // is the sole completion observer and retains the join until every
+      // finalizer closes before it can process the queued Stop/new input. In
+      // the pinned Effect runtime, simultaneous Fiber.join and Fiber.interrupt
+      // observers can cause one notification to be skipped; waiting here too
+      // would strand the subscriber even after the owned child has exited.
+      inFlight.cancel = Effect.sync(() => sending.interruptUnsafe());
       if (transientRecoverySubmissions.get(threadId) !== inFlight) yield* inFlight.cancel;
       yield* Fiber.join(sending).pipe(
         Effect.catchCause((cause) =>

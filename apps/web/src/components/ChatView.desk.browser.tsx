@@ -63,7 +63,8 @@ describe("ChatView full app (desk)", () => {
       { ...snapshot.threads[0]!, id: secondId, title: "Second Desk chat" },
     ],
   });
-  const splitChats = async () => {
+  const splitChats = async (assertActive: () => void = () => undefined) => {
+    assertActive();
     const dispatch = useDeskStore.getState().dispatch;
     dispatch({ type: "keepOpen", tabKey: firstKey });
     dispatch({ type: "open", target: secondTarget });
@@ -1266,70 +1267,89 @@ describe("ChatView full app (desk)", () => {
     }
   });
 
-  it("restores a detached timeline review position after selecting another tab", async () => {
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: withSecondThread(
-        createSnapshotForTargetUser({
-          targetMessageId: MessageId.make("desk-review"),
-          targetText: "Desk review fixture",
-        }),
-      ),
+  it("restores a detached timeline review position after selecting another tab", async (context) => {
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "desk-review-restoration",
     });
-    try {
+    await owner.run(async () => {
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: withSecondThread(
+          createSnapshotForTargetUser({
+            targetMessageId: MessageId.make("desk-review"),
+            targetText: "Desk review fixture",
+          }),
+        ),
+      });
+      owner.assertActive();
       useDeskStore.getState().dispatch({ type: "keepOpen", tabKey: firstKey });
-      const scroller = await waitForElement(
-        () =>
-          document
-            .querySelector<HTMLElement>('[data-timeline-root="true"]')
-            ?.closest<HTMLElement>(".overscroll-y-contain") ?? null,
-        "Timeline scroller missing",
+      const scroller = await owner.own("first-row", () =>
+        waitForElement(
+          () =>
+            document
+              .querySelector<HTMLElement>('[data-timeline-root="true"]')
+              ?.closest<HTMLElement>(".overscroll-y-contain") ?? null,
+          "Timeline scroller missing",
+        ),
       );
-      await vi.waitFor(() => expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight));
-      await vi.waitFor(() => expect(scroller.scrollTop).toBeGreaterThan(1000));
-      await waitForLayout();
+      await owner.own("layout", () =>
+        vi.waitFor(() => expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight)),
+      );
+      await owner.own("layout", () =>
+        vi.waitFor(() => expect(scroller.scrollTop).toBeGreaterThan(1000)),
+      );
+      await owner.own("layout", waitForLayout);
       // Synthetic wheel events have no native scrolling default action, so
       // deliver the physical movement in the same gesture. Yielding frames
       // between them can let ChatView correctly settle the unmoved wheel as
       // a no-op at the tail, leaving the later programmatic scroll without
       // any user review intent under a busy browser's frame scheduling.
+      owner.assertActive();
       scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -600, bubbles: true }));
       scroller.scrollTop = 300;
       scroller.dispatchEvent(new Event("scroll"));
-      await waitForLayout();
-      await vi.waitFor(() => expect(document.body.textContent).toContain("Scroll to bottom"));
+      await owner.own("layout", waitForLayout);
+      await owner.own("controls", () =>
+        vi.waitFor(() => expect(document.body.textContent).toContain("Scroll to bottom")),
+      );
       const reviewOffset = scroller.scrollTop;
       expect(reviewOffset).toBeLessThan(scroller.scrollHeight - scroller.clientHeight - 100);
       const scrollControl = page.getByRole("button", { name: "Scroll to bottom", exact: true });
-      await scrollControl.hover();
+      await owner.own("controls", () => scrollControl.hover());
       const hideScrollControl = page.getByRole("button", {
         name: "Hide until bottom",
         exact: true,
       });
-      await expect.element(hideScrollControl).toBeVisible();
-      await hideScrollControl.click();
-      await expect.element(scrollControl).not.toBeInTheDocument();
+      await owner.own("controls", () => expect.element(hideScrollControl).toBeVisible());
+      await owner.own("controls", () => hideScrollControl.click());
+      await owner.own("closed", () => expect.element(scrollControl).not.toBeInTheDocument());
       expect(scroller.scrollTop).toBe(reviewOffset);
+      owner.assertActive();
       useDeskStore.getState().dispatch({ type: "open", target: secondTarget });
-      await vi.waitFor(() => expect(scroller.isConnected).toBe(false));
+      await owner.own("tab", () => vi.waitFor(() => expect(scroller.isConnected).toBe(false)));
       const secondScroller = document
         .querySelector<HTMLElement>('[data-timeline-root="true"]')!
         .closest<HTMLElement>(".overscroll-y-contain")!;
+      owner.assertActive();
       useDeskStore.getState().dispatch({ type: "select", tabKey: firstKey });
-      await vi.waitFor(() => expect(secondScroller.isConnected).toBe(false));
-      const restored = await waitForElement(
-        () =>
-          document
-            .querySelector<HTMLElement>('[data-timeline-root="true"]')
-            ?.closest<HTMLElement>(".overscroll-y-contain") ?? null,
-        "Restored timeline missing",
+      await owner.own("tab", () =>
+        vi.waitFor(() => expect(secondScroller.isConnected).toBe(false)),
       );
-      await vi.waitFor(() => expect(Math.abs(restored.scrollTop - reviewOffset)).toBeLessThan(100));
+      const restored = await owner.own("reopen", () =>
+        waitForElement(
+          () =>
+            document
+              .querySelector<HTMLElement>('[data-timeline-root="true"]')
+              ?.closest<HTMLElement>(".overscroll-y-contain") ?? null,
+          "Restored timeline missing",
+        ),
+      );
+      await owner.own("layout", () =>
+        vi.waitFor(() => expect(Math.abs(restored.scrollTop - reviewOffset)).toBeLessThan(100)),
+      );
       expect(restored.scrollTop).toBeLessThan(restored.scrollHeight - restored.clientHeight - 100);
-      await expect.element(scrollControl).not.toBeInTheDocument();
-    } finally {
-      await mounted.cleanup();
-    }
+      await owner.own("closed", () => expect.element(scrollControl).not.toBeInTheDocument());
+    });
   });
 
   it("preserves a reopened chat's newer draft when its previous direct steer ACK arrives", async () => {
@@ -1552,34 +1572,40 @@ describe("ChatView full app (desk)", () => {
     }
   });
 
-  it("pins the original context and task rail independently in each real pane", async () => {
-    const mounted = await mountChatView({
-      viewport: { ...DEFAULT_VIEWPORT, width: 2100 },
-      snapshot: withSecondThread(
-        createSnapshotWithRuntimeTaskProgress({ withContextWindow: true }),
-      ),
+  it("pins the original context and task rail independently in each real pane", async (context) => {
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "desk-context-rail",
     });
-    try {
-      await splitChats();
+    await owner.run(async () => {
+      await owner.mount({
+        viewport: { ...DEFAULT_VIEWPORT, width: 2100 },
+        snapshot: withSecondThread(
+          createSnapshotWithRuntimeTaskProgress({ withContextWindow: true }),
+        ),
+      });
+      await owner.own("layout", () => splitChats(owner.assertActive));
       const group = () => document.querySelector<HTMLElement>('[aria-label="Main chat group"]')!;
       const trigger = group().querySelector<HTMLButtonElement>(
         'button[aria-label^="Task progress:"]',
       );
       expect(trigger).not.toBeNull();
+      owner.assertActive();
       trigger!.click();
-      await page.getByRole("button", { name: "Show on the side" }).click();
-      await vi.waitFor(() =>
-        expect(group().querySelector('[data-session-rail="true"]')).not.toBeNull(),
+      await owner.own("rail", () => page.getByRole("button", { name: "Show on the side" }).click());
+      await owner.own("rail", () =>
+        vi.waitFor(() =>
+          expect(group().querySelector('[data-session-rail="true"]')).not.toBeNull(),
+        ),
       );
       expect(useUiStateStore.getState().sessionRailDocked).toBe(false);
       expect(useDeskStore.getState().desk.groups.g1?.sessionRailDocked).toBe(true);
       expect(document.querySelectorAll('button[aria-label^="Context window"]')).toHaveLength(1);
-      await page.getByRole("button", { name: "Show in composer" }).click();
-      await vi.waitFor(() =>
-        expect(document.querySelectorAll('button[aria-label^="Context window"]')).toHaveLength(2),
+      await owner.own("rail", () => page.getByRole("button", { name: "Show in composer" }).click());
+      await owner.own("rail", () =>
+        vi.waitFor(() =>
+          expect(document.querySelectorAll('button[aria-label^="Context window"]')).toHaveLength(2),
+        ),
       );
-    } finally {
-      await mounted.cleanup();
-    }
+    });
   });
 });

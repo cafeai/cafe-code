@@ -4,7 +4,7 @@ Decision status: Accepted within the current user-authorized repair
 Implementation status: Implemented; normal rebuilt-runtime adoption required
 Verification status: Combined source/renderer qualification passed locally; forced build remains the final release gate; no live provider qualification
 Created: 2026-10-10 21:31:04 JST (UTC+0900)
-Last updated: 2026-10-19 12:16:05 JST (UTC+0900)
+Last updated: 2026-10-28 20:21:41 JST (UTC+0900)
 Decision authority: the user's request for persistent backed-off recovery until
 explicit Stop, correct surviving-child presentation, and compact Stop/restart UI.
 Partially supersedes: the failed-root availability assumption in
@@ -20,6 +20,12 @@ Also partially superseded by: [proven unsubmitted retry](codex-failed-root-unsub
 for a consumed attempt with a new exact typed pre-retirement refusal receipt.
 Unknown acknowledgment remains reconciliation, and every individual claim remains
 one-use; historical prose and legacy attempts gain no retrospective authority.
+The later [phased failed-root recovery](codex-phased-failed-root-recovery.md)
+separates zero-paid preparation from paid submission for a capability-qualified
+owner. It preserves this decision's classifiers, control ordering, terminal-time
+truth and unknown-ACK restrictions. Its exact-source qualification is
+separate from the historical local qualification recorded here; neither decision
+proves adoption by a running provider.
 
 ## Context
 

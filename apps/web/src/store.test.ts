@@ -1291,6 +1291,63 @@ describe("incremental orchestration updates", () => {
       expect(threadsOf(next)[0]?.latestTurn?.completedAt).toBe(activity.createdAt);
     }
   });
+  it("retains one newest preparation terminal through child activity pressure", () => {
+    const turnId = TurnId.make("preparation-root");
+    const at = "2026-02-27T00:00:00.000Z";
+    const marker = (
+      phase: "preparing" | "retired",
+      sequence: number,
+    ): Thread["activities"][number] => ({
+      id: EventId.make(`server:codex-preparation:20:0:${phase}`),
+      sequence,
+      kind: "runtime.warning",
+      tone: "info",
+      summary: "Preparation",
+      turnId,
+      createdAt: at,
+      payload: {
+        recovery: "codex-transient-preparation",
+        phase,
+        recoveryIntentSequence: 20,
+        sourceEventSequence: 10,
+        preparationSequence: 0,
+        observedWaits: 0,
+      },
+    });
+    const pending = marker("preparing", 1),
+      terminal = marker("retired", 2);
+    const tail = Array.from({ length: 501 }, (_, index) => ({
+      ...pending,
+      id: EventId.make(`preparation-child-${index}`),
+      sequence: index + 3,
+      kind: "tool.completed" as const,
+      payload: {},
+    }));
+    const thread = makeThread({
+      session: null,
+      latestTurn: {
+        turnId,
+        state: "error",
+        requestedAt: at,
+        startedAt: at,
+        completedAt: at,
+        assistantMessageId: null,
+      },
+      activities: [pending, terminal, ...tail.slice(0, 500)],
+    });
+    const next = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent(
+        "thread.activity-appended",
+        { threadId: thread.id, activity: tail[500]! },
+        { sequence: tail[500]!.sequence },
+      ),
+      localEnvironmentId,
+    );
+    const retained = threadsOf(next)[0]!.activities;
+    expect(retained.some((activity) => activity.id === terminal.id)).toBe(true);
+    expect(retained.some((activity) => activity.id === pending.id)).toBe(false);
+  });
   it.each([
     "codex-transient-recovery-waiting",
     "codex-transient-continuation-attempted",

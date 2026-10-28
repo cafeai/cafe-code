@@ -68,6 +68,10 @@ import {
   ThreadId,
   TurnId,
   ProviderSendTurnInput,
+  type ProviderPrepareFailedRootRecoveryInput,
+  type ProviderReadFailedRootRecoveryInput,
+  type ProviderFailedRootRecoveryPreparation,
+  type ProviderFailedRootRecoverySession,
   type ProviderSteerTurnInput,
   type ProviderSession,
   type ProviderSessionForkResult,
@@ -77,6 +81,7 @@ import {
   TurnCompletedPayload,
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -91,6 +96,13 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { matchesSubagentPolicySession } from "../subagentPolicyContinuation.ts";
+import {
+  codexFailedRootPreparationCommitment,
+  copyCodexFailedRootPreparationRequest,
+  mayPruneCodexFailedRootPreparation,
+  newCodexFailedRootPreparationSecret,
+  sameCodexFailedRootPreparationSecret,
+} from "../codexFailedRootPreparation.ts";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -605,12 +617,42 @@ interface CodexAdapterSessionContext {
   readonly activeAuthRecoveryTasksById: Map<string, TurnId | null>;
   readonly retirementCompletion: Deferred.Deferred<Exit.Exit<void, never>>;
   retirementStarted: boolean;
+  retirementCleanupJoined: boolean;
   pendingTransportPolicyRetirement?: {
     readonly fallbackEventId: string;
     readonly observedAt: string;
     readonly reason: string;
   };
   stopped: boolean;
+  recoveryControlEpoch: symbol;
+}
+
+interface CodexFailedRootPreparationReservation {
+  readonly request: ProviderSendTurnInput;
+  readonly attemptId: string;
+  readonly requestCommitment: string;
+  readonly retainedContext: CodexAdapterSessionContext;
+  readonly retainedSession: ProviderSession;
+  readonly originControlEpoch: symbol;
+  preparationSequence: number;
+  result: ProviderFailedRootRecoveryPreparation;
+  retired: boolean;
+  expired: boolean;
+  oldRetired: boolean;
+  oldCleanupJoined: boolean;
+  workerCompletion: Deferred.Deferred<Exit.Exit<unknown, unknown>>;
+  timerCompletion: Deferred.Deferred<Exit.Exit<unknown, unknown>>;
+  cancellationPending: boolean;
+  launchInstalled: boolean;
+  workerExited: boolean;
+  openingScopeOwned: boolean;
+  openingScopeCleanupJoined: boolean;
+  pending: boolean;
+  deadlineMs: number;
+  fiber?: Fiber.Fiber<void, never>;
+  timer?: Fiber.Fiber<void, never>;
+  preparedContext?: CodexAdapterSessionContext;
+  preparedPolicy?: CodexOpeningPolicy;
 }
 
 function mapCodexRuntimeError(
@@ -5333,6 +5375,62 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
+  const adapterScope = yield* Effect.service(Scope.Scope);
+  // One finite private reservation per chat. Live/uncertain ownership is never
+  // evicted to admit a competitor; an absent old capability always refuses.
+  const recoveryPreparations = new Map<ThreadId, CodexFailedRootPreparationReservation>();
+  const MAX_RECOVERY_PREPARATIONS = 256;
+  const preparationIdentity = (reservation: CodexFailedRootPreparationReservation) => ({
+    threadId: reservation.request.threadId,
+    attemptId: reservation.attemptId,
+    requestCommitment: reservation.requestCommitment,
+    preparationSequence: reservation.preparationSequence,
+  });
+  const signalPreparationFiber = (fiber: Fiber.Fiber<unknown, unknown> | undefined) =>
+    Effect.sync(() => fiber?.interruptUnsafe());
+  const signalAndJoinPreparation = (reservation: CodexFailedRootPreparationReservation) =>
+    Effect.gen(function* () {
+      yield* signalPreparationFiber(reservation.timer);
+      yield* signalPreparationFiber(reservation.fiber);
+      yield* Deferred.await(reservation.timerCompletion);
+      yield* Deferred.await(reservation.workerCompletion);
+    });
+  const forkPreparationFiber = (
+    work: Effect.Effect<void>,
+    completion: Deferred.Deferred<Exit.Exit<unknown, unknown>>,
+    onCompleted?: () => void,
+  ) =>
+    Effect.withFiber((self) => {
+      // Bootstrap is uninterruptible until this stable observer is installed;
+      // actual work then regains its original interruptibility. Immediate start
+      // reaches this hook before the qualified scheduler's scope-interruption
+      // observer. Never unregister during delivery: the pinned runtime iterates
+      // its observer array in place. Controls await only the shared Deferred.
+      self.addObserver((exit) => {
+        onCompleted?.();
+        // Exit is itself an Effect. Store it AS A SUCCESS VALUE so an interrupt
+        // cannot interrupt a waiter or change this shared completion's meaning.
+        Deferred.doneUnsafe(completion, Effect.succeed(exit));
+      });
+      return Effect.interruptible(work);
+    }).pipe(Effect.forkIn(adapterScope, { startImmediately: true, uninterruptible: true }));
+  const retireRecoveryPreparation = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const current = sessions.get(threadId);
+      if (current) current.recoveryControlEpoch = Symbol();
+      const reservation = recoveryPreparations.get(threadId);
+      if (!reservation) return;
+      // Revoke synchronously, before joining a possibly uninterruptible native
+      // acquisition. Its eventual completion cannot publish a usable permit.
+      reservation.retired = true;
+      reservation.retainedContext.recoveryControlEpoch = Symbol();
+      reservation.result = {
+        ...preparationIdentity(reservation),
+        state: "retired",
+        phase: "retired",
+      };
+      yield* signalAndJoinPreparation(reservation);
+    });
   const manualCompactions = new Set<ThreadId>();
   // A detail click is read-only but still spawns a short-lived app-server when
   // the root is not already live. Bound that resource amplification per
@@ -5498,8 +5596,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ),
           );
           yield* session.runtime.close;
-          yield* Scope.close(session.scope, Exit.void);
-        }).pipe(Effect.exit);
+        }).pipe(
+          // Earlier exact-owner revocation/native close can fail. Always join
+          // this same session scope, including its bridge and held bindings,
+          // while preserving the original and finalizer causes together. Scope
+          // success alone never converts uncertain native exit into proof.
+          Effect.ensuring(Scope.close(session.scope, Exit.void)),
+          Effect.exit,
+        );
+        session.retirementCleanupJoined = Exit.isSuccess(exit);
         yield* Deferred.succeed(session.retirementCompletion, exit);
         if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
       }),
@@ -5563,9 +5668,36 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     input: Parameters<CodexAdapterShape["startSession"]>[0],
     retainedPolicy?: CodexOpeningPolicy,
     requireExactResume?: true,
+    recoveryPreparation?: CodexFailedRootPreparationReservation,
   ) =>
     Effect.scoped(
       Effect.gen(function* () {
+        const assertPreparation = () =>
+          Effect.gen(function* () {
+            if (recoveryPreparation === undefined) return;
+            const now = yield* Clock.currentTimeMillis;
+            if (
+              recoveryPreparations.get(input.threadId) !== recoveryPreparation ||
+              recoveryPreparation.retired ||
+              recoveryPreparation.retainedContext.recoveryControlEpoch !==
+                recoveryPreparation.originControlEpoch
+            )
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/start",
+                detail: "The private Codex recovery opening was retired before completion.",
+              });
+            if (recoveryPreparation.expired || now >= recoveryPreparation.deadlineMs) {
+              recoveryPreparation.expired = true;
+              recoveryPreparation.result = {
+                ...preparationIdentity(recoveryPreparation),
+                state: "uncertain",
+                phase: "retiring-opening",
+              };
+              return yield* Effect.interrupt;
+            }
+          });
+        yield* assertPreparation();
         if (input.provider !== undefined && input.provider !== PROVIDER) {
           return yield* new ProviderAdapterValidationError({
             provider: PROVIDER,
@@ -5575,6 +5707,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         }
 
         const advertisedModels = yield* getRequestModels(input.modelSelection);
+        yield* assertPreparation();
         const daybreak = resolveCodexDaybreak(
           input.modelSelection,
           boundInstanceId,
@@ -5654,10 +5787,31 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         }
 
         yield* prepareRuntimeHomeForSession(input.threadId, "startSession");
+        yield* assertPreparation();
 
         let sessionScopeTransferred = false;
-        const sessionScope = yield* Effect.acquireRelease(Scope.make("sequential"), (scope) =>
-          sessionScopeTransferred ? Effect.void : Scope.close(scope, Exit.void),
+        const sessionScope = yield* Effect.acquireRelease(
+          Scope.make("sequential").pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                if (recoveryPreparation) {
+                  recoveryPreparation.openingScopeOwned = true;
+                  recoveryPreparation.openingScopeCleanupJoined = false;
+                }
+              }),
+            ),
+          ),
+          (scope) =>
+            sessionScopeTransferred
+              ? Effect.void
+              : Scope.close(scope, Exit.void).pipe(
+                  Effect.onExit((exit) =>
+                    Effect.sync(() => {
+                      if (recoveryPreparation)
+                        recoveryPreparation.openingScopeCleanupJoined = Exit.isSuccess(exit);
+                    }),
+                  ),
+                ),
         );
         const managementBinding = yield* Effect.acquireRelease(
           makeManagementMcpSession({
@@ -5676,6 +5830,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ),
           (binding) => binding?.dispose ?? Effect.void,
         ).pipe(Effect.provideService(Scope.Scope, sessionScope));
+        yield* assertPreparation();
         const schedulingBroker = readSchedulingSessionBroker();
         // acquireRelease registers revocation atomically with successful bind.
         // The broker creates private files asynchronously: interrupting an
@@ -5700,6 +5855,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               disposeSchedulingSession,
             ).pipe(Effect.provideService(Scope.Scope, sessionScope))
           : undefined;
+        yield* assertPreparation();
         const visualizationBroker =
           input.runtimeMode === "full-access" ? readVisualizationSessionBroker() : undefined;
         const visualizationBinding = visualizationBroker
@@ -5727,6 +5883,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 ),
             ).pipe(Effect.provideService(Scope.Scope, sessionScope))
           : undefined;
+        yield* assertPreparation();
         const glideBinding = yield* Effect.acquireRelease(
           bindGlideSession({
             threadId: input.threadId,
@@ -5736,6 +5893,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           }),
           disposeGlideSession,
         ).pipe(Effect.provideService(Scope.Scope, sessionScope));
+        yield* assertPreparation();
         const currentTransportPolicy = toRuntimeTransportPolicy(yield* Ref.get(transportPolicyRef));
         const runtimeInput: CodexSessionRuntimeOptions = {
           customInstructions: yield* readSystemPromptFileForInjection(
@@ -5856,7 +6014,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ).pipe(Effect.provideService(Scope.Scope, sessionScope));
         const { runtime, eventFiber, started, activeAuthRecoveryTasksById } = yield* Effect.gen(
           function* () {
-            const runtime = yield* createRuntime(runtimeInput).pipe(
+            yield* assertPreparation();
+            const acquireRuntime = createRuntime(runtimeInput).pipe(
               Effect.provideService(Scope.Scope, sessionScope),
               Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
               Effect.mapError(
@@ -5869,14 +6028,23 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   }),
               ),
             );
+            const runtime = yield* recoveryPreparation === undefined
+              ? acquireRuntime
+              : Effect.acquireRelease(acquireRuntime, (ownedRuntime) =>
+                  sessionScopeTransferred ? Effect.void : ownedRuntime.close,
+                ).pipe(Effect.provideService(Scope.Scope, sessionScope));
             // Until the session is published, this caller owns its runtime. A
             // deadline or cancellation must close that exact runtime before the
             // error escapes, including when startup has not reached start() yet.
             // Scope closure also retains the native child's existing force-kill
             // grace; do not detach cleanup or leave a late request able to publish.
-            yield* Effect.addFinalizer(() =>
-              sessionScopeTransferred ? Effect.void : runtime.close.pipe(Effect.ignore),
-            );
+            // Only the private phased path owns the atomic acquisition lease.
+            // Preserve ordinary manual construction's interruptibility and its
+            // original caller-scope finalizer registration without widening it.
+            if (recoveryPreparation === undefined)
+              yield* Effect.addFinalizer(() =>
+                sessionScopeTransferred ? Effect.void : runtime.close.pipe(Effect.ignore),
+              );
             // Keep lifecycle authority inside the exact native runtime's bridge.
             // A replacement allocates a separate cache; delayed old-runtime events
             // must never mutate the replacement's terminal or timer evidence.
@@ -6211,6 +6379,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   }),
               ),
             );
+            yield* assertPreparation();
 
             // Initialization may discover the pending catalog, but scheduling
             // mutations remain denied until the exact native session starts.
@@ -6244,31 +6413,43 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             });
             return { runtime, eventFiber, started, activeAuthRecoveryTasksById };
           },
-        ).pipe(
-          Effect.timeoutOrElse({
-            duration: CODEX_SESSION_START_TIMEOUT_MS,
-            orElse: () =>
-              Effect.logWarning("codex.session.start-timeout", {
-                threadId: input.threadId,
-                providerInstanceId: boundInstanceId,
-                timeoutMs: CODEX_SESSION_START_TIMEOUT_MS,
-              }).pipe(
-                Effect.andThen(
-                  Effect.fail(
-                    new ProviderAdapterRequestError({
-                      provider: PROVIDER,
-                      method: "session/start",
-                      remoteErrorTag: "startup-timeout",
-                      detail:
-                        "Codex did not finish starting within 60 seconds. The incomplete session was closed; try again when the provider is available.",
-                    }),
-                  ),
-                ),
+        ).pipe((opening) =>
+          // Phased recovery already owns one absolute sixty-second lease
+          // covering acquisition, opening and publication. A second relative
+          // timer could win at the same instant and erase its trusted expiry
+          // witness. Ordinary manual starts retain their existing budget.
+          recoveryPreparation !== undefined
+            ? opening
+            : opening.pipe(
+                Effect.timeoutOrElse({
+                  duration: CODEX_SESSION_START_TIMEOUT_MS,
+                  orElse: () =>
+                    Effect.logWarning("codex.session.start-timeout", {
+                      threadId: input.threadId,
+                      providerInstanceId: boundInstanceId,
+                      timeoutMs: CODEX_SESSION_START_TIMEOUT_MS,
+                    }).pipe(
+                      Effect.andThen(
+                        Effect.fail(
+                          new ProviderAdapterRequestError({
+                            provider: PROVIDER,
+                            method: "session/start",
+                            remoteErrorTag: "startup-timeout",
+                            detail:
+                              "Codex did not finish starting within 60 seconds. The incomplete session was closed; try again when the provider is available.",
+                          }),
+                        ),
+                      ),
+                    ),
+                }),
               ),
-          }),
         );
 
-        sessions.set(input.threadId, {
+        const retirementCompletion = yield* Deferred.make<Exit.Exit<void, never>>();
+        // No suspending allocation may occur between this final lease fence
+        // and publication of the exact scope/native owner.
+        yield* assertPreparation();
+        const publishedContext: CodexAdapterSessionContext = {
           visualizationBinding,
           glideBinding,
           startInput: input,
@@ -6291,17 +6472,28 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           eventFiber,
           transportPolicyApplied: currentTransportPolicy?.responsesWebsockets === "disabled",
           activeAuthRecoveryTasksById,
-          retirementCompletion: yield* Deferred.make<Exit.Exit<void, never>>(),
+          retirementCompletion,
           retirementStarted: false,
+          retirementCleanupJoined: false,
           stopped: false,
-        });
+          recoveryControlEpoch: Symbol(),
+        };
+        if (recoveryPreparation !== undefined) {
+          recoveryPreparation.preparedContext = publishedContext;
+          recoveryPreparation.preparedPolicy = publishedContext.openingPolicy;
+        }
+        sessions.set(input.threadId, publishedContext);
         sessionScopeTransferred = true;
 
         return started;
       }),
     );
 
-  const startSession: CodexAdapterShape["startSession"] = (input) => startSessionWithPolicy(input);
+  const startSession: CodexAdapterShape["startSession"] = (input) =>
+    Effect.gen(function* () {
+      yield* retireRecoveryPreparation(input.threadId);
+      return yield* startSessionWithPolicy(input);
+    });
 
   // Codex 0.153.4 has native image inputs but no arbitrary local-file input.
   // Its normal read-only/workspace-write policies permit file reads; a bounded
@@ -6381,245 +6573,944 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           }),
         );
 
-  const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    let restarting:
-      | { readonly context: CodexAdapterSessionContext; readonly current: ProviderSession }
-      | undefined;
-    if (input.expectedFailedRoot !== undefined) {
-      const context = yield* requireSession(input.threadId);
+  const unavailablePreparation = (
+    input: ProviderReadFailedRootRecoveryInput,
+  ): ProviderFailedRootRecoveryPreparation => ({
+    ...input,
+    preparationSequence: 0,
+    state: "unavailable",
+    phase: "retired",
+  });
+  const preparationFailureCategory = (cause: Cause.Cause<unknown>) => {
+    // A transient first error cannot hide another failure, interrupted cleanup
+    // or a finalizer defect. Only one fully observed typed failure can carry
+    // new zero-paid retry authority; combined causes remain uncertain below.
+    const failure = cause.reasons[0];
+    if (cause.reasons.length !== 1 || failure === undefined || !Cause.isFailReason(failure))
+      return undefined;
+    let value: unknown = failure.error;
+    // Only trusted native error classes are unwrapped. Arbitrary records,
+    // strings, timeout/interrupt causes and malformed RPC data grant nothing.
+    for (let depth = 0; depth < 3; depth += 1) {
+      if (value instanceof CodexErrors.CodexAppServerTransportError) {
+        // A trusted transport wrapper cannot erase a nested native permanent
+        // rejection. Inspect recognized nested producers within the same finite
+        // bound; ordinary opaque socket/stream defects retain transport meaning.
+        const nested = value.cause;
+        if (
+          nested instanceof CodexErrors.CodexAppServerRequestError ||
+          nested instanceof CodexErrors.CodexAppServerTransportError ||
+          nested instanceof ProviderAdapterProcessError ||
+          nested instanceof ProviderAdapterRequestError ||
+          nested instanceof ProviderAdapterSessionClosedError
+        ) {
+          value = nested;
+          continue;
+        }
+        return "transport" as const;
+      }
+      if (value instanceof CodexErrors.CodexAppServerRequestError) {
+        const data = value.data;
+        if (data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
+        try {
+          const descriptors = Object.getOwnPropertyDescriptors(data);
+          if (Object.values(descriptors).some((field) => !("value" in field))) return undefined;
+          const own = Object.defineProperties(Object.create(null), descriptors) as Record<
+            string,
+            unknown
+          >;
+          if (Object.hasOwn(own, "message") && own.message !== value.errorMessage) return undefined;
+          return classifyCodexTransientFailure({ ...own, message: value.errorMessage });
+        } catch {
+          return undefined;
+        }
+      }
+      if (
+        value instanceof ProviderAdapterProcessError ||
+        value instanceof ProviderAdapterRequestError ||
+        value instanceof ProviderAdapterSessionClosedError
+      )
+        value = value.cause;
+      else return undefined;
+    }
+    return undefined;
+  };
+  const copyPreparationResult = (
+    result: ProviderFailedRootRecoveryPreparation,
+  ): ProviderFailedRootRecoveryPreparation =>
+    result.state === "prepared"
+      ? { ...result, recoverySession: { ...result.recoverySession } }
+      : { ...result };
+  const visiblePreparationResult = (reservation: CodexFailedRootPreparationReservation) =>
+    reservation.pending &&
+    (reservation.result.state === "prepared" || reservation.result.state === "retryable")
+      ? {
+          ...preparationIdentity(reservation),
+          state: "preparing" as const,
+          phase: "retiring-opening" as const,
+        }
+      : copyPreparationResult(reservation.result);
+  const readFailedRootRecovery: NonNullable<CodexAdapterShape["readFailedRootRecovery"]> = (
+    input,
+  ) =>
+    Effect.sync(() => {
+      const reservation = recoveryPreparations.get(input.threadId);
+      return reservation?.attemptId === input.attemptId &&
+        reservation.requestCommitment === input.requestCommitment
+        ? visiblePreparationResult(reservation)
+        : unavailablePreparation(input);
+    });
+  const cancelFailedRootRecovery: NonNullable<CodexAdapterShape["cancelFailedRootRecovery"]> = (
+    input,
+  ) =>
+    Effect.gen(function* () {
+      const reservation = recoveryPreparations.get(input.threadId);
+      if (
+        !reservation ||
+        reservation.retired ||
+        reservation.attemptId !== input.attemptId ||
+        reservation.requestCommitment !== input.requestCommitment
+      )
+        return;
+      const paidBegan = reservation.result.state === "consumed";
+      const paidWasPending = paidBegan && reservation.pending;
+      // This CAS revokes only the private attempt. It is not human whole-chat
+      // Stop and cannot retire work started by a newer manual turn or owner.
+      reservation.retired = true;
+      reservation.pending = true;
+      reservation.cancellationPending = true;
+      reservation.retainedContext.recoveryControlEpoch = Symbol();
+      reservation.result = {
+        ...preparationIdentity(reservation),
+        state: "retired",
+        phase: "retired",
+      };
+      yield* signalAndJoinPreparation(reservation);
+      const prepared = reservation.preparedContext;
+      if (prepared?.retirementStarted) {
+        // Map removal precedes async close. Join this captured exact owner even
+        // when a bridge already removed it or a newer owner occupies the key.
+        yield* stopSessionInternal(prepared);
+      } else if (
+        !paidBegan &&
+        prepared &&
+        sessions.get(input.threadId) === prepared &&
+        prepared.openingPolicy === reservation.preparedPolicy
+      ) {
+        const current = yield* prepared.runtime.getSession;
+        if (
+          sessions.get(input.threadId) === prepared &&
+          current.status === "ready" &&
+          current.activeTurnId === undefined &&
+          current.codexRootTurnFailure === undefined &&
+          current.codexRootTurnCompletion === undefined &&
+          prepared.runtime.closeIfIdle !== undefined &&
+          (yield* prepared.runtime.closeIfIdle)
+        )
+          yield* stopSessionInternal(prepared);
+      }
+      if (reservation.oldRetired && !reservation.oldCleanupJoined) {
+        reservation.result = {
+          ...preparationIdentity(reservation),
+          state: "uncertain",
+          phase: "retiring-opening",
+        };
+        return;
+      }
+      reservation.cancellationPending = false;
+      if (!paidWasPending) reservation.pending = false;
+    });
+
+  const runFailedRootPreparation = (reservation: CodexFailedRootPreparationReservation) =>
+    Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const original = reservation.retainedContext;
+        const expected = reservation.request.expectedFailedRoot!;
+        let preRetirementRefused = false;
+        let preparedResult:
+          | Extract<ProviderFailedRootRecoveryPreparation, { state: "prepared" }>
+          | undefined;
+        const identity = () => preparationIdentity(reservation);
+        const assertOwned = () =>
+          Effect.suspend(() =>
+            recoveryPreparations.get(reservation.request.threadId) === reservation &&
+            adapterScope.state._tag !== "Closed" &&
+            !reservation.retired &&
+            !reservation.expired &&
+            original.recoveryControlEpoch === reservation.originControlEpoch
+              ? Effect.void
+              : Effect.fail(
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session/start",
+                    detail: "The private Codex recovery preparation was retired.",
+                  }),
+                ),
+          );
+        const outcome = yield* Effect.exit(
+          restore(
+            Effect.gen(function* () {
+              yield* assertOwned();
+              if (!reservation.oldRetired) {
+                // No cancellation can strand an admitted old-owner teardown. The
+                // deadline revokes authority immediately, while cleanup still joins.
+                yield* Effect.uninterruptible(
+                  Effect.gen(function* () {
+                    const retirement = readFailedRootRetirementResult(
+                      yield* original.runtime.closeIfFailedRoot!(expected),
+                    );
+                    if (retirement?.retired !== true) {
+                      preRetirementRefused = retirement?.retired === false;
+                      return yield* new ProviderAdapterRequestError({
+                        provider: PROVIDER,
+                        method: "session/start",
+                        detail: "The failed Codex root changed before retirement.",
+                        ...(retirement?.retired === false
+                          ? { failedRootRetirementRefusal: retirement.reason }
+                          : {}),
+                      });
+                    }
+                    reservation.oldRetired = true;
+                    yield* stopSessionInternal(original);
+                    // Native close proof precedes adapter/MCP/scope cleanup.
+                    // Only this completed join can release retry/GC authority.
+                    reservation.oldCleanupJoined = true;
+                  }),
+                );
+              }
+              yield* assertOwned();
+              reservation.result = { ...identity(), state: "preparing", phase: "opening" };
+              const opened = yield* startSessionWithPolicy(
+                { ...original.startInput, resumeCursor: reservation.retainedSession.resumeCursor },
+                {
+                  ...original.openingPolicy,
+                  model: reservation.retainedSession.model ?? original.openingPolicy.model,
+                },
+                true,
+                reservation,
+              );
+              yield* assertOwned();
+              if (
+                opened.providerInstanceId !== boundInstanceId ||
+                opened.subagentRuntimeId === undefined ||
+                opened.subagentRuntimeId === expected.subagentRuntimeId ||
+                opened.status !== "ready" ||
+                opened.activeTurnId !== undefined ||
+                !isCodexResumeCursorSchema(opened.resumeCursor) ||
+                opened.resumeCursor.threadId !== expected.providerThreadId
+              )
+                return yield* new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/start",
+                  detail: "The private Codex recovery owner could not be confirmed.",
+                });
+              const recoverySession: ProviderFailedRootRecoverySession = {
+                previousSubagentRuntimeId: expected.subagentRuntimeId,
+                subagentRuntimeId: opened.subagentRuntimeId,
+                providerThreadId: expected.providerThreadId,
+              };
+              // Keep the exact context captured before publication. A native
+              // bridge may already remove its map entry while async retirement
+              // is pending; rereading the map would erase our cleanup owner.
+              const prepared = reservation.preparedContext;
+              if (
+                prepared === undefined ||
+                sessions.get(reservation.request.threadId) !== prepared ||
+                prepared.stopped ||
+                prepared.retirementStarted ||
+                prepared.openingPolicy !== reservation.preparedPolicy
+              )
+                return yield* new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/start",
+                  detail: "The private Codex recovery owner retired before preparation completed.",
+                });
+              // Opening ACK alone does not attest that the published owner is
+              // still idle. Authenticate its current descriptor before minting
+              // the one-use permit; paid admission repeats the native guards.
+              const ready = yield* prepared.runtime.getSession;
+              yield* assertOwned();
+              if (
+                sessions.get(reservation.request.threadId) !== prepared ||
+                prepared.stopped ||
+                prepared.retirementStarted ||
+                prepared.openingPolicy !== reservation.preparedPolicy ||
+                ready.providerInstanceId !== boundInstanceId ||
+                ready.subagentRuntimeId !== opened.subagentRuntimeId ||
+                ready.runtimeMode !== prepared.openingPolicy.runtimeMode ||
+                ready.status !== "ready" ||
+                ready.activeTurnId !== undefined ||
+                ready.codexRootTurnFailure !== undefined ||
+                ready.codexRootTurnCompletion !== undefined ||
+                !isCodexResumeCursorSchema(ready.resumeCursor) ||
+                ready.resumeCursor.threadId !== expected.providerThreadId
+              )
+                return yield* new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/start",
+                  detail: "The private Codex recovery owner is no longer ready for preparation.",
+                });
+              preparedResult = {
+                ...identity(),
+                state: "prepared",
+                phase: "prepared",
+                providerInstanceId: boundInstanceId,
+                recoverySession,
+                permit: newCodexFailedRootPreparationSecret(),
+              };
+            }),
+          ),
+        );
+        // The scoped opening has finalized before this point. Any late/native
+        // owner admitted just before revocation belongs to this reservation alone.
+        if (Exit.isFailure(outcome) || reservation.retired || reservation.expired) {
+          const late = reservation.preparedContext;
+          if (reservation.oldRetired && late) {
+            yield* stopSessionInternal(late);
+            reservation.openingScopeCleanupJoined = late.retirementCleanupJoined;
+          }
+          const controlledTimeout =
+            !reservation.retired &&
+            reservation.expired &&
+            Exit.isFailure(outcome) &&
+            Cause.hasInterruptsOnly(outcome.cause);
+          if (
+            (reservation.oldRetired && !reservation.oldCleanupJoined) ||
+            (reservation.openingScopeOwned && !reservation.openingScopeCleanupJoined) ||
+            (Exit.isFailure(outcome) &&
+              !Cause.hasInterruptsOnly(outcome.cause) &&
+              (outcome.cause.reasons.length !== 1 ||
+                !Cause.isFailReason(outcome.cause.reasons[0]!)))
+          ) {
+            // Scope closure returned a composite/defective outcome. Even a
+            // trusted transient opening error inside that outcome cannot prove
+            // successful owned cleanup. Keep the reservation pending so no
+            // continuation or competing constructor can be admitted.
+            reservation.result = {
+              ...identity(),
+              state: "uncertain",
+              phase: "retiring-opening",
+            };
+            yield* signalPreparationFiber(reservation.timer);
+            if (reservation.timer) yield* Deferred.await(reservation.timerCompletion);
+            return;
+          }
+          const category = controlledTimeout
+            ? ("transport" as const)
+            : !reservation.retired && !reservation.expired && Exit.isFailure(outcome)
+              ? preRetirementRefused
+                ? reservation.retainedSession.codexRootTurnFailure?.category
+                : preparationFailureCategory(outcome.cause)
+              : undefined;
+          reservation.result =
+            category !== undefined && (reservation.oldRetired || preRetirementRefused)
+              ? {
+                  ...identity(),
+                  state: "retryable",
+                  phase: "retired",
+                  category,
+                  reason: controlledTimeout
+                    ? "startup-timeout"
+                    : preRetirementRefused
+                      ? "pre-retirement-refusal"
+                      : "native-transient",
+                  continuationToken: newCodexFailedRootPreparationSecret(),
+                }
+              : { ...identity(), state: "retired", phase: "retired" };
+        }
+        if (
+          Exit.isSuccess(outcome) &&
+          !reservation.retired &&
+          !reservation.expired &&
+          preparedResult !== undefined
+        )
+          reservation.result = preparedResult;
+        yield* signalPreparationFiber(reservation.timer);
+        if (reservation.timer) yield* Deferred.await(reservation.timerCompletion);
+      }),
+    ).pipe(
+      Effect.catchCause(() =>
+        Effect.sync(() => {
+          // A failed finalizer is uncertainty, not permission to create a competitor.
+          reservation.result = {
+            ...preparationIdentity(reservation),
+            state: "uncertain",
+            phase: "retiring-opening",
+          };
+        }),
+      ),
+    );
+
+  const launchFailedRootPreparation = (reservation: CodexFailedRootPreparationReservation) =>
+    Effect.uninterruptible(
+      Effect.gen(function* () {
+        const completion = reservation.workerCompletion;
+        const timerCompletion = reservation.timerCompletion;
+        reservation.fiber = yield* forkPreparationFiber(
+          runFailedRootPreparation(reservation),
+          completion,
+          () => {
+            if (reservation.workerCompletion === completion) reservation.workerExited = true;
+            if (
+              reservation.workerCompletion === completion &&
+              reservation.launchInstalled &&
+              !reservation.cancellationPending &&
+              reservation.result.state !== "uncertain"
+            )
+              reservation.pending = false;
+          },
+        );
+        reservation.timer = yield* forkPreparationFiber(
+          expireFailedRootPreparation(reservation),
+          timerCompletion,
+        );
+        // A synchronous worker exit precedes this pair's final handle assignment.
+        // Retire its timer and publish availability only after both owners exist.
+        if (reservation.workerExited) {
+          yield* signalPreparationFiber(reservation.timer);
+          yield* Deferred.await(timerCompletion);
+        }
+        reservation.launchInstalled = true;
+        if (
+          reservation.workerExited &&
+          !reservation.cancellationPending &&
+          reservation.result.state !== "uncertain"
+        )
+          reservation.pending = false;
+        if (reservation.retired) yield* signalAndJoinPreparation(reservation);
+        // Return this sequence's owned snapshot before a reader can consume its
+        // continuation and mutate the shared reservation for a later sequence.
+        return visiblePreparationResult(reservation);
+      }),
+    );
+
+  const prepareFailedRootRecovery: NonNullable<CodexAdapterShape["prepareFailedRootRecovery"]> =
+    Effect.fn("prepareFailedRootRecovery")(function* (input) {
+      const request = yield* Effect.try({
+        try: () => copyCodexFailedRootPreparationRequest(input.request),
+        catch: () =>
+          new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "prepareFailedRootRecovery",
+            issue: "The private Codex recovery request is invalid.",
+          }),
+      });
+      const expected = request.expectedFailedRoot;
+      if (
+        request.preparedFailedRootRecovery !== undefined ||
+        expected?.restartSession !== true ||
+        expected.providerInstanceId !== boundInstanceId ||
+        expected.observedAt === undefined ||
+        request.codexReview !== undefined ||
+        request.expectedCompletedRootTurnId !== undefined ||
+        request.expectedSubagentPolicySession !== undefined ||
+        request.modelSelection !== undefined ||
+        request.deliveryPriority !== undefined ||
+        (request.attachments?.length ?? 0) !== 0 ||
+        !request.input
+      )
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "prepareFailedRootRecovery",
+          issue: "The private Codex recovery request is not eligible.",
+        });
+      const commitment = codexFailedRootPreparationCommitment(input.attemptId, request);
+      const workerCompletion = yield* Deferred.make<Exit.Exit<unknown, unknown>>();
+      const timerCompletion = yield* Deferred.make<Exit.Exit<unknown, unknown>>();
+      const previous = recoveryPreparations.get(request.threadId);
+      if (previous === undefined) {
+        // Admission, not polling, owns this bounded scan (at most 256 entries).
+        // Forget only terminal private authority after exact old cleanup joined.
+        // A consumed record may still have an ordinary live replacement; never
+        // close it, and let stale expected-generation admission reject reentry.
+        for (const [threadId, held] of recoveryPreparations)
+          if (
+            !(
+              held.preparedContext?.retirementStarted === true &&
+              !held.preparedContext.retirementCleanupJoined
+            ) &&
+            mayPruneCodexFailedRootPreparation({
+              oldRetired: held.oldRetired,
+              oldCleanupJoined: held.oldCleanupJoined,
+              pending: held.pending,
+              state: held.result.state,
+            })
+          )
+            recoveryPreparations.delete(threadId);
+      }
+      if (previous?.attemptId === input.attemptId) {
+        return yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            if (previous.requestCommitment !== commitment)
+              return yield* new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "prepareFailedRootRecovery",
+                issue: "The private Codex recovery request changed.",
+              });
+            if (input.preparationSequence === previous.preparationSequence)
+              return visiblePreparationResult(previous);
+            if (
+              previous.retired ||
+              previous.pending ||
+              previous.result.state !== "retryable" ||
+              !Number.isSafeInteger(input.preparationSequence) ||
+              input.preparationSequence !== previous.preparationSequence + 1 ||
+              !sameCodexFailedRootPreparationSecret(
+                input.continuationToken,
+                previous.result.continuationToken,
+              )
+            )
+              return yield* new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "prepareFailedRootRecovery",
+                issue: "The private Codex recovery sequence is no longer available.",
+              });
+            // Consume the prior token before the first await. A simultaneous caller
+            // can only observe this same next-sequence operation, never duplicate it.
+            previous.preparationSequence = input.preparationSequence;
+            previous.result = {
+              ...preparationIdentity(previous),
+              state: "preparing",
+              phase: "opening",
+            };
+            previous.pending = true;
+            previous.workerCompletion = workerCompletion;
+            previous.timerCompletion = timerCompletion;
+            previous.fiber = undefined;
+            previous.timer = undefined;
+            previous.cancellationPending = false;
+            previous.launchInstalled = false;
+            previous.workerExited = false;
+            previous.openingScopeOwned = false;
+            previous.openingScopeCleanupJoined = false;
+            previous.expired = false;
+            previous.deadlineMs = (yield* Clock.currentTimeMillis) + CODEX_SESSION_START_TIMEOUT_MS;
+            return yield* launchFailedRootPreparation(previous);
+          }),
+        );
+      }
+      if (
+        previous?.pending === true ||
+        (previous && previous.result.state !== "retired" && previous.result.state !== "consumed") ||
+        input.preparationSequence !== 0 ||
+        input.continuationToken !== undefined ||
+        (!previous && recoveryPreparations.size >= MAX_RECOVERY_PREPARATIONS)
+      )
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "prepareFailedRootRecovery",
+          issue: "Another private Codex recovery owner is still held.",
+        });
+      const context = yield* requireSession(request.threadId);
+      const originControlEpoch = context.recoveryControlEpoch;
       const current = yield* context.runtime.getSession;
       const failure = current.codexRootTurnFailure;
       if (
-        input.codexReview !== undefined ||
-        input.expectedCompletedRootTurnId !== undefined ||
-        (input.modelSelection !== undefined &&
-          input.modelSelection.instanceId !== boundInstanceId) ||
-        (input.attachments?.length ?? 0) > 0 ||
+        recoveryPreparations.get(request.threadId) !== previous ||
+        context.stopped ||
+        context.recoveryControlEpoch !== originControlEpoch ||
+        sessions.get(request.threadId) !== context ||
+        context.runtime.closeIfFailedRoot === undefined ||
+        current.providerInstanceId !== boundInstanceId ||
+        current.status !== "ready" ||
+        current.activeTurnId !== undefined ||
+        current.subagentRuntimeId !== expected.subagentRuntimeId ||
         failure?.category === undefined ||
-        failure.turnId !== input.expectedFailedRoot.turnId ||
-        failure.providerThreadId !== input.expectedFailedRoot.providerThreadId ||
-        current.subagentRuntimeId !== input.expectedFailedRoot.subagentRuntimeId
+        failure.turnId !== expected.turnId ||
+        failure.providerThreadId !== expected.providerThreadId ||
+        failure.observedAt !== expected.observedAt ||
+        current.runtimeMode !== context.openingPolicy.runtimeMode ||
+        !isCodexResumeCursorSchema(current.resumeCursor) ||
+        current.resumeCursor.threadId !== expected.providerThreadId ||
+        (request.interactionMode !== undefined &&
+          request.interactionMode !== context.startInput.interactionMode)
+      )
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "session/start",
+          detail: "The exact failed Codex owner is no longer available for preparation.",
+        });
+      const deadlineMs = (yield* Clock.currentTimeMillis) + CODEX_SESSION_START_TIMEOUT_MS;
+      const reservation: CodexFailedRootPreparationReservation = {
+        request,
+        attemptId: input.attemptId,
+        requestCommitment: commitment,
+        retainedContext: context,
+        retainedSession: current,
+        originControlEpoch,
+        preparationSequence: 0,
+        result: {
+          threadId: request.threadId,
+          attemptId: input.attemptId,
+          requestCommitment: commitment,
+          preparationSequence: 0,
+          state: "preparing",
+          phase: "retiring",
+        },
+        retired: false,
+        expired: false,
+        oldRetired: false,
+        oldCleanupJoined: false,
+        workerCompletion,
+        timerCompletion,
+        cancellationPending: false,
+        launchInstalled: false,
+        workerExited: false,
+        openingScopeOwned: false,
+        openingScopeCleanupJoined: false,
+        pending: true,
+        deadlineMs,
+      };
+      // Recheck after the last clock await before installing exclusive ownership.
+      return yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          if (
+            recoveryPreparations.get(request.threadId) !== previous ||
+            context.stopped ||
+            sessions.get(request.threadId) !== context ||
+            context.recoveryControlEpoch !== originControlEpoch ||
+            (previous === undefined && recoveryPreparations.size >= MAX_RECOVERY_PREPARATIONS)
+          )
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/start",
+              detail: "The private Codex recovery owner changed before reservation.",
+            });
+          recoveryPreparations.set(request.threadId, reservation);
+          return yield* launchFailedRootPreparation(reservation);
+        }),
+      );
+    });
+  const expireFailedRootPreparation = (reservation: CodexFailedRootPreparationReservation) =>
+    Effect.gen(function* () {
+      if (!reservation.pending || reservation.retired) return;
+      const remaining = Math.max(0, reservation.deadlineMs - (yield* Clock.currentTimeMillis));
+      yield* Effect.sleep(remaining);
+      if (!reservation.pending || reservation.retired) return;
+      reservation.expired = true;
+      reservation.result = {
+        ...preparationIdentity(reservation),
+        state: "uncertain",
+        phase: "retiring-opening",
+      };
+      yield* signalPreparationFiber(reservation.fiber);
+    });
+
+  const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (submittedInput) {
+    // The permit binds the entire literal wire request, not a caller-owned
+    // object which can be mutated during catalogue/home/attachment awaits.
+    // Copy before validation/consumption and use only that owned value below.
+    // Schema failures intentionally discard their payload-bearing causes.
+    const input = yield* Effect.try({
+      try: () =>
+        submittedInput.preparedFailedRootRecovery === undefined
+          ? submittedInput
+          : copyCodexFailedRootPreparationRequest(submittedInput),
+      catch: () =>
+        new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "sendTurn",
+          issue: "The private Codex recovery request is invalid.",
+        }),
+    });
+    let preparedReservation: CodexFailedRootPreparationReservation | undefined;
+    let recoverySession: import("@cafecode/contracts").ProviderTurnStartResult["recoverySession"];
+    const permit = input.preparedFailedRootRecovery;
+    if (permit !== undefined) {
+      const reservation = recoveryPreparations.get(input.threadId);
+      const result = reservation?.result;
+      if (
+        !reservation ||
+        reservation.retired ||
+        reservation.expired ||
+        reservation.pending ||
+        result?.state !== "prepared" ||
+        reservation.attemptId !== permit.attemptId ||
+        reservation.preparationSequence !== permit.preparationSequence ||
+        reservation.requestCommitment !== permit.requestCommitment ||
+        codexFailedRootPreparationCommitment(permit.attemptId, input) !==
+          reservation.requestCommitment ||
+        !sameCodexFailedRootPreparationSecret(permit.permit, result.permit)
       )
         return yield* new ProviderAdapterRequestError({
           provider: PROVIDER,
           method: "turn/start",
-          detail: "The failed Codex root is no longer available in its original runtime.",
+          detail: "The private Codex recovery permit is no longer available.",
         });
-      if (input.expectedFailedRoot.restartSession === true) {
-        const expected = input.expectedFailedRoot;
-        // Validate every compound policy before destructive retirement. A
-        // cold automatic continuation cannot borrow a model edit, native
-        // review, old-process policy exception or different account/mode.
+      // This transition is synchronous and precedes every await/paid operation.
+      // A transport timeout or a duplicate request can never reuse this permit.
+      recoverySession = { ...result.recoverySession };
+      reservation.result = {
+        ...preparationIdentity(reservation),
+        state: "consumed",
+        phase: "consumed",
+      };
+      reservation.pending = true;
+      preparedReservation = reservation;
+    } else {
+      yield* retireRecoveryPreparation(input.threadId);
+    }
+    return yield* Effect.gen(function* () {
+      let restarting:
+        | { readonly context: CodexAdapterSessionContext; readonly current: ProviderSession }
+        | undefined;
+      if (input.expectedFailedRoot !== undefined && preparedReservation === undefined) {
+        const context = yield* requireSession(input.threadId);
+        const current = yield* context.runtime.getSession;
+        const failure = current.codexRootTurnFailure;
         if (
-          expected.observedAt === undefined ||
-          expected.providerInstanceId !== boundInstanceId ||
-          failure.observedAt !== expected.observedAt ||
-          current.providerInstanceId !== boundInstanceId ||
-          current.status !== "ready" ||
-          current.activeTurnId !== undefined ||
-          current.runtimeMode !== context.openingPolicy.runtimeMode ||
-          !isCodexResumeCursorSchema(current.resumeCursor) ||
-          current.resumeCursor.threadId !== expected.providerThreadId ||
-          context.runtime.closeIfFailedRoot === undefined ||
-          input.modelSelection !== undefined ||
-          input.expectedSubagentPolicySession !== undefined ||
-          input.deliveryPriority !== undefined ||
-          (input.interactionMode !== undefined &&
-            input.interactionMode !== context.startInput.interactionMode)
+          input.codexReview !== undefined ||
+          input.expectedCompletedRootTurnId !== undefined ||
+          (input.modelSelection !== undefined &&
+            input.modelSelection.instanceId !== boundInstanceId) ||
+          (input.attachments?.length ?? 0) > 0 ||
+          failure?.category === undefined ||
+          failure.turnId !== input.expectedFailedRoot.turnId ||
+          failure.providerThreadId !== input.expectedFailedRoot.providerThreadId ||
+          current.subagentRuntimeId !== input.expectedFailedRoot.subagentRuntimeId
         )
           return yield* new ProviderAdapterRequestError({
             provider: PROVIDER,
             method: "turn/start",
-            detail: "The exact failed Codex session cannot be safely restarted.",
+            detail: "The failed Codex root is no longer available in its original runtime.",
           });
-        restarting = { context, current };
-      }
-    }
-    if (
-      input.codexReview !== undefined &&
-      (input.attachments?.length ||
-        (input.modelSelection !== undefined && input.modelSelection.instanceId !== boundInstanceId))
-    ) {
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "sendTurn",
-        issue: "Native review requires the exact Codex account and no attachments.",
-      });
-    }
-    // Native review inherits its materialized session/review-model settings.
-    // No ordinary composer override is supported by review/start; do not even
-    // validate a draft tier as if it were going to be submitted here.
-    const advertisedModels =
-      input.codexReview === undefined ? yield* getRequestModels(input.modelSelection) : undefined;
-    const daybreak =
-      input.codexReview === undefined
-        ? resolveCodexDaybreak(input.modelSelection, boundInstanceId, advertisedModels)
-        : {};
-    if (daybreak.error)
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "sendTurn",
-        issue: daybreak.error,
-      });
-    const tier =
-      // Internal guarded continuations carry their exact existing policy, not
-      // an unset composer choice. Preserve that policy (including native
-      // omission) and the native review contract. Ordinary new turns instead
-      // resolve an absent selection to explicit Standard, so a preceding Fast
-      // turn or native account default cannot silently enable paid routing.
-      input.codexReview !== undefined ||
-      (input.modelSelection === undefined &&
-        (input.expectedFailedRoot !== undefined ||
-          input.expectedSubagentPolicySession !== undefined))
-        ? {}
-        : resolveCodexServiceTier(input.modelSelection, boundInstanceId, advertisedModels);
-    if (tier.error)
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "sendTurn",
-        issue: tier.error,
-      });
-    yield* prepareRuntimeHomeForRequest(input.threadId, "turn/start");
-
-    const codexAttachments = yield* Effect.forEach(
-      (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
-      (attachment) => resolveAttachment("turn/start", attachment),
-      { concurrency: 1 },
-    );
-
-    const fileManifest = yield* prepareFileManifest(input, "turn/start");
-    const prompt = appendFileAttachmentPrompt(input.input, fileManifest);
-
-    let session = yield* requireSession(input.threadId);
-    let recoverySession: import("@cafecode/contracts").ProviderTurnStartResult["recoverySession"];
-    if (restarting !== undefined) {
-      const { context, current } = restarting;
-      const expected = input.expectedFailedRoot!;
-      if (session !== context || sessions.get(input.threadId) !== context)
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "turn/start",
-          detail: "The failed Codex session changed before retirement.",
-        });
-      // The immutable server attempt precedes this call. Reservation and exact
-      // cleanup are cancellation-safe; a pending Stop is delivered before the
-      // next interruptible opening, never while old teardown is unfinished.
-      yield* Effect.uninterruptible(
-        Effect.gen(function* () {
-          const retirement = readFailedRootRetirementResult(
-            yield* context.runtime.closeIfFailedRoot!(expected),
-          );
-          if (retirement?.retired !== true)
+        if (input.expectedFailedRoot.restartSession === true) {
+          const expected = input.expectedFailedRoot;
+          // Validate every compound policy before destructive retirement. A
+          // cold automatic continuation cannot borrow a model edit, native
+          // review, old-process policy exception or different account/mode.
+          if (
+            expected.observedAt === undefined ||
+            expected.providerInstanceId !== boundInstanceId ||
+            failure.observedAt !== expected.observedAt ||
+            current.providerInstanceId !== boundInstanceId ||
+            current.status !== "ready" ||
+            current.activeTurnId !== undefined ||
+            current.runtimeMode !== context.openingPolicy.runtimeMode ||
+            !isCodexResumeCursorSchema(current.resumeCursor) ||
+            current.resumeCursor.threadId !== expected.providerThreadId ||
+            context.runtime.closeIfFailedRoot === undefined ||
+            input.modelSelection !== undefined ||
+            input.expectedSubagentPolicySession !== undefined ||
+            input.deliveryPriority !== undefined ||
+            (input.interactionMode !== undefined &&
+              input.interactionMode !== context.startInput.interactionMode)
+          )
             return yield* new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "turn/start",
-              detail: "The failed Codex root changed before retirement.",
-              ...(retirement?.retired === false
-                ? { failedRootRetirementRefusal: retirement.reason }
-                : {}),
+              detail: "The exact failed Codex session cannot be safely restarted.",
             });
-          yield* stopSessionInternal(context);
-        }),
-      );
-      const opened = yield* startSessionWithPolicy(
-        { ...context.startInput, resumeCursor: current.resumeCursor },
-        {
-          ...context.openingPolicy,
-          // Later native model selection is recorded on the live snapshot;
-          // never revert to the initial request's model during cold resume.
-          model: current.model ?? context.openingPolicy.model,
-        },
-        true,
-      );
-      session = yield* requireSession(input.threadId);
+          restarting = { context, current };
+        }
+      }
       if (
-        opened.providerInstanceId !== boundInstanceId ||
-        opened.subagentRuntimeId === undefined ||
-        opened.subagentRuntimeId === expected.subagentRuntimeId ||
-        opened.status !== "ready" ||
-        opened.activeTurnId !== undefined ||
-        !isCodexResumeCursorSchema(opened.resumeCursor) ||
-        opened.resumeCursor.threadId !== expected.providerThreadId
+        input.codexReview !== undefined &&
+        (input.attachments?.length ||
+          (input.modelSelection !== undefined &&
+            input.modelSelection.instanceId !== boundInstanceId))
       ) {
-        yield* stopSessionInternal(session);
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "sendTurn",
+          issue: "Native review requires the exact Codex account and no attachments.",
+        });
+      }
+      // Native review inherits its materialized session/review-model settings.
+      // No ordinary composer override is supported by review/start; do not even
+      // validate a draft tier as if it were going to be submitted here.
+      const advertisedModels =
+        input.codexReview === undefined ? yield* getRequestModels(input.modelSelection) : undefined;
+      const daybreak =
+        input.codexReview === undefined
+          ? resolveCodexDaybreak(input.modelSelection, boundInstanceId, advertisedModels)
+          : {};
+      if (daybreak.error)
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "sendTurn",
+          issue: daybreak.error,
+        });
+      const tier =
+        // Internal guarded continuations carry their exact existing policy, not
+        // an unset composer choice. Preserve that policy (including native
+        // omission) and the native review contract. Ordinary new turns instead
+        // resolve an absent selection to explicit Standard, so a preceding Fast
+        // turn or native account default cannot silently enable paid routing.
+        input.codexReview !== undefined ||
+        (input.modelSelection === undefined &&
+          (input.expectedFailedRoot !== undefined ||
+            input.expectedSubagentPolicySession !== undefined))
+          ? {}
+          : resolveCodexServiceTier(input.modelSelection, boundInstanceId, advertisedModels);
+      if (tier.error)
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "sendTurn",
+          issue: tier.error,
+        });
+      yield* prepareRuntimeHomeForRequest(input.threadId, "turn/start");
+
+      const codexAttachments = yield* Effect.forEach(
+        (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
+        (attachment) => resolveAttachment("turn/start", attachment),
+        { concurrency: 1 },
+      );
+
+      const fileManifest = yield* prepareFileManifest(input, "turn/start");
+      const prompt = appendFileAttachmentPrompt(input.input, fileManifest);
+
+      let session = yield* requireSession(input.threadId);
+      if (restarting !== undefined) {
+        const { context, current } = restarting;
+        const expected = input.expectedFailedRoot!;
+        if (session !== context || sessions.get(input.threadId) !== context)
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "turn/start",
+            detail: "The failed Codex session changed before retirement.",
+          });
+        // The immutable server attempt precedes this call. Reservation and exact
+        // cleanup are cancellation-safe; a pending Stop is delivered before the
+        // next interruptible opening, never while old teardown is unfinished.
+        yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            const retirement = readFailedRootRetirementResult(
+              yield* context.runtime.closeIfFailedRoot!(expected),
+            );
+            if (retirement?.retired !== true)
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "turn/start",
+                detail: "The failed Codex root changed before retirement.",
+                ...(retirement?.retired === false
+                  ? { failedRootRetirementRefusal: retirement.reason }
+                  : {}),
+              });
+            yield* stopSessionInternal(context);
+          }),
+        );
+        const opened = yield* startSessionWithPolicy(
+          { ...context.startInput, resumeCursor: current.resumeCursor },
+          {
+            ...context.openingPolicy,
+            // Later native model selection is recorded on the live snapshot;
+            // never revert to the initial request's model during cold resume.
+            model: current.model ?? context.openingPolicy.model,
+          },
+          true,
+        );
+        session = yield* requireSession(input.threadId);
+        if (
+          opened.providerInstanceId !== boundInstanceId ||
+          opened.subagentRuntimeId === undefined ||
+          opened.subagentRuntimeId === expected.subagentRuntimeId ||
+          opened.status !== "ready" ||
+          opened.activeTurnId !== undefined ||
+          !isCodexResumeCursorSchema(opened.resumeCursor) ||
+          opened.resumeCursor.threadId !== expected.providerThreadId
+        ) {
+          yield* stopSessionInternal(session);
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "turn/start",
+            detail: "The restarted Codex conversation needs reconciliation.",
+          });
+        }
+        recoverySession = {
+          previousSubagentRuntimeId: expected.subagentRuntimeId,
+          subagentRuntimeId: opened.subagentRuntimeId,
+          providerThreadId: expected.providerThreadId,
+        };
+      }
+      if (input.expectedSubagentPolicySession !== undefined)
+        yield* assertExistingSubagentPolicy(input, yield* session.runtime.getSession);
+      const reasoningEffort =
+        input.modelSelection?.instanceId === boundInstanceId
+          ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
+          : undefined;
+      if (
+        preparedReservation !== undefined &&
+        (recoveryPreparations.get(input.threadId) !== preparedReservation ||
+          preparedReservation.retired ||
+          preparedReservation.preparedContext !== session ||
+          preparedReservation.preparedPolicy !== session.openingPolicy ||
+          sessions.get(input.threadId) !== session ||
+          session.stopped)
+      )
         return yield* new ProviderAdapterRequestError({
           provider: PROVIDER,
           method: "turn/start",
-          detail: "The restarted Codex conversation needs reconciliation.",
+          detail: "The prepared Codex owner changed before paid submission.",
         });
-      }
-      recoverySession = {
-        previousSubagentRuntimeId: expected.subagentRuntimeId,
-        subagentRuntimeId: opened.subagentRuntimeId,
-        providerThreadId: expected.providerThreadId,
-      };
-    }
-    if (input.expectedSubagentPolicySession !== undefined)
-      yield* assertExistingSubagentPolicy(input, yield* session.runtime.getSession);
-    const reasoningEffort =
-      input.modelSelection?.instanceId === boundInstanceId
-        ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
-        : undefined;
-    session.glideBinding?.resume();
-    const turn = yield* session.runtime
-      .sendTurn({
-        ...(input.expectedSubagentPolicySession !== undefined
-          ? { expectedSubagentPolicySession: input.expectedSubagentPolicySession }
-          : {}),
-        ...(input.codexReview !== undefined
-          ? { codexReview: input.codexReview, allowActiveTurnSteerFallback: false }
-          : {}),
-        ...(input.codexReview === undefined && input.allowActiveTurnSteerFallback !== undefined
-          ? { allowActiveTurnSteerFallback: input.allowActiveTurnSteerFallback }
-          : {}),
-        ...(input.expectedCompletedRootTurnId !== undefined
-          ? { expectedCompletedRootTurnId: input.expectedCompletedRootTurnId }
-          : {}),
-        ...(input.expectedFailedRoot !== undefined && recoverySession === undefined
-          ? { expectedFailedRoot: input.expectedFailedRoot, allowActiveTurnSteerFallback: false }
-          : {}),
-        ...(recoverySession !== undefined
-          ? { expectedRecoverySession: recoverySession, allowActiveTurnSteerFallback: false }
-          : {}),
-        ...(prompt !== undefined ? { input: prompt } : {}),
-        ...(input.codexReview === undefined && input.modelSelection?.instanceId === boundInstanceId
+      session.glideBinding?.resume();
+      const turn = yield* session.runtime
+        .sendTurn({
+          ...(input.expectedSubagentPolicySession !== undefined
+            ? { expectedSubagentPolicySession: input.expectedSubagentPolicySession }
+            : {}),
+          ...(input.codexReview !== undefined
+            ? { codexReview: input.codexReview, allowActiveTurnSteerFallback: false }
+            : {}),
+          ...(input.codexReview === undefined && input.allowActiveTurnSteerFallback !== undefined
+            ? { allowActiveTurnSteerFallback: input.allowActiveTurnSteerFallback }
+            : {}),
+          ...(input.expectedCompletedRootTurnId !== undefined
+            ? { expectedCompletedRootTurnId: input.expectedCompletedRootTurnId }
+            : {}),
+          ...(input.expectedFailedRoot !== undefined && recoverySession === undefined
+            ? { expectedFailedRoot: input.expectedFailedRoot, allowActiveTurnSteerFallback: false }
+            : {}),
+          ...(recoverySession !== undefined
+            ? { expectedRecoverySession: recoverySession, allowActiveTurnSteerFallback: false }
+            : {}),
+          ...(prompt !== undefined ? { input: prompt } : {}),
+          ...(input.codexReview === undefined &&
+          input.modelSelection?.instanceId === boundInstanceId
+            ? { model: input.modelSelection.model }
+            : {}),
+          ...(input.codexReview === undefined && reasoningEffort
+            ? {
+                effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
+              }
+            : {}),
+          ...(tier.serviceTier !== undefined ? { serviceTier: tier.serviceTier } : {}),
+          ...(daybreak.cyberAccessProgram !== undefined
+            ? { cyberAccessProgram: daybreak.cyberAccessProgram }
+            : {}),
+          ...(input.codexReview === undefined && input.interactionMode !== undefined
+            ? { interactionMode: input.interactionMode }
+            : {}),
+          ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
+        })
+        .pipe(
+          Effect.mapError((cause) =>
+            mapCodexRuntimeError(
+              input.threadId,
+              input.codexReview ? "review/start" : "turn/start",
+              cause,
+            ),
+          ),
+        );
+      // Retain only successful native model/tier evidence for this exact owner.
+      // Saved account defaults do not mutate the scalar opening policy.
+      session.openingPolicy = {
+        ...session.openingPolicy,
+        ...(input.modelSelection?.instanceId === boundInstanceId
           ? { model: input.modelSelection.model }
           : {}),
-        ...(input.codexReview === undefined && reasoningEffort
-          ? {
-              effort: reasoningEffort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort,
-            }
+        ...(readCodexServiceTier(turn.resolvedServiceTier) !== undefined
+          ? { serviceTier: readCodexServiceTier(turn.resolvedServiceTier) }
           : {}),
-        ...(tier.serviceTier !== undefined ? { serviceTier: tier.serviceTier } : {}),
-        ...(daybreak.cyberAccessProgram !== undefined
-          ? { cyberAccessProgram: daybreak.cyberAccessProgram }
-          : {}),
-        ...(input.codexReview === undefined && input.interactionMode !== undefined
-          ? { interactionMode: input.interactionMode }
-          : {}),
-        ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
-      })
-      .pipe(
-        Effect.mapError((cause) =>
-          mapCodexRuntimeError(
-            input.threadId,
-            input.codexReview ? "review/start" : "turn/start",
-            cause,
-          ),
-        ),
-      );
-    // Retain only successful native model/tier evidence for this exact owner.
-    // Saved account defaults do not mutate the scalar opening policy.
-    session.openingPolicy = {
-      ...session.openingPolicy,
-      ...(input.modelSelection?.instanceId === boundInstanceId
-        ? { model: input.modelSelection.model }
-        : {}),
-      ...(readCodexServiceTier(turn.resolvedServiceTier) !== undefined
-        ? { serviceTier: readCodexServiceTier(turn.resolvedServiceTier) }
-        : {}),
-    };
-    return { ...turn, ...(recoverySession !== undefined ? { recoverySession } : {}) };
+      };
+      return { ...turn, ...(recoverySession !== undefined ? { recoverySession } : {}) };
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (preparedReservation) preparedReservation.pending = false;
+        }),
+      ),
+    );
   });
 
   const forkSession: NonNullable<CodexAdapterShape["forkSession"]> = Effect.fn("forkSession")(
@@ -7085,6 +7976,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
   const stopSession: CodexAdapterShape["stopSession"] = (threadId) =>
     Effect.gen(function* () {
+      yield* retireRecoveryPreparation(threadId);
       const session = sessions.get(threadId);
       if (!session) {
         return;
@@ -7103,10 +7995,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     Effect.succeed(Boolean(sessions.get(threadId) && !sessions.get(threadId)?.stopped));
 
   const stopAll: CodexAdapterShape["stopAll"] = () =>
-    Effect.forEach(Array.from(sessions.values()), stopSessionInternal, {
-      concurrency: 1,
-      discard: true,
-    }).pipe(Effect.asVoid);
+    Effect.forEach(
+      Array.from(new Set([...sessions.keys(), ...recoveryPreparations.keys()])),
+      stopSession,
+      {
+        concurrency: 1,
+        discard: true,
+      },
+    ).pipe(Effect.asVoid);
 
   yield* Effect.acquireRelease(Effect.void, () =>
     stopAll().pipe(
@@ -7130,6 +8026,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       },
       subagentPolicyContinuation: true,
       codexFailedRootRestart: true,
+      codexPhasedFailedRootRecovery: true,
       sessionModelSwitch: "in-session",
       liveSteer: "supported",
       manualCompaction: "supported",
@@ -7140,6 +8037,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     forkSession,
     discardSessionFork,
     sendTurn,
+    prepareFailedRootRecovery,
+    readFailedRootRecovery,
+    cancelFailedRootRecovery,
     steerTurn,
     interruptTurn,
     compactThread,

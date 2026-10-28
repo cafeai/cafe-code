@@ -4,7 +4,7 @@ Decision status: Accepted within the user's explicit implementation request
 Implementation status: Guarded lifecycle and receipt transfer implemented; normal rebuilt-runtime adoption required
 Verification scope: Isolated synthetic peers/SQL and complete release checks; no live provider proof
 Created: 2026-10-14 15:46:27 JST (UTC+0900)
-Last updated: 2026-10-19 12:16:05 JST (UTC+0900)
+Last updated: 2026-10-28 20:21:41 JST (UTC+0900)
 Decision authority: the user explicitly requests ending a failed root's session and
 starting a completely new turn with the automatic continuation.
 Partially supersedes: [persistent transient recovery](codex-persistent-transient-recovery.md),
@@ -13,6 +13,12 @@ Partially superseded by: [proven unsubmitted retry](codex-failed-root-unsubmitte
 only when a new exact typed refusal proves that retirement and submission did not
 begin. The same-history cold restart, individual one-use claims, unknown-ACK
 reconciliation and all native/control guards below remain governing.
+Also partially superseded by: [phased failed-root recovery](codex-phased-failed-root-recovery.md)
+for the combined preparation/submission budget when the exact owner advertises
+the phased capability. The successor separates private zero-paid preparation
+from one-use paid submission; it preserves same-history reopening and forbids
+resend after an unknown paid acknowledgment. Its implementation and exact-source
+qualification are recorded separately from the historical evidence here.
 
 ## Context and alternatives
 

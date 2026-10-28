@@ -157,7 +157,17 @@ import { deriveChatActivityPresentation } from "./chat/chatActivity";
 import { deriveTurnCompletionSummary } from "./chat/turnCompletion";
 import { isLiveWorkRuntimeCurrent } from "@cafecode/shared/liveWork";
 import { CodexRecoveryNotice, SessionRail } from "./chat/SessionRail";
-import { deriveCodexRecoveryPresentation } from "../codexRecovery";
+import {
+  acceptPreparationStop,
+  connectingStopCommand,
+  connectingStopOwner,
+  deriveCodexRecoveryPresentation,
+  finishStopReservation,
+  preparationStopCommand,
+  preparationStopOwner,
+  samePreparationStopIntent,
+  type PreparationStopOwner,
+} from "../codexRecovery";
 import { ComposerAsyncQuestionsPanel } from "./chat/ComposerAsyncQuestionsPanel";
 import { persistExactAsyncQuestionAnswer, type AsyncQuestion } from "./chat/asyncQuestions";
 import { TriangleAlertIcon } from "lucide-react";
@@ -1154,6 +1164,18 @@ export default function ChatView(props: ChatViewProps) {
     Record<string, string | null>
   >({});
   const [isConnecting, _setIsConnecting] = useState(false);
+  const [stopReservations, setStopReservations] = useChatPaneSharedState<
+    Readonly<Record<string, string>>
+  >(`${runtimeKey}stop-reservations`, () => ({}));
+  const [acceptedPreparationStops, setAcceptedPreparationStops, acceptedPreparationStopsRef] =
+    useChatPaneSharedState<ReadonlyMap<string, PreparationStopOwner>>(
+      `${runtimeKey}accepted-preparation-stops`,
+      () => new Map(),
+    );
+  const stopInFlightThreads = useChatPaneResource(
+    `${runtimeKey}stop-in-flight`,
+    () => new Set<string>(),
+  );
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
   const [respondingRequestIds, setRespondingRequestIds] = useState<ApprovalRequestId[]>([]);
   const [respondingUserInputRequestIds, setRespondingUserInputRequestIds] = useState<
@@ -1549,6 +1571,11 @@ export default function ChatView(props: ChatViewProps) {
   );
   const isServerThread = routeKind === "server" && serverThread !== undefined;
   const activeThread = isServerThread ? serverThread : localDraftThread;
+  const activeStopKey = activeThread
+    ? scopedThreadKey(scopeThreadRef(activeThread.environmentId, activeThread.id))
+    : null;
+  const pendingStopRequest =
+    activeStopKey !== null && stopReservations[activeStopKey] !== undefined;
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode =
     composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
@@ -2324,6 +2351,30 @@ export default function ChatView(props: ChatViewProps) {
   );
   const selectedProvider: ProviderDriverKind = lockedProvider ?? unlockedSelectedProvider;
   const phase = derivePhase(activeThread?.session ?? null);
+  const connectingOwner = connectingStopOwner(activeThread ?? undefined);
+  const preparationOwner = preparationStopOwner(activeThread);
+  const priorAcceptedPreparation =
+    activeStopKey === null ? undefined : acceptedPreparationStops.get(activeStopKey);
+  const acceptedPreparationStop =
+    priorAcceptedPreparation !== undefined &&
+    samePreparationStopIntent(priorAcceptedPreparation, activeThread);
+  // A full bounded receipt table must never prevent a user from stopping work.
+  const stopInFlight = pendingStopRequest || acceptedPreparationStop;
+  useEffect(() => {
+    if (activeStopKey === null || !priorAcceptedPreparation || acceptedPreparationStop) return;
+    setAcceptedPreparationStops((current) => {
+      if (current.get(activeStopKey) !== priorAcceptedPreparation) return current;
+      const next = new Map(current);
+      next.delete(activeStopKey);
+      return next;
+    });
+  }, [
+    activeStopKey,
+    priorAcceptedPreparation,
+    acceptedPreparationStop,
+    setAcceptedPreparationStops,
+  ]);
+  const hasConnectingStop = connectingOwner !== null;
   const isProviderConnecting = phase === "connecting";
   const isComposerConnecting = isConnecting || isProviderConnecting;
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
@@ -2391,6 +2442,7 @@ export default function ChatView(props: ChatViewProps) {
       }),
     [activeThread, threadActivities, activeSubagentEntries],
   );
+  const hasRecoveryStop = codexRecovery !== null || preparationOwner !== null;
   const pendingApprovals = useMemo(
     () => derivePendingApprovals(threadActivities),
     [threadActivities],
@@ -3841,6 +3893,22 @@ export default function ChatView(props: ChatViewProps) {
         isComposerConnecting,
         isProviderConnecting,
         isConnecting,
+        // These are rendered control observations, never opening identity or
+        // permission to retry a provider submission. Keep private owner/token
+        // material out of both the full and compact debug snapshots.
+        connectingStopAvailable: hasConnectingStop,
+        recoveryStopAvailable: hasRecoveryStop,
+        preparationStopAvailable: preparationOwner !== null,
+        preparationStopAccepted: acceptedPreparationStop,
+        stopRequestPending: pendingStopRequest,
+        stopInFlight,
+        stopControlBlocker: activeEnvironmentUnavailable
+          ? "environment-unavailable"
+          : pendingStopRequest
+            ? "request-pending"
+            : acceptedPreparationStop
+              ? "stop-intent-accepted"
+              : null,
         isRevertingCheckpoint,
         activeEnvironmentUnavailable,
         serverAcknowledgedLocalDispatch,
@@ -3891,6 +3959,11 @@ export default function ChatView(props: ChatViewProps) {
     followUpQueuePhase,
     followUpQueueUiIdle,
     followUpQueueVisibleWorking,
+    hasConnectingStop,
+    hasRecoveryStop,
+    preparationOwner,
+    acceptedPreparationStop,
+    pendingStopRequest,
     isComposerConnecting,
     isConnecting,
     isProviderConnecting,
@@ -3916,6 +3989,7 @@ export default function ChatView(props: ChatViewProps) {
     timelineAutoFollowTail,
     timelineEntries.length,
     stickTimelineToEndRevision,
+    stopInFlight,
     manualStopBarrierByThreadIdRef,
     pendingSteerInterruptRecoveryByThreadIdRef,
     followUpQueueByThreadIdRef,
@@ -7133,7 +7207,9 @@ export default function ChatView(props: ChatViewProps) {
 
   const onInterrupt = async () => {
     const api = readEnvironmentApi(environmentId);
-    if (!api || !activeThread) return;
+    if (!api || !activeThread || activeEnvironmentUnavailable) return;
+    const stopKey = scopedThreadKey(scopeThreadRef(activeThread.environmentId, activeThread.id));
+    if (stopInFlightThreads.has(stopKey)) return;
     // Use canonical state at the actual click boundary, not a stale failed-root
     // notice. A terminal root has nothing to interrupt: stopping that context
     // closes its independently running children and durably cancels recovery.
@@ -7142,7 +7218,18 @@ export default function ChatView(props: ChatViewProps) {
       useStore.getState(),
       scopeThreadRef(activeThread.environmentId, activeThread.id),
     );
-    if (!currentThread) return;
+    if (!currentThread || isThreadEnvironmentUnavailable(currentThread)) return;
+    const priorStop = acceptedPreparationStopsRef.current.get(stopKey);
+    if (priorStop && samePreparationStopIntent(priorStop, currentThread)) return;
+    const preparationCommand = preparationOwner
+      ? preparationStopCommand(preparationOwner, currentThread)
+      : null;
+    if (preparationOwner && preparationCommand === null) return;
+    const openingCommand =
+      !preparationOwner && connectingOwner
+        ? connectingStopCommand(connectingOwner, currentThread)
+        : null;
+    if (!preparationOwner && connectingOwner && openingCommand === null) return;
     const stopRecoveryContext =
       deriveCodexRecoveryPresentation({
         thread: currentThread,
@@ -7160,6 +7247,23 @@ export default function ChatView(props: ChatViewProps) {
           },
         ),
       }) !== null;
+    if (!preparationOwner && !connectingOwner && codexRecovery !== null) {
+      // A click rendered for a ready recovery cannot adopt a replacement owner.
+      // If its own root was accepted in the meantime, use ordinary interrupt.
+      const shown = activeThread.session;
+      const current = currentThread.session;
+      if (
+        !shown?.providerInstanceId ||
+        !shown.subagentRuntimeId ||
+        !current ||
+        current.provider !== shown.provider ||
+        current.providerInstanceId !== shown.providerInstanceId ||
+        current.subagentRuntimeId !== shown.subagentRuntimeId ||
+        (!stopRecoveryContext &&
+          !(current.status === "running" && current.activeTurnId !== undefined))
+      )
+        return;
+    }
     const turnId = currentThread.session?.activeTurnId ?? undefined;
     updateManualStopBarrier(activeThread.id, {
       threadId: activeThread.id,
@@ -7167,23 +7271,40 @@ export default function ChatView(props: ChatViewProps) {
       requestedAt: new Date().toISOString(),
     });
     armPendingSteerInterruptRecovery(currentThread);
+    const stopCommandId = newCommandId();
+    stopInFlightThreads.add(stopKey);
+    setStopReservations((current) => ({ ...current, [stopKey]: stopCommandId }));
     try {
       await api.orchestration.dispatchCommand(
-        stopRecoveryContext
+        preparationCommand === "session-stop" ||
+          openingCommand === "session-stop" ||
+          (openingCommand === null && stopRecoveryContext)
           ? {
               type: "thread.session.stop",
-              commandId: newCommandId(),
+              commandId: stopCommandId,
               threadId: activeThread.id,
               createdAt: new Date().toISOString(),
             }
           : {
               type: "thread.turn.interrupt",
-              commandId: newCommandId(),
+              commandId: stopCommandId,
               threadId: activeThread.id,
               ...(turnId !== undefined ? { turnId } : {}),
               createdAt: new Date().toISOString(),
             },
       );
+      // ACK proves accepted durable Stop intent, not native exit. A late ACK
+      // cannot fence a different intent or replaced current chat.
+      if (preparationOwner) {
+        const current = selectThreadByRef(
+          useStore.getState(),
+          scopeThreadRef(preparationOwner.environmentId, preparationOwner.threadId),
+        );
+        setAcceptedPreparationStops((reservations) => {
+          if (!reservations.has(stopKey) && reservations.size >= 256) return reservations;
+          return acceptPreparationStop(reservations, stopKey, preparationOwner, current);
+        });
+      }
     } catch (error) {
       updatePendingSteerInterruptRecoveries((current) => {
         if (!(activeThread.id in current)) {
@@ -7200,6 +7321,12 @@ export default function ChatView(props: ChatViewProps) {
           uiText("Failed to interrupt active turn.", undefined, undefined, uiLocale),
         ),
       );
+    } finally {
+      setStopReservations((current) => {
+        if (current[stopKey] !== stopCommandId) return current;
+        stopInFlightThreads.delete(stopKey);
+        return finishStopReservation(current, stopKey, stopCommandId);
+      });
     }
   };
 
@@ -8594,7 +8721,7 @@ export default function ChatView(props: ChatViewProps) {
                 <CodexRecoveryNotice
                   presentation={codexRecovery}
                   onStop={() => void onInterrupt()}
-                  disabled={activeEnvironmentUnavailable || isComposerConnecting}
+                  disabled={activeEnvironmentUnavailable || stopInFlight}
                 />
               </div>
             ) : null}
@@ -8645,7 +8772,9 @@ export default function ChatView(props: ChatViewProps) {
                   isServerThread={isServerThread}
                   isLocalDraftThread={isLocalDraftThread}
                   phase={phase}
-                  recoveryStopAvailable={codexRecovery !== null}
+                  recoveryStopAvailable={hasRecoveryStop}
+                  connectingStopAvailable={hasConnectingStop}
+                  stopInFlight={stopInFlight}
                   isConnecting={isComposerConnecting}
                   isSendBusy={isSendBusy}
                   isPreparingWorktree={isPreparingWorktree}
@@ -8804,7 +8933,7 @@ export default function ChatView(props: ChatViewProps) {
               <SessionRail
                 codexRecovery={codexRecovery}
                 onStopCodexRecovery={() => void onInterrupt()}
-                codexRecoveryStopDisabled={activeEnvironmentUnavailable || isComposerConnecting}
+                codexRecoveryStopDisabled={activeEnvironmentUnavailable || stopInFlight}
                 scheduledFollowups={scheduledFollowupsContext}
                 providerTasks={providerTasksContext}
                 plan={composerActivePlan}

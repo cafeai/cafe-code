@@ -1606,6 +1606,248 @@ function makeProviderServiceLayer() {
 }
 
 const imageValidation = makeProviderServiceLayer();
+const phasedRecovery = makeProviderServiceLayer();
+phasedRecovery.layer("ProviderService phased recovery ownership", (it) => {
+  beforeEach(async () => {
+    await phasedRecovery.reset();
+    Object.assign(phasedRecovery.codex.adapter.capabilities, {
+      codexPhasedFailedRootRecovery: true,
+    });
+  });
+
+  for (const control of ["stop", "hard delete"] as const) {
+    it.effect(
+      `retires pending private preparation on ${control} even without native session inventory`,
+      () =>
+        Effect.gen(function* () {
+          const provider = yield* ProviderService;
+          const directory = yield* ProviderSessionDirectory;
+          const threadId = asThreadId(`pending-private-preparation-${control}`);
+          yield* provider.startSession(threadId, {
+            threadId,
+            provider: CODEX_DRIVER,
+            providerInstanceId: codexInstanceId,
+            runtimeMode: "full-access",
+          });
+          // Model the real cold-preparation interval after old-owner retirement
+          // and before a new native session exists. Its adapter still owns the
+          // private preparation and must receive cancellation.
+          yield* phasedRecovery.codex.stopAll();
+          phasedRecovery.codex.stopSession.mockClear();
+          assert.equal(yield* phasedRecovery.codex.hasSession(threadId), false);
+          if (control === "stop") yield* provider.stopSession({ threadId });
+          else yield* provider.quiesceThreadForHardDelete({ threadId });
+          assert.equal(phasedRecovery.codex.stopSession.mock.calls.length, 1);
+          assert.equal(phasedRecovery.codex.startSession.mock.calls.length, 1);
+          if (control === "stop")
+            assert.equal(
+              Option.getOrThrow(yield* directory.getBinding(threadId)).status,
+              "stopped",
+            );
+          else {
+            const rejected = yield* Effect.exit(
+              provider.startSession(threadId, {
+                threadId,
+                provider: CODEX_DRIVER,
+                providerInstanceId: codexInstanceId,
+                runtimeMode: "full-access",
+              }),
+            );
+            assert.equal(Exit.isFailure(rejected), true);
+            assert.equal(phasedRecovery.codex.startSession.mock.calls.length, 1);
+          }
+        }),
+    );
+  }
+
+  it.effect("keeps malformed private payloads and accessor causes out of local errors", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = asThreadId("opaque-private-schema-boundary");
+      const canary = "private-provider-schema-canary-never-observable";
+      const malformedLookup = {
+        threadId,
+        attemptId: "opaque-private-attempt",
+        requestCommitment: canary,
+      };
+      const operations = [
+        () =>
+          provider.prepareFailedRootRecovery!({
+            attemptId: "opaque-private-attempt",
+            preparationSequence: 0,
+            request: { threadId, input: { canary } },
+          } as never),
+        () => provider.readFailedRootRecovery!(malformedLookup as never),
+        () => provider.cancelFailedRootRecovery!(malformedLookup as never),
+        () =>
+          provider.sendTurn({
+            threadId,
+            input: canary,
+            preparedFailedRootRecovery: {
+              attemptId: "opaque-private-attempt",
+              preparationSequence: 0,
+              requestCommitment: "a".repeat(64),
+              permit: canary,
+            },
+          } as never),
+        () =>
+          provider.prepareFailedRootRecovery!({
+            attemptId: "opaque-private-attempt",
+            preparationSequence: 0,
+            get request() {
+              throw new Error(canary);
+            },
+          } as never),
+        () =>
+          provider.readFailedRootRecovery!({
+            ...malformedLookup,
+            get threadId() {
+              throw new Error(canary);
+            },
+          } as never),
+        () =>
+          provider.cancelFailedRootRecovery!({
+            ...malformedLookup,
+            get threadId() {
+              throw new Error(canary);
+            },
+          } as never),
+        () =>
+          provider.sendTurn({
+            preparedFailedRootRecovery: {},
+            get threadId() {
+              throw new Error(canary);
+            },
+          } as never),
+      ];
+      for (const operation of operations) {
+        const rejected = yield* Effect.exit(Effect.suspend(operation));
+        assert.equal(Exit.isFailure(rejected), true);
+        if (Exit.isFailure(rejected)) {
+          const failure = Cause.findErrorOption(rejected.cause);
+          assert.equal(Option.isSome(failure), true);
+          if (Option.isSome(failure)) {
+            assert.instanceOf(failure.value, ProviderValidationError);
+            assert.equal(Object.hasOwn(failure.value, "cause"), false);
+          }
+          assert.notInclude(Cause.pretty(rejected.cause), canary);
+        }
+      }
+      assert.equal(phasedRecovery.codex.startSession.mock.calls.length, 0);
+      assert.equal(phasedRecovery.codex.sendTurn.mock.calls.length, 0);
+      assert.equal(phasedRecovery.codex.stopSession.mock.calls.length, 0);
+    }),
+  );
+});
+
+it.effect(
+  "ProviderService retires only the previous account's hidden preparation before opening a replacement",
+  () =>
+    Effect.gen(function* () {
+      const first = makeFakeCodexAdapter();
+      const second = makeFakeCodexAdapter();
+      Object.assign(first.adapter.capabilities, { codexPhasedFailedRootRecovery: true });
+      const secondInstanceId = ProviderInstanceId.make("codex-private-preparation-replacement");
+      const base = makeAdapterRegistryMock({ [CODEX_DRIVER]: first.adapter });
+      const registry: ProviderAdapterRegistryShape = {
+        ...base,
+        getByInstance: (instanceId) =>
+          instanceId === secondInstanceId
+            ? Effect.succeed(second.adapter)
+            : base.getByInstance(instanceId),
+        getInstanceInfo: (instanceId) =>
+          instanceId === secondInstanceId
+            ? base.getInstanceInfo(codexInstanceId).pipe(
+                Effect.map((info) => ({
+                  ...info,
+                  instanceId,
+                  continuationIdentity: {
+                    driverKind: CODEX_DRIVER,
+                    continuationKey: `synthetic-preparation-owner:${instanceId}`,
+                  },
+                })),
+              )
+            : base.getInstanceInfo(instanceId),
+        listInstances: () => Effect.succeed([codexInstanceId, secondInstanceId]),
+      };
+      const repositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+        Layer.provide(SqlitePersistenceTest),
+      );
+      const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(repositoryLayer));
+      const layer = Layer.mergeAll(
+        directoryLayer,
+        makeProviderServiceLive().pipe(
+          Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+          Layer.provide(directoryLayer),
+          Layer.provide(defaultServerSettingsLayer),
+          Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId("hidden-preparation-provider-switch");
+        const siblingId = asThreadId("other-chat-must-remain-running");
+        const start = (target: ThreadId, providerInstanceId: ProviderInstanceId) =>
+          provider.startSession(target, {
+            threadId: target,
+            provider: CODEX_DRIVER,
+            providerInstanceId,
+            runtimeMode: "full-access",
+          });
+        yield* start(threadId, codexInstanceId);
+        yield* start(siblingId, codexInstanceId);
+        // Remove only the target native inventory; its private preparation remains
+        // represented by the held exact stop below. The sibling is a live control.
+        yield* first.stopSession(threadId);
+        first.stopSession.mockClear();
+        second.stopSession.mockClear();
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
+        let preparationPending = true;
+        const originalStop = first.stopSession.getMockImplementation()!;
+        first.stopSession.mockImplementation((target) =>
+          originalStop(target).pipe(
+            Effect.andThen(
+              target === threadId
+                ? Deferred.succeed(entered, undefined).pipe(
+                    Effect.andThen(Deferred.await(release)),
+                    Effect.tap(() =>
+                      Effect.sync(() => {
+                        preparationPending = false;
+                      }),
+                    ),
+                  )
+                : Effect.void,
+            ),
+          ),
+        );
+        const originalStart = second.startSession.getMockImplementation()!;
+        second.startSession.mockImplementation((input) =>
+          Effect.sync(() => {
+            assert.equal(preparationPending, false);
+          }).pipe(Effect.andThen(originalStart(input))),
+        );
+        const replacing = yield* start(threadId, secondInstanceId).pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        assert.equal(second.startSession.mock.calls.length, 0);
+        assert.equal(yield* first.hasSession(siblingId), true);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(replacing);
+        assert.equal(first.stopSession.mock.calls.length, 1);
+        assert.equal(first.stopSession.mock.calls[0]![0], threadId);
+        assert.equal(second.stopSession.mock.calls.length, 0);
+        assert.equal(second.startSession.mock.calls.length, 1);
+        assert.equal(yield* second.hasSession(threadId), true);
+        assert.equal(yield* first.hasSession(siblingId), true);
+        assert.equal(
+          Option.getOrThrow(yield* directory.getBinding(threadId)).providerInstanceId,
+          secondInstanceId,
+        );
+      }).pipe(Effect.provide(layer));
+    }),
+);
 const policyContinuation = makeProviderServiceLayer();
 policyContinuation.layer("ProviderService exact existing subagent policy continuation", (it) => {
   beforeEach(async () => {

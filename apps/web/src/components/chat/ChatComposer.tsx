@@ -280,6 +280,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   } | null;
   isRunning: boolean;
   recoveryStopAvailable?: boolean | undefined;
+  connectingStopAvailable?: boolean | undefined;
+  stopInFlight?: boolean | undefined;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
   isSendBusy: boolean;
@@ -318,6 +320,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         pendingAction={props.pendingAction}
         isRunning={props.isRunning}
         recoveryStopAvailable={props.recoveryStopAvailable}
+        connectingStopAvailable={props.connectingStopAvailable}
+        stopInFlight={props.stopInFlight}
         showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
         promptHasText={props.promptHasText}
         isSendBusy={props.isSendBusy}
@@ -862,6 +866,8 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   phase: SessionPhase;
   /** Exact owned recovery/context only; never substitutes for the root phase. */
   recoveryStopAvailable?: boolean | undefined;
+  connectingStopAvailable?: boolean | undefined;
+  stopInFlight?: boolean | undefined;
   isConnecting: boolean;
   isSendBusy: boolean;
   isPreparingWorktree: boolean;
@@ -1008,6 +1014,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isLocalDraftThread: _isLocalDraftThread,
     phase,
     recoveryStopAvailable = false,
+    connectingStopAvailable = false,
+    stopInFlight = false,
     isConnecting,
     isSendBusy,
     isPreparingWorktree,
@@ -2252,8 +2260,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (activePendingProgress) {
       return `pending:${activePendingProgress.questionIndex}:${activePendingProgress.isLastQuestion}:${activePendingIsResponding}:dictation:${showComposerDictation}`;
     }
-    if (phase === "running" || recoveryStopAvailable) {
-      return `running:${phase}:${recoveryStopAvailable}:${composerSendState.hasSendableContent}:${postSubmitInterruptGuardActive}:dictation:${showComposerDictation}`;
+    if (phase === "running" || recoveryStopAvailable || connectingStopAvailable) {
+      return `running:${phase}:${recoveryStopAvailable}:${connectingStopAvailable}:${composerSendState.hasSendableContent}:${postSubmitInterruptGuardActive}:dictation:${showComposerDictation}`;
     }
     if (showPlanFollowUpPrompt) {
       return `${prompt.trim().length > 0 ? "plan:refine" : "plan:implement"}:dictation:${showComposerDictation}`;
@@ -2268,6 +2276,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isSendBusy,
     phase,
     recoveryStopAvailable,
+    connectingStopAvailable,
     postSubmitInterruptGuardActive,
     prompt,
     showComposerDictation,
@@ -3981,6 +3990,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       compact
                       pendingAction={pendingPrimaryAction}
                       isRunning={false}
+                      recoveryStopAvailable={recoveryStopAvailable}
+                      connectingStopAvailable={connectingStopAvailable}
+                      stopInFlight={stopInFlight}
                       showPlanFollowUpPrompt={false}
                       promptHasText={false}
                       isSendBusy={isComposerPrimaryActionBusy}
@@ -4368,6 +4380,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     pendingAction={pendingPrimaryAction}
                     isRunning={phase === "running"}
                     recoveryStopAvailable={recoveryStopAvailable}
+                    connectingStopAvailable={connectingStopAvailable}
+                    stopInFlight={stopInFlight}
                     showPlanFollowUpPrompt={
                       pendingUserInputs.length === 0 && showPlanFollowUpPrompt
                     }
@@ -4578,6 +4592,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
                   recoveryStopAvailable={recoveryStopAvailable}
+                  connectingStopAvailable={connectingStopAvailable}
+                  stopInFlight={stopInFlight}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}
                   promptHasText={prompt.trim().length > 0}
                   isSendBusy={isComposerPrimaryActionBusy}
