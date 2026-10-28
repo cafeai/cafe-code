@@ -188,7 +188,7 @@ type ReactorWork =
   | RuntimeLossEvent
   | RuntimeRecoveryRetry
   | CodexTransientMarkerRetry
-  | { readonly _tag: "codex-prepared-submission"; readonly run: Effect.Effect<void, unknown> };
+  | { readonly _tag: "codex-prepared-submission"; readonly run: Effect.Effect<void> };
 interface PreparedProviderTurn {
   readonly request: ProviderSendTurnInput;
   readonly configuration: ProviderTurnConfiguration | undefined;
@@ -6213,7 +6213,7 @@ const make = Effect.gen(function* () {
       const claimSequence = winner[0]!.sequence;
       const paidDone = yield* Deferred.make<void>();
       const paidSetupDone = yield* Deferred.make<void>();
-      const paidExit = yield* Deferred.make<Exit.Exit<void, unknown>>();
+      const paidExit = yield* Deferred.make<Exit.Exit<unknown, unknown>>();
       let signalCoordinator = () => {};
       let signalPaid = () => {};
       let paidStarting = false;
@@ -6400,18 +6400,32 @@ const make = Effect.gen(function* () {
                         ),
                       );
                       const outcome = yield* Deferred.await(paidExit);
-                      if (
-                        Exit.isFailure(outcome) &&
-                        !(
-                          Cause.hasInterruptsOnly(outcome.cause) &&
-                          transientRecoverySubmissions.get(threadId) !== inFlight
-                        )
-                      )
-                        return yield* Effect.failCause(outcome.cause);
+                      if (Exit.isFailure(outcome)) {
+                        if (Cause.hasInterruptsOnly(outcome.cause)) {
+                          if (transientRecoverySubmissions.get(threadId) !== inFlight) return;
+                          return yield* Effect.failCause(
+                            Cause.fromReasons<never>(
+                              outcome.cause.reasons.filter(Cause.isInterruptReason),
+                            ),
+                          );
+                        }
+                        // The exact child Exit stays in the private completion
+                        // value. An unexpected cause is never forwarded to a
+                        // wider error channel or a raw diagnostic.
+                        paidOutcomeUncertain = true;
+                        if (transientRecoverySubmissions.get(threadId) === inFlight) {
+                          cancelPreparedOnExit = true;
+                          signalCoordinator();
+                        }
+                      }
                     }).pipe(
                       Effect.catchCause((cause) =>
                         Cause.hasInterruptsOnly(cause)
-                          ? Effect.failCause(cause)
+                          ? Effect.failCause(
+                              Cause.fromReasons<never>(
+                                cause.reasons.filter(Cause.isInterruptReason),
+                              ),
+                            )
                           : Effect.gen(function* () {
                               // Provider errors can contain private data. Publish only
                               // fixed reconciliation state, and retire solely the exact
