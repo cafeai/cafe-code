@@ -231,8 +231,11 @@ and hook contracts have independent fixtures; their per-case deadlines and real
 native controls remain in force, not a single shared aggregate time guarantee.
 Input-policy fixtures do not depend on an installed Xcode metadata service. On
 macOS they bind a fixture-owned developer tree and route only that owner's exact
-fixed metadata request to an inert current-Node child, retaining the original
-environment, abort signal, limits and actual child-close join. Native file,
+fixed metadata request to `/usr/bin/printf` with a fixed `%s\n` format, retaining
+the original environment, abort signal, limits and actual child-close join. The
+synthetic path remains data, including percent signs; exact bytes and close counts
+are checked for valid and malformed metadata. This avoids repeatedly starting Node
+only to print that inert path. The production lookup remains unchanged. Native file,
 selected-tool and null-device identity checks still run; malformed or foreign
 metadata must refuse without authenticating or publishing a receipt. This is
 synthetic metadata qualification, not evidence about the host's selected SDK.

@@ -1401,11 +1401,66 @@ describe("DesktopBackendManager", () => {
 
   it.effect(
     "terminates a stalled migration at the absolute cap despite repeated progress starts",
-    () =>
-      Effect.gen(function* () {
+    (context) => {
+      const startedAt = performance.now();
+      let probeCount = 0;
+      type Phase =
+        | "fixture-entered"
+        | "manager-start-entered"
+        | "manager-started"
+        | "first-offered"
+        | "first-consumed"
+        | "adjust-599-entered"
+        | "adjust-599-finished"
+        | "second-offered"
+        | "second-consumed"
+        | "adjust-1-entered"
+        | "adjust-1-finished"
+        | "native-exit-signalling"
+        | "native-exit-signalled"
+        | "progress-retired";
+      const phases: Array<{ phase: Phase; elapsedMs: number; probes: number }> = [];
+      const mark = (phase: Phase) => {
+        try {
+          if (phases.length >= 32) return;
+          const elapsed = performance.now() - startedAt;
+          phases.push({
+            phase,
+            elapsedMs: Number.isFinite(elapsed)
+              ? Math.min(60_000, Math.max(0, Math.floor(elapsed)))
+              : 0,
+            probes: Math.min(1_000_000, probeCount),
+          });
+        } catch {
+          // Failure diagnostics must not affect the test or ownership.
+        }
+      };
+      context.onTestFailed(() => {
+        try {
+          process.stderr.write(`Synthetic migration cap phases: ${encodeDiagnosticJson(phases)}\n`);
+        } catch {
+          // Keep the original timeout or assertion failure.
+        }
+      });
+      return Effect.gen(function* () {
+        mark("fixture-entered");
         const progress = yield* Queue.unbounded<Uint8Array>();
+        const firstConsumed = yield* Deferred.make<void>();
+        const secondConsumed = yield* Deferred.make<void>();
         const nativeExited = yield* Deferred.make<void>();
         let killCount = 0;
+        // These one-element sources are consumed serially by the manager's
+        // real runForEach. An acknowledgement is emitted only when that
+        // consumer pulls the following stream, after decoding and observing
+        // the preceding frame; queue admission or a pre-delivery tap is not
+        // proof that the startup deadline was updated. The stream stays open.
+        const progressStream = Stream.fromEffect(Queue.take(progress)).pipe(
+          Stream.concat(Stream.fromEffectDrain(Deferred.succeed(firstConsumed, undefined))),
+          Stream.concat(Stream.fromEffect(Queue.take(progress))),
+          Stream.concat(Stream.fromEffectDrain(Deferred.succeed(secondConsumed, undefined))),
+          Stream.concat(Stream.never),
+          Stream.ensuring(Effect.sync(() => mark("progress-retired"))),
+        );
         const managerLayer = makeManagerLayer({
           spawnerLayer: Layer.succeed(
             ChildProcessSpawner.ChildProcessSpawner,
@@ -1422,32 +1477,55 @@ describe("DesktopBackendManager", () => {
                       Effect.andThen(Deferred.succeed(nativeExited, undefined)),
                       Effect.asVoid,
                     ),
-                  progress: Stream.fromQueue(progress),
+                  progress: progressStream,
                 }),
               ),
             ),
           ),
           config: { ...baseConfig, readinessTimeout: Duration.seconds(2) },
-          httpClientLayer: httpClientLayer(() => Effect.never),
+          httpClientLayer: httpClientLayer(() =>
+            Effect.sync(() => {
+              probeCount = Math.min(1_000_000, probeCount + 1);
+            }).pipe(Effect.andThen(Effect.never)),
+          ),
         });
         yield* Effect.gen(function* () {
           const manager = yield* DesktopBackendManager.DesktopBackendManager;
+          mark("manager-start-entered");
           yield* manager.start;
+          mark("manager-started");
           const frame = new TextEncoder().encode(
             encodeBackendMigrationProgress({ phase: "start", migrationId: 92 }),
           );
           yield* Queue.offer(progress, frame);
+          mark("first-offered");
+          yield* Deferred.await(firstConsumed);
+          mark("first-consumed");
+          mark("adjust-599-entered");
           yield* TestClock.adjust(Duration.seconds(599));
+          mark("adjust-599-finished");
           assert.equal(killCount, 0);
           yield* Queue.offer(progress, frame);
+          mark("second-offered");
+          yield* Deferred.await(secondConsumed);
+          mark("second-consumed");
+          mark("adjust-1-entered");
           yield* TestClock.adjust(Duration.seconds(1));
+          mark("adjust-1-finished");
           yield* Effect.yieldNow;
           assert.equal(killCount > 0, true);
         }).pipe(
-          Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
+          Effect.ensuring(
+            Effect.gen(function* () {
+              mark("native-exit-signalling");
+              yield* Deferred.succeed(nativeExited, undefined);
+              mark("native-exit-signalled");
+            }),
+          ),
           Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
         );
-      }),
+      });
+    },
   );
 
   it.effect("does not grant migration time to stdout or malformed private frames", () =>
