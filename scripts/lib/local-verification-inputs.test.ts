@@ -1,4 +1,4 @@
-// Fixtures own inert temporary files and a bounded metadata-only Node peer.
+// Fixtures own inert temporary files and a bounded metadata-only native peer.
 // They qualify input policy, not an ambient SDK; no compiler/browser/provider
 // is launched, and the production developer-tool lookup remains unchanged.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
@@ -26,6 +26,7 @@ import { describe, expect, it, vi, type TestContext } from "vitest";
 import {
   createLocalVerificationFingerprint,
   localVerificationNullDeviceIdentity,
+  lookupLocalVerificationGitWithXcrun,
 } from "./local-verification-inputs.ts";
 import {
   createLocalVerificationCache,
@@ -376,7 +377,8 @@ vi.mock("node:child_process", async (importOriginal) => {
       // This input-policy fixture does not qualify an ambient Xcode SDK. Only
       // the exact held owner's fixed lookup may use this synthetic metadata.
       // Keep a REAL native peer and the ORIGINAL options object, signal,
-      // result promise, errors and .child; never synthesize native close.
+      // result promise, errors and .child; never synthesize native close. The
+      // fixed format keeps even percent signs in the synthetic path as data.
       const output =
         routedOwner.result === "empty"
           ? ""
@@ -388,8 +390,8 @@ vi.mock("node:child_process", async (importOriginal) => {
                 ? join(routedOwner.developer, "missing-git")
                 : routedOwner.git;
       nativeArgs = [
-        process.execPath,
-        ["-e", "process.stdout.write(process.argv[1] + '\\n');", output],
+        "/usr/bin/printf",
+        ["%s\n", output],
         options,
       ];
       routedOwner.invocations += 1;
@@ -1165,6 +1167,33 @@ describe("local verification input evidence", () => {
       f.setSelectionResult("owned");
       expect(await f.snapshot(), encode(f.refusals)).toBeDefined();
       expect(f.metadataObservation()).toEqual({ invocations: 1, closed: 1 });
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "returns exact synthetic metadata bytes only after each owned native peer closes",
+    async (context) => {
+      const f = await fixture(context);
+      const owner = fixtureGitMetadata.owner;
+      if (!owner) throw new Error("Synthetic metadata owner is unavailable");
+      // Percent signs in fixture data must not become printf format tokens.
+      owner.git = join(owner.developer, "git%literal");
+      const cases = [
+        ["owned", owner.git],
+        ["empty", ""],
+        ["relative", "git"],
+        ["outside", process.execPath],
+        ["missing", join(owner.developer, "missing-git")],
+      ] as const;
+      for (const [index, [result, expected]] of cases.entries()) {
+        f.setMetadataResult(result);
+        const observed = await f.ownPreparation(() =>
+          lookupLocalVerificationGitWithXcrun(f.task.environment, context.signal),
+        );
+        expect(observed.stdout).toBe(`${expected}\n`);
+        expect(observed.stderr).toBe("");
+        expect(f.metadataObservation()).toEqual({ invocations: index + 1, closed: index + 1 });
+      }
     },
   );
 

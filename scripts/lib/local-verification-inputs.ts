@@ -72,6 +72,13 @@ function sourceWorkspaceRoot(path: string): string | undefined {
   )?.[1];
 }
 const json = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+// These same native absence checks occur for every missing installed root and
+// PATH candidate. Compile each exact predicate once without changing which
+// errors count as absence or bypassing any later native identity checks.
+const isMissing = Schema.is(Schema.Struct({ code: Schema.Literal("ENOENT") }));
+const isMissingOrNotDirectory = Schema.is(
+  Schema.Struct({ code: Schema.Literals(["ENOENT", "ENOTDIR"]) }),
+);
 const executeFile = promisify(execFile);
 
 /** Node's execFile abort/error callback may reject its promisified result before
@@ -659,7 +666,7 @@ export function createLocalVerificationFingerprint(
         try {
           await lstat(installed, { bigint: true });
         } catch (error) {
-          if (!Schema.is(Schema.Struct({ code: Schema.Literal("ENOENT") }))(error)) refuse();
+          if (!isMissing(error)) refuse();
           absentInstalledRoots.push(installed);
           continue;
         }
@@ -1236,7 +1243,7 @@ export function createLocalVerificationFingerprint(
           try {
             stat = await lstat(candidate, { bigint: true });
           } catch (error) {
-            if (Schema.is(Schema.Struct({ code: Schema.Literals(["ENOENT", "ENOTDIR"]) }))(error))
+            if (isMissingOrNotDirectory(error))
               continue;
             // EPERM/EACCES/unknown native observation is not proof that native
             // execution would skip this candidate and choose a later binary.
@@ -1535,7 +1542,7 @@ export function createLocalVerificationFingerprint(
           await lstat(path);
           refuse();
         } catch (error) {
-          if (!Schema.is(Schema.Struct({ code: Schema.Literal("ENOENT") }))(error)) refuse();
+          if (!isMissing(error)) refuse();
         }
         feed(key, `absent-installed:${portable(relative(root, path))}`);
         feed(fence, `absent-installed:${path}`);
