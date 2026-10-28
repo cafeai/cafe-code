@@ -1,6 +1,6 @@
 # Browser test input isolation
 
-Last updated: 2026-10-28 14:43:35 JST (UTC+0900)
+Last updated: 2026-10-28 15:59:40 JST (UTC+0900)
 
 Current suite design is governed by [Test suite policy](test-suite-policy.md).
 The October 16 overhaul retires the exact fluid inventory, sample commit-chart
@@ -416,6 +416,15 @@ Keep all subsequent metadata growth, decoded image, full-width chart, native
 wheel, exact document/anchor, tail and review assertions. This corrects a
 fixture assumption; it does not change production image layout or establish a
 timeline ownership defect from a failure before those later checks.
+
+The loaded-image review fixture waits for the trusted wheel and scrollend on
+its exact scroller and actual upward review displacement within its existing
+wait before recording the physical anchor. The follow-intent flag alone can
+precede physical scroll completion. The exact test owner joins its render,
+native input and individual image decodes, then unmounts and retires its held
+transfer responses before mocks are restored. Original native input, image and
+anchor assertions, contexts, workers and deadlines remain unchanged; this
+evidence does not establish a historical failure's cause.
 
 ## Native drag finalization and bounded diagnostics
 
