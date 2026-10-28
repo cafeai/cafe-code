@@ -17,6 +17,7 @@ const labels = [
   "desk-preview",
   "desk-late-fork",
   "composer-rail-docking",
+  "navigation-atrium",
 ] as const;
 export type ChatViewCallerLabel = (typeof labels)[number];
 const phases = [

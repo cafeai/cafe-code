@@ -59,54 +59,73 @@ import { failBrowserWsRpc } from "../../test/wsRpcHarness";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { isMacPlatform } from "../lib/utils";
 import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
+import { createChatViewCallerOwner } from "./chatViewCallerOwner.test.fixture";
 import { toastManager } from "./ui/toast";
 
 describe("ChatView full app (navigation)", () => {
   registerChatViewBrowserHooks();
 
-  it("replaces an open subagent detail with Atrium and does not restore it on close", async () => {
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotWithActiveSubagent(),
-      configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          clientSettings: {
-            ...nextFixture.serverConfig.clientSettings,
-            ambianceAtriumEnabled: true,
-          },
-        };
-      },
+  it("replaces an open subagent detail with Atrium and does not restore it on close", async (context) => {
+    // Register this exact caller before mounting. A failed assertion or outer
+    // cancellation must join its native actions before shared fixture reset;
+    // closing the global store from an abandoned finally can affect a later case.
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "navigation-atrium",
+      afterUnmount: () => useTaskAtriumStore.getState().setOpen(false),
     });
-
-    try {
-      await page.getByRole("button", { name: /^1 active subagent\. Show task list$/i }).click();
+    await owner.run(async () => {
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithActiveSubagent(),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            clientSettings: {
+              ...nextFixture.serverConfig.clientSettings,
+              ambianceAtriumEnabled: true,
+            },
+          };
+        },
+      });
+      await owner.own("controls", () =>
+        page.getByRole("button", { name: /^1 active subagent\. Show task list$/i }).click(),
+      );
       const subagentRow = page
         .getByRole("region", { name: "Active subagents" })
         .getByRole("button", {
           name: /Browser lifecycle audit, Working\. Verify Atrium navigation\. Open details/i,
         });
-      await expect.element(subagentRow).toBeInTheDocument();
-      await subagentRow.click();
-      await vi.waitFor(() => {
-        expect(document.querySelector('[data-subagent-detail-view="true"]')).not.toBeNull();
-      });
+      await owner.own("first-row", () => expect.element(subagentRow).toBeInTheDocument());
+      await owner.own("request", () => subagentRow.click());
+      await owner.own("value", () =>
+        vi.waitFor(() => {
+          owner.assertActive();
+          expect(document.querySelector('[data-subagent-detail-view="true"]')).not.toBeNull();
+        }),
+      );
 
+      owner.assertActive();
+      owner.mark("overlay");
       useTaskAtriumStore.getState().setOpen(true);
-      await vi.waitFor(() => {
-        expect(document.querySelector('[data-cafe-task-atrium-overlay="true"]')).not.toBeNull();
-        expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
-      });
+      await owner.own("overlay", () =>
+        vi.waitFor(() => {
+          owner.assertActive();
+          expect(document.querySelector('[data-cafe-task-atrium-overlay="true"]')).not.toBeNull();
+          expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
+        }),
+      );
 
+      owner.assertActive();
+      owner.mark("close");
       useTaskAtriumStore.getState().setOpen(false);
-      await vi.waitFor(() => {
-        expect(document.querySelector('[data-cafe-task-atrium-overlay="true"]')).toBeNull();
-        expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
-      });
-    } finally {
-      useTaskAtriumStore.getState().setOpen(false);
-      await mounted.cleanup();
-    }
+      await owner.own("closed", () =>
+        vi.waitFor(() => {
+          owner.assertActive();
+          expect(document.querySelector('[data-cafe-task-atrium-overlay="true"]')).toBeNull();
+          expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
+        }),
+      );
+    });
   });
 
   it("keeps runtime access in the desktop options menu without a footer mode label", async () => {

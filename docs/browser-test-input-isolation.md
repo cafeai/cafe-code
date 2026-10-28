@@ -1,6 +1,6 @@
 # Browser test input isolation
 
-Last updated: 2026-10-24 08:17:53 JST (UTC+0900)
+Last updated: 2026-10-28 14:43:35 JST (UTC+0900)
 
 Current suite design is governed by [Test suite policy](test-suite-policy.md).
 The October 16 overhaul retires the exact fluid inventory, sample commit-chart
@@ -9,7 +9,7 @@ readiness below. Historical failure investigations remain useful evidence;
 they do not require reinstating removed tests. Native input/context isolation,
 security admission, worker/deadline limits and feature assertions still apply.
 
-Last updated: 2026-10-22 15:13:25 JST (UTC+0900)
+Historical input-isolation baseline: 2026-10-22 15:13:25 JST (UTC+0900)
 
 Cafe's pinned Vitest browser runner isolates test files by replacing a tester
 iframe. Its owning Playwright page and browser context can be reused for later
@@ -478,6 +478,24 @@ promise resolves, and restore the acquired API spy only after exact unmount.
 Rail-docking journeys use the same owner without a held-response gate. Keep all
 original hover/click, docking, navigation and acknowledgement assertions;
 lifetime ownership does not grant input replay or a longer test allowance.
+
+The Atrium replacement journey also admits its caller owner before mounting.
+It joins the original native actions and exact unmount before restoring the
+Atrium store. Keep both original closed-overlay and absent-detail assertions;
+a retained closed/ending popup does not by itself identify why retirement was
+delayed. Do not sample transient animation state or change motion policy to
+turn that observation into readiness.
+
+Glide's enable/disable fixture models status and activity reads using its last
+confirmed state, while retaining the held enable response and original native
+clicks. Assert the initial exact status read, ordered exact enable/disable
+mutations and every read's chat authority. Legitimate polling can interleave;
+the last call and a fixed total-call count do not identify the user's actions.
+Register its render/action retirement before acquisition and join that same
+owner from `afterEach`. Its native clicks do not depend on the held response,
+so dispose the renderer before releasing an abandoned reply, then settle that
+reply before the next fixture can reset the mock. Preserve primary assertion
+errors as well as cleanup failures.
 
 The shared hook owns one exact scoped caller-retirement lease, admitted before
 mount mutation. Vitest's `afterEach` precedes `onTestFinished`, so the shared
