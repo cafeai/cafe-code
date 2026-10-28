@@ -204,8 +204,8 @@ describe("ProviderDaemonCommandLedger", () => {
           error_json: string | null;
         }>`SELECT request_json, response_json, error_json FROM provider_daemon_commands WHERE command_id LIKE ${`${ownerKey}:%`}`;
         const snapshot = yield* ledger.snapshot;
-        expect(JSON.stringify(snapshot)).not.toContain("paid-turn");
-        const stored = JSON.stringify({ rows, snapshot });
+        expect(encodeProviderJsonString(snapshot)).not.toContain("paid-turn");
+        const stored = encodeProviderJsonString({ rows, snapshot });
         for (const value of [prompt, secret, continuation, "c".repeat(64), "private-history"])
           expect(stored).not.toContain(value);
         expect(

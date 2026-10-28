@@ -198,6 +198,22 @@ const CODEX_SUBAGENT_HISTORY_READ_TIMEOUT_MS = 15_000;
 // This is not a model-generation deadline and never retries a native request.
 const CODEX_SESSION_START_TIMEOUT_MS = 60_000;
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
+// Retry authority requires actual constructor identity. A class schema also
+// accepts its HMR brand; instanceOf's pinned declaration uses the exact native
+// instanceof predicate and keeps tag/brand lookalikes untrusted.
+const isTrustedRecoveryTransportError = Schema.is(
+  Schema.instanceOf(CodexErrors.CodexAppServerTransportError),
+);
+const isTrustedRecoveryRequestError = Schema.is(
+  Schema.instanceOf(CodexErrors.CodexAppServerRequestError),
+);
+const isTrustedRecoveryProcessError = Schema.is(Schema.instanceOf(ProviderAdapterProcessError));
+const isTrustedRecoveryAdapterRequestError = Schema.is(
+  Schema.instanceOf(ProviderAdapterRequestError),
+);
+const isTrustedRecoverySessionClosedError = Schema.is(
+  Schema.instanceOf(ProviderAdapterSessionClosedError),
+);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
@@ -5430,6 +5446,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         phase: "retired",
       };
       yield* signalAndJoinPreparation(reservation);
+      const prepared = reservation.preparedContext;
+      if (prepared?.retirementStarted) {
+        // Removal from the session map precedes native/scope cleanup. Manual
+        // start/send/Stop must join this exact existing retirement too, rather
+        // than treating an absent map entry as permission for a competitor.
+        // This wait neither begins retirement nor touches a newer map owner.
+        const closed = yield* Deferred.await(prepared.retirementCompletion);
+        if (Exit.isFailure(closed)) return yield* Effect.failCause(closed.cause);
+      }
     });
   const manualCompactions = new Set<ThreadId>();
   // A detail click is read-only but still spawns a short-lived app-server when
@@ -6592,24 +6617,24 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     // Only trusted native error classes are unwrapped. Arbitrary records,
     // strings, timeout/interrupt causes and malformed RPC data grant nothing.
     for (let depth = 0; depth < 3; depth += 1) {
-      if (value instanceof CodexErrors.CodexAppServerTransportError) {
+      if (isTrustedRecoveryTransportError(value)) {
         // A trusted transport wrapper cannot erase a nested native permanent
         // rejection. Inspect recognized nested producers within the same finite
         // bound; ordinary opaque socket/stream defects retain transport meaning.
         const nested = value.cause;
         if (
-          nested instanceof CodexErrors.CodexAppServerRequestError ||
-          nested instanceof CodexErrors.CodexAppServerTransportError ||
-          nested instanceof ProviderAdapterProcessError ||
-          nested instanceof ProviderAdapterRequestError ||
-          nested instanceof ProviderAdapterSessionClosedError
+          isTrustedRecoveryRequestError(nested) ||
+          isTrustedRecoveryTransportError(nested) ||
+          isTrustedRecoveryProcessError(nested) ||
+          isTrustedRecoveryAdapterRequestError(nested) ||
+          isTrustedRecoverySessionClosedError(nested)
         ) {
           value = nested;
           continue;
         }
         return "transport" as const;
       }
-      if (value instanceof CodexErrors.CodexAppServerRequestError) {
+      if (isTrustedRecoveryRequestError(value)) {
         const data = value.data;
         if (data === null || typeof data !== "object" || Array.isArray(data)) return undefined;
         try {
@@ -6626,9 +6651,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         }
       }
       if (
-        value instanceof ProviderAdapterProcessError ||
-        value instanceof ProviderAdapterRequestError ||
-        value instanceof ProviderAdapterSessionClosedError
+        isTrustedRecoveryProcessError(value) ||
+        isTrustedRecoveryAdapterRequestError(value) ||
+        isTrustedRecoverySessionClosedError(value)
       )
         value = value.cause;
       else return undefined;
@@ -7076,8 +7101,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             previous.pending = true;
             previous.workerCompletion = workerCompletion;
             previous.timerCompletion = timerCompletion;
-            previous.fiber = undefined;
-            previous.timer = undefined;
+            delete previous.fiber;
+            delete previous.timer;
             previous.cancellationPending = false;
             previous.launchInstalled = false;
             previous.workerExited = false;

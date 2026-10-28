@@ -5,7 +5,7 @@ Implementation status: Implemented in source; rebuilt-runtime adoption remains s
 Verification status: Exact-source qualification is recorded separately; focused results do not replace the required complete gate
 Verification scope: Synthetic adapter, authenticated transport, service, reactor and browser fixtures; no live-provider or running-runtime adoption proof
 Created: 2026-10-28 18:57:01 JST (UTC+0900)
-Last updated: 2026-10-28 20:34:45 JST (UTC+0900)
+Last updated: 2026-10-28 22:18:40 JST (UTC+0900)
 Decision authority: the user requests repairing capacity recovery which remains
 visibly connecting, continuing qualified transient retries until Stop, and making
 that recovery cancellable before an approved dev push.
@@ -173,13 +173,20 @@ and closes only its captured unchanged idle prepared context. It does not call a
 generic thread Stop which could kill newer work. Once paid submission has begun,
 that private cleanup cannot assume the new native root belongs to it.
 
-The live control subscriber signals interruption of the exact paid-wait fiber
-without attaching a second completion observer. The serial worker remains its
-sole joiner, so queued Stop or new input cannot execute until the child and its
-finalizers have closed. A synthetic pinned-runtime control exposed a lost wakeup
-when `Fiber.join` and `Fiber.interrupt` observed the same exiting child together;
-the signal-and-sole-join design retains ordered cleanup without that second
-observer. A held-finalizer regression checks the ordering, rather than treating
+Private preparation and its capped polling run in an exact-intent scoped
+coordinator outside the shared serial worker. Its one-use prepared handoff is
+private, queued once, and rechecks the durable intent and current native owner
+on the worker immediately before paid admission. Stop and new input synchronously
+revoke that coordinator. A per-thread cleanup barrier retains their order until
+the exact preparation and paid child close, while unrelated chats remain free
+to use the worker. A queued stale handoff cannot send.
+
+The paid child installs one stable observer of its actual Exit before scope
+shutdown can add another observer. The worker and coordinator await a shared
+success-valued completion; the subscriber only signals the exact owned children.
+A synthetic pinned-runtime control exposed a lost wakeup when `Fiber.join` and
+`Fiber.interrupt` observed the same exiting child together. Held-finalizer and
+shutdown regressions check actual cleanup ordering rather than treating an
 interruption or an accepted Stop as proof of native closure.
 
 If the prepared attestation no longer matches fresh native inventory, the reactor

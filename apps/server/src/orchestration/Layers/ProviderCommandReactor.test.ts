@@ -4363,6 +4363,731 @@ describe("ProviderCommandReactor", () => {
       return rows[0]?.completedAt;
     }
 
+    async function startIndependentThread(harness: Awaited<ReturnType<typeof createHarness>>) {
+      const secondThread = ThreadId.make("independent-thread");
+      const secondMessage = MessageId.make("independent-message");
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-independent-thread"),
+          threadId: secondThread,
+          projectId: asProjectId("project-1"),
+          title: "Independent thread",
+          modelSelection: { instanceId, model: "gpt-5-codex" },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-01-01T00:00:11.000Z",
+        }),
+      );
+      const observed = harness.observeNextProviderTurn(secondMessage, {
+        threadId: secondThread,
+        opening: true,
+      });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-independent-turn"),
+          threadId: secondThread,
+          message: {
+            messageId: secondMessage,
+            role: "user",
+            text: "Independent authorized work",
+            attachments: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          createdAt: "2026-01-01T00:00:11.000Z",
+        }),
+      );
+      // The observer owns original opening/paid-effect completion and the
+      // exact committed running turn, not only a mock invocation or drain.
+      await observed.waitForRunning();
+      return secondThread;
+    }
+
+    it.each(["preparing", "retryable"] as const)(
+      "lets another chat start while the first recovery is %s",
+      async (state) => {
+        const clock = await makeClock();
+        const harness = await createHarness({ startReactor: false, testClock: clock });
+        harness.prepareFailedRootRecovery.mockImplementation((request) =>
+          Effect.succeed({
+            threadId: request.request.threadId,
+            attemptId: request.attemptId,
+            requestCommitment: codexFailedRootPreparationCommitment(
+              request.attemptId,
+              request.request,
+            ),
+            preparationSequence: request.preparationSequence,
+            ...(state === "preparing"
+              ? { state: "preparing" as const, phase: "opening" as const }
+              : {
+                  state: "retryable" as const,
+                  phase: "retired" as const,
+                  category: "transport" as const,
+                  continuationToken: "b".repeat(64),
+                }),
+          }),
+        );
+        await seed(harness);
+        await waitForIntent(harness);
+        await Effect.runPromise(clock.adjust(1000));
+        await waitFor(() => harness.prepareFailedRootRecovery.mock.calls.length === 1);
+        // No further clock advancement and no Stop of A: B's actual accepted
+        // work must not depend on A's private polling or recovery backoff.
+        const secondThread = await startIndependentThread(harness);
+        expect(harness.prepareFailedRootRecovery).toHaveBeenCalledTimes(1);
+        expect(
+          harness.sendTurn.mock.calls.filter(([request]) => request.threadId === threadId),
+        ).toHaveLength(0);
+        expect(
+          harness.sendTurn.mock.calls.filter(([request]) => request.threadId === secondThread),
+        ).toHaveLength(1);
+      },
+    );
+
+    it("keeps another chat runnable while Stop cleanup orders the first chat's newer input", async () => {
+      const clock = await makeClock();
+      const harness = await createHarness({ startReactor: false, testClock: clock });
+      const cancelEntered = Effect.runSync(Deferred.make<void>());
+      const cancelReleased = Effect.runSync(Deferred.make<void>());
+      const cancelClosed = Effect.runSync(Deferred.make<void>());
+      const stopped = Effect.runSync(Deferred.make<void>());
+      const opened = Effect.runSync(Deferred.make<ProviderSession>());
+      const accepted = Effect.runSync(Deferred.make<ProviderTurnStartResult>());
+      await harness.addFixtureFinalizer(Deferred.succeed(cancelReleased, undefined));
+      const newerMessage = MessageId.make("same-chat-input-after-held-cancel");
+      const order: string[] = [];
+      harness.prepareFailedRootRecovery.mockImplementation((request) =>
+        Effect.succeed({
+          threadId: request.request.threadId,
+          attemptId: request.attemptId,
+          requestCommitment: codexFailedRootPreparationCommitment(
+            request.attemptId,
+            request.request,
+          ),
+          preparationSequence: request.preparationSequence,
+          state: "preparing",
+          phase: "opening",
+        }),
+      );
+      const originalCancel = harness.cancelFailedRootRecovery.getMockImplementation()!;
+      harness.cancelFailedRootRecovery.mockImplementation((request) =>
+        Deferred.succeed(cancelEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(cancelReleased)),
+          Effect.andThen(originalCancel(request)),
+          Effect.tap(() => Effect.sync(() => order.push("cancel-closed"))),
+          Effect.tap(() => Deferred.succeed(cancelClosed, undefined)),
+          Effect.uninterruptible,
+        ),
+      );
+      const originalStop = harness.stopSession.getMockImplementation()!;
+      harness.stopSession.mockImplementation((request) =>
+        originalStop(request).pipe(
+          Effect.tap(() => {
+            if ((request as { readonly threadId?: ThreadId }).threadId !== threadId)
+              return Effect.void;
+            return Effect.sync(() => order.push("stopped")).pipe(
+              Effect.andThen(Deferred.succeed(stopped, undefined)),
+            );
+          }),
+        ),
+      );
+      const originalStart = harness.startSession.getMockImplementation()!;
+      const originalSend = harness.sendTurn.getMockImplementation()!;
+      try {
+        await seed(harness);
+        await waitForIntent(harness);
+        await Effect.runPromise(clock.adjust(1000));
+        await waitFor(() => harness.prepareFailedRootRecovery.mock.calls.length === 1);
+        harness.startSession.mockImplementation((requestedThreadId, request) =>
+          originalStart(requestedThreadId, request).pipe(
+            Effect.tap((session) =>
+              requestedThreadId === threadId
+                ? Effect.sync(() => order.push("opened")).pipe(
+                    Effect.andThen(Deferred.succeed(opened, session)),
+                  )
+                : Effect.void,
+            ),
+          ),
+        );
+        harness.sendTurn.mockImplementation((request) =>
+          originalSend(request).pipe(
+            Effect.tap((turn) =>
+              request.threadId === threadId && request.messageId === newerMessage
+                ? Effect.sync(() => order.push("accepted")).pipe(
+                    Effect.andThen(Deferred.succeed(accepted, turn)),
+                  )
+                : Effect.void,
+            ),
+          ),
+        );
+        // Install the filtered observers before either durable control.
+        // B may interleave without consuming A's opening/acceptance receipt.
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.stop",
+            commandId: CommandId.make("stop-before-held-private-cleanup"),
+            threadId,
+            createdAt: "2026-01-01T00:00:12.000Z",
+          }),
+        );
+        await harness.awaitOwnedObserver(Deferred.await(cancelEntered));
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("input-behind-held-private-cleanup"),
+            threadId,
+            message: {
+              messageId: newerMessage,
+              role: "user",
+              text: "New authorized input after Stop",
+              attachments: [],
+            },
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            createdAt: "2026-01-01T00:00:13.000Z",
+          }),
+        );
+        const secondThread = await startIndependentThread(harness);
+        expect(await Effect.runPromise(Deferred.isDone(cancelClosed))).toBe(false);
+        expect(await Effect.runPromise(Deferred.isDone(stopped))).toBe(false);
+        expect(await Effect.runPromise(Deferred.isDone(opened))).toBe(false);
+        expect(await Effect.runPromise(Deferred.isDone(accepted))).toBe(false);
+        expect(
+          harness.sendTurn.mock.calls.filter(([request]) => request.threadId === threadId),
+        ).toHaveLength(0);
+        expect(
+          harness.sendTurn.mock.calls.filter(([request]) => request.threadId === secondThread),
+        ).toHaveLength(1);
+        expect(order).toEqual([]);
+        await Effect.runPromise(Deferred.succeed(cancelReleased, undefined));
+        await harness.awaitOwnedObserver(Deferred.await(cancelClosed));
+        await harness.awaitOwnedObserver(Deferred.await(stopped));
+        expect((await harness.awaitOwnedObserver(Deferred.await(opened))).threadId).toBe(threadId);
+        const turn = await harness.awaitOwnedObserver(Deferred.await(accepted));
+        await waitFor(async () => {
+          const detail = await harness.readThreadDetail(threadId);
+          return (
+            detail?.session?.status === "running" &&
+            detail.session.activeTurnId === turn.turnId &&
+            detail.latestTurn?.turnId === turn.turnId &&
+            detail.latestTurn.state === "running"
+          );
+        });
+        await harness.drain();
+        expect(order).toEqual(["cancel-closed", "stopped", "opened", "accepted"]);
+        expect(harness.cancelFailedRootRecovery).toHaveBeenCalledTimes(1);
+        const preparation = harness.prepareFailedRootRecovery.mock.calls[0]![0];
+        expect(harness.cancelFailedRootRecovery.mock.calls[0]![0]).toEqual({
+          threadId,
+          attemptId: preparation.attemptId,
+          requestCommitment: codexFailedRootPreparationCommitment(
+            preparation.attemptId,
+            preparation.request,
+          ),
+        });
+        expect(harness.stopSession).toHaveBeenCalledTimes(1);
+        const requests = harness.sendTurn.mock.calls.filter(
+          ([request]) => request.threadId === threadId,
+        );
+        expect(requests).toHaveLength(1);
+        expect(requests[0]![0]).toMatchObject({
+          messageId: newerMessage,
+          input: "New authorized input after Stop",
+        });
+        expect(requests[0]![0]).not.toHaveProperty("preparedFailedRootRecovery");
+        expect(requests[0]![0]).not.toHaveProperty("expectedFailedRoot");
+      } finally {
+        await Effect.runPromise(Deferred.succeed(cancelReleased, undefined));
+      }
+    });
+
+    it("never pays a late prepared handoff after durable Stop while another chat progresses", async () => {
+      const clock = await makeClock();
+      const harness = await createHarness({ startReactor: false, testClock: clock });
+      const preparedEntered = Effect.runSync(Deferred.make<void>());
+      const preparedReleased = Effect.runSync(Deferred.make<void>());
+      const preparedReturned = Effect.runSync(Deferred.make<void>());
+      const cancelClosed = Effect.runSync(Deferred.make<void>());
+      const stopped = Effect.runSync(Deferred.make<void>());
+      await harness.addFixtureFinalizer(Deferred.succeed(preparedReleased, undefined));
+      const originalPrepare = harness.prepareFailedRootRecovery.getMockImplementation()!;
+      harness.prepareFailedRootRecovery.mockImplementation((request) =>
+        originalPrepare(request).pipe(
+          Effect.tap(() => Deferred.succeed(preparedEntered, undefined)),
+          Effect.tap(() => Deferred.await(preparedReleased)),
+          Effect.tap(() => Deferred.succeed(preparedReturned, undefined)),
+          Effect.uninterruptible,
+        ),
+      );
+      const originalCancel = harness.cancelFailedRootRecovery.getMockImplementation()!;
+      harness.cancelFailedRootRecovery.mockImplementation((request) =>
+        originalCancel(request).pipe(Effect.tap(() => Deferred.succeed(cancelClosed, undefined))),
+      );
+      const originalStop = harness.stopSession.getMockImplementation()!;
+      harness.stopSession.mockImplementation((request) =>
+        originalStop(request).pipe(
+          Effect.tap(() =>
+            (request as { readonly threadId?: ThreadId }).threadId === threadId
+              ? Deferred.succeed(stopped, undefined)
+              : Effect.void,
+          ),
+        ),
+      );
+      try {
+        await seed(harness);
+        await waitForIntent(harness);
+        await Effect.runPromise(clock.adjust(1000));
+        await harness.awaitOwnedObserver(Deferred.await(preparedEntered));
+        expect(harness.recoveryTransitions).toHaveLength(1);
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.stop",
+            commandId: CommandId.make("stop-before-late-prepared-handoff"),
+            threadId,
+            createdAt: "2026-01-01T00:00:12.000Z",
+          }),
+        );
+        const secondThread = await startIndependentThread(harness);
+        expect(await Effect.runPromise(Deferred.isDone(preparedReturned))).toBe(false);
+        expect(await Effect.runPromise(Deferred.isDone(stopped))).toBe(false);
+        expect(
+          harness.sendTurn.mock.calls.filter(([request]) => request.threadId === threadId),
+        ).toHaveLength(0);
+        expect(
+          harness.sendTurn.mock.calls.filter(([request]) => request.threadId === secondThread),
+        ).toHaveLength(1);
+        await Effect.runPromise(Deferred.succeed(preparedReleased, undefined));
+        await harness.awaitOwnedObserver(Deferred.await(preparedReturned));
+        await harness.awaitOwnedObserver(Deferred.await(cancelClosed));
+        await harness.awaitOwnedObserver(Deferred.await(stopped));
+        await harness.drain();
+        await Effect.runPromise(clock.adjust(120000));
+        await harness.drain();
+        expect(harness.prepareFailedRootRecovery).toHaveBeenCalledTimes(1);
+        expect(harness.cancelFailedRootRecovery).toHaveBeenCalledTimes(1);
+        const preparation = harness.prepareFailedRootRecovery.mock.calls[0]![0];
+        expect(harness.cancelFailedRootRecovery.mock.calls[0]![0]).toEqual({
+          threadId,
+          attemptId: preparation.attemptId,
+          requestCommitment: codexFailedRootPreparationCommitment(
+            preparation.attemptId,
+            preparation.request,
+          ),
+        });
+        expect(harness.stopSession).toHaveBeenCalledTimes(1);
+        expect(
+          harness.sendTurn.mock.calls.filter(([request]) => request.threadId === threadId),
+        ).toHaveLength(0);
+        expect(await failedCompletedAt(harness)).toBe("2026-01-01T00:00:04.000Z");
+      } finally {
+        await Effect.runPromise(Deferred.succeed(preparedReleased, undefined));
+      }
+    });
+
+    it("joins the actual paid child's held finalizer during scoped shutdown without advancing its ACK clock", async (context) => {
+      const signal = context.signal;
+      const paidEntered = Effect.runSync(Deferred.make<void>());
+      const finalizerEntered = Effect.runSync(Deferred.make<void>());
+      const finalizerReleased = Effect.runSync(Deferred.make<void>());
+      const finalizerClosed = Effect.runSync(Deferred.make<void>());
+      const release = () => {
+        Deferred.doneUnsafe(finalizerReleased, Effect.void);
+      };
+      let closing: Promise<void> | undefined;
+      signal.addEventListener("abort", release, { once: true });
+      context.onTestFinished(async () => {
+        release();
+        await closing;
+        signal.removeEventListener("abort", release);
+      });
+      const clock = await makeClock();
+      const harness = await createHarness({ startReactor: false, testClock: clock });
+      const fixtureScope = scope!;
+      const fixtureRuntime = runtime!;
+      let closed = false;
+      const originalSend = harness.sendTurn.getMockImplementation()!;
+      harness.sendTurn.mockImplementationOnce((request) =>
+        originalSend(request).pipe(
+          Effect.tap(() => Deferred.succeed(paidEntered, undefined)),
+          // The fake provider effect has accepted this original call, but its
+          // response and finalization remain independently owned by the child.
+          Effect.andThen(Effect.never),
+          Effect.ensuring(
+            Deferred.succeed(finalizerEntered, undefined).pipe(
+              Effect.andThen(Deferred.await(finalizerReleased)),
+              Effect.andThen(Deferred.succeed(finalizerClosed, undefined)),
+            ),
+          ),
+        ),
+      );
+      try {
+        await seed(harness);
+        await waitForIntent(harness);
+        await Effect.runPromise(clock.adjust(1000));
+        await harness.awaitOwnedObserver(Deferred.await(paidEntered));
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        // The fixture subscription and observers have a separate scope from
+        // the reactor's ManagedRuntime layer. Close both captured owners; the
+        // latter owns the real coordinator, worker and paid child.
+        closing = (async () => {
+          await Effect.runPromise(Scope.close(fixtureScope, Exit.void));
+          await fixtureRuntime.dispose();
+          closed = true;
+        })();
+        void closing.catch(() => undefined);
+        await Effect.runPromise(Deferred.await(finalizerEntered), { signal });
+        expect(closed).toBe(false);
+        expect(Effect.runSync(Deferred.isDone(finalizerClosed))).toBe(false);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        release();
+        await closing;
+        expect(closed).toBe(true);
+        expect(Effect.runSync(Deferred.isDone(finalizerClosed))).toBe(true);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        // No TestClock advancement to the thirty-second paid deadline occurs
+        // between actual entry, interruption, joined cleanup and shutdown.
+      } finally {
+        release();
+        await closing;
+        signal.removeEventListener("abort", release);
+      }
+    });
+
+    it("cancels an actually prepared unsubmitted owner when its owning scope shuts down", async (context) => {
+      const signal = context.signal;
+      const preparedEntered = Effect.runSync(Deferred.make<void>());
+      const preparedReleased = Effect.runSync(Deferred.make<void>());
+      const ownerClosing = Effect.runSync(Deferred.make<void>());
+      const cancelClosed = Effect.runSync(Deferred.make<void>());
+      const release = () => {
+        Deferred.doneUnsafe(preparedReleased, Effect.void);
+      };
+      let closing: Promise<void> | undefined;
+      signal.addEventListener("abort", release, { once: true });
+      context.onTestFinished(async () => {
+        release();
+        await closing;
+        signal.removeEventListener("abort", release);
+      });
+      const clock = await makeClock();
+      const harness = await createHarness({ startReactor: false, testClock: clock });
+      const fixtureScope = scope!;
+      const fixtureRuntime = runtime!;
+      let closed = false;
+      const originalPrepare = harness.prepareFailedRootRecovery.getMockImplementation()!;
+      harness.prepareFailedRootRecovery.mockImplementation((request) =>
+        Effect.gen(function* () {
+          const owner = yield* Effect.serviceOption(Scope.Scope);
+          if (Option.isNone(owner))
+            return yield* Effect.die("Missing synthetic preparation owner scope");
+          // Observe closure of the actual provider-effect owner, not merely the
+          // unrelated fixture subscription. Register before acquiring a permit.
+          yield* Scope.addFinalizer(owner.value, Deferred.succeed(ownerClosing, undefined));
+          const prepared = yield* originalPrepare(request);
+          yield* Deferred.succeed(preparedEntered, undefined);
+          yield* Deferred.await(preparedReleased);
+          return prepared;
+        }).pipe(Effect.uninterruptible),
+      );
+      const originalCancel = harness.cancelFailedRootRecovery.getMockImplementation()!;
+      harness.cancelFailedRootRecovery.mockImplementation((request) =>
+        originalCancel(request).pipe(Effect.tap(() => Deferred.succeed(cancelClosed, undefined))),
+      );
+      try {
+        await seed(harness);
+        await waitForIntent(harness);
+        await Effect.runPromise(clock.adjust(1000));
+        await harness.awaitOwnedObserver(Deferred.await(preparedEntered));
+        expect(harness.recoveryTransitions).toHaveLength(1);
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        const preparation = harness.prepareFailedRootRecovery.mock.calls[0]![0];
+        closing = (async () => {
+          await Effect.runPromise(Scope.close(fixtureScope, Exit.void));
+          await fixtureRuntime.dispose();
+          closed = true;
+        })();
+        void closing.catch(() => undefined);
+        await Effect.runPromise(Deferred.await(ownerClosing), { signal });
+        expect(closed).toBe(false);
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        release();
+        await Effect.runPromise(Deferred.await(cancelClosed), { signal });
+        await closing;
+        expect(closed).toBe(true);
+        expect(harness.prepareFailedRootRecovery).toHaveBeenCalledTimes(1);
+        expect(harness.cancelFailedRootRecovery).toHaveBeenCalledTimes(1);
+        expect(harness.cancelFailedRootRecovery.mock.calls[0]![0]).toEqual({
+          threadId,
+          attemptId: preparation.attemptId,
+          requestCommitment: codexFailedRootPreparationCommitment(
+            preparation.attemptId,
+            preparation.request,
+          ),
+        });
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        // A prepared provider result was observed, but this fixture makes no
+        // claim that a local worker handoff had already entered its queue.
+      } finally {
+        release();
+        await closing;
+        signal.removeEventListener("abort", release);
+      }
+    });
+
+    it("keeps unexpected coordinator cleanup ahead of newer input without blocking another chat", async () => {
+      const clock = await makeClock();
+      const harness = await createHarness({ startReactor: false, testClock: clock });
+      const cancelEntered = Effect.runSync(Deferred.make<void>());
+      const cancelReleased = Effect.runSync(Deferred.make<void>());
+      const cancelClosed = Effect.runSync(Deferred.make<void>());
+      const accepted = Effect.runSync(Deferred.make<ProviderTurnStartResult>());
+      const newerMessage = MessageId.make("input-after-unexpected-private-exit");
+      const order: string[] = [];
+      await harness.addFixtureFinalizer(Deferred.succeed(cancelReleased, undefined));
+      harness.prepareFailedRootRecovery.mockImplementation((request) =>
+        Effect.succeed({
+          threadId: request.request.threadId,
+          attemptId: request.attemptId,
+          requestCommitment: "f".repeat(64),
+          preparationSequence: request.preparationSequence,
+          state: "preparing",
+          phase: "opening",
+        }),
+      );
+      const originalCancel = harness.cancelFailedRootRecovery.getMockImplementation()!;
+      harness.cancelFailedRootRecovery.mockImplementation((request) =>
+        Deferred.succeed(cancelEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(cancelReleased)),
+          Effect.andThen(originalCancel(request)),
+          Effect.tap(() => Effect.sync(() => order.push("cancel-closed"))),
+          Effect.tap(() => Deferred.succeed(cancelClosed, undefined)),
+          Effect.uninterruptible,
+        ),
+      );
+      const originalSend = harness.sendTurn.getMockImplementation()!;
+      harness.sendTurn.mockImplementation((request) =>
+        originalSend(request).pipe(
+          Effect.tap((turn) =>
+            request.threadId === threadId && request.messageId === newerMessage
+              ? Effect.sync(() => order.push("accepted")).pipe(
+                  Effect.andThen(Deferred.succeed(accepted, turn)),
+                )
+              : Effect.void,
+          ),
+        ),
+      );
+      try {
+        await seed(harness);
+        await waitForIntent(harness);
+        await Effect.runPromise(clock.adjust(1000));
+        // The mismatched proof exits automatically, without any prior human Stop.
+        await harness.awaitOwnedObserver(Deferred.await(cancelEntered));
+        const preparation = harness.prepareFailedRootRecovery.mock.calls[0]![0];
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("input-during-unexpected-private-cleanup"),
+            threadId,
+            message: {
+              messageId: newerMessage,
+              role: "user",
+              text: "New input after private recovery exit",
+              attachments: [],
+            },
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            createdAt: "2026-01-01T00:00:12.000Z",
+          }),
+        );
+        const secondThread = await startIndependentThread(harness);
+        expect(Effect.runSync(Deferred.isDone(cancelClosed))).toBe(false);
+        expect(Effect.runSync(Deferred.isDone(accepted))).toBe(false);
+        expect(
+          harness.sendTurn.mock.calls.filter(([request]) => request.threadId === threadId),
+        ).toHaveLength(0);
+        expect(
+          harness.sendTurn.mock.calls.filter(([request]) => request.threadId === secondThread),
+        ).toHaveLength(1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(order).toEqual([]);
+        await Effect.runPromise(Deferred.succeed(cancelReleased, undefined));
+        await harness.awaitOwnedObserver(Deferred.await(cancelClosed));
+        const turn = await harness.awaitOwnedObserver(Deferred.await(accepted));
+        await waitFor(async () => {
+          const detail = await harness.readThreadDetail(threadId);
+          return (
+            detail?.session?.status === "running" &&
+            detail.session.activeTurnId === turn.turnId &&
+            detail.latestTurn?.turnId === turn.turnId &&
+            detail.latestTurn.state === "running"
+          );
+        });
+        await harness.drain();
+        expect(order).toEqual(["cancel-closed", "accepted"]);
+        expect(harness.cancelFailedRootRecovery).toHaveBeenCalledTimes(1);
+        expect(harness.cancelFailedRootRecovery.mock.calls[0]![0]).toEqual({
+          threadId,
+          attemptId: preparation.attemptId,
+          requestCommitment: codexFailedRootPreparationCommitment(
+            preparation.attemptId,
+            preparation.request,
+          ),
+        });
+        const requests = harness.sendTurn.mock.calls.filter(
+          ([request]) => request.threadId === threadId,
+        );
+        expect(requests).toHaveLength(1);
+        expect(requests[0]![0]).toMatchObject({
+          messageId: newerMessage,
+          input: "New input after private recovery exit",
+        });
+        expect(requests[0]![0]).not.toHaveProperty("preparedFailedRootRecovery");
+        expect(harness.stopSession).not.toHaveBeenCalled();
+      } finally {
+        await Effect.runPromise(Deferred.succeed(cancelReleased, undefined));
+      }
+    });
+
+    it("defers a later accepted-root recovery until the prior coordinator's exact cleanup closes", async () => {
+      const clock = await makeClock();
+      const harness = await createHarness({ startReactor: false, testClock: clock });
+      const cancelEntered = Effect.runSync(Deferred.make<void>());
+      const cancelReleased = Effect.runSync(Deferred.make<void>());
+      const cancelClosed = Effect.runSync(Deferred.make<void>());
+      const firstAccepted = Effect.runSync(Deferred.make<ProviderTurnStartResult>());
+      const nextPreparation = Effect.runSync(
+        Deferred.make<
+          Parameters<NonNullable<ProviderServiceShape["prepareFailedRootRecovery"]>>[0]
+        >(),
+      );
+      const order: string[] = [];
+      await harness.addFixtureFinalizer(Deferred.succeed(cancelReleased, undefined));
+      const originalPrepare = harness.prepareFailedRootRecovery.getMockImplementation()!;
+      let preparationExecutions = 0;
+      harness.prepareFailedRootRecovery.mockImplementation((request) =>
+        Effect.suspend(() => {
+          preparationExecutions += 1;
+          if (preparationExecutions === 1) return originalPrepare(request);
+          return Effect.succeed({
+            threadId: request.request.threadId,
+            attemptId: request.attemptId,
+            requestCommitment: codexFailedRootPreparationCommitment(
+              request.attemptId,
+              request.request,
+            ),
+            preparationSequence: request.preparationSequence,
+            state: "preparing" as const,
+            phase: "opening" as const,
+          }).pipe(
+            Effect.tap(() => Effect.sync(() => order.push("prepared-next"))),
+            Effect.tap(() => Deferred.succeed(nextPreparation, request)),
+          );
+        }),
+      );
+      const originalSend = harness.sendTurn.getMockImplementation()!;
+      harness.sendTurn.mockImplementationOnce((request) =>
+        originalSend(request).pipe(Effect.tap((turn) => Deferred.succeed(firstAccepted, turn))),
+      );
+      const originalCancel = harness.cancelFailedRootRecovery.getMockImplementation()!;
+      let cancellationExecutions = 0;
+      harness.cancelFailedRootRecovery.mockImplementation((request) =>
+        Effect.suspend(() => {
+          cancellationExecutions += 1;
+          if (cancellationExecutions !== 1) return originalCancel(request);
+          return Deferred.succeed(cancelEntered, undefined).pipe(
+            Effect.andThen(Deferred.await(cancelReleased)),
+            Effect.andThen(originalCancel(request)),
+            Effect.tap(() => Effect.sync(() => order.push("cancel-closed"))),
+            Effect.tap(() => Deferred.succeed(cancelClosed, undefined)),
+            Effect.uninterruptible,
+          );
+        }),
+      );
+      const claimCount = async () => {
+        const rows = await Effect.runPromise(harness.sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count FROM orchestration_events
+          WHERE stream_id = ${threadId} AND actor_kind = 'server'
+            AND json_extract(payload_json, '$.activity.payload.recovery') IN (
+              'codex-transient-continuation-attempted',
+              'codex-transient-continuation-resubmit-attempted'
+            )`);
+        return rows[0]?.count;
+      };
+      try {
+        await seed(harness);
+        await waitForIntent(harness);
+        await Effect.runPromise(clock.adjust(1000));
+        const first = await harness.awaitOwnedObserver(Deferred.await(firstAccepted));
+        const replacementRuntimeId = await waitForAcceptedReplacement(
+          harness,
+          first.turnId,
+          runtimeId,
+        );
+        await harness.awaitOwnedObserver(Deferred.await(cancelEntered));
+        expect(await claimCount()).toBe(1);
+        // Manufacture terminal native observation only after the original fake
+        // paid effect, immutable acceptance receipt and running projection agree.
+        // No new paid claim or acceptance receipt is fabricated for the overlap.
+        await Effect.runPromise(clock.adjust(2000));
+        await recordFailure(harness, first.turnId, false, "2026-01-01T00:00:13.000Z");
+        await waitForIntent(harness, 2);
+        await Effect.runPromise(clock.adjust(60000));
+        await harness.drain();
+        const secondThread = await startIndependentThread(harness);
+        expect(Effect.runSync(Deferred.isDone(cancelClosed))).toBe(false);
+        expect(Effect.runSync(Deferred.isDone(nextPreparation))).toBe(false);
+        expect(harness.prepareFailedRootRecovery).toHaveBeenCalledTimes(1);
+        expect(await claimCount()).toBe(1);
+        expect(
+          harness.sendTurn.mock.calls.filter(([request]) => request.threadId === threadId),
+        ).toHaveLength(1);
+        expect(
+          harness.sendTurn.mock.calls.filter(([request]) => request.threadId === secondThread),
+        ).toHaveLength(1);
+        expect(order).toEqual([]);
+        await Effect.runPromise(Deferred.succeed(cancelReleased, undefined));
+        await harness.awaitOwnedObserver(Deferred.await(cancelClosed));
+        // Reconsideration may now admit its original backed-off wait. Observe that
+        // exact next root's wait and drain its admitted worker work before advancing
+        // the same fake clock; time spent behind the barrier is not a retry grant.
+        await waitFor(async () => {
+          const detail = await harness.readThreadDetail(threadId);
+          return (
+            detail?.activities.some(
+              (activity) =>
+                activity.turnId === first.turnId &&
+                (activity.payload as Record<string, unknown>)?.recovery ===
+                  "codex-transient-recovery-waiting",
+            ) === true
+          );
+        });
+        await harness.drain();
+        await Effect.runPromise(clock.adjust(60000));
+        const next = await harness.awaitOwnedObserver(Deferred.await(nextPreparation));
+        expect(next.request.expectedFailedRoot).toMatchObject({
+          turnId: first.turnId,
+          subagentRuntimeId: replacementRuntimeId,
+        });
+        expect(next.attemptId).not.toBe(
+          harness.prepareFailedRootRecovery.mock.calls[0]![0].attemptId,
+        );
+        expect(harness.prepareFailedRootRecovery).toHaveBeenCalledTimes(2);
+        expect(await claimCount()).toBe(2);
+        expect(order).toEqual(["cancel-closed", "prepared-next"]);
+        expect(
+          harness.sendTurn.mock.calls.filter(([request]) => request.threadId === threadId),
+        ).toHaveLength(1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+      } finally {
+        await Effect.runPromise(Deferred.succeed(cancelReleased, undefined));
+      }
+    });
+
     it("keeps a legal 31-second private preparation zero-paid until its exact owner is ready", async () => {
       const clock = await makeClock();
       const harness = await createHarness({ startReactor: false, testClock: clock });
@@ -5881,21 +6606,23 @@ describe("ProviderCommandReactor", () => {
               readonly count: number;
             }>`SELECT event_type AS type, COUNT(*) AS count FROM orchestration_events WHERE stream_id = ${threadId} AND event_type IN ('thread.session-stop-requested', 'thread.turn-start-requested') GROUP BY event_type`,
           );
-          console.info("synthetic phased stop failure", {
-            control,
-            sessionStatus: detail?.session?.status ?? "missing",
-            cancelCalls: harness.cancelFailedRootRecovery.mock.calls.length,
-            stopCalls: harness.stopSession.mock.calls.length,
-            sendCalls: harness.sendTurn.mock.calls.length,
-            retiredMarker:
-              detail?.activities.some(
-                (activity) =>
-                  (activity.payload as Record<string, unknown>)?.recovery ===
-                    "codex-transient-preparation" &&
-                  (activity.payload as Record<string, unknown>)?.phase === "retired",
-              ) ?? false,
-            controls: observations,
-          });
+          await Effect.runPromise(
+            Effect.logInfo("synthetic phased stop failure", {
+              control,
+              sessionStatus: detail?.session?.status ?? "missing",
+              cancelCalls: harness.cancelFailedRootRecovery.mock.calls.length,
+              stopCalls: harness.stopSession.mock.calls.length,
+              sendCalls: harness.sendTurn.mock.calls.length,
+              retiredMarker:
+                detail?.activities.some(
+                  (activity) =>
+                    (activity.payload as Record<string, unknown>)?.recovery ===
+                      "codex-transient-preparation" &&
+                    (activity.payload as Record<string, unknown>)?.phase === "retired",
+                ) ?? false,
+              controls: observations,
+            }).pipe(Effect.catchCause(() => Effect.void)),
+          );
           throw error;
         }
         await Effect.runPromise(Deferred.succeed(release, undefined));

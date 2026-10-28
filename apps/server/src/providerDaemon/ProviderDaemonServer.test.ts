@@ -389,7 +389,7 @@ describe("ProviderDaemonServer", () => {
           fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
             method: "POST",
             headers: { authorization: `Bearer ${TEST_TOKEN}`, "content-type": "application/json" },
-            body: JSON.stringify(body),
+            body: encodeProviderJsonString(body),
           }),
         );
         assert.equal(response.status, 400);
@@ -400,7 +400,7 @@ describe("ProviderDaemonServer", () => {
       assert.notProperty(seen[1] as object, "extra");
       const sql = yield* SqlClient.SqlClient;
       const rows = yield* sql`SELECT request_json FROM provider_daemon_commands`;
-      assert.notInclude(JSON.stringify(rows), "unknown-field-secret");
+      assert.notInclude(encodeProviderJsonString(rows), "unknown-field-secret");
     }).pipe(Effect.scoped, Effect.provide(makeProviderDaemonServerTestLayer(service)));
   });
 
@@ -500,7 +500,7 @@ describe("ProviderDaemonServer", () => {
           fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
             method: "POST",
             headers: { authorization: `Bearer ${TEST_TOKEN}`, "content-type": "application/json" },
-            body: JSON.stringify(body),
+            body: encodeProviderJsonString(body),
           }),
         );
         assert.equal(response.status, 400);
@@ -533,10 +533,10 @@ describe("ProviderDaemonServer", () => {
       const sql = yield* SqlClient.SqlClient;
       const rows =
         yield* sql`SELECT request_json, response_json, error_json FROM provider_daemon_commands`;
-      assert.notInclude(JSON.stringify(rows), secret);
-      assert.notInclude(JSON.stringify(rows), prompt);
-      assert.notInclude(JSON.stringify(rows), validSecret);
-      assert.notInclude(JSON.stringify(rows), digest);
+      assert.notInclude(encodeProviderJsonString(rows), secret);
+      assert.notInclude(encodeProviderJsonString(rows), prompt);
+      assert.notInclude(encodeProviderJsonString(rows), validSecret);
+      assert.notInclude(encodeProviderJsonString(rows), digest);
     }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer)),
   );
 

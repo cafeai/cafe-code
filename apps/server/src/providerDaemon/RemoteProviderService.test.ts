@@ -1074,7 +1074,7 @@ describe("RemoteProviderService", () => {
               return Effect.succeed({
                 sessionModelSwitch: "in-session" as const,
                 liveSteer: "supported" as const,
-                codexPhasedFailedRootRecovery: value,
+                ...(value === undefined ? {} : { codexPhasedFailedRootRecovery: value }),
               });
             },
             effect: delivered,

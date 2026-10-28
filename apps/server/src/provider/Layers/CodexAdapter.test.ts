@@ -1125,6 +1125,51 @@ for (const category of ["serverOverloaded", "unauthorized", "wrapped-unauthorize
   );
 }
 
+for (const shape of ["plain-tag", "forged-class-brand"] as const) {
+  it.effect(`phased recovery refuses a ${shape} transport error lookalike`, () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+      const originalFactory = fixture.factory.factory.getMockImplementation()!;
+      fixture.factory.factory.mockImplementation((options) =>
+        originalFactory(options).pipe(
+          Effect.tap((runtime) =>
+            Effect.sync(() => {
+              const lookalike = {
+                _tag: "CodexAppServerTransportError",
+                detail: "Synthetic transport lookalike",
+                message: "Synthetic transport lookalike",
+                cause: new Error("synthetic"),
+                ...(shape === "forged-class-brand"
+                  ? { "~effect/Schema/Class/CodexAppServerTransportError": true }
+                  : {}),
+              };
+              // Deliberately inject an untrusted shape into the native error seam.
+              // Its tag/HMR brand must not become trusted constructor identity.
+              runtime.start = () => Effect.fail(lookalike as CodexSessionRuntimeError);
+            }),
+          ),
+        ),
+      );
+      const request: ProviderSendTurnInput = {
+        threadId: fixture.threadId,
+        input: "Continue only with authenticated native evidence.",
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: fixture.expectedFailedRoot,
+      };
+      const attemptId = `untrusted-native-error-${shape}`;
+      yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+      const terminal = yield* awaitRecoveryPreparation(adapter, request, attemptId, "retired");
+      assert.equal(Object.hasOwn(terminal, "continuationToken"), false);
+      assert.equal(Object.hasOwn(terminal, "permit"), false);
+      assert.equal(fixture.factory.runtimes[1]!.closeImpl.mock.calls.length, 1);
+      assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
+      assert.equal(fixture.factory.runtimes.length, 2);
+    }).pipe(Effect.provide(fixture.layer));
+  });
+}
+
 it.effect("exact preparation cancellation cannot close a newer manual owner", () => {
   const fixture = makeFailedRootRecoveryFixture();
   return Effect.gen(function* () {
@@ -1364,7 +1409,18 @@ it.effect(
       const release = yield* Deferred.make<void>();
       yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
       return yield* Effect.gen(function* () {
-        const candidates = [];
+        const candidates: Array<{
+          readonly request: ProviderSendTurnInput;
+          readonly attemptId: string;
+          readonly native: FakeCodexRuntime;
+          readonly preparing: Fiber.Fiber<
+            Exit.Exit<
+              ProviderFailedRootRecoveryPreparation,
+              Effect.Error<ReturnType<NonNullable<CodexAdapterShape["prepareFailedRootRecovery"]>>>
+            >,
+            never
+          >;
+        }> = [];
         for (const index of [255, 256]) {
           const request = yield* makeRequest(index);
           const native = fixture.factory.runtimes.at(-1)!;
@@ -1532,6 +1588,90 @@ it.effect(
         assert.equal(prepared.closeImpl.mock.calls.length, 1);
         assert.equal(prepared.sendTurnImpl.mock.calls.length, 0);
       }).pipe(Effect.ensuring(Deferred.succeed(closeRelease, undefined)));
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+it.effect(
+  "manual replacement joins a private cancelled owner whose native retirement is still pending",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+      const request: ProviderSendTurnInput = {
+        threadId: fixture.threadId,
+        input: "Continue exact native history.",
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: fixture.expectedFailedRoot,
+      };
+      const attemptId = "manual-replacement-during-private-cancel";
+      const lookup = {
+        threadId: fixture.threadId,
+        attemptId,
+        requestCommitment: codexFailedRootPreparationCommitment(attemptId, request),
+      };
+      yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+      yield* awaitRecoveryPreparation(adapter, request, attemptId, "prepared");
+      const prepared = fixture.factory.runtimes[1]!;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const cancelled = yield* Deferred.make<void>();
+      const started = yield* Deferred.make<void>();
+      yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
+      return yield* Effect.gen(function* () {
+        const originalClose = prepared.close;
+        prepared.close = Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.andThen(originalClose),
+          Effect.uninterruptible,
+        );
+        yield* prepared.emit({
+          id: asEventId("private-cancel-manual-replacement-native-exit"),
+          kind: "session",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: fixture.threadId,
+          subagentRuntimeId: fixture.generations[1],
+          createdAt: "2026-10-28T10:00:00.000Z",
+          method: "session/exited",
+          message: "Synthetic exact native owner exit",
+        });
+        yield* Deferred.await(entered);
+        assert.equal(yield* adapter.hasSession(fixture.threadId), false);
+        const cancelling = yield* adapter.cancelFailedRootRecovery!(lookup).pipe(
+          Effect.tap(() => Deferred.succeed(cancelled, undefined)),
+          Effect.forkChild,
+        );
+        yield* awaitRecoveryPreparation(adapter, request, attemptId, "retired");
+        const starting = yield* adapter
+          .startSession({
+            threadId: fixture.threadId,
+            runtimeMode: "approval-required",
+            resumeCursor: { threadId: fixture.nativeThreadId },
+          })
+          .pipe(
+            Effect.tap(() => Deferred.succeed(started, undefined)),
+            Effect.forkChild,
+          );
+        yield* TestClock.adjust(1);
+        assert.equal(yield* Deferred.isDone(cancelled), false);
+        assert.equal(yield* Deferred.isDone(started), false);
+        assert.equal(fixture.factory.runtimes.length, 2);
+        assert.equal(prepared.closeImpl.mock.calls.length, 0);
+        assert.equal(prepared.sendTurnImpl.mock.calls.length, 0);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(cancelling);
+        const manual = yield* Fiber.join(starting);
+        assert.equal(manual.subagentRuntimeId, fixture.generations[2]);
+        assert.equal(fixture.factory.runtimes.length, 3);
+        assert.equal(prepared.closeImpl.mock.calls.length, 1);
+        assert.equal(prepared.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(fixture.factory.runtimes[2]!.closeImpl.mock.calls.length, 0);
+        assert.equal(fixture.factory.runtimes[2]!.sendTurnImpl.mock.calls.length, 0);
+        const sessions = yield* adapter.listSessions();
+        assert.equal(sessions.length, 1);
+        assert.equal(sessions[0]!.subagentRuntimeId, fixture.generations[2]);
+      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
     }).pipe(Effect.provide(fixture.layer));
   },
 );
@@ -1775,7 +1915,7 @@ it.effect("phased recovery retains a typed acquired-runtime cleanup failure as u
       if (result.state !== "preparing") break;
       yield* Effect.yieldNow;
     }
-    assert.equal(result.state, "uncertain", JSON.stringify(observations));
+    assert.equal(result.state, "uncertain", encodeProviderJsonString(observations));
     assert.equal(Object.hasOwn(result, "continuationToken"), false);
     assert.equal(fixture.factory.runtimes[1]!.closeImpl.mock.calls.length, 1);
     assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
