@@ -45,8 +45,8 @@ export function glideClickIntent(input: {
   readonly enabled: boolean;
   readonly status: GlideControlResult | undefined;
 }): GlideClickIntent {
-  if (input.error) return "refresh";
   if (input.enabled) return "toggle";
+  if (input.error) return "refresh";
   return glidePermissionsGranted(input.status) ? "toggle" : "setup";
 }
 

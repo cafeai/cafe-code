@@ -1790,17 +1790,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             : computerUseActivity?.state === "unavailable"
               ? uiText("Computer use status unavailable", undefined, undefined, uiLocale)
               : null;
-  const activity = computerUseLabel
-    ? {
-        ...(providerActivity ?? { taskCount: 0, agentCount: 0, canInspect: false }),
-        attention: computerUseActivity?.state === "unavailable",
-        label:
-          computerUseLabel +
-          (computerUseActivity?.appName
-            ? ` · ${computerUseActivity.appName}${computerUseActivity.windowTitle ? ` — ${computerUseActivity.windowTitle}` : ""}`
-            : ""),
-      }
-    : providerActivity;
+  // A removed control or an unavailable status cannot own the chat's live
+  // activity line. Connection/refresh errors remain on the Computer use button.
+  const activity =
+    environmentUnavailable === null &&
+    supportsGlide &&
+    computerUseActivity?.state !== "unavailable" &&
+    computerUseLabel
+      ? {
+          ...(providerActivity ?? { taskCount: 0, agentCount: 0, canInspect: false }),
+          attention: false,
+          label:
+            computerUseLabel +
+            (computerUseActivity?.appName
+              ? ` · ${computerUseActivity.appName}${computerUseActivity.windowTitle ? ` — ${computerUseActivity.windowTitle}` : ""}`
+              : ""),
+        }
+      : providerActivity;
 
   // ------------------------------------------------------------------
   // Composer-local state
@@ -4520,7 +4526,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         .getState()
                         .setComputerUseEnabled(composerDraftTarget, enabled, revision)
                     }
-                    refreshKey={`${isSendBusy}:${activeThread?.session?.createdAt ?? ""}`}
+                    refreshKey={`${isSendBusy}:${activeThread?.session?.createdAt ?? ""}:${environmentUnavailable === null}`}
                     disabled={
                       environmentUnavailable !== null ||
                       (!isServerThread && (isSendBusy || isConnecting || isPreparingWorktree))

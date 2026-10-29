@@ -74,13 +74,30 @@ export function GlideControl({
   draft.current = { enabled: draftEnabled, revision: draftRevision, change: onDraftEnabledChange };
 
   const request = useCallback(
-    async (input: GlideControlInput, generation: number): Promise<GlideControlResult | null> => {
+    async (
+      input: GlideControlInput,
+      generation: number,
+      reportErrors = true,
+    ): Promise<GlideControlResult | null> => {
       const api = readEnvironmentApi(environmentId)?.glide;
-      if (!api) return null;
       const sequence = ++issued.current;
-      const value = await api.control(input);
+      let value: GlideControlResult;
+      try {
+        if (!api) throw new Error("Computer use connection is unavailable.");
+        value = await api.control(input);
+      } catch {
+        // Failures obey the same sequence fence as successful replies. An old
+        // failed poll must not erase a newer confirmed toggle or activity.
+        if (owner.current !== generation || sequence < applied.current) return null;
+        applied.current = sequence;
+        if (reportErrors) setError(true);
+        // Missing transport is not confirmation or revocation of a grant.
+        setStatus((previous) => (previous ? { ...previous, activity: undefined } : previous));
+        throw new Error("Computer use status could not be confirmed.");
+      }
       if (owner.current !== generation || sequence < applied.current) return null;
       applied.current = sequence;
+      setError(value.activity?.state === "unavailable");
       setStatus((previous) =>
         input.action === "activity" && previous
           ? {
@@ -116,14 +133,11 @@ export function GlideControl({
         await request(
           { action: mode.action ?? "status", ...(threadId ? { threadId } : {}) },
           generation,
+          mode.reportErrors || mode.action === "activity",
         );
-        if (owner.current === generation && mode.reportErrors) setError(false);
       } catch {
-        if (owner.current === generation && mode.reportErrors) setError(true);
-        if (owner.current === generation && mode.action === "activity")
-          setStatus((previous) =>
-            previous ? { ...previous, activity: { state: "unavailable" } } : previous,
-          );
+        // The request applies fixed failure state under its exact sequence
+        // fence; a later continuation cannot overwrite a newer confirmation.
       } finally {
         if (owner.current === generation) {
           reading.current = false;
@@ -141,7 +155,6 @@ export function GlideControl({
     setPending(false);
     reading.current = false;
     mutating.current = false;
-    if (!readEnvironmentApi(environmentId)?.glide) return;
     const onFocus = () => {
       void read(generation, { busy: false, reportErrors: true });
     };
@@ -159,9 +172,14 @@ export function GlideControl({
   }, [environmentId, threadId, runtimeMode, refreshKey, read]);
 
   const granted = glidePermissionsGranted(status);
+  const confirmedActivity =
+    status?.activity?.state === "unavailable" ? undefined : status?.activity;
   useEffect(() => {
-    onActivityChange?.(status?.activity);
-  }, [onActivityChange, status?.activity]);
+    onActivityChange?.(confirmedActivity);
+    // The parent outlives this conditional control. Retire its projection on
+    // unmount/callback replacement before a newer projection is published.
+    return () => onActivityChange?.(undefined);
+  }, [onActivityChange, confirmedActivity]);
   useEffect(() => {
     if (!(status?.enabled || (!threadId && draftEnabled))) return;
     const generation = owner.current;
@@ -203,7 +221,6 @@ export function GlideControl({
     try {
       return await request(input, generation);
     } catch {
-      if (owner.current === generation) setError(true);
       return null;
     } finally {
       if (owner.current === generation) {
@@ -255,11 +272,16 @@ export function GlideControl({
 
   const enabled = threadId ? status?.enabled === true : draftEnabled;
   const label = uiText("Computer use", undefined, undefined, locale);
-  const description = error
-    ? uiText("Computer use could not be confirmed. Click to refresh.", undefined, undefined, locale)
-    : enabled
+  const description = enabled
+    ? uiText(
+        "Computer use is on. Click to turn it off for this chat.",
+        undefined,
+        undefined,
+        locale,
+      )
+    : error
       ? uiText(
-          "Computer use is on. Click to turn it off for this chat.",
+          "Computer use could not be confirmed. Click to refresh.",
           undefined,
           undefined,
           locale,

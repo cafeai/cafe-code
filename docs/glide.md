@@ -83,7 +83,12 @@ A filled accent dot means a screenshot or input operation is being dispatched;
 an outlined dot means text reading. Ready/idle access has no activity dot.
 **Capturing**, **Reading text**, **Controlling**,
 **Stopping** and **Status unavailable** are distinct states. The existing single
-activity line above the composer reflects the same owner-scoped activity. An
+activity line above the composer reflects confirmed owner-scoped activity while
+connected. Status failures stay on the Computer use button with its refresh
+action; they do not replace the chat's live activity. Disconnecting or removing
+the control retires its previous projection, and a successful current-owner
+status read restores it without changing saved grants or native permissions. An
+enabled switch still offers direct turn-off after a failed status read. An
 old preview is dated historical data, never evidence of streaming or a current
 native input grant. Opening this menu or polling activity does not capture.
 
