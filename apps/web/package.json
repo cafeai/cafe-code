@@ -26,6 +26,7 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@effect/atom-react": "catalog:",
     "@fontsource-variable/dm-sans": "5.3.0",
+    "@fontsource/noto-color-emoji": "5.3.2",
     "@formkit/auto-animate": "^0.10.0",
     "@legendapp/list": "patch:@legendapp/list@npm%3A3.0.0-beta.44#~/.yarn/patches/@legendapp-list-npm-3.0.0-beta.44-3d8b008deb.patch",
     "@lexical/react": "^0.41.0",

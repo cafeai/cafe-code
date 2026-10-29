@@ -775,6 +775,7 @@ __metadata:
     "@effect/atom-react": "catalog:"
     "@effect/language-service": "catalog:"
     "@fontsource-variable/dm-sans": "npm:5.3.0"
+    "@fontsource/noto-color-emoji": "npm:5.3.2"
     "@formkit/auto-animate": "npm:^0.10.0"
     "@legendapp/list": "patch:@legendapp/list@npm%3A3.0.0-beta.44#~/.yarn/patches/@legendapp-list-npm-3.0.0-beta.44-3d8b008deb.patch"
     "@lexical/react": "npm:^0.41.0"
@@ -1238,6 +1239,13 @@ __metadata:
   version: 5.3.0
   resolution: "@fontsource-variable/dm-sans@npm:5.3.0"
   checksum: 10c0/95c74b19fff2b4b1d669e61d481ede2186e28b92d7e1950748db94b9c3b2598aa38ff852e45ffd9955ea0a51386acdc90a8c4267783d45dd5f05e2430b24ad4e
+  languageName: node
+  linkType: hard
+
+"@fontsource/noto-color-emoji@npm:5.3.2":
+  version: 5.3.2
+  resolution: "@fontsource/noto-color-emoji@npm:5.3.2"
+  checksum: 10c0/6a88a93a85d517c176e4abd8b7f1d339a2f750beb97f9bd727c7b671dd75f7d4881eec8fb9e898b75631259fea1479b165da20ec5cf054b8dd898e5ae69c0ccb
   languageName: node
   linkType: hard
 

@@ -145,8 +145,13 @@ function renderTableViewerFixture(text = TABLE_VIEWER_MARKDOWN) {
   );
 }
 
+// A timed-out browser case must retire and join its own render and font load
+// before the shared cleanup below removes DOM or restores global fixtures.
+let emojiFixtureCleanup: (() => Promise<void>) | undefined;
+
 describe("ChatMarkdown", () => {
-  afterEach(() => {
+  afterEach(async () => {
+    if (emojiFixtureCleanup) await emojiFixtureCleanup();
     workspaceFixture.environmentId = null;
     confirmMock.mockClear();
     openInPreferredEditorMock.mockClear();
@@ -156,6 +161,95 @@ describe("ChatMarkdown", () => {
     localStorage.clear();
     Reflect.deleteProperty(window, "desktopBridge");
     document.body.innerHTML = "";
+  });
+
+  it("preserves emoji text and paints the chat fallback in color", async ({
+    signal,
+    onTestFinished,
+  }) => {
+    const hearts = ["💜", "❤️", "🩵", "🤍", "🩷", "💛", "💚"];
+    const text = `Seven colour hearts (${hearts.join("")}). Text: ❤︎ Emoji: ❤️ Joined: 👩‍💻. English 日本語`;
+    let retired = false;
+    let view: Awaited<ReturnType<typeof render>> | undefined;
+    let pendingRender: ReturnType<typeof render> | undefined;
+    let cleanupPromise: Promise<void> | undefined;
+    const pending = new Set<Promise<unknown>>();
+    const own = <T,>(operation: () => Promise<T>): Promise<T> => {
+      if (retired) throw new Error("Emoji fixture retired");
+      const result = operation();
+      pending.add(result);
+      void result.then(
+        () => pending.delete(result),
+        () => pending.delete(result),
+      );
+      return result;
+    };
+    const retire = () => {
+      retired = true;
+    };
+    const cleanup = () => {
+      if (cleanupPromise) return cleanupPromise;
+      retire();
+      cleanupPromise = (async () => {
+        try {
+          await Promise.allSettled([...pending]);
+          const mounted = view ?? (await pendingRender);
+          await mounted?.unmount();
+          if (emojiFixtureCleanup === cleanup) emojiFixtureCleanup = undefined;
+        } finally {
+          signal?.removeEventListener("abort", retire);
+        }
+      })();
+      return cleanupPromise;
+    };
+    emojiFixtureCleanup = cleanup;
+    onTestFinished(cleanup);
+    signal?.addEventListener("abort", retire, { once: true });
+    if (signal?.aborted) retire();
+    let bodyFailed = false;
+    try {
+      pendingRender = own(() => render(<ChatMarkdown text={text} cwd="/repo/project" />));
+      view = await pendingRender;
+      if (retired) throw new Error("Emoji fixture retired");
+      const faces = await own(() => document.fonts.load('32px "Cafe Emoji"', text));
+      if (retired) throw new Error("Emoji fixture retired");
+      expect(faces.length).toBeGreaterThan(0);
+      expect(faces.every((face) => face.status === "loaded")).toBe(true);
+      const host = document.querySelector<HTMLElement>(".chat-markdown");
+      expect(host?.textContent).toBe(text);
+      if (!host) throw new Error("Emoji fixture host unavailable");
+      const canvas = document.createElement("canvas");
+      canvas.width = 64;
+      canvas.height = 64;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Emoji fixture canvas unavailable");
+      context.font = `32px ${getComputedStyle(host).fontFamily}`;
+      context.textBaseline = "top";
+      context.fillStyle = "black";
+      for (const heart of hearts) {
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        context.fillText(heart, 4, 4);
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        let ink = 0;
+        let colored = 0;
+        for (let index = 0; index < pixels.length; index += 4) {
+          if ((pixels[index + 3] ?? 0) === 0) continue;
+          ink++;
+          const red = pixels[index] ?? 0;
+          const green = pixels[index + 1] ?? 0;
+          const blue = pixels[index + 2] ?? 0;
+          if (Math.max(red, green, blue) - Math.min(red, green, blue) > 15) colored++;
+        }
+        expect(ink, `${heart} has native rendered ink`).toBeGreaterThan(0);
+        if (heart !== "🤍") expect(colored, `${heart} has native color ink`).toBeGreaterThan(0);
+      }
+    } catch (error) {
+      bodyFailed = true;
+      throw error;
+    } finally {
+      if (bodyFailed) await cleanup().catch(() => undefined);
+      else await cleanup();
+    }
   });
 
   it("rewrites file uri hrefs into direct paths before rendering", async () => {

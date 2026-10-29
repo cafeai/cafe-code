@@ -89,6 +89,15 @@ DM Sans ships with the app (`font-sans`); code, paths and key hints use
 `font-mono`. Every size is rem-based so the Interface size setting scales it.
 Don't use pixel sizes (`text-[11px]`) and don't go below 11px.
 
+Main-renderer text includes the offline `Cafe Emoji` fallback after its normal
+text families. Its pinned Noto Color Emoji COLRv1 WOFF2 keeps emoji readable when
+macOS Lockdown Mode prevents Chromium from painting Apple Color Emoji. Preserve
+the actual Unicode text and variation selectors; do not replace message content
+with image URLs or weaken the sandbox/OS protections. Keep the complete OFL in
+`apps/web/public/licenses/noto-color-emoji-OFL.txt`. Generated visualizations and
+portable exports retain their separate bounded font payload; this chat fix does
+not qualify their emoji rendering. See [emoji rendering](emoji-rendering.md).
+
 | Class                 | Size      | Use                                                     |
 | --------------------- | --------- | ------------------------------------------------------- |
 | `text-2xs`            | 11px      | Timestamps, captions, badges, tiny metadata             |

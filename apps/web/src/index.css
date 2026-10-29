@@ -5,6 +5,20 @@
 @import "@fontsource-variable/dm-sans/opsz.css";
 @import "@fontsource-variable/dm-sans/opsz-italic.css";
 
+/* Apple Color Emoji can reserve blank glyphs in Chromium under macOS Lockdown
+   Mode. This local COLRv1 face avoids that system bitmap-font rendering path
+   without changing the sandbox, OS protection, or the underlying text. Use only
+   WOFF2 (supported by our browsers), rather than shipping duplicate legacy WOFF
+   assets. The full upstream OFL is in public/licenses/noto-color-emoji-OFL.txt. */
+@font-face {
+  font-family: "Cafe Emoji";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("@fontsource/noto-color-emoji/files/noto-color-emoji-emoji-400-normal.woff2")
+    format("woff2");
+}
+
 @custom-variant dark (&:is(.dark, .dark *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */
 @custom-variant wco (&:is(.wco, .wco *));
@@ -84,9 +98,10 @@
   --color-sidebar-ring: var(--ring);
   --font-sans:
     "DM Sans Variable", "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
-    sans-serif;
+    "Cafe Emoji", sans-serif;
   --font-mono:
-    "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+    "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", "Cafe Emoji",
+    monospace;
   /* Type scale additions. Tailwind supplies xs 12, sm 14, base 16, lg 18, xl 20
      and 2xl 24; 2xs and ui fill the dense-interface gaps. All are rem-based so
      the Interface size setting scales them. */
@@ -1103,7 +1118,8 @@ html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"] {
 
 pre,
 code {
-  font-family: "SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family:
+    "SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Cafe Emoji", monospace;
 }
 
 /* Window drag region (frameless titlebar) */
