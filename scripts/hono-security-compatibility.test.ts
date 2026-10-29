@@ -40,7 +40,7 @@ describe("MCP transitive Hono security compatibility", () => {
     });
     const onFound = vi.fn();
     const app = new Hono();
-    app.use("/static/admin/*", (context) => context.text("Unauthorized", 401));
+    app.use("/static/admin/*", async (context) => context.text("Unauthorized", 401));
     app.use("/static/*", serveGenericStatic({ getContent, onFound }));
 
     const protectedResponse = await app.request("/static/admin/secret.txt");
@@ -135,7 +135,9 @@ describe("MCP transitive Hono security compatibility", () => {
 
       const onFound = vi.fn();
       const app = new Hono();
-      app.use("/static/admin/*", (requestContext) => requestContext.text("Unauthorized", 401));
+      app.use("/static/admin/*", async (requestContext) =>
+        requestContext.text("Unauthorized", 401),
+      );
       app.use("/static/*", serveNodeStatic({ root: directory, onFound }));
       const head = (path: string) =>
         own(async () => {
