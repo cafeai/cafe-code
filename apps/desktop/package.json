@@ -21,7 +21,7 @@
     "@cafecode/shared": "workspace:*",
     "@effect/platform-node": "catalog:",
     "effect": "catalog:",
-    "electron": "42.11.15",
+    "electron": "43.8.4",
     "electron-updater": "^6.6.2",
     "node-pty": "^1.1.0"
   },

@@ -17,19 +17,24 @@ import { fileURLToPath } from "node:url";
 // unit-test graph. Synchronizing package declarations alone cannot detect a
 // stale/skipped Electron download. Invoke the executable resolved from the
 // desktop workspace and verify its own runtime report instead.
-// The release's DEPS names Node24.19.0; its build arguments retain ABI146.
+// The release's DEPS names Node 24.22.1; its build arguments declare ABI 148.
 // These reviewed source identities are expectations, not a substitute for the
 // installed executable's own bounded report below.
-// https://github.com/electron/electron/blob/v42.11.15/DEPS
-// https://github.com/electron/electron/blob/v42.11.15/build/args/all.gn
-const REVIEWED_ELECTRON_VERSION = "42.11.15";
-const REVIEWED_NODE_FLOOR = [24, 19, 0] as const;
-const REVIEWED_NATIVE_ABI = "146";
+// https://github.com/electron/electron/blob/v43.8.4/DEPS
+// https://github.com/electron/electron/blob/v43.8.4/build/args/all.gn
+const REVIEWED_ELECTRON_VERSION = "43.8.4";
+const REVIEWED_NODE_FLOOR = [24, 22, 1] as const;
+const REVIEWED_NATIVE_ABI = "148";
+// These checks observe the reviewed bundled Undici identity and Brotli fix
+// marker. They do not independently prove the complete native binary's code.
+// The Brotli version string remains 1.2.0 even when Node's backport is present.
+const REVIEWED_UNDICI_VERSION = "7.30.1";
+const REVIEWED_BROTLI_BLOCK_SWITCH = -17;
 const PROCESS_TIMEOUT_MS = 30_000;
 const OUTPUT_LIMIT_BYTES = 4096;
 const VERSION_PATTERN = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
 const RUNTIME_REPORT_SCRIPT =
-  "process.stdout.write(JSON.stringify({electron:process.versions.electron,node:process.versions.node,modules:process.versions.modules})+'\\n')";
+  "process.stdout.write(JSON.stringify({electron:process.versions.electron,node:process.versions.node,modules:process.versions.modules,undici:process.versions.undici,brotliBlockSwitch:require('node:zlib').constants.BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH})+'\\n')";
 
 interface ElectronPins {
   readonly desktop: unknown;
@@ -41,6 +46,8 @@ export interface ElectronRuntimeReport {
   readonly electron: string;
   readonly node: string;
   readonly modules: string;
+  readonly undici: string;
+  readonly brotliBlockSwitch: number;
 }
 
 // Only fixed, Cafe-authored diagnostics are printed. Native loader failures or
@@ -67,7 +74,7 @@ export function validateElectronQualificationPins(pins: ElectronPins): string {
     [pins.desktop, pins.server, pins.packaging].some((pin) => pin !== REVIEWED_ELECTRON_VERSION)
   ) {
     throw new ElectronQualificationError(
-      "All three Electron declarations must match the reviewed 42.11.15 release.",
+      "All three Electron declarations must match the reviewed 43.8.4 release.",
     );
   }
   return REVIEWED_ELECTRON_VERSION;
@@ -86,10 +93,12 @@ export function validateElectronRuntimeReport(stdout: string): ElectronRuntimeRe
   const report = asRecord(value);
   if (
     report === undefined ||
-    Object.keys(report).length !== 3 ||
+    Object.keys(report).length !== 5 ||
     typeof report.electron !== "string" ||
     typeof report.node !== "string" ||
-    typeof report.modules !== "string"
+    typeof report.modules !== "string" ||
+    typeof report.undici !== "string" ||
+    typeof report.brotliBlockSwitch !== "number"
   ) {
     throw new ElectronQualificationError("Electron runtime report has an invalid shape.");
   }
@@ -107,12 +116,26 @@ export function validateElectronRuntimeReport(stdout: string): ElectronRuntimeRe
     minor < REVIEWED_NODE_FLOOR[1] ||
     (minor === REVIEWED_NODE_FLOOR[1] && patch < REVIEWED_NODE_FLOOR[2])
   ) {
-    throw new ElectronQualificationError("Bundled Node must remain Node 24 at or above 24.19.0.");
+    throw new ElectronQualificationError("Bundled Node must remain Node 24 at or above 24.22.1.");
   }
   if (report.modules !== REVIEWED_NATIVE_ABI) {
     throw new ElectronQualificationError("Installed Electron has an unqualified native addon ABI.");
   }
-  return { electron: report.electron, node: report.node, modules: report.modules };
+  if (report.undici !== REVIEWED_UNDICI_VERSION) {
+    throw new ElectronQualificationError("Installed Electron has unqualified bundled Undici.");
+  }
+  if (report.brotliBlockSwitch !== REVIEWED_BROTLI_BLOCK_SWITCH) {
+    throw new ElectronQualificationError(
+      "Installed Electron lacks the reviewed Brotli fix marker.",
+    );
+  }
+  return {
+    electron: report.electron,
+    node: report.node,
+    modules: report.modules,
+    undici: report.undici,
+    brotliBlockSwitch: report.brotliBlockSwitch,
+  };
 }
 
 export function electronQualificationEnvironment(
@@ -289,7 +312,7 @@ if (isElectronQualificationEntryPoint(import.meta.url, process.argv[1])) {
   try {
     const report = await qualifyInstalledElectronRuntime();
     process.stdout.write(
-      `Qualified installed Electron ${report.electron}; bundled Node ${report.node}; native ABI ${report.modules}.\n`,
+      `Qualified installed Electron ${report.electron}; bundled Node ${report.node}; Undici ${report.undici}; native ABI ${report.modules}; Brotli fix marker observed.\n`,
     );
   } catch (error) {
     process.stderr.write(

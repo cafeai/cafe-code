@@ -29,13 +29,13 @@ export interface NativeFixtureRetirementSurface {
 }
 
 /** Record only the real exact-owned native crash invocation followed by actual
- * successful retirement. Electron42's Linux forcefullyCrashRenderer sends
- * RenderProcessHost::ForceCrash, whose Chromium148 CrashHungProcess emits the
+ * successful retirement. Electron 43's Linux forcefullyCrashRenderer sends
+ * RenderProcessHost::ForceCrash, whose Chromium 150 CrashHungProcess emits the
  * fixed FATAL message. A matching log alone is never a witness. This recorder
  * observes, but neither requests a crash nor changes any production admission,
  * kill/close fallback, retirement budget or uncertainty handling.
- * https://github.com/electron/electron/blob/v42.11.15/shell/browser/api/electron_api_web_contents.cc#L3101
- * https://github.com/chromium/chromium/blob/148.0.7778.280/content/child/child_thread_impl.cc#L375 */
+ * https://github.com/electron/electron/blob/v43.8.4/shell/browser/api/electron_api_web_contents.cc#L3320
+ * https://github.com/chromium/chromium/blob/150.0.7871.250/content/child/child_thread_impl.cc#L375 */
 export class NativeFixtureRetirementRecorder {
   private readonly proven = new Set<number>();
   private readonly surfaces = new WeakSet<NativeFixtureRetirementSurface>();

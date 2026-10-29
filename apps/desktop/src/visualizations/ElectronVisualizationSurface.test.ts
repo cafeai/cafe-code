@@ -12,6 +12,7 @@ import {
   ElectronVisualizationSurface,
   type VisualizationSurfaceOptions,
 } from "./ElectronVisualizationSurface.ts";
+import { PREVIEW_DEVICE_SCALE_FACTOR } from "./visualizationCapturePolicy.ts";
 
 const native = vi.hoisted(() => ({
   inventory: vi.fn(),
@@ -127,6 +128,27 @@ function startupFixture() {
 }
 
 describe("native visualization partial startup retirement", () => {
+  it("requests the fixed native scale only for private offscreen previews", async () => {
+    for (const preview of [false, true]) {
+      const f = startupFixture();
+      const surface = f.create(preview);
+      try {
+        await expect(surface.initialize()).rejects.toThrow("synthetic bootstrap refusal");
+        expect(native.createView).toHaveBeenCalledWith({
+          webPreferences: expect.objectContaining({
+            sandbox: true,
+            nodeIntegration: false,
+            contextIsolation: true,
+            webSecurity: true,
+            offscreen: preview ? { deviceScaleFactor: PREVIEW_DEVICE_SCALE_FACTOR } : false,
+          }),
+        });
+      } finally {
+        expect(await surface.retire(0)).toBe(true);
+      }
+    }
+  });
+
   it("refuses a sub-minimum initial mask before allocating a session or child", async () => {
     const f = startupFixture(),
       surface = f.create(false, 31);
@@ -1211,8 +1233,24 @@ describe("native visualization visibility commit", () => {
 
 /** Pure native API doubles prove refusal ordering and immutable tuple binding.
  * Actual native pixels/DPR remain qualified by the isolated Electron fixture. */
-function captureFixture() {
-  const { surface } = exclusive({ isDestroyed: () => true });
+function captureFixture(preview = false) {
+  // Select the real constructor role, rather than changing a private boolean
+  // after construction and accidentally qualifying another viewer fixture.
+  const surface = new ElectronVisualizationSurface({
+    document: {
+      kind: "generated",
+      html: "<p>inert capture fixture</p>",
+      assets: [],
+      width: 600,
+      height: 400,
+      appearance: "light",
+    },
+    preloadPath: "unlaunched capture preload",
+    window: preview ? null : ({} as Electron.BrowserWindow),
+    bounds: { x: 0, y: 0, width: 600, height: 400 },
+    onMessage: () => {},
+    onRevoked: () => {},
+  });
   vi.spyOn(surface, "isCurrent").mockReturnValue(true);
   let bounds = { x: 0, y: 0, width: 600, height: 400 };
   let ownerZoom = 1;
@@ -1223,7 +1261,7 @@ function captureFixture() {
   };
   const image = {
     isEmpty: () => false,
-    getSize: () => ({ width: 1200, height: 800 }),
+    getSize: () => (preview ? { width: 600, height: 400 } : { width: 1200, height: 800 }),
     resize: vi.fn(() => normalized),
   };
   const capture = vi.fn(async () => image);
@@ -1265,6 +1303,79 @@ function captureFixture() {
 }
 
 describe("native visualization capture ownership", () => {
+  it("accepts the exact 1x private preview raster on a 2x owner display", async () => {
+    const value = captureFixture(true);
+    await expect(value.surface.capture()).resolves.toEqual({
+      png: new Uint8Array([1, 2, 3]),
+      width: 600,
+      height: 400,
+    });
+    expect(value.capture).toHaveBeenCalledWith(
+      { x: 0, y: 0, width: 600, height: 400 },
+      { stayHidden: true, stayAwake: true },
+    );
+    expect(value.image.resize).toHaveBeenCalledWith({ width: 600, height: 400, quality: "good" });
+    expect(value.normalized.toPNG).toHaveBeenCalledWith({ scaleFactor: 1 });
+
+    const wrong = captureFixture(true);
+    wrong.image.getSize = () => ({ width: 1200, height: 800 });
+    await expect(wrong.surface.capture()).rejects.toThrow("refused");
+    expect(wrong.capture).toHaveBeenCalledOnce();
+    expect(wrong.image.resize).not.toHaveBeenCalled();
+    expect(wrong.normalized.toPNG).not.toHaveBeenCalled();
+  });
+
+  it("retains owner-display metadata and physical-work admission for private previews", async () => {
+    const missing = captureFixture(true);
+    native.display.mockReturnValue({ id: 5, scaleFactor: undefined });
+    await expect(missing.surface.capture()).rejects.toThrow("refused");
+    expect(missing.capture).not.toHaveBeenCalled();
+
+    const excessive = captureFixture(true);
+    excessive.setBounds({ x: 0, y: 0, width: 1600, height: 2000 });
+    native.display.mockReturnValue({ id: 5, scaleFactor: 3 });
+    await expect(excessive.surface.capture()).rejects.toThrow("refused");
+    expect(excessive.capture).not.toHaveBeenCalled();
+  });
+
+  it("refuses preview owner display, DPR, zoom and bounds drift before encoding", async () => {
+    for (const replacement of [
+      { id: 6, scaleFactor: 2 },
+      { id: 5, scaleFactor: 1 },
+    ]) {
+      const value = captureFixture(true);
+      native.display
+        .mockReturnValueOnce({ id: 5, scaleFactor: 2 })
+        .mockReturnValueOnce(replacement);
+      await expect(value.surface.capture()).rejects.toThrow("refused");
+      expect(value.image.resize).not.toHaveBeenCalled();
+      expect(value.normalized.toPNG).not.toHaveBeenCalled();
+    }
+
+    const before = captureFixture(true);
+    before.setZoom(1.3);
+    await expect(before.surface.capture()).rejects.toThrow("refused");
+    expect(before.capture).not.toHaveBeenCalled();
+
+    const zoom = captureFixture(true);
+    zoom.capture.mockImplementationOnce(async () => {
+      zoom.setZoom(0.8);
+      return zoom.image;
+    });
+    await expect(zoom.surface.capture()).rejects.toThrow("refused");
+    expect(zoom.image.resize).not.toHaveBeenCalled();
+    expect(zoom.normalized.toPNG).not.toHaveBeenCalled();
+
+    const bounds = captureFixture(true);
+    bounds.capture.mockImplementationOnce(async () => {
+      bounds.setBounds({ x: 1, y: 0, width: 600, height: 400 });
+      return bounds.image;
+    });
+    await expect(bounds.surface.capture()).rejects.toThrow("refused");
+    expect(bounds.image.resize).not.toHaveBeenCalled();
+    expect(bounds.normalized.toPNG).not.toHaveBeenCalled();
+  });
+
   it("refuses owner zoom drift before capture and around its asynchronous result", async () => {
     const before = captureFixture();
     before.setZoom(1.3);

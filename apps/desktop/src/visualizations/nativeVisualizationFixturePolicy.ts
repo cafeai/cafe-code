@@ -11,7 +11,7 @@ export type NativeVisualizationFixtureKind =
 export type NativeVisualizationFixtureGraphics = "native-default" | "sandboxed-swiftshader";
 
 /** The explicit full GLES driver exercises actual GL on GPU-less Linux bots.
- * Electron 42.11.15 retains Chromium 148.0.7778.280's base with backported
+ * Electron 43.8.4 retains Chromium 150.0.7871.250's base with backported
  * security fixes. Its docs/gpu/swiftshader.md
  * distinguishes this mode from the unsafe WebGL-only fallback, and
  * ui/gl/gl_features.cc:IsSwiftShaderAllowedByCommandLine plus
@@ -19,8 +19,8 @@ export type NativeVisualizationFixtureGraphics = "native-default" | "sandboxed-s
  * an unsafe-fallback switch. This still executes CPU JIT graphics code: confine
  * it to trusted synthetic fixture bytes, retain the GPU/renderer sandbox, and
  * require actual native mode/sandbox observations before any source is run.
- * https://github.com/chromium/chromium/blob/148.0.7778.280/docs/gpu/swiftshader.md
- * https://github.com/electron/electron/blob/v42.11.15/DEPS
+ * https://github.com/chromium/chromium/blob/150.0.7871.250/docs/gpu/swiftshader.md
+ * https://github.com/electron/electron/blob/v43.8.4/DEPS
  * Unknown future kinds are deliberately not equivalent to synthetic source. */
 export function nativeVisualizationFixtureDriver(
   platform: string,
@@ -73,8 +73,8 @@ export function configureNativeVisualizationFixtureDriver(
  * renderer-controlled canvas claim. The pinned native GPUInfo serializer emits
  * auxAttributes and the exact GLImplementationParts::ToString tuple below.
  * No machine names, arbitrary driver strings or native object escape this read.
- * https://github.com/chromium/chromium/blob/148.0.7778.280/gpu/config/gpu_info.cc
- * https://github.com/chromium/chromium/blob/148.0.7778.280/ui/gl/gl_implementation.cc */
+ * https://github.com/chromium/chromium/blob/150.0.7871.250/gpu/config/gpu_info.cc
+ * https://github.com/chromium/chromium/blob/150.0.7871.250/ui/gl/gl_implementation.cc */
 export function isSandboxedNativeFixtureDriver(value: unknown): boolean {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const auxiliary = Reflect.get(value, "auxAttributes");
@@ -91,7 +91,7 @@ export function isSandboxedNativeFixtureDriver(value: unknown): boolean {
  * line, SSL/GPU error or unwitnessed crash remains a failure. An exact pinned
  * Linux crash message additionally requires the fixture's positively observed
  * owned request/retirement PID witness, once per PID, never source consistency.
- * https://github.com/chromium/chromium/blob/148.0.7778.280/content/child/child_thread_impl.cc#L375
+ * https://github.com/chromium/chromium/blob/150.0.7871.250/content/child/child_thread_impl.cc#L375
  * Fixture classification text itself never authorizes success. This
  * is not a logging suppressor: callers preserve every admitted raw byte and all
  * rejected raw streams before interpreting the report. Other platforms retain

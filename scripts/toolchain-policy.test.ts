@@ -163,18 +163,18 @@ describe("repository toolchain policy", () => {
     // release rather than accepting a matching but vulnerable pair of pins.
     for (const packagePath of ["apps/desktop/package.json", "apps/server/package.json"]) {
       expect(readStringMap(readJson(packagePath).dependencies).electron, packagePath).toBe(
-        "42.11.15",
+        "43.8.4",
       );
     }
     expect(
       readStringMap(readJson("packaging/desktop-runtime/package.json").devDependencies).electron,
-    ).toBe("42.11.15");
+    ).toBe("43.8.4");
   });
 
   it("retains fixed security floors throughout the installed dependency graph", () => {
     const resolutions = readStringMap(readJson("package.json").resolutions);
-    expect(resolutions["fast-uri"]).toBe("^3.1.8");
-    expect(resolutions["ip-address"]).toBe("^10.7.1");
+    expect(resolutions["fast-uri"]).toBe("3.1.9");
+    expect(resolutions["ip-address"]).toBe("10.7.4");
     expect(resolutions["proxy-addr"]).toBe("^2.0.8");
     expect(resolutions["global-agent"]).toBe("^4.1.3");
     expect(resolutions["http-cache-semantics"]).toBe("^4.3.0");
@@ -186,14 +186,26 @@ describe("repository toolchain policy", () => {
     >;
     const minimums: Record<string, Record<number, readonly [number, number]>> = {
       "brace-expansion": { 1: [1, 21], 2: [1, 7], 5: [0, 12] },
-      "fast-uri": { 3: [1, 8] },
-      "ip-address": { 10: [7, 1] },
+      "fast-uri": { 3: [1, 9] },
+      "ip-address": { 10: [7, 4] },
       "proxy-addr": { 2: [0, 8] },
       "@modelcontextprotocol/sdk": { 1: [31, 0] },
       "global-agent": { 4: [1, 3] },
       "http-cache-semantics": { 4: [3, 0] },
       katex: { 0: [18, 2] },
       "source-map-js": { 1: [2, 2] },
+      // Security floors apply to every installed copy, including transitive
+      // adapters and Effect's formerly separate TOML dependency. A patched
+      // direct dependency must not conceal an older vulnerable nested copy.
+      hono: { 4: [13, 11] },
+      "@hono/node-server": { 2: [1, 3] },
+      "body-parser": { 2: [4, 0] },
+      dompurify: { 3: [4, 17] },
+      qs: { 6: [16, 1] },
+      seroval: { 1: [6, 11] },
+      toml: { 5: [0, 1] },
+      undici: { 8: [12, 2] },
+      zod: { 4: [6, 6] },
       // These servers run only during development/verification, but their
       // filesystem admission still protects the machine running Cafe's tools.
       // A fixed direct pin must not hide a vulnerable transitive server copy.

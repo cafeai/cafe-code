@@ -617,7 +617,189 @@ async function qualify(): Promise<void> {
                 )) === true;
             }
           }
-          return capture();
+          // Observe only this exact fixture generation's original native call.
+          // Missing/unavailable observations remain null, never evidence that
+          // capturePage was not called. No error object or received page value
+          // is inspected, and the original production capture still runs once.
+          const captureObservation: {
+            called: boolean | null;
+            resolved: boolean | null;
+            rejected: boolean | null;
+            rectWidth: number | null;
+            rectHeight: number | null;
+            imageWidth: number | null;
+            imageHeight: number | null;
+            offscreen: boolean | null;
+            ownerDpr: number | null;
+          } = {
+            called: null,
+            resolved: null,
+            rejected: null,
+            rectWidth: null,
+            rectHeight: null,
+            imageWidth: null,
+            imageHeight: null,
+            offscreen: null,
+            ownerDpr: null,
+          };
+          const dimension = (value: unknown): number | null =>
+            typeof value === "number" &&
+            Number.isSafeInteger(value) &&
+            value >= 0 &&
+            value <= 16_000
+              ? value
+              : null;
+          let originalDescriptor: PropertyDescriptor | undefined;
+          let recorder: Electron.WebContents["capturePage"] | undefined;
+          if (contents) {
+            try {
+              originalDescriptor = Object.getOwnPropertyDescriptor(contents, "capturePage");
+              const original = contents.capturePage;
+              recorder = async function (this: Electron.WebContents, ...args) {
+                captureObservation.called = true;
+                captureObservation.rectWidth = dimension(args[0]?.width);
+                captureObservation.rectHeight = dimension(args[0]?.height);
+                let image: Electron.NativeImage;
+                try {
+                  image = await original.apply(this, args);
+                  captureObservation.resolved = true;
+                } catch (error) {
+                  captureObservation.rejected = true;
+                  throw error;
+                }
+                try {
+                  const size = image.getSize();
+                  captureObservation.imageWidth = dimension(size.width);
+                  captureObservation.imageHeight = dimension(size.height);
+                } catch {
+                  // Observing dimensions cannot change the original outcome.
+                }
+                return image;
+              };
+              Object.defineProperty(contents, "capturePage", {
+                ...(originalDescriptor && "value" in originalDescriptor
+                  ? originalDescriptor
+                  : { configurable: true, enumerable: false, writable: true }),
+                value: recorder,
+              });
+              captureObservation.called = false;
+              captureObservation.resolved = false;
+              captureObservation.rejected = false;
+              captureObservation.offscreen = contents.isOffscreen();
+              const ownerWindow = Electron.BrowserWindow.fromWebContents(contents);
+              if (ownerWindow) {
+                const dpr = Electron.screen.getDisplayMatching(ownerWindow.getBounds()).scaleFactor;
+                if (Number.isFinite(dpr) && dpr >= 0.5 && dpr <= 4)
+                  captureObservation.ownerDpr = dpr;
+              }
+            } catch {
+              // Diagnostic setup is observational only; it does not replace or
+              // authorize another capture, window or generation.
+            }
+          }
+          let captureFailed = false;
+          try {
+            const captured = await capture();
+            if (options.document.kind === "mcp-app" && options.document.html === previewAppSource) {
+              // Inspect only the immutable result of the original capture. A
+              // later diagnostic DOM read cannot heal or replace these pixels.
+              try {
+                if (!hasFixtureColor(captured.png, 0, 0, 0)) {
+                  try {
+                    if (captured.png.byteLength <= 1_048_576)
+                      await writeFile(
+                        join(directory, "native-app-preview-failed.png"),
+                        captured.png,
+                        {
+                          flag: "wx",
+                          mode: 0o600,
+                        },
+                      );
+                  } catch {
+                    // Exact synthetic evidence retention is secondary only.
+                  }
+                  let dom: Record<string, boolean | number | null> | null = null;
+                  if (contents) {
+                    try {
+                      // One fixed synchronous read in this exact authored App,
+                      // after its failed PNG exists. No wait, source text,
+                      // message payload or replacement capture is introduced.
+                      const observed: unknown = await contents.executeJavaScript(
+                        "(()=>{const b=document.body;return {bodyExists:!!b,authoredTextMatches:b?.textContent==='Replayed poster',bodyComputedBlack:!!b&&getComputedStyle(b).backgroundColor==='rgb(0, 0, 0)',clientWidth:b?.clientWidth??0,clientHeight:b?.clientHeight??0,scrollWidth:b?.scrollWidth??0,scrollHeight:b?.scrollHeight??0,innerWidth,innerHeight}})()",
+                      );
+                      if (
+                        observed !== null &&
+                        typeof observed === "object" &&
+                        !Array.isArray(observed)
+                      ) {
+                        const flags = [
+                          "bodyExists",
+                          "authoredTextMatches",
+                          "bodyComputedBlack",
+                        ] as const;
+                        const sizes = [
+                          "clientWidth",
+                          "clientHeight",
+                          "scrollWidth",
+                          "scrollHeight",
+                          "innerWidth",
+                          "innerHeight",
+                        ] as const;
+                        if (
+                          Object.keys(observed).length === flags.length + sizes.length &&
+                          flags.every((key) => typeof Reflect.get(observed, key) === "boolean") &&
+                          sizes.every((key) => dimension(Reflect.get(observed, key)) !== null)
+                        )
+                          dom = Object.fromEntries<boolean | number | null>([
+                            ...flags.map(
+                              (key) => [key, Reflect.get(observed, key) === true] as const,
+                            ),
+                            ...sizes.map(
+                              (key) => [key, dimension(Reflect.get(observed, key))] as const,
+                            ),
+                          ]);
+                      }
+                    } catch {
+                      // Retired/unavailable native observations stay unknown.
+                    }
+                  }
+                  process.stderr.write(
+                    `Native fixture App preview pixels: ${JSON.stringify({ width: dimension(captured.width), height: dimension(captured.height), blackSample: false, dom })}\n`,
+                  );
+                }
+              } catch {
+                // Diagnostics never replace the original capture outcome.
+              }
+            }
+            return captured;
+          } catch (error) {
+            captureFailed = true;
+            throw error;
+          } finally {
+            try {
+              if (
+                contents &&
+                recorder &&
+                Object.getOwnPropertyDescriptor(contents, "capturePage")?.value === recorder
+              ) {
+                if (originalDescriptor)
+                  Object.defineProperty(contents, "capturePage", originalDescriptor);
+                else Reflect.deleteProperty(contents, "capturePage");
+              }
+            } catch {
+              // A diagnostic restoration failure must preserve the original
+              // capture result. This exact native child is still host-owned.
+            }
+            if (captureFailed) {
+              try {
+                process.stderr.write(
+                  `Native fixture preview capture: ${JSON.stringify(captureObservation)}\n`,
+                );
+              } catch {
+                // Emit at most one finite record and preserve the first error.
+              }
+            }
+          }
         };
       }
       return surface;
@@ -708,13 +890,39 @@ async function qualify(): Promise<void> {
         originalResultJson: '{"content":[{"type":"text","text":"private result"}]}',
       },
     );
+    const appPreviewBlack =
+      appPreview.status === "ready" &&
+      hasFixtureColor(Buffer.from(appPreview.png, "base64"), 0, 0, 0);
     if (
       appPreview.status !== "ready" ||
       appPreview.width !== 400 ||
       appPreview.height !== 200 ||
-      !hasFixtureColor(Buffer.from(appPreview.png, "base64"), 0, 0, 0)
-    )
+      !appPreviewBlack
+    ) {
+      const reason =
+        appPreview.status === "blocked" &&
+        [
+          "unavailable",
+          "invalid",
+          "expired",
+          "busy",
+          "owner-revoked",
+          "timeout",
+          "capture-failed",
+          "resource-denied",
+          "retirement-uncertain",
+        ].includes(appPreview.reason)
+          ? appPreview.reason
+          : null;
+      try {
+        process.stderr.write(
+          `Native fixture App preview result: ${JSON.stringify({ status: appPreview.status === "ready" ? "ready" : "blocked", reason, width: appPreview.status === "ready" ? appPreview.width : null, height: appPreview.status === "ready" ? appPreview.height : null, blackSample: appPreviewBlack })}\n`,
+        );
+      } catch {
+        // Preserve the original pixel/result assertion below.
+      }
       throw new Error(`Native App replay pixels missing: ${JSON.stringify(host.diagnostics())}`);
+    }
     phase("app-preview-replay-pixels");
     // Model a trusted owner revocation while the UI has not committed an open
     // acknowledgement. Actual native View visibility must remain false, and a
@@ -1051,16 +1259,16 @@ async function qualify(): Promise<void> {
         fullCapture.height !== child.height ||
         !hasClippedFixtureContent(fullCapture.png)
       ) {
-        // Electron 42.11.15 CapturePage requests the child DIP rectangle, scales
-        // its temporary bitmap by the native display DPR above one, and wraps
-        // that bitmap as a 1x NativeImage. The production surface independently
+        // Electron 43.8.4 CapturePage requests the child DIP rectangle, scales
+        // its temporary bitmap by the native view's device scale factor, and
+        // wraps that bitmap as a 1x NativeImage. The production surface independently
         // preflights that tuple and normalizes it to the same child DIP width/
         // height before PNG encoding. These assertions therefore keep their
         // exact units. No latest-Electron DIP-image semantics are substituted.
         // The old Linux failure did not reveal which clause failed: preserve a
         // fixed finite tuple (and any real PNG) without guessing a cause or
         // relaxing dimensions, opaque invariant-black RGBA, or ownership.
-        // https://github.com/electron/electron/blob/v42.11.15/shell/browser/api/electron_api_web_contents.cc#L3901
+        // https://github.com/electron/electron/blob/v43.8.4/shell/browser/api/electron_api_web_contents.cc
         const image = fullCapture
           ? Electron.nativeImage.createFromBuffer(Buffer.from(fullCapture.png))
           : null;

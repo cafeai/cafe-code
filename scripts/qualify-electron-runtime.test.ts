@@ -17,25 +17,31 @@ import {
 // The default graph deliberately tests pure boundaries only. Actual installed
 // Electron execution belongs to the explicitly selected standalone command in
 // CI, not an ambient process/native-runtime assumption in a unit fixture.
-const validReport = { electron: "42.11.15", node: "24.19.0", modules: "146" };
+const validReport = {
+  electron: "43.8.4",
+  node: "24.22.1",
+  modules: "148",
+  undici: "7.30.1",
+  brotliBlockSwitch: -17,
+};
 const isolatedRoot = join(tmpdir(), "cafe-electron-pure-environment-fixture");
 
 describe("installed Electron qualification validation", () => {
   it("requires the three exact synchronized and reviewed package declarations", () => {
     expect(
       validateElectronQualificationPins({
-        desktop: "42.11.15",
-        server: "42.11.15",
-        packaging: "42.11.15",
+        desktop: "43.8.4",
+        server: "43.8.4",
+        packaging: "43.8.4",
       }),
-    ).toBe("42.11.15");
+    ).toBe("43.8.4");
     for (const field of ["desktop", "server", "packaging"] as const) {
-      for (const invalid of [undefined, null, "42.5.1", "42.10.0", "^42.11.15", "43.0.0"]) {
+      for (const invalid of [undefined, null, "42.11.15", "43.8.3", "^43.8.4", "44.10.0"]) {
         expect(() =>
           validateElectronQualificationPins({
-            desktop: "42.11.15",
-            server: "42.11.15",
-            packaging: "42.11.15",
+            desktop: "43.8.4",
+            server: "43.8.4",
+            packaging: "43.8.4",
             [field]: invalid,
           }),
         ).toThrow(/All three Electron declarations/u);
@@ -47,29 +53,30 @@ describe("installed Electron qualification validation", () => {
         server: "42.10.0",
         packaging: "42.10.0",
       }),
-    ).toThrow(/reviewed 42\.11\.15/u);
+    ).toThrow(/reviewed 43\.8\.4/u);
   });
 
   it("verifies actual Electron, bundled Node floor and native ABI rather than standalone Node", () => {
     expect(validateElectronRuntimeReport(JSON.stringify(validReport))).toEqual(validReport);
-    for (const node of ["24.19.1", "24.20.0"]) {
+    for (const node of ["24.22.2", "24.23.0"]) {
       expect(validateElectronRuntimeReport(JSON.stringify({ ...validReport, node })).node).toBe(
         node,
       );
     }
-    for (const electron of ["42.5.1", "42.10.0"]) {
+    for (const electron of ["42.11.15", "43.8.3"]) {
       expect(() =>
         validateElectronRuntimeReport(JSON.stringify({ ...validReport, electron })),
       ).toThrow(/Installed Electron/u);
     }
     expect(() =>
-      validateElectronRuntimeReport(JSON.stringify({ ...validReport, modules: "147" })),
+      validateElectronRuntimeReport(JSON.stringify({ ...validReport, modules: "146" })),
     ).toThrow(/unqualified native addon ABI/u);
     for (const node of [
       "24.13.1",
       "24.18.0",
       "24.18.1",
       "24.18.99",
+      "24.22.0",
       "23.99.99",
       "25.0.0",
       "26.0.0",
@@ -82,6 +89,19 @@ describe("installed Electron qualification validation", () => {
       expect(() => validateElectronRuntimeReport(JSON.stringify({ ...validReport, node }))).toThrow(
         /Bundled Node/u,
       );
+    }
+  });
+
+  it("rejects unqualified bundled Undici and missing or incorrect Brotli fix markers", () => {
+    for (const undici of ["7.30.0", "8.12.2", "", undefined]) {
+      expect(() =>
+        validateElectronRuntimeReport(JSON.stringify({ ...validReport, undici })),
+      ).toThrow();
+    }
+    for (const brotliBlockSwitch of [undefined, null, -16, 17, "-17"]) {
+      expect(() =>
+        validateElectronRuntimeReport(JSON.stringify({ ...validReport, brotliBlockSwitch })),
+      ).toThrow();
     }
   });
 

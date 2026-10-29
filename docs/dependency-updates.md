@@ -195,7 +195,7 @@ The relevant Cafe boundaries are:
   paths. WebSocket per-message compression is DEFLATE. Serving precompressed
   `.br` assets sends existing bytes and does not invoke Node's Brotli decoder.
 
-**Desktop remains unresolved by this standalone update.** The repository-installed
+**The October 23 standalone update left desktop unresolved.** Its repository-installed
 Electron 42.11.15 runtime reports Node 24.19.0 and uses that runtime for the backend
 and provider daemon in `ELECTRON_RUN_AS_NODE` mode. The published stable releases
 checked on 2026-10-23 are
@@ -214,6 +214,81 @@ This is a source and runtime-metadata review, not a memory-corruption or RCE
 reproduction. No exploit or malformed Brotli fixture is part of this change.
 Repository checks, native-host qualification and any later desktop release must
 be recorded as separate observed results.
+
+## October 29 security maintenance
+
+Review updated: 2026-10-29 14:54:26 JST (UTC+0900).
+
+The reviewed security update pins Electron **43.8.4**, a supported release whose
+tagged source embeds Node **24.22.1**, Undici **7.30.1**, Chromium
+**150.0.7871.250** and native addon ABI **148**. This addresses the earlier desktop
+Brotli gap and includes Electron's certificate-distrust mitigation. The actual
+installed-runtime qualifier checks that tuple and the fixed Brotli block-switch
+constant in an isolated Node-mode child. A version string or marker alone is not
+a proof of every native byte; archive integrity, runtime observation and native
+packaging checks remain separate gates. See the
+[Electron release](https://github.com/electron/electron/releases/tag/v43.8.4) and
+[Node security advisory](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases).
+
+Electron 43's retained native preview path uses an explicit offscreen raster
+scale of one; ordinary viewers continue to use the native display scale. Both
+paths retain the original display admission, display/zoom/bounds drift checks
+and bounded actual-raster validation before encoding a semantic-size PNG.
+This handles the new offscreen view-scale capture API without treating a valid
+1x preview as a display-DPR-sized image. It does not promise pixel-identical
+antialiasing between Electron releases.
+
+The package fixes below apply throughout the resolved dependency graph. Existing
+security resolutions remain in place; these reviewed exact resolutions prevent
+an unchanged transitive consumer range from keeping a vulnerable second copy.
+The complete lockfile, including body-parser's required content-type 2.1.0
+dependency, is reviewed rather than refreshed indiscriminately.
+
+| Package           | Reviewed fixed version | Security boundary                                                 |
+| ----------------- | ---------------------- | ----------------------------------------------------------------- |
+| hono              | 4.13.11                | Static-prefix middleware bypass                                   |
+| @hono/node-server | 2.1.3                  | Independent copy of the static-prefix bypass                      |
+| dompurify         | 3.4.17                 | Conditional template/hook sanitization and XML attribute guards   |
+| body-parser       | 2.4.0                  | Compressed-body trailing-byte denial of service                   |
+| fast-uri          | 3.1.9                  | URI scheme, host and relative-path interpretation                 |
+| ip-address        | 10.7.4                 | IPv6 zone parsing resource bounds                                 |
+| qs                | 6.16.1                 | Comma-array stringification failure                               |
+| seroval           | 1.6.11                 | Serialization injection and deserializer resource/callable guards |
+| toml              | 5.0.1                  | Scalar, table and dotted-key parsing resource bounds              |
+| undici            | 8.12.2                 | TLS, redirect/cache and response-processing fixes                 |
+| zod               | 4.6.6                  | Constrained-collection validation resource bounds                 |
+
+The [Hono](https://github.com/honojs/hono/security/advisories/GHSA-5r4p-p66f-jhc7)
+and [Node adapter](https://github.com/honojs/node-server/security/advisories/GHSA-rmxm-3fg6-px4f)
+issues can bypass middleware on a prefix within the configured static root;
+they are not outside-root traversal. Cafe's own static/MCP routing uses Effect
+and the SDK's WebStandard transport, rather than those static helpers. The
+dependency regressions still exercise both real helpers with the upstream path,
+protected/public controls and the SDK's no-global-override behavior.
+
+Installed affected versions do not establish every advisory's exploitability.
+For example, Cafe's bounded SVG sanitizer does not enable DOMPurify's reported
+template/DOM-return/hook modes and independently excludes active SVG elements.
+Its existing native security tests remain required. Updating npm Undici does
+not update Node's or Electron's separate embedded HTTP implementation: their
+reviewed Node 24.22.1 source instead contains fixed Undici 7.30.1.
+
+No fixed TOML 4.x release is available, so the security resolution also moves
+Effect's CLI parser from 4.x to 5.0.1. Regression tests exercise safe numbers,
+dates, tables and arrays through both actual consumers and Effect's public file parser. One
+intentional compatibility change remains: default parsing rejects integers
+outside JavaScript's safe-integer range rather than silently rounding them.
+Cafe's own legacy MCP configuration retains its explicit `bigint: true` and
+`maxDepth: 80` options and preserves full signed 64-bit integers. This is not a
+claim of complete 4.x/5.x behavioral equivalence.
+
+This manual security response follows the exception to the routine seven-day
+settling window; it retains archive identity, registry-signature, compatibility
+and native checks. It does not waive provider-family quarantine. Standalone
+Node 24.22.1 already contains the reviewed October security fixes; Node 26's new
+LTS promotion requires a separate coordinated toolchain qualification rather
+than a security-only version relabel. A dev push updates source only: main,
+release artifacts, installed applications and running processes remain separate.
 
 ## Security fixes and main/dev coverage
 

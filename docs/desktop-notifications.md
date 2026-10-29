@@ -24,7 +24,7 @@ leaves the preference unchanged; a result after the settings page unmounts
 cannot save it. A ten-second scheduling deadline bounds each IPC request;
 expiration retires the exact pending native object without retrying it.
 
-The pinned Electron 42.11.15 macOS notification presenter requests native alert,
+The pinned Electron 43.8.4 macOS notification presenter requests native alert,
 sound and badge authorization when first created. Its `show` event means that
 the OS accepted scheduling, not that a banner was visible. Focus/Do Not Disturb,
 system notification style and OS authorization remain native decisions. Settings
@@ -33,8 +33,8 @@ rather than claiming delivery or permission. macOS requires a signed app for
 this Electron native notification API. An unsigned source app can fail despite
 the bridge being correctly wired; do not change signing, profiles or system
 preferences to conceal that result. Upstream implementation references:
-[presenter authorization](https://github.com/electron/electron/blob/v42.11.15/shell/browser/notifications/mac/notification_presenter_mac.mm)
-and [native scheduling callback](https://github.com/electron/electron/blob/v42.11.15/shell/browser/notifications/mac/cocoa_notification.mm).
+[presenter authorization](https://github.com/electron/electron/blob/v43.8.4/shell/browser/notifications/mac/notification_presenter_mac.mm)
+and [native scheduling callback](https://github.com/electron/electron/blob/v43.8.4/shell/browser/notifications/mac/cocoa_notification.mm).
 
 Node fixtures qualify the actual IPC admission, bounded retention, native-event
 failure mapping, exact-owner clicks and retirement using inert native doubles.

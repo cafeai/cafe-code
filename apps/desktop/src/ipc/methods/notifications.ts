@@ -136,10 +136,10 @@ export function makeDesktopNotifications() {
         }
         if (active.size >= MAX_NOTIFICATIONS) active.values().next().value?.retire();
 
-        // Electron 42.11.15's NotificationPresenterMac requests native alert,
+        // Electron 43.8.4's NotificationPresenterMac requests native alert,
         // sound and badge authorization when first created. Its `show` callback
         // is OS scheduling acceptance, not proof of a visible banner:
-        // https://github.com/electron/electron/blob/v42.11.15/shell/browser/notifications/mac/cocoa_notification.mm
+        // https://github.com/electron/electron/blob/v43.8.4/shell/browser/notifications/mac/cocoa_notification.mm
         notification = new Electron.Notification({ title: input.title, body: input.body });
         const onShow = () => {
           if (isCurrent()) finish("sent");
