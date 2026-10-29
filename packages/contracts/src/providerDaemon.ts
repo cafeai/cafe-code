@@ -65,6 +65,32 @@ export const PROVIDER_DAEMON_LIVENESS_PATH = "/api/provider-daemon/liveness";
 export const PROVIDER_DAEMON_RPC_PATH = "/api/provider-daemon/rpc";
 export const PROVIDER_DAEMON_EVENTS_PATH = "/api/provider-daemon/events";
 export const PROVIDER_DAEMON_LEASES_PATH = "/api/provider-daemon/leases";
+export const PROVIDER_DAEMON_RETIRE_PATH = "/api/provider-daemon/retire";
+
+/**
+ * Private bootstrap-owner cooperative retirement, deliberately absent from the
+ * lease capability enum. Every field identifies the daemon that is answering,
+ * rather than the replacement build. The nonce correlates one native reply;
+ * authentication remains the existing private bootstrap credential.
+ */
+const ProviderDaemonRetirementFields = {
+  protocolVersion: Schema.Literal(1),
+  pid: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 4_294_967_295 })),
+  startedAt: IsoDateTime,
+  runtimeBuildId: Schema.String.check(Schema.isMaxLength(64), Schema.isPattern(/^[a-f0-9]{64}$/)),
+  dataProfile: Schema.Literals(["production", "debug"]),
+  dataProfileId: Schema.String.check(Schema.isMaxLength(64), Schema.isPattern(/^[a-f0-9]{64}$/)),
+  nonce: Schema.String.check(Schema.isMaxLength(64), Schema.isPattern(/^[a-f0-9]{64}$/)),
+};
+export const ProviderDaemonRetirementRequest = Schema.Struct(
+  ProviderDaemonRetirementFields,
+).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type ProviderDaemonRetirementRequest = typeof ProviderDaemonRetirementRequest.Type;
+export const ProviderDaemonRetirementResponse = Schema.Struct({
+  accepted: Schema.Literal(true),
+  ...ProviderDaemonRetirementFields,
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type ProviderDaemonRetirementResponse = typeof ProviderDaemonRetirementResponse.Type;
 
 const ProviderDaemonToken = Schema.String.check(Schema.isMinLength(32));
 const ProviderDaemonCommandId = Schema.String.check(Schema.isMinLength(16));
@@ -428,6 +454,8 @@ export const ProviderDaemonHealth = Schema.Struct({
   ppid: NonNegativeInt,
   version: Schema.String,
   runtimeBuildId: Schema.optional(Schema.String),
+  // Omission on legacy/directly hosted servers is unknown, never a Stop grant.
+  retirementProtocol: Schema.optional(Schema.Literal(1)),
   windowsProcessIdentity: Schema.optional(WindowsProcessIdentity),
   windowsOwnershipId: Schema.optional(WindowsOwnershipId),
   startedAt: IsoDateTime,

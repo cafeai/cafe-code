@@ -8,6 +8,10 @@ import {
   ProviderDaemonAdapterCapabilities,
   ProviderDaemonEventRecord,
   ProviderDaemonLiveness,
+  ProviderDaemonHealth,
+  ProviderDaemonCapability,
+  ProviderDaemonRetirementRequest,
+  ProviderDaemonRetirementResponse,
   ProviderDaemonMarker,
   ProviderDaemonSubagentDetail,
   ProviderDaemonRpcRequest,
@@ -103,6 +107,58 @@ it("keeps private phased recovery tokens and status shapes finite across the dae
 
 const OWNERSHIP_ID = "9a90b48d-868f-4614-ae9c-66d50293d52b";
 const decodeDaemonLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
+
+it("keeps cooperative retirement finite, exact and outside ordinary lease capabilities", () => {
+  const request = {
+    protocolVersion: 1,
+    pid: 123,
+    startedAt: "2026-10-29T00:00:00.000Z",
+    runtimeBuildId: "a".repeat(64),
+    dataProfile: "debug",
+    dataProfileId: "b".repeat(64),
+    nonce: "c".repeat(64),
+  };
+  const decode = Schema.decodeUnknownSync(ProviderDaemonRetirementRequest);
+  const decodeResponse = Schema.decodeUnknownSync(ProviderDaemonRetirementResponse);
+  assert.deepEqual(decode(request), request);
+  assert.deepEqual(decodeResponse({ accepted: true, ...request }), { accepted: true, ...request });
+  for (const invalid of [
+    { ...request, protocolVersion: 2 },
+    { ...request, pid: 0 },
+    { ...request, pid: 1.5 },
+    { ...request, startedAt: "not-a-time" },
+    { ...request, runtimeBuildId: "A".repeat(64) },
+    { ...request, runtimeBuildId: "a".repeat(65) },
+    { ...request, runtimeBuildId: `${"a".repeat(64)}\n` },
+    { ...request, dataProfile: "other" },
+    { ...request, dataProfileId: "short" },
+    { ...request, dataProfileId: `${"b".repeat(64)}\n` },
+    { ...request, nonce: "c".repeat(63) },
+    { ...request, nonce: `${"c".repeat(64)}\n` },
+    { ...request, extra: "private-input-must-not-be-accepted" },
+  ])
+    assert.throws(() => decode(invalid));
+  assert.throws(() => decodeResponse({ accepted: false, ...request }));
+  assert.throws(() => decodeResponse({ accepted: true, ...request, extra: true }));
+  assert.throws(() => Schema.decodeUnknownSync(ProviderDaemonCapability)("retire"));
+  // Optional health proof is deliberately not a required legacy field.
+  const legacyHealth = {
+    ok: true,
+    mode: "provider-daemon",
+    pid: 123,
+    ppid: 1,
+    version: "0.0.0-test",
+    startedAt: request.startedAt,
+    activeSessionCount: 0,
+    configuredInstanceCount: 0,
+    eventCursor: 0,
+  };
+  const decodeHealth = Schema.decodeUnknownSync(ProviderDaemonHealth);
+  assert.equal(Object.hasOwn(decodeHealth(legacyHealth), "retirementProtocol"), false);
+  assert.equal(decodeHealth({ ...legacyHealth, retirementProtocol: 1 }).retirementProtocol, 1);
+  for (const retirementProtocol of [0, 2, true, null, "1"])
+    assert.throws(() => decodeHealth({ ...legacyHealth, retirementProtocol }));
+});
 
 it("retains only finite configuration-refusal evidence through current and legacy RPC codecs", () => {
   const decode = Schema.decodeUnknownSync(ProviderDaemonRpcEnvelope);

@@ -53,7 +53,11 @@ import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
 import { makeWindowsDesktopProviderDaemonManager } from "./WindowsDesktopProviderDaemonManager.ts";
 import * as NetService from "@cafecode/shared/Net";
 import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
-import { isPidAlive } from "./DesktopProcessReaper.ts";
+import {
+  observeProviderDaemonProcess,
+  providerDaemonRetirementRequest,
+  retireProviderDaemonForStartup,
+} from "./DesktopProviderDaemonRetirement.ts";
 
 const PROVIDER_DAEMON_READINESS_TIMEOUT_MS = 30_000;
 const PROVIDER_DAEMON_READINESS_INTERVAL_MS = 100;
@@ -658,6 +662,19 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   const state = yield* Ref.make(initialState);
   const cafeMcpPortRef = yield* Ref.make<number | undefined>(undefined);
   const lifecycleMutex = yield* Semaphore.make(1);
+  // The native desktop's profile singleton excludes another desktop writer.
+  // Keep the exact retired namespace until fresh spawn admission; an unknown
+  // acknowledgement must never be converted into another destructive request.
+  let retirementReservation: string | undefined;
+  let retiredNamespace:
+    | { readonly verifyBeforeSpawn: () => Promise<void>; readonly close: () => Promise<void> }
+    | undefined;
+  const closeRetirementEvidence = Effect.promise(async () => {
+    const evidence = retiredNamespace;
+    retiredNamespace = undefined;
+    await evidence?.close();
+  });
+  yield* Effect.addFinalizer(() => closeRetirementEvidence);
   const startupUpdates = yield* PubSub.sliding<ProviderDaemonStartupProgress>({
     capacity: 8,
     replay: 1,
@@ -743,7 +760,14 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     Effect.gen(function* () {
       const adoptionStartedAtMs = performance.now();
       const preserveInconclusiveOwner = (
-        phase: "credential" | "health" | "lease" | "profile" | "namespace" | "compatibility",
+        phase:
+          | "credential"
+          | "health"
+          | "lease"
+          | "profile"
+          | "namespace"
+          | "compatibility"
+          | "process",
       ) =>
         Effect.gen(function* () {
           // A live PID plus an unreadable response is not evidence that this
@@ -792,7 +816,9 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         // endpoint. Neither marker presence nor an argv/path match is authority.
         return yield* preserveInconclusiveOwner("namespace");
       }
-      if (!isPidAlive(marker.pid)) {
+      const processObservation = observeProviderDaemonProcess(marker.pid);
+      if (processObservation === "unknown") return yield* preserveInconclusiveOwner("process");
+      if (processObservation === "exited") {
         yield* removeMarker(environment.providerDaemonMarkerPath);
         return Option.none();
       }
@@ -820,9 +846,42 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         cafeMcpPort,
       });
       if (mismatch !== undefined) {
-        // An authenticated response proves a runtime is present, not that a
-        // recycled PID may be signaled. Older/incompatible owners remain intact.
-        const message = `Existing provider daemon ${compatibilityLabels[mismatch]} does not match this Cafe Code build. Its process and recovery files were preserved. Stop the owning runtime explicitly before retrying, or reopen its matching Cafe Code build.`;
+        const request = providerDaemonRetirementRequest(marker, health.value);
+        if (
+          request !== undefined &&
+          marker.transport === "ipc" &&
+          health.value.transport === "ipc" &&
+          (mismatch === "application-version" ||
+            mismatch === "runtime-build" ||
+            mismatch === "cafe-mcp-port")
+        ) {
+          const reservation = `${request.pid}:${request.startedAt}:${request.runtimeBuildId}`;
+          if (retirementReservation === reservation)
+            return yield* preserveInconclusiveOwner("compatibility");
+          retirementReservation = reservation;
+          yield* logInfo("retiring incompatible provider daemon", { reason: mismatch });
+          retiredNamespace = yield* Effect.tryPromise({
+            try: (signal) =>
+              retireProviderDaemonForStartup({
+                endpoint: rootEndpoint,
+                marker,
+                request,
+                markerPath: environment.providerDaemonMarkerPath,
+                credentialPath,
+                socketPath: providerDaemonIpcSocketPath(environment),
+                signal,
+                decryptCredential: (bytes) => Effect.runPromise(safeStorage.decryptString(bytes)),
+              }),
+            catch: () => undefined,
+          }).pipe(Effect.catch(() => preserveInconclusiveOwner("compatibility")));
+          // Only the authenticated self-retirement receipt, conclusive native
+          // absence and unchanged private namespace permit fresh spawn. Keep
+          // old recovery files until the new directly owned child publishes.
+          return Option.none();
+        }
+        // A legacy owner has no cooperative stop protocol. Authentication must
+        // never become a guessed POSIX kill capability for its observed PID.
+        const message = `Existing provider daemon ${compatibilityLabels[mismatch]} does not match this Cafe Code build. Safe automatic replacement is unavailable for this runtime. Its process and recovery files were preserved. Stop the owning runtime explicitly before retrying, or reopen its matching Cafe Code build.`;
         yield* Ref.update(state, (current) => ({
           ...current,
           status: "error" as const,
@@ -880,7 +939,19 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   const spawnDaemon = Effect.gen(function* () {
     const spawnStartedAtMs = performance.now();
     const socketPath = providerDaemonIpcSocketPath(environment);
-    yield* prepareProviderDaemonIpcPath(environment, socketPath);
+    if (retirementReservation !== undefined && retiredNamespace === undefined) {
+      return yield* Effect.die(new ProviderDaemonTerminationUnconfirmedError());
+    }
+    if (retiredNamespace !== undefined) {
+      // A retired daemon unlinks its own socket. Unlike ordinary stale-start
+      // preparation, this path must never blindly remove a replacement entry.
+      yield* Effect.tryPromise({
+        try: retiredNamespace.verifyBeforeSpawn,
+        catch: () => undefined,
+      }).pipe(Effect.catch(() => Effect.die(new ProviderDaemonTerminationUnconfirmedError())));
+    } else {
+      yield* prepareProviderDaemonIpcPath(environment, socketPath);
+    }
     const token = makeProviderDaemonToken();
     const cafeMcpPort = yield* Ref.get(cafeMcpPortRef);
     const rootEndpoint: ProviderDaemonClientConfig = {
@@ -1054,6 +1125,8 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
           ...(cafeMcpPort !== undefined ? { cafeMcpPort } : {}),
         };
         yield* writeMarker({ markerPath: environment.providerDaemonMarkerPath, marker });
+        yield* closeRetirementEvidence;
+        retirementReservation = undefined;
       }).pipe(
         Effect.catch((error) =>
           retireOwnedChild.pipe(
@@ -1133,7 +1206,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       runtimeBuildId,
     });
     return endpoint;
-  }).pipe(Effect.scoped);
+  }).pipe(Effect.scoped, Effect.ensuring(closeRetirementEvidence));
 
   const ensureRunningUnlocked = Effect.gen(function* () {
     const ensureStartedAtMs = performance.now();
@@ -1147,6 +1220,13 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       }));
       yield* publishDebugSnapshot;
       return current.endpoint.value;
+    }
+
+    if (retirementReservation !== undefined && retiredNamespace === undefined) {
+      // An uncertain/lost retirement ACK remains consumed in this controller.
+      // Even a later ESRCH or missing marker must not enter ordinary stale-file
+      // cleanup and bypass the acknowledgement/namespace verification gates.
+      return yield* Effect.die(new ProviderDaemonTerminationUnconfirmedError());
     }
 
     if (Option.isSome(current.ownedChild)) {

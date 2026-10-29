@@ -34,9 +34,11 @@ import {
   PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LEASES_PATH,
   PROVIDER_DAEMON_LIVENESS_PATH,
+  PROVIDER_DAEMON_RETIRE_PATH,
   PROVIDER_DAEMON_RPC_PATH,
   ProviderDaemonEventRecord,
   ProviderDaemonLeaseRequest,
+  ProviderDaemonRetirementRequest,
   ProviderDaemonSubagentDetail,
   type ProviderDaemonProcessDiagnostic,
   ProviderDaemonRpcRequest,
@@ -69,6 +71,7 @@ import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
@@ -141,6 +144,9 @@ const PROVIDER_SUPERVISOR_BRIDGE_CURSOR_PERSIST_INTERVAL = 100;
 
 const decodeRpcRequest = Schema.decodeUnknownEffect(ProviderDaemonRpcRequest);
 const decodeLeaseRequest = Schema.decodeUnknownEffect(ProviderDaemonLeaseRequest);
+const decodeRetirementRequest = Schema.decodeUnknownSync(ProviderDaemonRetirementRequest);
+const decodeRetirementJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const MAX_RETIREMENT_BODY_BYTES = 2 * 1024;
 const decodeProviderDaemonSubagentDetail = Schema.decodeUnknownEffect(ProviderDaemonSubagentDetail);
 const encodeEventRecordJson = Schema.encodeSync(Schema.fromJsonString(ProviderDaemonEventRecord));
 
@@ -870,6 +876,46 @@ function readJsonBody(
   });
 }
 
+/** Bootstrap-only control bodies have a much smaller independent bound. On
+ * overflow, stop retaining bytes and leave the exact request paused until its
+ * fixed refusal has finished; destroying it first can erase that response. */
+function readRetirementBody(request: http.IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let bytes = 0;
+    const chunks: Buffer[] = [];
+    const refuse = () => {
+      if (settled) return;
+      settled = true;
+      chunks.length = 0;
+      request.pause();
+      reject(undefined);
+    };
+    request.on("error", refuse);
+    request.once("aborted", refuse);
+    request.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      bytes += chunk.byteLength;
+      if (bytes > MAX_RETIREMENT_BODY_BYTES) {
+        refuse();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.once("end", () => {
+      if (settled) return;
+      try {
+        const value = decodeRetirementJson(Buffer.concat(chunks).toString("utf8"));
+        settled = true;
+        chunks.length = 0;
+        resolve(value);
+      } catch {
+        refuse();
+      }
+    });
+  });
+}
+
 function toRpcError(
   error: unknown,
   request?: ProviderDaemonRpcRequestValue,
@@ -1456,14 +1502,24 @@ export async function handleProviderDaemonEventStream(
   }
 }
 
-const closeHttpServer = (server: http.Server): Effect.Effect<void> =>
+const closeHttpServer = (server: http.Server, retireConnections = false): Effect.Effect<void> =>
   Effect.callback<void>((resume) => {
     server.close(() => resume(Effect.void));
+    // Only an acknowledged bootstrap retirement owns this stronger closure.
+    // Stop accepting first, then retire this server's exact active HTTP/SSE
+    // sockets so an event subscription cannot deadlock its enclosing scope.
+    if (retireConnections) server.closeAllConnections();
   });
 
 export const runProviderDaemonServer = (
   options: ProviderDaemonServerOptions,
   identityDependencies: ProviderDaemonProcessIdentityDependencies = {},
+) => runProviderDaemonServerInternal(options, identityDependencies);
+
+const runProviderDaemonServerInternal = (
+  options: ProviderDaemonServerOptions,
+  identityDependencies: ProviderDaemonProcessIdentityDependencies,
+  requestRetirement?: () => void,
 ): Effect.Effect<
   ProviderDaemonServerSnapshot,
   never,
@@ -1503,9 +1559,25 @@ export const runProviderDaemonServer = (
     const sql = yield* SqlClient.SqlClient;
     const startedAt = DateTime.formatIso(yield* DateTime.now);
     const mode = options.mode ?? "provider-daemon";
+    const runtimeBuildId = options.runtimeBuildId;
     const transport = options.transport ?? "tcp";
     const host = options.host ?? "127.0.0.1";
     const port = options.port ?? 3774;
+    // This hook is private to runForever's real scoped lifecycle. A flag on a
+    // directly hosted server or a lease cannot mint native shutdown authority.
+    const retirementIdentityAvailable =
+      requestRetirement !== undefined &&
+      process.platform !== "win32" &&
+      mode === "provider-daemon" &&
+      profileIdentity.dataProfile !== undefined &&
+      profileIdentity.dataProfileId !== undefined &&
+      runtimeBuildId !== undefined &&
+      runtimeBuildId.length === 64 &&
+      /^[a-f0-9]{64}$/.test(runtimeBuildId) &&
+      options.supervisorProcess === undefined &&
+      (Option.isNone(config) || config.value.providerSupervisor === undefined);
+    let retirementReserved = false;
+    let retirementAcknowledged = false;
     const journal = yield* makePersistentProviderDaemonEventJournal({
       capacity: PROVIDER_DAEMON_EVENT_JOURNAL_CAPACITY,
       ownerKey: mode,
@@ -1742,6 +1814,63 @@ export const runProviderDaemonServer = (
       const method = request.method ?? "GET";
       const url = new URL(request.url ?? "/", `http://${host}:${port}`);
       void (async () => {
+        if (url.pathname === PROVIDER_DAEMON_RETIRE_PATH) {
+          const refuse = () => {
+            // Do not echo credentials, input, decoder causes, or identity
+            // mismatches. Closing follows the fixed response, never precedes it.
+            response.setHeader("connection", "close");
+            response.once("finish", () => request.destroy());
+            writeJson(response, 403, { error: "Provider daemon retirement refused." });
+          };
+          // findLease uses constant-time credential comparison. Capabilities
+          // held by ordinary desktop/debug/provider leases are insufficient.
+          if (
+            method !== "POST" ||
+            findLease(request)?.bootstrap !== true ||
+            !retirementIdentityAvailable ||
+            retirementReserved
+          ) {
+            refuse();
+            return;
+          }
+          try {
+            const input = decodeRetirementRequest(await readRetirementBody(request));
+            const inventory = await runProviderEffect(runtimeInventory.snapshot);
+            if (
+              retirementReserved ||
+              inventory.upstreamSupervisor !== undefined ||
+              input.pid !== process.pid ||
+              input.startedAt !== startedAt ||
+              input.runtimeBuildId !== runtimeBuildId ||
+              input.dataProfile !== profileIdentity.dataProfile ||
+              input.dataProfileId !== profileIdentity.dataProfileId
+            ) {
+              refuse();
+              return;
+            }
+            // No await separates final admission from this one-use reserve.
+            // The response's native finish event, not handler entry or end(),
+            // grants the enclosing lifecycle permission to begin finalization.
+            retirementReserved = true;
+            response.setHeader("connection", "close");
+            response.once("finish", () => {
+              retirementAcknowledged = true;
+              requestRetirement?.();
+            });
+            writeJson(response, 200, { accepted: true, ...input });
+          } catch {
+            refuse();
+          }
+          return;
+        }
+        if (
+          retirementReserved &&
+          url.pathname !== PROVIDER_DAEMON_HEALTH_PATH &&
+          url.pathname !== PROVIDER_DAEMON_LIVENESS_PATH
+        ) {
+          writeJson(response, 503, { error: "Provider daemon is retiring." });
+          return;
+        }
         if (url.pathname === MCP_APP_OWNER_PATH && method === "POST") {
           // Private native control traffic never enters RPC ledgers/diagnostics.
           if (!hasCapability(request, "rpc")) {
@@ -1754,6 +1883,7 @@ export const runProviderDaemonServer = (
             MCP_APP_JSON_MAX_TRANSPORT_BYTES,
             async (body) => {
               const input = decodeMcpAppOwnerOperation(body);
+              if (retirementReserved) throw new Error("Private operation unavailable.");
               const json = await dispatchMcpAppOwnerOperation(input);
               if (Buffer.byteLength(json, "utf8") > 128 * 1024)
                 throw new Error("Private response refused.");
@@ -1783,6 +1913,7 @@ export const runProviderDaemonServer = (
             1024,
             async (body) => {
               const input = decodeVisualizationAuthorization(body);
+              if (retirementReserved) throw new Error("Private operation unavailable.");
               writeJson(
                 response,
                 200,
@@ -1805,9 +1936,10 @@ export const runProviderDaemonServer = (
             return;
           }
           // Ephemeral control traffic never enters command/event diagnostics.
-          await runPrivateGlideRequest(request, response, (body, signal) =>
-            dispatchGlideOwnerOperation(glideOwnerOperationSchema.parse(body), signal),
-          );
+          await runPrivateGlideRequest(request, response, (body, signal) => {
+            if (retirementReserved) throw new Error("Private operation unavailable.");
+            return dispatchGlideOwnerOperation(glideOwnerOperationSchema.parse(body), signal);
+          });
           return;
         }
         if (url.pathname === SCHEDULING_SESSION_DAEMON_PATH && method === "POST") {
@@ -1819,6 +1951,7 @@ export const runProviderDaemonServer = (
           }
           try {
             const input = decodeSchedulingSessionAuthorization(await readJsonBody(request));
+            if (retirementReserved) throw new Error("Private operation unavailable.");
             const authority = await dispatchSchedulingSessionAuthorization(input.token);
             writeJson(response, 200, authority);
           } catch {
@@ -1844,9 +1977,7 @@ export const runProviderDaemonServer = (
             pid: process.pid,
             ppid: process.ppid,
             version: options.version,
-            ...(options.runtimeBuildId !== undefined
-              ? { runtimeBuildId: options.runtimeBuildId }
-              : {}),
+            ...(runtimeBuildId !== undefined ? { runtimeBuildId } : {}),
             startedAt,
             transport,
             ...processIdentity,
@@ -1889,8 +2020,11 @@ export const runProviderDaemonServer = (
                 pid: process.pid,
                 ppid: process.ppid,
                 version: options.version,
-                ...(options.runtimeBuildId !== undefined
-                  ? { runtimeBuildId: options.runtimeBuildId }
+                ...(runtimeBuildId !== undefined ? { runtimeBuildId } : {}),
+                ...(retirementIdentityAvailable &&
+                !retirementReserved &&
+                inventorySnapshot.upstreamSupervisor === undefined
+                  ? { retirementProtocol: 1 }
                   : {}),
                 startedAt,
                 ...processIdentity,
@@ -1972,6 +2106,10 @@ export const runProviderDaemonServer = (
             return;
           }
           const rawBody = await readJsonBody(request);
+          if (retirementReserved) {
+            writeJson(response, 503, { error: "Provider daemon is retiring." });
+            return;
+          }
           const envelope: ProviderDaemonLeaseResponse | ProviderDaemonRpcEnvelope =
             await runProviderEffect(
               decodeLeaseRequest(rawBody).pipe(
@@ -1980,6 +2118,13 @@ export const runProviderDaemonServer = (
                     const token = makeDaemonToken();
                     const leaseId = makeLeaseId();
                     const issuedAt = DateTime.formatIso(yield* DateTime.now);
+                    if (retirementReserved)
+                      return yield* Effect.fail(
+                        new ProviderValidationError({
+                          operation: "createLease",
+                          issue: "Provider daemon is retiring.",
+                        }),
+                      );
                     leases.set(token, {
                       leaseId,
                       token,
@@ -2043,6 +2188,10 @@ export const runProviderDaemonServer = (
                 message: "Provider request is unavailable or invalid.",
               },
             });
+            return;
+          }
+          if (retirementReserved) {
+            writeJson(response, 503, { error: "Provider daemon is retiring." });
             return;
           }
           const rpcStartedAtMs = performance.now();
@@ -2112,6 +2261,14 @@ export const runProviderDaemonServer = (
                       },
                     });
                   const rpcRequest = decoded.rpcRequest;
+                  if (retirementReserved)
+                    return Effect.succeed({
+                      ok: false as const,
+                      error: {
+                        tag: "ProviderValidationError",
+                        message: "Provider daemon is retiring.",
+                      },
+                    });
                   rpcMethod = rpcRequest.method;
                   rpcCommandId = privateRecoveryRequest ? undefined : requestCommandId(rpcRequest);
                   if (
@@ -2127,7 +2284,16 @@ export const runProviderDaemonServer = (
                     return Effect.succeed(privateRecoveryError);
                   return commandLedger.runOnce(
                     rpcRequest,
-                    executeRpcRequest(providerService, rpcRequest, purgeThread).pipe(
+                    Effect.suspend(() =>
+                      retirementReserved
+                        ? Effect.fail(
+                            new ProviderValidationError({
+                              operation: "providerDaemonRpc",
+                              issue: "Provider daemon is retiring.",
+                            }),
+                          )
+                        : executeRpcRequest(providerService, rpcRequest, purgeThread),
+                    ).pipe(
                       Effect.map((value): ProviderDaemonRpcEnvelope => ({
                         ok: true,
                         value: value === undefined ? null : value,
@@ -2263,7 +2429,7 @@ export const runProviderDaemonServer = (
     );
 
     yield* Effect.addFinalizer(() =>
-      closeHttpServer(server).pipe(
+      closeHttpServer(server, retirementAcknowledged).pipe(
         Effect.andThen(
           transport === "ipc" && options.socketPath !== undefined
             ? Effect.tryPromise({
@@ -2296,8 +2462,9 @@ export const runProviderDaemonServer = (
 
 export const runProviderDaemonServerForever = (
   options: ProviderDaemonServerOptions,
+  identityDependencies: ProviderDaemonProcessIdentityDependencies = {},
 ): Effect.Effect<
-  never,
+  void,
   never,
   | Scope.Scope
   | ProviderService
@@ -2306,16 +2473,18 @@ export const runProviderDaemonServerForever = (
   | ProviderSupervisorRegistry
   | SqlClient.SqlClient
 > =>
-  runProviderDaemonServer(options).pipe(
-    Effect.tap((snapshot) =>
-      Effect.logInfo("provider daemon listening", {
-        mode: snapshot.mode,
-        transport: snapshot.transport,
-        host: snapshot.host,
-        port: snapshot.port,
-        socketPath: snapshot.socketPath,
-        pid: snapshot.pid,
-      }),
-    ),
-    Effect.andThen(Effect.never),
-  );
+  Effect.gen(function* () {
+    const retirement = yield* Deferred.make<void>();
+    const snapshot = yield* runProviderDaemonServerInternal(options, identityDependencies, () => {
+      Deferred.doneUnsafe(retirement, Effect.void);
+    });
+    yield* Effect.logInfo("provider daemon listening", {
+      mode: snapshot.mode,
+      transport: snapshot.transport,
+      host: snapshot.host,
+      port: snapshot.port,
+      socketPath: snapshot.socketPath,
+      pid: snapshot.pid,
+    });
+    yield* Deferred.await(retirement);
+  }).pipe(Effect.scoped);

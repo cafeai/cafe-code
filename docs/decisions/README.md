@@ -1,6 +1,6 @@
 # Verification decision index
 
-Last updated: 2026-10-28 20:21:41 JST (UTC+0900)
+Last updated: 2026-10-29 23:00:14 JST (UTC+0900)
 
 This index covers verification decisions; independent feature decisions remain
 in this directory.
@@ -23,6 +23,9 @@ in this directory.
 - [Provider daemon update retirement](provider-daemon-update-retirement.md):
   exact-owner preparation, explicit active-work consent and native exit before
   installing a different app build; adopted/unknown owners remain protected.
+- [Provider daemon startup retirement](provider-daemon-startup-retirement.md):
+  root-only cooperative self-retirement of supported incompatible POSIX owners,
+  with exact acknowledgement, confirmed exit and preserved legacy-owner limits.
 
 Related provider lifecycle decision:
 

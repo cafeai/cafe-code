@@ -236,6 +236,14 @@ preparation. After a native installer invocation, a return or later error is not
 proof that handoff never began: keep installation reserved instead of replaying
 it. Received native event errors remain opaque and use fixed localized feedback.
 
+Startup can automatically replace a supported incompatible same-profile daemon
+through its bootstrap-root-authenticated self-retirement protocol. It waits for
+the exact acknowledgement, native exit and unchanged private recovery namespace
+before starting the new build; this stops that obsolete runtime's active work.
+Windows retains its existing generation/FILETIME-bound replacement path. See the
+[startup-retirement decision](decisions/provider-daemon-startup-retirement.md).
+In-app installation still requires the explicit native confirmation above.
+
 This source repair does not alter an already installed older updater. A legacy
 incompatible daemon already left running still requires a deliberate, separately
 authorized runtime stop; do not delete its marker or kill a PID to bypass that
