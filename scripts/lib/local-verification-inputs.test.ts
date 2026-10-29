@@ -864,13 +864,13 @@ function observeYarnInputPhases(context: TestContext, label: "entry-name" | "exe
   };
 }
 
-/** Only the two diagnosed native-input contracts use this fixed phase ledger.
+/** Only the diagnosed native-input contracts use this fixed phase ledger.
  * Keep the latest sixteen rows so even a late fifth snapshot and exact owned
  * cleanup remain visible; no source, argv, environment or error is retained.
  */
 function observeNativeInputPhases(
   context: TestContext,
-  label: "null-device-negative" | "vitest-output",
+  label: "null-device-negative" | "vitest-output" | "scripts-read-contract",
 ) {
   type Phase =
     | "fixture-entered"
@@ -2495,19 +2495,42 @@ describe("local verification input evidence", () => {
   });
 
   it("binds scripts' repository-wide read contract rather than only their imports", async (context) => {
-    const f = await fixture(context);
+    const phases = observeNativeInputPhases(context, "scripts-read-contract");
+    phases.mark("fixture-entered");
+    const f = await fixture(context, phases.ownedClosed);
+    phases.bindRefusals(f.refusals);
+    phases.mark("fixture-ready");
     const task: LocalVerificationTask = {
       ...f.task,
       scope: { kind: "node", workspace: "scripts" },
     };
+    phases.mark("snapshot-entered", 1);
     const first = await f.fingerprint(task, context.signal);
+    phases.mark("snapshot-settled", 1);
     expect(first).toBeDefined();
+    phases.mark("writes-entered", 1);
     await f.put("apps/web/src/unused.browser.tsx", "export const unrelatedBrowserCase = 3;\n");
-    expect((await f.fingerprint(task, context.signal))?.key).not.toBe(first?.key);
+    phases.mark("writes-settled", 1);
+    phases.mark("snapshot-entered", 2);
+    const changed = await f.fingerprint(task, context.signal);
+    phases.mark("snapshot-settled", 2);
+    // A refusal is a cache miss, not proof that valid changed input was bound.
+    expect(changed).toBeDefined();
+    expect(changed?.key).not.toBe(first?.key);
     // Touch is not reusable content, but must retire the execution publication
     // fence even when the source bytes are unchanged.
     const path = join(f.root, "apps/server/src/value.ts");
+    phases.mark("writes-entered", 2);
     await f.ownPreparation(() => utimes(path, 1, 1));
-    expect((await f.fingerprint(task, context.signal))?.fence).not.toBe(first?.fence);
+    phases.mark("writes-settled", 2);
+    phases.mark("snapshot-entered", 3);
+    const touched = await f.fingerprint(task, context.signal);
+    phases.mark("snapshot-settled", 3);
+    expect(touched).toBeDefined();
+    // Compare the timestamp-only edit with the immediately preceding content
+    // snapshot; comparing only with `first` could pass on the earlier byte edit.
+    expect(touched?.key).toBe(changed?.key);
+    expect(touched?.fence).not.toBe(changed?.fence);
+    expect(touched?.fence).not.toBe(first?.fence);
   });
 });
