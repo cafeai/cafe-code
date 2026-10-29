@@ -23,6 +23,7 @@ import {
 import { assert, describe, expect, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -345,6 +346,12 @@ const retirementProfileLayer = Layer.effect(
   ),
 );
 
+class SyntheticRetirementTransportError extends Data.TaggedError(
+  "SyntheticRetirementTransportError",
+)<{
+  readonly message: string;
+}> {}
+
 /** Register exact cancellation and completion ownership before native IO.
  * Effect interruption alone does not join an original promise's late close. */
 const retirementNative = <A>(execute: (signal: AbortSignal) => Promise<A>) =>
@@ -365,7 +372,10 @@ const retirementNative = <A>(execute: (signal: AbortSignal) => Promise<A>) =>
         owner.pending = execute(owner.abort.signal);
         return owner.pending;
       },
-      catch: () => new Error("Synthetic retirement transport failed."),
+      catch: () =>
+        new SyntheticRetirementTransportError({
+          message: "Synthetic retirement transport failed.",
+        }),
     }).pipe(Effect.orDie);
   }).pipe(Effect.scoped);
 

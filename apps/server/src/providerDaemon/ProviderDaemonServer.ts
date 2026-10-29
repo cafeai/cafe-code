@@ -2251,63 +2251,67 @@ const runProviderDaemonServerInternal = (
                 // future private shape is disguised as an ordinary method.
                 Effect.map((rpcRequest) => ({ valid: true as const, rpcRequest })),
                 Effect.catch(() => Effect.succeed({ valid: false as const })),
-                Effect.flatMap((decoded) => {
-                  if (!decoded.valid)
-                    return Effect.succeed({
-                      ok: false as const,
-                      error: {
-                        tag: "ProviderValidationError",
-                        message: "Provider request is unavailable or invalid.",
-                      },
-                    });
-                  const rpcRequest = decoded.rpcRequest;
-                  if (retirementReserved)
-                    return Effect.succeed({
-                      ok: false as const,
-                      error: {
-                        tag: "ProviderValidationError",
-                        message: "Provider daemon is retiring.",
-                      },
-                    });
-                  rpcMethod = rpcRequest.method;
-                  rpcCommandId = privateRecoveryRequest ? undefined : requestCommandId(rpcRequest);
-                  if (
-                    privateRecoveryRequest &&
-                    rpcRequest.method !== "prepareFailedRootRecovery" &&
-                    rpcRequest.method !== "readFailedRootRecovery" &&
-                    rpcRequest.method !== "cancelFailedRootRecovery" &&
-                    !(
-                      rpcRequest.method === "sendTurn" &&
-                      rpcRequest.payload.preparedFailedRootRecovery !== undefined
+                Effect.flatMap((decoded) =>
+                  Effect.gen(function* () {
+                    if (!decoded.valid)
+                      return {
+                        ok: false as const,
+                        error: {
+                          tag: "ProviderValidationError",
+                          message: "Provider request is unavailable or invalid.",
+                        },
+                      };
+                    const rpcRequest = decoded.rpcRequest;
+                    if (retirementReserved)
+                      return {
+                        ok: false as const,
+                        error: {
+                          tag: "ProviderValidationError",
+                          message: "Provider daemon is retiring.",
+                        },
+                      };
+                    rpcMethod = rpcRequest.method;
+                    rpcCommandId = privateRecoveryRequest
+                      ? undefined
+                      : requestCommandId(rpcRequest);
+                    if (
+                      privateRecoveryRequest &&
+                      rpcRequest.method !== "prepareFailedRootRecovery" &&
+                      rpcRequest.method !== "readFailedRootRecovery" &&
+                      rpcRequest.method !== "cancelFailedRootRecovery" &&
+                      !(
+                        rpcRequest.method === "sendTurn" &&
+                        rpcRequest.payload.preparedFailedRootRecovery !== undefined
+                      )
                     )
-                  )
-                    return Effect.succeed(privateRecoveryError);
-                  return commandLedger.runOnce(
-                    rpcRequest,
-                    Effect.suspend(() =>
-                      retirementReserved
-                        ? Effect.fail(
-                            new ProviderValidationError({
-                              operation: "providerDaemonRpc",
-                              issue: "Provider daemon is retiring.",
-                            }),
-                          )
-                        : executeRpcRequest(providerService, rpcRequest, purgeThread),
-                    ).pipe(
-                      Effect.map((value): ProviderDaemonRpcEnvelope => ({
-                        ok: true,
-                        value: value === undefined ? null : value,
-                      })),
-                      Effect.catch((error) =>
-                        Effect.succeed(
-                          privateRecoveryRequest
-                            ? privateRecoveryError
-                            : toRpcError(error, rpcRequest),
+                      return privateRecoveryError;
+                    return yield* commandLedger.runOnce(
+                      rpcRequest,
+                      Effect.suspend(() =>
+                        retirementReserved
+                          ? Effect.fail(
+                              new ProviderValidationError({
+                                operation: "providerDaemonRpc",
+                                issue: "Provider daemon is retiring.",
+                              }),
+                            )
+                          : executeRpcRequest(providerService, rpcRequest, purgeThread),
+                      ).pipe(
+                        Effect.map((value): ProviderDaemonRpcEnvelope => ({
+                          ok: true,
+                          value: value === undefined ? null : value,
+                        })),
+                        Effect.catch((error) =>
+                          Effect.succeed(
+                            privateRecoveryRequest
+                              ? privateRecoveryError
+                              : toRpcError(error, rpcRequest),
+                          ),
                         ),
                       ),
-                    ),
-                  );
-                }),
+                    );
+                  }),
+                ),
                 Effect.catch((error) =>
                   Effect.succeed(privateRecoveryRequest ? privateRecoveryError : toRpcError(error)),
                 ),
