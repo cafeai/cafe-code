@@ -2,10 +2,10 @@
 
 Decision status: Accepted within the user-requested automatic startup repair
 Implementation status: Implemented in source; rebuilt runtime adoption required
-Verification status: Regression coverage added; local execution explicitly waived
-by the user for this push; exact-source GitHub CI remains the runtime gate
+Verification status: Contract and synthetic retirement regressions passed locally;
+exact-source GitHub CI and rebuilt runtime adoption remain separate gates
 Created: 2026-10-29 23:00:14 JST (UTC+0900)
-Last updated: 2026-10-29 23:00:14 JST (UTC+0900)
+Last updated: 2026-10-30 02:41:31 JST (UTC+0900)
 Decision authority: User request to automatically stop the obsolete daemon that
 blocks bootstrap, followed by explicit authorization to push dev without local tests.
 Supplements: [ownership-safe startup](provider-daemon-migration-startup.md).
@@ -38,6 +38,14 @@ Bind the request to that old PID, authenticated start time, build and profile
 plus a fresh random nonce. Read private single-link recovery files through
 bounded no-follow descriptors and compare their exact credential bytes to the
 authenticated root token. Do not send control to a foreign namespace.
+
+The private request and acknowledgement require the producer's canonical
+24-character millisecond UTC start time. The retirement-specific codec checks
+both shape and a real calendar-date round trip, rejecting normalized impossible
+dates, alternate offset spellings, trailing characters and oversized input.
+Legacy general health/display timestamps keep their existing compatibility;
+their presence alone never qualifies retirement. This validation refines the
+existing exact-identity decision and grants no additional shutdown authority.
 
 The daemon strictly validates the bounded request, reserves retirement once,
 fences new RPC/lease admission and flushes its matching acknowledgement before
@@ -80,6 +88,8 @@ controls, Debug/Production isolation and Windows native ownership are unchanged.
 Synthetic coverage exercises root-versus-lease authorization, stale/foreign
 identity, strict PID observations, request/receipt binding, namespace drift,
 one-use admission and Windows exit-before-replacement ordering. These added
-tests were not run locally at the user's request. Static review and formatting
-do not establish native upgrade success; the dev push's CI and later rebuilt
-application adoption are separate evidence.
+tests were originally delegated to CI at the user's request. The timestamp
+validation refinement has since passed the contract workspace and the complete
+synthetic daemon-server and desktop-retirement test files locally. Those checks
+do not establish full-platform CI or native upgrade success; the dev push's CI
+and later rebuilt application adoption remain separate evidence.

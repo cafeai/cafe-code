@@ -122,7 +122,7 @@ it("keeps cooperative retirement finite, exact and outside ordinary lease capabi
   const decodeResponse = Schema.decodeUnknownSync(ProviderDaemonRetirementResponse);
   assert.deepEqual(decode(request), request);
   assert.deepEqual(decodeResponse({ accepted: true, ...request }), { accepted: true, ...request });
-  for (const invalid of [
+  for (const [index, invalid] of [
     { ...request, protocolVersion: 2 },
     { ...request, pid: 0 },
     { ...request, pid: 1.5 },
@@ -136,8 +136,8 @@ it("keeps cooperative retirement finite, exact and outside ordinary lease capabi
     { ...request, nonce: "c".repeat(63) },
     { ...request, nonce: `${"c".repeat(64)}\n` },
     { ...request, extra: "private-input-must-not-be-accepted" },
-  ])
-    assert.throws(() => decode(invalid));
+  ].entries())
+    assert.throws(() => decode(invalid), `invalid retirement request case ${index}`);
   assert.throws(() => decodeResponse({ accepted: false, ...request }));
   assert.throws(() => decodeResponse({ accepted: true, ...request, extra: true }));
   assert.throws(() => Schema.decodeUnknownSync(ProviderDaemonCapability)("retire"));
@@ -155,9 +155,58 @@ it("keeps cooperative retirement finite, exact and outside ordinary lease capabi
   };
   const decodeHealth = Schema.decodeUnknownSync(ProviderDaemonHealth);
   assert.equal(Object.hasOwn(decodeHealth(legacyHealth), "retirementProtocol"), false);
+  assert.equal(
+    decodeHealth({ ...legacyHealth, startedAt: "legacy-native-time" }).startedAt,
+    "legacy-native-time",
+  );
   assert.equal(decodeHealth({ ...legacyHealth, retirementProtocol: 1 }).retirementProtocol, 1);
   for (const retirementProtocol of [0, 2, true, null, "1"])
     assert.throws(() => decodeHealth({ ...legacyHealth, retirementProtocol }));
+});
+
+it("requires a bounded real canonical UTC instant in both retirement wire directions", () => {
+  const request = {
+    protocolVersion: 1,
+    pid: 123,
+    startedAt: "2026-10-29T00:00:00.000Z",
+    runtimeBuildId: "a".repeat(64),
+    dataProfile: "debug",
+    dataProfileId: "b".repeat(64),
+    nonce: "c".repeat(64),
+  };
+  const requestJson = Schema.fromJsonString(ProviderDaemonRetirementRequest);
+  const responseJson = Schema.fromJsonString(ProviderDaemonRetirementResponse);
+  const decodeRequest = Schema.decodeUnknownSync(ProviderDaemonRetirementRequest);
+  const decodeResponse = Schema.decodeUnknownSync(ProviderDaemonRetirementResponse);
+  const decodeRequestJson = Schema.decodeUnknownSync(requestJson);
+  const decodeResponseJson = Schema.decodeUnknownSync(responseJson);
+  const encodeRequestJson = Schema.encodeSync(requestJson);
+  const encodeResponseJson = Schema.encodeSync(responseJson);
+
+  // A leap day and the Unix epoch remain valid through the actual JSON codecs.
+  for (const startedAt of ["2024-02-29T23:59:59.123Z", "1970-01-01T00:00:00.000Z"]) {
+    const value = { ...request, startedAt };
+    const response = { accepted: true, ...value };
+    assert.deepEqual(decodeRequestJson(encodeRequestJson(decodeRequest(value))), value);
+    assert.deepEqual(decodeResponseJson(encodeResponseJson(decodeResponse(response))), response);
+  }
+  for (const [label, startedAt] of [
+    ["invalid text", "not-a-time"],
+    ["impossible month day", "2026-02-30T00:00:00.000Z"],
+    ["non-leap February", "2025-02-29T00:00:00.000Z"],
+    ["normalized next-day hour", "2026-10-29T24:00:00.000Z"],
+    ["missing milliseconds", "2026-10-29T00:00:00Z"],
+    ["alternate UTC offset", "2026-10-29T00:00:00.000+00:00"],
+    ["trailing newline", "2026-10-29T00:00:00.000Z\n"],
+    ["oversized input", "0".repeat(1024)],
+  ] as const) {
+    const value = { ...request, startedAt };
+    const response = { accepted: true, ...value };
+    assert.throws(() => decodeRequest(value), `${label}: request`);
+    assert.throws(() => decodeResponse(response), `${label}: response`);
+    assert.throws(() => decodeRequestJson(JSON.stringify(value)), `${label}: JSON request`);
+    assert.throws(() => decodeResponseJson(JSON.stringify(response)), `${label}: JSON response`);
+  }
 });
 
 it("retains only finite configuration-refusal evidence through current and legacy RPC codecs", () => {

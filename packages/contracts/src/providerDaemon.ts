@@ -8,6 +8,7 @@ import {
 import { ProviderCompactThreadInput } from "./providerCompaction.ts";
 import { ProviderTaskControlInput, ProviderTaskControlResult } from "./providerTaskControls.ts";
 import * as Schema from "effect/Schema";
+import * as DateTime from "effect/DateTime";
 import {
   ProviderRespondToInteractionInput,
   ProviderResolveInteractionUrlInput,
@@ -73,10 +74,29 @@ export const PROVIDER_DAEMON_RETIRE_PATH = "/api/provider-daemon/retire";
  * rather than the replacement build. The nonce correlates one native reply;
  * authentication remains the existing private bootstrap credential.
  */
+// The private retirement identity is emitted by DateTime.formatIso. Unlike
+// legacy display/health timestamps, it must be a finite canonical UTC instant.
+// A pattern alone accepts impossible calendar dates which Date.parse normalizes;
+// the exact round trip rejects those without changing the shared legacy schema.
+const ProviderDaemonRetirementStartedAt = Schema.String.check(
+  Schema.isMinLength(24),
+  Schema.isMaxLength(24),
+  Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+  Schema.makeFilter((value) => {
+    // Keep the native parser bounded even for callers collecting every issue.
+    if (value.length !== 24) return false;
+    const milliseconds = Date.parse(value);
+    return (
+      Number.isFinite(milliseconds) &&
+      DateTime.formatIso(DateTime.makeUnsafe(milliseconds)) === value
+    );
+  }),
+);
+
 const ProviderDaemonRetirementFields = {
   protocolVersion: Schema.Literal(1),
   pid: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 4_294_967_295 })),
-  startedAt: IsoDateTime,
+  startedAt: ProviderDaemonRetirementStartedAt,
   runtimeBuildId: Schema.String.check(Schema.isMaxLength(64), Schema.isPattern(/^[a-f0-9]{64}$/)),
   dataProfile: Schema.Literals(["production", "debug"]),
   dataProfileId: Schema.String.check(Schema.isMaxLength(64), Schema.isPattern(/^[a-f0-9]{64}$/)),
