@@ -1,7 +1,7 @@
 # Reactor fixture readiness
 
 Created: 2026-10-14 15:05:10 JST (UTC+0900)
-Last updated: 2026-10-22 12:42:30 JST (UTC+0900)
+Last updated: 2026-10-30 17:58:21 JST (UTC+0900)
 
 An orchestration dispatch receipt proves durable intent acceptance, not provider
 session opening, turn acceptance or completion of the later projection writes.
@@ -112,3 +112,5 @@ nonempty, unexpired release artifacts; diagnostics and skipped dependencies do n
 qualify releases. No AppImage launch/smoke phase is inferred from build/upload.
 
 Preparation-backoff integration tests observe the original controlled clock sleep registering before advancing it. The exponential schedule/cap is a separate pure decision table; integration tests cover actual retry and Stop without replaying the whole cap table through SQLite. Checkpoint fixtures subscribe to their exact engine before dispatch and await its ordered event queue, rather than rescanning all historical events every polling turn.
+
+Controlled checkpoint rewind fixtures observe the original fake preparation effect's successful receipt before their unchanged drain observer. Their public test-signal owner registers before repository or runtime acquisition, fences late continuations, releases only the held fixture gate and joins exact pending observations before shared scope/runtime teardown. Retirement never completes a preparation receipt. A controlled drain clock must not intercept an unrelated native Git timeout with the same duration: Git retains its original live clock, arguments, timeout and native close ownership. The fixture separately requires exactly one controlled drain timer. Fixed, bounded failure-only phase/count/elapsed observations freeze at retirement and contain no paths, payloads, environment or received errors; they do not identify the cause of an earlier unlocalized timeout.

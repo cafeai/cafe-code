@@ -35,7 +35,7 @@ import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFailed, vi, type TestContext } from "vitest";
 
 import { CheckpointInvariantError } from "../../checkpointing/Errors.ts";
 import { CheckpointStoreLive } from "../../checkpointing/Layers/CheckpointStore.ts";
@@ -347,6 +347,65 @@ async function waitForGitRefMissing(cwd: string, ref: string, timeoutMs = 15_000
   return poll();
 }
 
+type ControlledRewindPhase =
+  | "owner-start"
+  | "retired"
+  | "repository-start"
+  | "repository-returned"
+  | "runtime-start"
+  | "engine-start"
+  | "engine-returned"
+  | "snapshot-service-start"
+  | "snapshot-service-returned"
+  | "reactor-service-start"
+  | "reactor-service-returned"
+  | "checkpoint-service-start"
+  | "checkpoint-service-returned"
+  | "sql-service-start"
+  | "sql-service-returned"
+  | "receipt-service-start"
+  | "receipt-service-returned"
+  | "scope-start"
+  | "scope-returned"
+  | "subscription-start"
+  | "subscription-returned"
+  | "reactor-start"
+  | "reactor-returned"
+  | "project-dispatch-start"
+  | "project-dispatch-returned"
+  | "thread-dispatch-start"
+  | "thread-dispatch-returned"
+  | "checkpoint-seed-start"
+  | "checkpoint-seed-returned"
+  | "harness-returned"
+  | "session-dispatch-start"
+  | "session-dispatch-returned"
+  | "diff-dispatch-start"
+  | "diff-dispatch-returned"
+  | "worker-drain-start"
+  | "seed-drain-returned"
+  | "rewind-harness-returned"
+  | "snapshot-read-start"
+  | "snapshot-read-returned"
+  | "request-start"
+  | "request-returned"
+  | "prepare-observed"
+  | "drain-observed"
+  | "timer-registered"
+  | "timer-observed"
+  | "held-gate-release"
+  | "final-drain-returned"
+  | "assertions-returned";
+
+interface RewindFixtureLifetime {
+  readonly record: (phase: ControlledRewindPhase) => void;
+  readonly assertActive: () => void;
+  readonly isRetired: () => boolean;
+  readonly acquire: <A>(start: () => Promise<A>) => Promise<A>;
+  readonly observe: <A, E>(effect: Effect.Effect<A, E>) => Promise<A>;
+  readonly cleanup: () => Promise<void>;
+}
+
 describe("CheckpointReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
     | OrchestrationEngineService
@@ -359,8 +418,110 @@ describe("CheckpointReactor", () => {
   > | null = null;
   let scope: Scope.Closeable | null = null;
   const tempDirs: string[] = [];
+  let controlledRewindCleanup: (() => Promise<void>) | undefined;
+
+  // Only the two controlled rewind fixtures opt in. Match the existing owned
+  // observer pattern: retirement cancels observations, never manufactures a
+  // successful prepare receipt. Release only the fixture's held test gate.
+  function ownControlledRewind(
+    context: TestContext,
+    releaseHeld: () => void,
+    fixture: "lifetime" | "drain-order" | "drain-timeout" = "lifetime",
+  ): RewindFixtureLifetime {
+    // Passive failure observations are not preparation, event admission or
+    // completion receipts. Keep fixed names/counts/monotonic elapsed times only;
+    // never retain paths, inputs, native IDs, environment or received errors.
+    // Register before acquisition and freeze at retirement, so cleanup or a
+    // late continuation cannot overwrite the phase observed at a hard timeout.
+    const observationStart = performance.now();
+    const observations: {
+      readonly phase: ControlledRewindPhase;
+      readonly count: number;
+      readonly elapsedMs: number;
+    }[] = [];
+    const counts = new Map<ControlledRewindPhase, number>();
+    let recording = true;
+    const record = (phase: ControlledRewindPhase) => {
+      if (!recording || observations.length >= 96) return;
+      const count = (counts.get(phase) ?? 0) + 1;
+      counts.set(phase, count);
+      const elapsed = performance.now() - observationStart;
+      const elapsedMs = Number.isFinite(elapsed)
+        ? Math.max(0, Math.min(86_400_000, Math.round(elapsed)))
+        : 0;
+      observations.push({ phase, count, elapsedMs });
+    };
+    onTestFailed(() => {
+      Effect.runSync(
+        Effect.logError("Synthetic controlled rewind passive observations", {
+          fixture,
+          observations,
+        }),
+      );
+    });
+    record("owner-start");
+    let retired = false;
+    let cleanupPromise: Promise<void> | undefined;
+    const observerAbort = new AbortController();
+    const pending = new Set<Promise<unknown>>();
+    const assertActive = () => {
+      if (retired || context.signal.aborted) throw new Error("Controlled rewind fixture retired.");
+    };
+    const acquire = <A>(start: () => Promise<A>): Promise<A> => {
+      assertActive();
+      const operation = start().then((value) => {
+        assertActive();
+        return value;
+      });
+      pending.add(operation);
+      void operation.then(
+        () => pending.delete(operation),
+        () => pending.delete(operation),
+      );
+      return operation;
+    };
+    const retire = () => {
+      if (!retired) {
+        record("retired");
+        recording = false;
+      }
+      retired = true;
+      observerAbort.abort();
+      releaseHeld();
+    };
+    const cleanup = (): Promise<void> => {
+      if (cleanupPromise) return cleanupPromise;
+      retire();
+      cleanupPromise = (async () => {
+        try {
+          while (pending.size) await Promise.allSettled([...pending]);
+        } finally {
+          context.signal.removeEventListener("abort", retire);
+        }
+      })();
+      return cleanupPromise;
+    };
+    // afterEach runs before onTestFinished. Join this same owner before closing
+    // or resetting the shared runtime/scope, including a late acquisition.
+    controlledRewindCleanup = cleanup;
+    context.signal.addEventListener("abort", retire, { once: true });
+    context.onTestFinished(cleanup);
+    if (context.signal.aborted) retire();
+    return {
+      assertActive,
+      acquire,
+      cleanup,
+      record,
+      isRetired: () => retired,
+      observe: (effect) =>
+        acquire(() => Effect.runPromise(effect, { signal: observerAbort.signal })),
+    };
+  }
 
   afterEach(async () => {
+    const controlledCleanup = controlledRewindCleanup;
+    controlledRewindCleanup = undefined;
+    await controlledCleanup?.();
     if (scope) {
       await Effect.runPromise(Scope.close(scope, Exit.void));
     }
@@ -391,11 +552,17 @@ describe("CheckpointReactor", () => {
     readonly runtimeReceiptBusLayer?: Layer.Layer<RuntimeReceiptBus>;
     readonly ingestionDrain?: Effect.Effect<void>;
     readonly testClock?: Clock.Clock;
+    readonly rewindLifetime?: RewindFixtureLifetime;
   }) {
+    const active = options?.rewindLifetime?.assertActive ?? (() => {});
+    const phase = options?.rewindLifetime?.record ?? (() => {});
+    active();
+    phase("repository-start");
     const cwd =
       options?.initializeRepository === false
         ? fs.mkdtempSync(path.join(os.tmpdir(), "cafe-code-checkpoint-handler-"))
         : createGitRepository();
+    phase("repository-returned");
     tempDirs.push(cwd);
     const provider = createProviderServiceHarness(
       cwd,
@@ -457,6 +624,22 @@ describe("CheckpointReactor", () => {
       streamStatus: () => Stream.empty,
     });
 
+    // The controlled clock belongs to the reactor's drain-budget fixture.
+    // Native Git still uses the original live clock and exact original timeout,
+    // arguments, process implementation and close ownership. Otherwise any Git
+    // 30-second timer could falsely satisfy the drain timer's receipt.
+    const nativeClock = Effect.runSync(Effect.service(Clock.Clock));
+    const nativeVcsProcessLayer = options?.testClock
+      ? Layer.effect(
+          VcsProcess.VcsProcess,
+          Effect.map(Effect.service(VcsProcess.VcsProcess), (original) =>
+            VcsProcess.VcsProcess.of({
+              run: (input) =>
+                original.run(input).pipe(Effect.provideService(Clock.Clock, nativeClock)),
+            }),
+          ),
+        ).pipe(Layer.provide(VcsProcess.layer))
+      : VcsProcess.layer;
     const layer = CheckpointReactorLive.pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
@@ -479,32 +662,66 @@ describe("CheckpointReactor", () => {
         ),
       ),
       Layer.provideMerge(WorkspacePathsLive),
-      Layer.provideMerge(VcsProcess.layer),
+      Layer.provideMerge(nativeVcsProcessLayer),
       Layer.provideMerge(ServerConfigLayer),
       Layer.provideMerge(NodeServices.layer),
       Layer.provideMerge(SqlitePersistenceTest),
     );
 
+    phase("runtime-start");
     runtime = ManagedRuntime.make(
       options?.testClock
         ? layer.pipe(Layer.provideMerge(Layer.succeed(Clock.Clock, options.testClock)))
         : layer,
     );
+    phase("engine-start");
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
+    phase("engine-returned");
+    active();
+    phase("snapshot-service-start");
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
+    phase("snapshot-service-returned");
+    active();
+    phase("reactor-service-start");
     const reactor = await runtime.runPromise(Effect.service(CheckpointReactor));
+    phase("reactor-service-returned");
+    active();
+    phase("checkpoint-service-start");
     const checkpointStore = await runtime.runPromise(Effect.service(CheckpointStore));
+    phase("checkpoint-service-returned");
+    active();
+    phase("sql-service-start");
     const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
+    phase("sql-service-returned");
+    active();
+    phase("receipt-service-start");
     const receiptBus = await runtime.runPromise(Effect.service(RuntimeReceiptBus));
+    phase("receipt-service-returned");
+    active();
+    phase("scope-start");
     scope = await Effect.runPromise(Scope.make("sequential"));
+    phase("scope-returned");
+    active();
+    phase("subscription-start");
     const events = await Effect.runPromise(
       Stream.toQueue(engine.streamDomainEvents, { capacity: "unbounded" }).pipe(
         Scope.provide(scope),
       ),
     );
+    active();
+    phase("subscription-returned");
     checkpointEvents.set(engine, Queue.take(events));
+    phase("reactor-start");
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
-    const drain = () => Effect.runPromise(reactor.drain);
+    phase("reactor-returned");
+    active();
+    const drain = () => {
+      active();
+      phase("worker-drain-start");
+      return options?.rewindLifetime
+        ? options.rewindLifetime.observe(reactor.drain)
+        : Effect.runPromise(reactor.drain);
+    };
     const publishIngestionReceipt = (event: LegacyProviderRuntimeEvent) => {
       if (event.type !== "turn.completed" || !event.turnId) {
         return Promise.resolve();
@@ -529,6 +746,8 @@ describe("CheckpointReactor", () => {
     };
 
     const createdAt = "2026-01-01T00:00:00.000Z";
+    active();
+    phase("project-dispatch-start");
     await Effect.runPromise(
       engine.dispatch({
         type: "project.create",
@@ -543,6 +762,9 @@ describe("CheckpointReactor", () => {
         createdAt,
       }),
     );
+    active();
+    phase("project-dispatch-returned");
+    phase("thread-dispatch-start");
     await Effect.runPromise(
       engine.dispatch({
         type: "thread.create",
@@ -562,32 +784,53 @@ describe("CheckpointReactor", () => {
       }),
     );
 
+    active();
+    phase("thread-dispatch-returned");
     if (options?.seedFilesystemCheckpoints ?? true) {
+      phase("checkpoint-seed-start");
       await runtime.runPromise(
         checkpointStore.captureCheckpoint({
           cwd,
           checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0),
         }),
       );
+      phase("checkpoint-seed-returned");
+      active();
       fs.writeFileSync(path.join(cwd, "README.md"), "v2\n", "utf8");
+      phase("checkpoint-seed-start");
       await runtime.runPromise(
         checkpointStore.captureCheckpoint({
           cwd,
           checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1),
         }),
       );
+      phase("checkpoint-seed-returned");
+      active();
       fs.writeFileSync(path.join(cwd, "README.md"), "v3\n", "utf8");
+      phase("checkpoint-seed-start");
       await runtime.runPromise(
         checkpointStore.captureCheckpoint({
           cwd,
           checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2),
         }),
       );
+      phase("checkpoint-seed-returned");
     }
 
+    active();
+    phase("harness-returned");
     return {
       engine,
-      readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
+      readModel: () => {
+        active();
+        phase("snapshot-read-start");
+        if (!options?.rewindLifetime) return Effect.runPromise(snapshotQuery.getSnapshot());
+        const operation = options.rewindLifetime.observe(snapshotQuery.getSnapshot());
+        return operation.then((snapshot) => {
+          phase("snapshot-read-returned");
+          return snapshot;
+        });
+      },
       provider: {
         ...provider,
         emit,
@@ -608,15 +851,23 @@ describe("CheckpointReactor", () => {
     providerName: ProviderDriverKind = ProviderDriverKind.make("claudeAgent"),
     turnCounts: ReadonlyArray<number> = [1, 2],
     ingestionDrain?: Effect.Effect<void>,
-    options?: { readonly testClock?: Clock.Clock; readonly gitStatusRefreshCalls?: string[] },
+    options?: {
+      readonly testClock?: Clock.Clock;
+      readonly gitStatusRefreshCalls?: string[];
+      readonly rewindLifetime?: RewindFixtureLifetime;
+    },
   ) {
     const harness = await createHarness({
       providerName,
       ...(ingestionDrain ? { ingestionDrain } : {}),
       ...options,
     });
+    const active = options?.rewindLifetime?.assertActive ?? (() => {});
+    const phase = options?.rewindLifetime?.record ?? (() => {});
+    active();
     const threadId = ThreadId.make("thread-1");
     const createdAt = "2026-01-01T00:00:00.000Z";
+    phase("session-dispatch-start");
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.session.set",
@@ -634,7 +885,11 @@ describe("CheckpointReactor", () => {
         createdAt,
       }),
     );
+    phase("session-dispatch-returned");
+    active();
     for (const turnCount of turnCounts) {
+      active();
+      phase("diff-dispatch-start");
       await Effect.runPromise(
         harness.engine.dispatch({
           type: "thread.turn.diff.complete",
@@ -649,8 +904,12 @@ describe("CheckpointReactor", () => {
           completedAt: createdAt,
         }),
       );
+      phase("diff-dispatch-returned");
     }
+    active();
     await harness.drain();
+    phase("seed-drain-returned");
+    active();
     const request = (turnCount = 1) =>
       Effect.runPromise(
         harness.engine.dispatch({
@@ -661,6 +920,7 @@ describe("CheckpointReactor", () => {
           createdAt,
         }),
       );
+    phase("rewind-harness-returned");
     return {
       ...harness,
       request,
@@ -2157,67 +2417,155 @@ describe("CheckpointReactor", () => {
     },
   );
 
-  it("drains old-generation ingestion after Claude preparation and before touching the workspace", async () => {
+  it("retires controlled rewind observers without completing preparation or admitting late acquisition", async (context) => {
+    const preparation = Effect.runSync(Deferred.make<void>());
+    let released = false;
+    const lifetime = ownControlledRewind(context, () => {
+      released = true;
+    });
+    const observed = lifetime.observe(Deferred.await(preparation)).then(
+      () => "prepared",
+      () => "retired",
+    );
+    await lifetime.cleanup();
+    expect(await observed).toBe("retired");
+    expect(Effect.runSync(Deferred.isDone(preparation))).toBe(false);
+    expect(released).toBe(true);
+    let lateAcquisition = false;
+    expect(() =>
+      lifetime.acquire(async () => {
+        lateAcquisition = true;
+      }),
+    ).toThrow();
+    expect(lateAcquisition).toBe(false);
+  });
+
+  it("drains old-generation ingestion after Claude preparation and before touching the workspace", async (context) => {
     const entered = Effect.runSync(Deferred.make<void>());
     const release = Effect.runSync(Deferred.make<void>());
-    const harness = await createRewindHarness(
-      ProviderDriverKind.make("claudeAgent"),
-      [1, 2],
-      Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+    const releaseHeld = () => {
+      Deferred.doneUnsafe(release, Effect.void);
+    };
+    const lifetime = ownControlledRewind(context, releaseHeld, "drain-order");
+    const harness = await lifetime.acquire(() =>
+      createRewindHarness(
+        ProviderDriverKind.make("claudeAgent"),
+        [1, 2],
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        { rewindLifetime: lifetime },
+      ),
+    );
+    const prepared = Effect.runSync(Deferred.make<void>());
+    const originalPrepare = harness.provider.prepareConversationRollback.getMockImplementation()!;
+    harness.provider.prepareConversationRollback.mockImplementationOnce((input) =>
+      originalPrepare(input).pipe(
+        Effect.tap(() =>
+          lifetime.isRetired() ? Effect.void : Deferred.succeed(prepared, undefined),
+        ),
+      ),
     );
     const capture = vi.spyOn(harness.checkpointStore, "captureCheckpoint");
     const restore = vi.spyOn(harness.checkpointStore, "restoreCheckpoint");
     try {
-      await harness.request();
-      await Effect.runPromise(Deferred.await(entered).pipe(Effect.timeout("5 seconds")));
+      lifetime.record("request-start");
+      await lifetime.acquire(() => harness.request());
+      lifetime.record("request-returned");
+      // Durable dispatch is not worker preparation. Observe the original fake
+      // preparation's successful effect before the unchanged five-second wait.
+      await lifetime.observe(Deferred.await(prepared));
+      lifetime.record("prepare-observed");
+      await lifetime.observe(Deferred.await(entered).pipe(Effect.timeout("5 seconds")));
+      lifetime.record("drain-observed");
       expect(harness.provider.prepareConversationRollback).toHaveBeenCalledTimes(1);
       expect(harness.provider.commitConversationRollback).not.toHaveBeenCalled();
       expect(capture).not.toHaveBeenCalled();
       expect(restore).not.toHaveBeenCalled();
       expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v3\n");
     } finally {
-      await Effect.runPromise(Deferred.succeed(release, undefined));
-      await harness.drain();
+      lifetime.record("held-gate-release");
+      releaseHeld();
+      if (!lifetime.isRetired()) {
+        await harness.drain();
+        lifetime.record("final-drain-returned");
+      }
     }
+    lifetime.assertActive();
     expect(harness.provider.finishConversationRollback).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ outcome: "committed" }),
     );
+    lifetime.record("assertions-returned");
   });
 
-  it("bounds a stuck ingestion drain without restoring files or releasing its prepared reservation", async () => {
+  it("bounds a stuck ingestion drain without restoring files or releasing its prepared reservation", async (context) => {
     const drainEntered = Effect.runSync(Deferred.make<void>());
     const timerEntered = Effect.runSync(Deferred.make<void>());
     const expire = Effect.runSync(Deferred.make<void>());
+    const releaseHeld = () => {
+      Deferred.doneUnsafe(expire, Effect.void);
+    };
+    const lifetime = ownControlledRewind(context, releaseHeld, "drain-timeout");
     const liveClock = Effect.runSync(Effect.service(Clock.Clock));
-    const harness = await createRewindHarness(
-      ProviderDriverKind.make("claudeAgent"),
-      [1, 2],
-      Deferred.succeed(drainEntered, undefined).pipe(Effect.andThen(Effect.never)),
-      {
-        testClock: {
-          currentTimeMillisUnsafe: () => liveClock.currentTimeMillisUnsafe(),
-          currentTimeNanosUnsafe: () => liveClock.currentTimeNanosUnsafe(),
-          currentTimeMillis: liveClock.currentTimeMillis,
-          currentTimeNanos: liveClock.currentTimeNanos,
-          sleep: (duration) =>
-            Duration.toMillis(duration) === 30_000
-              ? Deferred.succeed(timerEntered, undefined).pipe(
-                  Effect.andThen(Deferred.await(expire)),
-                )
-              : liveClock.sleep(duration),
+    let controlledTimers = 0;
+    const harness = await lifetime.acquire(() =>
+      createRewindHarness(
+        ProviderDriverKind.make("claudeAgent"),
+        [1, 2],
+        Deferred.succeed(drainEntered, undefined).pipe(Effect.andThen(Effect.never)),
+        {
+          rewindLifetime: lifetime,
+          testClock: {
+            currentTimeMillisUnsafe: () => liveClock.currentTimeMillisUnsafe(),
+            currentTimeNanosUnsafe: () => liveClock.currentTimeNanosUnsafe(),
+            currentTimeMillis: liveClock.currentTimeMillis,
+            currentTimeNanos: liveClock.currentTimeNanos,
+            sleep: (duration) =>
+              Duration.toMillis(duration) === 30_000
+                ? Effect.sync(() => {
+                    controlledTimers += 1;
+                    lifetime.record("timer-registered");
+                  }).pipe(
+                    Effect.andThen(Deferred.succeed(timerEntered, undefined)),
+                    Effect.andThen(Deferred.await(expire)),
+                  )
+                : liveClock.sleep(duration),
+          },
         },
-      },
+      ),
+    );
+    const prepared = Effect.runSync(Deferred.make<void>());
+    const originalPrepare = harness.provider.prepareConversationRollback.getMockImplementation()!;
+    harness.provider.prepareConversationRollback.mockImplementationOnce((input) =>
+      originalPrepare(input).pipe(
+        Effect.tap(() =>
+          lifetime.isRetired() ? Effect.void : Deferred.succeed(prepared, undefined),
+        ),
+      ),
     );
     const capture = vi.spyOn(harness.checkpointStore, "captureCheckpoint");
     const restore = vi.spyOn(harness.checkpointStore, "restoreCheckpoint");
     try {
-      await harness.request();
-      await Effect.runPromise(Deferred.await(drainEntered).pipe(Effect.timeout("5 seconds")));
-      await Effect.runPromise(Deferred.await(timerEntered).pipe(Effect.timeout("5 seconds")));
+      lifetime.record("request-start");
+      await lifetime.acquire(() => harness.request());
+      lifetime.record("request-returned");
+      await lifetime.observe(Deferred.await(prepared));
+      lifetime.record("prepare-observed");
+      await lifetime.observe(Deferred.await(drainEntered).pipe(Effect.timeout("5 seconds")));
+      lifetime.record("drain-observed");
+      await lifetime.observe(Deferred.await(timerEntered).pipe(Effect.timeout("5 seconds")));
+      lifetime.record("timer-observed");
+      // Native VCS uses its original clock, so this receipt can describe only
+      // the one unchanged 30-second drain allowance in this no-runtime-event case.
+      expect(controlledTimers).toBe(1);
     } finally {
-      await Effect.runPromise(Deferred.succeed(expire, undefined));
-      await harness.drain();
+      lifetime.record("held-gate-release");
+      releaseHeld();
+      if (!lifetime.isRetired()) {
+        await harness.drain();
+        lifetime.record("final-drain-returned");
+      }
     }
+    lifetime.assertActive();
+    expect(controlledTimers).toBe(1);
     expect(capture).not.toHaveBeenCalled();
     expect(restore).not.toHaveBeenCalled();
     expect(harness.provider.prepareConversationRollback).toHaveBeenCalledTimes(1);
@@ -2229,6 +2577,7 @@ describe("CheckpointReactor", () => {
         payload: { turnCount: 1, detail: new ProviderAdapterRewindOutcomeUnknownError({}).message },
       }),
     );
+    lifetime.record("assertions-returned");
   });
 
   it("does not recreate a removed checkpoint from a retired native generation with an old terminal receipt", async () => {
