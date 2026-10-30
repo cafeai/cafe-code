@@ -828,18 +828,27 @@ describe("Mermaid family probe qualification", () => {
       name: "refuses an exact queued startup marker at the unchanged absolute deadline",
       admitSourceOnReady: false,
       terminal: false,
+      elapsedMs: 10_000,
     },
     {
       name: "refuses initial Family bootstrap at the unchanged absolute deadline",
       admitSourceOnReady: true,
       terminal: false,
+      elapsedMs: 10_000,
     },
     {
       name: "refuses terminal Family readiness at the unchanged absolute deadline",
       admitSourceOnReady: true,
       terminal: true,
+      elapsedMs: 10_000,
     },
-  ])("$name", async ({ admitSourceOnReady, terminal }, { signal }) => {
+    {
+      name: "bounds the separate rejected late-bootstrap witness without admitting expired source",
+      admitSourceOnReady: true,
+      terminal: true,
+      elapsedMs: 100_000,
+    },
+  ])("$name", async ({ admitSourceOnReady, terminal, elapsedMs }, { signal }) => {
     const now = vi.spyOn(performance, "now").mockReturnValue(0);
     const phases: MermaidProbeBootstrapPhase[] = [];
     const close = vi.spyOn(MessagePort.prototype, "close");
@@ -864,7 +873,7 @@ describe("Mermaid family probe qualification", () => {
         );
       }
     }
-    now.mockReturnValue(10_000);
+    now.mockReturnValue(elapsedMs);
     window.dispatchEvent(
       new MessageEvent("message", {
         source: probe.frame.contentWindow,
@@ -878,6 +887,9 @@ describe("Mermaid family probe qualification", () => {
     );
     await expect(probe.result).rejects.toThrow(
       `did not reply (baseline; phase document-constructed) [bootstrap ${terminal ? "receiver-installed" : "not-observed"}]`,
+    );
+    await expect(probe.result).rejects.toThrow(
+      `[late bootstrap ${terminal ? "fixture-ready" : "engine-entered"}; elapsed-ms-capped-60000 ${Math.min(elapsedMs, 60_000)}]`,
     );
     load?.call(probe.frame, new Event("load"));
     expect(phases).toEqual(

@@ -103,9 +103,10 @@ export function browserTestPlan(
           ),
           browser("Mermaid families", [
             ...(selection?.mermaidFamilyFiles ?? browserPolicy.mermaidFamilyFiles),
-            // Local family files exercise independent native engines. Serialize
-            // their admission without changing the per-probe budgets or CI plan.
-            ...(completeLocal ? ["--fileParallelism=false"] : []),
+            // Each file starts full native engines in fresh opaque documents.
+            // Bound overlapping startup in macOS CI and complete local runs;
+            // preserve every probe's absolute allowance and the worker cap.
+            ...(completeLocal || platform === "darwin" ? ["--fileParallelism=false"] : []),
           ]),
           browser(
             "Diagram and table PNG",

@@ -33,7 +33,11 @@ describe("native test plans", () => {
       const testSteps = steps.filter((step) => step.args.includes("test:browser"));
       for (const step of testSteps) {
         expect(step.args).toContain("--maxWorkers=2");
-        expect(step.args).not.toContain("--fileParallelism=false");
+        if (platform === "darwin" && step.name === "Mermaid families") {
+          expect(step.args.filter((arg) => arg === "--fileParallelism=false")).toEqual([
+            "--fileParallelism=false",
+          ]);
+        } else expect(step.args).not.toContain("--fileParallelism=false");
       }
       const index = (selector: string) => steps.findIndex((step) => step.args.includes(selector));
       expect(index("--project=touch")).toBe(index("--project=desktop"));

@@ -290,6 +290,10 @@ jobs:
           name: visualization-qualification-failure-${{ matrix.os }}-${{ github.run_attempt }}
           path: |
             apps/web/.vitest/attachments/failure-screenshots/MermaidFamilies.browser.tsx/
+            apps/web/.vitest/attachments/failure-screenshots/MermaidFamilies.allocation.browser.tsx/
+            apps/web/.vitest/attachments/failure-screenshots/MermaidFamilies.output.browser.tsx/
+            apps/web/.vitest/attachments/failure-screenshots/MermaidFamilies.parsed.browser.tsx/
+            apps/web/.vitest/attachments/failure-screenshots/MermaidFamilies.probe.browser.tsx/
             apps/web/.vitest/attachments/failure-screenshots/MermaidSecurity.browser.tsx/
             apps/web/.vitest/attachments/failure-screenshots/Visualizations.browser.tsx/
             apps/web/.vitest/attachments/failure-screenshots/VisualizationFluid.browser.tsx/

@@ -131,11 +131,20 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
     let phase: ProbePhase = "document-constructed";
     let bootstrapPhase = -1;
     let sourceReserved = false;
+    // A valid next marker can reach the parent after its admission allowance.
+    // Keep that rejected observation separate from accepted readiness. It
+    // cannot advance bootstrapPhase, invoke the observer or authorize source.
+    let lateBootstrap:
+      | { readonly phase: MermaidProbeBootstrapPhase; readonly elapsedMs: number | null }
+      | undefined;
     const failure = (reason: string) =>
       new Error(
         `${options.kind} ${reason} (${options.invocation}; phase ${phase})` +
           (options.bootstrapObservation
             ? ` [bootstrap ${bootstrapPhases[bootstrapPhase] ?? "not-observed"}]`
+            : "") +
+          (lateBootstrap
+            ? ` [late bootstrap ${lateBootstrap.phase}; elapsed-ms-capped-60000 ${lateBootstrap.elapsedMs ?? "unavailable"}]`
             : ""),
       );
     const finish = (outcome: { readonly result: T } | { readonly error: Error }) => {
@@ -166,7 +175,8 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
     // finished, while frame loading, parsing and the reply all share one fixed
     // allowance. Observed breadcrumbs never renew this timer or authorize a
     // retry, and it remains an asynchronous bound rather than a CPU deadline.
-    const deadline = performance.now() + 10_000;
+    const startedAt = performance.now();
+    const deadline = startedAt + 10_000;
     const expired = () => performance.now() >= deadline;
     const timeout = setTimeout(() => finish({ error: failure("did not reply") }), 10_000);
     const sendSource = (readyPhase: "frame-loaded" | "fixture-ready") => {
@@ -222,6 +232,13 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
       // terminal exact marker may own Family source admission; prior/foreign
       // observations cannot renew the timer or authorize a transferred port.
       if (expired()) {
+        const elapsedMs = performance.now() - startedAt;
+        lateBootstrap = {
+          phase: bootstrapPhases[next]!,
+          elapsedMs: Number.isFinite(elapsedMs)
+            ? Math.min(60_000, Math.max(0, Math.floor(elapsedMs)))
+            : null,
+        };
         finish({ error: failure("did not reply") });
         return;
       }
