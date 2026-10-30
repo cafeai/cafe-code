@@ -2149,6 +2149,21 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
       const adapter = yield* makeTestAdapter(wrapperPath);
 
+      // These are passive failure labels, not startup/event readiness receipts.
+      // Preserve the original guard error and cancellation: the observer never
+      // reads the cause, and even a logger defect cannot replace that failure.
+      type GuardPhase = "start-session-join" | "turn-completed" | "send-turn-join";
+      let guardPhase: GuardPhase = "start-session-join";
+      let guardFailureReported = false;
+      const reportGuardFailure = () =>
+        Effect.suspend(() => {
+          if (guardFailureReported) return Effect.void;
+          guardFailureReported = true;
+          return Effect.logError("Synthetic Grok notification lifetime guard failed", {
+            phase: guardPhase,
+          }).pipe(Effect.catchCause(() => Effect.void));
+        });
+
       const runtimeEvents: ProviderRuntimeEvent[] = [];
       const turnCompleted = yield* Deferred.make<void>();
       const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
@@ -2171,7 +2186,11 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
           runtimeMode: "full-access",
         })
         .pipe(Effect.forkChild);
-      yield* Fiber.join(startSessionFiber).pipe(Effect.timeout("10 seconds"));
+      guardPhase = "start-session-join";
+      yield* Fiber.join(startSessionFiber).pipe(
+        Effect.timeout("10 seconds"),
+        Effect.tapError(reportGuardFailure),
+      );
 
       // Forked, and the assertion waits on the projected event rather than on
       // sendTurn: with the consumer dead the turn never settles, so awaiting it
@@ -2179,8 +2198,16 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       const sendTurnFiber = yield* adapter
         .sendTurn({ threadId, input: "hello grok", attachments: [] })
         .pipe(Effect.forkChild);
-      yield* Deferred.await(turnCompleted).pipe(Effect.timeout("10 seconds"));
-      yield* Fiber.join(sendTurnFiber).pipe(Effect.timeout("10 seconds"));
+      guardPhase = "turn-completed";
+      yield* Deferred.await(turnCompleted).pipe(
+        Effect.timeout("10 seconds"),
+        Effect.tapError(reportGuardFailure),
+      );
+      guardPhase = "send-turn-join";
+      yield* Fiber.join(sendTurnFiber).pipe(
+        Effect.timeout("10 seconds"),
+        Effect.tapError(reportGuardFailure),
+      );
 
       const delta = runtimeEvents.find(
         (event) => event.type === "content.delta" && String(event.threadId) === String(threadId),
