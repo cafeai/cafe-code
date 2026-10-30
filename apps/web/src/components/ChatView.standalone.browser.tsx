@@ -955,7 +955,78 @@ describe("ChatView full app (standalone)", () => {
         await mounted.cleanup();
       }
     });
-    it("rechecks the actual steer session's account after deferred image preparation without claiming or consuming input", async () => {
+    it("rechecks the actual steer session's account after deferred image preparation without claiming or consuming input", async (context) => {
+      const originalRead = FileReader.prototype.readAsDataURL;
+      const prepared: { reader: FileReader; blob: Blob }[] = [];
+      const nativeReads = new Set<{ reader: FileReader; done: Promise<void> }>();
+      let restoreReadSpy: (() => void) | undefined;
+      let restorePersistenceSpy: (() => void) | undefined;
+      let retirePersistenceRead: () => void = () => undefined;
+      let retiringReads = false;
+      const startNativeReader = (reader: FileReader, blob: Blob) => {
+        let resolveDone!: () => void;
+        const done = new Promise<void>((resolve) => {
+          resolveDone = resolve;
+        });
+        const observed = { reader, done };
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          reader.removeEventListener("loadend", finish);
+          nativeReads.delete(observed);
+          resolveDone();
+        };
+        // Completion is native retirement evidence only, never a replacement
+        // data/result event or proof that production accepted the image.
+        reader.addEventListener("loadend", finish, { once: true });
+        nativeReads.add(observed);
+        try {
+          originalRead.call(reader, blob);
+        } catch (failure) {
+          finish();
+          throw failure;
+        }
+      };
+      const releaseReaders = () => {
+        caller.assertActive();
+        for (const { reader, blob } of prepared.splice(0)) startNativeReader(reader, blob);
+      };
+      const retireReaders = () => {
+        retiringReads = true;
+        retirePersistenceRead();
+        // These calls were held before native IO admission. Never start them
+        // after cancellation, manufacture an event/result, or replay an input.
+        prepared.length = 0;
+        const failures: unknown[] = [];
+        for (const { reader } of nativeReads) {
+          try {
+            if (reader.readyState === FileReader.LOADING) reader.abort();
+          } catch (failure) {
+            failures.push(failure);
+          }
+        }
+        if (failures.length === 1) throw failures[0];
+        if (failures.length > 1)
+          throw new AggregateError(failures, "Synthetic image-reader retirement failed.");
+      };
+      const caller = createChatViewCallerOwner(context, mountChatView, {
+        label: "pending-steer",
+        beforeDrain: retireReaders,
+        afterUnmount: async () => {
+          try {
+            // Only already-issued native reads have a close to join. The
+            // retirement fence admits no new read while this set drains.
+            while (nativeReads.size > 0)
+              await Promise.allSettled([...nativeReads].map(({ done }) => done));
+          } finally {
+            restorePersistenceSpy?.();
+            restorePersistenceSpy = undefined;
+            restoreReadSpy?.();
+            restoreReadSpy = undefined;
+          }
+        },
+      });
       const original = createSnapshotForTargetUser({
         targetMessageId: MessageId.make("live-steer-policy"),
         targetText: "Active steer policy fixture",
@@ -986,7 +1057,7 @@ describe("ChatView full app (standalone)", () => {
             : null,
         })),
       };
-      const mounted = await mountChatView({
+      await caller.mount({
         viewport: WIDE_FOOTER_VIEWPORT,
         snapshot: base,
         configureFixture: (next) => {
@@ -1017,16 +1088,60 @@ describe("ChatView full app (standalone)", () => {
           };
         },
       });
-      const originalRead = FileReader.prototype.readAsDataURL;
-      const prepared: { reader: FileReader; blob: Blob }[] = [];
-      let restoreReadSpy: (() => void) | undefined;
-      const releaseReaders = () => {
-        for (const { reader, blob } of prepared.splice(0)) originalRead.call(reader, blob);
-      };
       const prompt = "Keep this exact unsent steer input";
       try {
-        await waitForServerConfigToApply();
+        await caller.own("config", () => waitForServerConfigToApply());
         useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+        const imageFile = new File(["x"], "draft.png", { type: "image/png" });
+        let persistenceStarted = false;
+        let persistenceSettled = false;
+        let resolvePersistence!: () => void;
+        let rejectPersistence!: (failure: Error) => void;
+        let detachPersistence: () => void = () => undefined;
+        const persistenceRead = new Promise<void>((resolve, reject) => {
+          resolvePersistence = resolve;
+          rejectPersistence = reject;
+        });
+        // Retirement can precede the original await; retain its rejection for
+        // that await without creating an unhandled test-owned promise tail.
+        void persistenceRead.catch(() => undefined);
+        retirePersistenceRead = () => {
+          detachPersistence();
+          if (persistenceSettled) return;
+          persistenceSettled = true;
+          rejectPersistence(new Error("The exact fixture persistence read was retired."));
+        };
+        const persistenceSpy = vi
+          .spyOn(FileReader.prototype, "readAsDataURL")
+          .mockImplementation(function (this: FileReader, blob: Blob) {
+            if (retiringReads) throw new Error("The exact fixture image read was retired.");
+            caller.assertActive();
+            if (blob === imageFile && !persistenceStarted) {
+              persistenceStarted = true;
+              const reader = this;
+              const complete = () => {
+                if (persistenceSettled) return;
+                persistenceSettled = true;
+                detachPersistence();
+                if (typeof reader.result === "string") resolvePersistence();
+                else
+                  rejectPersistence(
+                    new Error("The exact fixture persistence read returned no image data."),
+                  );
+              };
+              detachPersistence = () => reader.removeEventListener("loadend", complete);
+              reader.addEventListener("loadend", complete, { once: true });
+            }
+            // Observe, never hold, the original persistence read. The later
+            // independent spy still defers only steer attachment preparation.
+            try {
+              startNativeReader(this, blob);
+            } catch (failure) {
+              if (blob === imageFile) retirePersistenceRead();
+              throw failure;
+            }
+          });
+        restorePersistenceSpy = () => persistenceSpy.mockRestore();
         useComposerDraftStore.getState().addImages(THREAD_REF, [
           {
             id: "live-steer-image",
@@ -1035,39 +1150,52 @@ describe("ChatView full app (standalone)", () => {
             mimeType: "image/png",
             sizeBytes: 1,
             previewUrl: "data:image/png;base64,eA==",
-            file: new File(["x"], "draft.png", { type: "image/png" }),
+            file: imageFile,
           },
         ]);
+        await caller.own("attachments", () => persistenceRead);
+        restorePersistenceSpy();
+        restorePersistenceSpy = undefined;
         // Let the independent composer image-persistence effect finish its
         // own read first. The only deferred read below is turn preparation,
         // not an arbitrary earlier image/storage operation.
-        await vi.waitFor(() =>
-          expect(
-            useComposerDraftStore
-              .getState()
-              .getComposerDraft(THREAD_REF)
-              ?.persistedAttachments.map((image) => image.id),
-          ).toEqual(["live-steer-image"]),
+        await caller.own("attachments", () =>
+          vi.waitFor(() =>
+            expect(
+              useComposerDraftStore
+                .getState()
+                .getComposerDraft(THREAD_REF)
+                ?.persistedAttachments.map((image) => image.id),
+            ).toEqual(["live-steer-image"]),
+          ),
         );
         const readSpy = vi
           .spyOn(FileReader.prototype, "readAsDataURL")
           .mockImplementation(function (this: FileReader, blob: Blob) {
+            if (retiringReads) throw new Error("The exact fixture image read was retired.");
+            caller.assertActive();
             prepared.push({ reader: this, blob });
           });
         restoreReadSpy = () => readSpy.mockRestore();
-        await vi.waitFor(() =>
-          expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(prompt),
+        await caller.own("editor", () =>
+          vi.waitFor(() =>
+            expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+              prompt,
+            ),
+          ),
         );
         // Direct steering is the dedicated keyboard action; the visible
         // primary running-turn button intentionally queues instead.
-        (await waitForComposerEditor()).focus();
-        await userEvent.keyboard("{Control>}{Enter}{/Control}");
-        await vi.waitFor(() => expect(prepared).toHaveLength(1));
-        await revokeLiveAccountCapability();
+        (await caller.own("editor", () => waitForComposerEditor())).focus();
+        await caller.own("steer", () => userEvent.keyboard("{Control>}{Enter}{/Control}"));
+        await caller.own("attachments", () => vi.waitFor(() => expect(prepared).toHaveLength(1)));
+        await caller.own("config", () => revokeLiveAccountCapability());
         releaseReaders();
-        await vi.waitFor(() =>
-          expect(document.body.textContent).toContain(
-            "This provider runtime does not support the account subagent limit.",
+        await caller.own("snapshot", () =>
+          vi.waitFor(() =>
+            expect(document.body.textContent).toContain(
+              "This provider runtime does not support the account subagent limit.",
+            ),
           ),
         );
         expect(
@@ -1086,9 +1214,7 @@ describe("ChatView full app (standalone)", () => {
         expect(persisted.ok).toBe(true);
         if (persisted.ok) expect(persisted.value.claimed).toHaveLength(0);
       } finally {
-        restoreReadSpy?.();
-        releaseReaders();
-        await mounted.cleanup();
+        await caller.cleanup();
       }
     });
     it("does not borrow an unsent supported account's capability when the active steer owner is unrecorded", async () => {

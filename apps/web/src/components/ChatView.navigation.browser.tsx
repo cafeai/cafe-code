@@ -2055,66 +2055,88 @@ describe("ChatView full app (navigation)", () => {
     }
   });
 
-  it("searches projects by path and opens the latest thread for that project", async () => {
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotWithSecondaryProject(),
-      configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          settings: {
-            ...nextFixture.serverConfig.settings,
-            defaultThreadEnvMode: "worktree",
-          },
-          keybindings: [
-            {
-              command: "commandPalette.toggle",
-              shortcut: {
-                key: "k",
-                metaKey: false,
-                ctrlKey: false,
-                shiftKey: false,
-                altKey: false,
-                modKey: true,
-              },
-              whenAst: {
-                type: "not",
-                node: { type: "identifier", name: "modelPickerOpen" },
-              },
-            },
-          ],
-        };
-      },
+  it("searches projects by path and opens the latest thread for that project", async (context) => {
+    // Register before mounting; the shared afterEach joins this exact caller
+    // before resetting DOM/RPC state, including an unfinished native action.
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "navigation-project-search",
     });
+    await owner.run(async () => {
+      const mounted = await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithSecondaryProject(),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            settings: {
+              ...nextFixture.serverConfig.settings,
+              defaultThreadEnvMode: "worktree",
+            },
+            keybindings: [
+              {
+                command: "commandPalette.toggle",
+                shortcut: {
+                  key: "k",
+                  metaKey: false,
+                  ctrlKey: false,
+                  shiftKey: false,
+                  altKey: false,
+                  modKey: true,
+                },
+                whenAst: {
+                  type: "not",
+                  node: { type: "identifier", name: "modelPickerOpen" },
+                },
+              },
+            ],
+          };
+        },
+      });
 
-    try {
-      await waitForServerConfigToApply();
-      await waitForCommandPaletteShortcutLabel();
+      await owner.own("config", () => waitForServerConfigToApply());
+      await owner.own("controls", () => waitForCommandPaletteShortcutLabel());
       const palette = page.getByTestId("command-palette");
-      await openCommandPaletteFromTrigger();
-
-      await expect.element(palette).toBeInTheDocument();
-      await page.getByPlaceholder("Search commands, projects and chats…").fill("clients/docs");
-      await expect.element(palette.getByText("Docs Portal", { exact: true })).toBeInTheDocument();
-      await expect
-        .element(palette.getByText("/repo/clients/docs-portal", { exact: true }))
-        .toBeInTheDocument();
-      await palette.getByText("Docs Portal", { exact: true }).click();
-
-      const nextPath = await waitForURL(
-        mounted.router,
-        (path) => path === serverThreadPath("thread-secondary-project" as ThreadId),
-        "Route should have changed to the latest thread for the selected project.",
+      // Preserve the helper's exact visibility/click/open sequence while
+      // fencing each new native step after the previous await.
+      const trigger = page.getByTestId("command-palette-trigger");
+      await owner.own("controls", () => expect.element(trigger).toBeInTheDocument());
+      await owner.own("input", () => trigger.click());
+      await owner.own("rail", () =>
+        waitForElement(
+          () => document.querySelector('[data-testid="command-palette"]'),
+          "Command palette should have opened from the sidebar trigger.",
+        ),
       );
+
+      await owner.own("rail", () => expect.element(palette).toBeInTheDocument());
+      await owner.own("input", () =>
+        page.getByPlaceholder("Search commands, projects and chats…").fill("clients/docs"),
+      );
+      await owner.own("first-row", () =>
+        expect.element(palette.getByText("Docs Portal", { exact: true })).toBeInTheDocument(),
+      );
+      await owner.own("value", () =>
+        expect
+          .element(palette.getByText("/repo/clients/docs-portal", { exact: true }))
+          .toBeInTheDocument(),
+      );
+      await owner.own("input", () => palette.getByText("Docs Portal", { exact: true }).click());
+
+      const nextPath = await owner.own("route", () =>
+        waitForURL(
+          mounted.router,
+          (path) => path === serverThreadPath("thread-secondary-project" as ThreadId),
+          "Route should have changed to the latest thread for the selected project.",
+        ),
+      );
+      owner.assertActive();
       expect(nextPath).toBe(serverThreadPath("thread-secondary-project" as ThreadId));
       expect(
         useComposerDraftStore
           .getState()
           .getDraftThread(threadRefFor("thread-secondary-project" as ThreadId)),
       ).toBeNull();
-    } finally {
-      await mounted.cleanup();
-    }
+    });
   });
 
   it("creates a new thread from project search when no active project thread exists", async () => {

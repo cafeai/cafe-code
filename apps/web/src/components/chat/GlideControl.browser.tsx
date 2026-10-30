@@ -583,31 +583,80 @@ it("switches computer use on and off with exact chat authority and waits for con
   }
 });
 
-it.each(["approval-required", "full-access"] as const)(
-  "restores the saved switch and allows revocation with missing OS permissions in %s mode",
-  async (runtimeMode) => {
-    fixture.control
-      .mockResolvedValueOnce({
-        ...state,
-        enabled: true,
-        fullAccess: runtimeMode === "full-access",
-        accessibility: false,
-        screenRecording: false,
-      })
-      .mockResolvedValue(state);
-    await render(
-      <GlideControl environmentId={environmentId} threadId={threadId} runtimeMode={runtimeMode} />,
-    );
-    await expect.element(button()).toHaveAttribute("aria-pressed", "true");
-    await button().click();
-    await expect.element(button()).toHaveAttribute("aria-pressed", "false");
-    expect(fixture.control.mock.calls.at(-1)?.[0]).toEqual({
-      action: "set-enabled",
-      threadId,
-      enabled: false,
-    });
-  },
-);
+for (const runtimeMode of ["approval-required", "full-access"] as const) {
+  it(
+    "restores the saved switch and allows revocation with missing OS permissions in " +
+      runtimeMode +
+      " mode",
+    async (context) => {
+      // Public retirement is installed before render/native acquisition. This
+      // exact existing owner joins actions and replies before shared mock reset.
+      await withActivityFixture(context, async (lifetime) => {
+        let enabled = true;
+        const nativeStatus: GlideControlResult = {
+          ...state,
+          enabled: true,
+          fullAccess: runtimeMode === "full-access",
+          accessibility: false,
+          screenRecording: false,
+        };
+        fixture.control.mockImplementation(
+          (input: { action: string; threadId?: ThreadId; enabled?: boolean }) => {
+            if (
+              input.threadId !== threadId ||
+              (input.action !== "status" &&
+                input.action !== "activity" &&
+                input.action !== "set-enabled") ||
+              (input.action === "set-enabled" && input.enabled !== false)
+            ) {
+              return lifetime.reply(
+                Promise.reject(new Error("Unexpected synthetic Glide authority mutation.")),
+              );
+            }
+            // Status/focus/activity reads observe stable saved authority and missing
+            // permissions. Only the original explicit OFF mutation may revoke it.
+            if (input.action === "set-enabled") enabled = false;
+            return lifetime.reply(Promise.resolve({ ...nativeStatus, enabled }));
+          },
+        );
+        await lifetime.mount(
+          <GlideControl
+            environmentId={environmentId}
+            threadId={threadId}
+            runtimeMode={runtimeMode}
+          />,
+        );
+        await lifetime.owned(() =>
+          expect.element(button()).toHaveAttribute("aria-pressed", "true"),
+        );
+        await lifetime.owned(() => button().click());
+        await lifetime.owned(() =>
+          expect.element(button()).toHaveAttribute("aria-pressed", "false"),
+        );
+        // Legitimate reads may follow a click. Assert every mutation, never the
+        // last unrelated global call, so polls cannot hide an extra grant/action.
+        expect(
+          readOnlyInputs().filter(
+            (input) => input.action !== "status" && input.action !== "activity",
+          ),
+        ).toEqual([
+          {
+            action: "set-enabled",
+            threadId,
+            enabled: false,
+          },
+        ]);
+        for (const input of readOnlyInputs()) {
+          if (input.action !== "set-enabled")
+            expect(input).toEqual({
+              action: expect.stringMatching(/^(status|activity)$/),
+              threadId,
+            });
+        }
+      });
+    },
+  );
+}
 
 it("requires Full access, then opens setup on first click without enabling or opening Settings", async () => {
   fixture.control.mockResolvedValue({
