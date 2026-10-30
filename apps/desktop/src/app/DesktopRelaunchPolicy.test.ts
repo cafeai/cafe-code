@@ -3,16 +3,19 @@ import { describe, expect, it } from "vitest";
 import { usesDesktopRestartSupervisor } from "./DesktopRelaunchPolicy.ts";
 
 describe("desktop native source restart ownership", () => {
-  it("hands a built Debug restart to the stable native parent", () => {
-    expect(
-      usesDesktopRestartSupervisor({
-        isDevelopment: false,
-        isPackaged: false,
-        platform: "darwin",
-        nativeHostVersion: "1",
-      }),
-    ).toBe(true);
-  });
+  it.each(["1", "2"])(
+    "hands a built Debug restart to its version %s native parent",
+    (nativeHostVersion) => {
+      expect(
+        usesDesktopRestartSupervisor({
+          isDevelopment: false,
+          isPackaged: false,
+          platform: "darwin",
+          nativeHostVersion,
+        }),
+      ).toBe(true);
+    },
+  );
 
   it("preserves release and explicitly selected launch contexts", () => {
     for (const input of [

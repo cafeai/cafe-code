@@ -139,6 +139,7 @@ function TokenCountFigure({
   value,
   context,
   suffix = " tokens",
+  stackSuffix = false,
   className,
   valueClassName,
   align = "left",
@@ -146,13 +147,14 @@ function TokenCountFigure({
   value: number;
   context: TokenFigureContext;
   suffix?: string;
+  stackSuffix?: boolean;
   className?: string;
   valueClassName?: string;
   align?: "left" | "right";
 }) {
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
-  const exact = `${formatFullTokenCount(value)}${suffix}`;
+  const exact = formatFullTokenCount(value);
   return (
     <div
       className={cn("min-w-0", align === "right" && "text-right", className)}
@@ -166,6 +168,7 @@ function TokenCountFigure({
         data-usage-token-full={context}
       >
         {exact}
+        {stackSuffix ? <span className="block">{suffix}</span> : suffix}
       </div>
       <div
         className="mt-0.5 text-2xs tabular-nums text-subtle-foreground"
@@ -334,6 +337,7 @@ function StatTile(props: StatTileProps) {
         <TokenCountFigure
           value={props.rawTokens}
           context={`composition-${props.id}`}
+          stackSuffix
           className="mt-1"
           valueClassName="text-lg sm:text-xl"
         />

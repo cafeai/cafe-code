@@ -180,6 +180,8 @@ export interface HistoricalWorkLogSummary {
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
   activityKind: OrchestrationThreadActivity["kind"];
+  operationStatus?: ClaudeCommandInspection["status"];
+  operationCompletedAt?: string;
   collapseKey?: string;
   toolCallId?: string;
   /** Content-free duplicate-occurrence witness; stripped before rendering. */
@@ -766,6 +768,8 @@ export function deriveWorkLogEntries(
   ).map(
     ({
       activityKind: _activityKind,
+      operationStatus: _operationStatus,
+      operationCompletedAt: _operationCompletedAt,
       collapseKey: _collapseKey,
       diagnosticEchoKey: _diagnosticEchoKey,
       ...entry
@@ -1217,9 +1221,9 @@ function toDerivedWorkLogEntry(
       ? stripTrailingExitCode(payload.detail).output
       : null
     : extractActivityDetail(activity.kind, payload, title ?? activity.summary);
-  const toolCallId = isTaskActivity
-    ? null
-    : (readWorkLogOperationIdentity(activity)?.id ?? extractToolCallId(payload));
+  const toolCallId =
+    readWorkLogOperationIdentity(activity)?.id ??
+    (isTaskActivity ? null : extractToolCallId(payload));
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
     turnId: activity.turnId,
@@ -1233,6 +1237,17 @@ function toDerivedWorkLogEntry(
           ? "info"
           : activity.tone,
     activityKind: activity.kind,
+    ...((activity.kind === "tool.completed" || activity.kind === "task.completed") &&
+    Number.isFinite(Date.parse(activity.createdAt))
+      ? { operationCompletedAt: activity.createdAt }
+      : {}),
+    ...(payload?.status === "inProgress" ||
+    payload?.status === "completed" ||
+    payload?.status === "failed"
+      ? { operationStatus: payload.status }
+      : payload?.status === "stopped" && toolCallId && isTaskActivity
+        ? { operationStatus: "failed" as const }
+        : {}),
   };
   const publicSummary =
     activity.kind === "reasoning.summary" ? readProviderPublicSummary(payload) : undefined;
@@ -1334,8 +1349,25 @@ function toDerivedWorkLogEntry(
 function foldClaudeOperationSnapshots(entries: DerivedWorkLogEntry[]): DerivedWorkLogEntry[] {
   const folded: DerivedWorkLogEntry[] = [];
   const positions = new Map<string, number>();
+  const commandKey = (entry: DerivedWorkLogEntry) =>
+    entry.turnId && entry.toolCallId
+      ? JSON.stringify([entry.turnId, "command", entry.toolCallId])
+      : undefined;
+  // Older background edges omitted the inspection marker. Only an admitted
+  // command in this bounded input can supply its disclosure; native identity
+  // can join lifecycle metadata but never promote arbitrary legacy tool JSON.
+  const inspectedCommands = new Set(
+    entries.filter((entry) => entry.commandInspection).map(commandKey),
+  );
   for (const entry of entries) {
-    const kind = entry.publicSummary ? "summary" : entry.commandInspection ? "command" : null;
+    const keyForCommand = commandKey(entry);
+    const isCommandLifecycle =
+      keyForCommand !== undefined &&
+      inspectedCommands.has(keyForCommand) &&
+      (isCollapsibleToolLifecycleActivity(entry.activityKind) ||
+        entry.activityKind === "task.progress" ||
+        entry.activityKind === "task.completed");
+    const kind = entry.publicSummary ? "summary" : isCommandLifecycle ? "command" : null;
     if (!kind || !entry.toolCallId || !entry.turnId) {
       folded.push(entry);
       continue;
@@ -1351,7 +1383,63 @@ function foldClaudeOperationSnapshots(entries: DerivedWorkLogEntry[]): DerivedWo
     // A delayed replay/update cannot revive an already terminal operation.
     // Summary completion may have a same-status proven snapshot repair, but
     // an ordinary tool's authoritative completion is its final disclosure.
-    if (previous.commandInspection && previous.activityKind === "tool.completed") continue;
+    if (kind === "command") {
+      // Bash can return a successful background-start receipt before the
+      // associated native task finishes. Its exact task outcome still belongs
+      // to this command; ordinary delayed tool updates cannot reopen it.
+      const taskCompletion =
+        entry.activityKind === "task.completed" && previous.activityKind !== "task.completed";
+      if (
+        previous.commandInspection &&
+        ((isCommandCompletion(previous) && !taskCompletion) ||
+          entry.activityKind === "task.progress")
+      )
+        continue;
+      const merged =
+        entry.commandInspection || !previous.commandInspection
+          ? mergeDerivedWorkLogEntries(previous, entry)
+          : { ...previous, activityKind: entry.activityKind };
+      const terminal = taskCompletion
+        ? entry
+        : isCommandCompletion(previous)
+          ? previous
+          : isCommandCompletion(entry)
+            ? entry
+            : undefined;
+      const status =
+        isCommandCompletion(previous) && previous.operationStatus === "failed"
+          ? "failed"
+          : (terminal?.operationStatus ?? entry.operationStatus ?? previous.operationStatus);
+      if (merged.commandInspection) {
+        merged.commandInspection = {
+          ...merged.commandInspection,
+          ...(status ? { status } : {}),
+          ...(terminal?.operationCompletedAt &&
+          (taskCompletion || !merged.commandInspection.completedAt)
+            ? { completedAt: terminal.operationCompletedAt }
+            : {}),
+        };
+        // Generic task summaries and legacy output never replace the admitted
+        // description, command or output, including copy/search presentation.
+        delete merged.detail;
+        delete merged.command;
+        delete merged.rawCommand;
+        if (merged.commandInspection.description)
+          merged.detail = merged.commandInspection.description;
+        if (merged.commandInspection.command) merged.command = merged.commandInspection.command;
+      }
+      folded[position] = {
+        ...merged,
+        ...(terminal ? { activityKind: terminal.activityKind } : {}),
+        ...(terminal?.operationCompletedAt
+          ? { operationCompletedAt: terminal.operationCompletedAt }
+          : {}),
+        ...(status ? { operationStatus: status } : {}),
+        id: previous.id,
+        createdAt: previous.createdAt,
+      };
+      continue;
+    }
     const previousSummaryStatus = previous.publicSummary?.status;
     if (
       (previousSummaryStatus === "completed" || previousSummaryStatus === "failed") &&
@@ -1362,6 +1450,10 @@ function foldClaudeOperationSnapshots(entries: DerivedWorkLogEntry[]): DerivedWo
     folded[position] = { ...merged, id: previous.id, createdAt: previous.createdAt };
   }
   return folded;
+}
+
+function isCommandCompletion(entry: DerivedWorkLogEntry): boolean {
+  return entry.activityKind === "tool.completed" || entry.activityKind === "task.completed";
 }
 
 function providerDiagnosticSubjectKey(entry: DerivedWorkLogEntry): string | null {

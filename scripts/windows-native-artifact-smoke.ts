@@ -231,7 +231,16 @@ export function inspectWindowsInstallFailure(
       join(installDir, "resources", "managed-runtime", "install-managed-provider-runtime.ps1"),
     ),
     managedNode: pathExists(
-      join(installDir, "resources", "managed-runtime", "node", "win-x64", "node.exe"),
+      join(
+        installDir,
+        "resources",
+        "managed-runtime",
+        "providers",
+        "win-x64",
+        "content",
+        "node",
+        "node.exe",
+      ),
     ),
     installerOptions: pathExists(join(cafeRoot, "installer-options.json")),
     bootstrapLog: pathExists(join(cafeRoot, "installer-managed-runtime.log")),

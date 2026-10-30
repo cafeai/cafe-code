@@ -49,10 +49,10 @@ function Write-JsonFile {
   $Value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
-function Resolve-ManagedNodeSource {
+function Resolve-ManagedBundleSource {
   param([string]$InstallDir)
 
-  $nodeRoot = Join-Path $InstallDir "resources\managed-runtime\node"
+  $providersRoot = Join-Path $InstallDir "resources\managed-runtime\providers"
   $processorArchitecture = [Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE")
   $processorArchitecture6432 = [Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITEW6432")
   $architecture = "$processorArchitecture $processorArchitecture6432"
@@ -64,15 +64,15 @@ function Resolve-ManagedNodeSource {
   }
 
   foreach ($candidateName in $candidateNames) {
-    $candidate = Join-Path $nodeRoot $candidateName
+    $candidate = Join-Path $providersRoot $candidateName
     if (
-      (Test-Path -LiteralPath (Join-Path $candidate "node.exe") -PathType Leaf)
+      (Test-Path -LiteralPath (Join-Path $candidate "content\node\node.exe") -PathType Leaf)
     ) {
       return $candidate
     }
   }
 
-  throw "Could not find packaged managed Node runtime under $nodeRoot."
+  throw "Could not find packaged managed Node runtime under $providersRoot."
 }
 
 function Assert-ManagedDirectory {
@@ -165,10 +165,8 @@ try {
   $resolvedInstallDir = Resolve-InstallerPath -Value $InstallDir -EnvironmentName "ProgramFiles" -Description "installation directory"
   Assert-ManagedDirectory -Path $managedRoot
 
-  $nodeSource = Resolve-ManagedNodeSource -InstallDir $resolvedInstallDir
-  $architecture = Split-Path -Leaf $nodeSource
-  $bundleSource = Join-Path $resolvedInstallDir "resources\managed-runtime\providers\$architecture"
-  $nodePath = Join-Path $nodeSource "node.exe"
+  $bundleSource = Resolve-ManagedBundleSource -InstallDir $resolvedInstallDir
+  $nodePath = Join-Path $bundleSource "content\node\node.exe"
   $installer = Join-Path $resolvedInstallDir "resources\managed-runtime\install-runtime.mjs"
   $settingsPath = Join-Path $resolvedUserProfile ".cafe-code\userdata\settings.json"
   # Hold an OS-enforced installer guard. A dead installer releases it without

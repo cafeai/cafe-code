@@ -210,11 +210,76 @@ First-run bundled preferences publish only after successful preparation and acti
 preferences remain intact. Failures return nonzero to NSIS and preserve the prior generation
 and recovery records. An interrupted preparation child cannot activate its files.
 
+The packaged Node distribution lives once under
+`resources/managed-runtime/providers/win-<arch>/content/node`. The installer uses
+that same sealed bundle copy to prepare the new generation; there is no second
+bootstrap Node distribution. Generation preparation still verifies the complete
+inventory and exact runtime/provider versions before activation. This changes
+packaged inputs only, not retained generations or existing user data.
+
 Repair by rerunning the reviewed installer. Selected generations are immutable to Cafe's package
 update controls. Old `current` paths remain compatible when no activation record exists; an
 invalid activation record fails closed. Application updates retain the existing `--updated`
 exclusion from fresh provider bootstrap. Neither repair nor uninstall guesses which unselected
 or running generation can be deleted; retained user runtime/data policy is unchanged.
+
+## Desktop payload selection
+
+Release packaging and ordinary source application launches share the narrow
+exclusions in `scripts/lib/desktop-runtime-files.ts` and the production runtime
+workspace. Local builds copy the selected installed dependencies into a private,
+content-addressed generation under `node_modules/.cache/cafecode-runtime-dependencies`.
+The desktop and backend install the synchronous module resolver before importing
+application code: a missing package/file cannot resolve through the checkout's
+larger ancestor dependency tree. Packaged builds apply that same refusal inside
+their staged runtime. The fixed PDF extraction child installs its own resolver
+before importing PDF.js, so optional Canvas cannot return through an ancestor.
+
+The checkout still installs development tools and types, which are required for
+compilation, lint and tests. Application runtimes use the filtered copy. Every
+build rechecks complete selected bytes before reusing a dependency generation;
+changed or corrupt generations get separate copies, leaving held older copies
+alone. Source Debug receipts bind the private generation pointer, which is
+excluded from desktop artifacts. Standalone npm packaging removes that pointer
+and requalifies its copied Debug closure; its consumer-installed dependencies
+retain their existing npm contract.
+
+Backend/desktop bundles and renderer production builds omit source maps by
+default. `CAFE_CODE_WEB_SOURCEMAP=1` explicitly enables renderer build maps for a
+diagnostic build; packaging still excludes maps. Vite's development transforms
+retain their normal debugging support. Application-version receipts bind the actual renderer/backend
+JavaScript before and after staging, and final archive hashes and native signing
+cover the selected shipping payload.
+
+Both production Claude query paths provide the selected system or managed CLI
+as `pathToClaudeCodeExecutable`. Packaging therefore retains the JavaScript Agent
+SDK but omits its unused optional native CLI packages. The separate Anthropic API
+SDK remains a development peer for SDK types and is omitted from the installed
+runtime; initialization qualification exercises the real Agent SDK without either
+fallback payload. The Windows offline provider bundle remains included.
+
+PDF attachments use the legacy PDF.js text parser and its sibling worker, with
+the CMaps, standard fonts and decoder assets retained. Packaging omits the modern
+duplicate, browser viewer, alternate builds and optional Canvas/Skia packages.
+Qualification compiles the production extraction helper against that selected
+package tree and checks Latin/non-Latin text, empty/malformed input and the
+original 200-page bound without Canvas. Source-only Effect package trees are
+also omitted; their compiled JavaScript and licenses remain included.
+
+The backend bundles the patch-parser portion of `@pierre/diffs`, allowing its
+unused browser renderers and highlighters to be discarded. The desktop runtime
+workspace consequently does not ship the full diff/highlighter dependency tree;
+the web build retains its normal highlighting features. The parser's Apache
+license remains in desktop `third-party-licenses` resources. Isolated execution
+of the actual bundled parser qualifies the dependency closure.
+
+Electron locales are limited to Cafe's English, Japanese and Korean interface
+languages, including both the macOS `en` and Windows/Linux `en-US` resource
+spellings. Source launchers prune their fresh copied Electron runtime to the
+same language set before signing/launch, under a new cache namespace; installed
+Electron and older held source runtimes are unchanged. ICU, native runtime libraries, PTYs, feature assets and both validated
+web compression representations retain their existing behavior. These package
+reductions do not change release quality, signing, notarization or update gates.
 
 ## Runtime Behavior
 

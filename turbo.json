@@ -48,6 +48,14 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", "dist-electron/**"]
     },
+    "@cafeai/cafe-code#build": {
+      "cache": false,
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "@cafecode/desktop#build": {
+      "cache": false
+    },
     "dev": {
       "dependsOn": ["@cafecode/contracts#build"],
       "cache": false,

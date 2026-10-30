@@ -3,7 +3,7 @@
   "extends": ["//"],
   "tasks": {
     "build": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["^build", "@cafeai/cafe-code#build"],
       "outputs": ["dist-electron/**"],
     },
     "dev": {

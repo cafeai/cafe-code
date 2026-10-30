@@ -35,6 +35,16 @@ export function readWorkLogOperationIdentity(activity: {
     return id ? { kind: "summary", id } : undefined;
   }
   if (
+    activity.kind === "task.started" ||
+    activity.kind === "task.progress" ||
+    activity.kind === "task.completed"
+  ) {
+    // Explicit native task/tool correlation from trusted ingestion, never a
+    // task id, description or control target guessed to be a tool identity.
+    const id = readWorkLogOperationId(ownValue(activity.payload, "workLogToolCallId"));
+    return id ? { kind: "tool", id } : undefined;
+  }
+  if (
     activity.kind !== "tool.started" &&
     activity.kind !== "tool.updated" &&
     activity.kind !== "tool.completed"

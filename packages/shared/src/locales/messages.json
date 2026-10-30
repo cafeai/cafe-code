@@ -323,11 +323,11 @@
   },
   "About cost estimates": {
     "message": "About cost estimates",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:747"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:751"]
   },
   "About estimated cost": {
     "message": "About estimated cost",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:772"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:776"]
   },
   "About follow-up runs": {
     "message": "About follow-up runs",
@@ -339,7 +339,7 @@
   },
   "About partial estimate": {
     "message": "About partial estimate",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:855"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:859"]
   },
   "About reloading": {
     "message": "About reloading",
@@ -407,11 +407,11 @@
   },
   "About time spent generating": {
     "message": "About time spent generating",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:989"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:993"]
   },
   "About unattributed usage": {
     "message": "About unattributed usage",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1031"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1035"]
   },
   "About unsandboxed checks": {
     "message": "About unsandboxed checks",
@@ -433,8 +433,8 @@
     "message": "About {value0}",
     "locations": [
       "apps/web/src/components/settings/ProviderSettingsForm.tsx:379",
-      "apps/web/src/components/settings/UsageCostSection.tsx:256",
-      "apps/web/src/components/settings/UsageCostSection.tsx:328"
+      "apps/web/src/components/settings/UsageCostSection.tsx:259",
+      "apps/web/src/components/settings/UsageCostSection.tsx:331"
     ]
   },
   "Absolute path": {
@@ -1343,7 +1343,7 @@
   },
   "Axiom reports settled costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.": {
     "message": "Axiom reports settled costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:947"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:951"]
   },
   "Axiom verification": {
     "message": "Axiom verification",
@@ -1576,11 +1576,11 @@
   },
   "Cache writes": {
     "message": "Cache writes",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:674"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:678"]
   },
   "Cache-write duration is unknown for {tokens} tokens; the estimate uses the regular cache-write rate for those tokens.": {
     "message": "Cache-write duration is unknown for {tokens} tokens; the estimate uses the regular cache-write rate for those tokens.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:802"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:806"]
   },
   "Cached attestation report": {
     "message": "Cached attestation report",
@@ -1589,8 +1589,8 @@
   "Cached input": {
     "message": "Cached input",
     "locations": [
-      "apps/web/src/components/settings/UsageCostSection.tsx:657",
-      "apps/web/src/components/settings/UsageCostSection.tsx:912"
+      "apps/web/src/components/settings/UsageCostSection.tsx:661",
+      "apps/web/src/components/settings/UsageCostSection.tsx:916"
     ]
   },
   "Cafe Code": {
@@ -1914,7 +1914,7 @@
   },
   "Chart measure": {
     "message": "Chart measure",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:467"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:471"]
   },
   "Chat": {
     "message": "Chat",
@@ -2273,7 +2273,7 @@
   },
   "Claude estimates cannot account for provider-side custom pricing or fallback after a refusal.": {
     "message": "Claude estimates cannot account for provider-side custom pricing or fallback after a refusal.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:786"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:790"]
   },
   "Claude home folder": {
     "message": "Claude home folder",
@@ -2307,7 +2307,7 @@
     "message": "Claude summary",
     "locations": [
       "apps/web/src/components/chat/ProviderOperationWorkEntry.tsx:44",
-      "apps/web/src/session-logic.ts:1246"
+      "apps/web/src/session-logic.ts:1261"
     ]
   },
   "Claude workflow": {
@@ -2788,7 +2788,7 @@
       "apps/web/src/components/chat/ScheduledFollowups.tsx:118",
       "apps/web/src/components/chat/SubagentDetailView.tsx:138",
       "apps/web/src/components/chat/taskProgressPresentation.ts:32",
-      "apps/web/src/session-logic.ts:880"
+      "apps/web/src/session-logic.ts:884"
     ]
   },
   "Completion observed <slot1></slot1>": {
@@ -3362,23 +3362,23 @@
   "Cost": {
     "message": "Cost",
     "locations": [
-      "apps/web/src/components/settings/UsageCostSection.tsx:700",
-      "apps/web/src/components/settings/UsageCostSection.tsx:767",
+      "apps/web/src/components/settings/UsageCostSection.tsx:704",
+      "apps/web/src/components/settings/UsageCostSection.tsx:771",
       "apps/web/src/components/settings/UsageCostSection.tsx:78",
-      "apps/web/src/components/settings/UsageCostSection.tsx:977"
+      "apps/web/src/components/settings/UsageCostSection.tsx:981"
     ]
   },
   "Cost (USD)": {
     "message": "Cost (USD)",
     "locations": [
-      "apps/web/src/components/settings/UsageCostSection.tsx:1168",
-      "apps/web/src/components/settings/UsageCostSection.tsx:766",
+      "apps/web/src/components/settings/UsageCostSection.tsx:1172",
+      "apps/web/src/components/settings/UsageCostSection.tsx:770",
       "apps/web/src/components/settings/settingsSearchIndex.ts:661"
     ]
   },
   "Cost quality": {
     "message": "Cost quality",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1101"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1105"]
   },
   "Could not add provider": {
     "message": "Could not add provider",
@@ -3903,11 +3903,11 @@
   },
   "Counts full active-turn time, including tools and waits. Concurrent chats count separately. Earlier history is not included. Not recorded means no time was measured for that model.": {
     "message": "Counts full active-turn time, including tools and waits. Concurrent chats count separately. Earlier history is not included. Not recorded means no time was measured for that model.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:739"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:743"]
   },
   "Counts full active-turn time, including tools and waits. Concurrent chats count separately. Recorded since {recordedSince} (UTC); earlier history is not included. Not recorded means no time was measured for that model.": {
     "message": "Counts full active-turn time, including tools and waits. Concurrent chats count separately. Recorded since {recordedSince} (UTC); earlier history is not included. Not recorded means no time was measured for that model.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:733"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:737"]
   },
   "Create & Add": {
     "message": "Create & Add",
@@ -4092,7 +4092,7 @@
   },
   "Daily cost": {
     "message": "Daily cost",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:836"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:840"]
   },
   "Daily generating time for the last few months; brighter cells mean more time.": {
     "message": "Daily generating time for the last few months; brighter cells mean more time.",
@@ -4104,7 +4104,7 @@
   },
   "Daily tokens": {
     "message": "Daily tokens",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:837"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:841"]
   },
   "Daily usage: {value0}": {
     "message": "Daily usage: {value0}",
@@ -5271,17 +5271,17 @@
   "Estimated cost": {
     "message": "Estimated cost",
     "locations": [
-      "apps/web/src/components/settings/UsageCostSection.tsx:701",
-      "apps/web/src/components/settings/UsageCostSection.tsx:770"
+      "apps/web/src/components/settings/UsageCostSection.tsx:705",
+      "apps/web/src/components/settings/UsageCostSection.tsx:774"
     ]
   },
   "Estimated cost (USD)": {
     "message": "Estimated cost (USD)",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:769"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:773"]
   },
   "Estimates from recorded usage; may be incomplete.<slot1></slot1>": {
     "message": "Estimates from recorded usage; may be incomplete.<slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1143"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1147"]
   },
   "Event receipt ID": {
     "message": "Event receipt ID",
@@ -5481,7 +5481,7 @@
       "apps/web/src/components/chat/WorkflowTasks.tsx:24",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1956",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:26",
-      "apps/web/src/session-logic.ts:875"
+      "apps/web/src/session-logic.ts:879"
     ]
   },
   "Failed RPC calls to the provider daemon.": {
@@ -6374,7 +6374,7 @@
   },
   "Includes settled Axiom costs reported by the native CLI. Other providers use standard API-rate estimates. Only recorded requests are included; this is not the account-wide bill.": {
     "message": "Includes settled Axiom costs reported by the native CLI. Other providers use standard API-rate estimates. Only recorded requests are included; this is not the account-wide bill.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:774"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:778"]
   },
   "Increase fetch interval": {
     "message": "Increase fetch interval",
@@ -7271,7 +7271,7 @@
       "apps/web/src/components/chat/AxiomSecurityControl.tsx:257",
       "apps/web/src/components/chat/ScheduledFollowupEditor.tsx:707",
       "apps/web/src/components/chat/ScheduledFollowupNotices.tsx:332",
-      "apps/web/src/components/settings/UsageCostSection.tsx:974"
+      "apps/web/src/components/settings/UsageCostSection.tsx:978"
     ]
   },
   "Model Picker: Jump: {index}": {
@@ -7552,7 +7552,7 @@
   },
   "Net cache savings": {
     "message": "Net cache savings",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:938"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:942"]
   },
   "Network access": {
     "message": "Network access",
@@ -8067,7 +8067,7 @@
   },
   "No usage by model in this period.": {
     "message": "No usage by model in this period.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:814"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:818"]
   },
   "No usage in this period": {
     "message": "No usage in this period",
@@ -8179,8 +8179,8 @@
     "message": "Not recorded",
     "locations": [
       "apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:112",
-      "apps/web/src/components/settings/UsageCostSection.tsx:296",
-      "apps/web/src/components/settings/UsageCostSection.tsx:942"
+      "apps/web/src/components/settings/UsageCostSection.tsx:299",
+      "apps/web/src/components/settings/UsageCostSection.tsx:946"
     ]
   },
   "Not signed in": {
@@ -8209,7 +8209,7 @@
   },
   "Nothing recorded in this period.": {
     "message": "Nothing recorded in this period.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1009"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1013"]
   },
   "Notification permission was denied. Allow notifications for this site in your browser settings, then try again.": {
     "message": "Notification permission was denied. Allow notifications for this site in your browser settings, then try again.",
@@ -8593,12 +8593,12 @@
     "message": "OpenCode thinking",
     "locations": [
       "apps/web/src/components/chat/ProviderOperationWorkEntry.tsx:43",
-      "apps/web/src/session-logic.ts:1243"
+      "apps/web/src/session-logic.ts:1258"
     ]
   },
   "Opened web page": {
     "message": "Opened web page",
-    "locations": ["apps/web/src/session-logic.ts:1301"]
+    "locations": ["apps/web/src/session-logic.ts:1316"]
   },
   "Opening a pull request in a chat isn't available.": {
     "message": "Opening a pull request in a chat isn't available.",
@@ -8688,8 +8688,8 @@
     "message": "Output",
     "locations": [
       "apps/web/src/components/atrium/TaskAtrium.tsx:1385",
-      "apps/web/src/components/settings/UsageCostSection.tsx:680",
-      "apps/web/src/components/settings/UsageCostSection.tsx:923"
+      "apps/web/src/components/settings/UsageCostSection.tsx:684",
+      "apps/web/src/components/settings/UsageCostSection.tsx:927"
     ]
   },
   "Output not recorded.": {
@@ -8819,7 +8819,7 @@
   },
   "Partial estimate<slot1></slot1>": {
     "message": "Partial estimate<slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:850"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:854"]
   },
   "Partial read": {
     "message": "Partial read",
@@ -8901,7 +8901,7 @@
   },
   "Per-model time is unavailable on this server.": {
     "message": "Per-model time is unavailable on this server.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1070"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1074"]
   },
   "Permission duration": {
     "message": "Permission duration",
@@ -9130,11 +9130,11 @@
   },
   "Priced": {
     "message": "Priced",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1106"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1110"]
   },
   "Priced share covers recorded tokens only; interrupted requests may not report all usage, so this is not a complete billing record. Codex subagent usage includes only observed increments after a baseline; earlier child usage is not backfilled, and child tokens do not increase the main chat’s context-window meter.": {
     "message": "Priced share covers recorded tokens only; interrupted requests may not report all usage, so this is not a complete billing record. Codex subagent usage includes only observed increments after a baseline; earlier child usage is not backfilled, and child tokens do not increase the main chat’s context-window meter.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:748"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:752"]
   },
   "Primary": {
     "message": "Primary",
@@ -9192,7 +9192,7 @@
   },
   "Processed tokens": {
     "message": "Processed tokens",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:905"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:909"]
   },
   "Processed: {tokens}": {
     "message": "Processed: {tokens}",
@@ -9517,7 +9517,7 @@
   },
   "Published standard API rates, or your custom rates if set. Excludes long-context and speed-tier adjustments; not your subscription bill.": {
     "message": "Published standard API rates, or your custom rates if set. Excludes long-context and speed-tier adjustments; not your subscription bill.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:780"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:784"]
   },
   "Pull request lookup is unavailable.": {
     "message": "Pull request lookup is unavailable.",
@@ -9805,7 +9805,7 @@
   },
   "Recorded costs and estimates may be incomplete.<slot1></slot1>": {
     "message": "Recorded costs and estimates may be incomplete.<slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1138"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1142"]
   },
   "Recycle Bin emptied": {
     "message": "Recycle Bin emptied",
@@ -10175,7 +10175,7 @@
   },
   "Reported": {
     "message": "Reported",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:272"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:275"]
   },
   "Repository": {
     "message": "Repository",
@@ -11039,7 +11039,7 @@
   },
   "Searched the web": {
     "message": "Searched the web",
-    "locations": ["apps/web/src/session-logic.ts:1300"]
+    "locations": ["apps/web/src/session-logic.ts:1315"]
   },
   "Searching workspace files…": {
     "message": "Searching workspace files…",
@@ -11376,7 +11376,7 @@
   },
   "Show all {value0} models": {
     "message": "Show all {value0} models",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1088"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1092"]
   },
   "Show an image in the sidebar.": {
     "message": "Show an image in the sidebar.",
@@ -11419,7 +11419,7 @@
   },
   "Show fewer models": {
     "message": "Show fewer models",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1087"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1091"]
   },
   "Show full error": {
     "message": "Show full error",
@@ -11935,7 +11935,7 @@
       "apps/web/src/components/chat/SubagentDetailView.tsx:144",
       "apps/web/src/components/chat/WorkflowTasks.tsx:30",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:30",
-      "apps/web/src/session-logic.ts:879"
+      "apps/web/src/session-logic.ts:883"
     ]
   },
   "Status unconfirmed": {
@@ -12069,7 +12069,7 @@
       "apps/web/src/components/chat/SubagentDetailView.tsx:142",
       "apps/web/src/components/chat/WorkflowTasks.tsx:27",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:28",
-      "apps/web/src/session-logic.ts:877"
+      "apps/web/src/session-logic.ts:881"
     ]
   },
   "Stopped after repeated denials": {
@@ -13251,7 +13251,7 @@
   },
   "Time recorded since ": {
     "message": "Time recorded since ",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1066"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1070"]
   },
   "Time spent generating": {
     "message": "Time spent generating",
@@ -13259,7 +13259,7 @@
   },
   "Time spent generating<slot1></slot1>": {
     "message": "Time spent generating<slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:984"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:988"]
   },
   "Time unavailable": {
     "message": "Time unavailable",
@@ -13329,7 +13329,7 @@
     "locations": [
       "apps/web/src/components/chat/ThreadGoalControl.tsx:390",
       "apps/web/src/components/settings/UsageCostSection.tsx:84",
-      "apps/web/src/components/settings/UsageCostSection.tsx:980"
+      "apps/web/src/components/settings/UsageCostSection.tsx:984"
     ]
   },
   "Tokens generated": {
@@ -13459,7 +13459,7 @@
   },
   "Turn accepted · {settings}": {
     "message": "Turn accepted · {settings}",
-    "locations": ["apps/web/src/session-logic.ts:1279"]
+    "locations": ["apps/web/src/session-logic.ts:1294"]
   },
   "Turn it on again from a chat’s composer.": {
     "message": "Turn it on again from a chat’s composer.",
@@ -13655,7 +13655,7 @@
   },
   "Unattributed usage": {
     "message": "Unattributed usage",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1028"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1032"]
   },
   "Unavailable": {
     "message": "Unavailable",
@@ -13684,8 +13684,8 @@
   "Uncached input": {
     "message": "Uncached input",
     "locations": [
-      "apps/web/src/components/settings/UsageCostSection.tsx:663",
-      "apps/web/src/components/settings/UsageCostSection.tsx:918"
+      "apps/web/src/components/settings/UsageCostSection.tsx:667",
+      "apps/web/src/components/settings/UsageCostSection.tsx:922"
     ]
   },
   "Uncommitted changes": {
@@ -13750,10 +13750,10 @@
   "Unpriced": {
     "message": "Unpriced",
     "locations": [
-      "apps/web/src/components/settings/UsageCostSection.tsx:1043",
-      "apps/web/src/components/settings/UsageCostSection.tsx:1119",
-      "apps/web/src/components/settings/UsageCostSection.tsx:212",
-      "apps/web/src/components/settings/UsageCostSection.tsx:278"
+      "apps/web/src/components/settings/UsageCostSection.tsx:1047",
+      "apps/web/src/components/settings/UsageCostSection.tsx:1123",
+      "apps/web/src/components/settings/UsageCostSection.tsx:215",
+      "apps/web/src/components/settings/UsageCostSection.tsx:281"
     ]
   },
   "Unsandboxed connection checks enabled": {
@@ -14023,7 +14023,7 @@
   },
   "Usage recorded without a provider or model, such as older history. It''s counted but not priced.": {
     "message": "Usage recorded without a provider or model, such as older history. It''s counted but not priced.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1033"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:1037"]
   },
   "Usage reset result": {
     "message": "Usage reset result",
@@ -14035,7 +14035,7 @@
   },
   "Usage without a daily model rate is left out of the daily cost.": {
     "message": "Usage without a daily model rate is left out of the daily cost.",
-    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:857"]
+    "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:861"]
   },
   "Usage · all chats": {
     "message": "Usage · all chats",
@@ -14368,7 +14368,7 @@
       "apps/web/src/components/chat/SubagentDetailView.tsx:134",
       "apps/web/src/components/chat/WorkflowTasks.tsx:15",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:22",
-      "apps/web/src/session-logic.ts:871"
+      "apps/web/src/session-logic.ts:875"
     ]
   },
   "Waiting for Cafe to connect.": {
@@ -14599,7 +14599,7 @@
       "apps/web/src/components/chat/SubagentDetailView.tsx:136",
       "apps/web/src/components/chat/WorkflowTasks.tsx:18",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:24",
-      "apps/web/src/session-logic.ts:873",
+      "apps/web/src/session-logic.ts:877",
       "apps/web/src/subagent-activity.ts:525"
     ]
   },
@@ -15804,11 +15804,11 @@
   },
   "{count, plural, one {{formatted} file} other {{formatted} files}}{suffix}": {
     "message": "{count, plural, one {{formatted} file} other {{formatted} files}}{suffix}",
-    "locations": ["apps/web/src/session-logic.ts:1861"]
+    "locations": ["apps/web/src/session-logic.ts:1953"]
   },
   "{count, plural, one {{formatted} line} other {{formatted} lines}}": {
     "message": "{count, plural, one {{formatted} line} other {{formatted} lines}}",
-    "locations": ["apps/web/src/session-logic.ts:1843"]
+    "locations": ["apps/web/src/session-logic.ts:1935"]
   },
   "{count, plural, one {{formatted} token} other {{formatted} tokens}}": {
     "message": "{count, plural, one {{formatted} token} other {{formatted} tokens}}",
@@ -15906,7 +15906,7 @@
     "locations": [
       "apps/web/src/components/chat/ThreadGoalControl.tsx:102",
       "apps/web/src/lib/codexRateLimits.ts:116",
-      "apps/web/src/session-logic.ts:273"
+      "apps/web/src/session-logic.ts:275"
     ]
   },
   "{hours}h {minutes}m": {
@@ -15986,7 +15986,7 @@
       "apps/web/src/components/chat/ThreadGoalControl.tsx:103",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:97",
       "apps/web/src/lib/codexRateLimits.ts:117",
-      "apps/web/src/session-logic.ts:276"
+      "apps/web/src/session-logic.ts:278"
     ]
   },
   "{minutes}m {seconds}s": {
@@ -16145,10 +16145,10 @@
       "apps/web/src/components/chat/ConnectionStatusIndicator.tsx:63",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:105",
       "apps/web/src/components/settings/usageStatsPresentation.ts:39",
-      "apps/web/src/session-logic.ts:256",
-      "apps/web/src/session-logic.ts:264",
-      "apps/web/src/session-logic.ts:279",
-      "apps/web/src/session-logic.ts:282"
+      "apps/web/src/session-logic.ts:258",
+      "apps/web/src/session-logic.ts:266",
+      "apps/web/src/session-logic.ts:281",
+      "apps/web/src/session-logic.ts:284"
     ]
   },
   "{source, select, submitted {Settings Cafe submitted for this accepted turn.} other {Settings of the existing session that accepted this input.}} Provider defaults may be inherited; this is not independent execution or billing confirmation.{nativeFast, select, yes { Fast mode uses the native session routing captured for this turn.} other {}}": {
@@ -16450,10 +16450,10 @@
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1393",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1495",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1509",
-      "apps/web/src/components/settings/UsageCostSection.tsx:1055",
-      "apps/web/src/components/settings/UsageCostSection.tsx:1110",
-      "apps/web/src/components/settings/UsageCostSection.tsx:1123",
-      "apps/web/src/components/settings/UsageCostSection.tsx:265"
+      "apps/web/src/components/settings/UsageCostSection.tsx:1059",
+      "apps/web/src/components/settings/UsageCostSection.tsx:1114",
+      "apps/web/src/components/settings/UsageCostSection.tsx:1127",
+      "apps/web/src/components/settings/UsageCostSection.tsx:268"
     ]
   },
   "…": {

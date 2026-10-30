@@ -1294,6 +1294,189 @@ describe("deriveWorkLogEntries", () => {
       deriveWorkLogEntries([completed], undefined)[0]?.commandInspection?.startedAt,
     ).toBeUndefined();
   });
+  it.each([false, true])(
+    "folds background command echoes across interleaved work (legacy markers: %s)",
+    (legacy) => {
+      const command = (
+        id: string,
+        sequence: number,
+        itemId: string,
+        kind: string,
+        status: string,
+        inspected = true,
+      ) =>
+        makeActivity({
+          id,
+          turnId: "turn-a",
+          sequence,
+          createdAt: `2026-10-09T00:00:0${sequence}.000Z`,
+          kind,
+          summary: "Command run",
+          payload: {
+            itemId,
+            itemType: "command_execution",
+            status,
+            data: inspected
+              ? {
+                  toolName: "Bash",
+                  commandInspectionVersion: 1,
+                  inspectionProvider: "claudeAgent",
+                  input: { description: "Search for the auth file", command: "rg auth fixture" },
+                  output: "Received command output",
+                }
+              : { input: { command: "unadmitted command" }, result: "unadmitted output" },
+          },
+        });
+      const start = command("start", 1, "background-command", "tool.started", "inProgress");
+      const update = command(
+        "background",
+        3,
+        "background-command",
+        "tool.updated",
+        "inProgress",
+        !legacy,
+      );
+      const done = command("done", 5, "background-command", "tool.completed", "failed", !legacy);
+      const task = (
+        id: string,
+        sequence: number,
+        kind: string,
+        workLogToolCallId?: string,
+        status = "failed",
+      ) =>
+        makeActivity({
+          id,
+          turnId: "turn-a",
+          sequence,
+          createdAt: `2026-10-09T00:00:0${sequence}.000Z`,
+          kind,
+          tone: "error",
+          summary: "Task failed",
+          payload: {
+            taskId: "native-background-task",
+            workLogToolCallId,
+            status,
+            detail: "Search for the auth file",
+          },
+        });
+      const taskDone = task("task-done", 6, "task.completed", "background-command");
+      const entries = deriveWorkLogEntries(
+        [
+          start,
+          command("same-description", 2, "different-command", "tool.completed", "completed"),
+          update,
+          task("progress", 4, "task.progress", "background-command"),
+          done,
+          taskDone,
+          command("late", 7, "background-command", "tool.updated", "inProgress", !legacy),
+          task("unknown-legacy-task", 8, "task.completed"),
+        ],
+        undefined,
+      );
+      expect(entries.map(({ id }) => id)).toEqual([
+        "start",
+        "same-description",
+        "unknown-legacy-task",
+      ]);
+      expect(entries[0]).toMatchObject({
+        id: "start",
+        createdAt: start.createdAt,
+        command: "rg auth fixture",
+        detail: "Search for the auth file",
+        commandInspection: {
+          status: "failed",
+          output: "Received command output",
+          startedAt: start.createdAt,
+          completedAt: taskDone.createdAt,
+        },
+      });
+      expect(entries[0]?.rawCommand).toBeUndefined();
+      expect(entries[1]?.commandInspection?.status).toBe("completed");
+      expect(entries[2]?.tone).toBe("error");
+      const taskFailure = task("task-only-completion", 4, "task.completed", "background-command");
+      expect(
+        deriveWorkLogEntries([start, update, taskFailure], undefined)[0]?.commandInspection,
+      ).toMatchObject({ status: "failed", completedAt: taskFailure.createdAt });
+      expect(deriveWorkLogEntries([taskFailure], undefined)).toHaveLength(1);
+      const backgroundReceipt = command(
+        "background-receipt",
+        2,
+        "background-command",
+        "tool.completed",
+        "completed",
+      );
+      expect(
+        deriveWorkLogEntries([start, backgroundReceipt, taskFailure], undefined)[0]
+          ?.commandInspection,
+      ).toMatchObject({ status: "failed", completedAt: taskFailure.createdAt });
+      expect(
+        deriveWorkLogEntries(
+          [
+            start,
+            done,
+            task("task-success", 6, "task.completed", "background-command", "completed"),
+          ],
+          undefined,
+        )[0]?.commandInspection?.status,
+      ).toBe("failed");
+      const foreign = {
+        ...taskFailure,
+        id: EventId.make("other-turn-task"),
+        turnId: TurnId.make("turn-b"),
+      };
+      expect(deriveWorkLogEntries([start, foreign], undefined)).toHaveLength(2);
+    },
+  );
+
+  it("retains an exact legacy terminal status when inspection arrives later without promoting legacy output", () => {
+    const legacy = (id: string, sequence: number, kind: string) =>
+      makeActivity({
+        id,
+        sequence,
+        turnId: "turn-a",
+        kind,
+        createdAt: `2026-10-09T00:00:0${sequence}.000Z`,
+        payload: {
+          itemId: "tool-a",
+          itemType: "command_execution",
+          status: kind === "tool.completed" ? "failed" : "inProgress",
+          data: { result: "private legacy JSON" },
+        },
+      });
+    const update = legacy("legacy-update", 1, "tool.updated");
+    const completion = legacy("legacy-completion", 2, "tool.completed");
+    const inspected = makeActivity({
+      id: "admitted",
+      sequence: 3,
+      turnId: "turn-a",
+      kind: "tool.updated",
+      payload: {
+        itemId: "tool-a",
+        itemType: "command_execution",
+        status: "inProgress",
+        data: {
+          toolName: "Bash",
+          commandInspectionVersion: 1,
+          inspectionProvider: "claudeAgent",
+          input: { description: "Admitted description" },
+        },
+      },
+    });
+    const entries = deriveWorkLogEntries([update, completion, inspected], undefined);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: update.id,
+      createdAt: update.createdAt,
+      commandInspection: {
+        status: "failed",
+        description: "Admitted description",
+        completedAt: completion.createdAt,
+      },
+    });
+    expect(entries[0]?.commandInspection?.output).toBeUndefined();
+    expect(entries[0]?.rawCommand).toBeUndefined();
+  });
+
   it("omits tool started entries and keeps completed entries", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

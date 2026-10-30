@@ -324,10 +324,11 @@ describe("Renovate repository policy", () => {
       readJson("apps/server/package.json").dependencies,
       "server dependencies",
     );
-    const stagedDependencies = asObject(
-      readJson("packaging/desktop-runtime/package.json").dependencies,
-      "staged dependencies",
-    );
+    const stagedPackage = readJson("packaging/desktop-runtime/package.json");
+    const stagedDependencies = {
+      ...asObject(stagedPackage.dependencies, "staged dependencies"),
+      ...asObject(stagedPackage.devDependencies, "staged development peers"),
+    };
     const scriptDependencies = asObject(
       readJson("scripts/package.json").dependencies,
       "scripts dependencies",

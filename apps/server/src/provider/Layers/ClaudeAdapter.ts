@@ -6578,6 +6578,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             status: "inProgress",
             title: tool.title,
             detail: "Continuing in the background",
+            ...(tool.inspectionNativeSessionId ? { data: claudeToolPresentationData(tool) } : {}),
           },
         });
         continue;
@@ -8203,12 +8204,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               ...(spawningTool.taskOwner ? { taskOwner: spawningTool.taskOwner } : {}),
               status: "inProgress",
               title: spawningTool.title,
+              ...(spawningTool.inspectionNativeSessionId
+                ? { data: claudeToolPresentationData(spawningTool) }
+                : {}),
             },
           });
         }
         yield* offerRuntimeEvent(context, {
           ...base,
           turnId: startedBinding.turnId ?? undefined,
+          providerRefs: nativeProviderRefs(context, { providerItemId: startedBinding.toolUseId }),
           type: "task.started",
           payload: {
             taskId: startedBinding.taskId,
@@ -8299,6 +8304,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         yield* offerRuntimeEvent(context, {
           ...base,
           turnId: progressBinding.turnId ?? undefined,
+          providerRefs: nativeProviderRefs(context, { providerItemId: progressBinding.toolUseId }),
           type: "task.progress",
           payload: {
             taskId: progressBinding.taskId,
@@ -8430,6 +8436,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 status: terminalStatus === "completed" ? "completed" : "failed",
                 title: tool.title,
                 ...(patchedSummary ? { detail: patchedSummary } : {}),
+                ...(tool.inspectionNativeSessionId
+                  ? { data: claudeToolPresentationData(tool) }
+                  : {}),
               },
             });
           }
@@ -8440,6 +8449,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           yield* offerRuntimeEvent(context, {
             ...base,
             turnId: updatedBinding.turnId ?? undefined,
+            providerRefs: nativeProviderRefs(context, { providerItemId: updatedBinding.toolUseId }),
             type: "task.completed",
             payload: {
               taskId: updatedBinding.taskId,
@@ -8463,6 +8473,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         yield* offerRuntimeEvent(context, {
           ...base,
           turnId: updatedBinding.turnId ?? undefined,
+          providerRefs: nativeProviderRefs(context, { providerItemId: updatedBinding.toolUseId }),
           type: "task.progress",
           payload: {
             taskId: updatedBinding.taskId,
@@ -8597,12 +8608,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               status: message.status === "completed" ? "completed" : "failed",
               title: tool.title,
               ...(summary ? { detail: summary } : {}),
+              ...(tool.inspectionNativeSessionId ? { data: claudeToolPresentationData(tool) } : {}),
             },
           });
         }
         yield* offerRuntimeEvent(context, {
           ...base,
           turnId: notificationBinding.turnId ?? undefined,
+          providerRefs: nativeProviderRefs(context, {
+            providerItemId: notificationBinding.toolUseId,
+          }),
           type: "task.completed",
           payload: {
             taskId: notificationBinding.taskId,

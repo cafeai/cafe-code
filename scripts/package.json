@@ -25,6 +25,7 @@
     "@effect/vitest": "catalog:",
     "@napi-rs/canvas": "1.0.8",
     "oxfmt": "^0.70.0",
+    "tsdown": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "catalog:"

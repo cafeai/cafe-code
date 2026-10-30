@@ -10241,6 +10241,67 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.activities.some((activity) => activity.id.startsWith("unowned-"))).toBe(false);
   });
 
+  it("retains exact Claude task/tool display correlation without borrowing task ids or other providers", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("background-turn"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-background"),
+      payload: {},
+    });
+    for (const provider of ["claudeAgent", "codex"] as const) {
+      for (const type of ["task.started", "task.progress", "task.completed"] as const) {
+        harness.emit({
+          type,
+          eventId: asEventId(`${provider}-${type}`),
+          provider: ProviderDriverKind.make(provider),
+          createdAt: now,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-background"),
+          providerRefs: { providerItemId: ProviderItemId.make("exact-command") },
+          payload: {
+            taskId: RuntimeTaskId.make(`${provider}-native-task`),
+            description: "Command description",
+            status: "failed",
+            summary: "Command failed",
+          },
+        });
+      }
+    }
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("unidentified-task"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-background"),
+      payload: {
+        taskId: RuntimeTaskId.make("exact-command"),
+        status: "failed",
+        summary: "Command failed",
+      },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(({ id }) => id === "unidentified-task"),
+    );
+    for (const provider of ["claudeAgent", "codex"] as const) {
+      for (const kind of ["task.started", "task.progress", "task.completed"] as const) {
+        const activity = thread.activities.find(({ id }) => id === `${provider}-${kind}`);
+        expect(activity?.kind).toBe(kind);
+        if (provider === "claudeAgent")
+          expect(activity?.payload).toHaveProperty("workLogToolCallId", "exact-command");
+        else expect(activity?.payload).not.toHaveProperty("workLogToolCallId");
+      }
+    }
+    const unlinked = thread.activities.find(({ id }) => id === "unidentified-task");
+    expect(unlinked?.payload).not.toHaveProperty("workLogToolCallId");
+    expect(unlinked?.tone).toBe("error");
+  });
+
   it("strips counterfeit command inspector provenance from other provider lifecycle data", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

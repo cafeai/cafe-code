@@ -4,6 +4,10 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./runtimeDependencies": {
+      "types": "./src/runtimeDependencies.ts",
+      "import": "./src/runtimeDependencies.ts"
+    },
     "./visualizationRasterPolicy": {
       "types": "./src/visualizationRasterPolicy.ts",
       "import": "./src/visualizationRasterPolicy.ts"

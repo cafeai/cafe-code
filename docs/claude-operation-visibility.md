@@ -1,6 +1,6 @@
 # Claude operation visibility
 
-Last updated: 2026-10-27 00:16:00 PDT (UTC-0700)
+Last updated: 2026-10-29 PDT (UTC-0700)
 
 ## What the chat can show
 
@@ -27,6 +27,15 @@ Cafe's observed start/completion edges, not an independently measured provider
 execution duration. Missing timing or output stays visibly unavailable; empty
 received output is different from missing output. A failed operation stays
 failed even if another operation later succeeds.
+
+Background commands retain that same expandable row. Native task starts,
+progress and terminal notifications keep their exact spawning tool identity
+through ingestion, so a generic command lifecycle edge or a task-result echo
+does not create another row beside an admitted command in the same turn.
+Interleaved commands keep their own rows even when their descriptions match.
+The row keeps its original position and open disclosure, and late progress
+cannot revive a completed command. Task summaries are never treated as command
+stdout; missing command output stays unavailable.
 
 Only explicitly projected command fields are inspected. The view never
 stringifies arbitrary tool JSON or uses omitted file contents, patches, private
@@ -78,6 +87,14 @@ arbitrary inspection fallback. Older work logs can lack these admitted fields
 and cannot be reconstructed by a push. Bounded detail snapshots and historical expansion retain their existing
 paging limits. The operation view makes no provider call, reads no credential
 store and never replays a command or prompt.
+
+The earlier-work reader uses the same explicit task/tool operation identity as
+the inline list and its indexed presence/count/page filters. An older generic
+tool edge can fold into a retained admitted command through its exact item id;
+an older task result without an explicit task/tool link remains visible. A
+matching description or native task id does not supply the missing correlation.
+All native lifecycle events remain persisted and retain their original task
+control and liveness semantics.
 
 ## Qualification and adoption
 

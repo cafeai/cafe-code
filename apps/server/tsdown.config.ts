@@ -9,6 +9,7 @@ import {
   resolveApplicationBuildVersion,
 } from "../../packages/shared/src/applicationBuildVersion.ts";
 import packageJson from "./package.json" with { type: "json" };
+import { prepareRuntimeDependencies } from "../../scripts/lib/prepare-runtime-dependencies.ts";
 
 const internalPackagePrefixes = ["@cafecode/", "effect-acp", "effect-codex-app-server"];
 const applicationVersion = resolveApplicationBuildVersion(
@@ -18,9 +19,9 @@ const applicationVersion = resolveApplicationBuildVersion(
 
 export default defineConfig([
   {
-    entry: ["src/bin.ts", "src/launcher.ts"],
+    entry: { bin: "src/runtimeEntry.ts", backend: "src/bin.ts", launcher: "src/launcher.ts" },
     outDir: "dist",
-    sourcemap: true,
+    sourcemap: false,
     clean: true,
     // Bake identity into the emitted module, not the provider/backend's later
     // environment. Daemon health and native-client identification must agree
@@ -32,13 +33,23 @@ export default defineConfig([
       "build:done": ({ options, chunks }) => {
         const root = resolve(options.cwd, options.outDir);
         const output = chunks.filter((chunk) => chunk.type === "chunk");
+        const dependencies = prepareRuntimeDependencies(resolve(options.cwd, "../.."), root);
         publishSourceDebugBuildManifest(
           resolve(root, "bin.mjs"),
           "server",
-          output.map((chunk) => resolve(options.cwd, chunk.outDir, chunk.fileName)),
-          Object.fromEntries(
-            output.map((chunk) => [resolve(options.cwd, chunk.outDir, chunk.fileName), chunk.code]),
-          ),
+          [
+            ...output.map((chunk) => resolve(options.cwd, chunk.outDir, chunk.fileName)),
+            dependencies.file,
+          ],
+          {
+            ...Object.fromEntries(
+              output.map((chunk) => [
+                resolve(options.cwd, chunk.outDir, chunk.fileName),
+                chunk.code,
+              ]),
+            ),
+            [dependencies.file]: dependencies.code,
+          },
         );
         publishApplicationBuildVersionManifest(
           root,
@@ -56,7 +67,12 @@ export default defineConfig([
       },
     },
     deps: {
-      alwaysBundle: (id) => internalPackagePrefixes.some((prefix) => id.startsWith(prefix)),
+      // The backend needs only patch parsing. Bundling this side-effect-aware
+      // package lets the compiler discard its browser renderers/highlighters.
+      alwaysBundle: (id) =>
+        internalPackagePrefixes.some((prefix) => id.startsWith(prefix)) ||
+        id === "@pierre/diffs" ||
+        id.startsWith("@pierre/diffs/"),
       onlyBundle: false,
     },
     // The server package publishes CLI/runtime entrypoints, not a typed library API.

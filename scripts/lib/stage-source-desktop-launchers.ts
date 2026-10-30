@@ -25,10 +25,13 @@ const LAUNCHER_FILES = [
   "apps/desktop/native/mac-dictation-target.swift",
   "apps/desktop/native/mac-source-host.m",
   "packages/shared/src/sourceDebugBuild.ts",
+  "packages/shared/src/runtimeDependencies.ts",
   "packages/shared/src/dataProfileStorage.ts",
   "scripts/lib/mac-source-runtime-signing.ts",
   "scripts/lib/mac-source-launch.ts",
   "scripts/lib/mac-source-host.ts",
+  "scripts/lib/electron-locale-files.ts",
+  "scripts/lib/desktop-runtime-files.ts",
 ] as const;
 
 /** Resolve reviewed locale copy while building, not from a missing workspace

@@ -100,6 +100,7 @@ import {
 } from "../codexSteerIntentLedger.ts";
 import { sanitizeProviderToolData } from "@cafecode/shared/activityPayloadSanitizer";
 import { readProviderTaskOwnerPayload } from "@cafecode/shared/providerTaskOwnership";
+import { readWorkLogOperationId } from "@cafecode/shared/providerWorkLog";
 import { readMatchingCodexCompactionObservationField } from "@cafecode/shared/codexCompactionDiagnostics";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { isSupersededSessionLifecycle, sessionLifecycleSnapshot } from "../sessionLifecycle.ts";
@@ -596,6 +597,12 @@ function runtimeEventToActivities(
   // Reconstruct only its finite fields; never promote raw tool receivers,
   // labels, private extra data or a control target into source ownership.
   const taskOwner = readProviderTaskOwnerPayload(event.payload);
+  // Claude's exact task/tool association is display identity only. Keep the
+  // native task lifecycle and its independent control/ownership unchanged.
+  const workLogToolCallId =
+    event.provider === "claudeAgent"
+      ? readWorkLogOperationId(event.providerRefs?.providerItemId)
+      : undefined;
   // The adapter already compared native turn coordinates (a routed child has
   // a different Cafe parent turn). Rebind the finite evidence to this exact
   // activity phase/item/source; never promote a tool's nested diagnostic copy.
@@ -911,6 +918,7 @@ function runtimeEventToActivities(
               ? { individualTaskControl: event.payload.individualTaskControl }
               : {}),
             taskId: event.payload.taskId,
+            ...(workLogToolCallId ? { workLogToolCallId } : {}),
             ...(event.payload.taskType ? { taskType: event.payload.taskType } : {}),
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
@@ -940,6 +948,7 @@ function runtimeEventToActivities(
               ? { individualTaskControl: event.payload.individualTaskControl }
               : {}),
             taskId: event.payload.taskId,
+            ...(workLogToolCallId ? { workLogToolCallId } : {}),
             detail: truncateDetail(event.payload.summary ?? event.payload.description),
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
@@ -977,6 +986,7 @@ function runtimeEventToActivities(
             ...(taskOwner ? { taskOwner } : {}),
             ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             taskId: event.payload.taskId,
+            ...(workLogToolCallId ? { workLogToolCallId } : {}),
             status: event.payload.status,
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),

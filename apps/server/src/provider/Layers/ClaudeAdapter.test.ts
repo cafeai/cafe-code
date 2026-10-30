@@ -1367,6 +1367,154 @@ describe("ClaudeAdapterLive", () => {
     },
   );
 
+  for (const terminal of ["task_updated", "task_notification"] as const) {
+    it.effect(`retains inspected background Bash identity and failure through ${terminal}`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "approval-required" });
+        const turn = yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "Inspect background work",
+        });
+        const sessionId = "sdk-background-command";
+        const base = makeClaudeResponseLimitAssistant({ sessionId, text: "Inspecting." });
+        harness.query.emit(base);
+        const emit = (event: unknown, uuid: string) =>
+          harness.query.emit({
+            type: "stream_event",
+            session_id: sessionId,
+            parent_tool_use_id: null,
+            uuid,
+            event,
+          } as unknown as SDKMessage);
+        emit(
+          {
+            type: "message_start",
+            message: { ...base.message, id: "api-background-command", content: [] },
+          },
+          "background-message",
+        );
+        emit(
+          {
+            type: "content_block_start",
+            index: 0,
+            content_block: {
+              type: "tool_use",
+              id: "background-bash",
+              name: "Bash",
+              input: {
+                command: "rg auth fixture",
+                description: "Search for the auth file",
+                run_in_background: true,
+              },
+            },
+          },
+          "background-tool",
+        );
+        const taskBase = {
+          type: "system",
+          task_id: "native-background-task",
+          tool_use_id: "background-bash",
+          session_id: sessionId,
+        };
+        harness.query.emit({
+          ...taskBase,
+          subtype: "task_started",
+          task_type: "local_bash",
+          description: "Search for the auth file",
+          uuid: "background-start",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "user",
+          session_id: sessionId,
+          parent_tool_use_id: null,
+          uuid: "background-placeholder",
+          tool_use_result: { detachedToolCall: true },
+          message: {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "background-bash", content: "Still running" },
+            ],
+          },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          ...taskBase,
+          subtype: "task_progress",
+          description: "Search for the auth file",
+          summary: "Checking fixture paths",
+          uuid: "background-progress",
+        } as unknown as SDKMessage);
+        const failure =
+          terminal === "task_updated"
+            ? {
+                ...taskBase,
+                subtype: terminal,
+                patch: { status: "failed", summary: "Search for the auth file" },
+                uuid: "background-terminal",
+              }
+            : {
+                ...taskBase,
+                subtype: terminal,
+                status: "failed",
+                summary: "Search for the auth file",
+                output_file: "",
+                uuid: "background-terminal",
+              };
+        harness.query.emit(failure as unknown as SDKMessage);
+        harness.query.emit(failure as unknown as SDKMessage);
+        harness.query.emit(makeSuccessfulClaudeResult(sessionId));
+        const events = Array.from(yield* Fiber.join(collected));
+        const tools = events.filter(
+          (event) =>
+            (event.type === "item.started" ||
+              event.type === "item.updated" ||
+              event.type === "item.completed") &&
+            event.itemId === "background-bash",
+        );
+        assert.equal(tools.length, 4);
+        for (const tool of tools) {
+          assert.equal(tool.turnId, turn.turnId);
+          if (
+            tool.type !== "item.started" &&
+            tool.type !== "item.updated" &&
+            tool.type !== "item.completed"
+          )
+            continue;
+          const data = tool.payload.data as Record<string, unknown>;
+          assert.equal(data.commandInspectionVersion, 1);
+          assert.deepEqual(data.input, {
+            command: "rg auth fixture",
+            description: "Search for the auth file",
+          });
+          assert.equal(data.output, undefined);
+          assert.equal(data.startedAt, tools[0]?.createdAt);
+        }
+        const completion = tools.at(-1);
+        assert.equal(completion?.type, "item.completed");
+        if (completion?.type === "item.completed")
+          assert.equal(completion.payload.status, "failed");
+        const tasks = events.filter(
+          (event) =>
+            event.type === "task.started" ||
+            event.type === "task.progress" ||
+            event.type === "task.completed",
+        );
+        assert.deepEqual(
+          tasks.map((event) => event.type),
+          ["task.started", "task.progress", "task.completed", "task.completed"],
+        );
+        for (const task of tasks)
+          assert.equal(task.providerRefs?.providerItemId, "background-bash");
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
+
   for (const toolName of ["WebFetch", "WebSearch", "mcp__test__lookup"]) {
     it.effect(
       `retains detached ${toolName} through response boundaries and settles the original item exactly once`,

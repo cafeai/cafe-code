@@ -14,6 +14,7 @@ import {
   type ProviderDaemonHealth as ProviderDaemonHealthValue,
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
+import { assertSourceDebugBuild } from "@cafecode/shared/sourceDebugBuild";
 import { assert, describe, it } from "vitest";
 import * as Schema from "effect/Schema";
 
@@ -40,7 +41,9 @@ function makeToken(): string {
 }
 
 function backendEntryPath(): string {
-  return path.resolve(import.meta.dirname, "../src/bin.ts");
+  const entry = path.resolve(import.meta.dirname, "../dist/bin.mjs");
+  assertSourceDebugBuild(entry, "server");
+  return entry;
 }
 
 function collectChildLogs(child: ChildProcess): () => string {

@@ -2962,11 +2962,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     const toolId = sql`COALESCE(NULLIF(CASE
       WHEN json_type(payload_json, '$.data.toolCallId') = 'text'
       THEN trim(json_extract(payload_json, '$.data.toolCallId'), ${trimCharacters}) END, ''), ${itemId})`;
+    const taskToolId = sql`CASE WHEN json_type(payload_json, '$.workLogToolCallId') = 'text'
+      THEN trim(json_extract(payload_json, '$.workLogToolCallId'), ${trimCharacters}) END`;
     return sql.and([
       ids?.length ? sql`activity_id NOT IN ${sql.in(ids)}` : sql`1 = 1`,
       tools?.length
-        ? sql`NOT (kind IN ('tool.started', 'tool.updated', 'tool.completed')
-            AND COALESCE(${toolId} IN ${sql.in(tools)}, 0))`
+        ? sql`NOT ((kind IN ('tool.started', 'tool.updated', 'tool.completed')
+            AND COALESCE(${toolId} IN ${sql.in(tools)}, 0)) OR
+            (kind IN ('task.started', 'task.progress', 'task.completed')
+            AND COALESCE(${taskToolId} IN ${sql.in(tools)}, 0)))`
         : sql`1 = 1`,
       summaries?.length
         ? sql`NOT (kind = 'reasoning.summary' AND COALESCE(${itemId} IN ${sql.in(summaries)}, 0))`

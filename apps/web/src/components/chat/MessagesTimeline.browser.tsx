@@ -10,6 +10,7 @@ import {
   TurnId,
   type EnvironmentApi,
   type LocalApi,
+  type OrchestrationThreadActivity,
 } from "@cafecode/contracts";
 import { createRef } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
@@ -1353,7 +1354,10 @@ function setNativeContextMenuMock(
 }
 
 describe("MessagesTimeline", () => {
+  let retireCommandFixture: (() => Promise<void>) | undefined;
   afterEach(async () => {
+    await retireCommandFixture?.();
+    retireCommandFixture = undefined;
     scrollToEndSpy.mockReset();
     scrollToIndexSpy.mockReset();
     getStateSpy.mockClear();
@@ -1364,6 +1368,138 @@ describe("MessagesTimeline", () => {
     delete (window as typeof window & { nativeApi?: unknown }).nativeApi;
     await __resetLocalApiForTests();
     document.body.innerHTML = "";
+  });
+
+  it("keeps one open row per exact Claude command through background task failure and replay", async ({
+    signal,
+    onTestFinished,
+  }) => {
+    const turnId = TurnId.make("background-command-turn");
+    const command = (
+      id: string,
+      sequence: number,
+      itemId: string,
+      kind: string,
+      status: string,
+      inspected: boolean,
+    ): OrchestrationThreadActivity => ({
+      id: EventId.make(id),
+      turnId,
+      sequence,
+      createdAt: `2026-10-09T00:00:0${sequence}.000Z`,
+      kind,
+      tone: "tool",
+      summary: "Command run",
+      payload: {
+        itemId,
+        itemType: "command_execution",
+        status,
+        data: inspected
+          ? {
+              toolName: "Bash",
+              commandInspectionVersion: 1,
+              inspectionProvider: "claudeAgent",
+              input: {
+                description: "Search for the auth file",
+                command: itemId === "command-a" ? "rg auth fixture" : "rg auth second-fixture",
+              },
+              output: "Received command output",
+            }
+          : {},
+      },
+    });
+    const started = command("command-start", 1, "command-a", "tool.started", "inProgress", true);
+    const entries: OrchestrationThreadActivity[] = [
+      started,
+      command("separate-command", 2, "command-b", "tool.completed", "completed", true),
+      command("background-update", 3, "command-a", "tool.updated", "inProgress", false),
+      command("background-completion", 4, "command-a", "tool.completed", "failed", false),
+      {
+        id: EventId.make("task-failure"),
+        turnId,
+        sequence: 5,
+        createdAt: "2026-10-09T00:00:05.000Z",
+        kind: "task.completed",
+        tone: "error",
+        summary: "Task failed",
+        payload: {
+          taskId: "native-background-task",
+          workLogToolCallId: "command-a",
+          status: "failed",
+          detail: "Native task result echo",
+        },
+      },
+      command("delayed-background-update", 6, "command-a", "tool.updated", "inProgress", false),
+    ];
+    const props = buildProps();
+    const content = (activities: OrchestrationThreadActivity[]) => (
+      <MessagesTimeline
+        {...props}
+        activeProvider={ProviderDriverKind.make("claudeAgent")}
+        timelineEntries={deriveTimelineEntries([], [], deriveWorkLogEntries(activities, turnId))}
+      />
+    );
+    let retired = false;
+    let pendingRender: ReturnType<typeof render> | undefined;
+    let pendingWork: Promise<unknown> | undefined;
+    let cleanup: Promise<void> | undefined;
+    const retire = () => {
+      retired = true;
+      cleanup ??= (async () => {
+        await Promise.allSettled([pendingWork]);
+        const rendered = await pendingRender?.catch(() => undefined);
+        await rendered?.unmount();
+        signal.removeEventListener("abort", retire);
+      })();
+      return cleanup;
+    };
+    const owned = async <T,>(operation: () => Promise<T>): Promise<T> => {
+      if (retired) throw new Error("Retired command fixture");
+      const pending = operation();
+      pendingWork = pending;
+      const result = await pending;
+      if (retired) throw new Error("Retired command fixture");
+      return result;
+    };
+    retireCommandFixture = retire;
+    onTestFinished(retire);
+    signal.addEventListener("abort", retire, { once: true });
+    pendingRender = render(content([started]));
+    const screen = await owned(() => pendingRender!);
+    const triggers = page.getByRole("button", {
+      name: "Inspect command: Search for the auth file",
+      exact: true,
+    });
+    await owned(() => triggers.click());
+    const original = triggers.element();
+    await owned(() => expect.element(triggers).toHaveAttribute("aria-expanded", "true"));
+    await owned(() => screen.rerender(content(entries)));
+    expect(triggers.elements()).toHaveLength(2);
+    expect(triggers.nth(0).element()).toBe(original);
+    await owned(() => expect.element(triggers.nth(0)).toHaveAttribute("aria-expanded", "true"));
+    expect(original.textContent).toContain("Failed");
+    expect(document.querySelectorAll("[data-claude-command-inspection]")).toHaveLength(2);
+    expect(document.body.textContent).not.toContain("Command run");
+    expect(document.body.textContent).not.toContain("Native task result echo");
+    await owned(() =>
+      expect.element(page.getByText("Received command output", { exact: true })).toBeVisible(),
+    );
+    await owned(() =>
+      expect.element(page.getByText("rg auth fixture", { exact: true })).toBeVisible(),
+    );
+    await owned(() => triggers.nth(1).click());
+    await owned(() =>
+      expect.element(page.getByText("rg auth second-fixture", { exact: true })).toBeVisible(),
+    );
+    const screenshots = import.meta.env.VITE_CLAUDE_OPERATION_SCREENSHOT_DIR;
+    if (typeof screenshots === "string" && screenshots.length > 0) {
+      await owned(() =>
+        page.screenshot({
+          path: `${screenshots}/background-command-work-log.png`,
+          element: original.closest("[data-claude-command-inspection]")!,
+        }),
+      );
+    }
   });
 
   it.each([

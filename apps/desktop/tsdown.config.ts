@@ -3,30 +3,41 @@ import { defineConfig } from "tsdown";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { resolve } from "node:path";
 import { publishSourceDebugBuildManifest } from "../../packages/shared/src/sourceDebugBuild.ts";
+import { prepareRuntimeDependencies } from "../../scripts/lib/prepare-runtime-dependencies.ts";
 
 const shared = {
   format: "cjs" as const,
   outDir: "dist-electron",
-  sourcemap: true,
+  sourcemap: false,
   outExtensions: () => ({ js: ".cjs" }),
 };
 
 export default defineConfig([
   {
     ...shared,
-    entry: ["src/main.ts"],
+    entry: { main: "src/runtimeMain.ts", "desktop-main": "src/main.ts" },
     clean: true,
     hooks: {
       "build:done": ({ options, chunks }) => {
         const root = resolve(options.cwd, options.outDir);
         const output = chunks.filter((chunk) => chunk.type === "chunk");
+        const dependencies = prepareRuntimeDependencies(resolve(options.cwd, "../.."), root);
         publishSourceDebugBuildManifest(
           resolve(root, "main.cjs"),
           "desktop",
-          output.map((chunk) => resolve(options.cwd, chunk.outDir, chunk.fileName)),
-          Object.fromEntries(
-            output.map((chunk) => [resolve(options.cwd, chunk.outDir, chunk.fileName), chunk.code]),
-          ),
+          [
+            ...output.map((chunk) => resolve(options.cwd, chunk.outDir, chunk.fileName)),
+            dependencies.file,
+          ],
+          {
+            ...Object.fromEntries(
+              output.map((chunk) => [
+                resolve(options.cwd, chunk.outDir, chunk.fileName),
+                chunk.code,
+              ]),
+            ),
+            [dependencies.file]: dependencies.code,
+          },
         );
       },
     },

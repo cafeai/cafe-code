@@ -16,9 +16,13 @@
     "../apps/web/reactCompilerConfig.ts",
     "../apps/server/tsdown.config.ts",
     "../apps/server/src/applicationVersion.ts",
+    "../apps/server/src/checkpointing/Diffs.ts",
+    "../apps/server/src/provider/fileAttachmentExtraction.ts",
+    "../apps/server/integration/fixtures/pdf.ts",
     "**/*.ts",
     "../apps/web/browser-test-policy.json",
     "../packages/shared/src/nativeRuntime.ts",
+    "../packages/shared/src/runtimeDependencies.ts",
     "../packages/shared/src/i18n.ts",
     "../packages/shared/src/browserUiCopy.ts"
   ]

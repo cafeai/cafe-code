@@ -23,6 +23,7 @@ const validReport = {
   modules: "148",
   undici: "7.30.1",
   brotliBlockSwitch: -17,
+  moduleHooks: true,
 };
 const isolatedRoot = join(tmpdir(), "cafe-electron-pure-environment-fixture");
 
@@ -71,6 +72,11 @@ describe("installed Electron qualification validation", () => {
     expect(() =>
       validateElectronRuntimeReport(JSON.stringify({ ...validReport, modules: "146" })),
     ).toThrow(/unqualified native addon ABI/u);
+    for (const moduleHooks of [false, undefined, "true", 1]) {
+      expect(() =>
+        validateElectronRuntimeReport(JSON.stringify({ ...validReport, moduleHooks })),
+      ).toThrow();
+    }
     for (const node of [
       "24.13.1",
       "24.18.0",

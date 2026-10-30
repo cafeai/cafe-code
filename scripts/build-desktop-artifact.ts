@@ -5,6 +5,7 @@ import serverPackageJson from "../apps/server/package.json" with { type: "json" 
 import desktopRuntimePackageJson from "../packaging/desktop-runtime/package.json" with { type: "json" };
 
 import { copyStagedYarnProject } from "./lib/staged-yarn-project.ts";
+import { DESKTOP_ELECTRON_LANGUAGES, DESKTOP_RUNTIME_FILES } from "./lib/desktop-runtime-files.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
 import { readYarnCatalog, resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
@@ -783,11 +784,6 @@ const stageWindowsManagedRuntime = Effect.fn("stageWindowsManagedRuntime")(funct
     options.verbose,
   );
 
-  const targetDir = path.join(stageResourcesDir, "managed-runtime", "node", `win-${archive.arch}`);
-  yield* fs.remove(targetDir, { recursive: true, force: true }).pipe(Effect.ignore);
-  yield* fs.makeDirectory(path.dirname(targetDir), { recursive: true });
-  yield* fs.copy(extractedRoot, targetDir);
-
   const providersRoot = path.join(
     stageResourcesDir,
     "managed-runtime",
@@ -828,7 +824,7 @@ const stageWindowsManagedRuntime = Effect.fn("stageWindowsManagedRuntime")(funct
   );
 
   yield* Effect.log("[desktop-artifact] Staged Windows managed provider runtime.").pipe(
-    Effect.annotateLogs({ nodeRuntime: targetDir }),
+    Effect.annotateLogs({ nodeRuntime: path.join(contentRoot, "node") }),
   );
 });
 
@@ -1058,6 +1054,8 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     appId: "com.cafeai.cafecode",
     productName: resolveDesktopProductName(version),
     artifactName: "Cafe-Code-${version}-${arch}.${ext}",
+    files: DESKTOP_RUNTIME_FILES,
+    electronLanguages: DESKTOP_ELECTRON_LANGUAGES,
     directories: {
       buildResources: "apps/desktop/resources",
     },

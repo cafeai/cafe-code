@@ -359,6 +359,43 @@ const publicSummary = (
   });
 
 describe("Earlier work lifecycle folding", () => {
+  it("omits linked background task echoes of an inline command while retaining unidentified failures", () => {
+    const itemId = "bash-item";
+    const current = claudeCommand("inline-command", 6, "tool.completed", itemId);
+    const linked = activity("older-task-echo", 2, {
+      kind: "task.completed",
+      tone: "error",
+      payload: {
+        taskId: "native-background-task",
+        workLogToolCallId: itemId,
+        status: "failed",
+        detail: "Command failed",
+      },
+    });
+    const unknown = activity("legacy-failure", 3, {
+      kind: "task.completed",
+      tone: "error",
+      payload: {
+        taskId: itemId,
+        status: "failed",
+        detail: "Command failed",
+      },
+    });
+    expect(
+      deriveEarlierWorkLogEntries({
+        activities: [linked, unknown],
+        liveActivities: [current],
+        turnId,
+      }).map(({ id }) => id),
+    ).toEqual([unknown.id]);
+    expect(
+      deriveEarlierWorkLogEntries({
+        activities: [linked, unknown],
+        liveActivities: [],
+        turnId,
+      }).map(({ id }) => id),
+    ).toEqual([linked.id, unknown.id]);
+  });
   it.each([
     ["Codex compaction", "tool.started", { itemId: "native", itemType: "context_compaction" }],
     [

@@ -47,6 +47,27 @@ it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
         const query = yield* ProjectionSnapshotQuery;
         const cases = [
           [
+            "Claude task progress",
+            "task.progress",
+            {
+              taskId: "native-task",
+              workLogToolCallId: "\u3000inline-id\ufeff",
+              detail: "Command progress",
+            },
+            "tool",
+          ],
+          [
+            "Claude task completion",
+            "task.completed",
+            {
+              taskId: "native-task",
+              workLogToolCallId: "inline-id",
+              status: "failed",
+              detail: "Command failed",
+            },
+            "tool",
+          ],
+          [
             "Claude",
             "tool.started",
             {
@@ -146,14 +167,15 @@ it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
           (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
           VALUES ('independent-work',${threadId},${turnId},'tool','tool.completed','Saved work',${encodeJsonString({ itemId: "other-operation", itemType: "command_execution" })},2,${timestamp(2)}),
             ('same-id-warning',${threadId},${turnId},'info','runtime.warning','Visible warning',${encodeJsonString({ itemId: "inline-id" })},3,${timestamp(3)}),
+            ('unlinked-task',${threadId},${turnId},'error','task.completed','Task failed',${encodeJsonString({ taskId: "inline-id", status: "failed", detail: "Unlinked task failure" })},4,${timestamp(4)}),
             ('foreign-turn',${threadId},'other-turn','tool','tool.completed','Foreign work','{}',4,${timestamp(4)}),
             ('foreign-thread','other-thread',${turnId},'tool','tool.completed','Foreign work','{}',4,${timestamp(4)})`;
           assert.deepStrictEqual((yield* presence()).turnIdsWithWorkLog, [turnId], provider);
           const visible = yield* page();
-          assert.equal(visible.totalCount, 2, provider);
+          assert.equal(visible.totalCount, 3, provider);
           assert.deepStrictEqual(
             visible.activities.map(({ id }) => id),
-            ["independent-work", "same-id-warning"],
+            ["independent-work", "same-id-warning", "unlinked-task"],
             provider,
           );
         }

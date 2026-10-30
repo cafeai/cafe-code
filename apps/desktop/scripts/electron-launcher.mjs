@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   copyFileSync,
   constants,
@@ -13,7 +13,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -22,21 +22,25 @@ import {
   renderMacPrivacyStrings,
 } from "../../../scripts/lib/mac-app-privacy.ts";
 import {
-  MAC_SOURCE_BUNDLE_IDENTIFIER,
   MAC_SOURCE_APP_NAME,
   resolveMacSourceRuntimeDirectory,
+  resolveMacSourceRuntimeBundleIdentifier,
+  registerMacSourceRuntime,
   signMacSourceRuntime,
 } from "../../../scripts/lib/mac-source-runtime-signing.ts";
+import { pruneCopiedElectronLocales } from "../../../scripts/lib/electron-locale-files.ts";
+import { DESKTOP_ELECTRON_LANGUAGES } from "../../../scripts/lib/desktop-runtime-files.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const desktopDir = resolve(__dirname, "..");
 
 const macAppName = MAC_SOURCE_APP_NAME;
-const macBundleIdentifier = MAC_SOURCE_BUNDLE_IDENTIFIER;
+const macBundleIdentifier =
+  process.platform === "darwin" ? resolveMacSourceRuntimeBundleIdentifier(desktopDir) : undefined;
 // Rebuild cached bundles with signatures matching their branded plists. A
 // leftover Electron signing identity can fail macOS Local Network admission.
-const macRuntimeLauncherVersion = 5;
+const macRuntimeLauncherVersion = 7;
 // Keep pre-profile source runtimes untouched. The new cache namespace binds
 // its plist/signature identity and cannot reuse Production-branded metadata.
 const macRuntimeDir = resolveMacSourceRuntimeDirectory(desktopDir);
@@ -164,6 +168,7 @@ function resolveBrandedMacElectronPath(electronExecutablePath) {
     privacyFingerprint: createHash("sha256")
       .update(JSON.stringify(["en", "ja", "ko"].map(renderMacPrivacyStrings)))
       .digest("hex"),
+    electronLanguages: DESKTOP_ELECTRON_LANGUAGES,
   };
   const currentMetadata = readJsonFile(macRuntimeMetadataPath);
 
@@ -171,6 +176,7 @@ function resolveBrandedMacElectronPath(electronExecutablePath) {
     existsSync(macRuntimeExecutablePath) &&
     JSON.stringify(currentMetadata) === JSON.stringify(expectedMetadata)
   ) {
+    registerMacSourceRuntime(macRuntimeAppBundlePath, { bundleIdentifier: macBundleIdentifier });
     return macRuntimeExecutablePath;
   }
 
@@ -181,6 +187,7 @@ function resolveBrandedMacElectronPath(electronExecutablePath) {
     force: true,
     verbatimSymlinks: true,
   });
+  pruneCopiedElectronLocales(macRuntimeAppBundlePath, "darwin");
 
   if (existsSync(macRuntimeIconPath)) {
     copyFileSync(
@@ -190,7 +197,8 @@ function resolveBrandedMacElectronPath(electronExecutablePath) {
   }
 
   patchMacAppBundlePlists(macRuntimeAppBundlePath);
-  signMacSourceRuntime(macRuntimeAppBundlePath);
+  signMacSourceRuntime(macRuntimeAppBundlePath, { bundleIdentifier: macBundleIdentifier });
+  registerMacSourceRuntime(macRuntimeAppBundlePath, { bundleIdentifier: macBundleIdentifier });
   writeFileSync(macRuntimeMetadataPath, `${JSON.stringify(expectedMetadata, null, 2)}\n`);
   return macRuntimeExecutablePath;
 }
@@ -198,7 +206,37 @@ function resolveBrandedMacElectronPath(electronExecutablePath) {
 export function resolveElectronPath() {
   const electronExecutablePath = resolveInstalledElectronPath();
   if (process.platform !== "darwin") {
-    return electronExecutablePath;
+    return resolveCopiedElectronPath(electronExecutablePath);
   }
   return resolveBrandedMacElectronPath(electronExecutablePath);
+}
+
+function resolveCopiedElectronPath(electronExecutablePath) {
+  const source = dirname(electronExecutablePath);
+  const directory = join(
+    desktopDir,
+    ".electron-runtime",
+    "reduced-v1",
+    `${process.platform}-${process.arch}`,
+  );
+  const expected = {
+    source,
+    executableFingerprint: statFingerprint(electronExecutablePath),
+    electronLanguages: DESKTOP_ELECTRON_LANGUAGES,
+  };
+  mkdirSync(dirname(directory), { recursive: true });
+  // The new namespace cannot replace the previously used installed Electron.
+  // A future changed executable receives a separate cache generation.
+  let generation = `${directory}-${createHash("sha256").update(JSON.stringify(expected)).digest("hex").slice(0, 16)}`;
+  const candidate = join(generation, basename(electronExecutablePath));
+  if (
+    existsSync(candidate) &&
+    JSON.stringify(readJsonFile(`${generation}.json`)) === JSON.stringify(expected)
+  )
+    return candidate;
+  if (existsSync(generation)) generation = `${generation}-${randomUUID()}`;
+  cpSync(source, generation, { recursive: true, verbatimSymlinks: true, errorOnExist: true });
+  pruneCopiedElectronLocales(generation, process.platform);
+  writeFileSync(`${generation}.json`, JSON.stringify(expected), { flag: "wx" });
+  return join(generation, basename(electronExecutablePath));
 }

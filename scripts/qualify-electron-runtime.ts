@@ -34,7 +34,7 @@ const PROCESS_TIMEOUT_MS = 30_000;
 const OUTPUT_LIMIT_BYTES = 4096;
 const VERSION_PATTERN = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
 const RUNTIME_REPORT_SCRIPT =
-  "process.stdout.write(JSON.stringify({electron:process.versions.electron,node:process.versions.node,modules:process.versions.modules,undici:process.versions.undici,brotliBlockSwitch:require('node:zlib').constants.BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH})+'\\n')";
+  "const module=require('node:module');let moduleHooks=false;if(typeof module.registerHooks==='function'){const hook=module.registerHooks({resolve(specifier,context,next){return specifier==='cafecode:runtime-hook-qualification'?{url:'node:path',shortCircuit:true}:next(specifier,context)}});try{moduleHooks=require('cafecode:runtime-hook-qualification').basename('qualified')==='qualified'}finally{hook.deregister()}}process.stdout.write(JSON.stringify({electron:process.versions.electron,node:process.versions.node,modules:process.versions.modules,undici:process.versions.undici,brotliBlockSwitch:require('node:zlib').constants.BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH,moduleHooks})+'\\n')";
 
 interface ElectronPins {
   readonly desktop: unknown;
@@ -48,6 +48,7 @@ export interface ElectronRuntimeReport {
   readonly modules: string;
   readonly undici: string;
   readonly brotliBlockSwitch: number;
+  readonly moduleHooks: true;
 }
 
 // Only fixed, Cafe-authored diagnostics are printed. Native loader failures or
@@ -93,7 +94,7 @@ export function validateElectronRuntimeReport(stdout: string): ElectronRuntimeRe
   const report = asRecord(value);
   if (
     report === undefined ||
-    Object.keys(report).length !== 5 ||
+    Object.keys(report).length !== 6 ||
     typeof report.electron !== "string" ||
     typeof report.node !== "string" ||
     typeof report.modules !== "string" ||
@@ -129,12 +130,18 @@ export function validateElectronRuntimeReport(stdout: string): ElectronRuntimeRe
       "Installed Electron lacks the reviewed Brotli fix marker.",
     );
   }
+  if (report.moduleHooks !== true) {
+    throw new ElectronQualificationError(
+      "Installed Electron does not support the qualified application dependency loader.",
+    );
+  }
   return {
     electron: report.electron,
     node: report.node,
     modules: report.modules,
     undici: report.undici,
     brotliBlockSwitch: report.brotliBlockSwitch,
+    moduleHooks: true,
   };
 }
 
@@ -312,7 +319,7 @@ if (isElectronQualificationEntryPoint(import.meta.url, process.argv[1])) {
   try {
     const report = await qualifyInstalledElectronRuntime();
     process.stdout.write(
-      `Qualified installed Electron ${report.electron}; bundled Node ${report.node}; Undici ${report.undici}; native ABI ${report.modules}; Brotli fix marker observed.\n`,
+      `Qualified installed Electron ${report.electron}; bundled Node ${report.node}; Undici ${report.undici}; native ABI ${report.modules}; Brotli fix marker observed; synchronous dependency hooks.\n`,
     );
   } catch (error) {
     process.stderr.write(

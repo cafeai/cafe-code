@@ -363,9 +363,16 @@ describe("repository toolchain policy", () => {
     const stagePackage = readJson("packaging/desktop-runtime/package.json");
     const desktopDependencies = readStringMap(desktopPackage.dependencies);
     const serverDependencies = readStringMap(serverPackage.dependencies);
+    // The patch parser is compiled into the backend; the API SDK is provided
+    // only as the Agent SDK's development/type peer in the staged workspace.
+    // Actual isolated runtime qualification covers both deliberate omissions.
+    const compiledOrDevelopmentOnly = new Set(["@pierre/diffs", "@anthropic-ai/sdk"]);
     const expectedDependencies = Object.fromEntries(
       Object.entries({ ...serverDependencies, ...desktopDependencies }).filter(
-        ([name, spec]) => name !== "electron" && !spec.startsWith("workspace:"),
+        ([name, spec]) =>
+          name !== "electron" &&
+          !spec.startsWith("workspace:") &&
+          !compiledOrDevelopmentOnly.has(name),
       ),
     );
 
@@ -377,6 +384,7 @@ describe("repository toolchain policy", () => {
     );
     expect(stagePackage.dependencies).toEqual(expectedDependencies);
     expect(stagePackage.devDependencies).toEqual({
+      "@anthropic-ai/sdk": serverDependencies["@anthropic-ai/sdk"],
       electron: desktopDependencies.electron,
       "electron-builder": readStringMap(rootPackage.devDependencies)["electron-builder"],
     });

@@ -131,6 +131,11 @@ with development watchers:
 corepack yarn dev:desktop
 ```
 
+Desktop and backend development use the same reduced application dependencies
+as desktop packaging, so missing shipping dependencies fail locally too. The
+backend watcher runs the bundled server; build tools and types remain available
+to the toolchain. See [source development](docs/source-development.md).
+
 For a built checkout, enable the localhost-only debug endpoint with:
 
 ```bash
