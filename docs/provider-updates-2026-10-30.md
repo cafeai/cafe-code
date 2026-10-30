@@ -1,10 +1,10 @@
-# Codex 0.166 and Claude unanswered-question update
+# Codex 0.166 and coordinated Claude 314 update
 
-Last updated: 2026-10-30 14:11:14 JST (UTC+0900)
+Last updated: 2026-10-30 15:07:14 JST (UTC+0900)
 
 This audit compares Cafe's Codex 0.164 protocol and managed runtime with
 **0.166.0**, and Claude Agent SDK **0.3.311** / managed Code **2.1.311** with
-the coordinated **0.3.314 / 2.1.314** candidate. Source integration, package
+the coordinated **0.3.314 / 2.1.314** target. Source integration, package
 admission, synthetic compatibility checks and live provider adoption are separate
 observations. A configured external executable can remain on another version;
 changing Cafe's SDK or fresh-install Windows bundle never updates that executable.
@@ -23,8 +23,9 @@ and embedded-manifest/platform checks, with 14 npm metadata signatures verified.
 The managed Windows manifest selects the exact wrapper/x64/arm64 bytes.
 This manual Codex stable-artifact review does not assert 24 hours have elapsed,
 prove source-to-native reproducibility or install/launch a provider. It is
-separate from Yarn dependency admission and does not waive Claude's mandatory
-complete-family quarantine.
+separate from Yarn dependency admission. It does not itself authorize a Claude
+package-age exception; the separate user-approved exception for this exact update
+is recorded below.
 
 Codex 0.166 adds structured `ModelProviderError` variants for saved/current
 provider mismatch, an unavailable configured provider and managed-policy
@@ -97,6 +98,13 @@ Explanations intended for the model belong in ordinary answers; native unanswere
 metadata is not model-visible. See [the interaction decision](decisions/claude-unanswered-questions.md)
 for validation, ownership and compatibility boundaries.
 
+Canonical operational logging for these exact input-request/resolution events
+retains bounded routing metadata, counts and Boolean facts instead of question
+text, answers, full-text disposition keys or raw copies. This log-only projection
+preserves authenticated events/activities and native callbacks. The separate
+optional protected native protocol transcript log retains its existing behavior;
+this change does not scrub historical logs or every content-bearing event type.
+
 ## Coordinated Claude package admission
 
 At the October 30 audit, SDK `latest`/`next` were 0.3.314 and Code
@@ -104,15 +112,33 @@ At the October 30 audit, SDK `latest`/`next` were 0.3.314 and Code
 2.1.308. A non-prerelease on `latest` is not proof of a `stable` channel change.
 The 314 target remains frozen even if mutable tags later advance.
 
-The complete SDK wrapper/eight-platform family clears its 24-hour hold at
-2026-10-31 00:17:55.347 UTC; the complete CLI family clears at
-2026-10-31 00:24:18.389 UTC (09:24:18.389 JST). At this document's update,
-these gates are **pending**: all three SDK pins, Yarn lock and Windows CLI
-manifest must remain on 311 until fresh complete-family timestamps, signatures,
-archive digests and embedded platform identities are admitted. Wrapper-only age
-is insufficient. Registry signatures authenticate npm metadata under the
-published registry keys; they do not prove native behavior or source-to-binary
-reproducibility. Managed packaging does not execute the CLI's lifecycle scripts.
+The complete SDK wrapper/eight-platform family reaches 24 hours at
+2026-10-31 00:17:55.347 UTC; the complete CLI family reaches 24 hours at
+2026-10-31 00:24:18.389 UTC (09:24:18.389 JST). The user explicitly approved a
+**one-time package-age exception for SDK 0.3.314 and CLI 2.1.314** in this update.
+At this document's update those chronological ages have not elapsed. The
+exception permits early admission of this exact coordinated pair; it does not
+claim the packages have aged 24 hours or change the normal age rule for future
+updates.
+
+Fresh admission completed at **2026-10-30 14:58:00.679 JST (UTC+0900)**. All **18** exact
+wrapper/platform archives passed timestamp validation, SHA-512/SHA-1 integrity,
+embedded manifest/platform checks and **36** npm metadata signatures. The bounded
+serial audit read 2,128,960,251 compressed bytes without installing or executing
+a provider. The three SDK pins and Yarn lock now select **0.3.314**; the managed
+Windows CLI wrapper, x64 and arm64 entries select **2.1.314** with their reviewed
+archive identities. Existing selected external CLI generations remain unchanged.
+
+The repository-only dependency install used transient preapproval for the nine
+exact SDK 0.3.314 descriptors covered by the age exception. A subsequent normal
+immutable install passed without that override; no persistent age-policy change
+was made. Wrapper-only checks remain insufficient. The exception does not relax
+finite download/decompression limits, private file ownership, package-script
+exclusions or compatibility verification. Registry signatures authenticate npm
+metadata under the published registry keys; they do not prove native behavior or
+source-to-binary reproducibility. Managed packaging does not execute the CLI's
+lifecycle scripts. Required final integration verification remains separate;
+this admission record does not claim it passed or attest live provider adoption.
 
 Code 2.1.314 reports a sandbox/worktree repair for headless resume/continue,
 relevant to Cafe's resumed SDK queries. Other native changes concern required

@@ -101,6 +101,7 @@ import {
   type ProviderRuntimeOwnerEvidence,
 } from "../providerRuntimeOwnerEvidence.ts";
 import { getCodexRootTurnCompletion } from "../codexRootTurnCompletion.ts";
+import { projectProviderEventForOperationalLog } from "../providerUserInputLogProjection.ts";
 import { matchesSubagentPolicySession } from "../subagentPolicyContinuation.ts";
 import { normalizeClaudeSubagentHistoryRoot } from "../claudeSubagentHistoryRoot.ts";
 import {
@@ -812,12 +813,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       Effect.tap((canonicalEvent) =>
         canonicalEventLogger
           ? canonicalEventLogger
-              .write(
-                // The private diagnostic copy has its own durable owner reader.
-                // Do not broaden optional ordinary NDJSON observability logs.
-                { ...canonicalEvent, diagnostic: undefined },
-                canonicalEvent.threadId,
-              )
+              .write(projectProviderEventForOperationalLog(canonicalEvent), canonicalEvent.threadId)
               .pipe(
                 Effect.catchCause((cause) =>
                   Effect.logWarning("provider.runtime.canonical-log-write-failed", {

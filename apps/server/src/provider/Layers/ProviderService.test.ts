@@ -27,6 +27,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionStartInput,
+  RuntimeRequestId,
   SubagentRuntimeId,
   ThreadId,
   TurnId,
@@ -3197,6 +3198,132 @@ it.effect("ProviderServiceLive writes canonical events to the emitting thread se
       /private-native-diagnostic|private-diagnostic-sentinel|Private received error detail/,
     );
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "ProviderServiceLive keeps question content on canonical/control paths and out of operational logs",
+  () =>
+    Effect.gen(function* () {
+      const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+      const nativeEvents = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+      // Admit this exact test-owned subscription before service acquisition. It
+      // retains events even if the service's native reader has not run yet.
+      const nativeSubscription = yield* PubSub.subscribe(nativeEvents);
+      const adapter = {
+        ...claude.adapter,
+        streamEvents: Stream.fromSubscription(nativeSubscription),
+      };
+      const registry = makeAdapterRegistryMock({ [CLAUDE_AGENT_DRIVER]: adapter });
+      const records: unknown[] = [];
+      const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+        Layer.provide(SqlitePersistenceTest),
+      );
+      const directoryLayer = ProviderSessionDirectoryLive.pipe(
+        Layer.provide(runtimeRepositoryLayer),
+      );
+      const layer = makeProviderServiceLive({
+        canonicalEventLogger: {
+          filePath: "memory://user-input-content-boundary",
+          write: (record) =>
+            Effect.sync(() => {
+              records.push(record);
+            }),
+          close: () => Effect.void,
+        },
+      }).pipe(
+        Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+      );
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("input-content-boundary");
+        yield* provider.startSession(threadId, {
+          provider: CLAUDE_AGENT_DRIVER,
+          providerInstanceId: claudeAgentInstanceId,
+          threadId,
+          runtimeMode: "approval-required",
+        });
+        const received = yield* provider.streamEvents.pipe(
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkChild({ startImmediately: true }),
+        );
+        const question = "private-question-content-sentinel";
+        const answer = "private-answer-content-sentinel";
+        const raw = {
+          source: "claude.sdk.permission" as const,
+          payload: { question, answer, private: "private-raw-sentinel" },
+        };
+        const requested: ProviderRuntimeEvent = {
+          type: "user-input.requested",
+          eventId: asEventId("privacy-requested"),
+          provider: CLAUDE_AGENT_DRIVER,
+          threadId,
+          requestId: RuntimeRequestId.make("privacy-request"),
+          createdAt: "2026-10-30T05:00:00.000Z",
+          raw,
+          payload: {
+            questions: [
+              { id: question, question, header: "Choice", options: [], multiSelect: false },
+            ],
+            isBlocking: true,
+            supportsUnanswered: true,
+          },
+        };
+        const resolved: ProviderRuntimeEvent = {
+          type: "user-input.resolved",
+          eventId: asEventId("privacy-resolved"),
+          provider: CLAUDE_AGENT_DRIVER,
+          threadId,
+          requestId: RuntimeRequestId.make("privacy-request"),
+          createdAt: "2026-10-30T05:00:01.000Z",
+          raw,
+          payload: { answers: { Answered: answer }, unanswered: { [question]: "skipped" } },
+        };
+        yield* PubSub.publish(nativeEvents, requested);
+        yield* provider.respondToUserInput({
+          threadId,
+          requestId: asRequestId("privacy-request"),
+          answers: { Answered: answer },
+          unanswered: { [question]: "skipped" },
+        });
+        yield* PubSub.publish(nativeEvents, resolved);
+        const events = yield* Fiber.join(received);
+        assert.deepEqual(
+          events.map((event) => event.payload),
+          [requested.payload, resolved.payload],
+        );
+        assert.deepEqual(
+          events.map((event) => event.raw),
+          [raw, raw],
+        );
+        assert.deepEqual(claude.respondToUserInput.mock.calls, [
+          [
+            threadId,
+            asRequestId("privacy-request"),
+            { Answered: answer },
+            { [question]: "skipped" },
+          ],
+        ]);
+        assert.equal(records.length, 2);
+        assert.notMatch(
+          encodeProviderJsonString(records),
+          /private-question|private-answer|private-raw/,
+        );
+        assert.deepEqual((records[0] as { payload: unknown }).payload, {
+          contentOmitted: true,
+          questionCount: 1,
+          isBlocking: true,
+          supportsUnanswered: true,
+        });
+        assert.deepEqual((records[1] as { payload: unknown }).payload, {
+          contentOmitted: true,
+          hasExplicitUnanswered: true,
+        });
+      }).pipe(Effect.provide(layer));
+    }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.effect("ProviderServiceLive keeps persisted resumable sessions on startup", () =>

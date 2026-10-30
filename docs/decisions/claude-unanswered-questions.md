@@ -3,7 +3,7 @@
 Status: Accepted design; implementation under qualification
 
 Created: 2026-10-30 13:06:02 JST (UTC+0900)
-Last updated: 2026-10-30 14:11:14 JST (UTC+0900)
+Last updated: 2026-10-30 15:07:23 JST (UTC+0900)
 
 Decision authority: implementation choice within the user's approved provider
 update. Design acceptance and source implementation do not establish passing
@@ -73,7 +73,15 @@ steer, turn start or paid inference is introduced.
 ## Security, privacy and compatibility
 
 Question text, answers and annotations belong to the authenticated conversation
-and its existing response transport; they do not belong in operational logs.
+and its existing response transport. Ordinary canonical operational logs retain
+only bounded routing metadata, question counts and Boolean resolution/capability
+facts for these exact input-request events; they omit question/answer content,
+full-text disposition keys, raw copies and private diagnostic snapshots. This
+log-only projection never replaces or rewrites the authenticated canonical event,
+its activity or the native callback. The separate optional protected native
+protocol transcript log and other content-bearing event types retain their
+existing behavior; this change does not claim to scrub historical logs or every
+transcript copy.
 The adapter translates the bounded typed disposition into native
 `annotations[question].unanswered` only after capability and request validation.
 Prototype-like provider question identities are inert own response properties,
@@ -87,9 +95,13 @@ composer, typing a draft or receiving another message cannot mark a question as
 replied in chat. Dismiss is also not an alias for cancellation or approval.
 
 No credentials, native history, global settings or permissions are copied or
-changed. SDK and managed CLI pin changes remain subject to the independent full
-package-family age and provenance review. Running external CLI generations are
-not upgraded by a source pin or a rebuilt application bundle.
+changed. SDK and managed CLI pin changes require independent complete-family
+provenance and compatibility review. The normal 24-hour package-age policy
+remains in force; the user explicitly waived elapsed age only for SDK 0.3.314
+and CLI 2.1.314 in this update. The coordinated audit records that exception
+separately from timestamp, signature, archive-integrity and platform checks.
+Running external CLI generations are not upgraded by a source pin or a rebuilt
+application bundle.
 
 ## Alternatives and verification
 
@@ -109,5 +121,6 @@ tests use synthetic providers; they do not claim live Claude execution.
 
 The controller and native browser wiring passed focused qualification on
 2026-10-30 13:29:51 JST (UTC+0900). Complete integration qualification against the
-final age-cleared SDK/runtime pins, repository checks and the fresh forced
+final qualified SDK/runtime pins (with the exact 314 elapsed-age exception above),
+repository checks and the fresh forced
 desktop build remain separate completion gates.
