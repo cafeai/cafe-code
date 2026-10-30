@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ProviderRuntimeEvent } from "@cafecode/contracts";
+import { RuntimeItemId, type ProviderRuntimeEvent } from "@cafecode/contracts";
 import { projectProviderEventForOperationalLog } from "./providerUserInputLogProjection.ts";
 
 const envelope = {
@@ -165,7 +165,7 @@ describe("structured user-input operational logging", () => {
     const source = Object.defineProperty(
       {
         ...fixture("user-input.resolved", { cancelled: true }),
-        itemId: "x".repeat(513),
+        itemId: RuntimeItemId.make("x".repeat(513)),
       },
       "providerInstanceId",
       {
