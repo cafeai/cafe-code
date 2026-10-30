@@ -75,7 +75,10 @@ import type { ProviderInstance } from "../ProviderDriver.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import {
+  makeManualOnlyProviderMaintenanceCapabilities,
+  makeProviderMaintenanceCapabilities,
+} from "../providerMaintenance.ts";
 import { parseCodexRateLimitUpdate } from "../codexRateLimits.ts";
 import { supportsSubagentConcurrency } from "../Drivers/SubagentConcurrency.ts";
 
@@ -804,6 +807,84 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               }).pipe(Effect.provide(runtime));
             }),
           ),
+      );
+
+      it.effect("does not expose update authority for a driver-mismatched instance request", () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const snapshot = catalogProvider();
+            const capabilities = makeProviderMaintenanceCapabilities({
+              provider: snapshot.driver,
+              packageName: "@openai/codex",
+              updateExecutable: "npm",
+              updateArgs: ["install", "-g", "@openai/codex@latest"],
+              updateLockKey: "npm-global",
+            });
+            let capabilityReads = 0;
+            const instance: ProviderInstance = {
+              instanceId: snapshot.instanceId,
+              driverKind: snapshot.driver,
+              continuationIdentity: {
+                driverKind: snapshot.driver,
+                continuationKey: "codex:instance:codex",
+              },
+              displayName: undefined,
+              enabled: true,
+              snapshot: {
+                get maintenanceCapabilities() {
+                  capabilityReads += 1;
+                  return capabilities;
+                },
+                getSnapshot: Effect.succeed(snapshot),
+                refresh: Effect.succeed(snapshot),
+                streamChanges: Stream.empty,
+              },
+              adapter: {} as ProviderInstance["adapter"],
+              textGeneration: {} as ProviderInstance["textGeneration"],
+            };
+            const instanceLayer = Layer.succeed(ProviderInstanceRegistry, {
+              getInstance: (id) =>
+                Effect.succeed(id === instance.instanceId ? instance : undefined),
+              listInstances: Effect.succeed([instance]),
+              listUnavailable: Effect.succeed([]),
+              streamChanges: Stream.empty,
+              subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+            });
+            const runtime = yield* Layer.build(
+              ProviderRegistryLive.pipe(
+                Layer.provideMerge(instanceLayer),
+                Layer.provideMerge(
+                  ServerConfig.layerTest(process.cwd(), {
+                    prefix: "cafe-maintenance-driver-binding-",
+                  }),
+                ),
+                Layer.provideMerge(NodeServices.layer),
+              ),
+            );
+            yield* Effect.gen(function* () {
+              const registry = yield* ProviderRegistry;
+              const before = capabilityReads;
+              const refused = yield* registry.getProviderMaintenanceCapabilitiesForInstance(
+                instance.instanceId,
+                ProviderDriverKind.make("claudeAgent"),
+              );
+              assert.strictEqual(refused.update, null);
+              assert.strictEqual(capabilityReads, before);
+              const absent = yield* registry.getProviderMaintenanceCapabilitiesForInstance(
+                ProviderInstanceId.make("missing-maintenance-owner"),
+                snapshot.driver,
+              );
+              assert.strictEqual(absent.update, null);
+              assert.strictEqual(capabilityReads, before);
+              const accepted = yield* registry.getProviderMaintenanceCapabilitiesForInstance(
+                instance.instanceId,
+                snapshot.driver,
+              );
+              assert.deepStrictEqual(accepted, capabilities);
+              assert.strictEqual(capabilityReads, before + 1);
+            }).pipe(Effect.provide(runtime));
+          }),
+        ),
       );
 
       for (const includeMaintenance of [false, true]) {

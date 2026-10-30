@@ -21,10 +21,13 @@ import {
   getProviderUpdateRejectedToastView,
   getProviderUpdateRunningToastView,
   providerUpdateNotificationKey,
+  singleFailedProviderUpdateInstanceId,
   type ProviderUpdateCandidate,
   type ProviderUpdateToastView,
 } from "./ProviderUpdateLaunchNotification.logic";
 import { stackedThreadToast, toastManager } from "./ui/toast";
+import { revealSettingsSearchTarget } from "./settings/settingsSearchLanding";
+import { settingsSearchProviderAnchorId } from "./settings/settingsSearchIndex";
 
 const seenProviderUpdateNotificationKeys = new Set<string>();
 type ProviderUpdateToastId = ReturnType<typeof toastManager.add>;
@@ -201,7 +204,10 @@ export function ProviderUpdateLaunchNotification() {
   );
 
   const openProviderSettings = useCallback(
-    (toastId?: ProviderUpdateToastId) => {
+    (toastId?: ProviderUpdateToastId, instanceId?: ProviderInstanceId) => {
+      // An old environment's toast cannot navigate to a different server's
+      // similarly named account or reveal its output after a workspace switch.
+      if (readWorkspaceEnvironmentId() !== environmentId) return;
       const activeToast = activeToastRef.current;
       if (toastId !== undefined) {
         toastManager.close(toastId);
@@ -211,9 +217,21 @@ export function ProviderUpdateLaunchNotification() {
       if (activeToast && (toastId === undefined || activeToast.toastId === toastId)) {
         activeToastRef.current = null;
       }
-      void navigate({ to: "/settings/providers" });
+      void navigate({ to: "/settings/providers" })
+        .then(() => {
+          if (!instanceId || readWorkspaceEnvironmentId() !== environmentId) return;
+          // Reuse the existing bounded Settings reveal, including CSS.escape.
+          // This highlights the exact card but never opens its output panel.
+          return revealSettingsSearchTarget({
+            id: settingsSearchProviderAnchorId(instanceId),
+            kind: "setting",
+            root: document.body,
+            isCurrent: () => readWorkspaceEnvironmentId() === environmentId,
+          });
+        })
+        .catch(() => undefined);
     },
-    [navigate],
+    [environmentId, navigate],
   );
 
   useEffect(() => {
@@ -237,7 +255,11 @@ export function ProviderUpdateLaunchNotification() {
         providers: activeProviders,
         providerCount: activeToast.providerCount,
       },
-      openSettings: () => openProviderSettings(activeToast.toastId),
+      openSettings: () =>
+        openProviderSettings(
+          activeToast.toastId,
+          singleFailedProviderUpdateInstanceId(activeProviders),
+        ),
     });
 
     if (isTerminalProviderUpdateToastView(view)) {
@@ -337,7 +359,11 @@ export function ProviderUpdateLaunchNotification() {
           toastId,
           view,
           copy: { kind: "progress", providers: updatedProviderSnapshots, providerCount },
-          openSettings,
+          openSettings: () =>
+            openProviderSettings(
+              toastId,
+              singleFailedProviderUpdateInstanceId(updatedProviderSnapshots),
+            ),
         });
 
         if (isTerminalProviderUpdateToastView(view)) {

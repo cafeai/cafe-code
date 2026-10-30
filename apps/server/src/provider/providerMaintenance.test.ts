@@ -7,9 +7,11 @@ import path from "node:path";
 import { ProviderDriverKind } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Random from "effect/Random";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { CLAUDE_PROVIDER_MAINTENANCE } from "./claudeMaintenance.ts";
 import {
   clearLatestProviderVersionCacheForTests,
   createProviderVersionAdvisory,
@@ -90,6 +92,225 @@ afterEach(() => {
 });
 
 describe("providerMaintenance", () => {
+  const claudeUpdate = makePackageManagedProviderMaintenanceResolver(CLAUDE_PROVIDER_MAINTENANCE);
+  const syntheticAlias = "/cafe-maintenance-synthetic-fixture/bin/claude";
+  const options = { binaryPath: syntheticAlias, platform: "darwin" as const, env: { PATH: "" } };
+  for (const prefix of ["/opt/homebrew", "/usr/local"]) {
+    for (const cask of ["claude-code", "claude-code@latest"] as const) {
+      it("selects the exact observed " + cask + " cask under " + prefix, () => {
+        const capabilities = claudeUpdate.resolve({
+          ...options,
+          realCommandPath: prefix + "/Caskroom/" + cask + "/2.1.314/claude",
+        });
+        expect(capabilities.update).toEqual({
+          command: "brew upgrade " + cask,
+          executable: "brew",
+          args: ["upgrade", cask],
+          lockKey: "homebrew",
+        });
+      });
+    }
+  }
+  it.effect("uses only the successful native realPath observation to select Claude latest", () => {
+    const calls: string[] = [];
+    return Effect.gen(function* () {
+      const nativeLookingAlias = "/cafe-synthetic/.local/bin/claude";
+      const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(claudeUpdate, {
+        ...options,
+        binaryPath: nativeLookingAlias,
+      });
+      expect(calls).toEqual([nativeLookingAlias]);
+      expect(capabilities.update?.args).toEqual(["upgrade", "claude-code@latest"]);
+    }).pipe(
+      Effect.provideService(
+        FileSystem.FileSystem,
+        FileSystem.makeNoop({
+          realPath: (value) => {
+            calls.push(value);
+            return Effect.succeed("/opt/homebrew/Caskroom/claude-code@latest/2.1.314/claude");
+          },
+        }),
+      ),
+    );
+  });
+  it.effect("never upgrades a lexical Caskroom guess after native realPath failure", () =>
+    Effect.gen(function* () {
+      const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(claudeUpdate, {
+        ...options,
+        binaryPath: "/opt/homebrew/Caskroom/claude-code@latest/cafe-fixture-version/claude",
+      });
+      expect(capabilities.update).toBeNull();
+    }).pipe(Effect.provideService(FileSystem.FileSystem, FileSystem.makeNoop({}))),
+  );
+  it.effect(
+    "scrubs a hidden caller realPath value when the actual filesystem observation fails",
+    () =>
+      Effect.gen(function* () {
+        const hidden = {
+          ...options,
+          realCommandPath: "/opt/homebrew/Caskroom/claude-code@latest/2.1.314/claude",
+        };
+        const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
+          claudeUpdate,
+          hidden,
+        );
+        expect(capabilities.update).toBeNull();
+      }).pipe(Effect.provideService(FileSystem.FileSystem, FileSystem.makeNoop({}))),
+  );
+  it.effect("preserves a generic provider's legacy Homebrew outcome after realPath failure", () =>
+    Effect.gen(function* () {
+      const capabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(packageToolUpdate, {
+        binaryPath: "/opt/homebrew/bin/cafe-package-tool-synthetic-fixture",
+        platform: "darwin",
+        env: { PATH: "" },
+      });
+      expect(capabilities.update?.args).toEqual(["upgrade", "package-tool"]);
+    }).pipe(Effect.provideService(FileSystem.FileSystem, FileSystem.makeNoop({}))),
+  );
+  for (const realCommandPath of [
+    undefined,
+    null,
+    "/opt/homebrew/bin/claude",
+    "/opt/homebrew/Caskroom/claude-code@beta/2.1.314/claude",
+    "/custom/Homebrew/Caskroom/claude-code@latest/2.1.314/claude",
+    "/tmp/opt/homebrew/Caskroom/claude-code@latest/2.1.314/claude",
+    "/opt/homebrew/Caskroom/claude-code@latest/claude",
+    "/opt/homebrew/Caskroom/claude-code@latest/./claude",
+    "/opt/homebrew/Caskroom/claude-code@latest/../claude",
+    "/opt/homebrew/Caskroom/claude-code@latest/--force/claude",
+    "/opt/homebrew/Caskroom/claude-code@latest/2.1.314/extra/claude",
+    "/opt/homebrew/Caskroom/claude-code@latest/2.1.314/not-claude",
+    "/opt/homebrew/Caskroom/claude-code@latest/2.1.314/--force",
+    "/opt/homebrew/Caskroom/claude-code@latest --force/2.1.314/claude",
+    "/opt/homebrew/Caskroom/claude-code@latest;touch-owned/2.1.314/claude",
+    "/opt/homebrew/Caskroom/claude-code@latest%2Fother/2.1.314/claude",
+    "/opt/homebrew/Caskroom/claude-code@latest/" + "1".repeat(129) + "/claude",
+    "/opt/homebrew/Caskroom/claude-code@latest/2.1.314/claude\u0000ignored",
+    "/opt/homebrew/Caskroom/CLAUDE-CODE@LATEST/2.1.314/claude",
+    "/opt/homebrew/Caskroom/claude-code@latest/2.1.314/Claude",
+    "/opt/homebrew/caskroom/claude-code@latest/2.1.314/claude",
+    "file:///opt/homebrew/Caskroom/claude-code@latest/2.1.314/claude",
+  ]) {
+    it(
+      "refuses unproved, malformed or non-allowlisted Claude cask evidence " +
+        String(realCommandPath),
+      () => {
+        expect(claudeUpdate.resolve({ ...options, realCommandPath }).update).toBeNull();
+      },
+    );
+  }
+  it("preserves manual-only policy for an empty legacy formula", () => {
+    const empty = makePackageManagedProviderMaintenanceResolver({
+      provider: driver("packageTool"),
+      npmPackageName: "@example/package-tool",
+      homebrewFormula: "",
+      nativeUpdate: null,
+    });
+    expect(
+      empty.resolve({
+        ...options,
+        binaryPath: "/opt/homebrew/bin/cafe-package-tool-synthetic-fixture",
+      }).update,
+    ).toBeNull();
+  });
+  it("does not infer a Claude channel from a Homebrew bin alias alone", () => {
+    expect(
+      claudeUpdate.resolve({
+        ...options,
+        binaryPath: "/opt/homebrew/bin/cafe-claude-synthetic-fixture",
+      }).update,
+    ).toBeNull();
+  });
+  it("does not adopt a macOS cask target on another platform", () => {
+    expect(
+      claudeUpdate.resolve({
+        ...options,
+        platform: "linux",
+        realCommandPath: "/opt/homebrew/Caskroom/claude-code@latest/2.1.314/claude",
+      }).update,
+    ).toBeNull();
+  });
+  for (const row of [
+    {
+      binaryPath: "/cafe-synthetic/.local/bin/claude",
+      executable: "claude",
+      args: ["update"],
+      lockKey: "claude-native",
+    },
+    {
+      binaryPath: "/cafe-synthetic/.vite-plus/bin/claude",
+      executable: "vp",
+      args: ["i", "-g", "@anthropic-ai/claude-code"],
+      lockKey: "vite-plus-global",
+    },
+    {
+      binaryPath: "/cafe-synthetic/.local/share/pnpm/claude",
+      executable: "pnpm",
+      args: ["add", "-g", "@anthropic-ai/claude-code@latest"],
+      lockKey: "pnpm-global",
+    },
+    {
+      binaryPath: "/cafe-synthetic/lib/node_modules/@anthropic-ai/claude-code/bin/claude",
+      executable: "npm",
+      args: ["install", "-g", "@anthropic-ai/claude-code@latest"],
+      lockKey: "npm-global",
+    },
+  ]) {
+    it("preserves " + row.lockKey + " behavior for a non-Caskroom installation", () => {
+      const update = claudeUpdate.resolve({
+        ...options,
+        binaryPath: row.binaryPath,
+        realCommandPath: row.binaryPath,
+      }).update;
+      expect(update).toMatchObject({
+        executable: row.executable,
+        args: row.args,
+        lockKey: row.lockKey,
+      });
+    });
+  }
+
+  for (const binaryPath of [
+    "/cafe-synthetic/.local/bin/claude",
+    "/cafe-synthetic/.vite-plus/bin/claude",
+    "/cafe-synthetic/.local/share/pnpm/claude",
+    "/cafe-synthetic/lib/node_modules/@anthropic-ai/claude-code/bin/claude",
+  ]) {
+    for (const cask of ["claude-code", "claude-code@latest"] as const) {
+      it("uses observed " + cask + " ownership instead of lexical alias " + binaryPath, () => {
+        const update = claudeUpdate.resolve({
+          ...options,
+          binaryPath,
+          realCommandPath: "/opt/homebrew/Caskroom/" + cask + "/2.1.314/claude",
+        }).update;
+        expect(update).toEqual({
+          command: "brew upgrade " + cask,
+          executable: "brew",
+          args: ["upgrade", cask],
+          lockKey: "homebrew",
+        });
+      });
+    }
+    for (const realCommandPath of [
+      "/opt/homebrew/Caskroom",
+      "/opt/homebrew/Caskroom/claude-code@beta/2.1.314/claude",
+      "/opt/homebrew/Caskroom/claude-code@latest/../claude",
+      "/opt/homebrew/Caskroom/claude-code@latest/2.1.314/extra/claude",
+      "/opt/homebrew/Caskroom/claude-code@latest/2.1.314/not-claude",
+      "/opt/homebrew/Caskroom/--force/2.1.314/claude",
+    ]) {
+      it(
+        "does not fall through another updater for invalid known Caskroom ownership " +
+          binaryPath +
+          realCommandPath,
+        () => {
+          expect(
+            claudeUpdate.resolve({ ...options, binaryPath, realCommandPath }).update,
+          ).toBeNull();
+        },
+      );
+    }
+  }
   it.effect(
     "bounds version lookup across headers and a stalled body without changing cache expiry",
     () => {

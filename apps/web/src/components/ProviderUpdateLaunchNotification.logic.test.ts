@@ -14,6 +14,7 @@ import {
   hasOneClickUpdateProviderCandidate,
   isProviderUpdateCandidate,
   providerUpdateNotificationKey,
+  singleFailedProviderUpdateInstanceId,
   type ProviderUpdateCandidate,
 } from "./ProviderUpdateLaunchNotification.logic";
 
@@ -328,7 +329,7 @@ describe("provider update launch notification logic", () => {
     expect(view).toMatchObject({
       phase: "failed",
       type: "error",
-      title: "Provider update failed",
+      title: "Codex update failed",
       description: "command failed",
     });
   });
@@ -669,5 +670,57 @@ describe("provider update launch notification logic", () => {
         provider({ driver: driver("claudeAgent"), canUpdate: false }),
       ]),
     ).toBeNull();
+  });
+});
+
+describe("provider update failure target identity", () => {
+  const failure = {
+    status: "failed",
+    startedAt: checkedAt,
+    finishedAt: checkedAt,
+    message: "Update command exited with code 1.",
+    output: "private-package-output",
+  } as const;
+  it("targets the selected exact failed instance, not a default account sharing its driver", () => {
+    const selected = provider({
+      driver: driver("codex"),
+      instanceId: instanceId("codex-personal"),
+      updateState: failure,
+    });
+    const other = provider({ driver: driver("codex"), instanceId: instanceId("codex") });
+    expect(singleFailedProviderUpdateInstanceId([other, selected])).toBe("codex-personal");
+    expect(singleFailedProviderUpdateInstanceId([other])).toBeUndefined();
+    expect(
+      singleFailedProviderUpdateInstanceId([selected, { ...other, updateState: failure }]),
+    ).toBeUndefined();
+  });
+  it("keeps account/output/latest-advisory data out of the failed title and uses a fixed unknown-driver fallback", () => {
+    const selected = {
+      ...provider({ driver: driver("codex"), updateState: failure, latestVersion: "99.9.9" }),
+      displayName: "Private account",
+    };
+    const view = getProviderUpdateProgressToastView({ providers: [selected], providerCount: 1 });
+    expect(view.title).toBe("Codex update failed");
+    expect(JSON.stringify(view)).not.toContain("private-package-output");
+    expect(view.title).not.toContain("Private account");
+    expect(view.title).not.toContain("99.9.9");
+    for (const unknownDriver of ["private-custom-provider-slug", "toString", "constructor"]) {
+      const unknown = getProviderUpdateProgressToastView({
+        providers: [provider({ driver: driver(unknownDriver), updateState: failure })],
+        providerCount: 1,
+      });
+      expect(unknown.title).toBe("Provider update failed");
+      expect(unknown.title).not.toContain(unknownDriver);
+    }
+    // Canonical driver/instance constructors deliberately reject __proto__.
+    // Bypass admission only for this direct malformed-input helper negative;
+    // normal prototype-name cases above still use the real constructors.
+    const malformed = {
+      ...provider({ driver: driver("codex"), updateState: failure }),
+      driver: "__proto__" as ReturnType<typeof driver>,
+    };
+    expect(
+      getProviderUpdateProgressToastView({ providers: [malformed], providerCount: 1 }).title,
+    ).toBe("Provider update failed");
   });
 });

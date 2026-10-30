@@ -180,8 +180,15 @@ function fixture(context: TestContext, reducedMotion = false) {
       frames.delete(id);
       callback(0);
     },
-    reveal: (id: string, kind: "page" | "setting" = "setting") =>
-      own(() => revealSettingsSearchTarget({ id, kind, root: rootElement })),
+    reveal: (id: string, kind: "page" | "setting" = "setting", isCurrent?: () => boolean) =>
+      own(() =>
+        revealSettingsSearchTarget({
+          id,
+          kind,
+          root: rootElement,
+          ...(isCurrent ? { isCurrent } : {}),
+        }),
+      ),
   };
 }
 
@@ -282,5 +289,36 @@ it("reveals a read-only row without manufacturing a focus control", async (conte
     expect(anchor.highlighted()).toBe(true);
     expect(anchor.control.focus).not.toHaveBeenCalled();
     expect(anchor.order).toEqual(["scroll", "highlight"]);
+  });
+});
+
+it("rejects a stale caller after the owned frame without scrolling, highlighting or focusing its anchor", async (context) => {
+  await withFixture(context, false, async (f) => {
+    let current = true;
+    const anchor = f.anchor("private-provider");
+    const frame = f.nextFrame();
+    const result = f.reveal("private-provider", "setting", () => current);
+    const id = await frame;
+    current = false;
+    f.flushFrame(id);
+    await expect(result).resolves.toBe(false);
+    expect(anchor.order).toEqual([]);
+    expect(anchor.node.scrollIntoView).not.toHaveBeenCalled();
+    expect(anchor.control.focus).not.toHaveBeenCalled();
+    expect(anchor.highlighted()).toBe(false);
+  });
+});
+
+it("does not let an already-stale caller cancel a current reveal or acquire a frame", async (context) => {
+  await withFixture(context, false, async (f) => {
+    const anchor = f.anchor("current-provider");
+    const frame = f.nextFrame();
+    const current = f.reveal("current-provider");
+    const id = await frame;
+    await expect(f.reveal("foreign-provider", "setting", () => false)).resolves.toBe(false);
+    expect(f.requestFrame).toHaveBeenCalledTimes(1);
+    f.flushFrame(id);
+    await expect(current).resolves.toBe(true);
+    expect(anchor.order).toEqual(["scroll", "highlight", "focus"]);
   });
 });

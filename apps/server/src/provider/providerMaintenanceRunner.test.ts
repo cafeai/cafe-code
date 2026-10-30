@@ -8,10 +8,12 @@ import {
 } from "@cafecode/contracts";
 import { ServerProviderUpdateError } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
@@ -227,6 +229,178 @@ const makeTestRunner = (registry: ProviderRegistryShape) =>
   ProviderMaintenanceRunner.make().pipe(Effect.provideService(ProviderRegistry, registry));
 
 describe("providerMaintenanceRunner", () => {
+  it.effect(
+    "refuses mismatched instance-owned updater capabilities before any state, HTTP or command admission",
+    () => {
+      let httpCalls = 0;
+      let commandCalls = 0;
+      return Effect.gen(function* () {
+        const { registry, updateStatesRef } = yield* makeRegistry();
+        const updater = yield* makeTestRunner({
+          ...registry,
+          getProviderMaintenanceCapabilitiesForInstance: () =>
+            Effect.succeed(lifecycleFor(CODEX_DRIVER)),
+        });
+        const result = yield* updater
+          .updateProvider({ provider: CLAUDE_DRIVER, instanceId: CODEX_INSTANCE_ID })
+          .pipe(Effect.result);
+        assert.isTrue(result._tag === "Failure");
+        if (result._tag === "Failure")
+          assert.strictEqual(
+            result.failure.reason,
+            "The selected provider does not match this provider instance.",
+          );
+        assert.deepStrictEqual(yield* Ref.get(updateStatesRef), []);
+        assert.strictEqual(httpCalls, 0);
+        assert.strictEqual(commandCalls, 0);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make((request) => {
+                httpCalls += 1;
+                return Effect.succeed(
+                  HttpClientResponse.fromWeb(request, Response.json({ version: "0.0.0" })),
+                );
+              }),
+            ),
+            mockSpawnerLayer(() => {
+              commandCalls += 1;
+              return { code: 1 };
+            }),
+          ),
+        ),
+      );
+    },
+  );
+
+  it.effect("retains completed command metadata when the following timestamp read fails", () => {
+    let commandCompleted = false;
+    let clockFailures = 0;
+    const logs: unknown[] = [];
+    const privateClockDetail = "PRIVATE_CLOCK_FAILURE_/private/clock_token";
+    const privateOutput = "PRIVATE_COMPLETED_COMMAND_OUTPUT";
+    return Effect.gen(function* () {
+      const originalClock = yield* Clock.Clock;
+      const controlledClock: Clock.Clock = {
+        currentTimeMillisUnsafe: () => originalClock.currentTimeMillisUnsafe(),
+        currentTimeNanosUnsafe: () => originalClock.currentTimeNanosUnsafe(),
+        currentTimeNanos: originalClock.currentTimeNanos,
+        sleep: (duration) => originalClock.sleep(duration),
+        // DateTime.now uses this effect. The fake command's exact exit-code
+        // effect arms one synthetic failure only after its native result.
+        currentTimeMillis: Effect.suspend(() => {
+          if (commandCompleted && clockFailures === 0) {
+            clockFailures += 1;
+            return Effect.die(new Error(privateClockDetail));
+          }
+          return originalClock.currentTimeMillis;
+        }),
+      };
+      yield* Effect.gen(function* () {
+        const { registry } = yield* makeRegistry();
+        const updater = yield* makeTestRunner(registry);
+        const result = yield* updater.updateProvider(CODEX_DRIVER);
+        const state = result.providers[0]?.updateState;
+        assert.strictEqual(clockFailures, 1);
+        assert.strictEqual(state?.status, "failed");
+        assert.strictEqual(state?.message, "Provider update failed before completion.");
+        assert.strictEqual(state?.output, null);
+        assert.deepStrictEqual(state?.diagnostics, {
+          phase: "command",
+          category: "unexpected_failure",
+          exitCode: 1,
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          outputTruncated: false,
+        });
+        const serializedLogs = encodeProviderJsonString(logs);
+        assert.notInclude(serializedLogs, privateClockDetail);
+        assert.notInclude(serializedLogs, privateOutput);
+      }).pipe(Effect.provideService(Clock.Clock, controlledClock));
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          latestVersionHttpClient("0.0.0"),
+          mockSpawnerLayer(() => ({
+            stderr: privateOutput,
+            exitCode: Effect.sync(() => {
+              commandCompleted = true;
+              return ChildProcessSpawner.ExitCode(1);
+            }),
+          })),
+          Logger.layer(
+            [
+              Logger.make(({ message }) => {
+                logs.push(message);
+              }),
+            ],
+            { mergeWithExisting: false },
+          ),
+        ),
+      ),
+    );
+  });
+
+  for (const variant of ["joined", "stdout", "stderr"] as const) {
+    it.effect(
+      "reports " +
+        variant +
+        " truncation as metadata without copying native output into operational logs",
+      () => {
+        const logs: unknown[] = [];
+        const stdoutSentinel = "PRIVATE_STDOUT_/private/stdout_token";
+        const stderrSentinel = "PRIVATE_STDERR_/private/stderr_token";
+        const stdout =
+          stdoutSentinel + (variant === "stdout" ? "a".repeat(11000) : "a".repeat(6000));
+        const stderr =
+          stderrSentinel + (variant === "stderr" ? "b".repeat(11000) : "b".repeat(6000));
+        return Effect.gen(function* () {
+          const { registry } = yield* makeRegistry();
+          const updater = yield* makeTestRunner(registry);
+          const result = yield* updater.updateProvider(CODEX_DRIVER);
+          const state = result.providers[0]?.updateState;
+          assert.strictEqual(state?.status, "failed");
+          assert.strictEqual(state?.message, "Update command exited with code 1.");
+          assert.strictEqual(state?.output?.length, 10000);
+          assert.include(state?.output ?? "", stderrSentinel);
+          assert.deepStrictEqual(state?.diagnostics, {
+            phase: "command",
+            category: "command_failed",
+            exitCode: 1,
+            timedOut: false,
+            stdoutTruncated: variant === "stdout",
+            stderrTruncated: variant === "stderr",
+            outputTruncated: true,
+          });
+          const serializedLogs = encodeProviderJsonString(logs);
+          assert.include(serializedLogs, "command_failed");
+          assert.notInclude(serializedLogs, stdoutSentinel);
+          assert.notInclude(serializedLogs, stderrSentinel);
+          assert.notInclude(serializedLogs, stdout);
+          assert.notInclude(serializedLogs, stderr);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              latestVersionHttpClient("0.0.0"),
+              mockSpawnerLayer(() => ({ stdout, stderr, code: 1 })),
+              Logger.layer(
+                [
+                  Logger.make(({ message }) => {
+                    logs.push(message);
+                  }),
+                ],
+                { mergeWithExisting: false },
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   for (const dataProfile of ["debug", "production"] as const) {
     it.effect(`runs the qualified native Claude updater in ${dataProfile}`, () => {
       const lookups: Array<{ instanceId: ProviderInstanceId; provider: ProviderDriverKind }> = [];
@@ -603,6 +777,15 @@ describe("providerMaintenanceRunner", () => {
       assert.strictEqual(updateState?.status, "failed");
       assert.strictEqual(updateState?.message, "Update command exited with code 1.");
       assert.include(updateState?.output ?? "", "permission denied");
+      assert.deepStrictEqual(updateState?.diagnostics, {
+        phase: "command",
+        category: "command_failed",
+        exitCode: 1,
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        outputTruncated: false,
+      });
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -626,6 +809,15 @@ describe("providerMaintenanceRunner", () => {
         result.providers[0]?.updateState?.message,
         "Provider update failed before completion.",
       );
+      assert.deepStrictEqual(result.providers[0]?.updateState?.diagnostics, {
+        phase: "command",
+        category: "unexpected_failure",
+        exitCode: null,
+        timedOut: false,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        outputTruncated: false,
+      });
       assert.notInclude(serializedState, "/private/provider/bin/npm");
       assert.notInclude(serializedState, "sensitive-spawn-detail");
     }).pipe(

@@ -925,6 +925,63 @@ const makeLargeProviderDaemonSnapshot = () => ({
 });
 
 describe("DesktopDebugServer compact snapshots", () => {
+  it("retains canonical provider update diagnostics through rich and compact snapshots without inventing legacy evidence", () => {
+    debugServer.reset();
+    const recordedUpdate = {
+      status: "failed",
+      startedAt: "2026-10-30T10:00:00.000Z",
+      finishedAt: "2026-10-30T10:00:02.000Z",
+      diagnostics: {
+        phase: "command",
+        category: "command_failed",
+        exitCode: 1,
+        timedOut: false,
+        stdoutTruncated: true,
+        stderrTruncated: false,
+        outputTruncated: true,
+      },
+    };
+    const legacyUpdate = {
+      status: "failed",
+      startedAt: "2026-10-30T09:00:00.000Z",
+      finishedAt: "2026-10-30T09:00:02.000Z",
+    };
+    try {
+      // The renderer producer owns omission of raw message/output and future
+      // fields. This fixture qualifies only the real desktop rich/compact
+      // forwarding boundary for its canonical metadata, not a new sanitizer.
+      debugServer.publishRendererSnapshot({
+        capturedAt: "2026-10-30T10:00:03.000Z",
+        source: "fixture",
+        provider: {
+          fleet: {
+            totalCount: 2,
+            includedCount: 2,
+            omittedCount: 0,
+            limit: 64,
+            instances: [
+              { instanceId: "synthetic-codex", driver: "codex", update: recordedUpdate },
+              { instanceId: "synthetic-legacy", driver: "claudeAgent", update: legacyUpdate },
+            ],
+          },
+        },
+      });
+      const richRenderer = debugServer.buildFullDebugSnapshot().renderer as Record<string, unknown>;
+      const rich = richRenderer.snapshot as Record<string, unknown>;
+      const compact = debugServer.buildCompactDebugSnapshot().renderer as Record<string, unknown>;
+      for (const renderer of [rich, compact]) {
+        const provider = renderer.provider as Record<string, unknown>;
+        const fleet = provider.fleet as Record<string, unknown>;
+        const instances = fleet.instances as ReadonlyArray<Record<string, unknown>>;
+        assert.deepEqual(instances[0]?.update, recordedUpdate);
+        assert.deepEqual(instances[1]?.update, legacyUpdate);
+        assert.isFalse(Object.hasOwn(instances[1]?.update as object, "diagnostics"));
+      }
+    } finally {
+      debugServer.reset();
+    }
+  });
+
   it("reports fixed Mac shortcut lifecycle without forwarding injected private fields", () => {
     debugServer.reset();
     debugServer.publishGlobalDictationShortcutSnapshot({

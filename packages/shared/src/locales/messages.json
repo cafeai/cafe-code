@@ -185,7 +185,7 @@
   },
   "1–64. Inherited by new and existing chats without an override, at their next safe idle turn. Blank uses legacy runtime configuration or the provider default.": {
     "message": "1–64. Inherited by new and existing chats without an override, at their next safe idle turn. Blank uses legacy runtime configuration or the provider default.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:720"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:721"]
   },
   "24-hour": {
     "message": "24-hour",
@@ -213,7 +213,7 @@
   },
   "<slot0></slot0> settings": {
     "message": "<slot0></slot0> settings",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1686"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1692"]
   },
   "<slot1></slot1> The most recent matching binding wins when both conditions can apply.": {
     "message": "<slot1></slot1> The most recent matching binding wins when both conditions can apply.",
@@ -265,7 +265,7 @@
   },
   "<slot1></slot1>Sensitive": {
     "message": "<slot1></slot1>Sensitive",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:448"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:449"]
   },
   "<slot1></slot1>–<slot3></slot3> of <slot5></slot5> · Page<slot7></slot7><slot9></slot9> of <slot11></slot11>": {
     "message": "<slot1></slot1>–<slot3></slot3> of <slot5></slot5> · Page<slot7></slot7><slot9></slot9> of <slot11></slot11>",
@@ -343,7 +343,7 @@
   },
   "About reloading": {
     "message": "About reloading",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:992"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:993"]
   },
   "About scheduled follow-ups": {
     "message": "About scheduled follow-ups",
@@ -351,7 +351,7 @@
   },
   "About sensitive values": {
     "message": "About sensitive values",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:471"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:472"]
   },
   "About session approval": {
     "message": "About session approval",
@@ -375,11 +375,11 @@
   },
   "About the default context window": {
     "message": "About the default context window",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:741"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:742"]
   },
   "About the default subagent limit": {
     "message": "About the default subagent limit",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:674"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:675"]
   },
   "About the external step": {
     "message": "About the external step",
@@ -445,7 +445,7 @@
     "message": "Accent color",
     "locations": [
       "apps/web/src/components/OnboardingScreen.tsx:604",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1796",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1802",
       "apps/web/src/components/settings/SettingsPanels.tsx:1103",
       "apps/web/src/components/settings/settingsReset.ts:24",
       "apps/web/src/components/settings/settingsSearchIndex.ts:184"
@@ -507,7 +507,7 @@
   },
   "Account defaults": {
     "message": "Account defaults",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:663"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:664"]
   },
   "Account on hold": {
     "message": "Account on hold",
@@ -608,7 +608,7 @@
     "locations": [
       "apps/web/src/components/CommandPalette.tsx:1414",
       "apps/web/src/components/Sidebar.tsx:3377",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:392",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:393",
       "apps/web/src/components/settings/ProviderModelsSection.tsx:469"
     ]
   },
@@ -742,7 +742,7 @@
   "Advanced": {
     "message": "Advanced",
     "locations": [
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:968",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:969",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:183"
     ]
   },
@@ -825,8 +825,8 @@
   "Allow shared native provider state": {
     "message": "Allow shared native provider state",
     "locations": [
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1735",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1753"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1741",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1759"
     ]
   },
   "Allow the agent to finish this schedule when the instructions are satisfied.": {
@@ -1206,7 +1206,7 @@
   },
   "Authenticated as": {
     "message": "Authenticated as",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1341"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1342"]
   },
   "Authenticated · {authLabel}": {
     "message": "Authenticated · {authLabel}",
@@ -1448,7 +1448,7 @@
   },
   "Blank follows your Codex settings and model defaults.": {
     "message": "Blank follows your Codex settings and model defaults.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:782"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:783"]
   },
   "Blank reuses your existing grok login.": {
     "message": "Blank reuses your existing grok login.",
@@ -1862,6 +1862,14 @@
     "message": "Cancel turn",
     "locations": ["apps/web/src/components/chat/ComposerPendingApprovalActions.tsx:45"]
   },
+  "Captured command output was truncated.": {
+    "message": "Captured command output was truncated.",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:130"]
+  },
+  "Captured update command output": {
+    "message": "Captured update command output",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:153"]
+  },
   "Capturing": {
     "message": "Capturing",
     "locations": ["apps/server/src/glide/trayPresentation.ts:42"]
@@ -2142,6 +2150,10 @@
     "message": "Checking saved and provider history…",
     "locations": ["apps/web/src/components/Sidebar.tsx:470"]
   },
+  "Checking the installed version": {
+    "message": "Checking the installed version",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.logic.ts:123"]
+  },
   "Checking usage…": {
     "message": "Checking usage…",
     "locations": ["apps/web/src/components/ProviderUsageResetButton.tsx:215"]
@@ -2273,7 +2285,7 @@
   },
   "Claude limits Agent-tool spawning, not all running work.": {
     "message": "Claude limits Agent-tool spawning, not all running work.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:683"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:684"]
   },
   "Claude limits are unavailable.": {
     "message": "Claude limits are unavailable.",
@@ -2307,7 +2319,7 @@
     "locations": [
       "apps/web/src/components/chat/ChatComposer.tsx:604",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:433",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:306"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:307"
     ]
   },
   "Clear Task Atrium errors": {
@@ -2328,7 +2340,7 @@
   },
   "Clear {value0} as default provider": {
     "message": "Clear {value0} as default provider",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1570"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1571"]
   },
   "Click archive twice to confirm.": {
     "message": "Click archive twice to confirm.",
@@ -2534,7 +2546,7 @@
       "apps/web/src/codexContextWindow.ts:219",
       "apps/web/src/codexContextWindow.ts:223",
       "apps/web/src/codexContextWindow.ts:69",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:763"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:764"
     ]
   },
   "Codex didn''t report reset availability. Try refreshing or updating Codex.": {
@@ -2559,7 +2571,7 @@
   },
   "Codex limits spawned agents that stay open.": {
     "message": "Codex limits spawned agents that stay open.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:689"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:690"]
   },
   "Codex limits spawned resident agents. The primary agent is not counted.": {
     "message": "Codex limits spawned resident agents. The primary agent is not counted.",
@@ -2679,6 +2691,14 @@
   "Command not recorded.": {
     "message": "Command not recorded.",
     "locations": ["apps/web/src/components/chat/ProviderOperationWorkEntry.tsx:160"]
+  },
+  "Command output is unavailable because the update timed out.": {
+    "message": "Command output is unavailable because the update timed out.",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:161"]
+  },
+  "Command output may contain local paths or account details.": {
+    "message": "Command output may contain local paths or account details.",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:97"]
   },
   "Command palette": {
     "message": "Command palette",
@@ -3138,7 +3158,7 @@
       "apps/web/src/components/chat/ProviderDiagnosticWorkEntry.tsx:532",
       "apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:223",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:363",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1485",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1486",
       "apps/web/src/components/visualizations/VisualizationCard.tsx:882"
     ]
   },
@@ -3211,7 +3231,7 @@
     "message": "Copy command",
     "locations": [
       "apps/web/src/components/OnboardingScreen.tsx:224",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1486"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1487"
     ]
   },
   "Copy current PNG": {
@@ -3317,7 +3337,7 @@
   },
   "Copy update command": {
     "message": "Copy update command",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1468"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1469"]
   },
   "Copy {path}": {
     "message": "Copy {path}",
@@ -3432,7 +3452,7 @@
   },
   "Could not copy {value0} update command": {
     "message": "Could not copy {value0} update command",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1152"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1153"]
   },
   "Could not create chat": {
     "message": "Could not create chat",
@@ -4175,7 +4195,7 @@
   },
   "Debug-only opt-in: this provider may use external or Production sign-in, configuration and history. The same online account still shares quota. Changing this setting reloads the provider and can end its active sessions.": {
     "message": "Debug-only opt-in: this provider may use external or Production sign-in, configuration and history. The same online account still shares quota. Changing this setting reloads the provider and can end its active sessions.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1743"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1749"]
   },
   "Dec": {
     "message": "Dec",
@@ -4205,7 +4225,7 @@
     "locations": [
       "apps/web/src/components/settings/ConnectionsSettings.tsx:1415",
       "apps/web/src/components/settings/KeybindingsSettings.logic.ts:120",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1580"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1581"
     ]
   },
   "Default Grok home": {
@@ -4218,7 +4238,7 @@
   },
   "Default context window (tokens)": {
     "message": "Default context window (tokens)",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:738"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:739"]
   },
   "Default editor": {
     "message": "Default editor",
@@ -4240,7 +4260,7 @@
   "Default model": {
     "message": "Default model",
     "locations": [
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:809",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:810",
       "apps/web/src/turnConfiguration.ts:172"
     ]
   },
@@ -4254,7 +4274,7 @@
   },
   "Default subagent limit": {
     "message": "Default subagent limit",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:670"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:671"]
   },
   "Default variant": {
     "message": "Default variant",
@@ -4286,7 +4306,7 @@
       "apps/web/src/components/ProjectScriptsControl.tsx:498",
       "apps/web/src/components/chat/AxiomMcpControl.tsx:220",
       "apps/web/src/components/chat/ScheduledFollowups.tsx:444",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1329",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1330",
       "apps/web/src/components/settings/SavedEnvironmentsSettings.tsx:488"
     ]
   },
@@ -4328,7 +4348,7 @@
   },
   "Delete provider instance {value0}": {
     "message": "Delete provider instance {value0}",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1317"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1318"]
   },
   "Delete schedule": {
     "message": "Delete schedule",
@@ -4432,6 +4452,10 @@
   "Destination project folder": {
     "message": "Destination project folder",
     "locations": ["apps/web/src/components/Sidebar.tsx:3577"]
+  },
+  "Detailed status was not recorded by this Cafe Code version.": {
+    "message": "Detailed status was not recorded by this Cafe Code version.",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:117"]
   },
   "Details": {
     "message": "Details",
@@ -4696,11 +4720,15 @@
   },
   "Display name": {
     "message": "Display name",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1782"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1788"]
   },
   "Display name <slot1></slot1>": {
     "message": "Display name <slot1></slot1>",
     "locations": ["apps/web/src/components/settings/AddProviderInstanceDialog.tsx:365"]
+  },
+  "Displayed command output was truncated.": {
+    "message": "Displayed command output was truncated.",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:145"]
   },
   "Displays the mobile sidebar.": {
     "message": "Displays the mobile sidebar.",
@@ -5003,7 +5031,7 @@
   },
   "Enable {value0}": {
     "message": "Enable {value0}",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1648"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1649"]
   },
   "Enabled": {
     "message": "Enabled",
@@ -5116,7 +5144,7 @@
     "message": "Enter a positive whole token count within the supported numeric range.",
     "locations": [
       "apps/web/src/components/chat/CodexContextWindowControl.tsx:200",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:773"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:774"
     ]
   },
   "Enter a replacement key": {
@@ -5207,15 +5235,15 @@
   },
   "Environment variable name {value0}": {
     "message": "Environment variable name {value0}",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:416"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:417"]
   },
   "Environment variable value {value0}": {
     "message": "Environment variable value {value0}",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:439"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:440"]
   },
   "Environment variables": {
     "message": "Environment variables",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:373"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:374"]
   },
   "Environment: <slot1></slot1>": {
     "message": "Environment: <slot1></slot1>",
@@ -5301,6 +5329,10 @@
   "Exit": {
     "message": "Exit",
     "locations": ["apps/desktop/src/window/DesktopApplicationMenu.ts:185"]
+  },
+  "Exit code": {
+    "message": "Exit code",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:110"]
   },
   "Expand": {
     "message": "Expand",
@@ -5657,6 +5689,10 @@
     "message": "Failed to update network exposure.",
     "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:142"]
   },
+  "Failure category": {
+    "message": "Failure category",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:108"]
+  },
   "Failures": {
     "message": "Failures",
     "locations": [
@@ -5897,15 +5933,15 @@
   },
   "For manual sign-in, set CODEX_HOME to this folder when running codex login. Cafe creates the private home only after you enable the provider.": {
     "message": "For manual sign-in, set CODEX_HOME to this folder when running codex login. Cafe creates the private home only after you enable the provider.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1707"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1713"]
   },
   "For manual sign-in, set GROK_HOME to this folder when running grok login. Enable the provider first to create its private home.": {
     "message": "For manual sign-in, set GROK_HOME to this folder when running grok login. Enable the provider first to create its private home.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1720"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1726"]
   },
   "For manual sign-in, set HOME to this folder and CLAUDE_CONFIG_DIR to its .claude subfolder. Cafe does not reuse your default terminal login. Enable the provider first to create its private home.": {
     "message": "For manual sign-in, set HOME to this folder and CLAUDE_CONFIG_DIR to its .claude subfolder. Cafe does not reuse your default terminal login. Enable the provider first to create its private home.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1714"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1720"]
   },
   "For this chat (1–64). Blank uses the account default.": {
     "message": "For this chat (1–64). Blank uses the account default.",
@@ -6170,6 +6206,10 @@
   "Hide error details": {
     "message": "Hide error details",
     "locations": ["apps/web/src/routes/__root.tsx:315"]
+  },
+  "Hide failure details": {
+    "message": "Hide failure details",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:90"]
   },
   "Hide from picker": {
     "message": "Hide from picker",
@@ -6449,7 +6489,7 @@
   },
   "Instance label": {
     "message": "Instance label",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1790"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1796"]
   },
   "Instructions": {
     "message": "Instructions",
@@ -6773,7 +6813,7 @@
   },
   "Leave this off for private Debug Codex, Claude and Grok homes. Other drivers require explicit sharing. Provider executable updates can affect installations shared with Production.": {
     "message": "Leave this off for private Debug Codex, Claude and Grok homes. Other drivers require explicit sharing. Provider executable updates can affect installations shared with Production.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1766"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1772"]
   },
   "Left": {
     "message": "Left",
@@ -7000,7 +7040,7 @@
     "message": "Log in",
     "locations": [
       "apps/web/src/components/OnboardingScreen.tsx:208",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1516"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1517"
     ]
   },
   "Log in by running": {
@@ -7053,6 +7093,10 @@
       "apps/web/src/components/OnboardingScreen.tsx:551",
       "apps/web/src/components/OnboardingScreen.tsx:717"
     ]
+  },
+  "Managing the update": {
+    "message": "Managing the update",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.logic.ts:125"]
   },
   "Manual": {
     "message": "Manual",
@@ -7248,7 +7292,7 @@
   },
   "Model default: {value0}": {
     "message": "Model default: {value0}",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:892"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:893"]
   },
   "Model not reported": {
     "message": "Model not reported",
@@ -7536,11 +7580,11 @@
   },
   "New and existing Codex chats inherit this unless they have a chat override. Changes wait for a safe idle turn and never interrupt active work. Codex controls supported capacity and compaction; the usage meter keeps its reported capacity.": {
     "message": "New and existing Codex chats inherit this unless they have a chat override. Changes wait for a safe idle turn and never interrupt active work. Codex controls supported capacity and compaction; the usage meter keeps its reported capacity.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:743"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:744"]
   },
   "New and existing chats inherit this unless they have a per-chat override. Changing it doesn''t interrupt active work; inherited chats use the new setting at their next safe idle turn. The main agent isn''t counted.": {
     "message": "New and existing chats inherit this unless they have a per-chat override. Changing it doesn''t interrupt active work; inherited chats use the new setting at their next safe idle turn. The main agent isn''t counted.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:676"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:677"]
   },
   "New browser logins will need a pairing link.": {
     "message": "New browser logins will need a pairing link.",
@@ -7566,7 +7610,7 @@
   },
   "New chat defaults": {
     "message": "New chat defaults",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:796"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:797"]
   },
   "New chat in <project></project>": {
     "message": "New chat in <project></project>",
@@ -7597,11 +7641,11 @@
   },
   "New chats keep the last model used.": {
     "message": "New chats keep the last model used.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:603"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:604"]
   },
   "New chats start on this provider. Click to clear.": {
     "message": "New chats start on this provider. Click to clear.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1585"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1586"]
   },
   "New dictation sessions will no longer start until an owner saves another key.": {
     "message": "New dictation sessions will no longer start until an owner saves another key.",
@@ -7767,6 +7811,10 @@
     "message": "No child processes running.",
     "locations": ["apps/web/src/components/settings/DiagnosticsSettings.tsx:582"]
   },
+  "No command output is available for this update.": {
+    "message": "No command output is available for this update.",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:167"]
+  },
   "No commands or tools.": {
     "message": "No commands or tools.",
     "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3248"]
@@ -7774,9 +7822,9 @@
   "No default": {
     "message": "No default",
     "locations": [
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:602",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:853",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:889"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:603",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:854",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:890"
     ]
   },
   "No displayable output retained.": {
@@ -8053,6 +8101,10 @@
     "message": "None available",
     "locations": ["apps/web/src/lib/codexRateLimits.ts:282"]
   },
+  "Nonprinting and directional controls are shown as Unicode escapes.": {
+    "message": "Nonprinting and directional controls are shown as Unicode escapes.",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:135"]
+  },
   "Normal": {
     "message": "Normal",
     "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:256"]
@@ -8106,7 +8158,7 @@
   },
   "Not currently reported by this provider.": {
     "message": "Not currently reported by this provider.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:618"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:619"]
   },
   "Not found": {
     "message": "Not found",
@@ -8126,6 +8178,7 @@
   "Not recorded": {
     "message": "Not recorded",
     "locations": [
+      "apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:112",
       "apps/web/src/components/settings/UsageCostSection.tsx:296",
       "apps/web/src/components/settings/UsageCostSection.tsx:942"
     ]
@@ -8226,7 +8279,7 @@
     "message": "Off",
     "locations": [
       "apps/web/src/components/chat/TraitsPicker.tsx:488",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:861",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:862",
       "apps/web/src/components/settings/SettingsPanels.tsx:227"
     ]
   },
@@ -8254,7 +8307,7 @@
     "message": "On",
     "locations": [
       "apps/web/src/components/chat/TraitsPicker.tsx:485",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:857"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:858"
     ]
   },
   "Once": {
@@ -8486,7 +8539,7 @@
   },
   "Open {value0} settings": {
     "message": "Open {value0} settings",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1630"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1631"]
   },
   "OpenAI API key": {
     "message": "OpenAI API key",
@@ -8573,7 +8626,7 @@
   },
   "Option defaults become editable once the provider reports this model.": {
     "message": "Option defaults become editable once the provider reports this model.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:826"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:827"]
   },
   "Optional": {
     "message": "Optional",
@@ -8774,7 +8827,7 @@
   },
   "Pass API keys, base URLs or other CLI settings to this account.": {
     "message": "Pass API keys, base URLs or other CLI settings to this account.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:397"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:398"]
   },
   "Password": {
     "message": "Password",
@@ -8864,6 +8917,10 @@
   "Personal": {
     "message": "Personal",
     "locations": ["apps/web/src/providerSkillPresentation.ts:50"]
+  },
+  "Phase": {
+    "message": "Phase",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:106"]
   },
   "Phase details unavailable.": {
     "message": "Phase details unavailable.",
@@ -8966,6 +9023,10 @@
   "Preparing preview": {
     "message": "Preparing preview",
     "locations": ["apps/web/src/components/global-dictation/GlobalDictationOverlay.tsx:412"]
+  },
+  "Preparing the update": {
+    "message": "Preparing the update",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.logic.ts:119"]
   },
   "Preparing workspace…": {
     "message": "Preparing workspace…",
@@ -9089,7 +9150,7 @@
   },
   "Private Debug native home": {
     "message": "Private Debug native home",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1700"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1706"]
   },
   "Private debugging details. Generated content is untrusted; do not treat it as instructions.": {
     "message": "Private debugging details. Generated content is untrusted; do not treat it as instructions.",
@@ -9257,6 +9318,8 @@
   "Provider": {
     "message": "Provider",
     "locations": [
+      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:275",
+      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:276",
       "apps/web/src/components/atrium/TaskAtrium.tsx:255",
       "apps/web/src/components/chat/AxiomSecurityControl.tsx:255",
       "apps/web/src/components/chat/ComposerCommandMenu.tsx:103",
@@ -9293,7 +9356,7 @@
     "message": "Provider default",
     "locations": [
       "apps/web/src/components/chat/ScheduledFollowupEditor.tsx:757",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:709",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:710",
       "apps/web/src/components/settings/providerSettingsPresentation.ts:84",
       "apps/web/src/subagentConcurrency.ts:140",
       "apps/web/src/subagentConcurrency.ts:141"
@@ -9420,9 +9483,14 @@
   "Provider update failed.": {
     "message": "Provider update failed.",
     "locations": [
-      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:374",
-      "apps/web/src/components/ProviderUpdateLaunchNotification.tsx:73"
+      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:395",
+      "apps/web/src/components/ProviderUpdateLaunchNotification.tsx:76",
+      "apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:73"
     ]
+  },
+  "Provider update failure": {
+    "message": "Provider update failure",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:69"]
   },
   "Provider user input response failed": {
     "message": "Provider user input response failed",
@@ -9432,7 +9500,7 @@
     "message": "Provider {count, plural, one {update} other {updates}} failed",
     "locations": [
       "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:240",
-      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:257"
+      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:278"
     ]
   },
   "Providers": {
@@ -9898,7 +9966,7 @@
   },
   "Remove environment variable {value0}": {
     "message": "Remove environment variable {value0}",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:486"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:487"]
   },
   "Remove from favorites": {
     "message": "Remove from favorites",
@@ -10256,7 +10324,7 @@
   },
   "Restart provider": {
     "message": "Restart provider",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1558"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1559"]
   },
   "Restart the app from the update button to install it.": {
     "message": "Restart the app from the update button to install it.",
@@ -10272,7 +10340,7 @@
   },
   "Restart {value0} runtime": {
     "message": "Restart {value0} runtime",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1542"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1543"]
   },
   "Restart {value0}? Running turns may be interrupted.": {
     "message": "Restart {value0}? Running turns may be interrupted.",
@@ -10557,6 +10625,10 @@
     "message": "Running provider update command.",
     "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:229"]
   },
+  "Running the update command": {
+    "message": "Running the update command",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.logic.ts:121"]
+  },
   "Running…": {
     "message": "Running…",
     "locations": ["apps/web/src/components/chat/ProviderOperationWorkEntry.tsx:94"]
@@ -10778,7 +10850,7 @@
   "Saved. Type a new value to replace it.": {
     "message": "Saved. Type a new value to replace it.",
     "locations": [
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:430",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:431",
       "apps/web/src/components/settings/ProviderSettingsForm.tsx:539"
     ]
   },
@@ -10792,7 +10864,7 @@
   },
   "Saving these reloads the account and can end active chats.": {
     "message": "Saving these reloads the account and can end active chats.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:984"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:985"]
   },
   "Saving your progress before Cafe Code takes a nap.": {
     "message": "Saving your progress before Cafe Code takes a nap.",
@@ -11116,7 +11188,7 @@
   },
   "Sensitive values are stored separately and aren''t shown again after saving.": {
     "message": "Sensitive values are stored separately and aren''t shown again after saving.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:472"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:473"]
   },
   "Sep": {
     "message": "Sep",
@@ -11214,7 +11286,7 @@
   },
   "Set {value0} as default provider": {
     "message": "Set {value0} as default provider",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1603"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1604"]
   },
   "Sets CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS (Claude Code 2.1.217+). Saving reloads this account. Limits Agent-tool spawning, not all running work: resumes and manual forks can exceed it, ultracode is exempt, and workflows/teams use separate limits.": {
     "message": "Sets CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS (Claude Code 2.1.217+). Saving reloads this account. Limits Agent-tool spawning, not all running work: resumes and manual forks can exceed it, ultracode is exempt, and workflows/teams use separate limits.",
@@ -11239,11 +11311,11 @@
   "Settings": {
     "message": "Settings",
     "locations": [
-      "apps/web/src/components/ProviderUpdateLaunchNotification.tsx:157",
-      "apps/web/src/components/ProviderUpdateLaunchNotification.tsx:372",
-      "apps/web/src/components/ProviderUpdateLaunchNotification.tsx:386",
+      "apps/web/src/components/ProviderUpdateLaunchNotification.tsx:160",
+      "apps/web/src/components/ProviderUpdateLaunchNotification.tsx:398",
+      "apps/web/src/components/ProviderUpdateLaunchNotification.tsx:412",
       "apps/web/src/components/SidebarFooterNavigation.tsx:83",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1642",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1643",
       "apps/web/src/routes/settings.tsx:101",
       "apps/web/src/routes/settings.tsx:119"
     ]
@@ -11332,6 +11404,10 @@
   "Show error details": {
     "message": "Show error details",
     "locations": ["apps/web/src/routes/__root.tsx:312"]
+  },
+  "Show failure details": {
+    "message": "Show failure details",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:91"]
   },
   "Show fewer": {
     "message": "Show fewer",
@@ -12598,6 +12674,10 @@
     "message": "The provider reports this task has already ended.",
     "locations": ["apps/web/src/components/chat/SubagentTaskControls.tsx:110"]
   },
+  "The provider runtime check failed": {
+    "message": "The provider runtime check failed",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.logic.ts:141"]
+  },
   "The provider runtime restart could not be started.": {
     "message": "The provider runtime restart could not be started.",
     "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2196"]
@@ -12734,9 +12814,33 @@
     "message": "The terminal was not opened.",
     "locations": ["apps/web/src/components/chat/OpenInPicker.tsx:46"]
   },
+  "The update command failed": {
+    "message": "The update command failed",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.logic.ts:137"]
+  },
+  "The update command timed out": {
+    "message": "The update command timed out",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.logic.ts:139"]
+  },
+  "The update command timed out.": {
+    "message": "The update command timed out.",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.tsx:126"]
+  },
+  "The update could not finish": {
+    "message": "The update could not finish",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.logic.ts:145"]
+  },
+  "The update was interrupted": {
+    "message": "The update was interrupted",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.logic.ts:147"]
+  },
   "The update was not installed because Cafe Code could not safely prepare and stop its provider runtime. The downloaded update is still available. Stop the runtime explicitly before retrying.": {
     "message": "The update was not installed because Cafe Code could not safely prepare and stop its provider runtime. The downloaded update is still available. Stop the runtime explicitly before retrying.",
     "locations": ["apps/desktop/src/updates/DesktopUpdates.ts:414"]
+  },
+  "The updated version could not be verified": {
+    "message": "The updated version could not be verified",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.logic.ts:143"]
   },
   "The voice command microphone stopped. Your draft is unchanged.": {
     "message": "The voice command microphone stopped. Your draft is unchanged.",
@@ -12956,7 +13060,7 @@
   },
   "This model does not report configurable options.": {
     "message": "This model does not report configurable options.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:816"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:817"]
   },
   "This project still has hidden or stale chats. Force remove clears them too.": {
     "message": "This project still has hidden or stale chats. Force remove clears them too.",
@@ -12964,7 +13068,7 @@
   },
   "This provider (<slot1></slot1>) isn''t in this version of Cafe Code. Its settings are kept but can''t be edited here.": {
     "message": "This provider (<slot1></slot1>) isn''t in this version of Cafe Code. Its settings are kept but can''t be edited here.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1853"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1859"]
   },
   "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset.": {
     "message": "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset.",
@@ -13690,7 +13794,7 @@
   "Update": {
     "message": "Update",
     "locations": [
-      "apps/web/src/components/ProviderUpdateLaunchNotification.tsx:368",
+      "apps/web/src/components/ProviderUpdateLaunchNotification.tsx:394",
       "apps/web/src/components/chat/SubagentDetailView.tsx:630",
       "apps/web/src/components/chat/SubagentDetailView.tsx:633"
     ]
@@ -13706,18 +13810,18 @@
   "Update available": {
     "message": "Update available",
     "locations": [
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1413",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1414",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:219",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:50"
     ]
   },
   "Update available — view details": {
     "message": "Update available — view details",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1394"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1395"]
   },
   "Update available: {provider} {version}": {
     "message": "Update available: {provider} {version}",
-    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:541"]
+    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:562"]
   },
   "Update check failed": {
     "message": "Update check failed",
@@ -13749,7 +13853,11 @@
   },
   "Update now": {
     "message": "Update now",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1438"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1439"]
+  },
+  "Update preparation failed": {
+    "message": "Update preparation failed",
+    "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.logic.ts:135"]
   },
   "Update the Cafe server to use Codex device-code sign-in.": {
     "message": "Update the Cafe server to use Codex device-code sign-in.",
@@ -13800,7 +13908,7 @@
   },
   "Updates available: {count} providers": {
     "message": "Updates available: {count} providers",
-    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:546"]
+    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:567"]
   },
   "Updates unavailable": {
     "message": "Updates unavailable",
@@ -13820,20 +13928,20 @@
   },
   "Updating {count} providers": {
     "message": "Updating {count} providers",
-    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:425"]
+    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:446"]
   },
   "Updating {provider}": {
     "message": "Updating {provider}",
     "locations": [
-      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:321",
-      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:424"
+      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:342",
+      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:445"
     ]
   },
   "Updating…": {
     "message": "Updating…",
     "locations": [
       "apps/web/src/components/chat/ProviderOperationWorkEntry.tsx:48",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1437"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1438"
     ]
   },
   "Upload": {
@@ -13981,7 +14089,7 @@
   },
   "Use for new chats by default": {
     "message": "Use for new chats by default",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1617"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1618"]
   },
   "Use global default": {
     "message": "Use global default",
@@ -14026,7 +14134,7 @@
   },
   "Use {value0} accent": {
     "message": "Use {value0} accent",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:264"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:265"]
   },
   "Used for buttons, focus rings, and highlights.": {
     "message": "Used for buttons, focus rings, and highlights.",
@@ -14038,7 +14146,7 @@
   },
   "Used for new chats. “No default” uses the model''s default.": {
     "message": "Used for new chats. “No default” uses the model''s default.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:799"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:800"]
   },
   "Used: Unavailable": {
     "message": "Used: Unavailable",
@@ -14092,11 +14200,11 @@
   },
   "VARIABLE_NAME": {
     "message": "VARIABLE_NAME",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:414"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:415"]
   },
   "Value": {
     "message": "Value",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:436"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:437"]
   },
   "Verification could not be refreshed. Check this session and try again.": {
     "message": "Verification could not be refreshed. Check this session and try again.",
@@ -15030,7 +15138,7 @@
   },
   "or update manually": {
     "message": "or update manually",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1444"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1445"]
   },
   "phase": {
     "message": "phase",
@@ -15668,11 +15776,11 @@
   },
   "{count, plural, one {Provider still needs an update} other {Providers still need updates}}": {
     "message": "{count, plural, one {Provider still needs an update} other {Providers still need updates}}",
-    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:271"]
+    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:292"]
   },
   "{count, plural, one {Provider updated} other {Provider updates finished}}": {
     "message": "{count, plural, one {Provider updated} other {Provider updates finished}}",
-    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:297"]
+    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:318"]
   },
   "{count, plural, one {Submit answer} other {Submit answers}}": {
     "message": "{count, plural, one {Submit answer} other {Submit answers}}",
@@ -15724,15 +15832,15 @@
   },
   "{count} provider updates failed": {
     "message": "{count} provider updates failed",
-    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:455"]
+    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:476"]
   },
   "{count} providers still need updates": {
     "message": "{count} providers still need updates",
-    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:480"]
+    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:501"]
   },
   "{count} providers updated": {
     "message": "{count} providers updated",
-    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:506"]
+    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:527"]
   },
   "{count} running background work": {
     "message": "{count} running background work",
@@ -15958,19 +16066,19 @@
   },
   "{providers} failed to update. Check provider settings for details.": {
     "message": "{providers} failed to update. Check provider settings for details.",
-    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:556"]
+    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:577"]
   },
   "{providers} {count, plural, one {still appears} other {still appear}} outdated. Check provider settings for details.": {
     "message": "{providers} {count, plural, one {still appears} other {still appear}} outdated. Check provider settings for details.",
-    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:275"]
+    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:296"]
   },
   "{providers} {count, plural, one {still appears} other {still appear}} outdated. Review provider settings for details.": {
     "message": "{providers} {count, plural, one {still appears} other {still appear}} outdated. Review provider settings for details.",
-    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:481"]
+    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:502"]
   },
   "{providers} {count, plural, one {update in progress.} other {updates are in progress.}}": {
     "message": "{providers} {count, plural, one {update in progress.} other {updates are in progress.}}",
-    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:426"]
+    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:447"]
   },
   "{provider} Workspace": {
     "message": "{provider} Workspace",
@@ -15987,8 +16095,8 @@
   "{provider} still needs an update": {
     "message": "{provider} still needs an update",
     "locations": [
-      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:331",
-      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:479"
+      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:352",
+      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:500"
     ]
   },
   "{provider} unavailable": {
@@ -15997,7 +16105,10 @@
   },
   "{provider} update failed": {
     "message": "{provider} update failed",
-    "locations": ["apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:120"]
+    "locations": [
+      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:120",
+      "apps/web/src/components/ProviderUpdateLaunchNotification.logic.ts:273"
+    ]
   },
   "{provider} updated": {
     "message": "{provider} updated",
@@ -16327,7 +16438,7 @@
   },
   "· <slot1></slot1> customized": {
     "message": "· <slot1></slot1> customized",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:971"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:972"]
   },
   "—": {
     "message": "—",

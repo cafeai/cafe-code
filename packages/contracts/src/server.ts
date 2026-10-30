@@ -286,12 +286,39 @@ export const ServerProviderUpdateStatus = Schema.Literals([
 ]);
 export type ServerProviderUpdateStatus = typeof ServerProviderUpdateStatus.Type;
 
+// Operational metadata only. Raw command output remains a separately bounded,
+// authenticated details field; never add command lines, paths or error prose here.
+export const ServerProviderUpdateDiagnostics = Schema.Struct({
+  phase: Schema.Literals(["preflight", "command", "verification", "lifecycle"]),
+  category: Schema.Literals([
+    "preflight_failed",
+    "command_failed",
+    "command_timed_out",
+    "runtime_check_failed",
+    "version_unverified",
+    "unexpected_failure",
+    "interrupted",
+  ]),
+  // Native Windows statuses may use a signed or unsigned32-bit representation.
+  exitCode: Schema.NullOr(
+    Schema.Int.check(Schema.isBetween({ minimum: -2147483648, maximum: 4294967295 })),
+  ),
+  timedOut: Schema.Boolean,
+  // These flags describe only the returned retained capture. Timeout currently
+  // discards partial streams, so false flags cannot attest original completeness.
+  stdoutTruncated: Schema.Boolean,
+  stderrTruncated: Schema.Boolean,
+  outputTruncated: Schema.Boolean,
+});
+export type ServerProviderUpdateDiagnostics = typeof ServerProviderUpdateDiagnostics.Type;
+
 export const ServerProviderUpdateState = Schema.Struct({
   status: ServerProviderUpdateStatus,
   startedAt: Schema.NullOr(IsoDateTime),
   finishedAt: Schema.NullOr(IsoDateTime),
   message: Schema.NullOr(TrimmedNonEmptyString),
   output: Schema.NullOr(Schema.String.check(Schema.isMaxLength(10_000))),
+  diagnostics: Schema.optionalKey(ServerProviderUpdateDiagnostics),
 });
 export type ServerProviderUpdateState = typeof ServerProviderUpdateState.Type;
 

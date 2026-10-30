@@ -21,6 +21,7 @@ import * as Schema from "effect/Schema";
 
 import { ServerSettingsService } from "../serverSettings.ts";
 import { ServerConfig } from "../config.ts";
+import { CLAUDE_PROVIDER_MAINTENANCE } from "./claudeMaintenance.ts";
 import {
   prepareDebugProviderHome,
   resolveProviderProfileAdmission,
@@ -49,12 +50,9 @@ const CODEX_PACKAGE = {
   nativeUpdate: null,
 } as const;
 
-const CLAUDE_PACKAGE = {
-  provider: CLAUDE_DRIVER,
-  npmPackageName: "@anthropic-ai/claude-code",
-  homebrewFormula: "claude-code",
-  nativeUpdate: null,
-} as const;
+// Login's managed-package lookup keeps its previous non-native action policy,
+// while sharing the same package and explicit Homebrew channels as the driver.
+const CLAUDE_PACKAGE = { ...CLAUDE_PROVIDER_MAINTENANCE, nativeUpdate: null } as const;
 const isServerProviderLoginError = Schema.is(ServerProviderLoginError);
 const decodeCodexSettingsUnknown = Schema.decodeUnknownEffect(CodexSettings);
 const decodeClaudeSettingsUnknown = Schema.decodeUnknownEffect(ClaudeSettings);

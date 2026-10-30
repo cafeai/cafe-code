@@ -54,10 +54,10 @@ import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   makePackageManagedProviderMaintenanceResolver,
-  normalizeCommandPath,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "../providerMaintenance.ts";
 import { resolveProviderRuntimeEnvironment } from "../managedProviderRuntime.ts";
+import { CLAUDE_PROVIDER_MAINTENANCE } from "../claudeMaintenance.ts";
 import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
 import { makeClaudeAuthenticationEnvironment } from "./ClaudeAuthenticationEnvironment.ts";
 import { makeClaudeAccountQuotaReader } from "../claudeAccountQuota.ts";
@@ -67,26 +67,7 @@ const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
 const CAPABILITIES_PROBE_TTL = Duration.minutes(5);
 
-function isClaudeNativeCommandPath(commandPath: string): boolean {
-  const normalized = normalizeCommandPath(commandPath);
-  return (
-    normalized.endsWith("/.local/bin/claude") ||
-    normalized.endsWith("/.local/bin/claude.exe") ||
-    normalized.includes("/.local/share/claude/")
-  );
-}
-
-const UPDATE_DEFINITION = {
-  provider: DRIVER_KIND,
-  npmPackageName: "@anthropic-ai/claude-code",
-  homebrewFormula: "claude-code",
-  nativeUpdate: {
-    executable: "claude",
-    args: ["update"],
-    lockKey: "claude-native",
-    isCommandPath: isClaudeNativeCommandPath,
-  },
-} as const;
+const UPDATE_DEFINITION = CLAUDE_PROVIDER_MAINTENANCE;
 const UPDATE = makePackageManagedProviderMaintenanceResolver(UPDATE_DEFINITION);
 
 export type ClaudeDriverEnv =

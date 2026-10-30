@@ -936,7 +936,8 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
       "getProviderMaintenanceCapabilitiesForInstance",
     )(function* (instanceId: ProviderInstanceId, provider: ProviderDriverKind) {
       const instance = Array.from((yield* Ref.get(liveSubsRef)).values()).find(
-        (candidate) => candidate.instanceId === instanceId,
+        // Never lend one driver's update authority to a differently labelled RPC.
+        (candidate) => candidate.instanceId === instanceId && candidate.driverKind === provider,
       );
       return (
         instance?.snapshot.maintenanceCapabilities ??

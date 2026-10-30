@@ -6,6 +6,7 @@ import {
   type ServerProvider,
   type ServerProviderUpdatedPayload,
   type ServerProviderUpdateState,
+  type ServerProviderUpdateDiagnostics,
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -165,6 +166,48 @@ function commandOutput(result: ProviderMaintenanceCommandResult): string | null 
   return truncateText(output, UPDATE_OUTPUT_MAX_BYTES);
 }
 
+type UpdateCommandMetadata = Pick<
+  ServerProviderUpdateDiagnostics,
+  "exitCode" | "timedOut" | "stdoutTruncated" | "stderrTruncated" | "outputTruncated"
+>;
+const emptyCommandMetadata: UpdateCommandMetadata = {
+  exitCode: null,
+  timedOut: false,
+  stdoutTruncated: false,
+  stderrTruncated: false,
+  outputTruncated: false,
+};
+
+function commandMetadata(result: ProviderMaintenanceCommandResult): UpdateCommandMetadata {
+  const joined = trimNullable([result.stderr, result.stdout].filter(Boolean).join("\n\n"));
+  return {
+    exitCode:
+      result.exitCode !== null &&
+      Number.isInteger(result.exitCode) &&
+      result.exitCode >= -2147483648 &&
+      result.exitCode <= 4294967295
+        ? result.exitCode
+        : null,
+    timedOut: result.timedOut,
+    stdoutTruncated: result.stdoutTruncated,
+    stderrTruncated: result.stderrTruncated,
+    // Individual streams may fit their byte caps while their joined renderer
+    // details exceed the existing10000-character limit. Report both limits.
+    outputTruncated:
+      result.stdoutTruncated ||
+      result.stderrTruncated ||
+      (joined?.length ?? 0) > UPDATE_OUTPUT_MAX_BYTES,
+  };
+}
+
+function updateDiagnostics(
+  phase: ServerProviderUpdateDiagnostics["phase"],
+  category: ServerProviderUpdateDiagnostics["category"],
+  metadata: UpdateCommandMetadata = emptyCommandMetadata,
+): ServerProviderUpdateDiagnostics {
+  return { phase, category, ...metadata };
+}
+
 function failureMessage(result: ProviderMaintenanceCommandResult): string {
   if (result.timedOut) {
     return "Update timed out.";
@@ -277,6 +320,7 @@ function makeUpdateState(input: {
   readonly finishedAt: string | null;
   readonly message: string | null;
   readonly output?: string | null;
+  readonly diagnostics?: ServerProviderUpdateDiagnostics;
 }): ServerProviderUpdateState {
   return {
     status: input.status,
@@ -284,6 +328,7 @@ function makeUpdateState(input: {
     finishedAt: input.finishedAt,
     message: input.message,
     output: input.output ?? null,
+    ...(input.diagnostics ? { diagnostics: input.diagnostics } : {}),
   };
 }
 
@@ -384,6 +429,15 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
       instanceId,
       provider,
     );
+    // The request's driver must agree with the actual instance-owned capability.
+    // Otherwise a mismatched RPC could execute another driver's updater while
+    // skipping its driver-specific preflight. Refuse before state or lock admission.
+    if (capabilities.provider !== provider) {
+      return yield* new ServerProviderUpdateError({
+        provider,
+        reason: "The selected provider does not match this provider instance.",
+      });
+    }
     const update = capabilities.update;
     if (!update) {
       return yield* new ServerProviderUpdateError({
@@ -407,6 +461,10 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
       }),
     ).pipe(Effect.asVoid);
     const startedAtRef = yield* Ref.make<string | null>(null);
+    const phaseRef = yield* Ref.make<ServerProviderUpdateDiagnostics["phase"]>("lifecycle");
+    // Retain only metadata here. Exceptional failures never promote partial
+    // command output or arbitrary native error text into logs or diagnostics.
+    const commandMetadataRef = yield* Ref.make<UpdateCommandMetadata>(emptyCommandMetadata);
 
     const runProviderUpdate = Effect.fn("ProviderMaintenanceRunner.runProviderUpdate")(
       function* () {
@@ -429,27 +487,50 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
             // before an update can remove the currently working installation.
             // Preflight returns only fixed public failure text and pins the
             // package argument so a changing latest tag cannot race this check.
+            yield* Ref.set(phaseRef, "preflight");
             const prepared = yield* prepareCodexProviderUpdate(provider, update).pipe(
               Effect.provideService(HttpClient.HttpClient, httpClient),
               Effect.result,
             );
             if (Result.isFailure(prepared)) {
+              const diagnostics = updateDiagnostics("preflight", "preflight_failed");
+              yield* Effect.logWarning("Provider update admission failed", {
+                provider,
+                instanceId,
+                diagnostics,
+              });
               return yield* finish(
                 makeUpdateState({
                   status: "failed",
                   startedAt,
                   finishedAt: yield* nowIso,
                   message: prepared.failure.message,
+                  diagnostics,
                 }),
               );
             }
             const preparedUpdate = prepared.success;
+            yield* Ref.set(phaseRef, "command");
             const result = yield* runMaintenanceCommand(
               preparedUpdate.executable,
               preparedUpdate.args,
             );
+            const metadata = commandMetadata(result);
+            // Retain the completed command's metadata before another awaited
+            // clock/interruption boundary can obscure an already known code.
+            yield* Ref.set(commandMetadataRef, metadata);
             const finishedAt = yield* nowIso;
             if (result.timedOut || result.exitCode !== 0) {
+              const diagnostics = updateDiagnostics(
+                "command",
+                result.timedOut ? "command_timed_out" : "command_failed",
+                metadata,
+              );
+              yield* Effect.logWarning("Provider update command failed", {
+                provider,
+                instanceId,
+                diagnostics,
+              });
               return yield* finish(
                 makeUpdateState({
                   status: "failed",
@@ -457,24 +538,44 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
                   finishedAt,
                   message: failureMessage(result),
                   output: commandOutput(result),
+                  diagnostics,
                 }),
               );
             }
 
+            yield* Ref.set(phaseRef, "verification");
             const { verifiedProviders } = yield* verifyRefreshedProvider(
               provider,
               capabilities,
               instanceId,
             );
+            const verification = classifyProviderUpdateVerification(
+              verifiedProviders,
+              preparedUpdate.verifiedTargetVersion,
+            );
+            const diagnostics =
+              verification.status === "succeeded"
+                ? undefined
+                : updateDiagnostics(
+                    "verification",
+                    verification.status === "failed"
+                      ? "runtime_check_failed"
+                      : "version_unverified",
+                    metadata,
+                  );
+            if (diagnostics)
+              yield* Effect.logWarning("Provider update did not verify", {
+                provider,
+                instanceId,
+                diagnostics,
+              });
             return yield* finish(
               makeUpdateState({
-                ...classifyProviderUpdateVerification(
-                  verifiedProviders,
-                  preparedUpdate.verifiedTargetVersion,
-                ),
+                ...verification,
                 startedAt,
                 finishedAt,
                 output: commandOutput(result),
+                ...(diagnostics ? { diagnostics } : {}),
               }),
             );
           },
@@ -490,10 +591,16 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
             const failureKind = Cause.hasInterruptsOnly(cause)
               ? "interrupted"
               : "unexpected_failure";
+            const diagnostics = updateDiagnostics(
+              yield* Ref.get(phaseRef),
+              failureKind === "interrupted" ? "interrupted" : "unexpected_failure",
+              yield* Ref.get(commandMetadataRef),
+            );
             yield* Effect.logWarning("Provider update failed before completion", {
               provider,
               instanceId,
               failureKind,
+              diagnostics,
             });
             const startedAt = yield* Ref.get(startedAtRef);
             return yield* finish(
@@ -503,6 +610,7 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
                 finishedAt: yield* nowIso,
                 message: "Provider update failed before completion.",
                 output: null,
+                diagnostics,
               }),
             );
           },
@@ -520,28 +628,24 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         onAcquiredExit: (exit) =>
           Exit.isSuccess(exit)
             ? Effect.void
-            : Ref.get(startedAtRef).pipe(
-                Effect.flatMap((startedAt) =>
-                  nowIso.pipe(
-                    Effect.flatMap((finishedAt) =>
-                      setUpdateState(
-                        makeUpdateState({
-                          status: "failed",
-                          startedAt,
-                          finishedAt,
-                          // Do not surface Effect causes or interruptor metadata here.
-                          // Provider update errors can contain paths or process details;
-                          // this terminal state only needs to explain that the owned job
-                          // stopped before it could publish its normal result.
-                          message: "Provider update stopped before completion.",
-                          output: null,
-                        }),
-                      ),
-                    ),
-                  ),
-                ),
-                Effect.asVoid,
-              ),
+            : Effect.gen(function* () {
+                const startedAt = yield* Ref.get(startedAtRef);
+                const diagnostics = updateDiagnostics(
+                  yield* Ref.get(phaseRef),
+                  Cause.hasInterruptsOnly(exit.cause) ? "interrupted" : "unexpected_failure",
+                  yield* Ref.get(commandMetadataRef),
+                );
+                yield* setUpdateState(
+                  makeUpdateState({
+                    status: "failed",
+                    startedAt,
+                    finishedAt: yield* nowIso,
+                    message: "Provider update stopped before completion.",
+                    output: null,
+                    diagnostics,
+                  }),
+                );
+              }),
         run: runProviderUpdate(),
       })
       .pipe(

@@ -1,6 +1,6 @@
 # Codex 0.166 and coordinated Claude 314 update
 
-Last updated: 2026-10-30 15:07:14 JST (UTC+0900)
+Last updated: 2026-10-30 20:21:11 JST (UTC+0900)
 
 This audit compares Cafe's Codex 0.164 protocol and managed runtime with
 **0.166.0**, and Claude Agent SDK **0.3.311** / managed Code **2.1.311** with
@@ -104,6 +104,36 @@ text, answers, full-text disposition keys or raw copies. This log-only projectio
 preserves authenticated events/activities and native callbacks. The separate
 optional protected native protocol transcript log retains its existing behavior;
 this change does not scrub historical logs or every content-bearing event type.
+
+## Provider executable updates and failure details
+
+Claude's [official setup guide](https://code.claude.com/docs/en/setup) distinguishes
+the `claude-code` and `claude-code@latest` Homebrew casks. Cafe's previous fixed
+stable-cask target did not match a latest-cask installation. The source now selects
+the exact allowlisted stable/latest target from a successful native canonical
+Caskroom observation, before considering native/npm/pnpm/Vite-plus-looking
+aliases. Unknown or malformed targets in those known namespaces remain
+manual-only; custom prefixes cannot qualify a Brew channel, and manager
+precedence outside the recognized namespace remains unchanged. No new advisory
+source or automatic channel switch is introduced.
+
+An independent authority fix binds each update request to its actual instance
+and driver, then checks the returned capability's driver before any queued state,
+preflight or command. This prevents a differently labelled request from borrowing
+another instance's updater while bypassing its driver-specific preflight.
+Failed updates now retain typed phase/category/exit/truncation metadata and offer
+explicit bounded command-output details. Operational logs, routine diagnostic
+copies and provider fleet debug retain metadata only; older missing diagnostics
+remain unknown, and timeout discards cannot attest complete original output.
+See [provider update diagnostics](provider-update-diagnostics.md) for the exact
+display, correlation, ownership and recovery boundaries.
+
+The user identified the reported installation as `claude-code@latest`; an attempt
+to upgrade an absent stable cask could explain exit code 1, but the historical
+stderr is still required to confirm that cause. Source changes and synthetic
+checks do not update an external CLI, prove a live Homebrew update or establish
+adoption by a running backend/provider. No provider, installer or app restart is
+part of this source implementation.
 
 ## Coordinated Claude package admission
 

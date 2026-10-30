@@ -133,3 +133,46 @@ describe("summarizeProviderDebugFleet", () => {
     );
   });
 });
+
+it("projects only typed update diagnostic facts while excluding raw and future private properties", () => {
+  let unexpectedReads = 0;
+  const diagnostics = {
+    phase: "command",
+    category: "command_failed",
+    exitCode: 4_294_967_295,
+    timedOut: false,
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    outputTruncated: true,
+  } as const;
+  Object.defineProperty(diagnostics, "futurePrivateField", {
+    enumerable: true,
+    get: () => {
+      unexpectedReads += 1;
+      return "private-future-diagnostic-sentinel";
+    },
+  });
+  const current = providerFixture(2);
+  const source = { ...current, updateState: { ...current.updateState!, diagnostics } };
+  const result = summarizeProviderDebugFleet([source]);
+  expect(result.instances[0]?.update?.diagnostics).toEqual({
+    phase: "command",
+    category: "command_failed",
+    exitCode: 4_294_967_295,
+    timedOut: false,
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    outputTruncated: true,
+  });
+  const serialized = JSON.stringify(result);
+  for (const sentinel of [
+    "private-future-diagnostic-sentinel",
+    "secret-package-manager-output",
+    "/private/secret/path",
+    "secret-account",
+    "sensitive account",
+    "futurePrivateField",
+  ])
+    expect(serialized).not.toContain(sentinel);
+  expect(unexpectedReads).toBe(0);
+});

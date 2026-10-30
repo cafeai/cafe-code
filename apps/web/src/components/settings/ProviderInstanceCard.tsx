@@ -64,6 +64,7 @@ import {
   readProviderConfigString,
 } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
+import { ProviderUpdateFailureDetails } from "./ProviderUpdateFailureDetails";
 import { GrokSandboxSettings } from "./GrokSandboxSettings";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
@@ -1654,6 +1655,11 @@ export function ProviderInstanceCard({
             not change the available width and unexpectedly rewrap rows. */}
         <div className="mt-2 min-w-0 space-y-2" data-provider-card-details>
           {authRowNode}
+          <ProviderUpdateFailureDetails
+            instanceId={instanceId}
+            driver={instance.driver}
+            provider={liveProvider}
+          />
           {accountQuota || sessionQuota ? (
             <div className="w-full [&_[data-account-quota-scroll]]:[scrollbar-gutter:stable]">
               <ProviderAccountQuotaDetails

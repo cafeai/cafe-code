@@ -69,6 +69,7 @@
     "src/components/chat/ClaudeTaskControls.browser.tsx",
     "src/components/chat/TraitsPicker.serviceTiers.browser.tsx",
     "src/components/settings/ProviderInstanceCard.layout.browser.tsx",
+    "src/components/settings/ProviderUpdateFailureDetails.browser.tsx",
     "src/components/atrium/TaskAtrium.browser.tsx",
     "src/components/atrium/AtriumSubagentDetailBoundary.browser.tsx",
     "src/components/chat/EarlierWorkLog.browser.tsx",

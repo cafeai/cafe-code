@@ -244,6 +244,17 @@ export function getProviderUpdateRejectedToastView(
   };
 }
 
+/** Select only one failed exact instance from the already-admitted update
+ * snapshots. An aggregate failure never guesses which account to reveal. */
+export function singleFailedProviderUpdateInstanceId(
+  providers: ReadonlyArray<ServerProvider>,
+): ProviderInstanceId | undefined {
+  const failed = dedupeProvidersByInstanceId(providers).filter(
+    (provider) => provider.updateState?.status === "failed",
+  );
+  return failed.length === 1 ? failed[0]!.instanceId : undefined;
+}
+
 export function getProviderUpdateProgressToastView(input: {
   readonly providers: ReadonlyArray<ServerProvider>;
   readonly providerCount: number;
@@ -254,9 +265,19 @@ export function getProviderUpdateProgressToastView(input: {
     return {
       phase: "failed",
       type: "error",
-      title: uiText("Provider {count, plural, one {update} other {updates}} failed", {
-        count: failedProviders.length,
-      }),
+      // The selected instance remains the Settings target. Keep account names
+      // and raw output out of the toast, and do not guess an attempted version
+      // from a latest-version advisory which may already have changed.
+      title:
+        failedProviders.length === 1
+          ? uiText("{provider} update failed", {
+              provider: Object.hasOwn(PROVIDER_DISPLAY_NAMES, failedProviders[0]!.driver)
+                ? (PROVIDER_DISPLAY_NAMES[failedProviders[0]!.driver] ?? uiText("Provider"))
+                : uiText("Provider"),
+            })
+          : uiText("Provider {count, plural, one {update} other {updates}} failed", {
+              count: failedProviders.length,
+            }),
       description: getFailedProviderUpdateDescription(failedProviders),
     };
   }
