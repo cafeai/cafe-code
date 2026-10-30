@@ -195,7 +195,14 @@ describe("providerMaintenance", () => {
       "refuses unproved, malformed or non-allowlisted Claude cask evidence " +
         String(realCommandPath),
       () => {
-        expect(claudeUpdate.resolve({ ...options, realCommandPath }).update).toBeNull();
+        expect(
+          claudeUpdate.resolve(
+            // This raw negative deliberately retains an own undefined value,
+            // modelling a legacy/untyped caller. Assert only the static view;
+            // do not omit, rewrite or narrow the runtime object or table row.
+            { ...options, realCommandPath } as Parameters<typeof claudeUpdate.resolve>[0],
+          ).update,
+        ).toBeNull();
       },
     );
   }
