@@ -464,6 +464,14 @@ export const ProviderDaemonQualificationSummary = Schema.Struct({
 });
 export type ProviderDaemonQualificationSummary = typeof ProviderDaemonQualificationSummary.Type;
 
+/** Bounded optional-tool observations, never permission or retry authority. */
+export const ProviderDaemonGlideStartupDiagnostics = Schema.Struct({
+  attachFailureCount: NonNegativeInt,
+  activationFailureCount: NonNegativeInt,
+  trayFailureCount: NonNegativeInt,
+  lastFailurePhase: Schema.optional(Schema.Literals(["attach", "activate", "tray"])),
+});
+
 export const ProviderDaemonHealth = Schema.Struct({
   ok: Schema.Literal(true),
   mode: ProviderRuntimeProcessMode,
@@ -482,6 +490,7 @@ export const ProviderDaemonHealth = Schema.Struct({
   activeSessionCount: NonNegativeInt,
   configuredInstanceCount: NonNegativeInt,
   providerQualification: Schema.optional(ProviderDaemonQualificationSummary),
+  glideStartup: Schema.optional(ProviderDaemonGlideStartupDiagnostics),
   eventCursor: NonNegativeInt,
   transport: Schema.optional(ProviderDaemonTransport),
   activeStreamCount: Schema.optional(NonNegativeInt),

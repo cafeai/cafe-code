@@ -61,6 +61,12 @@ name; command-line helper paths and app allowlists cannot authorize execution.
 
 ## Menu bar visibility and stopping
 
+Authenticated daemon health and compact desktop debug expose `glideStartup`:
+bounded attach, activation and tray failure counters plus the last fixed failure
+phase. These process-local observations reset with the owning runtime; an older
+runtime's missing field means unknown. They contain no native error text, paths,
+chat identities or credentials, and grant neither execution nor automatic retry.
+
 The macOS **Computer use** cursor icon appears only while a chat with computer
 use enabled is running. An open provider session or a saved permission alone
 does not keep it visible. Native turn completion, cancellation and session exit
@@ -97,6 +103,11 @@ survives closing the Electron window or choosing **Leave Running**. Capture and
 input wait for the native status host's render acknowledgment, then repeat the
 original cancellation/deadline/grant checks. Losing the status host fences new
 admission and disables grants rather than permitting invisible computer use.
+Ordinary provider startup with Computer use disabled remains available when the
+status host fails. Its inert MCP catalogue cannot execute desktop operations;
+status refresh failures also do not replace successful owned cancellation or
+disposal with a provider failure. Enabling desktop authority still requires the
+native status acknowledgment and the existing permission and ownership checks.
 **Open chat** uses a single server-minted navigation receipt for the local
 desktop's primary environment; stale row owners cannot open another chat.
 

@@ -71,7 +71,11 @@ import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts"
 import { RepositoryIdentityResolver } from "../../project/Services/RepositoryIdentityResolver.ts";
 import { buildCodexSteerClientCorrelationId } from "../../provider/codexSteerCorrelation.ts";
 import { codexFailedRootPreparationCommitment } from "../../provider/codexFailedRootPreparation.ts";
-import { ProviderAdapterRequestError, type ProviderServiceError } from "../../provider/Errors.ts";
+import {
+  ProviderAdapterProcessError,
+  ProviderAdapterRequestError,
+  type ProviderServiceError,
+} from "../../provider/Errors.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -8203,6 +8207,87 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
+
+  it.each([
+    ["local", "attach"],
+    ["local", "activate"],
+    ["local", "process"],
+    ["daemon", "attach"],
+    ["daemon", "activate"],
+    ["daemon", "process"],
+  ] as const)(
+    "reports a %s %s startup failure without inventing native exit or recovery",
+    async (transport, failure) => {
+      const harness = await createHarness();
+      const threadId = ThreadId.make("thread-1");
+      const detail =
+        failure === "process"
+          ? "Synthetic process startup failure at /private/synthetic-provider-path"
+          : `Could not ${failure} Glide desktop tools.`;
+      const processError = new ProviderAdapterProcessError({
+        provider: "codex",
+        threadId,
+        detail,
+      });
+      const error =
+        transport === "local"
+          ? processError
+          : toRemoteRequestError(
+              "startSession",
+              new ProviderDaemonRpcResponseError(
+                "ProviderAdapterProcessError",
+                `${processError.message}\n    at /private/synthetic-daemon-stack:1:1`,
+              ),
+            );
+      const failedOpening = Effect.runSync(Deferred.make<boolean>());
+      // Observe the exact fake opening's failure before checking projection;
+      // mock invocation alone does not establish that the worker completed it.
+      harness.startSession.mockImplementationOnce(() =>
+        Effect.fail(error).pipe(
+          Effect.onExit((exit) => Deferred.succeed(failedOpening, Exit.isFailure(exit))),
+        ),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("startup-error-category"),
+          threadId,
+          message: {
+            messageId: asMessageId("startup-error-category-message"),
+            role: "user",
+            text: "Synthetic startup request",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+      expect(await harness.awaitOwnedObserver(Deferred.await(failedOpening))).toBe(true);
+      await waitFor(async () =>
+        Boolean(
+          (await harness.readThreadDetail(threadId))?.activities.some(
+            (activity) => activity.kind === "provider.turn.start.failed",
+          ),
+        ),
+      );
+      await harness.drain();
+      const thread = await harness.readThreadDetail(threadId);
+      const expectedDetail =
+        failure === "process"
+          ? "Provider runtime request failed. Check the selected provider account, model access, and local CLI install."
+          : `Glide desktop tools could not be ${failure === "attach" ? "attached" : "activated"}. Check Computer use in the chat controls.`;
+      expect(
+        thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed")
+          ?.payload,
+      ).toMatchObject({ detail: expectedDetail });
+      expect(thread?.session?.lastError).toBe(expectedDetail);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(["codex", "claudeAgent", "grok"] as const)(
     "uses native instructions for Codex/Claude and preserves %s input policy",

@@ -19,6 +19,7 @@ import { ServerConfig } from "../config.ts";
 import { makeSessionMcpFiles, type SessionMcpFiles } from "../mcp/sessionFiles.ts";
 import { createGlideNativePeer, GlideNativeHost } from "./nativeHost.ts";
 import { GlideActivity } from "./activity.ts";
+import { recordGlideTrayFailure } from "./diagnostics.ts";
 import { glideTrayPresentation } from "./trayPresentation.ts";
 import type { UiLocale } from "@cafecode/shared/i18n";
 import { createGlideTrayHost, type GlideTrayHost, type GlideTrayEvent } from "./tray.ts";
@@ -442,6 +443,7 @@ export function makeGlideSessionRuntime(options: {
       () => {
         // Revoke synchronously before any persistence, pipe or process await.
         trayFailed = true;
+        recordGlideTrayFailure();
         void stopAll().catch(() => undefined);
       },
     );
@@ -666,7 +668,11 @@ export function makeGlideSessionRuntime(options: {
             const policy = await options.readPolicy(binding.threadId);
             if (policy.enabled && policy.fullAccess && !blocked)
               await grant(binding.threadId, binding);
-            else await publish();
+            // An inert MCP catalogue grants no desktop authority. Its provider
+            // session must not depend on the optional status child's readiness
+            // or survival. Enabled grants still await the native ACK above;
+            // status-host failure keeps the global execution fence closed.
+            else void publish().catch(() => undefined);
           },
           cancel: async () => {
             binding.paused = true;
@@ -676,7 +682,10 @@ export function makeGlideSessionRuntime(options: {
               delete binding.runningTurn;
               activity.running(binding.id, false);
             }
-            await publish();
+            // Exact owned cancellation above is required. Refreshing an
+            // already-stopped status host must not turn that success into a
+            // provider interruption failure.
+            void publish().catch(() => undefined);
           },
           resume: () => {
             if (!binding.revoked) binding.paused = false;
@@ -726,7 +735,9 @@ export function makeGlideSessionRuntime(options: {
               if (threadOwners.get(binding.threadId) === binding.id)
                 threadOwners.delete(binding.threadId);
               bindings.delete(binding.tokenDigest);
-              await publish();
+              // The owned kernel and private MCP files are already retired.
+              // Native status failure cannot undo that completed disposal.
+              void publish().catch(() => undefined);
             })();
             return binding.disposal;
           },

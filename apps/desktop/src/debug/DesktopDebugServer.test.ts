@@ -334,6 +334,51 @@ describe("Daemon-local qualification debug summary", () => {
   });
 });
 
+describe("Content-free optional desktop-tools startup summary", () => {
+  const project = (glideStartup: unknown) => {
+    debugServer.reset();
+    debugServer.publishProviderDaemonSnapshot({ lastHealth: { glideStartup } });
+    const daemon = debugServer.buildCompactDebugSnapshot().providerDaemon as Record<
+      string,
+      unknown
+    >;
+    return (daemon.lastHealth as Record<string, unknown>).glideStartup;
+  };
+  it("projects only finite counters and Cafe-authored phases, leaving legacy state unknown", () => {
+    assert.deepEqual(
+      project({
+        attachFailureCount: 1,
+        activationFailureCount: 2,
+        trayFailureCount: 3,
+        lastFailurePhase: "tray",
+        error: "private-path-or-credential",
+      }),
+      {
+        attachFailureCount: 1,
+        activationFailureCount: 2,
+        trayFailureCount: 3,
+        lastFailurePhase: "tray",
+      },
+    );
+    assert.isNull(project(undefined));
+    const get = () => {
+      throw new Error("received accessor must not execute");
+    };
+    const received = {
+      activationFailureCount: -1,
+      trayFailureCount: Infinity,
+      lastFailurePhase: "private-error",
+    };
+    Object.defineProperty(received, "attachFailureCount", { get });
+    assert.deepEqual(project(received), {
+      attachFailureCount: null,
+      activationFailureCount: null,
+      trayFailureCount: null,
+      lastFailurePhase: null,
+    });
+  });
+});
+
 describe("Content-free failed-root retirement refusal debug summary", () => {
   const failure = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
     method: "sendTurn",

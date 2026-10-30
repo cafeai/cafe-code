@@ -1194,6 +1194,8 @@ function summarizeProviderDaemonHealthForCompactDebug(
   }
   const runtimeEvents = readRecord(health.runtimeEvents);
   const providerQualification = readRecord(health.providerQualification);
+  const glideStartup = readRpcDebugRecord(ownRpcDebugField(health, "glideStartup"));
+  const glideFailurePhase = ownRpcDebugField(glideStartup, "lastFailurePhase");
   const rpc = readRpcDebugRecord(ownRpcDebugField(health, "rpc"));
   const recentRpcFailures = readRecentRpcFailuresForCompactDebug(
     ownRpcDebugField(rpc, "recentFailures"),
@@ -1241,6 +1243,34 @@ function summarizeProviderDaemonHealthForCompactDebug(
               0,
               Number.MAX_SAFE_INTEGER,
             ),
+          },
+    // Fixed scalar observations only: never project received error text or
+    // grant permission/retry authority from an optional-tool failure count.
+    glideStartup:
+      glideStartup === null
+        ? null
+        : {
+            attachFailureCount: readBoundedInteger(
+              ownRpcDebugField(glideStartup, "attachFailureCount"),
+              0,
+              Number.MAX_SAFE_INTEGER,
+            ),
+            activationFailureCount: readBoundedInteger(
+              ownRpcDebugField(glideStartup, "activationFailureCount"),
+              0,
+              Number.MAX_SAFE_INTEGER,
+            ),
+            trayFailureCount: readBoundedInteger(
+              ownRpcDebugField(glideStartup, "trayFailureCount"),
+              0,
+              Number.MAX_SAFE_INTEGER,
+            ),
+            lastFailurePhase:
+              glideFailurePhase === "attach" ||
+              glideFailurePhase === "activate" ||
+              glideFailurePhase === "tray"
+                ? glideFailurePhase
+                : null,
           },
     activeStreamCount: readNumber(health.activeStreamCount),
     retainedEventCount: readNumber(health.retainedEventCount),

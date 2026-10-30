@@ -441,9 +441,19 @@ function findProviderAdapterProcessError(
   return undefined;
 }
 
-function sanitizeProviderFailureDetail(detail: string): string {
-  return RAW_PROVIDER_PROCESS_FAILURE_PATTERN.test(detail)
-    ? "Provider runtime exited while starting. Cafe Code attempted automatic fresh-session recovery; if this repeats, check the selected provider account, model access, and local CLI install."
+function sanitizeProviderFailureDetail(detail: string, processFailure = false): string {
+  // The daemon can wrap this fixed local capability failure in a process-error
+  // envelope. Preserve the actionable category without projecting that wrapper,
+  // its stack or an arbitrary native cause into the durable work log. A process
+  // error class alone proves neither native exit nor a recovery attempt.
+  if (/\bCould not attach Glide desktop tools\./.test(detail)) {
+    return "Glide desktop tools could not be attached. Check Computer use in the chat controls.";
+  }
+  if (/\bCould not activate Glide desktop tools\./.test(detail)) {
+    return "Glide desktop tools could not be activated. Check Computer use in the chat controls.";
+  }
+  return processFailure || RAW_PROVIDER_PROCESS_FAILURE_PATTERN.test(detail)
+    ? "Provider runtime request failed. Check the selected provider account, model access, and local CLI install."
     : detail;
 }
 
@@ -976,11 +986,14 @@ const make = Effect.gen(function* () {
       ? failReason.error
       : undefined;
     if (providerError) {
-      return sanitizeProviderFailureDetail(providerError.detail);
+      return sanitizeProviderFailureDetail(
+        providerError.detail,
+        providerError.remoteErrorTag === "ProviderAdapterProcessError",
+      );
     }
     const processError = findProviderAdapterProcessError(cause);
     if (processError) {
-      return sanitizeProviderFailureDetail(processError.detail);
+      return sanitizeProviderFailureDetail(processError.detail, true);
     }
     return sanitizeProviderFailureDetail(Cause.pretty(cause));
   };

@@ -60,6 +60,7 @@ import {
 import { captureWindowsProcessIdentity } from "@cafecode/shared/windowsProcessOwnership";
 import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
 import { ServerConfig } from "../config.ts";
+import { readGlideStartupDiagnostics } from "../glide/diagnostics.ts";
 import { PROVIDER_PIPELINE_POLICY, utf8ByteLength } from "@cafecode/shared/providerPipelinePolicy";
 import {
   addProviderDaemonStreamDiagnostics,
@@ -2033,6 +2034,7 @@ const runProviderDaemonServerInternal = (
                 ...(inventorySnapshot.providerQualification === undefined
                   ? {}
                   : { providerQualification: inventorySnapshot.providerQualification }),
+                glideStartup: readGlideStartupDiagnostics(),
                 eventCursor: journalSnapshot.eventCursor,
                 transport,
                 activeStreamCount,

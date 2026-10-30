@@ -129,6 +129,86 @@ async function fixture() {
   };
 }
 describe("Cafe Glide session authority", () => {
+  it("keeps disabled provider sessions and their cleanup independent of a failed status host", async () => {
+    const f = await fixture();
+    try {
+      f.tray.publish.mockImplementationOnce(async () => {
+        f.trayFailure();
+        throw new Error("Synthetic status-host failure");
+      });
+      const binding = (await f.runtime.bind(identity))!;
+      const token = await f.token(binding);
+      await expect(binding.activate()).resolves.toBeUndefined();
+      await expect(f.runtime.operation({ kind: "catalog", token })).resolves.toEqual({
+        connected: true,
+      });
+      binding.resume();
+      await f.start(binding);
+      await expect(
+        f.runtime.operation({ kind: "execute", token, input: { code: "not granted" } }),
+      ).rejects.toThrow("Glide");
+      await expect(binding.cancel()).resolves.toBeUndefined();
+      await expect(binding.dispose()).resolves.toBeUndefined();
+      await expect(f.runtime.operation({ kind: "catalog", token })).rejects.toThrow("Glide");
+      // The failed child remains unavailable. A later ordinary session must
+      // still start without recovering or silently re-enabling desktop access.
+      const replacement = (await f.runtime.bind(identity))!;
+      await expect(replacement.activate()).resolves.toBeUndefined();
+      await expect(
+        f.runtime.operation({
+          kind: "execute",
+          token: await f.token(replacement),
+          input: { code: "still not granted" },
+        }),
+      ).rejects.toThrow("Glide");
+      await expect(replacement.dispose()).resolves.toBeUndefined();
+      expect(f.kernels).toHaveLength(0);
+      expect(f.nativeFactory).not.toHaveBeenCalled();
+      expect(f.writePolicy).not.toHaveBeenCalled();
+    } finally {
+      await f.cleanup();
+    }
+  });
+  it("still requires status acknowledgement when activating an enabled desktop grant", async () => {
+    const f = await fixture();
+    const entered = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    let activating: Promise<void> | undefined;
+    try {
+      f.policy({ enabled: true, apps: ["fixture.editor"] });
+      f.tray.publish.mockImplementationOnce(async () => {
+        entered.resolve();
+        await release.promise;
+        f.trayFailure();
+        throw new Error("Synthetic native ACK failure");
+      });
+      const binding = (await f.runtime.bind(identity))!;
+      let activated = false;
+      activating = binding.activate().then(() => {
+        activated = true;
+      });
+      const refused = expect(activating).rejects.toThrow("Synthetic native ACK failure");
+      await entered.promise;
+      expect(activated).toBe(false);
+      release.resolve();
+      await refused;
+      binding.resume();
+      await f.start(binding);
+      await expect(
+        f.runtime.operation({
+          kind: "execute",
+          token: await f.token(binding),
+          input: { code: "failed status grant" },
+        }),
+      ).rejects.toThrow("Glide");
+      expect(f.kernels).toHaveLength(0);
+      expect(f.nativeFactory).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      await activating?.catch(() => undefined);
+      await f.cleanup();
+    }
+  });
   it("keeps the status visible until an admitted cell drains after its exact turn finishes", async () => {
     const f = await fixture();
     const entered = Promise.withResolvers<void>(),

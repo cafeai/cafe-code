@@ -2,6 +2,7 @@ import { type ThreadId, type ProviderInstanceId } from "@cafecode/contracts";
 import { ProviderAdapterProcessError } from "../provider/Errors.ts";
 import * as Effect from "effect/Effect";
 import { readGlideSessionBroker, type GlideSessionBinding } from "./sessionRuntime.ts";
+import { recordGlideStartupFailure } from "./diagnostics.ts";
 
 export type { GlideSessionBinding } from "./sessionRuntime.ts";
 export const bindGlideSession = (input: {
@@ -12,12 +13,14 @@ export const bindGlideSession = (input: {
 }) =>
   Effect.tryPromise({
     try: () => readGlideSessionBroker()?.bind(input) ?? Promise.resolve(undefined),
-    catch: () =>
-      new ProviderAdapterProcessError({
+    catch: () => {
+      recordGlideStartupFailure("attach");
+      return new ProviderAdapterProcessError({
         provider: input.provider,
         threadId: input.threadId,
         detail: "Could not attach Glide desktop tools.",
-      }),
+      });
+    },
   });
 export const disposeGlideSession = (binding: GlideSessionBinding | undefined) =>
   Effect.promise(() => binding?.dispose() ?? Promise.resolve()).pipe(
@@ -33,10 +36,12 @@ export const activateGlideSession = (
 ) =>
   Effect.tryPromise({
     try: () => binding?.activate() ?? Promise.resolve(),
-    catch: () =>
-      new ProviderAdapterProcessError({
+    catch: () => {
+      recordGlideStartupFailure("activate");
+      return new ProviderAdapterProcessError({
         provider: input.provider,
         threadId: input.threadId,
         detail: "Could not activate Glide desktop tools.",
-      }),
+      });
+    },
   });

@@ -2564,6 +2564,11 @@ describe("ProviderDaemonServer", () => {
       assert.equal(health.supervisorProcess?.leaseId, "lease-000000000000000000000000000");
       assert.isDefined(health.pipelineDiagnostics);
       assert.equal(health.pipelineDiagnostics?.daemonStream.activeStreamCount, 0);
+      assert.deepEqual(health.glideStartup, {
+        attachFailureCount: 0,
+        activationFailureCount: 0,
+        trayFailureCount: 0,
+      });
       assert.notInclude(encodeProviderDaemonHealthJson(health), TEST_TOKEN);
     }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer)),
   );

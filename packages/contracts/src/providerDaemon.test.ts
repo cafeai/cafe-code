@@ -9,6 +9,7 @@ import {
   ProviderDaemonEventRecord,
   ProviderDaemonLiveness,
   ProviderDaemonHealth,
+  ProviderDaemonGlideStartupDiagnostics,
   ProviderDaemonCapability,
   ProviderDaemonRetirementRequest,
   ProviderDaemonRetirementResponse,
@@ -21,6 +22,36 @@ import {
   ProviderDaemonRpcResultByMethod,
   WindowsProcessIdentity,
 } from "./providerDaemon.ts";
+
+it("keeps optional desktop-tools failure observations numeric and finite in JSON health", () => {
+  const decode = Schema.decodeUnknownSync(ProviderDaemonGlideStartupDiagnostics);
+  const json = Schema.fromJsonString(ProviderDaemonGlideStartupDiagnostics);
+  for (const phase of [undefined, "attach", "activate", "tray"] as const) {
+    const observation = {
+      attachFailureCount: 1,
+      activationFailureCount: 2,
+      trayFailureCount: 0,
+      ...(phase === undefined ? {} : { lastFailurePhase: phase }),
+    };
+    assert.deepEqual(
+      Schema.decodeUnknownSync(json)(Schema.encodeSync(json)(observation)),
+      observation,
+    );
+  }
+  for (const invalid of [-1, 0.5, Infinity, "1", Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() =>
+      decode({ attachFailureCount: invalid, activationFailureCount: 0, trayFailureCount: 0 }),
+    );
+  }
+  assert.throws(() =>
+    decode({
+      attachFailureCount: 0,
+      activationFailureCount: 0,
+      trayFailureCount: 0,
+      lastFailurePhase: "arbitrary native error",
+    }),
+  );
+});
 
 it("keeps private phased recovery tokens and status shapes finite across the daemon codec", () => {
   const decodeRequest = Schema.decodeUnknownSync(ProviderDaemonRpcRequest);
