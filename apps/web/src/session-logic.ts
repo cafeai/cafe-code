@@ -201,6 +201,8 @@ export interface PendingUserInput {
   createdAt: string;
   questions: ReadonlyArray<UserInputQuestion>;
   isBlocking: boolean;
+  /** Presentation hint only; the live native callback rechecks authority. */
+  supportsUnanswered?: boolean;
   interaction?: ProviderInteraction;
 }
 
@@ -508,6 +510,7 @@ export function derivePendingUserInputs(
         // Events written before Codex 0.147 did not carry the field and must
         // remain blocking. Only an explicit false enables auto-resolution.
         isBlocking: payload?.isBlocking !== false,
+        ...(payload?.supportsUnanswered === true ? { supportsUnanswered: true } : {}),
       });
       continue;
     }

@@ -114,11 +114,13 @@ import {
 } from "../session-logic";
 import { type LegendListRef } from "@legendapp/list/react";
 import {
-  buildPendingUserInputAnswers,
+  buildPendingUserInputResponse,
   derivePendingUserInputProgress,
   setPendingUserInputCustomAnswer,
+  skipPendingUserInputQuestion,
   togglePendingUserInputOptionSelection,
   type PendingUserInputDraftAnswer,
+  type PendingUserInputResponse,
 } from "../pendingUserInput";
 import {
   selectProjectByRef,
@@ -1181,6 +1183,9 @@ export default function ChatView(props: ChatViewProps) {
   const [respondingUserInputRequestIds, setRespondingUserInputRequestIds] = useState<
     ApprovalRequestId[]
   >([]);
+  // State disables rendered controls; this synchronous reservation also covers
+  // a second activation before React commits that disabled presentation.
+  const userInputResponsesInFlightRef = useRef(new Set<string>());
   const snoozedUserInputRequestIdsRef = useRef<Set<string>>(new Set());
   const [snoozedUserInputRequestIds, setSnoozedUserInputRequestIds] = useState<ApprovalRequestId[]>(
     [],
@@ -2452,6 +2457,16 @@ export default function ChatView(props: ChatViewProps) {
     [threadActivities],
   );
   const activePendingUserInput = pendingUserInputs[0] ?? null;
+  const activePendingUserInputOwnerRef = useRef({
+    environmentId,
+    threadId: activeThreadId,
+    prompt: activePendingUserInput,
+  });
+  activePendingUserInputOwnerRef.current = {
+    environmentId,
+    threadId: activeThreadId,
+    prompt: activePendingUserInput,
+  };
   const activePendingDraftAnswers = useMemo(
     () =>
       activePendingUserInput
@@ -2470,17 +2485,23 @@ export default function ChatView(props: ChatViewProps) {
             activePendingUserInput.questions,
             activePendingDraftAnswers,
             activePendingQuestionIndex,
+            activePendingUserInput.supportsUnanswered === true,
           )
         : null,
     [activePendingDraftAnswers, activePendingQuestionIndex, activePendingUserInput],
   );
-  const activePendingResolvedAnswers = useMemo(
+  const activePendingResolvedResponse = useMemo(
     () =>
       activePendingUserInput
-        ? buildPendingUserInputAnswers(activePendingUserInput.questions, activePendingDraftAnswers)
+        ? buildPendingUserInputResponse(
+            activePendingUserInput.questions,
+            activePendingDraftAnswers,
+            activePendingUserInput.supportsUnanswered === true,
+          )
         : null,
     [activePendingDraftAnswers, activePendingUserInput],
   );
+  const activePendingResolvedAnswers = activePendingResolvedResponse?.answers ?? null;
   const activePendingIsResponding = activePendingUserInput
     ? respondingUserInputRequestIds.includes(activePendingUserInput.requestId)
     : false;
@@ -7361,35 +7382,67 @@ export default function ChatView(props: ChatViewProps) {
     [activeThreadId, environmentId, setThreadError, uiLocale],
   );
 
+  const readCurrentPendingUserInput = useCallback(
+    (requestId: ApprovalRequestId) => {
+      const owner = activePendingUserInputOwnerRef.current;
+      if (
+        !activeThreadId ||
+        owner.environmentId !== environmentId ||
+        owner.threadId !== activeThreadId ||
+        owner.prompt?.requestId !== requestId
+      )
+        return null;
+      // A canonical resolution or replacement can arrive before React renders
+      // its new card. Recheck the store at the actual native action boundary.
+      const thread = selectThreadByRef(
+        useStore.getState(),
+        scopeThreadRef(environmentId, activeThreadId),
+      );
+      const current = thread ? derivePendingUserInputs(thread.activities)[0] : undefined;
+      return current?.requestId === requestId && current.createdAt === owner.prompt.createdAt
+        ? current
+        : null;
+    },
+    [activeThreadId, environmentId],
+  );
+
   const onRespondToUserInput = useCallback(
-    async (requestId: ApprovalRequestId, answers: Record<string, unknown>) => {
+    async (requestId: ApprovalRequestId, response: PendingUserInputResponse) => {
       const api = readEnvironmentApi(environmentId);
-      if (!api || !activeThreadId) return;
+      const current = readCurrentPendingUserInput(requestId);
+      if (!api || !activeThreadId || !current || current.interaction) return;
+      if (response.unanswered && current.supportsUnanswered !== true) return;
+      const key = JSON.stringify([environmentId, activeThreadId, requestId, current.createdAt]);
+      if (userInputResponsesInFlightRef.current.has(key)) return;
+      userInputResponsesInFlightRef.current.add(key);
 
       setRespondingUserInputRequestIds((existing) =>
         existing.includes(requestId) ? existing : [...existing, requestId],
       );
-      await api.orchestration
-        .dispatchCommand({
+      try {
+        await api.orchestration.dispatchCommand({
           type: "thread.user-input.respond",
           commandId: newCommandId(),
           threadId: activeThreadId,
           requestId,
-          answers,
+          answers: response.answers,
+          ...(response.unanswered ? { unanswered: response.unanswered } : {}),
           createdAt: new Date().toISOString(),
-        })
-        .catch((err: unknown) => {
-          setThreadError(
-            activeThreadId,
-            describeSendFailureMessage(
-              err,
-              uiText("Failed to submit user input.", undefined, undefined, uiLocale),
-            ),
-          );
         });
-      setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
+      } catch (err: unknown) {
+        setThreadError(
+          activeThreadId,
+          describeSendFailureMessage(
+            err,
+            uiText("Failed to submit user input.", undefined, undefined, uiLocale),
+          ),
+        );
+      } finally {
+        userInputResponsesInFlightRef.current.delete(key);
+        setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
+      }
     },
-    [activeThreadId, environmentId, setThreadError, uiLocale],
+    [activeThreadId, environmentId, readCurrentPendingUserInput, setThreadError, uiLocale],
   );
 
   // MCP answers can contain credentials. Send only through the authenticated
@@ -7544,20 +7597,82 @@ export default function ChatView(props: ChatViewProps) {
     }
     onSnoozeActivePendingUserInput();
     if (activePendingProgress.isLastQuestion) {
-      if (activePendingResolvedAnswers) {
-        void onRespondToUserInput(activePendingUserInput.requestId, activePendingResolvedAnswers);
+      if (activePendingResolvedResponse) {
+        void onRespondToUserInput(activePendingUserInput.requestId, activePendingResolvedResponse);
       }
       return;
     }
     setActivePendingUserInputQuestionIndex(activePendingProgress.questionIndex + 1);
   }, [
     activePendingProgress,
-    activePendingResolvedAnswers,
+    activePendingResolvedResponse,
     activePendingUserInput,
     onRespondToUserInput,
     onSnoozeActivePendingUserInput,
     setActivePendingUserInputQuestionIndex,
   ]);
+
+  const onSkipActivePendingUserInputQuestion = useCallback(
+    (requestId: ApprovalRequestId, questionId: string) => {
+      const current = readCurrentPendingUserInput(requestId);
+      if (
+        !current ||
+        current.interaction ||
+        current.supportsUnanswered !== true ||
+        activePendingIsResponding ||
+        activePendingProgress?.activeQuestion?.id !== questionId
+      )
+        return;
+      const nextAnswers = {
+        ...activePendingDraftAnswers,
+        [questionId]: skipPendingUserInputQuestion(),
+      };
+      setPendingUserInputAnswersByRequestId((existing) => ({
+        ...existing,
+        [requestId]: { ...existing[requestId], [questionId]: skipPendingUserInputQuestion() },
+      }));
+      if (activePendingProgress.isLastQuestion) {
+        const response = buildPendingUserInputResponse(current.questions, nextAnswers, true);
+        if (response) void onRespondToUserInput(requestId, response);
+      } else {
+        setActivePendingUserInputQuestionIndex(activePendingProgress.questionIndex + 1);
+      }
+    },
+    [
+      activePendingDraftAnswers,
+      activePendingIsResponding,
+      activePendingProgress,
+      onRespondToUserInput,
+      readCurrentPendingUserInput,
+      setActivePendingUserInputQuestionIndex,
+    ],
+  );
+
+  const onDismissActivePendingUserInput = useCallback(
+    (requestId: ApprovalRequestId) => {
+      const current = readCurrentPendingUserInput(requestId);
+      if (
+        !current ||
+        current.interaction ||
+        current.supportsUnanswered !== true ||
+        activePendingIsResponding
+      )
+        return;
+      const response = buildPendingUserInputResponse(
+        current.questions,
+        activePendingDraftAnswers,
+        true,
+        true,
+      );
+      if (response) void onRespondToUserInput(requestId, response);
+    },
+    [
+      activePendingDraftAnswers,
+      activePendingIsResponding,
+      onRespondToUserInput,
+      readCurrentPendingUserInput,
+    ],
+  );
 
   const onPreviousActivePendingUserInputQuestion = useCallback(() => {
     if (!activePendingProgress) {
@@ -8837,6 +8952,8 @@ export default function ChatView(props: ChatViewProps) {
                   onRespondToApproval={onRespondToApproval}
                   onSelectActivePendingUserInputOption={onSelectActivePendingUserInputOption}
                   onAdvanceActivePendingUserInput={onAdvanceActivePendingUserInput}
+                  onSkipActivePendingUserInputQuestion={onSkipActivePendingUserInputQuestion}
+                  onDismissActivePendingUserInput={onDismissActivePendingUserInput}
                   onRespondToInteraction={onRespondToInteraction}
                   onResolveInteractionUrl={onResolveInteractionUrl}
                   onPreviousActivePendingUserInputQuestion={

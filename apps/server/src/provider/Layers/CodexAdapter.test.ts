@@ -6257,6 +6257,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             status: "completed",
             result: "base64-result-is-not-used-as-the-visible-detail",
             fileId: "private-image-adapter-attachment",
+            generationId: "private-image-adapter-generation",
             inputImages: [
               { path: "/private-image-adapter-input.png", sha256: "private-image-adapter-digest" },
             ],
@@ -6307,6 +6308,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
                 status: method === "item/started" ? "inProgress" : "completed",
                 revisedPrompt: "The original visible image prompt",
                 savedPath: "/fixture/existing-image.png",
+                generationId: "private-image-reference-generation",
                 inputImages: [
                   {
                     path: "/private-image-reference-input.png",
@@ -6380,6 +6382,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
                   id: "file-image",
                   status: "completed",
                   fileId: "private-image-history-file",
+                  generationId: "private-image-history-generation",
                 },
                 {
                   type: "imageGeneration",
@@ -11037,6 +11040,7 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
               status: "completed",
               revisedPrompt: "Visible image prompt",
               savedPath: "/fixture/existing-log-image.png",
+              generationId: "native-log-secret-image-generation",
               inputImages: [
                 {
                   path: "/native-log-secret-image-input.png",

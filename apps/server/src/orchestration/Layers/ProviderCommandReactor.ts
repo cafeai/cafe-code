@@ -5350,6 +5350,9 @@ const make = Effect.gen(function* () {
           threadId: event.payload.threadId,
           requestId: event.payload.requestId,
           answers: event.payload.answers,
+          ...(event.payload.unanswered !== undefined
+            ? { unanswered: event.payload.unanswered }
+            : {}),
         })
         .pipe(
           Effect.catchCause((cause) =>

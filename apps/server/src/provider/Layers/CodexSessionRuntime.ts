@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+// Native opaque-error boundary: reject Proxies before reflective inspection;
+// Effect has no equivalent Proxy-identification primitive.
+import { types } from "node:util";
 import { awaitProcessShutdownEvidence } from "../../processShutdownObservation.ts";
 import { redactVisualizationReceiptProofs } from "../../visualizations/nativePrivacy.ts";
 import { readMcpAppModelContext } from "../../mcpApps/owner.ts";
@@ -2820,7 +2823,45 @@ export function makeCodexStderrClassifier(now: () => number = Date.now) {
 }
 
 export function isRecoverableThreadResumeError(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  // A provider name can contain any of the legacy missing-thread snippets.
+  // Codex 0.166 now identifies provider mismatch, removal and managed-policy
+  // refusal in JSON-RPC error.data: those refusals must preserve this exact
+  // conversation instead of silently creating a blank native thread. The tag
+  // is a negative admission guard, not permission to switch provider or ignore
+  // policy; missing/malformed variant fields must not reopen the fallback.
+  // https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/app-server-protocol/src/protocol/v2/model_provider_error.rs
+  let nativeMessage: unknown;
+  if (typeof error === "string") {
+    nativeMessage = error;
+  } else {
+    // The native JSONL reader produces ordinary values and typed request
+    // errors. Do not execute a received Proxy, accessor or string conversion
+    // merely to decide whether creating a different conversation is safe.
+    if (error === null || typeof error !== "object" || types.isProxy(error)) return false;
+    const data = Object.getOwnPropertyDescriptor(error, "data");
+    if (data && !("value" in data)) return false;
+    if (data?.value !== null && typeof data?.value === "object") {
+      if (types.isProxy(data.value)) return false;
+      const prototype = Object.getPrototypeOf(data.value);
+      if (prototype !== Object.prototype && prototype !== Array.prototype && prototype !== null)
+        return false;
+      const discriminator = Object.getOwnPropertyDescriptor(data.value, "type");
+      if (discriminator && !("value" in discriminator)) return false;
+      if (
+        discriminator?.value === "modelProviderMismatch" ||
+        discriminator?.value === "modelProviderNotConfigured" ||
+        discriminator?.value === "modelProviderPolicyConflict"
+      )
+        return false;
+    }
+    const messageField =
+      Object.getOwnPropertyDescriptor(error, "errorMessage") ??
+      Object.getOwnPropertyDescriptor(error, "message");
+    if (!messageField || !("value" in messageField)) return false;
+    nativeMessage = messageField.value;
+  }
+  if (typeof nativeMessage !== "string") return false;
+  const message = nativeMessage.toLowerCase();
   if (!message.includes("thread")) {
     return false;
   }

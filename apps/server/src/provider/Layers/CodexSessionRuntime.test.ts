@@ -3512,6 +3512,7 @@ describe("Codex protocol diagnostic redaction", () => {
       id: "image-1",
       status: "completed",
       fileId: "private-image-file-sentinel",
+      generationId: "private-image-generation-sentinel",
       inputImages: [
         { path: "/private-input-path-sentinel.png", sha256: "private-input-digest-sentinel" },
       ],
@@ -3533,12 +3534,16 @@ describe("Codex protocol diagnostic redaction", () => {
       payload: decoded,
     });
     const serialized = encodeProviderJsonString(diagnostic);
-    assert.doesNotMatch(serialized, /private-(?:image-file|input-path|input-digest)-sentinel/);
-    assert.doesNotMatch(serialized, /"(?:fileId|inputImages)"/);
+    assert.doesNotMatch(
+      serialized,
+      /private-(?:image-file|image-generation|input-path|input-digest)-sentinel/,
+    );
+    assert.doesNotMatch(serialized, /"(?:fileId|generationId|inputImages)"/);
     assert.match(serialized, /"imageGeneration"/);
     assert.match(serialized, /"image-1"/);
     assert.match(serialized, /A public image description/);
     assert.equal(item.fileId, "private-image-file-sentinel");
+    assert.equal(item.generationId, "private-image-generation-sentinel");
     assert.equal(item.inputImages[0].path, "/private-input-path-sentinel.png");
     assert.equal(item.inputImages[0].sha256, "private-input-digest-sentinel");
     assert.deepEqual(decodeNativeNotificationForDiagnostics(wire), wire);
@@ -3551,6 +3556,7 @@ describe("Codex protocol diagnostic redaction", () => {
       status: "completed",
       result: "legacy-inline-image",
       fileId: "private-aggregate-file-sentinel",
+      generationId: "private-aggregate-generation-sentinel",
       inputImages: [
         { path: "/private-aggregate-path-sentinel.png", sha256: "private-aggregate-hash-sentinel" },
       ],
@@ -3567,11 +3573,12 @@ describe("Codex protocol diagnostic redaction", () => {
         payload: { method, params },
       });
       const serialized = encodeProviderJsonString(diagnostic);
-      assert.doesNotMatch(serialized, /private-aggregate-(?:file|path|hash)-sentinel/);
+      assert.doesNotMatch(serialized, /private-aggregate-(?:file|generation|path|hash)-sentinel/);
       assert.match(serialized, /"imageGeneration"/);
       assert.match(serialized, /"legacy-inline-image"/);
     }
     assert.equal(item.fileId, "private-aggregate-file-sentinel");
+    assert.equal(item.generationId, "private-aggregate-generation-sentinel");
     assert.equal(item.inputImages[0].path, "/private-aggregate-path-sentinel.png");
   });
 
@@ -9574,6 +9581,53 @@ describe("openCodexThread", () => {
       assert.equal(Reflect.has(calls[1]!.payload as object, "threadId"), false);
     },
   );
+
+  it.each([
+    {
+      type: "modelProviderMismatch",
+      modelProvider: "thread not found",
+      currentModelProvider: "current-provider",
+    },
+    { type: "modelProviderNotConfigured", modelProvider: "missing thread" },
+    {
+      type: "modelProviderPolicyConflict",
+      modelProvider: "unknown thread",
+      requiredModelProvider: "required-provider",
+    },
+  ])("preserves the exact native resume refusal without a blank fallback: %j", async (data) => {
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const failure = CodexErrors.CodexAppServerRequestError.invalidRequest(
+      "This chat uses thread not found, but its provider configuration has changed.",
+      data,
+    );
+    const error = await Effect.runPromise(
+      openCodexThread({
+        client: {
+          raw: {
+            request: (method, payload) => {
+              calls.push({ method, payload });
+              return method === "thread/resume"
+                ? Effect.fail(failure)
+                : Effect.succeed(makeThreadOpenResponse("unrelated-blank-thread"));
+            },
+          },
+        },
+        threadId: ThreadId.make("provider-refusal-thread"),
+        runtimeMode: "approval-required",
+        cwd: process.cwd(),
+        requestedModel: "gpt-6.1-sol",
+        serviceTier: undefined,
+        resumeThreadId: "preserved-native-history",
+        // Exercise ordinary manual resume as well: the strict failed-root
+        // recovery policy already disallows every blank-thread fallback.
+      }).pipe(Effect.flip),
+    );
+    assert.equal(error, failure);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "thread/resume");
+    assert.equal(Reflect.get(calls[0]!.payload as object, "threadId"), "preserved-native-history");
+    assert.deepEqual(failure.data, data);
+  });
 
   it("propagates non-recoverable resume failures", async () => {
     const client = {

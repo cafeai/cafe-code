@@ -963,6 +963,8 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   ) => Promise<void>;
   onSelectActivePendingUserInputOption: (questionId: string, optionLabel: string) => void;
   onAdvanceActivePendingUserInput: () => void;
+  onSkipActivePendingUserInputQuestion: (requestId: ApprovalRequestId, questionId: string) => void;
+  onDismissActivePendingUserInput: (requestId: ApprovalRequestId) => void;
   onPreviousActivePendingUserInputQuestion: () => void;
   onChangeActivePendingUserInputCustomAnswer: (
     questionId: string,
@@ -1079,6 +1081,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onResolveInteractionUrl,
     onSelectActivePendingUserInputOption,
     onAdvanceActivePendingUserInput,
+    onSkipActivePendingUserInputQuestion,
+    onDismissActivePendingUserInput,
     onPreviousActivePendingUserInputQuestion,
     onChangeActivePendingUserInputCustomAnswer,
     onSnoozeActivePendingUserInput,
@@ -3905,11 +3909,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               >
                 <ComposerPendingUserInputPanel
                   pendingUserInputs={pendingUserInputs}
-                  respondingRequestIds={respondingRequestIds}
+                  isResponding={activePendingIsResponding}
                   answers={activePendingDraftAnswers}
                   questionIndex={activePendingQuestionIndex}
                   onToggleOption={onSelectActivePendingUserInputOption}
                   onAdvance={onAdvanceActivePendingUserInput}
+                  onSkipQuestion={onSkipActivePendingUserInputQuestion}
+                  onDismiss={onDismissActivePendingUserInput}
                   autoResolutionSnoozed={activePendingAutoResolutionSnoozed}
                   onSnoozeAutoResolution={onSnoozeActivePendingUserInput}
                   {...(onRespondToInteraction ? { onRespondToInteraction } : {})}
@@ -3954,11 +3960,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             >
               <ComposerPendingUserInputPanel
                 pendingUserInputs={pendingUserInputs}
-                respondingRequestIds={respondingRequestIds}
+                isResponding={activePendingIsResponding}
                 answers={activePendingDraftAnswers}
                 questionIndex={activePendingQuestionIndex}
                 onToggleOption={onSelectActivePendingUserInputOption}
                 onAdvance={onAdvanceActivePendingUserInput}
+                onSkipQuestion={onSkipActivePendingUserInputQuestion}
+                onDismiss={onDismissActivePendingUserInput}
                 autoResolutionSnoozed={activePendingAutoResolutionSnoozed}
                 onSnoozeAutoResolution={onSnoozeActivePendingUserInput}
                 {...(onRespondToInteraction ? { onRespondToInteraction } : {})}

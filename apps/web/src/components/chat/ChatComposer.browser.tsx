@@ -406,6 +406,8 @@ async function mountComposer(
     onRespondToApproval: vi.fn().mockResolvedValue(undefined),
     onSelectActivePendingUserInputOption: vi.fn(),
     onAdvanceActivePendingUserInput: vi.fn(),
+    onSkipActivePendingUserInputQuestion: vi.fn(),
+    onDismissActivePendingUserInput: vi.fn(),
     onPreviousActivePendingUserInputQuestion: vi.fn(),
     onChangeActivePendingUserInputCustomAnswer: vi.fn(),
     onSnoozeActivePendingUserInput: vi.fn(),
@@ -1138,6 +1140,7 @@ describe("provider-specific composer menu actions", () => {
       requestId,
       createdAt,
       isBlocking: true,
+      supportsUnanswered: true,
       questions: [
         {
           id: "earlier",
@@ -1179,7 +1182,8 @@ describe("provider-specific composer menu actions", () => {
               current: { selectedOptionLabels: ["Keep"], customAnswer: "Retained custom answer" },
             },
             activePendingIsResponding: true,
-            respondingRequestIds: [requestId],
+            // Approval submission state is independent of question responses.
+            respondingRequestIds: [],
           },
           owner,
         ),
@@ -1192,11 +1196,19 @@ describe("provider-specific composer menu actions", () => {
         await owner.observe("assertion", () => expect.element(question).toBeVisible());
         await owner.observe("assertion", () => expect.element(previous).toBeDisabled());
         await owner.observe("assertion", () => expect.element(submitting).toBeDisabled());
+        await owner.observe("assertion", () =>
+          expect.element(page.getByRole("button", { name: "Skip", exact: true })).toBeDisabled(),
+        );
+        await owner.observe("assertion", () =>
+          expect.element(page.getByRole("button", { name: "Dismiss", exact: true })).toBeDisabled(),
+        );
         await owner.observe("controls", () => expect.element(stop).toBeEnabled());
         await owner.observe("controls", () => stop.click());
         expect(interrupt).toHaveBeenCalledExactlyOnceWith();
         expect(fixture.props.onAdvanceActivePendingUserInput).not.toHaveBeenCalled();
         expect(fixture.props.onPreviousActivePendingUserInputQuestion).not.toHaveBeenCalled();
+        expect(fixture.props.onSkipActivePendingUserInputQuestion).not.toHaveBeenCalled();
+        expect(fixture.props.onDismissActivePendingUserInput).not.toHaveBeenCalled();
         expect(fixture.props.onRespondToApproval).not.toHaveBeenCalled();
         expect(fixture.onSend).not.toHaveBeenCalled();
         expect(fixture.props.pendingUserInputs).toEqual([pending]);

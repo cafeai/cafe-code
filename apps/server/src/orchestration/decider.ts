@@ -1238,6 +1238,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           requestId: command.requestId,
           answers: command.answers,
+          ...(command.unanswered !== undefined ? { unanswered: command.unanswered } : {}),
           createdAt: command.createdAt,
         },
       };

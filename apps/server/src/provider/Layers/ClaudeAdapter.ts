@@ -19,6 +19,12 @@ import {
  */
 import { createHash, randomUUID } from "node:crypto";
 import { isClaudeStoppedExecutionResult } from "../claudeTurnInterruption.ts";
+import {
+  CLAUDE_UNANSWERED_QUESTION_CAPABILITY,
+  prepareClaudeUnansweredQuestionResponse,
+  supportsClaudeUnansweredQuestions,
+  type ClaudeUnansweredQuestionResponse,
+} from "../claudeUnansweredQuestions.ts";
 // Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { constants as fsConstants, lstatSync, realpathSync, unlinkSync } from "node:fs";
@@ -643,6 +649,13 @@ interface PendingUserInput {
   readonly interaction?: ProviderElicitation;
   /** Authorization URLs are live capabilities, never durable event fields. */
   readonly interactionUrl?: string;
+  /** Exact init/query/turn witness, never reconstructed from renderer metadata. */
+  readonly unansweredOwner?: {
+    readonly capability: { readonly nativeSessionId: string };
+    readonly turnId: TurnId;
+    readonly signal: AbortSignal;
+  };
+  unansweredResponse?: ClaudeUnansweredQuestionResponse;
 }
 
 interface ToolInFlight {
@@ -857,6 +870,8 @@ interface ClaudeSessionContext {
   failClosedTaskVisibilityOverflow: boolean;
   readonly promptLifecycleByUuid: Map<string, ClaudePromptLifecycleState>;
   readonly capabilities: Set<string>;
+  /** A replacement init invalidates all prior unanswered-callback witnesses. */
+  unansweredCapability?: { readonly nativeSessionId: string } | undefined;
   readonly fastModeRequested: boolean;
   turnState: ClaudeTurnState | undefined;
   deferredTurnResult: ClaudeDeferredTurnResult | undefined;
@@ -4598,16 +4613,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const getNativeSubagentMessages = options?.getNativeSubagentMessages ?? getSubagentMessages;
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
+  /** A request snapshot is not enduring native authority. Both response
+   * consumption and final callback settlement consult the same live witness. */
+  const hasCurrentUnansweredOwner = (context: ClaudeSessionContext, pending: PendingUserInput) => {
+    const owner = pending.unansweredOwner;
+    return (
+      owner !== undefined &&
+      !pending.interaction &&
+      !context.stopped &&
+      !context.authFailureSeen &&
+      !context.queryClosureUncertain &&
+      !context.sdkStreamEnded &&
+      context.inFlightSdkTurnBoundaryCount === 0 &&
+      !owner.signal.aborted &&
+      context.session.providerInstanceId === boundInstanceId &&
+      sessions.get(context.session.threadId) === context &&
+      context.unansweredCapability === owner.capability &&
+      context.resumeSessionId === owner.capability.nativeSessionId &&
+      context.lastThreadStartedId === owner.capability.nativeSessionId &&
+      context.session.activeTurnId === owner.turnId &&
+      context.turnState?.turnId === owner.turnId &&
+      context.capabilities.has(CLAUDE_UNANSWERED_QUESTION_CAPABILITY)
+    );
+  };
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const nextEventId = Effect.map(Random.nextUUIDv4, (id) => EventId.make(id));
   const makeEventStamp = () => Effect.all({ eventId: nextEventId, createdAt: nowIso });
 
-  const offerRuntimeEvent = (
+  const decorateRuntimeEvent = (
     context: ClaudeSessionContext,
     event: ProviderRuntimeEvent,
-  ): Effect.Effect<void> => {
+  ): ProviderRuntimeEvent => {
     context.glideBinding?.observeTurn?.(event);
     const binding =
       event.type === "task.started" ||
@@ -4713,48 +4751,48 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }
         : undefined;
     if ((event.type === "item.started" || event.type === "item.updated") && toolControl) {
-      return Queue.offer(runtimeEventQueue, {
+      return {
         ...stamped,
         payload: { ...event.payload, individualTaskControl: toolControl },
-      } as ProviderRuntimeEvent).pipe(Effect.asVoid);
+      } as ProviderRuntimeEvent;
     }
-    return Queue.offer(
-      runtimeEventQueue,
-      (event.type === "task.started" ||
-        event.type === "task.progress" ||
-        event.type === "task.completed") &&
-        (event.payload.subagent || taskControl || workflow)
-        ? ({
-            ...stamped,
-            payload: {
-              ...event.payload,
-              ...(binding?.taskOwner && !binding.isSubagent
-                ? { taskOwner: binding.taskOwner }
-                : {}),
-              ...(workflow ? { workflow } : {}),
-              ...(taskControl
-                ? {
-                    individualTaskControl: {
-                      taskId: String(binding!.taskId),
-                      runtimeId: context.subagentRuntimeId,
-                      capability: taskControl,
-                    },
-                  }
-                : {}),
-              ...(event.payload.subagent
-                ? {
-                    subagent: {
-                      ...event.payload.subagent,
-                      runtimeId: context.subagentRuntimeId,
-                      ...(taskControl ? { taskControl } : {}),
-                    },
-                  }
-                : {}),
-            },
-          } as ProviderRuntimeEvent)
-        : stamped,
-    ).pipe(Effect.asVoid);
+    return (event.type === "task.started" ||
+      event.type === "task.progress" ||
+      event.type === "task.completed") &&
+      (event.payload.subagent || taskControl || workflow)
+      ? ({
+          ...stamped,
+          payload: {
+            ...event.payload,
+            ...(binding?.taskOwner && !binding.isSubagent ? { taskOwner: binding.taskOwner } : {}),
+            ...(workflow ? { workflow } : {}),
+            ...(taskControl
+              ? {
+                  individualTaskControl: {
+                    taskId: String(binding!.taskId),
+                    runtimeId: context.subagentRuntimeId,
+                    capability: taskControl,
+                  },
+                }
+              : {}),
+            ...(event.payload.subagent
+              ? {
+                  subagent: {
+                    ...event.payload.subagent,
+                    runtimeId: context.subagentRuntimeId,
+                    ...(taskControl ? { taskControl } : {}),
+                  },
+                }
+              : {}),
+          },
+        } as ProviderRuntimeEvent)
+      : stamped;
   };
+
+  // Keep ordinary event delivery unchanged. The question callback below uses
+  // the same synchronous decoration inside its exact-owner settlement fence.
+  const offerRuntimeEvent = (context: ClaudeSessionContext, event: ProviderRuntimeEvent) =>
+    Queue.offer(runtimeEventQueue, decorateRuntimeEvent(context, event)).pipe(Effect.asVoid);
 
   const emitClaudeProvisionalTaskRetraction = Effect.fn("emitClaudeProvisionalTaskRetraction")(
     function* (
@@ -7453,6 +7491,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             context.capabilities.add(capability);
           }
         }
+        context.unansweredCapability =
+          !context.stopped &&
+          !context.authFailureSeen &&
+          sessions.get(context.session.threadId) === context &&
+          hasExactPrimaryClaudeParent(message) &&
+          context.resumeSessionId !== undefined &&
+          context.lastThreadStartedId === context.resumeSessionId &&
+          message.session_id === context.resumeSessionId &&
+          context.capabilities.has(CLAUDE_UNANSWERED_QUESTION_CAPABILITY)
+            ? { nativeSessionId: context.resumeSessionId }
+            : undefined;
         yield* reportClaudeFastModeStatus(context, message);
         yield* offerRuntimeEvent(context, {
           ...base,
@@ -9179,6 +9228,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // until completeTurn would lose the last good totals if a later segment
     // crashes. Only bounded numeric/model metadata enters this new event.
     if (rawMessageType === "conversation_reset") {
+      context.unansweredCapability = undefined;
       context.workflowSnapshots.clear();
       if (context.turnState) context.turnState.responseLimitError = undefined;
       yield* flushPublicSummaries(context, "failed");
@@ -9880,9 +9930,25 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
         const answersDeferred = yield* Deferred.make<ProviderUserInputAnswers>();
         let aborted = false;
+        const unansweredCapability = context.unansweredCapability;
         const pendingInput: PendingUserInput = {
           questions,
           answers: answersDeferred,
+          ...(unansweredCapability &&
+          !context.authFailureSeen &&
+          context.turnState &&
+          context.session.activeTurnId === context.turnState.turnId &&
+          context.resumeSessionId === unansweredCapability.nativeSessionId &&
+          context.lastThreadStartedId === unansweredCapability.nativeSessionId &&
+          supportsClaudeUnansweredQuestions(questions)
+            ? {
+                unansweredOwner: {
+                  capability: unansweredCapability,
+                  turnId: context.turnState.turnId,
+                  signal: callbackOptions.signal,
+                },
+              }
+            : {}),
         };
 
         // Emit user-input.requested so the UI can present the questions.
@@ -9899,7 +9965,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               }
             : {}),
           requestId: asRuntimeRequestId(requestId),
-          payload: { questions },
+          payload: {
+            questions,
+            ...(hasCurrentUnansweredOwner(context, pendingInput)
+              ? { supportsUnanswered: true }
+              : {}),
+          },
           providerRefs: nativeProviderRefs(context, {
             providerItemId: callbackOptions.toolUseID,
           }),
@@ -9927,47 +9998,70 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
 
-        // Emit user-input.resolved so the UI knows the interaction completed.
+        // Stamp before entering the synchronous settlement fence. A scheduler
+        // boundary between an ownership check, resolution publication and the
+        // returned permission could otherwise claim submission after revocation.
         const resolvedStamp = yield* makeEventStamp();
-        yield* offerRuntimeEvent(context, {
-          type: "user-input.resolved",
-          eventId: resolvedStamp.eventId,
-          provider: PROVIDER,
-          createdAt: resolvedStamp.createdAt,
-          threadId: context.session.threadId,
-          ...(context.turnState
-            ? {
-                turnId: asCanonicalTurnId(context.turnState.turnId),
-              }
-            : {}),
-          requestId: asRuntimeRequestId(requestId),
-          payload: { answers },
-          providerRefs: nativeProviderRefs(context, {
-            providerItemId: callbackOptions.toolUseID,
-          }),
-          raw: {
-            source: "claude.sdk.permission",
-            method: "canUseTool/AskUserQuestion/resolved",
-            payload: { answers },
-          },
-        });
-
-        if (aborted || context.stopped || callbackOptions.signal.aborted) {
+        return yield* Effect.sync(() => {
+          const owner = pendingInput.unansweredOwner;
+          const cancelled =
+            aborted ||
+            context.stopped ||
+            callbackOptions.signal.aborted ||
+            (pendingInput.unansweredResponse !== undefined &&
+              !hasCurrentUnansweredOwner(context, pendingInput));
+          const payload = cancelled
+            ? { answers: {}, cancelled: true }
+            : {
+                answers,
+                ...(pendingInput.unansweredResponse
+                  ? { unanswered: pendingInput.unansweredResponse.unanswered }
+                  : {}),
+              };
+          const admitted = Queue.offerUnsafe(
+            runtimeEventQueue,
+            decorateRuntimeEvent(context, {
+              type: "user-input.resolved",
+              ...resolvedStamp,
+              provider: PROVIDER,
+              threadId: context.session.threadId,
+              ...(owner
+                ? { turnId: owner.turnId }
+                : context.turnState
+                  ? { turnId: asCanonicalTurnId(context.turnState.turnId) }
+                  : {}),
+              requestId: asRuntimeRequestId(requestId),
+              payload,
+              providerRefs: nativeProviderRefs(context, {
+                providerItemId: callbackOptions.toolUseID,
+              }),
+              raw: {
+                source: "claude.sdk.permission",
+                method: "canUseTool/AskUserQuestion/resolved",
+                payload,
+              },
+            }),
+          );
+          if (cancelled || !admitted) {
+            return {
+              behavior: "deny",
+              message: "User cancelled tool execution.",
+            } satisfies PermissionResult;
+          }
+          // Strict legacy hosts receive no annotations field at all. For a
+          // capable callback, only native metadata describes unanswered keys;
+          // no fabricated answer or implicit chat message is submitted.
           return {
-            behavior: "deny",
-            message: "User cancelled tool execution.",
+            behavior: "allow",
+            updatedInput: {
+              questions: toolInput.questions,
+              answers,
+              ...(pendingInput.unansweredResponse
+                ? { annotations: pendingInput.unansweredResponse.annotations }
+                : {}),
+            },
           } satisfies PermissionResult;
-        }
-
-        // Return the answers to the SDK in the expected format:
-        // { questions: [...], answers: { questionText: selectedLabel } }
-        return {
-          behavior: "allow",
-          updatedInput: {
-            questions: toolInput.questions,
-            answers,
-          },
-        } satisfies PermissionResult;
+        });
       });
 
       const canUseToolEffect = Effect.fn("canUseTool")(function* (
@@ -11857,7 +11951,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const respondToUserInput: ClaudeAdapterShape["respondToUserInput"] = Effect.fn(
     "respondToUserInput",
-  )(function* (threadId, requestId, answers) {
+  )(function* (threadId, requestId, answers, unanswered) {
     const context = yield* requireSession(threadId);
     const pending = context.pendingUserInputs.get(requestId);
     if (!pending) {
@@ -11874,6 +11968,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         method: "item/tool/respondToUserInput",
         detail: "The response does not match the pending provider interaction.",
       });
+    }
+    if (unanswered !== undefined) {
+      const response = hasCurrentUnansweredOwner(context, pending)
+        ? prepareClaudeUnansweredQuestionResponse(pending.questions, answers, unanswered)
+        : undefined;
+      if (!response) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "item/tool/respondToUserInput",
+          detail: "Explicitly unanswered questions are unsupported or invalid for this request.",
+        });
+      }
+      // No async work may separate this exact-owner check from consuming its
+      // pending callback. The callback rechecks the same witness before wire IO.
+      pending.unansweredResponse = response;
+      answers = response.answers;
     }
     context.pendingUserInputs.delete(requestId);
     yield* Deferred.succeed(pending.answers, answers);
@@ -12203,6 +12313,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     controlTask,
     provider: PROVIDER,
     capabilities: {
+      userInputUnanswered: true,
       get subagentConcurrency() {
         return options?.getSubagentConcurrencySupport?.() ?? false;
       },

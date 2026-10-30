@@ -2,33 +2,33 @@
   "version": 1,
   "node": "24.22.1",
   "providers": {
-    "codex": "0.164.0",
+    "codex": "0.166.0",
     "claude": "2.1.311"
   },
   "packages": [
     {
       "name": "@openai/codex",
-      "version": "0.164.0",
+      "version": "0.166.0",
       "installPath": "@openai/codex",
       "arch": "all",
-      "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.164.0.tgz",
-      "integrity": "sha512-TWj7UGyPRe3Pj/A3ddNAxs1te3a/W/xAd+J0LHrrFTmsSfahGMOLF/vn88D3QCIgAT3B1rm1y/Z3NYE0rx6cZQ=="
+      "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.166.0.tgz",
+      "integrity": "sha512-2Szlp1l1cz5TX1ccpX4Zok3DZrot9xeZe0km+6/1v8JmqxADwyJxKBJah4dBymkwtS25j/u6dipJusTOI97Z8Q=="
     },
     {
       "name": "@openai/codex",
-      "version": "0.164.0-win32-x64",
+      "version": "0.166.0-win32-x64",
       "installPath": "@openai/codex-win32-x64",
       "arch": "x64",
-      "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.164.0-win32-x64.tgz",
-      "integrity": "sha512-urWPhwh9YavuoAPIkmVYKBTtd5OtGVL4Ki0Fb28dhK/Mz6Pt4LSy+gbRrZFz5+RXrw9ubvXuXDCcd8beYcWhDg=="
+      "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.166.0-win32-x64.tgz",
+      "integrity": "sha512-NS8Ps5oG5r19pCrMCUXwUqOui6odnUIoBlQkrjCJ+h1k6KiwCzC/+mI9d3nSZCqFoVONPBTmqyq8NYq3YaFGyA=="
     },
     {
       "name": "@openai/codex",
-      "version": "0.164.0-win32-arm64",
+      "version": "0.166.0-win32-arm64",
       "installPath": "@openai/codex-win32-arm64",
       "arch": "arm64",
-      "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.164.0-win32-arm64.tgz",
-      "integrity": "sha512-Zkzt8HNmB/vOnlDo5D7IOlrt5rHaxYQB7iGbNP7bHcXZtrk6gaD7UriwaieGYJpcf8DqAT/0tqzY4xbs8ZwbmQ=="
+      "url": "https://registry.npmjs.org/@openai/codex/-/codex-0.166.0-win32-arm64.tgz",
+      "integrity": "sha512-LWO1cyGlxbKgeUM7QJ1a6QMSsJi++3PqgIi6BmIUBoj/kzZqRIR69UDMQgeU/9izzJFYMSbwt++lHnUFyjQXlA=="
     },
     {
       "name": "@anthropic-ai/claude-code",

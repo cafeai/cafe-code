@@ -3103,7 +3103,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.thread_id": input.threadId,
         "provider.request_id": input.requestId,
       });
-      yield* routed.adapter.respondToUserInput(routed.threadId, input.requestId, input.answers);
+      if (input.unanswered !== undefined && !routed.adapter.capabilities.userInputUnanswered) {
+        return yield* new ProviderValidationError({
+          operation: "ProviderService.respondToUserInput",
+          issue: "This provider does not support explicitly unanswered questions.",
+        });
+      }
+      // Omission preserves the legacy positional call as well as the native
+      // wire. A renderer flag never grants the adapter's callback authority.
+      yield* input.unanswered === undefined
+        ? routed.adapter.respondToUserInput(routed.threadId, input.requestId, input.answers)
+        : routed.adapter.respondToUserInput(
+            routed.threadId,
+            input.requestId,
+            input.answers,
+            input.unanswered,
+          );
     }).pipe(
       withMetrics({
         counter: providerTurnsTotal,

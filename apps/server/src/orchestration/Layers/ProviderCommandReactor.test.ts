@@ -14077,6 +14077,24 @@ describe("ProviderCommandReactor", () => {
         sandbox_mode: "workspace-write",
       },
     });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.user-input.respond",
+        commandId: CommandId.make("cmd-user-input-explicit-unanswered"),
+        threadId: ThreadId.make("thread-1"),
+        requestId: asApprovalRequestId("user-input-request-2"),
+        answers: { "Answered?": "Yes" },
+        unanswered: { "Later?": "skipped", "Other?": "dismissed" },
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.respondToUserInput.mock.calls.length === 2);
+    expect(harness.respondToUserInput.mock.calls[1]?.[0]).toEqual({
+      threadId: "thread-1",
+      requestId: "user-input-request-2",
+      answers: { "Answered?": "Yes" },
+      unanswered: { "Later?": "skipped", "Other?": "dismissed" },
+    });
   });
 
   it("reacts to thread.user-input.snooze without resolving the request", async () => {

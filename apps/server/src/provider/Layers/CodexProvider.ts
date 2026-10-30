@@ -109,6 +109,9 @@ function codexAccountAuthLabel(account: CodexSchema.V2GetAccountResponse["accoun
   if (!account) return undefined;
   if (account.type === "apiKey") return "OpenAI API Key";
   if (account.type === "amazonBedrock") return "Amazon Bedrock";
+  // This is only the native account/read identity label. It does not create
+  // GCP credentials, select a model provider or borrow ChatGPT quota identity.
+  if (account.type === "gcp") return "Google Cloud";
   if (account.type !== "chatgpt") return undefined;
 
   return formatCodexSubscriptionLabel(account.planType);

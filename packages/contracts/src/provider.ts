@@ -28,6 +28,7 @@ import {
 } from "./orchestration.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 import { MaxConcurrentSubagents } from "./subagentLimits.ts";
+import { ProviderUserInputUnanswered, hasDisjointUserInputAnswers } from "./providerUserInput.ts";
 import { CodexContextWindowOverride } from "./codexContextWindow.ts";
 import { CodexReviewTarget } from "./codexReview.ts";
 import {
@@ -497,7 +498,8 @@ export const ProviderRespondToUserInputInput = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
-});
+  unanswered: Schema.optional(ProviderUserInputUnanswered),
+}).check(Schema.makeFilter(hasDisjointUserInputAnswers));
 export type ProviderRespondToUserInputInput = typeof ProviderRespondToUserInputInput.Type;
 
 /**

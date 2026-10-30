@@ -19,6 +19,7 @@ import { ProviderInteraction, ProviderNetworkApproval } from "./providerInteract
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 import { ProviderTaskOwner } from "./providerTaskOwnership.ts";
 import { CodexCompactionObservation } from "./codexCompactionDiagnostics.ts";
+import { ProviderUserInputUnanswered } from "./providerUserInput.ts";
 import { ProviderDiagnostic } from "./providerDiagnostic.ts";
 import {
   ProviderIndividualTaskControl,
@@ -654,6 +655,9 @@ export type UserInputQuestion = typeof UserInputQuestion.Type;
 
 const UserInputRequestedPayload = Schema.Struct({
   questions: Schema.Array(UserInputQuestion),
+  // Display-only advertisement from the exact native callback owner. Missing
+  // remains unsupported; the adapter rechecks authority on every response.
+  supportsUnanswered: Schema.optional(Schema.Boolean),
   interaction: Schema.optional(ProviderInteraction),
   // Codex 0.147 makes this explicit. Older providers and persisted events are
   // blocking by default, preserving the pre-0.147 behavior on decode.
@@ -665,6 +669,8 @@ export type UserInputRequestedPayload = typeof UserInputRequestedPayload.Type;
 
 const UserInputResolvedPayload = Schema.Struct({
   answers: UnknownRecordSchema,
+  unanswered: Schema.optional(ProviderUserInputUnanswered),
+  cancelled: Schema.optional(Schema.Boolean),
   autoResolved: Schema.optional(Schema.Boolean),
 });
 export type UserInputResolvedPayload = typeof UserInputResolvedPayload.Type;

@@ -58,6 +58,7 @@ import { createModelSelection } from "@cafecode/shared/model";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it, vi } from "@effect/vitest";
 import * as Context from "effect/Context";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -480,6 +481,7 @@ function emitWorkflowFixtureInit(
   query: FakeClaudeQuery,
   version = "2.1.288",
   sessionId = WORKFLOW_FIXTURE_SESSION_ID,
+  capabilities: string[] = [],
 ): void {
   // Use a complete typed public init envelope; only workflow_progress itself
   // needs the received-extension cast above. The cwd is inert fixture metadata.
@@ -499,7 +501,7 @@ function emitWorkflowFixtureInit(
     output_style: "default",
     skills: [],
     plugins: [],
-    capabilities: [],
+    capabilities,
   } satisfies SDKSystemMessage);
 }
 function emitWorkflowFixtureStart(
@@ -17376,6 +17378,398 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "binds Skip and Dismiss to an advertised native callback and keeps real answers",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Ask me", attachments: [] });
+        yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+        emitWorkflowFixtureInit(harness.query, "2.1.314", WORKFLOW_FIXTURE_SESSION_ID, [
+          "ask_user_question_unanswered_v1",
+        ]);
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "session.configured"),
+          Stream.runHead,
+        );
+        const canUseTool = harness.getLastCreateQueryInput()!.options.canUseTool!;
+        const input = {
+          questions: ["Framework?", "Theme?", "Deploy?"].map((question) => ({
+            question,
+            header: "Choice",
+            options: [],
+            multiSelect: false,
+          })),
+        };
+        const permission = canUseTool("AskUserQuestion", input, {
+          signal: new AbortController().signal,
+          toolUseID: "ask-capable",
+          requestId: "native-capable",
+        });
+        const opened = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "user-input.requested"),
+          Stream.runHead,
+        );
+        if (opened._tag !== "Some" || opened.value.type !== "user-input.requested")
+          return assert.fail("Expected native question callback");
+        assert.equal(opened.value.payload.supportsUnanswered, true);
+        const requestId = ApprovalRequestId.make(String(opened.value.requestId));
+        // Invalid answers must not consume the callback; the exact same request
+        // can still receive one valid mixed response afterwards.
+        for (const [answers, unanswered] of [
+          [{ "Framework?": "React" }, { "Theme?": "skipped" }],
+          [
+            { "Framework?": "React" },
+            { "Framework?": "skipped", "Theme?": "skipped", "Deploy?": "dismissed" },
+          ],
+          [
+            { "Framework?": "React" },
+            { "Theme?": "skipped", "Deploy?": "dismissed", foreign: "skipped" },
+          ],
+        ] as const) {
+          const invalid = yield* adapter
+            .respondToUserInput(THREAD_ID, requestId, answers, unanswered)
+            .pipe(Effect.exit);
+          assert.equal(invalid._tag, "Failure");
+        }
+        yield* adapter.respondToUserInput(
+          THREAD_ID,
+          requestId,
+          { "Framework?": "React" },
+          {
+            "Theme?": "skipped",
+            "Deploy?": "dismissed",
+          },
+        );
+        const resolved = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "user-input.resolved"),
+          Stream.runHead,
+        );
+        if (resolved._tag !== "Some" || resolved.value.type !== "user-input.resolved")
+          return assert.fail("Expected resolved callback");
+        assert.deepEqual(resolved.value.payload.answers, { "Framework?": "React" });
+        assert.deepEqual(resolved.value.payload.unanswered, {
+          "Theme?": "skipped",
+          "Deploy?": "dismissed",
+        });
+        assert.deepEqual(yield* Effect.promise(() => permission), {
+          behavior: "allow",
+          updatedInput: {
+            questions: input.questions,
+            answers: { "Framework?": "React" },
+            annotations: {
+              "Theme?": { unanswered: "skipped" },
+              "Deploy?": { unanswered: "dismissed" },
+            },
+          },
+        });
+        assert.equal(
+          (yield* adapter
+            .respondToUserInput(
+              THREAD_ID,
+              requestId,
+              {},
+              {
+                "Framework?": "skipped",
+                "Theme?": "skipped",
+                "Deploy?": "dismissed",
+              },
+            )
+            .pipe(Effect.exit))._tag,
+          "Failure",
+        );
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect("does not infer unanswered support from a newer version or a renderer response", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Ask me", attachments: [] });
+      yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+      emitWorkflowFixtureInit(harness.query, "2.1.314");
+      yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "session.configured"),
+        Stream.runHead,
+      );
+      const canUseTool = harness.getLastCreateQueryInput()!.options.canUseTool!;
+      const input = { questions: [{ question: "Choice?", header: "Choice", options: [] }] };
+      const permission = canUseTool("AskUserQuestion", input, {
+        signal: new AbortController().signal,
+        toolUseID: "ask-legacy",
+        requestId: "native-legacy",
+      });
+      const opened = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "user-input.requested"),
+        Stream.runHead,
+      );
+      if (opened._tag !== "Some" || opened.value.type !== "user-input.requested")
+        return assert.fail("Expected native question callback");
+      assert.equal(Object.hasOwn(opened.value.payload, "supportsUnanswered"), false);
+      const id = ApprovalRequestId.make(String(opened.value.requestId));
+      assert.equal(
+        (yield* adapter
+          .respondToUserInput(THREAD_ID, id, {}, { "Choice?": "dismissed" })
+          .pipe(Effect.exit))._tag,
+        "Failure",
+      );
+      yield* adapter.respondToUserInput(THREAD_ID, id, { "Choice?": "Actual answer" });
+      assert.deepEqual(yield* Effect.promise(() => permission), {
+        behavior: "allow",
+        updatedInput: { questions: input.questions, answers: { "Choice?": "Actual answer" } },
+      });
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect(
+    "rejects unanswered response after receiving a terminal result before projecting it",
+    () =>
+      Effect.gen(function* () {
+        const enteredLogger = yield* Deferred.make<void>();
+        const releaseLogger = yield* Deferred.make<void>();
+        let holdLogger = false;
+        const harness = makeHarness({
+          nativeEventLogger: {
+            filePath: "memory://unanswered-terminal-fence",
+            write: () =>
+              holdLogger
+                ? Deferred.succeed(enteredLogger, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseLogger)),
+                  )
+                : Effect.void,
+            close: () => Effect.void,
+          },
+        });
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+          yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+          yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Ask me", attachments: [] });
+          yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+          emitWorkflowFixtureInit(harness.query, "2.1.314", WORKFLOW_FIXTURE_SESSION_ID, [
+            "ask_user_question_unanswered_v1",
+          ]);
+          yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "session.configured"),
+            Stream.runHead,
+          );
+          const controller = new AbortController();
+          const permission = harness.getLastCreateQueryInput()!.options.canUseTool!(
+            "AskUserQuestion",
+            {
+              questions: [{ question: "Choice?", header: "Choice", options: [] }],
+            },
+            { signal: controller.signal, toolUseID: "ask-terminal", requestId: "native-terminal" },
+          );
+          const opened = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "user-input.requested"),
+            Stream.runHead,
+          );
+          if (opened._tag !== "Some" || opened.value.type !== "user-input.requested")
+            return assert.fail("Expected native question callback");
+          assert.equal(opened.value.payload.supportsUnanswered, true);
+          holdLogger = true;
+          harness.query.emit(makeSuccessfulClaudeResult(WORKFLOW_FIXTURE_SESSION_ID));
+          yield* Deferred.await(enteredLogger);
+          // The stream synchronously received the result, but its logger is held
+          // before ordinary result projection can clear the active turn.
+          const refused = yield* adapter
+            .respondToUserInput(
+              THREAD_ID,
+              ApprovalRequestId.make(String(opened.value.requestId)),
+              {},
+              { "Choice?": "dismissed" },
+            )
+            .pipe(Effect.exit);
+          assert.equal(refused._tag, "Failure");
+          controller.abort();
+          const resolved = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "user-input.resolved"),
+            Stream.runHead,
+          );
+          if (resolved._tag !== "Some" || resolved.value.type !== "user-input.resolved")
+            return assert.fail("Expected cancelled callback resolution");
+          assert.deepEqual(resolved.value.payload, { answers: {}, cancelled: true });
+          assert.deepEqual(yield* Effect.promise(() => permission), {
+            behavior: "deny",
+            message: "User cancelled tool execution.",
+          });
+        }).pipe(
+          Effect.ensuring(Deferred.succeed(releaseLogger, undefined)),
+          Effect.provide(harness.layer),
+        );
+      }),
+  );
+
+  for (const retirement of ["abort", "native-reinit"] as const) {
+    it.effect(
+      `does not publish submitted annotations when ${retirement} wins after response consumption`,
+      () => {
+        const harness = makeHarness();
+        return Effect.gen(function* () {
+          const clock = yield* Clock.Clock;
+          const enteredStamp = yield* Deferred.make<void>();
+          const releaseStamp = yield* Deferred.make<void>();
+          let holdNextMillis = false;
+          const gatedClock: Clock.Clock = {
+            currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe(),
+            currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+            currentTimeNanos: clock.currentTimeNanos,
+            sleep: (duration) => clock.sleep(duration),
+            currentTimeMillis: Effect.suspend(() => {
+              if (!holdNextMillis) return clock.currentTimeMillis;
+              holdNextMillis = false;
+              return Deferred.succeed(enteredStamp, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseStamp)),
+                Effect.andThen(clock.currentTimeMillis),
+              );
+            }),
+          };
+          yield* Effect.gen(function* () {
+            const adapter = yield* ClaudeAdapter;
+            yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+            yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+            yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Ask me", attachments: [] });
+            yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+            emitWorkflowFixtureInit(harness.query, "2.1.314", WORKFLOW_FIXTURE_SESSION_ID, [
+              "ask_user_question_unanswered_v1",
+            ]);
+            yield* adapter.streamEvents.pipe(
+              Stream.filter((event) => event.type === "session.configured"),
+              Stream.runHead,
+            );
+            const controller = new AbortController();
+            const permission = harness.getLastCreateQueryInput()!.options.canUseTool!(
+              "AskUserQuestion",
+              {
+                questions: [{ question: "Choice?", header: "Choice", options: [] }],
+              },
+              {
+                signal: controller.signal,
+                toolUseID: `ask-final-${retirement}`,
+                requestId: `native-final-${retirement}`,
+              },
+            );
+            const opened = yield* adapter.streamEvents.pipe(
+              Stream.filter((event) => event.type === "user-input.requested"),
+              Stream.runHead,
+            );
+            if (opened._tag !== "Some" || opened.value.type !== "user-input.requested")
+              return assert.fail("Expected native question callback");
+            assert.equal(opened.value.payload.supportsUnanswered, true);
+            // No native messages/telemetry are in flight here. The next effectful
+            // millisecond read is this callback's final resolution stamp. Keep
+            // the original Clock's sleep and unsafe/nanosecond instrumentation.
+            holdNextMillis = true;
+            yield* adapter.respondToUserInput(
+              THREAD_ID,
+              ApprovalRequestId.make(String(opened.value.requestId)),
+              {},
+              { "Choice?": "skipped" },
+            );
+            yield* Deferred.await(enteredStamp);
+            if (retirement === "abort") controller.abort();
+            else {
+              emitWorkflowFixtureInit(harness.query, "2.1.314", WORKFLOW_FIXTURE_SESSION_ID, [
+                "ask_user_question_unanswered_v1",
+              ]);
+              yield* adapter.streamEvents.pipe(
+                Stream.filter((event) => event.type === "session.configured"),
+                Stream.runHead,
+              );
+            }
+            yield* Deferred.succeed(releaseStamp, undefined);
+            const resolved = yield* adapter.streamEvents.pipe(
+              Stream.filter((event) => event.type === "user-input.resolved"),
+              Stream.runHead,
+            );
+            if (resolved._tag !== "Some" || resolved.value.type !== "user-input.resolved")
+              return assert.fail("Expected cancelled callback resolution");
+            assert.deepEqual(resolved.value.payload, { answers: {}, cancelled: true });
+            assert.deepEqual(yield* Effect.promise(() => permission), {
+              behavior: "deny",
+              message: "User cancelled tool execution.",
+            });
+          }).pipe(
+            Effect.ensuring(Deferred.succeed(releaseStamp, undefined)),
+            Effect.provide(harness.layer),
+            Effect.provideService(Clock.Clock, gatedClock),
+          );
+        });
+      },
+    );
+  }
+
+  for (const revoke of ["same-session-init", "foreign-session-init", "abort"] as const) {
+    it.effect(`rejects stale unanswered authority after ${revoke}`, () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Ask me", attachments: [] });
+        yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+        emitWorkflowFixtureInit(harness.query, "2.1.314", WORKFLOW_FIXTURE_SESSION_ID, [
+          "ask_user_question_unanswered_v1",
+        ]);
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "session.configured"),
+          Stream.runHead,
+        );
+        const controller = new AbortController();
+        const permission = harness.getLastCreateQueryInput()!.options.canUseTool!(
+          "AskUserQuestion",
+          {
+            questions: [{ question: "Choice?", header: "Choice", options: [] }],
+          },
+          { signal: controller.signal, toolUseID: `ask-${revoke}`, requestId: `native-${revoke}` },
+        );
+        const opened = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "user-input.requested"),
+          Stream.runHead,
+        );
+        if (opened._tag !== "Some" || opened.value.type !== "user-input.requested")
+          return assert.fail("Expected native question callback");
+        assert.equal(opened.value.payload.supportsUnanswered, true);
+        if (revoke === "abort") controller.abort();
+        else {
+          emitWorkflowFixtureInit(
+            harness.query,
+            "2.1.314",
+            revoke === "foreign-session-init"
+              ? "71000000-0000-4000-8000-000000000199"
+              : WORKFLOW_FIXTURE_SESSION_ID,
+            ["ask_user_question_unanswered_v1"],
+          );
+          yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "session.configured"),
+            Stream.runHead,
+          );
+        }
+        const rejected = yield* adapter
+          .respondToUserInput(
+            THREAD_ID,
+            ApprovalRequestId.make(String(opened.value.requestId)),
+            {},
+            { "Choice?": "skipped" },
+          )
+          .pipe(Effect.exit);
+        assert.equal(rejected._tag, "Failure");
+        controller.abort();
+        assert.deepEqual(yield* Effect.promise(() => permission), {
+          behavior: "deny",
+          message: "User cancelled tool execution.",
+        });
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
 
   it.effect("routes AskUserQuestion through user-input flow even in full-access mode", () => {
     const harness = makeHarness();

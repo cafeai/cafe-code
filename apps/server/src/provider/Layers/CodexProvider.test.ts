@@ -122,6 +122,7 @@ describe("Codex account-scoped fallback catalogue", () => {
     { status: "unauthenticated", type: "chatgpt" },
     { status: "authenticated", type: "apiKey" },
     { status: "authenticated", type: "amazonBedrock" },
+    { status: "authenticated", type: "gcp" },
     { status: "authenticated" },
     { type: "chatgpt" },
     { status: "authenticated", type: "CHATGPT" },
@@ -367,6 +368,7 @@ describe("Codex catalogue producer provenance", () => {
   it.each([
     { label: "ChatGPT native", type: "chatgpt", requiresAuth: true, empty: false, failed: false },
     { label: "API native", type: "apiKey", requiresAuth: true, empty: false, failed: false },
+    { label: "GCP native", type: "gcp", requiresAuth: false, empty: false, failed: false },
     { label: "unknown native", type: "unknown", requiresAuth: false, empty: false, failed: false },
     { label: "native empty", type: "chatgpt", requiresAuth: true, empty: true, failed: false },
     {
@@ -393,7 +395,9 @@ describe("Codex catalogue producer provenance", () => {
           ? { type: "chatgpt", email: "synthetic@example.invalid", planType: "plus" }
           : type === "apiKey"
             ? { type: "apiKey" }
-            : null;
+            : type === "gcp"
+              ? { type: "gcp" }
+              : null;
       const earlyReturn = account === null && requiresAuth;
       const snapshot = await Effect.runPromise(
         Effect.gen(function* () {
@@ -512,6 +516,14 @@ describe("Codex catalogue producer provenance", () => {
         earlyReturn || failed || empty ? ["custom-model"] : ["gpt-5.5", "custom-model"],
       );
       expect(snapshot.models.find((row) => row.slug === "custom-model")?.isCustom).toBe(true);
+      if (type === "gcp") {
+        expect(snapshot.auth).toEqual({
+          status: "authenticated",
+          type: "gcp",
+          label: "Google Cloud",
+        });
+        expect(snapshot.auth).not.toHaveProperty("email");
+      }
       if (!earlyReturn && !failed && !empty) {
         expect(snapshot.models[0]).toMatchObject({
           slug: "gpt-5.5",

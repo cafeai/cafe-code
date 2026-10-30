@@ -22,6 +22,7 @@ const labels = [
   "composer-opening-stop",
   "composer-stop-accepted",
   "composer-preparation-stop",
+  "composer-unanswered",
   "navigation-atrium",
 ] as const;
 export type ChatViewCallerLabel = (typeof labels)[number];

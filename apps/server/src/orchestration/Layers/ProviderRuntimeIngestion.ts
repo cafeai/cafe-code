@@ -851,6 +851,7 @@ function runtimeEventToActivities(
           payload: {
             ...(event.requestId ? { requestId: event.requestId } : {}),
             questions: event.payload.questions,
+            ...(event.payload.supportsUnanswered === true ? { supportsUnanswered: true } : {}),
             isBlocking: event.payload.isBlocking,
             ...(event.payload.interaction ? { interaction: event.payload.interaction } : {}),
           },
@@ -867,12 +868,18 @@ function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "user-input.resolved",
-          summary: event.payload.autoResolved
-            ? "User input continued automatically"
-            : "User input submitted",
+          summary: event.payload.cancelled
+            ? "User input cancelled"
+            : event.payload.autoResolved
+              ? "User input continued automatically"
+              : "User input submitted",
           payload: {
             ...(event.requestId ? { requestId: event.requestId } : {}),
             answers: event.payload.answers,
+            ...(event.payload.cancelled ? { cancelled: true } : {}),
+            ...(event.payload.unanswered !== undefined
+              ? { unanswered: event.payload.unanswered }
+              : {}),
             ...(event.payload.autoResolved ? { autoResolved: true } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,

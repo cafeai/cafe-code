@@ -580,6 +580,113 @@ describe("readCodexSteerExpectedTurnMismatchActualTurnId", () => {
   });
 });
 describe("isRecoverableThreadResumeError", () => {
+  it.each([
+    {
+      type: "modelProviderMismatch",
+      modelProvider: "thread not found",
+      currentModelProvider: "current-provider",
+    },
+    { type: "modelProviderNotConfigured", modelProvider: "missing thread" },
+    {
+      type: "modelProviderPolicyConflict",
+      modelProvider: "unknown thread",
+      requiredModelProvider: "required-provider",
+    },
+    // A known refusal with omitted provider fields is still not proof of a
+    // missing conversation. Do not let a partial future/native error discard
+    // history by falling back to prose.
+    { type: "modelProviderMismatch" },
+    { type: "modelProviderNotConfigured" },
+    { type: "modelProviderPolicyConflict" },
+  ])("retains history for structured native provider refusal %j", (data) => {
+    assert.equal(
+      isRecoverableThreadResumeError(
+        CodexErrors.CodexAppServerRequestError.invalidRequest(
+          "This chat uses thread not found, but its provider configuration has changed.",
+          data,
+        ),
+      ),
+      false,
+    );
+  });
+
+  it("keeps unknown structured errors on the existing missing-thread policy", () => {
+    for (const data of [
+      undefined,
+      null,
+      { type: "futureNativeError" },
+      { detail: "ordinary" },
+      ["ordinary future metadata"],
+    ]) {
+      assert.equal(
+        isRecoverableThreadResumeError(
+          CodexErrors.CodexAppServerRequestError.invalidRequest("Thread does not exist", data),
+        ),
+        true,
+      );
+    }
+    assert.equal(isRecoverableThreadResumeError(new Error("Thread not found")), true);
+    assert.equal(isRecoverableThreadResumeError("Thread not found"), true);
+  });
+
+  it("does not execute received accessors, proxies or coercion to admit a blank thread", () => {
+    let reads = 0;
+    const refusal = Object.defineProperty({}, "type", {
+      get: () => {
+        reads += 1;
+        return "modelProviderMismatch";
+      },
+    });
+    const dataAccessor = Object.defineProperty({ errorMessage: "Thread not found" }, "data", {
+      get: () => {
+        reads += 1;
+        return refusal;
+      },
+    });
+    const messageAccessor = Object.defineProperty({}, "message", {
+      get: () => {
+        reads += 1;
+        return "Thread not found";
+      },
+    });
+    const coercible = {
+      toString: () => {
+        reads += 1;
+        return "Thread not found";
+      },
+    };
+    const proxy = new Proxy(
+      { errorMessage: "Thread not found" },
+      {
+        get: () => {
+          reads += 1;
+          throw new Error("Synthetic proxy must stay unread");
+        },
+        getOwnPropertyDescriptor: () => {
+          reads += 1;
+          throw new Error("Synthetic descriptor must stay unread");
+        },
+        getPrototypeOf: () => {
+          reads += 1;
+          throw new Error("Synthetic prototype must stay unread");
+        },
+      },
+    );
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    for (const error of [
+      CodexErrors.CodexAppServerRequestError.invalidRequest("Thread not found", refusal),
+      CodexErrors.CodexAppServerRequestError.invalidRequest("Thread not found", proxy),
+      dataAccessor,
+      messageAccessor,
+      coercible,
+      proxy,
+      revoked.proxy,
+    ])
+      assert.equal(isRecoverableThreadResumeError(error), false);
+    assert.equal(reads, 0);
+  });
+
   it("matches missing thread errors", () => {
     assert.equal(
       isRecoverableThreadResumeError(

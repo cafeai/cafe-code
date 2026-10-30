@@ -981,6 +981,202 @@ describe("ChatView full app (composer)", () => {
     };
   };
 
+  for (const supportsUnanswered of [true, false]) {
+    it(`keeps explicit question dispositions capability-bound without stopping work (supported: ${supportsUnanswered})`, async (context) => {
+      const base = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("claude-unanswered-request"),
+        targetText: "Continue the current work",
+        provider: "claudeAgent",
+        sessionStatus: "running",
+        history: "essential",
+      });
+      const question = (label: string) => ({
+        id: `Question ${label}`,
+        header: label,
+        question: `Question ${label}`,
+        options: [{ label, description: label }],
+        multiSelect: true,
+      });
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          modelSelection: responseLimitSelection,
+          activities: [
+            {
+              id: EventId.make("claude-unanswered-pending"),
+              createdAt: NOW_ISO,
+              kind: "user-input.requested",
+              tone: "info",
+              summary: "Claude has questions",
+              turnId: thread.latestTurn?.turnId ?? null,
+              payload: {
+                requestId: "claude-unanswered-pending",
+                isBlocking: true,
+                ...(supportsUnanswered ? { supportsUnanswered: true } : {}),
+                questions: [
+                  question("First choice"),
+                  question("Second choice"),
+                  question("Last choice"),
+                ],
+              },
+            },
+          ],
+        })),
+      };
+      let releaseReply!: () => void;
+      const reply = new Promise<{ sequence: number }>((resolve) => {
+        releaseReply = () => resolve({ sequence: snapshot.snapshotSequence + 1 });
+      });
+      let restoreDispatch: (() => void) | undefined;
+      let overrideAcquired = false;
+      const owner = createChatViewCallerOwner(context, mountChatView, {
+        label: "composer-unanswered",
+        beforeDrain: () => releaseReply(),
+        afterUnmount: () => {
+          try {
+            restoreDispatch?.();
+          } finally {
+            if (overrideAcquired) __resetEnvironmentApiOverridesForTests();
+          }
+        },
+      });
+      await owner.run(async () => {
+        await owner.mount({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot,
+          configureFixture: configureResponseLimitFixture,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            body.type === "thread.user-input.respond"
+              ? reply
+              : undefined,
+        });
+        const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+        const dispatch = api.orchestration.dispatchCommand;
+        const spy = vi.spyOn(api.orchestration, "dispatchCommand").mockImplementation(function (
+          this: unknown,
+          ...args
+        ) {
+          let completion: ReturnType<typeof dispatch> | undefined;
+          // Join the actual held wire operation before shared RPC/store reset,
+          // including when the native action or the enclosing test times out.
+          const joined = owner.own("ack", () => {
+            completion = dispatch.apply(this, args);
+            return completion;
+          });
+          void joined.catch(() => undefined);
+          return completion ?? joined;
+        });
+        restoreDispatch = () => spy.mockRestore();
+        __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, api);
+        overrideAcquired = true;
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep this independent draft");
+        await owner.own("controls", () =>
+          expect.element(page.getByText("Question First choice", { exact: true })).toBeVisible(),
+        );
+        if (!supportsUnanswered) {
+          await owner.own("controls", () =>
+            expect
+              .element(page.getByRole("button", { name: "Skip", exact: true }))
+              .not.toBeInTheDocument(),
+          );
+          await owner.own("controls", () =>
+            expect
+              .element(page.getByRole("button", { name: "Dismiss", exact: true }))
+              .not.toBeInTheDocument(),
+          );
+        }
+        await owner.own("input", () =>
+          page.getByRole("button", { name: "1 First choice", exact: true }).click(),
+        );
+        await owner.own("input", () =>
+          supportsUnanswered
+            ? page.getByRole("button", { name: "Skip", exact: true }).click()
+            : page.getByRole("button", { name: /^Next(?: question)?$/ }).click(),
+        );
+        await owner.own("controls", () =>
+          expect.element(page.getByText("Question Second choice", { exact: true })).toBeVisible(),
+        );
+        expect(
+          wsRequests.filter((request) => request.type === "thread.user-input.respond"),
+        ).toHaveLength(0);
+        await owner.own("input", () =>
+          page.getByRole("button", { name: "1 Second choice", exact: true }).click(),
+        );
+        await owner.own("input", () =>
+          page.getByRole("button", { name: /^Next(?: question)?$/ }).click(),
+        );
+        await owner.own("controls", () =>
+          expect.element(page.getByText("Question Last choice", { exact: true })).toBeVisible(),
+        );
+        if (supportsUnanswered) {
+          await owner.own("input", () =>
+            page.getByRole("button", { name: "Dismiss", exact: true }).click(),
+          );
+          await owner.own("controls", () =>
+            expect
+              .element(page.getByRole("button", { name: "Dismiss", exact: true }))
+              .toBeDisabled(),
+          );
+          await owner.own("controls", () =>
+            expect.element(page.getByRole("button", { name: "Skip", exact: true })).toBeDisabled(),
+          );
+        } else {
+          await owner.own("input", () =>
+            page.getByRole("button", { name: "1 Last choice", exact: true }).click(),
+          );
+          await owner.own("input", () =>
+            // The responsive footer uses the same native submit control with
+            // either its compact or expanded accessible label.
+            page.getByRole("button", { name: /^Submit(?: answers)?$/ }).click(),
+          );
+        }
+        await owner.own("request", () =>
+          vi.waitFor(() =>
+            expect(
+              wsRequests.filter((request) => request.type === "thread.user-input.respond"),
+            ).toHaveLength(1),
+          ),
+        );
+        const response = wsRequests.find(
+          (request) => request.type === "thread.user-input.respond",
+        )!;
+        expect(response).toMatchObject({
+          threadId: THREAD_ID,
+          requestId: "claude-unanswered-pending",
+          answers: supportsUnanswered
+            ? { "Question Second choice": ["Second choice"] }
+            : {
+                "Question First choice": ["First choice"],
+                "Question Second choice": ["Second choice"],
+                "Question Last choice": ["Last choice"],
+              },
+        });
+        if (supportsUnanswered)
+          expect(response.unanswered).toEqual({
+            "Question First choice": "skipped",
+            "Question Last choice": "dismissed",
+          });
+        else expect(response).not.toHaveProperty("unanswered");
+        expect(
+          wsRequests.some((request) =>
+            [
+              "thread.turn.interrupt",
+              "thread.session.stop",
+              "thread.turn.start",
+              "thread.turn.steer",
+            ].includes(String(request.type)),
+          ),
+        ).toBe(false);
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "Keep this independent draft",
+        );
+        releaseReply();
+      });
+    });
+  }
+
   const readResponseLimitCaretText = (editor: HTMLElement) => {
     const selection = editor.ownerDocument.getSelection();
     expect(editor.isConnected).toBe(true);

@@ -7,17 +7,20 @@ const MAX_DEPTH = 32;
 const MAX_ENTRIES = 50_000;
 
 /**
- * Remove the new image-generation attachment identity and input-file metadata
+ * Remove image-generation attachment/generation identity and input-file metadata
  * from observations, never from the wire used for decoding or native control.
  *
  * Codex 0.164 flattens either `fileId` or the legacy `result` onto an image item
  * and adds inputImages (absolute input paths and byte digests). Neither field
- * is Cafe filesystem/download authority. Preserve the existing presentation,
+ * is Cafe filesystem/download authority. Codex 0.166 also adds an opaque
+ * generationId, which Cafe does not consume: keep it out of observations rather
+ * than retaining a new correlation identifier in history or diagnostics.
+ * Preserve the existing presentation,
  * including savedPath, while keeping these new private fields out of public
  * activity, retained history and logs. The projected value is deliberately
  * unknown: a file-only copy is no longer a valid upstream image-item schema.
  *
- * https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/ext/items/src/image_generation.rs#L22-L87
+ * https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/ext/items/src/image_generation.rs
  */
 export function redactCodexImageGenerationMetadata(value: unknown): unknown {
   let remaining = MAX_ENTRIES;
@@ -71,7 +74,7 @@ export function redactCodexImageGenerationMetadata(value: unknown): unknown {
       let changed = false;
       for (const key of keys) {
         if (typeof key !== "string") return OMITTED;
-        if (image && (key === "fileId" || key === "inputImages")) {
+        if (image && (key === "fileId" || key === "generationId" || key === "inputImages")) {
           // Even an accessor in an omitted field stays unread. No attachment
           // lookup, path normalization or coercion belongs to this projection.
           changed = true;

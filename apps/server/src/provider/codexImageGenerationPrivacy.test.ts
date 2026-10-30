@@ -7,6 +7,7 @@ const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const OMITTED = "[Private image metadata omitted]";
 const privateFields = {
   fileId: "private-image-attachment-sentinel",
+  generationId: "private-image-generation-sentinel",
   inputImages: [
     { path: "/private/image-input-sentinel.png", sha256: "private-image-digest-sentinel" },
   ],
@@ -27,6 +28,7 @@ it.each([
       savedPath: "/fixture/existing-output.png",
       transparentBackground: false,
       ...reference,
+      generationId: privateFields.generationId,
       inputImages: privateFields.inputImages,
     };
     const before = encodeJson(original);
@@ -68,11 +70,16 @@ it("redacts own image occurrences in arbitrary nested protocol/history container
     },
   });
   expect(image).toHaveProperty("fileId", privateFields.fileId);
+  expect(image).toHaveProperty("generationId", privateFields.generationId);
   expect(image).toHaveProperty("inputImages", privateFields.inputImages);
 });
 
 it("preserves safe non-image JSON and its identity", () => {
-  const original = { fileId: "unrelated", items: [null, true, 2, "text", { type: "imageView" }] };
+  const original = {
+    fileId: "unrelated",
+    generationId: "ordinary-tool-correlation",
+    items: [null, true, 2, "text", { type: "imageView" }],
+  };
   expect(redactCodexImageGenerationMetadata(original)).toBe(original);
   expect(redactCodexImageGenerationMetadata(undefined)).toBeUndefined();
 });
@@ -96,6 +103,7 @@ it("preserves retained data-property visibility when a private image field is re
     enumerable: true,
   });
   expect(Object.hasOwn(projected, "fileId")).toBe(false);
+  expect(Object.hasOwn(projected, "generationId")).toBe(false);
   expect(Object.hasOwn(projected, "inputImages")).toBe(false);
   expect(encodeJson(projected)).not.toContain("private-image-");
   expect(Object.getOwnPropertyDescriptor(original, "revisedPrompt")?.enumerable).toBe(false);
@@ -155,20 +163,18 @@ it("never invokes accessors or string/JSON coercion during refusal", () => {
   expect(redactCodexImageGenerationMetadata(accessor)).toBe(OMITTED);
   expect(redactCodexImageGenerationMetadata(nested)).toBe(OMITTED);
   expect(encodeJson(redactCodexImageGenerationMetadata(coercible))).not.toContain("private-image-");
-  const omittedAccessor = Object.defineProperty(
-    { type: "imageGeneration", id: "image-1" },
-    "inputImages",
-    {
+  for (const key of ["inputImages", "fileId", "generationId"]) {
+    const omittedAccessor = Object.defineProperty({ type: "imageGeneration", id: "image-1" }, key, {
       get: () => {
         reads += 1;
         return "private-image-input-sentinel";
       },
-    },
-  );
-  expect(redactCodexImageGenerationMetadata(omittedAccessor)).toEqual({
-    type: "imageGeneration",
-    id: "image-1",
-  });
+    });
+    expect(redactCodexImageGenerationMetadata(omittedAccessor)).toEqual({
+      type: "imageGeneration",
+      id: "image-1",
+    });
+  }
   expect(reads).toBe(0);
 });
 

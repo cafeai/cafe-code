@@ -6,6 +6,7 @@ import path from "node:path";
 
 import type {
   ProviderApprovalDecision,
+  ProviderUserInputUnanswered,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
   ProviderSession,
@@ -261,6 +262,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       _threadId: ThreadId,
       _requestId: string,
       _answers: Record<string, unknown>,
+      _unanswered?: ProviderUserInputUnanswered,
     ): Effect.Effect<void, ProviderAdapterError> => Effect.void,
   );
 
@@ -328,6 +330,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider,
     capabilities: {
+      userInputUnanswered: provider === CLAUDE_AGENT_DRIVER,
       codexFailedRootRestart: provider === CODEX_DRIVER,
       subagentPolicyContinuation: provider === CODEX_DRIVER,
       sessionModelSwitch: "in-session",
@@ -3452,6 +3455,46 @@ routing.layer("ProviderServiceLive routing", (it) => {
         yield* provider.respondToInteraction!(input);
         assert.equal(routing.codex.respondToUserInput.mock.calls.length, 2);
       }),
+  );
+
+  it.effect("routes explicit unanswered metadata only to an implementing adapter", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const claude = yield* provider.startSession(asThreadId("unanswered-claude"), {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId: asThreadId("unanswered-claude"),
+        runtimeMode: "full-access",
+      });
+      const unanswered = { "Later?": "skipped" as const };
+      yield* provider.respondToUserInput({
+        threadId: claude.threadId,
+        requestId: asRequestId("claude-pending"),
+        answers: { "Now?": "Yes" },
+        unanswered,
+      });
+      assert.deepEqual(routing.claude.respondToUserInput.mock.calls, [
+        [claude.threadId, asRequestId("claude-pending"), { "Now?": "Yes" }, unanswered],
+      ]);
+      const codex = yield* provider.startSession(asThreadId("unanswered-codex"), {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId: asThreadId("unanswered-codex"),
+        runtimeMode: "full-access",
+      });
+      const refused = yield* provider
+        .respondToUserInput({
+          threadId: codex.threadId,
+          requestId: asRequestId("codex-pending"),
+          answers: {},
+          unanswered,
+        })
+        .pipe(Effect.exit);
+      assert.equal(refused._tag, "Failure");
+      assert.equal(routing.codex.respondToUserInput.mock.calls.length, 0);
+      assert.equal(routing.claude.stopSession.mock.calls.length, 0);
+      assert.equal(routing.codex.stopSession.mock.calls.length, 0);
+    }),
   );
 
   it.effect("routes provider operations and rollback conversation", () =>

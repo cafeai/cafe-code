@@ -11695,6 +11695,55 @@ describe("ProviderRuntimeIngestion", () => {
     expect(resolvedPayload?.autoResolved).toBe(true);
   });
 
+  it("projects native unanswered capability and explicit resolution separately from answers", async () => {
+    const harness = await createHarness();
+    const now = "2026-10-30T00:00:00.000Z";
+    harness.emit({
+      type: "user-input.requested",
+      eventId: asEventId("unanswered-request"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-unanswered"),
+      requestId: ApprovalRequestId.make("request-unanswered"),
+      payload: {
+        questions: [{ id: "Later?", header: "Choice", question: "Later?", options: [] }],
+        supportsUnanswered: true,
+      },
+    });
+    harness.emit({
+      type: "user-input.resolved",
+      eventId: asEventId("unanswered-resolution"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-unanswered"),
+      requestId: ApprovalRequestId.make("request-unanswered"),
+      payload: { answers: {}, unanswered: { "Later?": "dismissed" } },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "unanswered-resolution",
+      ),
+    );
+    const requested = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "unanswered-request",
+    );
+    const resolved = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "unanswered-resolution",
+    );
+    expect(requested?.payload).toMatchObject({
+      requestId: "request-unanswered",
+      supportsUnanswered: true,
+    });
+    expect(resolved?.payload).toMatchObject({
+      requestId: "request-unanswered",
+      answers: {},
+      unanswered: { "Later?": "dismissed" },
+    });
+    expect(resolved?.summary).toBe("User input submitted");
+  });
+
   it("continues processing runtime events after a single event handler failure", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

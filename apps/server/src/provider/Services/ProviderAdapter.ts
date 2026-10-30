@@ -16,6 +16,7 @@ import type {
   ProviderApprovalDecision,
   ProviderDriverKind,
   ProviderUserInputAnswers,
+  ProviderUserInputUnanswered,
   ProviderRuntimeEvent,
   ProviderSecurityReadInput,
   ProviderSecurityNativeRefreshInput,
@@ -47,6 +48,8 @@ export type ProviderThreadGoalSupport = "supported" | "unsupported";
 export type ProviderSessionForkSupport = "supported" | "unsupported";
 
 export interface ProviderAdapterCapabilities {
+  /** Adapter transport support only; each native callback must also opt in. */
+  readonly userInputUnanswered?: boolean;
   /** Supported only after the configured native CLI's version is qualified. */
   readonly subagentConcurrency?: boolean;
   /** Reviewed Codex thread-local nominal-window override; not model capacity. */
@@ -242,6 +245,7 @@ export interface ProviderAdapterShape<TError> {
     threadId: ThreadId,
     requestId: ApprovalRequestId,
     answers: ProviderUserInputAnswers,
+    unanswered?: ProviderUserInputUnanswered,
   ) => Effect.Effect<void, TError>;
 
   /**

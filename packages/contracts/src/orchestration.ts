@@ -15,6 +15,7 @@ import { GlideStopRevision } from "./glide.ts";
 import { ProviderDiagnosticSnapshot } from "./providerDiagnostic.ts";
 import { RepositoryIdentity } from "./environment.ts";
 import { CodexReviewTarget } from "./codexReview.ts";
+import { ProviderUserInputUnanswered, hasDisjointUserInputAnswers } from "./providerUserInput.ts";
 import {
   ApprovalRequestId,
   CheckpointRef,
@@ -1386,8 +1387,9 @@ const ThreadUserInputRespondCommand = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
+  unanswered: Schema.optional(ProviderUserInputUnanswered),
   createdAt: IsoDateTime,
-});
+}).check(Schema.makeFilter(hasDisjointUserInputAnswers));
 
 const ThreadUserInputSnoozeCommand = Schema.Struct({
   type: Schema.Literal("thread.user-input.snooze"),
@@ -1985,8 +1987,9 @@ const ThreadUserInputResponseRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
+  unanswered: Schema.optional(ProviderUserInputUnanswered),
   createdAt: IsoDateTime,
-});
+}).check(Schema.makeFilter(hasDisjointUserInputAnswers));
 
 const ThreadUserInputSnoozeRequestedPayload = Schema.Struct({
   threadId: ThreadId,

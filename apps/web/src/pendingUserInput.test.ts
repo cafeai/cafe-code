@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildPendingUserInputAnswers,
+  buildPendingUserInputResponse,
   countAnsweredPendingUserInputQuestions,
   derivePendingUserInputProgress,
   findFirstUnansweredPendingUserInputQuestionIndex,
   resolvePendingUserInputAnswer,
   setPendingUserInputCustomAnswer,
+  skipPendingUserInputQuestion,
   togglePendingUserInputOptionSelection,
 } from "./pendingUserInput";
 
@@ -105,6 +107,25 @@ describe("togglePendingUserInputOptionSelection", () => {
 });
 
 describe("buildPendingUserInputAnswers", () => {
+  it("preserves a prototype-like question id as an own ordinary answer", () => {
+    const answers = buildPendingUserInputAnswers(
+      [{ ...singleSelectQuestion, id: "__proto__" }],
+      Object.fromEntries([["__proto__", { customAnswer: "Keep the original provider" }]]),
+    );
+    expect(answers).toEqual(JSON.parse('{"__proto__":"Keep the original provider"}'));
+    expect(Object.hasOwn(answers!, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(answers!)).toBe(Object.prototype);
+  });
+
+  it("retains legacy last-question handling for repeated ordinary identities", () => {
+    expect(
+      buildPendingUserInputAnswers(
+        [{ ...singleSelectQuestion, multiSelect: true }, singleSelectQuestion],
+        { scope: { selectedOptionLabels: ["First", "Second"] } },
+      ),
+    ).toEqual({ scope: "First" });
+  });
+
   it("returns a canonical answer map for complete prompts", () => {
     expect(
       buildPendingUserInputAnswers(
@@ -246,5 +267,130 @@ describe("pending user input question progress", () => {
       canAdvance: true,
       isComplete: true,
     });
+  });
+});
+
+describe("explicit unanswered question responses", () => {
+  const questions = [singleSelectQuestion, multiSelectQuestion];
+
+  it("keeps the legacy answers-only response free of optional metadata", () => {
+    expect(
+      buildPendingUserInputResponse(
+        questions,
+        {
+          scope: { customAnswer: "Keep current behavior" },
+          areas: { selectedOptionLabels: ["Server", "Web"] },
+        },
+        false,
+      ),
+    ).toEqual({ answers: { scope: "Keep current behavior", areas: ["Server", "Web"] } });
+    expect(buildPendingUserInputResponse(questions, {}, false, true)).toBeNull();
+    expect(
+      buildPendingUserInputResponse(
+        questions,
+        {
+          scope: skipPendingUserInputQuestion(),
+          areas: { customAnswer: "Web" },
+        },
+        false,
+      ),
+    ).toBeNull();
+  });
+
+  it("keeps skips separate from actual answers and ignores unknown draft keys", () => {
+    expect(
+      buildPendingUserInputResponse(
+        questions,
+        {
+          scope: skipPendingUserInputQuestion(),
+          areas: { selectedOptionLabels: ["Web"] },
+          unrelated: { customAnswer: "Do not send this old draft" },
+        },
+        true,
+      ),
+    ).toEqual({ answers: { areas: ["Web"] }, unanswered: { scope: "skipped" } });
+    expect(
+      buildPendingUserInputAnswers([singleSelectQuestion], {
+        scope: skipPendingUserInputQuestion(),
+      }),
+    ).toBeNull();
+  });
+
+  it("dismisses only unanswered questions and retains completed answers and prior skips", () => {
+    const third = { ...singleSelectQuestion, id: "remaining" };
+    expect(
+      buildPendingUserInputResponse(
+        [...questions, third],
+        {
+          scope: skipPendingUserInputQuestion(),
+          areas: { customAnswer: "Keep the existing adapter" },
+        },
+        true,
+        true,
+      ),
+    ).toEqual({
+      answers: { areas: "Keep the existing adapter" },
+      unanswered: { scope: "skipped", remaining: "dismissed" },
+    });
+    expect(buildPendingUserInputResponse(questions, {}, true)).toBeNull();
+  });
+
+  it("removes a skip when a user types or selects an actual answer", () => {
+    const skipped = skipPendingUserInputQuestion();
+    expect(setPendingUserInputCustomAnswer(skipped, "Use the existing model")).toEqual({
+      customAnswer: "Use the existing model",
+    });
+    expect(
+      togglePendingUserInputOptionSelection(singleSelectQuestion, skipped, "Orchestration-first"),
+    ).toEqual({ customAnswer: "", selectedOptionLabels: ["Orchestration-first"] });
+    expect(
+      buildPendingUserInputResponse(
+        [singleSelectQuestion],
+        {
+          scope: { ...skipped, customAnswer: "Conflicting draft" },
+        },
+        true,
+      ),
+    ).toBeNull();
+    expect(
+      buildPendingUserInputResponse(
+        [singleSelectQuestion],
+        {
+          scope: { ...skipped, selectedOptionLabels: ["Orchestration-first"] },
+        },
+        true,
+        true,
+      ),
+    ).toBeNull();
+  });
+
+  it("treats an explicit supported skip as resolved without counting it as an answer", () => {
+    const draft = { scope: skipPendingUserInputQuestion() };
+    expect(derivePendingUserInputProgress([singleSelectQuestion], draft, 0, true)).toMatchObject({
+      canAdvance: true,
+      isComplete: true,
+      answeredQuestionCount: 0,
+      resolvedAnswer: null,
+    });
+    expect(derivePendingUserInputProgress([singleSelectQuestion], draft, 0, false)).toMatchObject({
+      canAdvance: false,
+      isComplete: false,
+      answeredQuestionCount: 0,
+    });
+  });
+
+  it("refuses duplicate identities and creates inert own response properties", () => {
+    expect(
+      buildPendingUserInputResponse([singleSelectQuestion, singleSelectQuestion], {}, true, true),
+    ).toBeNull();
+    const response = buildPendingUserInputResponse(
+      [{ ...singleSelectQuestion, id: "__proto__" }],
+      {},
+      true,
+      true,
+    );
+    expect(response?.unanswered).toEqual(JSON.parse('{"__proto__":"dismissed"}'));
+    expect(Object.getPrototypeOf(response!.unanswered!)).toBe(Object.prototype);
+    expect(Object.hasOwn(response!.unanswered!, "__proto__")).toBe(true);
   });
 });

@@ -303,6 +303,31 @@ describe("private interaction projection", () => {
 });
 
 describe("derivePendingUserInputs", () => {
+  it.each([true, false, undefined, "true"])(
+    "advertises unanswered controls only for a literal capability: %s",
+    (supportsUnanswered) => {
+      const [pending] = derivePendingUserInputs([
+        makeActivity({
+          id: "claude-unanswered-request",
+          kind: "user-input.requested",
+          payload: {
+            requestId: "claude-unanswered-request",
+            supportsUnanswered,
+            questions: [
+              {
+                id: "choice",
+                header: "Choice",
+                question: "Which option?",
+                options: [{ label: "Keep", description: "Keep the current behavior" }],
+              },
+            ],
+          },
+        }),
+      ]);
+      expect(pending?.supportsUnanswered).toBe(supportsUnanswered === true ? true : undefined);
+    },
+  );
+
   it("tracks open structured prompts and removes resolved ones", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
