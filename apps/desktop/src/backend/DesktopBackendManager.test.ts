@@ -5,6 +5,7 @@ import {
 import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -1410,8 +1411,11 @@ describe("DesktopBackendManager", () => {
         | "manager-started"
         | "first-offered"
         | "first-consumed"
+        | "first-probe-entered"
+        | "first-timer-queued"
         | "adjust-599-entered"
         | "adjust-599-finished"
+        | "post-jump-sleep-queued"
         | "second-offered"
         | "second-consumed"
         | "adjust-1-entered"
@@ -1448,7 +1452,66 @@ describe("DesktopBackendManager", () => {
         const firstConsumed = yield* Deferred.make<void>();
         const secondConsumed = yield* Deferred.make<void>();
         const nativeExited = yield* Deferred.make<void>();
+        const firstProbeEntered = yield* Deferred.make<void>();
+        const firstTimerQueued = yield* Deferred.make<void>();
+        const postJumpSleepQueued = yield* Deferred.make<void>();
         let killCount = 0;
+        let probeRetired = false;
+        let clockRetired = false;
+        let clockMillis = 0;
+        const beforeCap = Duration.seconds(599);
+        const finalCapStep = Duration.seconds(1);
+        const beforeCapMillis = Duration.toMillis(beforeCap);
+        const pendingSleeps = new Map<Deferred.Deferred<void>, number>();
+        // This case checks an absolute monotonic deadline, not how many HTTP
+        // polls fit into ten minutes. Model a host pause: move time first and
+        // wake only the sleeps already due at that jump. Newly queued sleeps
+        // start at the resumed time, rather than replaying every intermediate
+        // timeout/poll as TestClock.adjust does. Real manager timeouts, the
+        // default scheduler, and Vitest's native five-second guard stay intact.
+        const jumpClock: Clock.Clock = {
+          currentTimeMillisUnsafe: () => clockMillis,
+          currentTimeNanosUnsafe: () => BigInt(clockMillis) * 1_000_000n,
+          currentTimeMillis: Effect.sync(() => clockMillis),
+          currentTimeNanos: Effect.sync(() => BigInt(clockMillis) * 1_000_000n),
+          sleep: (duration) =>
+            Effect.gen(function* () {
+              const delay = Duration.toMillis(duration);
+              assert.isTrue(Number.isFinite(delay) && delay >= 0);
+              if (delay === 0) return;
+              const sleeper = yield* Deferred.make<void>();
+              yield* Effect.acquireUseRelease(
+                Effect.sync(() => {
+                  assert.equal(clockRetired, false);
+                  assert.isBelow(pendingSleeps.size, 32);
+                  pendingSleeps.set(sleeper, clockMillis + delay);
+                }),
+                () =>
+                  Effect.gen(function* () {
+                    yield* Deferred.succeed(firstTimerQueued, undefined);
+                    // The held request has retired before the real readiness loop
+                    // may schedule its next sleep. Do not freeze its poll interval.
+                    if (probeRetired && clockMillis === beforeCapMillis) {
+                      yield* Deferred.succeed(postJumpSleepQueued, undefined);
+                    }
+                    yield* Deferred.await(sleeper);
+                  }),
+                () =>
+                  Effect.sync(() => {
+                    pendingSleeps.delete(sleeper);
+                  }),
+              );
+            }),
+        };
+        const advance = (duration: Duration.Duration) =>
+          Effect.gen(function* () {
+            const millis = Duration.toMillis(duration);
+            assert.isTrue(Number.isSafeInteger(millis) && millis >= 0);
+            assert.equal(clockRetired, false);
+            clockMillis += millis;
+            const due = [...pendingSleeps].filter(([, deadline]) => deadline <= clockMillis);
+            for (const [sleeper] of due) yield* Deferred.succeed(sleeper, undefined);
+          });
         // These one-element sources are consumed serially by the manager's
         // real runForEach. An acknowledgement is emitted only when that
         // consumer pulls the following stream, after decoding and observing
@@ -1486,7 +1549,15 @@ describe("DesktopBackendManager", () => {
           httpClientLayer: httpClientLayer(() =>
             Effect.sync(() => {
               probeCount = Math.min(1_000_000, probeCount + 1);
-            }).pipe(Effect.andThen(Effect.never)),
+            }).pipe(
+              Effect.andThen(Deferred.succeed(firstProbeEntered, undefined)),
+              Effect.andThen(Effect.never),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  probeRetired = true;
+                }),
+              ),
+            ),
           ),
         });
         yield* Effect.gen(function* () {
@@ -1501,18 +1572,24 @@ describe("DesktopBackendManager", () => {
           mark("first-offered");
           yield* Deferred.await(firstConsumed);
           mark("first-consumed");
+          yield* Deferred.await(firstProbeEntered);
+          mark("first-probe-entered");
+          yield* Deferred.await(firstTimerQueued);
+          mark("first-timer-queued");
           mark("adjust-599-entered");
-          yield* TestClock.adjust(Duration.seconds(599));
+          yield* advance(beforeCap);
           mark("adjust-599-finished");
+          yield* Deferred.await(postJumpSleepQueued);
+          mark("post-jump-sleep-queued");
           assert.equal(killCount, 0);
           yield* Queue.offer(progress, frame);
           mark("second-offered");
           yield* Deferred.await(secondConsumed);
           mark("second-consumed");
           mark("adjust-1-entered");
-          yield* TestClock.adjust(Duration.seconds(1));
+          yield* advance(finalCapStep);
           mark("adjust-1-finished");
-          yield* Effect.yieldNow;
+          yield* Deferred.await(nativeExited);
           assert.equal(killCount > 0, true);
         }).pipe(
           Effect.ensuring(
@@ -1522,7 +1599,13 @@ describe("DesktopBackendManager", () => {
               mark("native-exit-signalled");
             }),
           ),
-          Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
+          Effect.provide(Layer.merge(Layer.succeed(Clock.Clock, jumpClock), managerLayer)),
+          Effect.ensuring(
+            Effect.sync(() => {
+              clockRetired = true;
+              assert.equal(pendingSleeps.size, 0);
+            }),
+          ),
         );
       });
     },
