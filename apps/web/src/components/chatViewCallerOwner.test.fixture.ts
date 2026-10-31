@@ -25,6 +25,11 @@ const labels = [
   "composer-unanswered",
   "navigation-atrium",
   "navigation-project-search",
+  "continuation-preparation",
+  "live-account-preparation",
+  "live-account-queue",
+  "context-late-ack",
+  "subagent-owner-release",
 ] as const;
 export type ChatViewCallerLabel = (typeof labels)[number];
 const phases = [

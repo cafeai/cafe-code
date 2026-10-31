@@ -510,45 +510,94 @@ describe("ChatView full app (standalone)", () => {
         await mounted.cleanup();
       }
     });
-    it.each(["send", "steer"] as const)(
+    it.for(["send", "steer"] as const)(
       "rechecks exact continuation authority after deferred %s attachment preparation",
-      async (action) => {
-        const mounted = await mountChatView({
+      async (action, context) => {
+        const originalRead = FileReader.prototype.readAsDataURL;
+        const prepared: { reader: FileReader; blob: Blob }[] = [];
+        const nativeReads = new Set<{ reader: FileReader; done: Promise<void> }>();
+        let restoreReadSpy: (() => void) | undefined;
+        let restorePersistenceSpy: (() => void) | undefined;
+        let retirePersistenceRead: () => void = () => undefined;
+        let retiringReads = false;
+        const startNativeReader = (reader: FileReader, blob: Blob) => {
+          let resolveDone!: () => void;
+          const done = new Promise<void>((resolve) => {
+            resolveDone = resolve;
+          });
+          const observed = { reader, done };
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            reader.removeEventListener("loadend", finish);
+            nativeReads.delete(observed);
+            resolveDone();
+          };
+          // Own only the original native read's terminal event. This receipt
+          // never substitutes image bytes or the production persistence result.
+          reader.addEventListener("loadend", finish, { once: true });
+          nativeReads.add(observed);
+          try {
+            originalRead.call(reader, blob);
+          } catch (failure) {
+            finish();
+            throw failure;
+          }
+        };
+        const releaseReaders = () => {
+          caller.assertActive();
+          for (const { reader, blob } of prepared.splice(0)) startNativeReader(reader, blob);
+        };
+        const retireReaders = () => {
+          retiringReads = true;
+          retirePersistenceRead();
+          // A held call has not acquired native IO. Discard it on retirement
+          // rather than starting submission reads after the UI has unmounted.
+          prepared.length = 0;
+          const failures: unknown[] = [];
+          for (const { reader } of nativeReads) {
+            try {
+              if (reader.readyState === FileReader.LOADING) reader.abort();
+            } catch (failure) {
+              failures.push(failure);
+            }
+          }
+          if (failures.length === 1) throw failures[0];
+          if (failures.length > 1)
+            throw new AggregateError(failures, "Synthetic image-reader retirement failed.");
+        };
+        const caller = createChatViewCallerOwner(context, mountChatView, {
+          label: "continuation-preparation",
+          beforeDrain: retireReaders,
+          afterUnmount: async () => {
+            try {
+              // Drain only already-issued original reads before restoring the
+              // shared prototype; the retirement fence forbids new admission.
+              while (nativeReads.size > 0)
+                await Promise.allSettled([...nativeReads].map(({ done }) => done));
+            } finally {
+              restorePersistenceSpy?.();
+              restorePersistenceSpy = undefined;
+              restoreReadSpy?.();
+              restoreReadSpy = undefined;
+            }
+          },
+        });
+        await caller.mount({
           viewport: WIDE_FOOTER_VIEWPORT,
           snapshot: continuationSnapshot(action === "steer"),
           configureFixture: configureExistingContinuation,
         });
         const prompt = "Preserve this exact continuation-race draft";
-        const originalRead = FileReader.prototype.readAsDataURL;
-        const prepared: { reader: FileReader; blob: Blob }[] = [];
-        let restoreReadSpy: (() => void) | undefined;
-        let restorePersistenceSpy: (() => void) | undefined;
-        let retirePersistenceRead: () => void = () => undefined;
-        let retired = false;
-        const releaseReaders = () => {
-          for (const { reader, blob } of prepared.splice(0)) originalRead.call(reader, blob);
-        };
-        const cleanup = async () => {
-          if (retired) return;
-          retired = true;
-          retirePersistenceRead();
-          restorePersistenceSpy?.();
-          restoreReadSpy?.();
-          // Retire the owning UI before releasing any held submission bytes.
-          // The same one-shot cleanup also owns hard-timeout retirement.
-          try {
-            await mounted.cleanup();
-          } finally {
-            releaseReaders();
-          }
-        };
-        onTestFinished(cleanup);
         try {
-          await waitForServerConfigToApply();
+          await caller.own("config", () => waitForServerConfigToApply());
           useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
-          await vi.waitFor(() =>
-            expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
-              prompt,
+          await caller.own("prompt", () =>
+            vi.waitFor(() =>
+              expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+                prompt,
+              ),
             ),
           );
           const imageFile = new File(["x"], "draft.png", { type: "image/png" });
@@ -573,6 +622,8 @@ describe("ChatView full app (standalone)", () => {
           const persistenceSpy = vi
             .spyOn(FileReader.prototype, "readAsDataURL")
             .mockImplementation(function (this: FileReader, blob: Blob) {
+              if (retiringReads) throw new Error("The exact continuation image read was retired.");
+              caller.assertActive();
               if (blob === imageFile && !persistenceStarted) {
                 persistenceStarted = true;
                 const reader = this;
@@ -606,7 +657,7 @@ describe("ChatView full app (standalone)", () => {
               // Observe the real effect-owned native read; do not replace its
               // result, force storage, or borrow a later submission read.
               try {
-                return originalRead.call(this, blob);
+                startNativeReader(this, blob);
               } catch (error) {
                 if (blob === imageFile && !persistenceSettled) {
                   persistenceSettled = true;
@@ -628,31 +679,41 @@ describe("ChatView full app (standalone)", () => {
               file: imageFile,
             },
           ]);
-          await persistenceRead;
-          if (retired) throw new Error("The exact continuation fixture was retired.");
+          await caller.own("attachments", () => persistenceRead);
           restorePersistenceSpy();
           restorePersistenceSpy = undefined;
           // The original state observer now starts after the exact native
           // persistence read, not before the image effect's React admission.
-          await vi.waitFor(() =>
-            expect(
-              useComposerDraftStore
-                .getState()
-                .getComposerDraft(THREAD_REF)
-                ?.persistedAttachments.map((image) => image.id),
-            ).toEqual(["continuation-race-image"]),
+          await caller.own("attachments", () =>
+            vi.waitFor(() =>
+              expect(
+                useComposerDraftStore
+                  .getState()
+                  .getComposerDraft(THREAD_REF)
+                  ?.persistedAttachments.map((image) => image.id),
+              ).toEqual(["continuation-race-image"]),
+            ),
           );
           const readSpy = vi
             .spyOn(FileReader.prototype, "readAsDataURL")
             .mockImplementation(function (this: FileReader, blob: Blob) {
+              if (retiringReads) throw new Error("The exact continuation image read was retired.");
+              caller.assertActive();
               prepared.push({ reader: this, blob });
             });
           restoreReadSpy = () => readSpy.mockRestore();
           if (action === "steer") {
-            (await waitForComposerEditor()).focus();
-            await userEvent.keyboard("{Control>}{Enter}{/Control}");
-          } else (await waitForSendButton()).click();
-          await vi.waitFor(() => expect(prepared).toHaveLength(1));
+            const editor = await caller.own("editor", () => waitForComposerEditor());
+            caller.assertActive();
+            editor.focus();
+            await caller.own("steer", () => userEvent.keyboard("{Control>}{Enter}{/Control}"));
+          } else {
+            const sendButton = await caller.own("send-target", () => waitForSendButton());
+            caller.assertActive();
+            caller.mark("send");
+            sendButton.click();
+          }
+          await caller.own("attachments", () => vi.waitFor(() => expect(prepared).toHaveLength(1)));
           // The fleet revokes Cafe continuation availability while bytes
           // are being prepared. Numeric history is insufficient at this
           // advisory boundary, even though the policy remains unchanged;
@@ -676,16 +737,20 @@ describe("ChatView full app (standalone)", () => {
             type: "snapshot",
             config: encodeServerConfig(chatViewFixture.fixture.serverConfig),
           });
-          await vi.waitFor(() =>
-            expect(
-              getServerConfig()?.providers.find((provider) => provider.instanceId === account)
-                ?.runtimeCapabilities?.subagentPolicyContinuation,
-            ).toBe(false),
+          await caller.own("config", () =>
+            vi.waitFor(() =>
+              expect(
+                getServerConfig()?.providers.find((provider) => provider.instanceId === account)
+                  ?.runtimeCapabilities?.subagentPolicyContinuation,
+              ).toBe(false),
+            ),
           );
           releaseReaders();
-          await vi.waitFor(() =>
-            expect(document.body.textContent).toContain(
-              "This provider runtime does not support the account subagent limit.",
+          await caller.own("receipt", () =>
+            vi.waitFor(() =>
+              expect(document.body.textContent).toContain(
+                "This provider runtime does not support the account subagent limit.",
+              ),
             ),
           );
           expect(
@@ -706,7 +771,7 @@ describe("ChatView full app (standalone)", () => {
           expect(persisted.ok).toBe(true);
           if (persisted.ok) expect(persisted.value.claimed).toHaveLength(0);
         } finally {
-          await cleanup();
+          await caller.cleanup();
         }
       },
     );
@@ -778,9 +843,9 @@ describe("ChatView full app (standalone)", () => {
         }
       },
     );
-    it.each(["ordinary send", "plan follow-up", "plan new chat"] as const)(
+    it.for(["ordinary send", "plan follow-up", "plan new chat"] as const)(
       "rechecks live account policy after deferred preparation for %s and preserves unsent work",
-      async (action) => {
+      async (action, context) => {
         const original =
           action === "ordinary send"
             ? policySnapshot(undefined, 12)
@@ -805,7 +870,19 @@ describe("ChatView full app (standalone)", () => {
         const pending = new Promise<{ sequence: number }>((resolve) => {
           release = resolve;
         });
-        const mounted = await mountChatView({
+        let released = false;
+        const releasePreparation = () => {
+          if (released) return;
+          released = true;
+          release({ sequence: 2 });
+        };
+        // Register the exact held ACK and caller lifetime before mounting can
+        // yield; retirement drains the original native actions before unmount.
+        const caller = createChatViewCallerOwner(context, mountChatView, {
+          label: "live-account-preparation",
+          beforeDrain: releasePreparation,
+        });
+        const mounted = await caller.mount({
           viewport: WIDE_FOOTER_VIEWPORT,
           snapshot: base,
           configureFixture: configureLiveDefaults,
@@ -818,7 +895,7 @@ describe("ChatView full app (standalone)", () => {
         });
         const prompt = "Keep this exact unsent policy-race draft";
         try {
-          await waitForServerConfigToApply();
+          await caller.own("config", () => waitForServerConfigToApply());
           const originalPlan = selectThreadByRef(useStore.getState(), THREAD_REF)?.proposedPlans;
           if (action === "ordinary send") {
             useComposerDraftStore
@@ -830,29 +907,46 @@ describe("ChatView full app (standalone)", () => {
                   : "approval-required",
               );
             useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
-            await vi.waitFor(() =>
-              expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
-                prompt,
+            await caller.own("prompt", () =>
+              vi.waitFor(() =>
+                expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+                  prompt,
+                ),
               ),
             );
-            (await waitForSendButton()).click();
+            const sendButton = await caller.own("send-target", () => waitForSendButton());
+            caller.assertActive();
+            caller.mark("send");
+            sendButton.click();
           } else if (action === "plan follow-up") {
-            (await waitForButtonByText("Implement")).click();
+            const implementButton = await caller.own("send-target", () =>
+              waitForButtonByText("Implement"),
+            );
+            caller.assertActive();
+            caller.mark("send");
+            implementButton.click();
           } else {
-            await page.getByRole("button", { name: "Implementation actions", exact: true }).click();
-            await page
-              .getByRole("menuitem", { name: "Implement in a new chat", exact: true })
-              .click();
+            await caller.own("controls", () =>
+              page.getByRole("button", { name: "Implementation actions", exact: true }).click(),
+            );
+            await caller.own("send", () =>
+              page.getByRole("menuitem", { name: "Implement in a new chat", exact: true }).click(),
+            );
           }
-          await vi.waitFor(() =>
-            expect(wsRequests.some((body) => body.type === blockedType)).toBe(true),
+          await caller.own("request", () =>
+            vi.waitFor(() =>
+              expect(wsRequests.some((body) => body.type === blockedType)).toBe(true),
+            ),
           );
           expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
-          await revokeLiveAccountCapability();
-          release({ sequence: 2 });
-          await vi.waitFor(() =>
-            expect(document.body.textContent).toContain(
-              "This provider runtime does not support the account subagent limit.",
+          await caller.own("config", () => revokeLiveAccountCapability());
+          releasePreparation();
+          caller.mark("ack");
+          await caller.own("receipt", () =>
+            vi.waitFor(() =>
+              expect(document.body.textContent).toContain(
+                "This provider runtime does not support the account subagent limit.",
+              ),
             ),
           );
           expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
@@ -863,78 +957,102 @@ describe("ChatView full app (standalone)", () => {
             expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
               prompt,
             );
-            await vi.waitFor(() =>
-              expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
-                prompt,
+            await caller.own("prompt", () =>
+              vi.waitFor(() =>
+                expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
+                  prompt,
+                ),
               ),
             );
           } else if (action === "plan follow-up") {
-            await expect
-              .element(page.getByRole("button", { name: "Implement", exact: true }))
-              .toBeEnabled();
+            await caller.own("send-target", () =>
+              expect
+                .element(page.getByRole("button", { name: "Implement", exact: true }))
+                .toBeEnabled(),
+            );
           } else {
-            await vi.waitFor(() =>
-              expect(wsRequests.some((body) => body.type === "thread.delete")).toBe(true),
+            await caller.own("closed", () =>
+              vi.waitFor(() =>
+                expect(wsRequests.some((body) => body.type === "thread.delete")).toBe(true),
+              ),
             );
             expect(mounted.router.state.location.pathname).toBe(serverThreadPath(THREAD_ID));
           }
         } finally {
-          release({ sequence: 2 });
-          await mounted.cleanup();
+          await caller.cleanup();
         }
       },
     );
-    it("leaves a deferred queued send definitely unclaimed when the live account policy becomes unsupported", async () => {
+    it("leaves a deferred queued send definitely unclaimed when the live account policy becomes unsupported", async (context) => {
       const queue = createFollowUpQueuePersistence();
       const base = policySnapshot(undefined, 12);
       const queuedRuntime =
         base.threads[0]!.runtimeMode === "approval-required" ? "full-access" : "approval-required";
-      expect(
-        (
-          await queue.save(LOCAL_ENVIRONMENT_ID, [
-            {
-              id: "live-policy-queued",
-              environmentId: LOCAL_ENVIRONMENT_ID,
-              threadId: THREAD_ID,
-              promptText: "Preserve this exact queued input",
-              images: [],
-              files: [],
-              provider: ProviderDriverKind.make("codex"),
-              model: "gpt-5",
-              promptEffort: null,
-              modelSelection: createModelSelection(account, "gpt-5"),
-              runtimeMode: queuedRuntime,
-              interactionMode: "default",
-              queuedAt: isoAt(1000),
-              blockedReason: null,
-            },
-          ])
-        ).ok,
-      ).toBe(true);
       let release!: (value: { sequence: number }) => void;
       const pending = new Promise<{ sequence: number }>((resolve) => {
         release = resolve;
       });
-      const mounted = await mountChatView({
-        viewport: WIDE_FOOTER_VIEWPORT,
-        snapshot: base,
-        configureFixture: configureLiveDefaults,
-        resolveRpc: (body) =>
-          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
-            ? body.type === "thread.runtime-mode.set"
-              ? pending
-              : { sequence: 2 }
-            : undefined,
-      });
-      try {
-        await vi.waitFor(() =>
-          expect(wsRequests.some((body) => body.type === "thread.runtime-mode.set")).toBe(true),
-        );
-        await revokeLiveAccountCapability();
+      let released = false;
+      const releasePreparation = () => {
+        if (released) return;
+        released = true;
         release({ sequence: 2 });
-        await vi.waitFor(() =>
-          expect(document.body.textContent).toContain(
-            "This provider runtime does not support the account subagent limit.",
+      };
+      const caller = createChatViewCallerOwner(context, mountChatView, {
+        label: "live-account-queue",
+        beforeDrain: releasePreparation,
+      });
+      // The persistence operation precedes mount admission, so its ordinary
+      // rejection must also join this caller before shared fixture reset.
+      try {
+        expect(
+          (
+            await caller.own("draft", () =>
+              queue.save(LOCAL_ENVIRONMENT_ID, [
+                {
+                  id: "live-policy-queued",
+                  environmentId: LOCAL_ENVIRONMENT_ID,
+                  threadId: THREAD_ID,
+                  promptText: "Preserve this exact queued input",
+                  images: [],
+                  files: [],
+                  provider: ProviderDriverKind.make("codex"),
+                  model: "gpt-5",
+                  promptEffort: null,
+                  modelSelection: createModelSelection(account, "gpt-5"),
+                  runtimeMode: queuedRuntime,
+                  interactionMode: "default",
+                  queuedAt: isoAt(1000),
+                  blockedReason: null,
+                },
+              ]),
+            )
+          ).ok,
+        ).toBe(true);
+        await caller.mount({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot: base,
+          configureFixture: configureLiveDefaults,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? body.type === "thread.runtime-mode.set"
+                ? pending
+                : { sequence: 2 }
+              : undefined,
+        });
+        await caller.own("request", () =>
+          vi.waitFor(() =>
+            expect(wsRequests.some((body) => body.type === "thread.runtime-mode.set")).toBe(true),
+          ),
+        );
+        await caller.own("config", () => revokeLiveAccountCapability());
+        releasePreparation();
+        caller.mark("ack");
+        await caller.own("receipt", () =>
+          vi.waitFor(() =>
+            expect(document.body.textContent).toContain(
+              "This provider runtime does not support the account subagent limit.",
+            ),
           ),
         );
         expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
@@ -951,8 +1069,7 @@ describe("ChatView full app (standalone)", () => {
           });
         }
       } finally {
-        release({ sequence: 2 });
-        await mounted.cleanup();
+        await caller.cleanup();
       }
     });
     it("rechecks the actual steer session's account after deferred image preparation without claiming or consuming input", async (context) => {
@@ -2204,14 +2321,39 @@ describe("ChatView full app (standalone)", () => {
       },
     );
 
-    it.each(["account", "model"] as const)(
+    it.for(["account", "model"] as const)(
       "fences a late ACK across %s away-and-back without closing the replacement editor",
-      async (transition) => {
+      async (transition, context) => {
         let release!: (value: { sequence: number }) => void;
         const pending = new Promise<{ sequence: number }>((resolve) => {
           release = resolve;
         });
-        const mounted = await mountChatView({
+        let released = false;
+        const releaseAck = () => {
+          if (released) return;
+          released = true;
+          release({ sequence: 2 });
+        };
+        const caller = createChatViewCallerOwner(context, mountChatView, {
+          label: "context-late-ack",
+          beforeDrain: releaseAck,
+        });
+        const openOwnedContextEditor = async () => {
+          // Fence each existing native action separately: a retired first
+          // click cannot resume this helper and admit its next menu action.
+          await caller.own("controls", () =>
+            page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+          );
+          await caller.own("editor", () =>
+            page.getByRole("menuitem", { name: "Context window…", exact: true }).click(),
+          );
+          await caller.own("editor", () =>
+            expect
+              .element(page.getByRole("dialog", { name: "Context window", exact: true }))
+              .toBeVisible(),
+          );
+        };
+        await caller.mount({
           viewport: WIDE_FOOTER_VIEWPORT,
           snapshot: contextSnapshot(),
           configureFixture: configureContext,
@@ -2219,11 +2361,15 @@ describe("ChatView full app (standalone)", () => {
             body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? pending : undefined,
         });
         try {
-          await openContextEditor();
-          await contextInput().fill("700000");
-          await page.getByRole("button", { name: "Save", exact: true }).click();
-          await vi.waitFor(() =>
-            expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+          await openOwnedContextEditor();
+          await caller.own("input", () => contextInput().fill("700000"));
+          await caller.own("save", () =>
+            page.getByRole("button", { name: "Save", exact: true }).click(),
+          );
+          await caller.own("request", () =>
+            vi.waitFor(() =>
+              expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+            ),
           );
           useComposerDraftStore
             .getState()
@@ -2234,35 +2380,41 @@ describe("ChatView full app (standalone)", () => {
                 transition === "model" ? "gpt-5.6-sol" : "gpt-5",
               ),
             );
-          await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
+          await caller.own("closed", () =>
+            vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull()),
+          );
           useUiStateStore.getState().setSessionRailDocked(true);
-          await vi.waitFor(() =>
-            expect(findSessionRail()?.textContent).toContain(
-              transition === "account"
-                ? "Context override: 500K · saved"
-                : "Context override: 500K",
+          await caller.own("rail", () =>
+            vi.waitFor(() =>
+              expect(findSessionRail()?.textContent).toContain(
+                transition === "account"
+                  ? "Context override: 500K · saved"
+                  : "Context override: 500K",
+              ),
             ),
           );
           expect(findSessionRail()?.textContent).not.toContain("→");
           useComposerDraftStore
             .getState()
             .setModelSelection(THREAD_REF, createModelSelection(account, "gpt-5"));
-          await openContextEditor();
-          await contextInput().fill("800000");
-          release({ sequence: 2 });
-          await waitForLayout();
-          await expect
-            .element(page.getByRole("dialog", { name: "Context window", exact: true }))
-            .toBeVisible();
-          await expect.element(contextInput()).toHaveValue(800_000);
+          await openOwnedContextEditor();
+          await caller.own("input", () => contextInput().fill("800000"));
+          releaseAck();
+          caller.mark("ack");
+          await caller.own("layout", () => waitForLayout());
+          await caller.own("editor", () =>
+            expect
+              .element(page.getByRole("dialog", { name: "Context window", exact: true }))
+              .toBeVisible(),
+          );
+          await caller.own("value", () => expect.element(contextInput()).toHaveValue(800_000));
           expect(
             useComposerDraftStore.getState().getComposerDraft(THREAD_REF)
               ?.codexContextWindowOverride,
           ).toBeUndefined();
           expect(wsRequests.filter((body) => body.type === "thread.meta.update")).toHaveLength(1);
         } finally {
-          release({ sequence: 2 });
-          await mounted.cleanup();
+          await caller.cleanup();
         }
       },
     );
@@ -3472,7 +3624,7 @@ describe("ChatView full app (standalone)", () => {
         }
       },
     );
-    it.each([
+    it.for([
       { change: "account", afterAck: false },
       { change: "thread", afterAck: false },
       { change: "unmount", afterAck: false },
@@ -3481,34 +3633,63 @@ describe("ChatView full app (standalone)", () => {
       { change: "unmount", afterAck: true },
     ])(
       "releases exact-owner ACK authority after $change changes (after ACK=$afterAck)",
-      async ({ change, afterAck }) => {
+      async ({ change, afterAck }, context) => {
         let resolveAck!: (result: { sequence: number }) => void;
         const acknowledgement = new Promise<{ sequence: number }>((resolve) => {
           resolveAck = resolve;
         });
+        let ackReleased = false;
+        const releaseAck = () => {
+          if (ackReleased) return;
+          ackReleased = true;
+          resolveAck({ sequence: 3 });
+        };
+        const caller = createChatViewCallerOwner(context, mountChatView, {
+          label: "subagent-owner-release",
+          beforeDrain: releaseAck,
+        });
+        const openOwnedPolicyEditor = async () => {
+          await caller.own("controls", () =>
+            page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+          );
+          await caller.own("editor", () =>
+            page.getByRole("menuitem", { name: /^Subagent limit…/ }).click(),
+          );
+          await caller.own("editor", () =>
+            expect.element(page.getByRole("dialog", { name: "Subagent limit" })).toBeVisible(),
+          );
+        };
         const base = policySnapshot();
         const secondId = "limit-other-thread" as ThreadId;
-        const mounted = await mountChatView({
+        const mounted = await caller.mount({
           viewport: DEFAULT_VIEWPORT,
           snapshot: addThreadToSnapshot(base, secondId),
           configureFixture: configureLimitFixture,
           resolveRpc: (body) =>
             body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? acknowledgement : undefined,
         });
-        let cleaned = false;
         try {
-          await openPolicyEditor();
-          await page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("6");
-          await page.getByRole("button", { name: "Save", exact: true }).click();
-          await vi.waitFor(() =>
-            expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+          await openOwnedPolicyEditor();
+          await caller.own("input", () =>
+            page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("6"),
+          );
+          await caller.own("save", () =>
+            page.getByRole("button", { name: "Save", exact: true }).click(),
+          );
+          await caller.own("request", () =>
+            vi.waitFor(() =>
+              expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(true),
+            ),
           );
           if (afterAck) {
-            resolveAck({ sequence: 3 });
-            await vi.waitFor(() =>
-              expect(
-                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
-              ).toEqual({ codex: 6, claude: 8 }),
+            releaseAck();
+            caller.mark("ack");
+            await caller.own("overlay", () =>
+              vi.waitFor(() =>
+                expect(
+                  useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+                ).toEqual({ codex: 6, claude: 8 }),
+              ),
             );
           }
           if (change === "account")
@@ -3516,29 +3697,36 @@ describe("ChatView full app (standalone)", () => {
               .getState()
               .setModelSelection(THREAD_REF, createModelSelection(alternateAccount, "gpt-5"));
           else if (change === "thread")
-            await mounted.router.navigate({
-              to: "/$environmentId/$threadId",
-              params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: secondId },
-            });
+            await caller.own("route", () =>
+              mounted.router.navigate({
+                to: "/$environmentId/$threadId",
+                params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: secondId },
+              }),
+            );
           else {
-            await mounted.cleanup();
-            cleaned = true;
+            // This is the tested unmount-before-ACK transition, not final
+            // caller retirement: releasing its gate here would change proof.
+            await caller.own("close", () => mounted.cleanup());
           }
-          await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
-          resolveAck({ sequence: 3 });
-          await waitForLayout();
-          await vi.waitFor(() => {
-            expect(
-              useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
-            ).toBeUndefined();
-            expect(
-              useComposerDraftStore.getState().getComposerDraft(threadRefFor(secondId))
-                ?.subagentLimits,
-            ).toBeUndefined();
-          });
+          await caller.own("closed", () =>
+            vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull()),
+          );
+          releaseAck();
+          caller.mark("ack");
+          await caller.own("layout", () => waitForLayout());
+          await caller.own("overlay", () =>
+            vi.waitFor(() => {
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
+              ).toBeUndefined();
+              expect(
+                useComposerDraftStore.getState().getComposerDraft(threadRefFor(secondId))
+                  ?.subagentLimits,
+              ).toBeUndefined();
+            }),
+          );
         } finally {
-          resolveAck({ sequence: 3 });
-          if (!cleaned) await mounted.cleanup();
+          await caller.cleanup();
         }
       },
     );

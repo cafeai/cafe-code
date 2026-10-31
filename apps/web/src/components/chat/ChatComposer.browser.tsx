@@ -1527,68 +1527,109 @@ describe("provider-specific composer menu actions", () => {
     },
   );
 
-  it("binds message priority to the selected Claude account, capability and chat", async () => {
-    await using fixture = await mountComposer(1100);
-    await fixture.select("claudeAgent");
-    await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-    await page.getByRole("menuitemradio", { name: "Later", exact: true }).click();
-    await closeComposerControlsWithKeyboard();
-    await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
-    expect(fixture.composerRef.current?.getSendContext().deliveryPriority).toBe("later");
-    for (const id of ["claude-work", "codex", "grok"]) {
-      await fixture.select(id);
-      expect(fixture.composerRef.current?.getSendContext()).not.toHaveProperty("deliveryPriority");
-      if (id !== "claude-work") {
-        await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-        await expect
-          .element(page.getByText("Message delivery", { exact: true }))
-          .not.toBeInTheDocument();
-        await closeComposerControlsWithKeyboard();
+  it("binds message priority to the selected Claude account, capability and chat", async (context) => {
+    // Register retirement before the first viewport/render await. A hard test
+    // timeout must join this journey's native selections before shared reset.
+    const owner = createComposerOwner(context, "composer-delivery");
+    await owner.run(async () => {
+      await using fixture = await owner.observe("mount", () => mountComposer(1100, {}, owner));
+      try {
+        await owner.observe("selection", () => fixture.select("claudeAgent"));
+        await owner.observe("controls", () =>
+          page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+        );
+        await owner.observe("controls", () =>
+          page.getByRole("menuitemradio", { name: "Later", exact: true }).click(),
+        );
+        await closeComposerControlsWithKeyboard(owner);
+        await owner.observe("assertion", () =>
+          expect.element(page.getByRole("menu")).not.toBeInTheDocument(),
+        );
+        expect(fixture.composerRef.current?.getSendContext().deliveryPriority).toBe("later");
+        for (const id of ["claude-work", "codex", "grok"]) {
+          await owner.observe("selection", () => fixture.select(id));
+          expect(fixture.composerRef.current?.getSendContext()).not.toHaveProperty(
+            "deliveryPriority",
+          );
+          if (id !== "claude-work") {
+            await owner.observe("controls", () =>
+              page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+            );
+            await owner.observe("assertion", () =>
+              expect
+                .element(page.getByText("Message delivery", { exact: true }))
+                .not.toBeInTheDocument(),
+            );
+            await closeComposerControlsWithKeyboard(owner);
+          }
+        }
+        await owner.observe("selection", () => fixture.select("claudeAgent"));
+        await owner.observe("render", () =>
+          fixture.update({
+            providerStatuses: providers.map((entry) =>
+              entry.instanceId === "claudeAgent"
+                ? {
+                    ...entry,
+                    runtimeCapabilities: {
+                      liveSteer: "supported",
+                      threadGoals: "unsupported",
+                      deliveryPriority: false,
+                    },
+                  }
+                : entry,
+            ),
+          }),
+        );
+        expect(fixture.composerRef.current?.getSendContext()).not.toHaveProperty(
+          "deliveryPriority",
+        );
+        await owner.observe("controls", () =>
+          page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+        );
+        await owner.observe("assertion", () =>
+          expect
+            .element(page.getByText("Message delivery", { exact: true }))
+            .not.toBeInTheDocument(),
+        );
+        await closeComposerControlsWithKeyboard(owner);
+        expect(document.querySelector('[data-chat-composer-tab="true"]')).toBeNull();
+        await owner.observe("render", () => fixture.update({ providerStatuses: providers }));
+        await owner.observe("controls", () =>
+          page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+        );
+        await owner.observe("controls", () =>
+          page.getByRole("menuitemradio", { name: "Now", exact: true }).click(),
+        );
+        await closeComposerControlsWithKeyboard(owner);
+        await owner.observe("assertion", () =>
+          expect.element(page.getByRole("menu")).not.toBeInTheDocument(),
+        );
+        expect(fixture.composerRef.current?.getSendContext().deliveryPriority).toBe("now");
+        const nextThread = thread("other-chat");
+        const nextRef = { environmentId, threadId: nextThread.id };
+        owner.assertActive();
+        useComposerDraftStore
+          .getState()
+          .setModelSelection(
+            nextRef,
+            createModelSelection(ProviderInstanceId.make("claudeAgent"), "claude-opus-4-6"),
+          );
+        await owner.observe("render", () =>
+          fixture.update({
+            activeThread: nextThread,
+            activeThreadId: nextThread.id,
+            routeThreadRef: nextRef,
+            composerDraftTarget: nextRef,
+          }),
+        );
+        expect(fixture.composerRef.current?.getSendContext()).not.toHaveProperty(
+          "deliveryPriority",
+        );
+        expect(fixture.onSend).not.toHaveBeenCalled();
+      } catch (failure) {
+        owner.markBodyFailed();
+        throw failure;
       }
-    }
-    await fixture.select("claudeAgent");
-    await fixture.update({
-      providerStatuses: providers.map((entry) =>
-        entry.instanceId === "claudeAgent"
-          ? {
-              ...entry,
-              runtimeCapabilities: {
-                liveSteer: "supported",
-                threadGoals: "unsupported",
-                deliveryPriority: false,
-              },
-            }
-          : entry,
-      ),
     });
-    expect(fixture.composerRef.current?.getSendContext()).not.toHaveProperty("deliveryPriority");
-    await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-    await expect
-      .element(page.getByText("Message delivery", { exact: true }))
-      .not.toBeInTheDocument();
-    await closeComposerControlsWithKeyboard();
-    expect(document.querySelector('[data-chat-composer-tab="true"]')).toBeNull();
-    await fixture.update({ providerStatuses: providers });
-    await page.getByRole("button", { name: "More composer controls", exact: true }).click();
-    await page.getByRole("menuitemradio", { name: "Now", exact: true }).click();
-    await closeComposerControlsWithKeyboard();
-    await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
-    expect(fixture.composerRef.current?.getSendContext().deliveryPriority).toBe("now");
-    const nextThread = thread("other-chat");
-    const nextRef = { environmentId, threadId: nextThread.id };
-    useComposerDraftStore
-      .getState()
-      .setModelSelection(
-        nextRef,
-        createModelSelection(ProviderInstanceId.make("claudeAgent"), "claude-opus-4-6"),
-      );
-    await fixture.update({
-      activeThread: nextThread,
-      activeThreadId: nextThread.id,
-      routeThreadRef: nextRef,
-      composerDraftTarget: nextRef,
-    });
-    expect(fixture.composerRef.current?.getSendContext()).not.toHaveProperty("deliveryPriority");
-    expect(fixture.onSend).not.toHaveBeenCalled();
   });
 });

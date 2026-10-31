@@ -107,11 +107,14 @@ describe("ChatView full app (navigation)", () => {
       owner.assertActive();
       owner.mark("overlay");
       useTaskAtriumStore.getState().setOpen(true);
-      await owner.own("overlay", () =>
+      const openedAtrium = await owner.own("overlay", () =>
         vi.waitFor(() => {
           owner.assertActive();
-          expect(document.querySelector('[data-cafe-task-atrium-overlay="true"]')).not.toBeNull();
+          const overlay = document.querySelector('[data-cafe-task-atrium-overlay="true"]');
+          expect(overlay).not.toBeNull();
+          expect(overlay).toHaveAttribute("data-open");
           expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
+          return overlay;
         }),
       );
 
@@ -121,7 +124,16 @@ describe("ChatView full app (navigation)", () => {
       await owner.own("closed", () =>
         vi.waitFor(() => {
           owner.assertActive();
-          expect(document.querySelector('[data-cafe-task-atrium-overlay="true"]')).toBeNull();
+          expect(useTaskAtriumStore.getState().open).toBe(false);
+          const overlay = document.querySelector('[data-cafe-task-atrium-overlay="true"]');
+          // This journey owns clearing the selected detail across controlled
+          // close. Base UI may retain this exact closed popup during its exit;
+          // TaskAtrium's native Escape/pointer cases separately own actual
+          // portal retirement, so this is not a second animation-time gate.
+          if (overlay !== null) {
+            expect(overlay).toBe(openedAtrium);
+            expect(overlay).toHaveAttribute("data-closed");
+          }
           expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
         }),
       );
