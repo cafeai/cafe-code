@@ -100,7 +100,12 @@ it.layer(NodeServices.layer)("launch-time management connection", (it) => {
         expect((yield* Effect.exit(f.credentials.verify(b.token)))._tag).toBe("Failure");
         yield* historical.dispose;
         expect((yield* Effect.exit(f.credentials.verify(legacy.token)))._tag).toBe("Failure");
-      }).pipe(Effect.provide(sessionsLayer.pipe(Layer.provideMerge(configLayer)))),
+      }).pipe(
+        // Own binding retirement inside the provided credential/SQLite layer.
+        // The ambient test scope closes later, after that layer has finalized.
+        Effect.scoped,
+        Effect.provide(sessionsLayer.pipe(Layer.provideMerge(configLayer))),
+      ),
   );
   it.effect("renews a multi-day connection without overriding owner revocation", () =>
     Effect.gen(function* () {
@@ -130,7 +135,7 @@ it.layer(NodeServices.layer)("launch-time management connection", (it) => {
       expect((yield* Effect.exit(f.credentials.verify(next.token)))._tag).toBe("Failure");
       yield* binding.dispose;
       expect((yield* Effect.exit(f.credentials.verify(first.token)))._tag).toBe("Failure");
-    }).pipe(Effect.provide(sessionsLayer.pipe(Layer.provideMerge(configLayer)))),
+    }).pipe(Effect.scoped, Effect.provide(sessionsLayer.pipe(Layer.provideMerge(configLayer)))),
   );
   it.effect(
     "retires a failed launch credential and preserves replaced private files during cleanup",

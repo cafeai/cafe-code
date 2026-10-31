@@ -246,10 +246,12 @@ describe("desktop runtime payload selection", () => {
         join(ancestorCanvas, "index.cjs"),
         `require("node:fs").writeFileSync(${JSON.stringify(borrowed)}, "borrowed"); module.exports = {};`,
       );
-      // An unguarded library resolve really can borrow this parent package.
-      expect(createRequire(pathToFileURL(pdfEntry)).resolve("@napi-rs/canvas")).toBe(
-        await realpath(join(ancestorCanvas, "index.cjs")),
-      );
+      // An unguarded library resolve really can borrow this exact parent file.
+      // Windows may return its 8.3 alias, so compare native canonical paths
+      // rather than treating the spelling of a temp directory as identity.
+      expect(
+        await realpath(createRequire(pathToFileURL(pdfEntry)).resolve("@napi-rs/canvas")),
+      ).toBe(await realpath(join(ancestorCanvas, "index.cjs")));
     });
     expect(await readdir(dirname(pdfEntry))).toEqual(
       expect.arrayContaining(["pdf.mjs", "pdf.worker.mjs"]),

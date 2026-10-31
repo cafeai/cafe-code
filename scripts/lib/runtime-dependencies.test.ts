@@ -124,6 +124,8 @@ async function fixture(context: TestContext) {
 describe("local application dependency parity", () => {
   it("orders the actual renderer, backend and desktop builds while refreshing private runtime pointers", async (context) => {
     const f = await fixture(context);
+    const configurationRoot = join(f.root, "configuration");
+    await f.own(() => mkdir(configurationRoot));
     const platform = process.platform === "win32" ? "windows" : process.platform;
     const architecture = process.arch === "x64" ? "64" : process.arch;
     // Execute the pinned installed native CLI directly: no installer fallback,
@@ -147,6 +149,15 @@ describe("local application dependency parity", () => {
           env: {
             HOME: f.root,
             USERPROFILE: f.root,
+            // Turbo 2.11.4 resolves global configuration separately from HOME
+            // on Windows. Give both its explicit directory selectors and the
+            // native platform defaults the same empty, test-owned namespace;
+            // never inherit a runner's real config, authentication or cache.
+            APPDATA: configurationRoot,
+            LOCALAPPDATA: configurationRoot,
+            XDG_CONFIG_HOME: configurationRoot,
+            TURBO_CONFIG_DIR_PATH: configurationRoot,
+            VERCEL_CONFIG_DIR_PATH: configurationRoot,
             DO_NOT_TRACK: "1",
             CI: "1",
             ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
