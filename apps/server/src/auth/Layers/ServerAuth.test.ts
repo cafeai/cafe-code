@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Clock from "effect/Clock";
 import * as TestClock from "effect/testing/TestClock";
+import * as Headers from "effect/unstable/http/Headers";
 import { AuthSessionId } from "@cafecode/contracts/auth";
 import { ProviderInstanceId, ThreadId } from "@cafecode/contracts";
 import { TwoFactorService } from "../Services/TwoFactorService.ts";
@@ -75,7 +76,7 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
       });
       const both = {
         ...makeCookieRequest(cookie.token),
-        headers: { authorization: `Bearer ${bearer.token}` },
+        headers: Headers.fromInput({ authorization: `Bearer ${bearer.token}` }),
       };
       const ordinary = yield* auth.authenticateHttpRequest(both);
       expect(ordinary.sessionId).toBe(cookie.sessionId);
@@ -89,7 +90,10 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
       ];
       for (const headers of rejectedHeaders) {
         const refused = yield* Effect.flip(
-          auth.authenticateHttpRequest({ ...both, headers }, { bearerOnly: true }),
+          auth.authenticateHttpRequest(
+            { ...both, headers: Headers.fromInput(headers) },
+            { bearerOnly: true },
+          ),
         );
         expect(refused.status).toBe(401);
       }

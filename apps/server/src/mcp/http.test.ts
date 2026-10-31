@@ -7,7 +7,6 @@ import {
 } from "@cafecode/contracts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
@@ -17,30 +16,17 @@ import { describe, expect, it, type TestContext } from "vitest";
 
 import { ServerAuthLive } from "../auth/Layers/ServerAuth.ts";
 import { ServerSecretStoreLive } from "../auth/Layers/ServerSecretStore.ts";
-import { ServerAuth } from "../auth/Services/ServerAuth.ts";
 import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
 import { ServerConfig } from "../config.ts";
-import {
-  OrchestrationEngineService,
-  type OrchestrationEngineShape,
-} from "../orchestration/Services/OrchestrationEngine.ts";
-import {
-  ProjectionSnapshotQuery,
-  type ProjectionSnapshotQueryShape,
-} from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
-import {
-  ProviderRegistry,
-  type ProviderRegistryShape,
-} from "../provider/Services/ProviderRegistry.ts";
-import {
-  ProviderService,
-  type ProviderServiceShape,
-} from "../provider/Services/ProviderService.ts";
-import { ScheduledFollowups, type ScheduledFollowupsShape } from "../scheduledFollowups/service.ts";
-import { ServerRuntimeStartup, type ServerRuntimeStartupShape } from "../serverRuntimeStartup.ts";
-import { ServerSettingsService, type ServerSettingsShape } from "../serverSettings.ts";
-import { WorkspacePaths, type WorkspacePathsShape } from "../workspace/Services/WorkspacePaths.ts";
+import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import { ProviderService } from "../provider/Services/ProviderService.ts";
+import { ScheduledFollowups } from "../scheduledFollowups/service.ts";
+import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
+import { WorkspacePaths } from "../workspace/Services/WorkspacePaths.ts";
 import type { CafeMcpDependencies } from "./CafeMcpServer.ts";
 import { cafeMcpRouteLayer } from "./http.ts";
 
@@ -126,11 +112,24 @@ async function harness(context: TestContext) {
     prefix: "cafe-management-http-test-",
   });
   const runtime = ManagedRuntime.make(
-    ServerAuthLive.pipe(
-      Layer.provide(SqlitePersistenceTest),
-      Layer.provide(ServerSecretStoreLive),
-      Layer.provide(configLayer),
-      Layer.provide(NodeServices.layer),
+    Layer.mergeAll(
+      ServerAuthLive.pipe(
+        Layer.provide(SqlitePersistenceTest),
+        Layer.provide(ServerSecretStoreLive),
+        Layer.provide(configLayer),
+        Layer.provide(NodeServices.layer),
+      ),
+      // Typed mocks retain the real router's complete service contracts while
+      // defecting if an unrelated operation is accidentally used. Authentication
+      // and signed credential storage remain the actual production layers.
+      Layer.mock(OrchestrationEngineService)(dependencies.orchestrationEngine),
+      Layer.mock(ProjectionSnapshotQuery)(dependencies.projectionSnapshotQuery),
+      Layer.mock(ProviderRegistry)(dependencies.providerRegistry),
+      Layer.mock(ProviderService)(dependencies.providerService),
+      Layer.mock(ServerSettingsService)(dependencies.serverSettings),
+      Layer.mock(ServerRuntimeStartup)(dependencies.startup),
+      Layer.mock(WorkspacePaths)(dependencies.workspacePaths),
+      Layer.mock(ScheduledFollowups)({}),
     ),
   );
   const app = HttpRouter.toWebHandler(cafeMcpRouteLayer, { disableLogger: true });
@@ -174,32 +173,14 @@ async function harness(context: TestContext) {
     if (retired || context.signal.aborted) throw new Error("HTTP MCP fixture retired.");
   };
   assertLive();
-  const auth = await track(
-    runtime.runPromise(Effect.service(ServerAuth), { signal: context.signal }),
+  const services = await track(
+    runtime.runPromise(runtime.contextEffect, { signal: context.signal }),
   );
   assertLive();
   const issuer = await track(
     runtime.runPromise(Effect.service(SessionCredentialService), { signal: context.signal }),
   );
   assertLive();
-  // Narrow service fixtures intentionally refuse unrelated operations. The
-  // real router still selects every service and authenticates the actual token.
-  const services = Context.make(ServerAuth, auth).pipe(
-    Context.add(
-      OrchestrationEngineService,
-      dependencies.orchestrationEngine as OrchestrationEngineShape,
-    ),
-    Context.add(
-      ProjectionSnapshotQuery,
-      dependencies.projectionSnapshotQuery as ProjectionSnapshotQueryShape,
-    ),
-    Context.add(ProviderRegistry, dependencies.providerRegistry as ProviderRegistryShape),
-    Context.add(ProviderService, dependencies.providerService as ProviderServiceShape),
-    Context.add(ServerSettingsService, dependencies.serverSettings as ServerSettingsShape),
-    Context.add(ServerRuntimeStartup, dependencies.startup as ServerRuntimeStartupShape),
-    Context.add(WorkspacePaths, dependencies.workspacePaths as WorkspacePathsShape),
-    Context.add(ScheduledFollowups, {} as ScheduledFollowupsShape),
-  );
   const fetchRequest: typeof fetch = async (input, init) => {
     assertLive();
     const controller = new AbortController();

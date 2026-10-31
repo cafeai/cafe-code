@@ -4,12 +4,15 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+
+const encodePayload = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 it.layer(
   OrchestrationProjectionSnapshotQueryLive.pipe(
@@ -49,7 +52,7 @@ it.layer(
         for (const [id, threadId, kind, sequence, createdAt, usedTokens] of rows) {
           yield* sql`INSERT INTO projection_thread_activities
           (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
-          VALUES (${id},${threadId},NULL,'info',${kind},'Report',${JSON.stringify({ usedTokens })},${sequence},${createdAt})`;
+          VALUES (${id},${threadId},NULL,'info',${kind},'Report',${encodePayload({ usedTokens })},${sequence},${createdAt})`;
         }
         const report = yield* query.getThreadContextWindowActivity(ThreadId.make("usage-thread"));
         assert(Option.isSome(report));
