@@ -1019,6 +1019,16 @@ it("keeps an unconfirmed change off and refreshes instead of replaying it", asyn
   await expect.element(button()).toHaveAttribute("aria-pressed", "false");
   await button().click();
   await expect.element(button()).toHaveAttribute("aria-pressed", "true");
-  expect(fixture.control.mock.calls.at(-1)?.[0]).toEqual({ action: "status", threadId });
+  // The confirmed refresh enables ordinary activity polling. A later inert
+  // read must not replace proof of the original mutation and refresh order.
+  expect(
+    fixture.control.mock.calls
+      .map(([input]) => input)
+      .filter((input) => input.action !== "activity"),
+  ).toEqual([
+    { action: "status", threadId },
+    { action: "set-enabled", threadId, enabled: true },
+    { action: "status", threadId },
+  ]);
   expect(fixture.control.mock.calls.filter((c) => c[0].action === "set-enabled")).toHaveLength(1);
 });
