@@ -7,14 +7,20 @@ import {
 
 import { deriveGenerationRate, type GenerationRate } from "./generationRate";
 
-export type ContextWindowSnapshot = Omit<
-  ThreadContextWindowObservation,
-  "compactsAutomatically"
-> & {
-  readonly compactsAutomatically: boolean;
-  /** Chat-wide average of the most recent measured decoding, when reported. */
-  readonly generationRate?: GenerationRate | null;
-};
+type OptionalContextMetadata =
+  | "maxTokens"
+  | "totalProcessedTokens"
+  | "compactsAutomatically"
+  | "autoCompactTokenLimit";
+
+/** Keep the renderer's existing sparse snapshot input contract. The shared
+ * derivation returns explicit nulls for absent metadata, but callers and
+ * historical fixtures may still omit these optional native observations. */
+export type ContextWindowSnapshot = Omit<ThreadContextWindowObservation, OptionalContextMetadata> &
+  Partial<Pick<ThreadContextWindowObservation, OptionalContextMetadata>> & {
+    /** Chat-wide average of the most recent measured decoding, when reported. */
+    readonly generationRate?: GenerationRate | null;
+  };
 
 export function deriveLatestContextWindowSnapshot(
   activities: ReadonlyArray<OrchestrationThreadActivity>,

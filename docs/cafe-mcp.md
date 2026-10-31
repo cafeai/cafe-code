@@ -48,6 +48,8 @@ Missing readings are `null`/`unknown`, not zero or unlimited. A reset-only
 window retains its reset time while its remaining percentage stays unknown.
 Credit balances remain provider strings without an inferred currency. Up to
 128 limit buckets are returned with an explicit `truncated` flag. The exact
+legacy view uses the existing `codex` bucket key when no limit ID was reported;
+that compatibility key alone does not identify a model-specific allowance. The
 projected session instance takes precedence over a configured next-turn
 selection; a legacy session without that instance is labelled `configured`.
 Providers without cached account quota return unknown rather than triggering

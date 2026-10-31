@@ -14960,7 +14960,7 @@
   "compact-token-count\u0004{value}m": {
     "message": "{value}m",
     "context": "compact-token-count",
-    "locations": ["apps/web/src/lib/contextWindow.ts:46"]
+    "locations": ["apps/web/src/lib/contextWindow.ts:52"]
   },
   "create {kind}": {
     "message": "create {kind}",
@@ -16403,7 +16403,7 @@
   },
   "{value}k": {
     "message": "{value}k",
-    "locations": ["apps/web/src/lib/contextWindow.ts:41", "apps/web/src/lib/contextWindow.ts:44"]
+    "locations": ["apps/web/src/lib/contextWindow.ts:47", "apps/web/src/lib/contextWindow.ts:50"]
   },
   "{value}m": {
     "message": "{value}m",
