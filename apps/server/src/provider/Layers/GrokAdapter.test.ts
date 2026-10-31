@@ -541,9 +541,18 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         Effect.gen(function* () {
           const fixture = makeSchedulingRuntimeFixture();
           yield* Effect.addFinalizer(() => Effect.sync(fixture.release));
+          const issued: Parameters<
+            NonNullable<GrokAdapterLiveOptions["sessionCredentials"]>["issue"]
+          >[0][] = [];
           const adapter = yield* makeGrokAdapter(decodeGrokSettings({}), {
             makeRuntime: fixture.makeRuntime,
-            sessionCredentials: testSessionCredentials,
+            sessionCredentials: {
+              ...testSessionCredentials,
+              issue: (input) =>
+                Effect.sync(() => issued.push(input)).pipe(
+                  Effect.andThen(testSessionCredentials.issue()),
+                ),
+            },
             ...(account ? { instanceId: account } : {}),
           });
           const threadId = ThreadId.make("grok-scheduling-thread");
@@ -560,6 +569,16 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
             },
           ]);
           const launch = fixture.launches[0]!;
+          assert.equal(issued.length, 1);
+          assert.deepEqual(issued[0]?.managementLaunchContext, {
+            threadId,
+            providerInstanceId: account ?? ProviderInstanceId.make("grok"),
+            launchNonce: issued[0]?.managementLaunchContext?.launchNonce,
+          });
+          assert.match(
+            issued[0]?.managementLaunchContext?.launchNonce ?? "",
+            /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i,
+          );
           assert.equal(launch.permissionMode, "default");
           assert.equal(launch.sandboxProfile, "read-only");
           assert.deepEqual(

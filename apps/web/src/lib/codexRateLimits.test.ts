@@ -7,8 +7,6 @@ import {
   formatCodexRateLimitSummary,
   formatCodexRateLimitBuckets,
   formatCodexRateLimitPresentation,
-  selectCodexRateLimitBuckets,
-  selectCodexRateLimitSnapshot,
   shouldSurfaceProviderAccountRateLimits,
 } from "./codexRateLimits";
 
@@ -32,29 +30,6 @@ describe("codexRateLimits", () => {
         auth: { status: "authenticated" },
       }),
     ).toBe(false);
-  });
-
-  it("prefers the codex bucket when additional rate limit buckets are present", () => {
-    const snapshot = selectCodexRateLimitSnapshot({
-      checkedAt: "2026-05-28T00:00:00.000Z",
-      rateLimits: {
-        limitId: "other",
-        primary: { usedPercent: 90 },
-      },
-      rateLimitsByLimitId: {
-        other: {
-          limitId: "other",
-          primary: { usedPercent: 90 },
-        },
-        codex: {
-          limitId: "codex",
-          primary: { usedPercent: 20 },
-        },
-      },
-    });
-
-    expect(snapshot?.limitId).toBe("codex");
-    expect(snapshot?.primary?.usedPercent).toBe(20);
   });
 
   it("formats primary hours, secondary days, left percentages, and local reset times", () => {
@@ -226,12 +201,6 @@ describe("codexRateLimits", () => {
       "75% left",
     ]);
     expect(buckets[1]?.label).toBe("Research quota");
-    expect(
-      selectCodexRateLimitBuckets({
-        ...input,
-        rateLimits: { limitId: "legacy-only", primary: { usedPercent: 10 } },
-      }).map((bucket) => bucket.id),
-    ).toContain("legacy-only");
     expect(formatCodexRateLimitInlineText(input)).toContain(
       "Research quota: Primary window: 75% left",
     );

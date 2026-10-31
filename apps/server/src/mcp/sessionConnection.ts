@@ -10,6 +10,7 @@ import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
 import { readProviderMcpCredentialIssuer } from "../auth/ProviderMcpCredentialBroker.ts";
 import type { SessionCredentialServiceShape } from "../auth/Services/SessionCredentialService.ts";
+import { makeManagementLaunchContext } from "../auth/managementLaunchContext.ts";
 import { ServerConfig } from "../config.ts";
 import { makeSessionMcpFiles } from "./sessionFiles.ts";
 
@@ -47,12 +48,21 @@ export const makeManagementMcpSession = (input: {
     const config = yield* ServerConfig;
     const scope = yield* Scope.make();
     const subject = `provider:cafe-management:${randomUUID()}`;
+    // Snapshot one immutable context for this binding and every rotated SID.
+    // A new provider opening mints a new nonce; no renderer/account defaults
+    // participate in deciding which chat an omitted management argument means.
+    const managementLaunchContext = makeManagementLaunchContext({
+      threadId: input.threadId,
+      providerInstanceId: input.providerInstanceId,
+      launchNonce: randomUUID(),
+    });
     const issuedIds = new Set<Parameters<typeof credentials.revoke>[0]>();
     const issue = credentials
       .issue({
         subject,
         role: "owner",
         method: "bearer-session-token",
+        ...(managementLaunchContext ? { managementLaunchContext } : {}),
         ttl: Duration.days(30),
         client: {
           label: "Cafe management tools",
@@ -108,7 +118,21 @@ export const makeManagementMcpSession = (input: {
       // this background task. New calls read the atomically replaced private file.
       const refresh = Effect.gen(function* () {
         const verified = yield* credentials.verify(credential.token);
-        if (verified.subject !== subject || verified.role !== "owner") return yield* unavailable();
+        const verifiedContext = verified.managementLaunchContext;
+        const sameLaunchContext =
+          managementLaunchContext === undefined
+            ? verifiedContext === undefined
+            : verifiedContext !== undefined &&
+              verifiedContext.threadId === managementLaunchContext.threadId &&
+              verifiedContext.providerInstanceId === managementLaunchContext.providerInstanceId &&
+              verifiedContext.launchNonce === managementLaunchContext.launchNonce;
+        if (
+          verified.subject !== subject ||
+          verified.role !== "owner" ||
+          verified.method !== "bearer-session-token" ||
+          !sameLaunchContext
+        )
+          return yield* unavailable();
         const now = yield* DateTime.now;
         if (
           DateTime.toEpochMillis(credential.expiresAt) - DateTime.toEpochMillis(now) >

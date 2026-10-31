@@ -31,7 +31,7 @@ export const cafeMcpRouteLayer = HttpRouter.add(
         status: 401,
       });
     }
-    const session = yield* serverAuth.authenticateHttpRequest(request);
+    const session = yield* serverAuth.authenticateHttpRequest(request, { bearerOnly: true });
     if (session.role !== "owner" || session.subject === "cafe-mcp-local-bridge") {
       return yield* new AuthError({
         message: "Only owner sessions can use the Cafe Code MCP server.",
@@ -60,16 +60,21 @@ export const cafeMcpRouteLayer = HttpRouter.add(
         const transport = new WebStandardStreamableHTTPServerTransport({
           enableJsonResponse: true,
         });
-        const mcpServer = makeCafeMcpServer({
-          orchestrationEngine,
-          projectionSnapshotQuery,
-          providerRegistry,
-          providerService,
-          serverSettings,
-          startup,
-          workspacePaths,
-          scheduledFollowups,
-        });
+        const mcpServer = makeCafeMcpServer(
+          {
+            orchestrationEngine,
+            projectionSnapshotQuery,
+            providerRegistry,
+            providerService,
+            serverSettings,
+            startup,
+            workspacePaths,
+            scheduledFollowups,
+          },
+          session.managementLaunchContext
+            ? { managementLaunchContext: session.managementLaunchContext }
+            : undefined,
+        );
         try {
           await mcpServer.connect(transport);
           return await transport.handleRequest(webRequest);

@@ -88,6 +88,10 @@
       "types": "./src/codexCompactionDiagnostics.ts",
       "import": "./src/codexCompactionDiagnostics.ts"
     },
+    "./threadResourceUsage": {
+      "types": "./src/threadResourceUsage.ts",
+      "import": "./src/threadResourceUsage.ts"
+    },
     "./claudeResponseLimits": {
       "types": "./src/claudeResponseLimits.ts",
       "import": "./src/claudeResponseLimits.ts"

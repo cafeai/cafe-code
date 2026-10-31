@@ -2508,6 +2508,21 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  const getThreadContextWindowRow = SqlSchema.findOneOption({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ threadId }) => sql`
+      SELECT activity_id AS "activityId", thread_id AS "threadId",
+        turn_id AS "turnId", tone, kind, summary, payload_json AS "payload",
+        sequence, created_at AS "createdAt"
+      FROM projection_thread_activities INDEXED BY idx_projection_context_window_latest
+      WHERE thread_id = ${threadId} AND kind = 'context-window.updated'
+      ORDER BY CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+        sequence DESC, created_at DESC, activity_id DESC
+      LIMIT 1
+    `,
+  });
+
   const listThreadActivityRowsByThread = SqlSchema.findAll({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadDetailActivityDbRowSchema,
@@ -5178,6 +5193,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getFirstActiveThreadIdByProjectId,
     getThreadCheckpointContext,
     getThreadShellById,
+    getThreadContextWindowActivity: (threadId) =>
+      getThreadContextWindowRow({ threadId }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.getThreadContextWindowActivity:query",
+            "ProjectionSnapshotQuery.getThreadContextWindowActivity:decodeRow",
+          ),
+        ),
+        Effect.map(Option.map(mapActivityRow)),
+      ),
     getPostTerminalStaleSteerCandidates,
     getPostTerminalStaleSteerCandidateThreadIds,
     getCodexSteerAcceptanceEvidence,

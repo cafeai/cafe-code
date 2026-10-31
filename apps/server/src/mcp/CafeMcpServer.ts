@@ -48,6 +48,8 @@ import { redactServerSettingsForClient, type ServerSettingsShape } from "../serv
 import type { WorkspacePathsShape } from "../workspace/Services/WorkspacePaths.ts";
 import type { ScheduledFollowupsShape } from "../scheduledFollowups/service.ts";
 import { registerScheduledFollowupTools } from "../scheduledFollowups/mcp.ts";
+import type { ManagementLaunchContext } from "../auth/managementLaunchContext.ts";
+import { registerThreadUsageTool } from "./threadUsage.ts";
 
 const CAFE_MCP_SERVER_NAME = "cafe-code";
 const CAFE_MCP_SERVER_VERSION = "1.0.0";
@@ -140,6 +142,7 @@ export interface CafeMcpDependencies extends ProviderRuntimeControlDependencies 
     | "getProjectShellById"
     | "getThreadDetailById"
     | "getThreadShellById"
+    | "getThreadContextWindowActivity"
   >;
   readonly providerRegistry: Pick<ProviderRegistryShape, "getProviders" | "refreshInstance">;
   readonly providerService: Pick<
@@ -152,6 +155,8 @@ export interface CafeMcpDependencies extends ProviderRuntimeControlDependencies 
 }
 
 export interface CafeMcpServerOptions {
+  /** Verified internal launch intent; never derived from caller headers or subject text. */
+  readonly managementLaunchContext?: ManagementLaunchContext;
   /**
    * Schedule a provider restart after its tool acknowledgement is returned.
    * Tests inject a deterministic scheduler; production uses an unref'd timer.
@@ -544,15 +549,17 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
         "Failed to load the thread.",
       );
       if (Option.isNone(detail)) throw new Error(`Thread '${threadId}' does not exist.`);
-      const messages = detail.value.messages.slice(-messageLimit).map((message) => ({
-        id: message.id,
-        role: message.role,
-        text: message.text,
-        turnId: message.turnId,
-        streaming: message.streaming,
-        createdAt: message.createdAt,
-        updatedAt: message.updatedAt,
-      }));
+      const messages = (messageLimit === 0 ? [] : detail.value.messages.slice(-messageLimit)).map(
+        (message) => ({
+          id: message.id,
+          role: message.role,
+          text: message.text,
+          turnId: message.turnId,
+          streaming: message.streaming,
+          createdAt: message.createdAt,
+          updatedAt: message.updatedAt,
+        }),
+      );
       return toolResult(
         { thread: summarizeThread(detail.value), messages },
         `Loaded thread '${detail.value.title}' with ${messages.length} recent message(s).`,
@@ -1345,11 +1352,12 @@ export function makeCafeMcpServer(
     { name: CAFE_MCP_SERVER_NAME, version: CAFE_MCP_SERVER_VERSION },
     {
       instructions:
-        "Use list_projects, list_threads, and list_providers before mutations so you operate on stable Cafe Code IDs. Deletions, interrupts, provider configuration, and provider restarts are consequential. restart_provider_and_resume returns before teardown, then Cafe Code restarts the provider and submits a durable resume turn to each thread that was running at the restart boundary.",
+        "Use list_projects, list_threads, and list_providers before mutations so you operate on stable Cafe Code IDs. Use get_thread_usage to inspect last-reported context headroom and shared provider-account quota without loading messages; omitted threadId means only the authenticated launch Cafe chat, including on inherited subagent connections. Deletions, interrupts, provider configuration, and provider restarts are consequential. restart_provider_and_resume returns before teardown, then Cafe Code restarts the provider and submits a durable resume turn to each thread that was running at the restart boundary.",
     },
   );
 
   registerDiscoveryTools(server, dependencies);
+  registerThreadUsageTool(server, dependencies, options);
   if (dependencies.scheduledFollowups)
     registerScheduledFollowupTools(server, dependencies.scheduledFollowups);
   registerProjectTools(server, dependencies);

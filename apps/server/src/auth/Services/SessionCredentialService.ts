@@ -5,6 +5,7 @@ import * as Duration from "effect/Duration";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
+import type { ManagementLaunchContext } from "../managementLaunchContext.ts";
 
 export type SessionRole = "owner" | "client";
 
@@ -25,6 +26,8 @@ export interface VerifiedSession {
   readonly expiresAt?: DateTime.DateTime;
   readonly subject: string;
   readonly role: SessionRole;
+  /** Signed internal provider launch intent; absent on ordinary/manual grants. */
+  readonly managementLaunchContext?: ManagementLaunchContext;
 }
 
 export type SessionCredentialChange =
@@ -51,6 +54,8 @@ export interface SessionCredentialServiceShape {
     readonly method?: AuthContracts.ServerAuthSessionMethod;
     readonly role?: SessionRole;
     readonly client?: AuthContracts.AuthClientMetadata;
+    // Deliberately absent from the public CLI/AuthControlPlane issuance input.
+    readonly managementLaunchContext?: ManagementLaunchContext;
   }) => Effect.Effect<IssuedSession, SessionCredentialError>;
   readonly verify: (token: string) => Effect.Effect<VerifiedSession, SessionCredentialError>;
   readonly issueWebSocketToken: (

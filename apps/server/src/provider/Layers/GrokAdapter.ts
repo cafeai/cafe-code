@@ -60,6 +60,7 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { prepareFileAttachmentPrompt } from "../fileAttachmentPrompt.ts";
 import type { SessionCredentialServiceShape } from "../../auth/Services/SessionCredentialService.ts";
 import { readProviderMcpCredentialIssuer } from "../../auth/ProviderMcpCredentialBroker.ts";
+import { makeManagementLaunchContext } from "../../auth/managementLaunchContext.ts";
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
 import {
   readSchedulingSessionBroker,
@@ -1367,12 +1368,18 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               detail: "Cafe MCP credential service is unavailable for this Grok session.",
             });
           }
+          const managementLaunchContext = makeManagementLaunchContext({
+            threadId: input.threadId,
+            providerInstanceId: boundInstanceId,
+            launchNonce: yield* randomUUIDv4,
+          });
           const mcpCredential = yield* credentialIssuer
             .issue({
               ttl: Duration.hours(24),
               subject: `provider:grok:${boundInstanceId}`,
               method: "bearer-session-token",
               role: "owner",
+              ...(managementLaunchContext ? { managementLaunchContext } : {}),
               client: {
                 label: "Grok ACP",
                 deviceType: "bot",

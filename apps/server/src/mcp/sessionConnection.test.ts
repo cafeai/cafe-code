@@ -51,17 +51,46 @@ it.layer(NodeServices.layer)("launch-time management connection", (it) => {
       Effect.gen(function* () {
         const f = yield* fixture;
         const first = (yield* makeManagementMcpSession(f.input))!;
+        yield* Effect.addFinalizer(() => first.dispose);
         const second = (yield* makeManagementMcpSession({
           ...f.input,
           threadId: ThreadId.make("other-chat"),
         }))!;
+        yield* Effect.addFinalizer(() => second.dispose);
+        const historical = (yield* makeManagementMcpSession({
+          ...f.input,
+          threadId: ThreadId.make("x".repeat(513)),
+        }))!;
+        yield* Effect.addFinalizer(() => historical.dispose);
         const a = yield* Effect.promise(() => readBridgeConnection(first.launch.args[1]!));
         const b = yield* Effect.promise(() => readBridgeConnection(second.launch.args[1]!));
+        const legacy = yield* Effect.promise(() =>
+          readBridgeConnection(historical.launch.args[1]!),
+        );
         expect(first.name).not.toBe(second.name);
         expect(a.token).not.toBe(b.token);
         expect(encodeJsonText(first.launch)).not.toContain(a.token);
         expect(first.launch.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
-        expect((yield* f.credentials.verify(a.token)).role).toBe("owner");
+        const firstVerified = yield* f.credentials.verify(a.token);
+        const secondVerified = yield* f.credentials.verify(b.token);
+        expect(firstVerified.role).toBe("owner");
+        expect(firstVerified.managementLaunchContext).toEqual({
+          threadId: f.input.threadId,
+          providerInstanceId: f.input.providerInstanceId,
+          launchNonce: expect.any(String),
+        });
+        expect(secondVerified.managementLaunchContext?.threadId).toBe("other-chat");
+        expect(secondVerified.managementLaunchContext?.providerInstanceId).toBe(
+          f.input.providerInstanceId,
+        );
+        expect(secondVerified.managementLaunchContext?.launchNonce).not.toBe(
+          firstVerified.managementLaunchContext?.launchNonce,
+        );
+        // Unsupported optional metadata never blocks otherwise valid provider
+        // startup. Such a token still has owner scope but needs an explicit ID.
+        const historicalVerified = yield* f.credentials.verify(legacy.token);
+        expect(historicalVerified.role).toBe("owner");
+        expect(historicalVerified.managementLaunchContext).toBeUndefined();
         yield* first.dispose;
         yield* first.dispose;
         expect((yield* Effect.exit(f.credentials.verify(a.token)))._tag).toBe("Failure");
@@ -69,13 +98,17 @@ it.layer(NodeServices.layer)("launch-time management connection", (it) => {
         expect(yield* f.fs.exists(first.launch.args[1]!)).toBe(false);
         yield* second.dispose;
         expect((yield* Effect.exit(f.credentials.verify(b.token)))._tag).toBe("Failure");
+        yield* historical.dispose;
+        expect((yield* Effect.exit(f.credentials.verify(legacy.token)))._tag).toBe("Failure");
       }).pipe(Effect.provide(sessionsLayer.pipe(Layer.provideMerge(configLayer)))),
   );
   it.effect("renews a multi-day connection without overriding owner revocation", () =>
     Effect.gen(function* () {
       const f = yield* fixture;
       const binding = (yield* makeManagementMcpSession(f.input))!;
+      yield* Effect.addFinalizer(() => binding.dispose);
       const first = yield* Effect.promise(() => readBridgeConnection(binding.launch.args[1]!));
+      const originalIdentity = yield* f.credentials.verify(first.token);
       yield* Effect.yieldNow;
       yield* TestClock.adjust(Duration.days(24));
       const next = yield* Effect.promise(() =>
@@ -87,6 +120,8 @@ it.layer(NodeServices.layer)("launch-time management connection", (it) => {
       );
       expect(next.token).not.toBe(first.token);
       const verified = yield* f.credentials.verify(next.token);
+      expect(verified.sessionId).not.toBe(originalIdentity.sessionId);
+      expect(verified.managementLaunchContext).toEqual(originalIdentity.managementLaunchContext);
       yield* f.credentials.revoke(verified.sessionId);
       yield* TestClock.adjust(Duration.days(1));
       expect(
@@ -147,6 +182,7 @@ it.layer(NodeServices.layer)("launch-time management connection", (it) => {
       expect((yield* Effect.exit(f.credentials.verify(oldA.token)))._tag).toBe("Failure");
       expect((yield* Effect.exit(f.credentials.verify(oldB.token)))._tag).toBe("Failure");
       expect((yield* f.credentials.verify(owner.token)).role).toBe("owner");
+      expect((yield* f.credentials.verify(owner.token)).managementLaunchContext).toBeUndefined();
     }).pipe(
       Effect.provide(
         ServerSettingsService.layerTest().pipe(

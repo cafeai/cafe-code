@@ -5,6 +5,7 @@ import * as Layer from "effect/Layer";
 import * as Clock from "effect/Clock";
 import * as TestClock from "effect/testing/TestClock";
 import { AuthSessionId } from "@cafecode/contracts/auth";
+import { ProviderInstanceId, ThreadId } from "@cafecode/contracts";
 import { TwoFactorService } from "../Services/TwoFactorService.ts";
 import { totpAtStep } from "../totp.ts";
 
@@ -15,6 +16,7 @@ import { BootstrapCredentialError } from "../Services/BootstrapCredentialService
 import { ServerAuth, type ServerAuthShape } from "../Services/ServerAuth.ts";
 import { ServerAuthLive, toBootstrapExchangeAuthError } from "./ServerAuth.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
+import { readProviderMcpCredentialIssuer } from "../ProviderMcpCredentialBroker.ts";
 
 const makeServerConfigLayer = (overrides?: Partial<ServerConfigShape>) =>
   Layer.effect(
@@ -54,6 +56,51 @@ const requestMetadata = {
 };
 
 it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
+  it.effect("authenticates the exact management bearer without substituting a browser cookie", () =>
+    Effect.gen(function* () {
+      const auth = yield* ServerAuth;
+      const issuer = readProviderMcpCredentialIssuer();
+      expect(issuer).toBeDefined();
+      const cookie = yield* issuer!.issue({ subject: "browser-owner", role: "owner" });
+      const launch = {
+        threadId: ThreadId.make("bearer-launch-thread"),
+        providerInstanceId: ProviderInstanceId.make("codex-personal"),
+        launchNonce: "989be62b-0759-49c7-89a8-116a737560fe",
+      };
+      const bearer = yield* issuer!.issue({
+        subject: "provider:cafe-management:fixture",
+        role: "owner",
+        method: "bearer-session-token",
+        managementLaunchContext: launch,
+      });
+      const both = {
+        ...makeCookieRequest(cookie.token),
+        headers: { authorization: `Bearer ${bearer.token}` },
+      };
+      const ordinary = yield* auth.authenticateHttpRequest(both);
+      expect(ordinary.sessionId).toBe(cookie.sessionId);
+      expect(ordinary.managementLaunchContext).toBeUndefined();
+      const management = yield* auth.authenticateHttpRequest(both, { bearerOnly: true });
+      expect(management.sessionId).toBe(bearer.sessionId);
+      expect(management.managementLaunchContext).toEqual(launch);
+      const rejectedHeaders: ReadonlyArray<Readonly<Record<string, string>>> = [
+        {},
+        { authorization: "Bearer invalid-token" },
+      ];
+      for (const headers of rejectedHeaders) {
+        const refused = yield* Effect.flip(
+          auth.authenticateHttpRequest({ ...both, headers }, { bearerOnly: true }),
+        );
+        expect(refused.status).toBe(401);
+      }
+      yield* issuer!.revoke(bearer.sessionId);
+      expect(
+        (yield* Effect.flip(auth.authenticateHttpRequest(both, { bearerOnly: true }))).status,
+      ).toBe(401);
+      expect((yield* auth.authenticateHttpRequest(both)).sessionId).toBe(cookie.sessionId);
+    }).pipe(Effect.provide(makeServerAuthLayer())),
+  );
+
   it.effect(
     "requires second-factor proof for both cookie and bearer password and pairing logins",
     () =>

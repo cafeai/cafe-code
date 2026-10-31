@@ -72,9 +72,19 @@ it.layer(NodeServices.layer)("AuthControlPlane", (it) => {
       const authControlPlane = yield* AuthControlPlane;
       const sessionCredentials = yield* SessionCredentialService;
 
-      const issued = yield* authControlPlane.issueSession({
+      // Public/CLI issuance accepts arbitrary labels and subjects, but neither
+      // a reserved-looking subject nor an extra received field grants a launch
+      // default. The control plane copies only its declared public inputs.
+      const manualInput = {
         label: "deploy-bot",
-      });
+        subject: "provider:cafe-management:manual",
+        managementLaunchContext: {
+          threadId: "forged-default-chat",
+          providerInstanceId: "claude-work",
+          launchNonce: "989be62b-0759-49c7-89a8-116a737560fe",
+        },
+      };
+      const issued = yield* authControlPlane.issueSession(manualInput);
       const verified = yield* sessionCredentials.verify(issued.token);
       const listedBeforeRevoke = yield* authControlPlane.listSessions();
       const revoked = yield* authControlPlane.revokeSession(issued.sessionId);
@@ -87,6 +97,7 @@ it.layer(NodeServices.layer)("AuthControlPlane", (it) => {
       expect(verified.sessionId).toBe(issued.sessionId);
       expect(verified.role).toBe("owner");
       expect(verified.method).toBe("bearer-session-token");
+      expect(verified.managementLaunchContext).toBeUndefined();
       expect(listedBeforeRevoke).toHaveLength(1);
       expect(listedBeforeRevoke[0]?.sessionId).toBe(issued.sessionId);
       expect("token" in (listedBeforeRevoke[0] ?? {})).toBe(false);

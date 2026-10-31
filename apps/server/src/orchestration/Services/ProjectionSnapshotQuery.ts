@@ -15,6 +15,7 @@ import type {
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
   OrchestrationThread,
+  OrchestrationThreadActivity,
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadTurnActivityPage,
   OrchestrationThreadTurnActivityPageInput,
@@ -294,6 +295,15 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadShellById: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
+
+  /**
+   * Read only the newest persisted context report. The dedicated partial
+   * ordering index avoids hydrating messages or scanning an ordinary tool
+   * activity tail when an agent checks its remaining context.
+   */
+  readonly getThreadContextWindowActivity: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<OrchestrationThreadActivity>, ProjectionRepositoryError>;
 
   /**
    * Find active Codex threads with either a shell-proven legacy latest-turn

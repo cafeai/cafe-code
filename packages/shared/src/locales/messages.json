@@ -25,7 +25,7 @@
   },
   " ({percent} left)": {
     "message": " ({percent} left)",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:345"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:324"]
   },
   " Code": {
     "message": " Code",
@@ -517,7 +517,7 @@
     "message": "Account usage",
     "locations": [
       "apps/web/src/components/ProviderAccountQuotaDetails.tsx:132",
-      "apps/web/src/lib/codexRateLimits.ts:189"
+      "apps/web/src/lib/codexRateLimits.ts:184"
     ]
   },
   "Account: <slot1></slot1>. This account will execute and pay for these follow-ups.": {
@@ -1312,7 +1312,7 @@
   },
   "Available (balance not reported)": {
     "message": "Available (balance not reported)",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:281"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:258"]
   },
   "Average": {
     "message": "Average",
@@ -3960,7 +3960,7 @@
   },
   "Credits": {
     "message": "Credits",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:339"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:318"]
   },
   "Ctrl": {
     "message": "Ctrl",
@@ -6390,7 +6390,7 @@
   },
   "Individual spend limit": {
     "message": "Individual spend limit",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:349"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:328"]
   },
   "Individual task controls": {
     "message": "Individual task controls",
@@ -6865,8 +6865,8 @@
   "Limit reached": {
     "message": "Limit reached",
     "locations": [
-      "apps/web/src/lib/codexRateLimits.ts:365",
-      "apps/web/src/lib/codexRateLimits.ts:378"
+      "apps/web/src/lib/codexRateLimits.ts:344",
+      "apps/web/src/lib/codexRateLimits.ts:357"
     ]
   },
   "Limited": {
@@ -8099,7 +8099,7 @@
   },
   "None available": {
     "message": "None available",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:282"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:259"]
   },
   "Nonprinting and directional controls are shown as Unicode escapes.": {
     "message": "Nonprinting and directional controls are shown as Unicode escapes.",
@@ -9138,7 +9138,7 @@
   },
   "Primary": {
     "message": "Primary",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:317"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:296"]
   },
   "Primary directory": {
     "message": "Primary directory",
@@ -9146,7 +9146,7 @@
   },
   "Primary window": {
     "message": "Primary window",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:305"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:284"]
   },
   "Private Debug native home": {
     "message": "Private Debug native home",
@@ -10263,7 +10263,7 @@
   },
   "Resets: {count}": {
     "message": "Resets: {count}",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:214"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:202"]
   },
   "Resident memory across backend, provider daemon, provider supervisor, and attributable child processes in the current process snapshot.": {
     "message": "Resident memory across backend, provider daemon, provider supervisor, and attributable child processes in the current process snapshot.",
@@ -11051,11 +11051,11 @@
   },
   "Secondary": {
     "message": "Secondary",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:325"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:304"]
   },
   "Secondary window": {
     "message": "Secondary window",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:310"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:289"]
   },
   "Secrets redacted": {
     "message": "Secrets redacted",
@@ -11827,7 +11827,7 @@
   },
   "Spend control": {
     "message": "Spend control",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:365"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:344"]
   },
   "Split below": {
     "message": "Split below",
@@ -13729,11 +13729,11 @@
   },
   "Unlimited": {
     "message": "Unlimited",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:278"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:255"]
   },
   "Unlimited (balance: {balance})": {
     "message": "Unlimited (balance: {balance})",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:277"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:254"]
   },
   "Unnamed environment": {
     "message": "Unnamed environment",
@@ -14009,13 +14009,13 @@
   "Usage limit reached": {
     "message": "Usage limit reached",
     "locations": [
-      "apps/web/src/lib/codexRateLimits.ts:372",
+      "apps/web/src/lib/codexRateLimits.ts:351",
       "apps/web/src/providerDiagnostic.ts:232"
     ]
   },
   "Usage limit resets available: {count}": {
     "message": "Usage limit resets available: {count}",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:215"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:203"]
   },
   "Usage limited": {
     "message": "Usage limited",
@@ -14637,19 +14637,19 @@
   },
   "Workspace member credits depleted": {
     "message": "Workspace member credits depleted",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:374"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:353"]
   },
   "Workspace member usage limit reached": {
     "message": "Workspace member usage limit reached",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:376"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:355"]
   },
   "Workspace owner credits depleted": {
     "message": "Workspace owner credits depleted",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:373"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:352"]
   },
   "Workspace owner usage limit reached": {
     "message": "Workspace owner usage limit reached",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:375"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:354"]
   },
   "Workspace path": {
     "message": "Workspace path",
@@ -14960,7 +14960,7 @@
   "compact-token-count\u0004{value}m": {
     "message": "{value}m",
     "context": "compact-token-count",
-    "locations": ["apps/web/src/lib/contextWindow.ts:99"]
+    "locations": ["apps/web/src/lib/contextWindow.ts:46"]
   },
   "create {kind}": {
     "message": "create {kind}",
@@ -15673,11 +15673,11 @@
   },
   "{available, select, yes {Available} other {None available}} (balance: {balance})": {
     "message": "{available, select, yes {Available} other {None available}} (balance: {balance})",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:294"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:271"]
   },
   "{balance} available": {
     "message": "{balance} available",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:293"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:270"]
   },
   "{branch} branch": {
     "message": "{branch} branch",
@@ -15870,7 +15870,7 @@
     "message": "{days}d",
     "locations": [
       "apps/web/src/components/chat/ThreadGoalControl.tsx:101",
-      "apps/web/src/lib/codexRateLimits.ts:115"
+      "apps/web/src/lib/codexRateLimits.ts:120"
     ]
   },
   "{days}d {hours}h": {
@@ -15905,7 +15905,7 @@
     "message": "{hours}h",
     "locations": [
       "apps/web/src/components/chat/ThreadGoalControl.tsx:102",
-      "apps/web/src/lib/codexRateLimits.ts:116",
+      "apps/web/src/lib/codexRateLimits.ts:121",
       "apps/web/src/session-logic.ts:275"
     ]
   },
@@ -15941,7 +15941,7 @@
   },
   "{label} ({duration})": {
     "message": "{label} ({duration})",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:158"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:163"]
   },
   "{label} {state, select, on {On} other {Off}}": {
     "message": "{label} {state, select, on {On} other {Off}}",
@@ -15967,9 +15967,9 @@
     "message": "{label}: {value}",
     "locations": [
       "apps/web/src/components/chat/schedulePresentation.ts:164",
-      "apps/web/src/lib/codexRateLimits.ts:165",
-      "apps/web/src/lib/codexRateLimits.ts:335",
-      "apps/web/src/lib/codexRateLimits.ts:439"
+      "apps/web/src/lib/codexRateLimits.ts:169",
+      "apps/web/src/lib/codexRateLimits.ts:314",
+      "apps/web/src/lib/codexRateLimits.ts:418"
     ]
   },
   "{label}{isDefault, select, yes { (default)} other {}}": {
@@ -15985,7 +15985,7 @@
     "locations": [
       "apps/web/src/components/chat/ThreadGoalControl.tsx:103",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:97",
-      "apps/web/src/lib/codexRateLimits.ts:117",
+      "apps/web/src/lib/codexRateLimits.ts:122",
       "apps/web/src/session-logic.ts:278"
     ]
   },
@@ -16042,11 +16042,11 @@
   },
   "{percent} left": {
     "message": "{percent} left",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:161"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:165"]
   },
   "{percent}%": {
     "message": "{percent}%",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:66"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:71"]
   },
   "{percent}% of extra usage used": {
     "message": "{percent}% of extra usage used",
@@ -16201,11 +16201,11 @@
   },
   "{unit, select, day {{value, plural, one {# day} other {# days}}} hour {{value, plural, one {# hour} other {# hours}}} other {{value, plural, one {# minute} other {# minutes}}}}": {
     "message": "{unit, select, day {{value, plural, one {# day} other {# days}}} hour {{value, plural, one {# hour} other {# hours}}} other {{value, plural, one {# minute} other {# minutes}}}}",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:85"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:90"]
   },
   "{used} used of {limit}{remaining}{resetKnown, select, yes {, resets {reset}} other {}}": {
     "message": "{used} used of {limit}{remaining}{resetKnown, select, yes {, resets {reset}} other {}}",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:350"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:329"]
   },
   "{value0} (Enter)": {
     "message": "{value0} (Enter)",
@@ -16403,7 +16403,7 @@
   },
   "{value}k": {
     "message": "{value}k",
-    "locations": ["apps/web/src/lib/contextWindow.ts:94", "apps/web/src/lib/contextWindow.ts:97"]
+    "locations": ["apps/web/src/lib/contextWindow.ts:41", "apps/web/src/lib/contextWindow.ts:44"]
   },
   "{value}m": {
     "message": "{value}m",
@@ -16432,8 +16432,8 @@
   "{window} reset: {time}": {
     "message": "{window} reset: {time}",
     "locations": [
-      "apps/web/src/lib/codexRateLimits.ts:319",
-      "apps/web/src/lib/codexRateLimits.ts:327"
+      "apps/web/src/lib/codexRateLimits.ts:298",
+      "apps/web/src/lib/codexRateLimits.ts:306"
     ]
   },
   "· <slot1></slot1> customized": {

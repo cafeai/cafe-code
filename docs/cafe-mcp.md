@@ -10,6 +10,63 @@ Codex receives a private stdio server through the existing structured app-server
 
 Management tools have owner authority over Cafe projects, chats, providers and settings. Cafe adds no management approval prompt and does not modify provider approval policy. This is broader than scheduling's proposal/list/pause capability; enabling management never approves a recurring task.
 
+## Context and quota status
+
+Use `get_thread_usage` to check remaining context and provider quota without
+loading messages or starting a provider request:
+
+```json
+{ "threadId": "the-cafe-thread-id" }
+```
+
+Cafe-issued management connections may omit `threadId` to use their signed
+launch chat. External/manual and legacy connections must pass it explicitly.
+An inherited subagent connection still identifies the launch **Cafe chat**;
+it does not identify the child's independent native context window. An owner
+may request another Cafe chat explicitly, as with the other management reads.
+
+The response contains three separate records:
+
+- `target` identifies the selected Cafe chat. `launchMatchesSession` compares
+  launch intent with the projected provider instance when both are known;
+  it is not a native-generation or liveness proof.
+- `context` reports last-observed tokens, native capacity when available,
+  remaining tokens/percentage, processed tokens and reported compaction
+  settings. `observedAt` dates that report. Historical reports lack native
+  owner attribution and remain labelled `ownerAttribution: "not-recorded"`,
+  including after an account switch. Native token totals already include
+  reasoning; the tool does not add it again or expose Codex's hidden internal
+  compaction estimate. Saved context overrides do not replace reported capacity.
+- `quota` reports cached account-shared allowance for `providerInstanceId`,
+  including separate exact limit buckets, primary/secondary percentages and
+  native durations, reset timestamps in **epoch seconds**, credit balance and
+  the authoritative available reset count. This is not a per-chat token budget.
+  Multiple chats using the same provider account share it. `checkedAt` dates
+  the cached account snapshot; retained individual windows may be older.
+
+Missing readings are `null`/`unknown`, not zero or unlimited. A reset-only
+window retains its reset time while its remaining percentage stays unknown.
+Credit balances remain provider strings without an inferred currency. Up to
+128 limit buckets are returned with an explicit `truncated` flag. The exact
+projected session instance takes precedence over a configured next-turn
+selection; a legacy session without that instance is labelled `configured`.
+Providers without cached account quota return unknown rather than triggering
+a native probe or borrowing another chat's passive report.
+
+These are passive reads of projection metadata and the provider registry.
+They do not refresh account state, enumerate native sessions, renew runtime
+ownership, run inference, or return authentication details or transcripts.
+The context lookup uses a dedicated partial ordering index and hydrates one
+context activity, independently of the chat's recent tool-activity cap.
+Existing `get_thread` clients may use `messageLimit: 0` for an empty message
+list; `get_thread_usage` is the dedicated usage-only interface.
+
+The default target is taken only from an internally issued signed launch
+claim on the verified bearer session. Subject strings, cookies, client labels,
+query parameters and extra thread headers cannot choose it. Existing manually
+issued owner tokens retain explicit-target access. See
+[the resource-status decision](decisions/mcp-thread-resource-status.md).
+
 ## External MCP clients
 
 External clients can connect to Cafe's authenticated Streamable HTTP endpoint at

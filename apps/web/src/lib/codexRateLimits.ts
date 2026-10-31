@@ -2,9 +2,14 @@ import { uiFormatDateTime, uiText } from "@cafecode/shared/i18n";
 import type {
   ServerProvider,
   ServerProviderAccountRateLimitSnapshot,
-  ServerProviderAccountRateLimitWindow,
   ServerProviderAccountRateLimits,
 } from "@cafecode/contracts";
+import {
+  deriveAvailableRateLimitResetCount,
+  deriveCodexRateLimitBuckets,
+  deriveProviderRateLimitWindow,
+  type ProviderRateLimitWindowUsage,
+} from "@cafecode/shared/threadResourceUsage";
 
 export function shouldSurfaceProviderAccountRateLimits(
   provider: Pick<ServerProvider, "auth" | "driver"> | null | undefined,
@@ -144,20 +149,19 @@ function formatResetTime(epochSeconds: number, options: FormatOptions): string |
 function formatWindowLine(input: {
   readonly label: string;
   readonly durationLabel: string | null;
-  readonly window: ServerProviderAccountRateLimitWindow | null | undefined;
+  readonly window: ProviderRateLimitWindowUsage | null;
 }): CodexRateLimitWindowSummary | null {
   // Only render a usage line when we actually have a usage figure. A window with just a
   // reset time (Claude omits utilization unless you're near the limit) is surfaced through
   // its reset line (primaryReset / secondaryReset) instead — no usage line. An absent window
   // is omitted entirely.
-  const usedPercent = input.window?.usedPercent;
-  if (typeof usedPercent !== "number" || !Number.isFinite(usedPercent)) {
+  const remainingPercent = input.window?.remainingPercent;
+  if (remainingPercent === null || remainingPercent === undefined) {
     return null;
   }
   const label = input.durationLabel
     ? uiText("{label} ({duration})", { label: input.label, duration: input.durationLabel })
     : input.label;
-  const remainingPercent = clampPercentage(100 - usedPercent);
   const value = uiText("{percent} left", { percent: formatPercentage(remainingPercent) });
   return {
     label,
@@ -175,26 +179,10 @@ function formatWindowLine(input: {
 export function selectCodexRateLimitBuckets(
   rateLimits: ServerProviderAccountRateLimits | null | undefined,
 ): readonly CodexRateLimitBucket[] {
-  if (!rateLimits) return [];
-  const buckets = Object.entries(rateLimits.rateLimitsByLimitId ?? {}).map(([id, snapshot]) => ({
-    id,
-    label: snapshot.limitName ?? snapshot.limitId ?? id,
-    snapshot,
+  return deriveCodexRateLimitBuckets(rateLimits).map((bucket) => ({
+    ...bucket,
+    label: bucket.label ?? uiText("Account usage"),
   }));
-  const legacy = rateLimits.rateLimits;
-  const legacyId = legacy.limitId ?? "codex";
-  if (!buckets.some((bucket) => bucket.id === legacyId || bucket.snapshot.limitId === legacyId)) {
-    buckets.unshift({
-      id: legacyId,
-      label: legacy.limitName ?? legacy.limitId ?? uiText("Account usage"),
-      snapshot: legacy,
-    });
-  }
-  // Keep the familiar default quota first without assigning named buckets to
-  // particular models or combining them into an invented account-wide limit.
-  return buckets.toSorted((left, right) =>
-    left.id === "codex" ? (right.id === "codex" ? 0 : -1) : right.id === "codex" ? 1 : 0,
-  );
 }
 
 export function selectCodexRateLimitSnapshot(
@@ -218,18 +206,7 @@ export function formatCodexRateLimitResetAvailability(
 export function selectCodexAvailableResetCount(
   rateLimits: ServerProviderAccountRateLimits | null | undefined,
 ): number | null {
-  const availableCount = rateLimits?.rateLimitResetCredits?.availableCount;
-  if (
-    typeof availableCount !== "number" ||
-    !Number.isSafeInteger(availableCount) ||
-    availableCount < 0
-  ) {
-    return null;
-  }
-
-  // Upstream reports an authoritative aggregate because the optional credit list can be
-  // absent or redacted. Never infer availability by counting those detail rows.
-  return availableCount;
+  return deriveAvailableRateLimitResetCount(rateLimits);
 }
 
 /** Round display-only decimal metadata without converting it to a Number.
@@ -301,28 +278,30 @@ function formatSnapshot(
   snapshot: ServerProviderAccountRateLimitSnapshot,
   options: FormatOptions,
 ): CodexRateLimitSummary | null {
+  const primaryWindow = deriveProviderRateLimitWindow(snapshot.primary);
+  const secondaryWindow = deriveProviderRateLimitWindow(snapshot.secondary);
   const primary = formatWindowLine({
     label: uiText("Primary window"),
-    durationLabel: formatWindowDuration(snapshot.primary?.windowDurationMins),
-    window: snapshot.primary,
+    durationLabel: formatWindowDuration(primaryWindow?.windowDurationMins),
+    window: primaryWindow,
   });
   const secondary = formatWindowLine({
     label: uiText("Secondary window"),
-    durationLabel: formatWindowDuration(snapshot.secondary?.windowDurationMins),
-    window: snapshot.secondary,
+    durationLabel: formatWindowDuration(secondaryWindow?.windowDurationMins),
+    window: secondaryWindow,
   });
-  const primaryResetAt = snapshot.primary?.resetsAt ?? null;
+  const primaryResetAt = primaryWindow?.resetsAt ?? null;
   const primaryResetTime = primaryResetAt ? formatResetTime(primaryResetAt, options) : null;
   const primaryResetLabel =
-    formatShortDuration(snapshot.primary?.windowDurationMins) ?? uiText("Primary");
+    formatShortDuration(primaryWindow?.windowDurationMins) ?? uiText("Primary");
   const primaryReset = primaryResetTime
     ? uiText("{window} reset: {time}", { window: primaryResetLabel, time: primaryResetTime })
     : null;
 
-  const secondaryResetAt = snapshot.secondary?.resetsAt ?? null;
+  const secondaryResetAt = secondaryWindow?.resetsAt ?? null;
   const secondaryResetTime = secondaryResetAt ? formatResetTime(secondaryResetAt, options) : null;
   const secondaryResetLabel =
-    formatShortDuration(snapshot.secondary?.windowDurationMins) ?? uiText("Secondary");
+    formatShortDuration(secondaryWindow?.windowDurationMins) ?? uiText("Secondary");
   const secondaryReset = secondaryResetTime
     ? uiText("{window} reset: {time}", { window: secondaryResetLabel, time: secondaryResetTime })
     : null;
