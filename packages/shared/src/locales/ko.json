@@ -3177,7 +3177,6 @@
   "Axiom MCP tools": "Axiom MCP 도구",
   "Enabled": "활성화",
   "Environment (JSON object; blank preserves secrets, an empty object clears them)": "환경 변수(JSON 객체; 비워 두면 비밀 정보를 유지하고 빈 객체를 입력하면 삭제합니다)",
-  "Includes settled Axiom costs reported by the native CLI. Other providers use standard API-rate estimates. Only recorded requests are included; this is not the account-wide bill.": "네이티브 CLI가 보고한 Axiom의 확정 비용을 포함합니다. 다른 제공자는 표준 API 요금으로 추정합니다. 기록된 요청만 포함되며 계정 전체 청구액이 아닙니다.",
   "MCP action could not complete. Check the input, refresh settings, and wait for active work to finish. A lost response may have applied the change.": "MCP 작업을 완료하지 못했습니다. 입력을 확인하고 설정을 새로 고친 뒤 실행 중인 작업이 끝날 때까지 기다리세요. 응답이 유실된 경우 변경이 이미 적용되었을 수 있습니다.",
   "MCP tools": "MCP 도구",
   "Recorded costs and estimates may be incomplete.<slot1></slot1>": "기록된 비용과 추정치는 일부가 누락될 수 있습니다.<slot1></slot1>",
@@ -3186,7 +3185,6 @@
   "Server name": "서버 이름",
   "Servers are saved to this Axiom account. Tool selection applies to this conversation. Changes require idle work.": "서버는 이 Axiom 계정에 저장됩니다. 도구 선택은 이 대화에 적용됩니다. 실행 중인 작업이 없을 때 변경할 수 있습니다.",
   "Start an Axiom conversation to manage its MCP tools.": "Axiom 대화를 시작하면 MCP 도구를 관리할 수 있습니다.",
-  "Axiom reports settled costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.": "Axiom은 확정 비용을 보고하지만 캐시 절감액의 내역은 제공하지 않습니다. 다른 제공자의 캐시 절감액은 추정 요금을 사용합니다.",
   "Reply not verified": "응답 미검증",
   "Searched the web": "웹 검색",
   "Opened web page": "웹 페이지 열기",
@@ -3551,5 +3549,7 @@
   "The update could not finish": "업데이트를 완료하지 못했습니다",
   "The update was interrupted": "업데이트가 중단되었습니다",
   "The updated version could not be verified": "업데이트된 버전을 확인하지 못했습니다",
-  "Update preparation failed": "업데이트 준비에 실패했습니다"
+  "Update preparation failed": "업데이트 준비에 실패했습니다",
+  "Includes costs reported by Axiom and OpenCode, with standard API-rate estimates for other usage. OpenCode may report zero when pricing is unavailable. Only recorded requests are included; this is not the account-wide bill.": "Axiom과 OpenCode가 보고한 비용을 포함하며, 다른 사용량에는 표준 API 요금으로 추정한 비용을 적용합니다. 요금 정보가 없으면 OpenCode가 0을 보고할 수 있습니다. 기록된 요청만 포함되며 계정 전체 청구액이 아닙니다.",
+  "Axiom and OpenCode report costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.": "Axiom과 OpenCode는 비용을 보고하지만 캐시 절감액의 내역은 제공하지 않습니다. 다른 제공자의 캐시 절감액은 추정 요금을 사용합니다."
 }

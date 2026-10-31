@@ -12,8 +12,9 @@ import {
   type ToolLifecycleItemType,
   TurnId,
   type UserInputQuestion,
+  type ThreadTokenUsageSnapshot,
+  type UsageAccountingSnapshot,
 } from "@cafecode/contracts";
-import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -73,6 +74,7 @@ import {
   type OpenCodeServerConnection,
 } from "../opencodeRuntime.ts";
 import * as Option from "effect/Option";
+import { makeOpenCodeUsage } from "../opencodeUsage.ts";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
 
@@ -183,6 +185,7 @@ interface OpenCodeSessionContext {
   readonly reasoningBlocks: Map<string, OpenCodeReasoningBlock>;
   readonly retiredReasoningPartIds: Set<string>;
   readonly turns: Array<OpenCodeTurnSnapshot>;
+  readonly usage: ReturnType<typeof makeOpenCodeUsage>;
   manualCompaction?: OpenCodeManualCompaction;
   /** Retain the stopped generation until ordered native idle then busy edges. */
   interruption?: OpenCodeInterruption;
@@ -1040,6 +1043,31 @@ export function makeOpenCodeAdapter(
       }
     });
 
+    const emitUsageAccounting = (
+      context: OpenCodeSessionContext,
+      snapshot: UsageAccountingSnapshot,
+    ) =>
+      buildEventBase({ threadId: context.session.threadId, turnId: context.activeTurnId }).pipe(
+        Effect.flatMap((base) =>
+          emit({
+            ...base,
+            type: "thread.usage-accounting.updated",
+            payload: snapshot,
+          }),
+        ),
+      );
+
+    const emitContextUsage = (context: OpenCodeSessionContext, usage: ThreadTokenUsageSnapshot) =>
+      buildEventBase({ threadId: context.session.threadId, turnId: context.activeTurnId }).pipe(
+        Effect.flatMap((base) =>
+          emit({
+            ...base,
+            type: "thread.token-usage.updated",
+            payload: { usage },
+          }),
+        ),
+      );
+
     const handleSubscribedEvent = Effect.fn("handleSubscribedEvent")(function* (
       context: OpenCodeSessionContext,
       event: OpenCodeSubscribedEvent,
@@ -1079,6 +1107,9 @@ export function makeOpenCodeAdapter(
 
       switch (event.type) {
         case "message.updated": {
+          const usage = context.usage.observeMessage(event.properties.info);
+          for (const snapshot of usage.accounting) yield* emitUsageAccounting(context, snapshot);
+          if (usage.context) yield* emitContextUsage(context, usage.context);
           context.messageRoleById.set(event.properties.info.id, event.properties.info.role);
           if (event.properties.info.role === "assistant") {
             for (const part of context.partById.values()) {
@@ -1151,6 +1182,10 @@ export function makeOpenCodeAdapter(
 
         case "message.part.updated": {
           const part = event.properties.part;
+          if (part.type === "step-finish") {
+            const snapshot = context.usage.observeStep(part);
+            if (snapshot) yield* emitUsageAccounting(context, snapshot);
+          }
           context.partById.set(part.id, part);
           const messageRole = messageRoleForPart(context, part);
 
@@ -1682,6 +1717,13 @@ export function makeOpenCodeAdapter(
           reasoningBlocks: new Map(),
           retiredReasoningPartIds: new Set(),
           turns: [],
+          usage: makeOpenCodeUsage({
+            instanceId: boundInstanceId,
+            threadId: input.threadId,
+            directory,
+            serverUrl: resumeServerUrl,
+            sessionId: started.openCodeSession.id,
+          }),
           activeTurnId: undefined,
           activeAgent: undefined,
           activeVariant: undefined,
@@ -1691,6 +1733,27 @@ export function makeOpenCodeAdapter(
         };
         sessions.set(input.threadId, context);
         yield* startEventPump(context);
+
+        // One optional, scope-owned inventory read supplies the actual model's
+        // context ceiling. It never blocks readiness or repeats on token/part
+        // updates; unavailable metadata leaves a known token count with no
+        // guessed percentage. Cancellation still aborts the exact SDK request.
+        yield* runOpenCodeSdk("provider.list", (signal) =>
+          context.client.provider.list({ directory }, { signal }),
+        ).pipe(
+          Effect.timeoutOption("5 seconds"),
+          Effect.flatMap((result) =>
+            Effect.gen(function* () {
+              if (yield* Ref.get(context.stopped)) return;
+              const usage = Option.isSome(result)
+                ? context.usage.updateLimits(result.value.data)
+                : undefined;
+              if (usage) yield* emitContextUsage(context, usage);
+            }),
+          ),
+          Effect.catch(() => Effect.void),
+          Effect.forkIn(context.sessionScope),
+        );
 
         yield* emit({
           ...(yield* buildEventBase({ threadId: input.threadId })),

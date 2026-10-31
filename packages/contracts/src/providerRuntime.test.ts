@@ -357,12 +357,18 @@ describe("ProviderRuntimeEvent", () => {
       models: [model],
     };
     expect(decode(snapshot)).toEqual(snapshot);
+    const openCode = {
+      ...snapshot,
+      models: [{ ...model, model: "openrouter/anthropic/claude-sonnet-5" }],
+    };
+    expect(decode(openCode)).toEqual(openCode);
     for (const invalid of [
       { ...snapshot, scopeId: "provider-account-id" },
       { ...snapshot, revision: Infinity },
       { ...snapshot, models: [model, model] },
       { ...snapshot, models: [{ ...model, cachedInputTokens: 101 }] },
       { ...snapshot, models: [{ ...model, model: "/private/account/path" }] },
+      { ...snapshot, models: [{ ...model, model: "provider/../private" }] },
       // Separately safe input/output columns must also fit the processed total,
       // both within one row and when independent model rows are combined.
       { ...snapshot, models: [{ ...model, inputTokens: Number.MAX_SAFE_INTEGER }] },

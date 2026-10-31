@@ -48,6 +48,7 @@ import { UsageStatsService, type UsageStatsServiceShape } from "../Services/Usag
 import { UsageStatsServiceLive } from "./UsageStatsService.ts";
 import { AuxiliaryUsage, AuxiliaryUsageLive } from "../Services/AuxiliaryUsage.ts";
 import { makeCodexChildUsageAccounting } from "../../provider/codexChildUsageAccounting.ts";
+import { makeOpenCodeUsage } from "../../provider/opencodeUsage.ts";
 import * as Schema from "effect/Schema";
 
 const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
@@ -474,6 +475,68 @@ describe("UsageStatsService", () => {
             first.tokenBreakdown[0]?.reportedCost,
           );
           assert.equal(second.totals.inputTokens, 100);
+        }),
+      ),
+  );
+  it.effect(
+    "counts every OpenCode model step once across replay/restart without billing its context snapshots",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          const provider = ProviderDriverKind.make("opencode");
+          const identity = {
+            instanceId: "private-account",
+            threadId: THREAD_1,
+            directory: "/synthetic/project",
+            serverUrl: null,
+            sessionId: "native-session",
+          };
+          const usage = makeOpenCodeUsage(identity);
+          const tokens = { input: 100, output: 20, reasoning: 5, cache: { read: 30, write: 10 } };
+          const message = {
+            id: "message",
+            sessionID: identity.sessionId,
+            role: "assistant",
+            providerID: "openai",
+            modelID: "gpt-5",
+            time: { created: 1_000 },
+            tokens,
+          };
+          const context = usage.observeMessage(message).context!;
+          const step = {
+            id: "step-1",
+            messageID: message.id,
+            sessionID: identity.sessionId,
+            type: "step-finish",
+            tokens,
+            cost: 0.012345,
+          };
+          const first = usage.observeStep(step)!;
+          const second = usage.observeStep({ ...step, id: "step-2" })!;
+          for (const snapshot of [first, second, first])
+            yield* harness.service.recordAccounting(provider, snapshot, 0);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "opencode-context", provider),
+            type: "thread.token-usage.updated",
+            payload: { usage: context },
+          });
+          const recorded = yield* harness.service.get;
+          assert.equal(recorded.totals.inputTokens, 280);
+          assert.equal(recorded.totals.outputTokens, 50);
+          assert.equal(recorded.totals.reasoningOutputTokens, 10);
+          assert.equal(recorded.totals.cachedInputTokens, 60);
+          assert.equal(recorded.totals.cacheWriteInputTokens, 20);
+          assert.deepEqual(recorded.tokenBreakdown[0]?.reportedCost, {
+            microusd: "24690",
+            tokens: 330,
+          });
+          const rebuilt = yield* harness.rebuildService;
+          const reopened = makeOpenCodeUsage(identity);
+          reopened.observeMessage(message);
+          yield* rebuilt.recordAccounting(provider, reopened.observeStep(step)!, 0);
+          const restored = yield* rebuilt.get;
+          assert.deepEqual(restored.tokenBreakdown, recorded.tokenBreakdown);
+          assert.equal(restored.totals.outputTokens, 50);
         }),
       ),
   );

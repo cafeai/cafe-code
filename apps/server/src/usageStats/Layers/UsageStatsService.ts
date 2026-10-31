@@ -850,10 +850,15 @@ const makeUsageStatsService = Effect.gen(function* () {
       }
 
       case "thread.token-usage.updated": {
-        // Claude message counts describe one request/current context, not a
-        // cumulative bill. Its dedicated accounting stream deduplicates exact
-        // API message IDs and settles full per-model query totals instead.
-        if (event.provider === "claudeAgent" || event.provider === "axiom") return Effect.void;
+        // These providers' message counts describe a request/current context,
+        // not a cumulative bill. Their dedicated accounting streams settle
+        // exact requests/steps independently of context-window snapshots.
+        if (
+          event.provider === "claudeAgent" ||
+          event.provider === "axiom" ||
+          event.provider === "opencode"
+        )
+          return Effect.void;
         return Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
           const tracking = track(event.threadId);

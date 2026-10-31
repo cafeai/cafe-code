@@ -308,9 +308,9 @@ export function rollUpCost(
       } else unpricedTokens += tokens;
       continue;
     }
-    // A similarly named upstream model does not prove Axiom's billing rate.
+    // A similarly named upstream model does not prove an aggregator's billing rate.
     // Await native settlement instead of pricing it with another provider's table.
-    if (entry.provider === "axiom") {
+    if (entry.provider === "axiom" || entry.provider === "opencode") {
       unpricedTokens += tokens;
       continue;
     }

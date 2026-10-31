@@ -233,6 +233,11 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
   runOpenCodeCommand: () => Effect.succeed({ stdout: "", stderr: "", code: 0 }),
   createOpenCodeSdkClient: ({ baseUrl, serverPassword, directory }) =>
     ({
+      provider: {
+        list: async () => ({
+          data: { all: [{ id: "openai", models: { "gpt-5": { limit: { context: 400_000 } } } }] },
+        }),
+      },
       session: {
         create: async ({ permission }: { permission: PermissionRuleset }) => {
           runtimeMock.state.sessionCreateUrls.push(baseUrl);
@@ -404,6 +409,98 @@ const drainOpenCodeEvents = (feed: ReturnType<typeof makeLiveEventFeed>) =>
   });
 
 it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
+  it.effect(
+    "publishes settled root step usage and native costs separately from latest-call context",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-usage");
+        const sessionID = "http://127.0.0.1:9999/session";
+        const feed = makeLiveEventFeed();
+        runtimeMock.state.liveEvents = feed;
+        const received: ProviderRuntimeEvent[] = [];
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) => Effect.sync(() => received.push(event))),
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({
+          threadId,
+          input: "Count my usage",
+          modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+        });
+        const tokens = { input: 100, output: 20, reasoning: 5, cache: { read: 30, write: 10 } };
+        const info = {
+          id: "msg-usage",
+          sessionID,
+          role: "assistant",
+          providerID: "openai",
+          modelID: "gpt-5",
+          time: { created: 1_000 },
+          tokens,
+          cost: 100,
+        };
+        const part = {
+          id: "part-usage",
+          sessionID,
+          messageID: info.id,
+          type: "step-finish",
+          tokens,
+          cost: 0.012345,
+        };
+        feed.push(
+          { type: "message.updated", properties: { sessionID, info } },
+          { type: "message.part.updated", properties: { sessionID, part, time: 2_000 } },
+          { type: "message.part.updated", properties: { sessionID, part, time: 2_000 } },
+          { type: "message.updated", properties: { sessionID, info } },
+          {
+            type: "message.updated",
+            properties: { sessionID: "child", info: { ...info, sessionID: "child" } },
+          },
+          {
+            type: "message.part.updated",
+            properties: {
+              sessionID: "child",
+              part: { ...part, id: "child-part", sessionID: "child" },
+              time: 2_000,
+            },
+          },
+          { type: "session.status", properties: { sessionID, status: { type: "idle" } } },
+        );
+        yield* drainOpenCodeEvents(feed);
+        const accounting = received.filter(
+          (event) => event.type === "thread.usage-accounting.updated",
+        );
+        assert.equal(accounting.length, 1);
+        assert.deepEqual(accounting[0]?.payload.models, [
+          {
+            model: "openai/gpt-5",
+            inputTokens: 140,
+            cachedInputTokens: 30,
+            cacheWriteInputTokens: 10,
+            outputTokens: 25,
+            reasoningOutputTokens: 5,
+            reportedCostMicrousd: "12345",
+          },
+        ]);
+        const contexts = received.filter((event) => event.type === "thread.token-usage.updated");
+        assert.deepEqual(contexts.at(-1)?.payload.usage, {
+          usedTokens: 165,
+          inputTokens: 140,
+          cachedInputTokens: 30,
+          cacheWriteInputTokens: 10,
+          outputTokens: 25,
+          reasoningOutputTokens: 5,
+          maxTokens: 400_000,
+        });
+        assert.ok(received.some((event) => event.type === "turn.completed"));
+        assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+      }),
+  );
   it.effect(
     "persists the native session through SQLite close and a fresh Cafe provider service",
     () =>

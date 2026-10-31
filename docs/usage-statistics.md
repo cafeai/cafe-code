@@ -33,6 +33,46 @@ saved transcripts. A presentation-backend reconnect can reread a surviving owner
 inventory after revalidating its saved source authority.
 See the [quota report decision](decisions/claude-account-quota-report.md).
 
+## OpenCode tokens, cost and context
+
+OpenCode records the primary chat's completed model steps, including tool-call
+rounds and compaction steps, in the same daily and model usage ledger. Input
+includes native cache reads/writes; output includes native reasoning tokens.
+OpenCode reports those as separate buckets, so Cafe combines them once and
+retains the cache/reasoning breakdown. Repeated native parts and replay after a
+backend restart settle through the same opaque step checkpoint rather than
+adding the usage again. The bounded in-memory join retains at most 1,024 message
+model identities, 256 unmatched numeric steps and 2,048 recent step receipts;
+old receipt eviction does not remove durable deduplication. Only observed root
+steps are recorded; child sessions and unobserved historical work are not
+reconstructed. Unsupported or missing model labels retain their numeric usage
+in the existing “Model not reported” category. Metadata helpers also record the completed steps returned by
+their prompt response, even when the text fails structured-output validation.
+
+The installed OpenCode 1.18.3 compatibility API exposes a USD cost estimate on
+each `step-finish`. Cafe uses that estimate, rounded once per step to integer
+micro-USD, instead of applying another provider's bundled rates. This can
+preserve OpenCode's configured model/cache/context-tier pricing. It remains an
+OpenCode-reported estimate, not an invoice: OpenCode can return zero for free or
+subscription models and when its pricing metadata is missing. A zero estimate
+is retained as reported; missing, negative or nonfinite costs leave those
+tokens unpriced. The assistant's separate cumulative cost is never added too.
+
+The chat context meter uses the latest nonempty assistant call's input, cache,
+output and reasoning sum, matching OpenCode's own context presentation. It is a
+last-reported occupancy snapshot, not accumulated processed volume or a live
+token estimate. A later call or compaction may reduce it. One optional,
+session-scoped provider inventory request supplies the actual serving model's
+context ceiling. Missing/unavailable limits retain the count without inventing
+a percentage; context updates never bill tokens again. Existing chats acquire
+these observations with their next native usage reports, without scanning their
+saved transcripts or restarting a running provider.
+
+Source semantics were checked against the pinned upstream
+[usage normalization and cost calculation](https://github.com/anomalyco/opencode/blob/127bdb30784d508cc556c71a0f32b508a3061517/packages/opencode/src/session/session.ts#L338-L406),
+[completed-step publication](https://github.com/anomalyco/opencode/blob/127bdb30784d508cc556c71a0f32b508a3061517/packages/opencode/src/session/processor.ts#L435-L456)
+and [context calculation](https://github.com/anomalyco/opencode/blob/127bdb30784d508cc556c71a0f32b508a3061517/packages/app/src/components/session/session-context-metrics.ts#L28-L59).
+
 ## Calendar and data boundaries
 
 A finite period includes the server's current local day and the preceding N−1 calendar days. It is anchored to `today.day` in the detailed usage response, not the browser's timezone. Quiet days count toward the range and appear as zero activity. All includes all recorded history, including authoritative lifetime counters whose older daily or model detail may be unavailable.

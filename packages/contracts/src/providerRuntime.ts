@@ -430,7 +430,9 @@ const UsageAccountingCount = NonNegativeInt.check(
 export const UsageAccountingModel = Schema.Struct({
   model: TrimmedNonEmptyString.check(
     Schema.isMaxLength(256),
-    Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._[\]:-]*$/),
+    // OpenCode reports upstream provider/model slugs, including nested model
+    // namespaces. Keep these exact without admitting absolute filesystem paths.
+    Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._[\]:-]*(?:\/[a-zA-Z0-9][a-zA-Z0-9._[\]:-]*)*$/),
   ),
   reportedCostMicrousd: Schema.optional(
     Schema.String.check(Schema.isPattern(/^(0|[1-9][0-9]{0,99})$/)),
