@@ -499,7 +499,11 @@ function makeFailedRootRecoveryFixture(fastMode = false, prepareRuntimeHome?: Ef
       },
     ),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    // Runtime workspace input remains the checkout, but all mutable Cafe state
+    // belongs to this layer's scoped temporary root rather than that workspace.
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -2698,7 +2702,9 @@ it.effect(
       Effect.scoped,
       Effect.provide(
         SqlitePersistenceTest.pipe(
-          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(
+            ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+          ),
           Layer.provideMerge(ServerSettingsService.layerTest()),
           Layer.provideMerge(providerSessionDirectoryTestLayer),
           Layer.provideMerge(NodeServices.layer),
@@ -2811,7 +2817,9 @@ function makeConcurrencyTestLayer(
       },
     ),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -3209,7 +3217,9 @@ const validationLayer = it.layer(
       });
     }),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -3482,6 +3492,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
     Effect.gen(function* () {
       validationRuntimeFactory.factory.mockClear();
       const adapter = yield* CodexAdapter;
+      const config = yield* ServerConfig;
 
       yield* adapter.startSession({
         provider: ProviderDriverKind.make("codex"),
@@ -3498,7 +3509,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
       assert.deepStrictEqual(options, {
         customInstructions: undefined,
         historySafety: options?.historySafety,
-        appServerCwd: path.join(process.cwd(), "userdata"),
+        appServerCwd: config.stateDir,
         binaryPath: "codex",
         cwd: process.cwd(),
         model: "gpt-5.3-codex",
@@ -3601,7 +3612,9 @@ const sessionErrorLayer = it.layer(
       });
     }),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -3706,6 +3719,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
   it.effect("uses a transient reader without materializing a session or runtime events", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
+      const config = yield* ServerConfig;
       const threadId = asThreadId("sess-ended-subagent-detail");
       const childId = "provider-child-ended";
       const runtimeCountBefore = sessionRuntimeFactory.factory.mock.calls.length;
@@ -3726,7 +3740,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       );
       assert.deepEqual(transientSubagentHistoryRead.mock.calls[0]?.[0], {
         binaryPath: "codex",
-        appServerCwd: path.join(process.cwd(), "userdata"),
+        appServerCwd: config.stateDir,
         rootProviderThreadId: "provider-root-ended",
         subagentThreadId: childId,
         onHistoryDiagnostic: transientSubagentHistoryRead.mock.calls[0]?.[0].onHistoryDiagnostic,
@@ -3768,6 +3782,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
   it.effect("keeps an ended child pinned to its persisted root when another root is live", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
+      const config = yield* ServerConfig;
       const threadId = asThreadId("sess-live-different-root-subagent-detail");
       const childId = "provider-child-from-ended-root";
       yield* adapter.startSession({
@@ -3794,7 +3809,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       );
       assert.deepEqual(transientSubagentHistoryRead.mock.calls[0]?.[0], {
         binaryPath: "codex",
-        appServerCwd: path.join(process.cwd(), "userdata"),
+        appServerCwd: config.stateDir,
         rootProviderThreadId: "provider-root-that-ended",
         subagentThreadId: childId,
         onHistoryDiagnostic: transientSubagentHistoryRead.mock.calls[0]?.[0].onHistoryDiagnostic,
@@ -4232,7 +4247,9 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         });
       }),
     ).pipe(
-      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+      ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(providerSessionDirectoryTestLayer),
       Layer.provideMerge(NodeServices.layer),
@@ -4298,7 +4315,9 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
           });
         }),
       ).pipe(
-        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+        Layer.provideMerge(
+          ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+        ),
         Layer.provideMerge(ServerSettingsService.layerTest()),
         Layer.provideMerge(providerSessionDirectoryTestLayer),
         Layer.provideMerge(NodeServices.layer),
@@ -4408,7 +4427,9 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
             });
           }),
         ).pipe(
-          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(
+            ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+          ),
           Layer.provideMerge(ServerSettingsService.layerTest()),
           Layer.provideMerge(providerSessionDirectoryTestLayer),
           Layer.provideMerge(NodeServices.layer),
@@ -4506,7 +4527,9 @@ const lifecycleLayer = it.layer(
       });
     }),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -10595,7 +10618,9 @@ const scopedLifecycleLayer = it.layer(
       });
     }),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -10727,7 +10752,9 @@ const scopedFailureLayer = it.layer(
       });
     }),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -10867,7 +10894,7 @@ for (const phase of ["construction", "descriptor", "handshake"] as const) {
     ).pipe(
       Effect.provide(
         Layer.mergeAll(
-          ServerConfig.layerTest(process.cwd(), process.cwd()),
+          ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
           ServerSettingsService.layerTest(),
           providerSessionDirectoryTestLayer,
         ).pipe(Layer.provideMerge(NodeServices.layer)),
@@ -10925,7 +10952,7 @@ it.effect("keeps a Codex session that finishes acquisition before the startup de
   ).pipe(
     Effect.provide(
       Layer.mergeAll(
-        ServerConfig.layerTest(process.cwd(), process.cwd()),
+        ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
         ServerSettingsService.layerTest(),
         providerSessionDirectoryTestLayer,
       ).pipe(Layer.provideMerge(NodeServices.layer)),
@@ -10952,7 +10979,9 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
           });
         }),
       ).pipe(
-        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+        Layer.provideMerge(
+          ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+        ),
         Layer.provideMerge(ServerSettingsService.layerTest()),
         Layer.provideMerge(providerSessionDirectoryTestLayer),
         Layer.provideMerge(NodeServices.layer),
@@ -11246,7 +11275,7 @@ function schedulingCase<FixtureError>(
   ).pipe(
     Effect.provide(
       Layer.mergeAll(
-        ServerConfig.layerTest(process.cwd(), process.cwd()),
+        ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
         ServerSettingsService.layerTest(),
         providerSessionDirectoryTestLayer,
       ).pipe(Layer.provideMerge(NodeServices.layer)),

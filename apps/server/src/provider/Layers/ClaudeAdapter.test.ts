@@ -7085,7 +7085,11 @@ describe("ClaudeAdapterLive", () => {
         });
       }),
     ).pipe(
-      Layer.provideMerge(ServerConfig.layerTest("/tmp/claude-adapter-test", "/tmp")),
+      Layer.provideMerge(
+        ServerConfig.layerTest("/tmp/claude-adapter-test", {
+          prefix: "cafe-claude-adapter-replacement-",
+        }),
+      ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(NodeServices.layer),
     );
@@ -7176,7 +7180,11 @@ describe("ClaudeAdapterLive", () => {
         });
       }),
     ).pipe(
-      Layer.provideMerge(ServerConfig.layerTest("/tmp/claude-adapter-test", "/tmp")),
+      Layer.provideMerge(
+        ServerConfig.layerTest("/tmp/claude-adapter-test", {
+          prefix: "cafe-claude-adapter-prompt-stop-",
+        }),
+      ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(NodeServices.layer),
     );

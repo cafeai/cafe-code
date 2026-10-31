@@ -444,7 +444,11 @@ describe("ProviderRuntimeIngestion", () => {
         }),
       ),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
-      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      // Runtime disposal already joins this layer's finalizers. Keep its
+      // derived data directories temporary without changing the workspace cwd.
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "cafe-provider-ingestion-" }),
+      ),
       Layer.provideMerge(NodeServices.layer),
     );
     runtime = ManagedRuntime.make(

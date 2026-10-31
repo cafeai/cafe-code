@@ -116,6 +116,14 @@ native hook owner-retirement checks qualify the actual wiring.
 
 ## Assertions and fixtures
 
+Server fixtures keep their workspace and application-state roots separate.
+`ServerConfig.layerTest` creates real state, cache and worktree directories, so
+use its scoped temporary-prefix form or a test-owned scoped base directory;
+the checkout and a shared system temporary directory are not fixture state
+roots. Preserve the intended workspace `cwd`, provider inputs and assertions.
+Do not hide accidental state writes by excluding these paths from verification
+fingerprints: changing an input during a task must continue to refuse success.
+
 Settings fixtures must implement each invoked settings-write contract with a
 typed fake, including client preferences when a provider reset or deletion also
 updates server settings. Seed synthetic data for both the affected instance and

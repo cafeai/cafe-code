@@ -357,7 +357,11 @@ const OpenCodeAdapterTestLayer = Layer.effect(
   makeOpenCodeAdapter(openCodeAdapterTestSettings),
 ).pipe(
   Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
-  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+  // Preserve the workspace cwd while keeping materialized server state in the
+  // owning layer's temporary scope rather than writing into the checkout.
+  Layer.provideMerge(
+    ServerConfig.layerTest(process.cwd(), { prefix: "cafe-opencode-adapter-test-" }),
+  ),
   Layer.provideMerge(
     ServerSettingsService.layerTest({
       providers: {
@@ -1636,7 +1640,9 @@ it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           makeOpenCodeAdapter(openCodeAdapterTestSettings),
         ).pipe(
           Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
-          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(
+            ServerConfig.layerTest(process.cwd(), { prefix: "cafe-opencode-adapter-test-" }),
+          ),
           Layer.provideMerge(ServerSettingsService.layerTest()),
           Layer.provideMerge(providerSessionDirectoryTestLayer),
           Layer.provideMerge(NodeServices.layer),
@@ -1706,7 +1712,9 @@ it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       makeOpenCodeAdapter(openCodeAdapterTestSettings, { instanceId }),
     ).pipe(
       Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
-      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "cafe-opencode-adapter-test-" }),
+      ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(providerSessionDirectoryTestLayer),
       Layer.provideMerge(NodeServices.layer),
@@ -1753,7 +1761,9 @@ it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       makeOpenCodeAdapter(openCodeAdapterTestSettings, { instanceId }),
     ).pipe(
       Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
-      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "cafe-opencode-adapter-test-" }),
+      ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(providerSessionDirectoryTestLayer),
       Layer.provideMerge(NodeServices.layer),
@@ -1801,7 +1811,9 @@ it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       makeOpenCodeAdapter(openCodeAdapterTestSettings, { instanceId }),
     ).pipe(
       Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
-      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "cafe-opencode-adapter-test-" }),
+      ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(providerSessionDirectoryTestLayer),
       Layer.provideMerge(NodeServices.layer),
@@ -2307,7 +2319,9 @@ it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         }),
       ).pipe(
         Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
-        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+        Layer.provideMerge(
+          ServerConfig.layerTest(process.cwd(), { prefix: "cafe-opencode-adapter-test-" }),
+        ),
         Layer.provideMerge(
           ServerSettingsService.layerTest({
             providers: {
@@ -2389,7 +2403,9 @@ it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         }),
       ).pipe(
         Layer.provideMerge(Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble)),
-        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+        Layer.provideMerge(
+          ServerConfig.layerTest(process.cwd(), { prefix: "cafe-opencode-adapter-test-" }),
+        ),
         Layer.provideMerge(
           ServerSettingsService.layerTest({
             providers: {
