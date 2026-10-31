@@ -79,46 +79,43 @@ and request provider restarts. The resume restart variant records the exact
 active chats and submits durable continuation messages after that provider
 restarts. Restart acknowledgements precede shutdown.
 
-Issue a dedicated owner bearer session against the **same Cafe home and state
-database as the running backend**. A built source desktop normally uses
-`userdata`; development launches with a development URL use `dev` instead.
+Issue a dedicated owner bearer session against the **same configured Cafe root
+and explicit data profile as the running backend**. Source desktop and repository
+development launches use Debug; installed releases use Production even with
+diagnostic logging enabled. Direct standalone CLI commands retain their existing
+defaults unless a profile is explicit. See [data profiles](data-profiles.md).
 
-For a built source checkout, from the repository root:
-
-```bash
-node apps/server/src/bin.ts auth session issue --role owner --label cafe-mcp --ttl 30d --token-only
-```
-
-Only for a backend started with a development URL, pass that exact URL:
+For a source Debug desktop, from the repository root:
 
 ```bash
-node apps/server/src/bin.ts auth session issue --dev-url http://127.0.0.1:5733 --role owner --label cafe-mcp --ttl 30d --token-only
+node apps/server/src/bin.ts auth session issue --data-profile debug --role owner --label cafe-mcp --ttl 30d --token-only
 ```
 
-Use the URL printed by your development runner if it differs. Do not add
-`--dev-url` solely because the application was built from source: that selects
-a different database. Both commands must inherit the backend's configured
-`CAFE_CODE_HOME`, if any. Where the `cafe-code` CLI is already available,
-`cafe-code auth session issue` accepts the same options; installing the old
-registry package is not required to use these commands from a source checkout.
+Use `--data-profile production` when administering Production. If the backend
+uses a custom configured parent, pass that same `--base-dir /chosen/cafe-root`
+or inherit its configured `CAFE_CODE_HOME`; do not append `.debug` yourself.
+Preserve any explicit development-URL selection used by that backend, rather
+than adding `--dev-url` merely because the code was built from source. Where
+the `cafe-code` CLI is available it accepts the same auth options; installing
+an older registry package is unnecessary.
 
-Configure the client with `http://127.0.0.1:3773/mcp` for the default local built
-desktop, or the actual server origin and `/mcp` path. A development backend
-normally uses port `13773`, not the Vite frontend port `5733`. Use HTTPS for
-non-loopback connections. Send the credential only as
-`Authorization: Bearer <token>`; keep it out of URLs, prompts, logs, and
-source-controlled configuration.
+Connect to the actual backend origin with `/mcp`: packaged Production normally
+uses `http://127.0.0.1:3773/mcp` and source Debug normally uses
+`http://127.0.0.1:13773/mcp`. Use the origin printed by the runner if it differs;
+the Vite frontend port is not the backend MCP port. Use HTTPS for non-loopback
+connections. Send the credential only as `Authorization: Bearer <token>`; keep
+it out of URLs, prompts, logs and source-controlled configuration.
 
-List and revoke sessions against the same home/database:
+List and revoke sessions using the same root and profile:
 
 ```bash
-node apps/server/src/bin.ts auth session list
-node apps/server/src/bin.ts auth session revoke <session-id>
+node apps/server/src/bin.ts auth session list --data-profile debug
+node apps/server/src/bin.ts auth session revoke <session-id> --data-profile debug
 ```
 
-For development state, add the same `--dev-url` to each command.
-Owner credentials grant management authority; they are separate from the narrow
-session-only scheduling and visualization credentials below.
+Replace the profile and retain the same root/development selection when
+administering another backend. Owner credentials grant management authority;
+they are separate from the narrow scheduling and visualization credentials below.
 
 ## Separate scheduling and visualization connections
 
