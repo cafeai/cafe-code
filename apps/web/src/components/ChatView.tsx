@@ -2398,12 +2398,46 @@ export default function ChatView(props: ChatViewProps) {
         : null,
     [subagentRuntimeId, subagentSessionStatus],
   );
+  const unstartedFailureMessagesRef = useRef<
+    ReadonlyArray<Pick<ChatMessage, "id" | "role" | "turnId" | "createdAt">>
+  >([]);
+  const unstartedFailureMessages = useMemo(() => {
+    const messages = activeThread?.messages ?? [];
+    const next: Array<Pick<ChatMessage, "id" | "role" | "turnId" | "createdAt">> = [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!;
+      if (message.turnId !== null && message.turnId !== undefined) break;
+      if (message.role !== "user") continue;
+      next.push({ id: message.id, role: message.role, turnId: null, createdAt: message.createdAt });
+    }
+    next.reverse();
+    const previous = unstartedFailureMessagesRef.current;
+    if (
+      previous.length === next.length &&
+      previous.every(
+        (message, index) =>
+          message.id === next[index]!.id &&
+          message.role === next[index]!.role &&
+          message.turnId === next[index]!.turnId &&
+          message.createdAt === next[index]!.createdAt,
+      )
+    )
+      return previous;
+    // Assistant text deltas do not change accepted-message identity. Reuse
+    // this metadata-only suffix so they cannot invalidate the work-log fold.
+    unstartedFailureMessagesRef.current = next;
+    return next;
+  }, [activeThread?.messages]);
   const workLogEntries = useMemo(() => {
     const turnId = activeLatestTurn?.turnId;
     return uiPresentation.deriveWorkLogEntries(threadActivities, turnId, {
       includeUnscopedCompaction: true,
+      unstartedTurnFailures: {
+        messages: unstartedFailureMessages,
+        latestTurn: activeLatestTurn,
+      },
     });
-  }, [activeLatestTurn?.turnId, threadActivities, uiPresentation]);
+  }, [activeLatestTurn, unstartedFailureMessages, threadActivities, uiPresentation]);
   const subagentEntries = useMemo(() => {
     const turnId = activeLatestTurn?.turnId;
     return uiPresentation.deriveSubagentWorkEntries(threadActivities, turnId, {

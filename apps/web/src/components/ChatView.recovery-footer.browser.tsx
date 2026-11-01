@@ -15,6 +15,7 @@ import {
 } from "./ChatViewBrowser.shared";
 import {
   EventId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   type OrchestrationReadModel,
   ProviderInstanceId,
@@ -25,6 +26,7 @@ import { type NormalizedWsRpcRequestBody } from "../../test/wsRpcHarness";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { selectThreadByRef, useStore } from "../store";
 import { toastManager } from "./ui/toast";
+import { createChatViewCallerOwner } from "./chatViewCallerOwner.test.fixture";
 
 describe("ChatView full app (recovery-footer)", () => {
   registerChatViewBrowserHooks();
@@ -121,7 +123,12 @@ describe("ChatView full app (recovery-footer)", () => {
     };
   };
 
-  it("keeps a persisted provider failure discoverable in the Work Log without clearing canonical error state", async () => {
+  it("keeps a persisted provider failure discoverable in the Work Log without clearing canonical error state", async (context) => {
+    let restoreToastSpy: (() => void) | undefined;
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "recovery-diagnostic-visibility",
+      afterUnmount: () => restoreToastSpy?.(),
+    });
     const base = snapshotWithTerminalRoot("agents");
     const source = base.threads[0]!;
     const failure = source.session!.lastError!;
@@ -130,25 +137,41 @@ describe("ChatView full app (recovery-footer)", () => {
         new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))),
         (byte) => byte.toString(16).padStart(2, "0"),
       ).join("");
-    const providerErrorHash = await hash(failure);
-    const providerErrorOwnerHash = await hash(
-      JSON.stringify([
-        source.id,
-        source.latestTurn!.turnId,
-        source.session!.providerInstanceId,
-        source.session!.subagentRuntimeId,
-      ]),
+    const providerErrorHash = await owner.own("config", () => hash(failure));
+    const providerErrorOwnerHash = await owner.own("config", () =>
+      hash(
+        JSON.stringify([
+          source.id,
+          source.latestTurn!.turnId,
+          source.session!.providerInstanceId,
+          source.session!.subagentRuntimeId,
+        ]),
+      ),
     );
     const activityId = EventId.make("persisted-provider-error-exact-occurrence");
     const privateMessage = "Private synthetic received error details";
     const privateJson = JSON.stringify({
       error: { message: privateMessage, code: "synthetic_503" },
     });
+    const unstartedAt = isoAt(1_011);
+    const privateStartFailure = "Private synthetic legacy start failure";
     const snapshot: OrchestrationReadModel = {
       ...base,
       threads: [
         {
           ...source,
+          messages: [
+            ...source.messages,
+            {
+              id: MessageId.make("accepted-unstarted-recovery-message"),
+              role: "user",
+              text: "Keep this accepted message visible",
+              turnId: null,
+              streaming: false,
+              createdAt: unstartedAt,
+              updatedAt: unstartedAt,
+            },
+          ],
           activities: [
             ...source.activities,
             {
@@ -165,13 +188,24 @@ describe("ChatView full app (recovery-footer)", () => {
                 providerErrorOwnerHash,
               },
             },
+            {
+              id: EventId.make("legacy-unstarted-recovery-failure"),
+              kind: "provider.turn.start.failed",
+              tone: "error",
+              summary: "Provider turn start failed",
+              turnId: null,
+              sequence: 4,
+              createdAt: unstartedAt,
+              payload: { detail: privateStartFailure },
+            },
           ],
         },
       ],
     };
     const detailRequests: NormalizedWsRpcRequestBody[] = [];
     const toastSpy = vi.spyOn(toastManager, "add");
-    const mounted = await mountChatView({
+    restoreToastSpy = () => toastSpy.mockRestore();
+    await owner.mount({
       viewport: WIDE_FOOTER_VIEWPORT,
       snapshot,
       resolveRpc: (body) => {
@@ -200,13 +234,23 @@ describe("ChatView full app (recovery-footer)", () => {
         element.textContent?.includes(failure),
       ) ?? null;
     try {
-      await waitForComposerEditor();
-      await vi.waitFor(() => {
-        expect(errorBanner()).toBeNull();
-        expect(document.querySelector('[data-work-log-provider-errors="true"]')?.textContent).toBe(
-          "Provider error · 1",
-        );
-      });
+      await owner.own("editor", () => waitForComposerEditor());
+      await owner.own("work-log", () =>
+        vi.waitFor(() => {
+          expect(errorBanner()).toBeNull();
+          expect(
+            document.querySelector('[data-work-log-provider-errors="true"]')?.textContent,
+          ).toBe("Provider error · 1");
+        }),
+      );
+      // Exercise ChatView's real main-work-log memo and ordinary row renderer:
+      // the accepted message and its failed start have no provider TurnId.
+      await owner.own("work-log", () =>
+        expect
+          .element(page.getByRole("button", { name: "Provider turn start failed", exact: true }))
+          .toBeVisible(),
+      );
+      expect(document.body.textContent).not.toContain(privateStartFailure);
       expect(detailRequests).toHaveLength(0);
       expect(document.body.textContent).not.toContain(privateMessage);
       expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
@@ -219,9 +263,13 @@ describe("ChatView full app (recovery-footer)", () => {
         name: "Inspect provider diagnostic: Root · Provider error",
         exact: true,
       });
-      await expect.element(inspect).toHaveAttribute("aria-expanded", "false");
-      await inspect.click();
-      await expect.element(page.getByText(privateMessage, { exact: true })).toBeVisible();
+      await owner.own("work-log", () =>
+        expect.element(inspect).toHaveAttribute("aria-expanded", "false"),
+      );
+      await owner.own("controls", () => inspect.click());
+      await owner.own("receipt", () =>
+        expect.element(page.getByText(privateMessage, { exact: true })).toBeVisible(),
+      );
       expect(detailRequests).toHaveLength(1);
       expect(detailRequests[0]).toMatchObject({
         threadId: THREAD_ID,
@@ -230,13 +278,17 @@ describe("ChatView full app (recovery-footer)", () => {
       });
       // Raw JSON stays behind the explicit Technical details disclosure.
       expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
-      await page.getByRole("button", { name: "Technical details", exact: true }).click();
-      await vi.waitFor(() => {
-        expect(document.querySelector("[data-provider-diagnostic-json]")?.textContent).toBe(
-          privateJson,
-        );
-      });
-      await inspect.click();
+      await owner.own("controls", () =>
+        page.getByRole("button", { name: "Technical details", exact: true }).click(),
+      );
+      await owner.own("receipt", () =>
+        vi.waitFor(() => {
+          expect(document.querySelector("[data-provider-diagnostic-json]")?.textContent).toBe(
+            privateJson,
+          );
+        }),
+      );
+      await owner.own("controls", () => inspect.click());
       expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
       expect(document.body.textContent).not.toContain(privateMessage);
       expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(failure);
@@ -244,8 +296,7 @@ describe("ChatView full app (recovery-footer)", () => {
         source.latestTurn,
       );
     } finally {
-      await mounted.cleanup();
-      toastSpy.mockRestore();
+      await owner.cleanup();
     }
   });
 

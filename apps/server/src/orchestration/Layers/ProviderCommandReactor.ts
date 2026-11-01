@@ -3366,6 +3366,8 @@ const make = Effect.gen(function* () {
                   kind: "provider.turn.start.failed",
                   summary: "Provider turn start failed",
                   detail,
+                  messageId: event.payload.messageId,
+                  intentSequence: event.sequence,
                   turnId: null,
                   createdAt: event.payload.createdAt,
                 }).pipe(Effect.asVoid)

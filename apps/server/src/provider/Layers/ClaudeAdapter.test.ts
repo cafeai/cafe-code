@@ -50,6 +50,7 @@ import {
   RuntimeTaskId,
   ThreadId,
   TurnId,
+  type ProviderSession,
   type RuntimeMode,
   type RuntimeWorkflowPresentation,
 } from "@cafecode/contracts";
@@ -74,7 +75,7 @@ import { ServerConfig } from "../../config.ts";
 import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import { installSchedulingSessionBroker } from "../../scheduledFollowups/sessionRuntime.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { ProviderAdapterValidationError } from "../Errors.ts";
+import { ProviderAdapterValidationError, type ProviderAdapterError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import {
   claudeProjectDirectoryName,
@@ -246,6 +247,64 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
       },
     };
   }
+}
+
+/**
+ * Exercise the SDK's public async-generator behavior rather than the ordinary
+ * fake's next-only iterator. A native generator queues return() behind an
+ * unresolved next(); exact query.close must release that read before Cafe can
+ * join the reader. The optional return gate separately models incomplete
+ * cleanup after close was requested, without a provider process or real clock.
+ */
+function holdClaudeSdkReader(query: FakeClaudeQuery, holdReturn = false) {
+  let releaseNext!: () => void;
+  const nextGate = new Promise<void>((resolve) => {
+    releaseNext = resolve;
+  });
+  let releaseReturn!: () => void;
+  const returnGate = new Promise<void>((resolve) => {
+    releaseReturn = resolve;
+  });
+  let markNextEntered!: () => void;
+  const nextEntered = new Promise<void>((resolve) => {
+    markNextEntered = resolve;
+  });
+  let markReturnEntered!: (closeCalls: number) => void;
+  const returnEntered = new Promise<number>((resolve) => {
+    markReturnEntered = resolve;
+  });
+  const messages = (async function* (): AsyncGenerator<SDKMessage, void, unknown> {
+    markNextEntered();
+    await nextGate;
+  })();
+  let returnCalls = 0;
+  query[Symbol.asyncIterator] = () => ({
+    next: () => messages.next(),
+    return: async () => {
+      returnCalls += 1;
+      markReturnEntered(query.closeCalls);
+      const result = await messages.return(undefined);
+      await returnGate;
+      return result;
+    },
+  });
+  const originalClose = query.close;
+  (query as { close: () => void }).close = () => {
+    originalClose();
+    releaseNext();
+  };
+  if (!holdReturn) releaseReturn();
+  return {
+    nextEntered,
+    returnEntered,
+    get returnCalls() {
+      return returnCalls;
+    },
+    release: () => {
+      releaseNext();
+      releaseReturn();
+    },
+  };
 }
 
 /** Complete terminal fixture: avoid disguising incomplete results with casts. */
@@ -7143,6 +7202,188 @@ describe("ClaudeAdapterLive", () => {
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(layer),
     );
+  });
+
+  it.effect(
+    "stops a quiet Claude SDK generator without waiting for another provider message",
+    () => {
+      const harness = makeHarness({ environment: {} });
+      const reader = holdClaudeSdkReader(harness.query);
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        let stopping: Fiber.Fiber<void, ProviderAdapterError> | undefined;
+        yield* Effect.gen(function* () {
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+          yield* Effect.promise(() => reader.nextEntered);
+          stopping = yield* adapter.stopSession(THREAD_ID).pipe(Effect.forkChild);
+          // This receipt comes from the real generator's return wrapper. The
+          // pre-fix order reaches it with zero close calls and would otherwise
+          // remain blocked behind next(), before the old close budget starts.
+          assert.equal(yield* Effect.promise(() => reader.returnEntered), 1);
+          yield* Fiber.join(stopping);
+          assert.equal(harness.query.closeCalls, 1);
+          assert.equal(reader.returnCalls, 1);
+          assert.equal(harness.createInputs.length, 1);
+          assert.deepEqual(yield* adapter.listSessions(), []);
+        }).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              // Also release and join on the intended pre-fix assertion failure;
+              // a failed regression must not leave its synthetic reader behind.
+              reader.release();
+              if (stopping) yield* Fiber.await(stopping);
+              if ((yield* adapter.listSessions()).length > 0)
+                yield* adapter.stopSession(THREAD_ID).pipe(Effect.orDie);
+            }),
+          ),
+        );
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  for (const failure of ["close-refused", "reader-held"] as const) {
+    it.effect(`retains the exact Claude reader owner when retirement is ${failure}`, () => {
+      const harness = makeHarness({ environment: {}, newQueryPerSession: true });
+      const reader = holdClaudeSdkReader(harness.query, failure === "reader-held");
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const events: ProviderRuntimeEvent[] = [];
+        const nextReady = yield* Deferred.make<void>();
+        let readyCount = 0;
+        let stopping: Fiber.Fiber<void, ProviderAdapterError> | undefined;
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.gen(function* () {
+            events.push(event);
+            if (event.type === "session.state.changed" && event.payload.state === "ready") {
+              readyCount += 1;
+              if (readyCount === 2) yield* Deferred.succeed(nextReady, undefined);
+            }
+          }),
+        ).pipe(Effect.forkChild);
+        yield* Effect.gen(function* () {
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+          yield* Effect.promise(() => reader.nextEntered);
+          if (failure === "close-refused") {
+            harness.query.closeFailure = new Error("private synthetic close refusal");
+          }
+          stopping = yield* adapter.stopSession(THREAD_ID).pipe(Effect.forkChild);
+          if (failure === "reader-held") {
+            assert.equal(yield* Effect.promise(() => reader.returnEntered), 1);
+            yield* TestClock.adjust(10_000);
+          }
+          yield* Fiber.join(stopping);
+          assert.equal((yield* adapter.listSessions())[0]?.status, "error");
+          assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+          assert.equal(reader.returnCalls, failure === "close-refused" ? 0 : 1);
+          const replacement = yield* adapter
+            .startSession({ threadId: THREAD_ID, runtimeMode: "full-access" })
+            .pipe(Effect.result);
+          assert.equal(replacement._tag, "Failure");
+          if (replacement._tag === "Failure") {
+            assert.equal(
+              "remoteErrorTag" in replacement.failure ? replacement.failure.remoteErrorTag : null,
+              "subagent-concurrency-retirement-uncertain",
+            );
+          }
+          assert.equal(harness.createInputs.length, 1);
+          assert.equal(harness.query.closeCalls, 1);
+          if (failure === "reader-held") {
+            // A timeout must retain the same reader handle. Another explicit
+            // Stop still cannot claim retirement while that return is held.
+            stopping = yield* adapter.stopSession(THREAD_ID).pipe(Effect.forkChild);
+            yield* TestClock.adjust(10_000);
+            yield* Fiber.join(stopping);
+            assert.equal((yield* adapter.listSessions())[0]?.status, "error");
+            assert.equal(harness.query.closeCalls, 2);
+          }
+          harness.query.closeFailure = undefined;
+          reader.release();
+          yield* adapter.stopSession(THREAD_ID);
+          assert.deepEqual(yield* adapter.listSessions(), []);
+          yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+          // The next ready event is an ordered stream barrier: every preceding
+          // exit has now been projected, so an uncertain Stop cannot hide an
+          // earlier false session.exited behind subscriber scheduling.
+          yield* Deferred.await(nextReady);
+          assert.equal(events.filter((event) => event.type === "session.exited").length, 1);
+          assert.equal(harness.createInputs.length, 2);
+          assert.equal(reader.returnCalls, 1);
+        }).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              harness.query.closeFailure = undefined;
+              reader.release();
+              if (stopping) yield* Fiber.await(stopping);
+              if ((yield* adapter.listSessions()).length > 0)
+                yield* adapter.stopSession(THREAD_ID).pipe(Effect.orDie);
+            }),
+          ),
+        );
+      }).pipe(Effect.provide(harness.layer));
+    });
+  }
+
+  it.effect("fences a cancelled Claude replacement until its already-closed reader retires", () => {
+    const harness = makeHarness({
+      subagentConcurrencySupported: true,
+      newQueryPerSession: true,
+      environment: {},
+    });
+    const reader = holdClaudeSdkReader(harness.query, true);
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      let replacing: Fiber.Fiber<ProviderSession, ProviderAdapterError> | undefined;
+      yield* Effect.gen(function* () {
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+          maxConcurrentSubagents: 8,
+        });
+        yield* Effect.promise(() => reader.nextEntered);
+        replacing = yield* adapter
+          .startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+            maxConcurrentSubagents: 4,
+            requireIdleForSubagentLimitChange: true,
+          })
+          .pipe(Effect.forkChild);
+        // This public idle-limit path closes the query synchronously before
+        // handing stopSessionInternal its already-closed ownership receipt.
+        // Its reader's real return is now admitted but deliberately unjoined.
+        assert.equal(yield* Effect.promise(() => reader.returnEntered), 1);
+        yield* Fiber.interrupt(replacing);
+        assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+        const competing = yield* adapter
+          .startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+            maxConcurrentSubagents: 4,
+          })
+          .pipe(Effect.result);
+        assert.equal(competing._tag, "Failure");
+        if (competing._tag === "Failure") {
+          assert.equal(
+            "remoteErrorTag" in competing.failure ? competing.failure.remoteErrorTag : null,
+            "subagent-concurrency-retirement-uncertain",
+          );
+        }
+        assert.equal(harness.createInputs.length, 1);
+        assert.equal(harness.query.closeCalls, 1);
+        reader.release();
+        yield* adapter.stopSession(THREAD_ID);
+        assert.deepEqual(yield* adapter.listSessions(), []);
+      }).pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            reader.release();
+            if (replacing) yield* Fiber.await(replacing);
+            if ((yield* adapter.listSessions()).length > 0)
+              yield* adapter.stopSession(THREAD_ID).pipe(Effect.orDie);
+          }),
+        ),
+      );
+    }).pipe(Effect.provide(harness.layer));
   });
 
   it.effect("stopSession does not throw into the SDK prompt consumer", () => {

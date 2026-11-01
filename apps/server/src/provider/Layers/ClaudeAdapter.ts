@@ -790,7 +790,7 @@ interface ClaudeSessionContext {
   sdkMessageRevision: number;
   /** Received-result fence: a late interrupt receipt cannot qualify another response. */
   sdkResultRevision: number;
-  /** Native close threw; never admit another owner until explicit recovery. */
+  /** Query close or reader retirement is uncertain; never admit a competing owner. */
   queryClosureUncertain: boolean;
   /** A rewind's exact-exit requirement survives later explicit stop attempts. */
   rewindRetirementUncertain: boolean;
@@ -9487,9 +9487,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context.session = stoppedSession;
     context.stopped = true;
     if (context.turnState) context.turnState.responseLimitError = undefined;
-    // Any cleanup failure before query.close is also inconclusive teardown.
-    // Keep the ownership fence until that exact query is proven closed.
-    context.queryClosureUncertain = options?.queryAlreadyClosed !== true;
+    // A caller may already have requested native closure, but the exact
+    // reader is still owned until its required join completes. Keep the fence
+    // through cleanup and cancellation as well as a thrown close; otherwise a
+    // cancelled already-closed replacement could admit a competing query.
+    context.queryClosureUncertain = true;
 
     // Revoke before any asynchronous provider teardown. Even an uncertain
     // native close must not leave a stopped query able to schedule new work.
@@ -9549,32 +9551,42 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* Queue.shutdown(context.promptQueue);
 
     const streamFiber = context.streamFiber;
-    context.streamFiber = undefined;
-    if (
-      options?.interruptStreamFiber !== false &&
-      streamFiber &&
-      streamFiber.pollUnsafe() === undefined
-    ) {
-      yield* Fiber.interrupt(streamFiber);
-    }
-
-    yield* Effect.tryPromise({
-      try: async () => {
-        if (!options?.queryAlreadyClosed) context.query.close();
-        if (context.rewindRetirementUncertain && !options?.queryAlreadyClosed) {
-          if (!context.query.waitForExit) throw new Error("Claude rewind has no exit observation.");
-          await context.query.waitForExit();
-        }
-        context.queryClosureUncertain = false;
-        context.rewindRetirementUncertain = false;
-      },
-      catch: (cause) =>
-        new ProviderAdapterProcessError({
-          provider: PROVIDER,
-          threadId: context.session.threadId,
-          detail: toMessage(cause, "Failed to close Claude runtime query."),
-          cause,
-        }),
+    yield* Effect.gen(function* () {
+      // The SDK exposes its message async generator directly. Returning that
+      // generator while next() is waiting queues return() behind the pending
+      // read; only Query.close() starts the cleanup that releases that read.
+      // Request exact-query closure before joining the reader, otherwise Stop
+      // and cold replacement can wait forever before reaching close().
+      yield* Effect.tryPromise({
+        try: async () => {
+          if (!options?.queryAlreadyClosed) context.query.close();
+          if (context.rewindRetirementUncertain && !options?.queryAlreadyClosed) {
+            if (!context.query.waitForExit)
+              throw new Error("Claude rewind has no exit observation.");
+            await context.query.waitForExit();
+          }
+        },
+        catch: (cause) =>
+          new ProviderAdapterProcessError({
+            provider: PROVIDER,
+            threadId: context.session.threadId,
+            detail: toMessage(cause, "Failed to close Claude runtime query."),
+            cause,
+          }),
+      });
+      if (
+        options?.interruptStreamFiber !== false &&
+        streamFiber &&
+        streamFiber.pollUnsafe() === undefined
+      ) {
+        // The exact reader remains owned by this context if its finalizer is
+        // still pending at the existing deadline. Timeout retires this wait,
+        // not the ownership fence or a claim about the native process's exit.
+        yield* Fiber.interrupt(streamFiber).pipe(Effect.interruptible);
+      }
+      if (context.streamFiber === streamFiber) context.streamFiber = undefined;
+      context.queryClosureUncertain = false;
+      context.rewindRetirementUncertain = false;
     }).pipe(
       Effect.timeoutOrElse({
         duration: 10_000,
@@ -9606,7 +9618,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       updatedAt,
     };
 
-    if (options?.emitExitEvent !== false) {
+    if (options?.emitExitEvent !== false && !context.queryClosureUncertain) {
       const stamp = yield* makeEventStamp();
       yield* offerRuntimeEvent(context, {
         type: "session.exited",

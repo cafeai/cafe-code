@@ -25,6 +25,7 @@ import {
   hasActionableProposedPlan,
   hasToolActivityForTurn,
   isLatestTurnSettled,
+  workLogDisplayLabel,
 } from "./session-logic";
 
 function makeActivity(overrides: {
@@ -3607,6 +3608,187 @@ describe("deriveTimelineEntries", () => {
         completedAt: "2026-02-23T00:00:04.000Z",
       }),
     ).toBe("work-after-assistant");
+  });
+});
+
+describe("unstarted message failure visibility", () => {
+  const previousTurn = {
+    turnId: TurnId.make("previous-completed-turn"),
+    requestedAt: "2026-02-23T00:00:00.000Z",
+    startedAt: "2026-02-23T00:00:01.000Z",
+    completedAt: "2026-02-23T00:00:02.000Z",
+  };
+  const message = {
+    id: MessageId.make("accepted-unstarted-message"),
+    role: "user" as const,
+    text: "private accepted prompt",
+    turnId: null,
+    createdAt: "2026-02-23T00:00:03.000Z",
+    streaming: false,
+  };
+  const failure = (overrides: Parameters<typeof makeActivity>[0] = {}) =>
+    makeActivity({
+      id: "unstarted-failure",
+      kind: "provider.turn.start.failed",
+      summary: "private provider summary",
+      tone: "error",
+      createdAt: "2026-02-23T00:00:04.000Z",
+      sequence: 43,
+      payload: {
+        messageId: message.id,
+        intentSequence: 42,
+        detail: "private provider daemon diagnostic",
+        command: "private command must not become a preview",
+      },
+      ...overrides,
+    });
+
+  it("shows an accepted message's pre-turn failure with fixed public wording after the old turn ends", () => {
+    const activities = [
+      failure(),
+      makeActivity({ id: "unrelated-unscoped-warning", kind: "runtime.warning" }),
+    ];
+    const entries = deriveWorkLogEntries(activities, previousTurn.turnId, {
+      unstartedTurnFailures: { messages: [message], latestTurn: previousTurn },
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: "unstarted-failure",
+      turnId: null,
+      tone: "error",
+    });
+    expect(workLogDisplayLabel(entries[0]!)).toBe("Provider turn start failed");
+    expect(entries[0]).not.toHaveProperty("detail");
+    expect(entries[0]).not.toHaveProperty("command");
+    expect(entries[0]).not.toHaveProperty("providerDiagnostic");
+    expect(JSON.stringify(entries)).not.toContain("private");
+    expect(deriveTimelineEntries([message], [], entries).map((row) => [row.kind, row.id])).toEqual([
+      ["message", "accepted-unstarted-message"],
+      ["work", "unstarted-failure"],
+    ]);
+
+    // Other readers do not opt into a null-turn failure under the old turn.
+    expect(deriveWorkLogEntries(activities, previousTurn.turnId)).toEqual([]);
+    expect(
+      deriveHistoricalWorkLogSummaries({
+        messages: [message],
+        activities,
+        latestTurnId: previousTurn.turnId,
+      }).size,
+    ).toBe(0);
+  });
+
+  it("shows only an unambiguous legacy failed-start notice without treating its timestamp as a receipt", () => {
+    const legacy = failure({
+      createdAt: message.createdAt,
+      payload: { detail: "private legacy daemon failure" },
+    });
+    const entries = deriveWorkLogEntries([legacy], previousTurn.turnId, {
+      unstartedTurnFailures: { messages: [message], latestTurn: previousTurn },
+    });
+    expect(entries).toHaveLength(1);
+    expect(workLogDisplayLabel(entries[0]!)).toBe("Provider turn start failed");
+    expect(entries[0]).not.toHaveProperty("providerDiagnostic");
+    expect(JSON.stringify(entries)).not.toContain("private");
+    expect(entries[0]).not.toHaveProperty("messageId");
+    expect(entries[0]).not.toHaveProperty("intentSequence");
+    expect(
+      deriveWorkLogEntries([legacy], previousTurn.turnId, {
+        unstartedTurnFailures: {
+          messages: [message, { ...message, id: MessageId.make("ambiguous-same-time-message") }],
+          latestTurn: previousTurn,
+        },
+      }),
+    ).toEqual([]);
+  });
+
+  it.each([
+    { name: "missing canonical message", messages: [], overrides: {} },
+    {
+      name: "assistant message",
+      messages: [{ ...message, role: "assistant" as const }],
+      overrides: {},
+    },
+    {
+      name: "already-started message",
+      messages: [{ ...message, turnId: previousTurn.turnId }],
+      overrides: {},
+    },
+    {
+      name: "foreign message identity",
+      messages: [message],
+      overrides: { payload: { messageId: "another-message", intentSequence: 42 } },
+    },
+    {
+      name: "missing intent identity",
+      messages: [message],
+      overrides: { payload: { messageId: message.id } },
+    },
+    {
+      name: "partial legacy correlation",
+      messages: [message],
+      overrides: {
+        createdAt: message.createdAt,
+        payload: { detail: "private", messageId: message.id },
+      },
+    },
+    {
+      name: "future legacy payload",
+      messages: [message],
+      overrides: {
+        createdAt: message.createdAt,
+        payload: { detail: "private", futureCorrelation: true },
+      },
+    },
+    {
+      name: "malformed intent sequence",
+      messages: [message],
+      overrides: { payload: { messageId: message.id, intentSequence: -1 } },
+    },
+    { name: "failure predating intent", messages: [message], overrides: { sequence: 41 } },
+    {
+      name: "failure predating message",
+      messages: [message],
+      overrides: { createdAt: "2026-02-23T00:00:02.500Z" },
+    },
+  ])("does not borrow visibility from $name", ({ messages, overrides }) => {
+    expect(
+      deriveWorkLogEntries([failure(overrides)], previousTurn.turnId, {
+        unstartedTurnFailures: { messages, latestTurn: previousTurn },
+      }),
+    ).toEqual([]);
+  });
+
+  it("retires the failed suffix after another turn starts and refuses a mismatched turn boundary", () => {
+    const laterTurn = {
+      turnId: TurnId.make("later-successful-turn"),
+      requestedAt: "2026-02-23T00:00:05.000Z",
+      startedAt: "2026-02-23T00:00:06.000Z",
+      completedAt: "2026-02-23T00:00:07.000Z",
+    };
+    const laterMessage = {
+      ...message,
+      id: MessageId.make("later-message"),
+      turnId: laterTurn.turnId,
+      createdAt: laterTurn.requestedAt,
+    };
+    expect(
+      deriveWorkLogEntries([failure()], laterTurn.turnId, {
+        unstartedTurnFailures: { messages: [message, laterMessage], latestTurn: laterTurn },
+      }),
+    ).toEqual([]);
+    // A clipped message window still cannot move the old failure past the
+    // selected latest turn's timestamp boundary.
+    expect(
+      deriveWorkLogEntries([failure()], laterTurn.turnId, {
+        unstartedTurnFailures: { messages: [message], latestTurn: laterTurn },
+      }),
+    ).toEqual([]);
+    expect(
+      deriveWorkLogEntries([failure()], previousTurn.turnId, {
+        unstartedTurnFailures: { messages: [message], latestTurn: laterTurn },
+      }),
+    ).toEqual([]);
   });
 });
 

@@ -8518,7 +8518,7 @@ describe("ProviderCommandReactor", () => {
         }),
       ),
     );
-    await Effect.runPromise(
+    const receipt = await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("raced-native-review"),
@@ -8541,6 +8541,18 @@ describe("ProviderCommandReactor", () => {
           (activity) => activity.kind === "provider.turn.start.failed",
         ) === true,
     );
+    // The accepted input has no native turn, but its failure still belongs to
+    // this exact durable message/intent rather than the previous turn's log.
+    const failedStart = (
+      await harness.readThreadDetail(ThreadId.make("thread-1"))
+    )?.activities.find((activity) => activity.kind === "provider.turn.start.failed");
+    expect(failedStart).toMatchObject({
+      turnId: null,
+      payload: {
+        messageId: asMessageId("raced-native-review-message"),
+        intentSequence: receipt.sequence,
+      },
+    });
     expect(harness.sendTurn).toHaveBeenCalledTimes(1);
     expect(harness.steerTurn).not.toHaveBeenCalled();
     expect(harness.interruptTurn).not.toHaveBeenCalled();

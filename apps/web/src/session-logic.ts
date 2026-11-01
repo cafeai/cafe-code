@@ -658,13 +658,128 @@ export function hasActionableProposedPlan(
   return proposedPlan !== null && proposedPlan.implementedAt === null;
 }
 
+interface UnstartedTurnFailureContext {
+  /** Canonical retained messages only; optimistic rows cannot attest admission. */
+  readonly messages: ReadonlyArray<Pick<ChatMessage, "id" | "role" | "turnId" | "createdAt">>;
+  readonly latestTurn: Pick<
+    OrchestrationLatestTurn,
+    "turnId" | "requestedAt" | "startedAt" | "completedAt"
+  > | null;
+}
+
+function currentUnstartedMessageTimes(
+  context: UnstartedTurnFailureContext | undefined,
+  latestTurnId: TurnId | undefined,
+): ReadonlyMap<string, number> {
+  const result = new Map<string, number>();
+  if (!context || (context.latestTurn?.turnId ?? undefined) !== latestTurnId) return result;
+  const boundary = context.latestTurn
+    ? Date.parse(
+        context.latestTurn.completedAt ??
+          context.latestTurn.startedAt ??
+          context.latestTurn.requestedAt,
+      )
+    : null;
+  if (boundary !== null && !Number.isFinite(boundary)) return result;
+  // A later successful turn closes this suffix. Do not carry old failed
+  // messages into every subsequent turn's current work log merely because
+  // those messages never acquired a provider TurnId of their own.
+  for (let index = context.messages.length - 1; index >= 0; index -= 1) {
+    const message = context.messages[index]!;
+    if (message.turnId !== null && message.turnId !== undefined) break;
+    if (message.role !== "user") continue;
+    const createdAt = Date.parse(message.createdAt);
+    if (!Number.isFinite(createdAt) || (boundary !== null && createdAt <= boundary)) continue;
+    result.set(message.id, createdAt);
+  }
+  return result;
+}
+
+function isCurrentUnstartedTurnFailure(
+  activity: OrchestrationThreadActivity,
+  messageTimes: ReadonlyMap<string, number>,
+  uniqueLegacyMessageTimes: ReadonlySet<number>,
+): boolean {
+  if (
+    activity.kind !== "provider.turn.start.failed" ||
+    activity.turnId !== null ||
+    activity.tone !== "error"
+  )
+    return false;
+  const payload = asRecord(activity.payload);
+  const failedAt = Date.parse(activity.createdAt);
+  if (!Number.isFinite(failedAt)) return false;
+  if (
+    payload &&
+    Object.keys(payload).length === 1 &&
+    Object.hasOwn(payload, "detail") &&
+    typeof payload.detail === "string"
+  ) {
+    // Older failed-start rows retained only detail and the original intent's
+    // timestamp. A unique same-time canonical pending message admits a generic
+    // notice only; temporal coincidence is never a delivery/retry receipt.
+    // Partial or future correlation objects cannot fall back to this path.
+    return (
+      uniqueLegacyMessageTimes.has(failedAt) &&
+      (activity.sequence === undefined ||
+        (Number.isSafeInteger(activity.sequence) && activity.sequence > 0))
+    );
+  }
+  if (
+    typeof payload?.messageId !== "string" ||
+    typeof payload.intentSequence !== "number" ||
+    !Number.isSafeInteger(payload.intentSequence) ||
+    payload.intentSequence <= 0
+  )
+    return false;
+  const messageTime = messageTimes.get(payload.messageId);
+  // These received identities select presentation only. They grant no retry,
+  // delivery, liveness or native-owner authority. A timestamp cannot bind a
+  // stale failure to a later same-ID message, nor can malformed sequence data.
+  return (
+    messageTime !== undefined &&
+    Number.isFinite(failedAt) &&
+    failedAt >= messageTime &&
+    (activity.sequence === undefined ||
+      (Number.isSafeInteger(activity.sequence) && activity.sequence > payload.intentSequence))
+  );
+}
+
 export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   latestTurnId: TurnId | undefined,
-  options: DeriveSubagentActivityOptions & { includeUnscopedCompaction?: boolean } = {},
+  options: DeriveSubagentActivityOptions & {
+    includeUnscopedCompaction?: boolean;
+    /** Main-chat-only visibility for a durably accepted message with no turn. */
+    unstartedTurnFailures?: UnstartedTurnFailureContext;
+  } = {},
 ): WorkLogEntry[] {
-  const ordered = [...activities].toSorted(compareActivitiesByOrder).filter(
-    (activity) =>
+  const unstartedMessageTimes = currentUnstartedMessageTimes(
+    options.unstartedTurnFailures,
+    latestTurnId,
+  );
+  const uniqueLegacyMessageTimes = new Set<number>();
+  const ambiguousLegacyMessageTimes = new Set<number>();
+  for (const createdAt of unstartedMessageTimes.values()) {
+    if (ambiguousLegacyMessageTimes.has(createdAt)) continue;
+    if (uniqueLegacyMessageTimes.has(createdAt)) {
+      uniqueLegacyMessageTimes.delete(createdAt);
+      ambiguousLegacyMessageTimes.add(createdAt);
+    } else uniqueLegacyMessageTimes.add(createdAt);
+  }
+  const admittedUnstartedFailures = new Set<string>();
+  const ordered = [...activities].toSorted(compareActivitiesByOrder).filter((activity) => {
+    if (
+      options.unstartedTurnFailures &&
+      activity.turnId === null &&
+      activity.kind === "provider.turn.start.failed"
+    ) {
+      if (!isCurrentUnstartedTurnFailure(activity, unstartedMessageTimes, uniqueLegacyMessageTimes))
+        return false;
+      admittedUnstartedFailures.add(activity.id);
+      return true;
+    }
+    return (
       !latestTurnId ||
       activity.turnId === latestTurnId ||
       // Manual requests/failures and some provider compaction notifications
@@ -674,8 +789,9 @@ export function deriveWorkLogEntries(
         activity.turnId === null &&
         (isContextCompactionActivity(activity) ||
           activity.kind === "provider.compaction.requested" ||
-          activity.kind === "provider.compaction.failed")),
-  );
+          activity.kind === "provider.compaction.failed"))
+    );
+  });
   const latestTaskVisibility = new Map<string, "visible" | "ambient">();
   const configuredCodexTurns = new Set<TurnId>();
   const configurationByActivityId = new Map<string, ProviderTurnConfiguration>();
@@ -756,13 +872,27 @@ export function deriveWorkLogEntries(
       const payload = asRecord(activity.payload);
       return payload?.taskId !== `codex-turn-start:${activity.turnId}`;
     })
-    .map((activity) =>
-      toDerivedWorkLogEntry(
+    .map((activity) => {
+      if (admittedUnstartedFailures.has(activity.id)) {
+        // A preparation failure has no native turn, but it still belongs next
+        // to its accepted user message. Keep opaque failure prose out of the
+        // ordinary entry/debug/preview. No private copy exists for this notice,
+        // so do not manufacture a diagnostic subject or inspection affordance.
+        return {
+          id: activity.id,
+          turnId: activity.turnId,
+          createdAt: activity.createdAt,
+          label: uiText("Provider turn start failed"),
+          tone: "error" as const,
+          activityKind: activity.kind,
+        };
+      }
+      return toDerivedWorkLogEntry(
         activity,
         configurationByActivityId.get(activity.id),
         activity.turnId ? configurationByTurnId.get(activity.turnId) : undefined,
-      ),
-    );
+      );
+    });
   const collapsed = collapseDerivedWorkLogEntries(
     foldProviderDiagnosticEntries(foldClaudeOperationSnapshots(entries)),
   ).map(

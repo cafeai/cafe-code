@@ -30,6 +30,7 @@ const labels = [
   "live-account-queue",
   "context-late-ack",
   "subagent-owner-release",
+  "recovery-diagnostic-visibility",
 ] as const;
 export type ChatViewCallerLabel = (typeof labels)[number];
 const phases = [
