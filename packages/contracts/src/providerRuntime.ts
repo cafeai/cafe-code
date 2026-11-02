@@ -542,7 +542,15 @@ export type TurnStartedPayload = typeof TurnStartedPayload.Type;
 
 // Content-free native failure evidence. These categories describe a terminal
 // Codex root, not a general permission to retry an arbitrary provider action.
-export const CodexTransientFailureCategory = Schema.Literals(["transport", "server", "rate-limit"]);
+// `response-limit` is an incomplete output, not account quota or context
+// exhaustion. Retain the historical type/field names; every category
+// still requires the same exact native-owner and one-use continuation proof.
+export const CodexTransientFailureCategory = Schema.Literals([
+  "transport",
+  "server",
+  "rate-limit",
+  "response-limit",
+]);
 export type CodexTransientFailureCategory = typeof CodexTransientFailureCategory.Type;
 
 export const TurnCompletedPayload = Schema.Struct({

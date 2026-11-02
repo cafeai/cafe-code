@@ -45,6 +45,14 @@ const nativePublicErrorVariants = new Set([
 const genericProcessingError =
   /^(?:(?:Error running remote compact task: )?stream disconnected before completion: )?An error occurred while processing your request\. You can retry your request, or contact us through our help center at help\.openai\.com if the error persists\. Please include the request ID [a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12} in your message\.$/u;
 
+// Codex 0.166 reports ResponseIncomplete as `other`; output exhaustion is a
+// semantic terminal outcome, separate from content filtering and interruption.
+// Recognize only its exact output-limit reason, not arbitrary `other` prose or
+// the predecessor Stream/remote-compaction wrappers. The existing failed-root
+// owner/history/one-use guards still decide whether a new continuation may run.
+// https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/protocol/src/error.rs#L78-L86
+const outputLimitError = "Incomplete response returned, reason: max_output_tokens";
+
 function ownRecord(value: unknown): Record<string, unknown> | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   try {
@@ -193,6 +201,17 @@ export function classifyCodexTransientFailure(
   if (info === "serverOverloaded" || info === "internalServerError") return "server";
   if (info === "rateLimitExceeded") return "rate-limit";
   if (info === "other") {
+    if (error.message === outputLimitError) {
+      // Contradictory details cannot borrow the public output-limit wording.
+      // In particular, auth/quota/filter diagnostics remain non-retryable.
+      const details = error.additionalDetails;
+      return details === undefined ||
+        details === null ||
+        details === "" ||
+        details === outputLimitError
+        ? "response-limit"
+        : undefined;
+    }
     // A contradictory additional diagnostic must not turn a permanent error
     // into an unattended retry merely because its public message looks fixed.
     const details = error.additionalDetails;

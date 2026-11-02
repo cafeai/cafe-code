@@ -11,8 +11,79 @@ const processingError =
   "An error occurred while processing your request. You can retry your request, or contact us through our help center at help.openai.com if the error persists. Please include the request ID eb45b1d3-36e9-4f02-a321-8ea87f01185c in your message.";
 const disconnectedProcessingError = `stream disconnected before completion: ${processingError}`;
 const remoteCompactionProcessingError = `Error running remote compact task: ${disconnectedProcessingError}`;
+const outputLimitError = "Incomplete response returned, reason: max_output_tokens";
 
 describe("Codex terminal transient failure evidence", () => {
+  it("recognizes only the exact native output limit after protocol decoding", () => {
+    // The real native terminal shape reports this semantic response boundary
+    // as `other`. It is neither exhausted account quota nor context overflow.
+    for (const additionalDetails of [null, "", outputLimitError]) {
+      const decoded = decodeCodexNotification({
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: {
+            id: "turn-1",
+            items: [],
+            status: "failed",
+            error: {
+              message: outputLimitError,
+              codexErrorInfo: "other",
+              additionalDetails,
+              misalignment: null,
+            },
+          },
+        },
+      });
+      if (decoded.method !== "turn/completed") throw new Error("Expected terminal envelope");
+      expect(classifyCodexTransientFailure(decoded.params.turn.error)).toBe("response-limit");
+    }
+    // Legacy direct runtime envelopes may omit the newer nullable field.
+    expect(
+      classifyCodexTransientFailure({ message: outputLimitError, codexErrorInfo: "other" }),
+    ).toBe("response-limit");
+  });
+
+  it("does not turn arbitrary incomplete-response prose or contradictory evidence into continuation", () => {
+    const native = { message: outputLimitError, codexErrorInfo: "other" };
+    const refused = [
+      ...[
+        `${outputLimitError}\n`,
+        `Assistant said: ${outputLimitError}`,
+        `stream disconnected before completion: ${outputLimitError}`,
+        `Error running remote compact task: ${outputLimitError}`,
+        `${outputLimitError} Unauthorized`,
+        outputLimitError.replace("max_output_tokens", "content_filter"),
+        outputLimitError.replace("max_output_tokens", "interrupted"),
+        outputLimitError.replace("max_output_tokens", "unknown"),
+      ].map((message) => ({ ...native, message })),
+      ...[
+        undefined,
+        "unauthorized",
+        "usageLimitExceeded",
+        "contextWindowExceeded",
+        "cyberPolicy",
+      ].map((codexErrorInfo) => ({ ...native, codexErrorInfo })),
+      ...["Unauthorized", processingError, { retry: true }, "x".repeat(4_097)].map(
+        (additionalDetails) => ({ ...native, additionalDetails }),
+      ),
+      { ...native, misalignment: { denied: true } },
+      { ...native, futurePolicy: "permanent" },
+      Object.create(native),
+    ];
+    for (const error of refused) expect(classifyCodexTransientFailure(error)).toBeUndefined();
+    let reads = 0;
+    const accessor = {
+      ...native,
+      get additionalDetails() {
+        reads++;
+        return outputLimitError;
+      },
+    };
+    expect(classifyCodexTransientFailure(accessor)).toBeUndefined();
+    expect(reads).toBe(0);
+  });
+
   it("redacts newly open nested errors in typed startup notifications without changing native evidence", () => {
     const error = {
       message: "Public error",

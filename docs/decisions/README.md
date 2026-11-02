@@ -1,6 +1,6 @@
 # Verification decision index
 
-Last updated: 2026-10-29 23:00:14 JST (UTC+0900)
+Last updated: 2026-11-02 10:01:53 JST (UTC+0900)
 
 This index covers verification decisions; independent feature decisions remain
 in this directory.
@@ -27,10 +27,14 @@ in this directory.
   root-only cooperative self-retirement of supported incompatible POSIX owners,
   with exact acknowledgement, confirmed exit and preserved legacy-owner limits.
 
-Related provider lifecycle decision:
+Related provider lifecycle decisions:
 
 - [Phased Codex failed-root recovery](codex-phased-failed-root-recovery.md):
   private zero-paid preparation, exact joined ownership and one-use paid
   submission; unknown paid acknowledgments never permit resend. This accepted
   successor keeps source implementation, exact-source qualification and
   live-runtime adoption separate from the preserved predecessor evidence.
+- [Codex output-limit recovery](codex-output-limit-recovery.md): the exact
+  `max_output_tokens` incomplete-response message under `other` adds one guarded
+  classification; native proof, one-use submission, Stop and uncertain-ACK
+  restrictions remain unchanged.

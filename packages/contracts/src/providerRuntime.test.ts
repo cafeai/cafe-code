@@ -258,7 +258,7 @@ describe("ProviderRuntimeEvent", () => {
       payload: { state: "failed" },
     };
     expect(decodeRuntimeEvent(input).payload).toEqual({ state: "failed" });
-    for (const category of ["server", "transport", "rate-limit"]) {
+    for (const category of ["server", "transport", "rate-limit", "response-limit"]) {
       const value = {
         ...input,
         payload: { state: "failed", codexTransientFailure: category, nativeContextAvailable: true },

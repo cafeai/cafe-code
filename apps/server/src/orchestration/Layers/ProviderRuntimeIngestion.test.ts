@@ -3123,6 +3123,7 @@ describe("ProviderRuntimeIngestion", () => {
   it.each([
     "transient",
     "remote-compaction",
+    "output-limit",
     "permanent",
     "missing-marker",
     "missing-proof",
@@ -3151,6 +3152,18 @@ describe("ProviderRuntimeIngestion", () => {
       codexErrorInfo: "other",
     });
     if (scenario === "remote-compaction") expect(remoteCompactionCategory).toBe("server");
+    const recoveryCategory =
+      scenario === "output-limit"
+        ? classifyCodexTransientFailure({
+            message: "Incomplete response returned, reason: max_output_tokens",
+            codexErrorInfo: "other",
+            additionalDetails: null,
+            misalignment: null,
+          })
+        : scenario === "remote-compaction"
+          ? remoteCompactionCategory
+          : ("server" as const);
+    if (scenario === "output-limit") expect(recoveryCategory).toBe("response-limit");
     const session: ProviderSession = {
       provider: ProviderDriverKind.make("codex"),
       providerInstanceId: instanceId,
@@ -3167,7 +3180,7 @@ describe("ProviderRuntimeIngestion", () => {
         observedAt:
           scenario === "proof-time-disagreement" ? "2026-01-01T00:00:01.999Z" : completedAt,
         ...(transient && scenario !== "category-disagreement"
-          ? { category: "server" as const }
+          ? { category: recoveryCategory! }
           : {}),
       },
     };
@@ -3236,8 +3249,7 @@ describe("ProviderRuntimeIngestion", () => {
         ...(scenario === "missing-marker" ? {} : { nativeContextAvailable: true as const }),
         ...(transient
           ? {
-              codexTransientFailure:
-                scenario === "remote-compaction" ? remoteCompactionCategory! : ("server" as const),
+              codexTransientFailure: recoveryCategory!,
             }
           : {}),
       },
@@ -3387,6 +3399,7 @@ describe("ProviderRuntimeIngestion", () => {
     const available =
       scenario === "transient" ||
       scenario === "remote-compaction" ||
+      scenario === "output-limit" ||
       scenario === "permanent" ||
       scenario === "partial-fanout" ||
       scenario === "delayed-error" ||

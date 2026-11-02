@@ -4364,7 +4364,33 @@ describe("Codex failed-root continuation authority", () => {
     () =>
       Effect.gen(function* () {
         for (const lateStatus of [false, true]) {
-          for (const transient of [false, true]) {
+          for (const failure of [
+            {
+              error: {
+                message: "Definitive native request failed",
+                codexErrorInfo: "unauthorized",
+              },
+              category: undefined,
+            },
+            {
+              error: {
+                message: "Definitive native request failed",
+                codexErrorInfo: "internalServerError",
+              },
+              category: "server",
+            },
+            // Exercise the exact native response ceiling through decoding,
+            // completion commit and owner proof, not a fabricated category.
+            {
+              error: {
+                message: "Incomplete response returned, reason: max_output_tokens",
+                codexErrorInfo: "other",
+                additionalDetails: null,
+                misalignment: null,
+              },
+              category: "response-limit",
+            },
+          ] as const) {
             const boundary = yield* makeBoundary();
             yield* Ref.set(boundary.completionsRef, new Map());
             yield* Ref.set(boundary.sessionRef, {
@@ -4392,10 +4418,7 @@ describe("Codex failed-root continuation authority", () => {
               threadId: "native-thread",
               turnId: failedTurnId,
               willRetry: false,
-              error: {
-                message: "Definitive native request failed",
-                codexErrorInfo: transient ? "internalServerError" : "unauthorized",
-              },
+              error: failure.error,
             });
             assert.equal(
               yield* commitCodexRootErrorLifecycleBoundary({
@@ -4470,7 +4493,7 @@ describe("Codex failed-root continuation authority", () => {
             assert.equal(published, true);
             assert.equal(after.status, "ready");
             assert.equal(after.activeTurnId, undefined);
-            assert.equal(after.lastError, "Definitive native request failed");
+            assert.equal(after.lastError, failure.error.message);
             assert.equal(after.updatedAt, observedAt);
             assert.deepEqual(
               readCodexRootTurnFailure({
@@ -4486,7 +4509,7 @@ describe("Codex failed-root continuation authority", () => {
                 turnId: failedTurnId,
                 providerThreadId: "native-thread",
                 observedAt,
-                ...(transient ? { category: "server" } : {}),
+                ...(failure.category !== undefined ? { category: failure.category } : {}),
               },
             );
             assert.equal((yield* Ref.get(pendingAggregateRef)).size, 0);
