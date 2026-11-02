@@ -2292,8 +2292,10 @@
   "Slowest spans": "最も遅いスパン",
   "Snow": "雪",
   "Some activity couldn’t be loaded.": "一部の活動を読み込めませんでした。",
+  "Some agent status information is unavailable.": "一部のエージェントの状態を確認できません。",
   "Some chats may remain. Reconnect before trying again.": "一部のチャットが残っている場合があります。再接続してから再試行してください。",
   "Some messages couldn’t be loaded.": "一部のメッセージを読み込めませんでした。",
+  "Some pending requests are not shown.": "一部の保留中のリクエストは表示されていません。",
   "Some trace files couldn''t be read: {value0}": "一部のトレースファイルを読み取れませんでした: {value0}",
   "Some workflow details were omitted.": "ワークフローの一部の詳細は省略されています。",
   "Something went wrong.": "問題が発生しました。",
@@ -3551,5 +3553,6 @@
   "The updated version could not be verified": "更新後のバージョンを確認できませんでした",
   "Update preparation failed": "更新の準備に失敗しました",
   "Includes costs reported by Axiom and OpenCode, with standard API-rate estimates for other usage. OpenCode may report zero when pricing is unavailable. Only recorded requests are included; this is not the account-wide bill.": "Axiom と OpenCode が報告した費用を含み、その他の使用量には標準 API 料金による推定値を使います。料金情報がない場合、OpenCode はゼロを報告することがあります。記録済みリクエストのみが対象で、アカウント全体の請求額ではありません。",
-  "Axiom and OpenCode report costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.": "Axiom と OpenCode は費用を報告しますが、キャッシュ節約額の内訳は含みません。他のプロバイダーのキャッシュ節約額は料金に基づく推定値です。"
+  "Axiom and OpenCode report costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.": "Axiom と OpenCode は費用を報告しますが、キャッシュ節約額の内訳は含みません。他のプロバイダーのキャッシュ節約額は料金に基づく推定値です。",
+  "Your provider requested a one-time confirmation. This can still appear with automatic permissions enabled.": "プロバイダーが一度限りの確認を要求しています。権限の自動承認が有効でも、この確認が表示されることがあります。"
 }

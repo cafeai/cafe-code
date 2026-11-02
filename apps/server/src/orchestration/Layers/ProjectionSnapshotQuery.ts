@@ -3,6 +3,7 @@ import {
   AdditionalWorkspaceRoots,
   IsoDateTime,
   MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
+  MAX_UNCONFIRMED_NATIVE_AGENTS,
   MessageId,
   NonNegativeInt,
   SubagentRuntimeId,
@@ -44,6 +45,7 @@ import {
   HIDDEN_PROVIDER_WARNING_MESSAGES,
   PUBLIC_REASONING_SUMMARY_PROVIDERS,
 } from "@cafecode/shared/providerWorkLog";
+import { MAX_PENDING_REQUEST_RETENTION_IDENTITIES } from "@cafecode/shared/pendingRequestRetention";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -136,6 +138,8 @@ const ProjectionThreadDetailActivityDbRowSchema = Schema.Struct({
   subagentRetentionTruncated: Schema.Number,
   /** True only when the all-turn normalized lifecycle sidecar is complete. */
   subagentRetentionHydrated: Schema.Number,
+  /** Bounded pending interactions omitted from this detail, never retired. */
+  pendingRequestRetentionTruncated: Schema.Number,
 });
 const ProjectionThreadSessionDbRowSchema = ProjectionThreadSessionSqlRow;
 const ProjectionThreadGoalDbRowSchema = ProviderThreadGoal;
@@ -619,6 +623,93 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const diagnosticStore = makeProviderActivityDiagnosticStore(sql);
+  /**
+   * A native child can be re-admitted under a newer root turn. Its immutable
+   * per-turn history is deliberately retained, but those earlier heads are
+   * not independent live workers. An exact structured start binds the current
+   * presentation owner. Late terminal/progress edges from an older turn cannot
+   * retire that newer owner. Generic task controls and tool item IDs keep their
+   * original turn namespace; this read policy grants no native control.
+   *
+   * Ingestion qualifies the shared full schema once and materializes one
+   * binding per native task slot. Recheck only that exact source witness here;
+   * progress refreshes never hydrate historical starts or parse their payloads.
+   * All binding owner/watermark metadata remains relevant to stale-copy
+   * suppression, so metadata work is proportional to stored native slots.
+   * Source payload equality is checked only for active owners and identities
+   * already selected by detail's bounded lanes, never every completed slot.
+   * An invalidated binding retains its owner/order watermark and suppresses
+   * unconfirmed agent heads until qualified evidence renews it. That is unknown
+   * presentation, never provider termination or native-control permission.
+   */
+  const liveWorkBindingCtes = (threadId: typeof ThreadId.Encoded | null, detail = false) => sql`
+    current_live_work AS MATERIALIZED (
+      SELECT work.* FROM projection_thread_sessions AS sessions
+      JOIN projection_live_work AS work
+        ON work.thread_id = sessions.thread_id AND work.runtime_id = sessions.subagent_runtime_id
+      WHERE sessions.status NOT IN ('stopped', 'error')
+        AND ${threadId === null ? sql`1 = 1` : sql`sessions.thread_id = ${threadId}`}
+    ),
+    known_native_agent_bindings AS MATERIALIZED (
+      -- 0: unconfirmed source/head; 1: exact witness checked; 2: inactive,
+      -- unselected owner metadata only. State2 can suppress obsolete copies,
+      -- but cannot hydrate a start, count active work or emit an unknown hint.
+      SELECT binding.thread_id, binding.runtime_id, binding.work_id,
+        binding.turn_id, binding.activity_id,
+        CASE WHEN binding.valid != 1 OR owning_activity.activity_id IS NULL THEN 0
+          WHEN owning_head.active = 1 OR ${
+            detail
+              ? sql`binding.work_id IN (
+            SELECT work_id FROM retained_native_agent_identity_keys
+          )`
+              : sql`0 = 1`
+          } THEN
+            CASE WHEN activity.activity_id IS NOT NULL THEN 1 ELSE 0 END
+          ELSE 2 END AS source_current
+      FROM projection_native_agent_bindings AS binding
+      JOIN projection_thread_sessions AS sessions
+        ON sessions.thread_id = binding.thread_id
+          AND sessions.subagent_runtime_id = binding.runtime_id
+          AND sessions.status NOT IN ('stopped', 'error')
+      LEFT JOIN projection_live_work AS owning_head
+        ON owning_head.thread_id = binding.thread_id AND owning_head.runtime_id = binding.runtime_id
+          AND owning_head.turn_id = COALESCE(binding.turn_id, '')
+          AND owning_head.lane = 'task' AND owning_head.work_id = binding.work_id
+      LEFT JOIN projection_thread_activities AS owning_activity
+        ON owning_activity.activity_id = owning_head.activity_id
+          AND owning_activity.thread_id = binding.thread_id
+          AND owning_activity.turn_id IS binding.turn_id
+          AND owning_activity.sequence IS owning_head.sequence
+          AND owning_activity.created_at = owning_head.created_at
+          AND owning_activity.kind IN ('task.started', 'task.progress', 'task.completed')
+      LEFT JOIN projection_thread_activities AS activity
+        ON activity.activity_id = CASE WHEN binding.valid = 1
+          AND owning_activity.activity_id IS NOT NULL
+          AND (owning_head.active = 1 OR ${
+            detail
+              ? sql`binding.work_id IN (
+            SELECT work_id FROM retained_native_agent_identity_keys
+          )`
+              : sql`0 = 1`
+          }) THEN binding.activity_id END
+          AND activity.thread_id = binding.thread_id AND activity.turn_id IS binding.turn_id
+          AND activity.kind = 'task.started' AND activity.sequence IS binding.activity_sequence
+          AND activity.created_at = binding.created_at
+          AND activity.payload_json = CASE WHEN activity.activity_id IS NOT NULL THEN binding.payload_json END
+      WHERE ${threadId === null ? sql`1 = 1` : sql`sessions.thread_id = ${threadId}`}
+    ),
+    native_agent_start_anchors AS (
+      SELECT * FROM known_native_agent_bindings WHERE source_current = 1
+    ),
+    current_live_work_heads AS (
+      SELECT work.* FROM current_live_work AS work
+      LEFT JOIN known_native_agent_bindings AS anchor
+        ON anchor.thread_id = work.thread_id AND anchor.runtime_id = work.runtime_id
+          AND anchor.work_id = work.work_id AND work.lane = 'task' AND work.is_agent = 1
+      WHERE anchor.activity_id IS NULL OR
+        ((anchor.source_current = 1 OR (anchor.source_current = 2 AND work.active = 0))
+          AND COALESCE(anchor.turn_id, '') = work.turn_id)
+    )`;
   const listLiveWorkRows = SqlSchema.findAll({
     Request: Schema.NullOr(ThreadId),
     Result: Schema.Struct({
@@ -626,19 +717,33 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       runtimeId: SubagentRuntimeId,
       taskCount: NonNegativeInt,
       agentCount: NonNegativeInt,
+      unconfirmedAgentIds: Schema.fromJsonString(Schema.Array(Schema.String)),
     }),
     execute: (threadId) => sql`
+      WITH ${liveWorkBindingCtes(threadId)}
       SELECT sessions.thread_id AS "threadId", sessions.subagent_runtime_id AS "runtimeId",
         SUM(CASE WHEN work.is_agent = 0 AND work.active = 1 THEN 1 ELSE 0 END) AS "taskCount",
-        SUM(CASE WHEN work.is_agent = 1 AND work.active = 1 THEN 1 ELSE 0 END) AS "agentCount"
+        SUM(CASE WHEN work.is_agent = 1 AND work.active = 1 THEN 1 ELSE 0 END) AS "agentCount",
+        (
+          SELECT json_group_array(work_id) FROM (
+            SELECT binding.work_id FROM known_native_agent_bindings AS binding
+            WHERE binding.thread_id = sessions.thread_id
+              AND binding.runtime_id = sessions.subagent_runtime_id
+              AND binding.source_current = 0
+            ORDER BY binding.work_id LIMIT ${MAX_UNCONFIRMED_NATIVE_AGENTS + 1}
+          )
+        ) AS "unconfirmedAgentIds"
       FROM projection_thread_sessions AS sessions
-      LEFT JOIN projection_live_work AS work
+      LEFT JOIN current_live_work_heads AS work
         ON work.thread_id = sessions.thread_id AND work.runtime_id = sessions.subagent_runtime_id
         AND work.active = 1
       WHERE sessions.status NOT IN ('stopped', 'error')
         AND ${threadId === null ? sql`1 = 1` : sql`sessions.thread_id = ${threadId}`}
-        AND EXISTS (SELECT 1 FROM projection_live_work AS observed
+        AND (EXISTS (SELECT 1 FROM projection_live_work AS observed
           WHERE observed.thread_id = sessions.thread_id AND observed.runtime_id = sessions.subagent_runtime_id)
+          OR EXISTS (SELECT 1 FROM known_native_agent_bindings AS binding
+            WHERE binding.thread_id = sessions.thread_id
+              AND binding.runtime_id = sessions.subagent_runtime_id))
       GROUP BY sessions.thread_id, sessions.subagent_runtime_id`,
   });
   const readLiveWorkSummaries = (threadId: ThreadId | null) =>
@@ -647,8 +752,28 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         (rows) =>
           new Map(
             rows.map(
-              ({ threadId: id, ...summary }) =>
-                [id, summary satisfies OrchestrationLiveWork] as const,
+              ({ threadId: id, unconfirmedAgentIds, ...summary }) =>
+                [
+                  id,
+                  {
+                    ...summary,
+                    // These exact-runtime display hints prevent retained historical
+                    // starts from reviving an invalidated owner while another agent is
+                    // still live. They grant no provider/control/history authority. Keep
+                    // one bounded sentinel so clients can fail closed on hint overflow.
+                    ...(unconfirmedAgentIds.length === 0
+                      ? {}
+                      : {
+                          unconfirmedAgentIds: unconfirmedAgentIds.slice(
+                            0,
+                            MAX_UNCONFIRMED_NATIVE_AGENTS,
+                          ),
+                          ...(unconfirmedAgentIds.length > MAX_UNCONFIRMED_NATIVE_AGENTS
+                            ? { unconfirmedAgentIdsTruncated: true }
+                            : {}),
+                        }),
+                  } satisfies OrchestrationLiveWork,
+                ] as const,
             ),
           ),
       ),
@@ -2539,6 +2664,86 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             activity_id DESC
           LIMIT ${THREAD_DETAIL_ACTIVITY_LIMIT}
         ),
+        request_lifecycle_rows AS MATERIALIZED (
+          -- Only indexed interaction kinds are inspected. Ordinary tool history
+          -- never expands this lane; selected payloads remain bounded below.
+          SELECT activity_id, kind, sequence, created_at,
+            CASE WHEN kind IN ('approval.requested', 'approval.resolved',
+              'provider.approval.respond.failed') THEN 'approval' ELSE 'question' END AS lane,
+            json_extract(payload_json, '$.requestId') AS request_id,
+            CASE WHEN kind IN ('approval.resolved', 'user-input.resolved') THEN 2 ELSE 1 END AS lifecycle_rank
+          FROM projection_thread_activities
+            INDEXED BY idx_projection_thread_activities_thread_kind_created_id
+          WHERE thread_id = ${threadId}
+            AND kind IN ('approval.requested', 'approval.resolved', 'provider.approval.respond.failed',
+              'user-input.requested', 'user-input.resolved', 'provider.user-input.respond.failed')
+            AND CASE WHEN json_valid(payload_json) THEN
+              json_type(payload_json, '$.requestId') = 'text'
+              AND length(json_extract(payload_json, '$.requestId')) > 0
+              AND (kind NOT IN ('provider.approval.respond.failed', 'provider.user-input.respond.failed')
+                OR (kind = 'provider.approval.respond.failed'
+                  AND json_type(payload_json, '$.detail') = 'text' AND (
+                  lower(COALESCE(json_extract(payload_json, '$.detail'), '')) LIKE '%stale pending approval request%'
+                  OR lower(COALESCE(json_extract(payload_json, '$.detail'), '')) LIKE '%unknown pending approval request%'
+                  OR lower(COALESCE(json_extract(payload_json, '$.detail'), '')) LIKE '%unknown pending permission request%'))
+                OR (kind = 'provider.user-input.respond.failed'
+                  AND json_type(payload_json, '$.detail') = 'text' AND (
+                  lower(COALESCE(json_extract(payload_json, '$.detail'), '')) LIKE '%stale pending user-input request%'
+                  OR lower(COALESCE(json_extract(payload_json, '$.detail'), '')) LIKE '%unknown pending user-input request%')))
+            ELSE 0 END
+        ),
+        request_lifecycle_heads AS (
+          SELECT * FROM (
+            SELECT lifecycle.*, ROW_NUMBER() OVER (
+              PARTITION BY lane, request_id ORDER BY
+                CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+                sequence DESC, created_at DESC, lifecycle_rank DESC, activity_id DESC
+            ) AS head_rank FROM request_lifecycle_rows AS lifecycle
+          ) WHERE head_rank = 1
+        ),
+        pending_request_heads AS (
+          SELECT * FROM request_lifecycle_heads
+          WHERE kind IN ('approval.requested', 'user-input.requested')
+            AND (lane != 'approval' OR EXISTS (
+              SELECT 1 FROM projection_pending_approvals AS approval
+              WHERE approval.thread_id = ${threadId}
+                AND approval.request_id = request_lifecycle_heads.request_id
+                AND approval.status = 'pending'
+            ))
+          ORDER BY CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+            sequence DESC, created_at DESC, lifecycle_rank DESC, activity_id DESC
+        ),
+        retained_pending_request_heads AS (
+          SELECT * FROM pending_request_heads
+          ORDER BY CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+            sequence DESC, created_at DESC, lifecycle_rank DESC, activity_id DESC
+          LIMIT ${MAX_PENDING_REQUEST_RETENTION_IDENTITIES}
+        ),
+        retained_request_identities AS (
+          SELECT lane, request_id FROM retained_pending_request_heads
+          UNION
+          SELECT lifecycle.lane, lifecycle.request_id
+          FROM recent_activity_ids AS recent JOIN request_lifecycle_rows AS lifecycle
+            ON lifecycle.activity_id = recent.activity_id
+          WHERE lifecycle.kind IN ('approval.requested', 'user-input.requested')
+        ),
+        retained_request_terminal_ids AS (
+          -- A legacy same-clock terminal can sort just before its request in
+          -- the ordinary cursor order. Keep that exact witness too so trimming
+          -- cannot resurrect a settled card. At most 500+64 identities qualify.
+          SELECT activity_id FROM (
+            SELECT lifecycle.activity_id, ROW_NUMBER() OVER (
+              PARTITION BY lifecycle.lane, lifecycle.request_id ORDER BY
+                CASE WHEN lifecycle.sequence IS NULL THEN 0 ELSE 1 END DESC,
+                lifecycle.sequence DESC, lifecycle.created_at DESC,
+                lifecycle.lifecycle_rank DESC, lifecycle.activity_id DESC
+            ) AS terminal_rank
+            FROM retained_request_identities AS retained
+            JOIN request_lifecycle_rows AS lifecycle
+              ON lifecycle.lane = retained.lane AND lifecycle.request_id = retained.request_id
+            WHERE lifecycle.kind NOT IN ('approval.requested', 'user-input.requested')
+          ) WHERE terminal_rank = 1
+        ),
         latest_task_plan_activity_id AS (
           SELECT activity_id
           FROM projection_thread_activities
@@ -2858,17 +3063,93 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           WHERE edges.turn_id = identity.turn_id
             AND edges.child_id = identity.child_id
         ),
+        ${liveWorkBindingCtes(threadId, true)},
+        recent_native_agent_identity_keys AS MATERIALIZED (
+          -- Inspect only the already-selected ordinary tail. These exact
+          -- opaque strings select existing current-runtime binding evidence;
+          -- they do not qualify a new owner or trim/alias a native identity.
+          -- CASE guards every JSON read, including corrupt legacy tail rows.
+          -- A qualified 512-UTF16-unit key uses at most 1536 UTF8 bytes. Bound
+          -- both dimensions before UNION; SQLite character length alone stops
+          -- at embedded NUL and cannot bound an adversarial trailing string.
+          SELECT CASE WHEN json_valid(activity.payload_json) THEN
+            CASE WHEN json_type(activity.payload_json, '$.taskId') = 'text'
+              AND length(json_extract(activity.payload_json, '$.taskId')) BETWEEN 1 AND 512
+              AND length(CAST(json_extract(activity.payload_json, '$.taskId') AS BLOB)) BETWEEN 1 AND 1536
+              THEN json_extract(activity.payload_json, '$.taskId') END
+          END AS work_id
+          FROM recent_activity_ids AS recent
+          CROSS JOIN projection_thread_activities AS activity
+          WHERE activity.activity_id = recent.activity_id
+            AND substr(activity.kind, 1, 5) = 'task.'
+            AND CASE WHEN json_valid(activity.payload_json) THEN
+              json_extract(activity.payload_json, '$.nativeWorkRuntimeId') = (
+                SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+              OR json_extract(activity.payload_json, '$.individualTaskControl.runtimeId') = (
+                SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+              OR json_extract(activity.payload_json, '$.subagent.runtimeId') = (
+                SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+            ELSE 0 END
+          UNION
+          SELECT CASE WHEN json_valid(activity.payload_json) THEN
+            CASE WHEN json_type(activity.payload_json, '$.subagent.threadId') = 'text'
+              AND length(json_extract(activity.payload_json, '$.subagent.threadId')) BETWEEN 1 AND 512
+              AND length(CAST(json_extract(activity.payload_json, '$.subagent.threadId') AS BLOB)) BETWEEN 1 AND 1536
+              THEN json_extract(activity.payload_json, '$.subagent.threadId') END
+          END AS work_id
+          FROM recent_activity_ids AS recent
+          CROSS JOIN projection_thread_activities AS activity
+          WHERE activity.activity_id = recent.activity_id
+            AND substr(activity.kind, 1, 5) = 'task.'
+            AND CASE WHEN json_valid(activity.payload_json) THEN
+              json_extract(activity.payload_json, '$.nativeWorkRuntimeId') = (
+                SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+              OR json_extract(activity.payload_json, '$.individualTaskControl.runtimeId') = (
+                SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+              OR json_extract(activity.payload_json, '$.subagent.runtimeId') = (
+                SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+            ELSE 0 END
+        ),
+        retained_native_agent_identity_keys AS (
+          SELECT work_id FROM recent_native_agent_identity_keys WHERE work_id IS NOT NULL
+          UNION
+          SELECT child_id AS work_id FROM retained_global_subagent_identities
+          UNION
+          SELECT child_id AS work_id FROM retained_current_turn_subagent_identities
+        ),
+        retained_native_agent_start_anchors AS MATERIALIZED (
+          -- Binding rows persist after completion. Retain their payloads only
+          -- for identities the existing bounded detail lanes already selected,
+          -- rather than reopening every completed native start in this runtime.
+          -- source_current=1 already means a checked active owner or one of
+          -- these selected identities. Inactive unselected metadata is state2
+          -- and cannot expand the payload set or masquerade as a live start.
+          SELECT * FROM native_agent_start_anchors
+        ),
+        retained_native_agent_owning_head_ids AS (
+          -- A selected owner may already be completed, or its latest terminal
+          -- may omit repeated subagent metadata. Its exact one-per-slot head
+          -- must accompany the start so the start cannot revive that owner.
+          SELECT work.activity_id FROM retained_native_agent_start_anchors AS anchor
+          CROSS JOIN current_live_work AS work
+          WHERE work.thread_id = anchor.thread_id AND work.runtime_id = anchor.runtime_id
+            AND work.turn_id = COALESCE(anchor.turn_id, '')
+            AND work.lane = 'task' AND work.work_id = anchor.work_id
+        ),
         retained_activity_ids AS (
           SELECT activity_id
           FROM recent_activity_ids
           UNION
+          SELECT activity_id FROM retained_pending_request_heads
+          UNION
+          SELECT activity_id FROM retained_request_terminal_ids
+          UNION
           SELECT work.activity_id
-          FROM projection_live_work AS work
-          JOIN projection_thread_sessions AS sessions
-            ON sessions.thread_id = work.thread_id
-            AND sessions.subagent_runtime_id = work.runtime_id
-          WHERE work.thread_id = ${threadId} AND work.active = 1
-            AND sessions.status NOT IN ('stopped', 'error')
+          FROM current_live_work_heads AS work WHERE work.active = 1
+          UNION
+          SELECT activity_id FROM retained_native_agent_start_anchors
+          UNION
+          SELECT activity_id FROM retained_native_agent_owning_head_ids
           UNION
           SELECT activity_id
           FROM latest_task_plan_activity_id
@@ -2915,7 +3196,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 SELECT COUNT(*) FROM current_turn_subagent_identities
               ) > ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN} THEN 1 ELSE 0 END
             END AS "subagentRetentionTruncated",
-            subagent_hydration.complete AS "subagentRetentionHydrated"
+            subagent_hydration.complete AS "subagentRetentionHydrated",
+            CASE WHEN EXISTS (
+              SELECT 1 FROM pending_request_heads AS pending
+              WHERE pending.activity_id NOT IN (SELECT activity_id FROM recent_activity_ids)
+                AND pending.activity_id NOT IN (SELECT activity_id FROM retained_pending_request_heads)
+            ) THEN 1 ELSE 0 END
+              AS "pendingRequestRetentionTruncated"
           -- Keep the bounded retained-id set outermost. Mature sqlite_stat1
           -- estimates can otherwise reorder this join into a synchronous scan
           -- of the entire activity primary-key index before probing retained.
@@ -3488,6 +3775,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 messages: messagesByThread.get(row.threadId) ?? [],
                 proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
                 activities: activitiesByThread.get(row.threadId) ?? [],
+                // The complete legacy read model carries every activity; the
+                // bounded-detail omission budget does not apply to this path.
+                pendingRequestRetentionTruncated: false,
                 checkpoints: checkpointsByThread.get(row.threadId) ?? [],
                 session: sessionsByThread.get(row.threadId) ?? null,
                 goal: goalsByThread.get(row.threadId) ?? null,
@@ -5014,6 +5304,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         }),
         proposedPlans: proposedPlanRows.map(mapProposedPlanRow),
         activities: activityRows.map(mapActivityRow),
+        pendingRequestRetentionTruncated: activityRows[0]?.pendingRequestRetentionTruncated === 1,
         checkpoints: checkpointRows.map((row) => ({
           turnId: row.turnId,
           checkpointTurnCount: row.checkpointTurnCount,

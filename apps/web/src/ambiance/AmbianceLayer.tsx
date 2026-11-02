@@ -383,7 +383,9 @@ function AmbianceCanvas() {
 
   // Focused-thread signals → engine. Pulses fire only on observed
   // transitions, never on initial subscription, so opening an old thread
-  // does not replay its history as weather.
+  // does not replay its history as weather. Engine replacement must acquire
+  // the current levels even when the projection has not changed; keep the
+  // prior observation across that replacement so it does not replay pulses.
   const previousSignalsRef = useRef<{ threadId: string | null; signals: FocusedThreadSignals }>({
     threadId: null,
     signals: EMPTY_SIGNALS,
@@ -443,7 +445,7 @@ function AmbianceCanvas() {
     }
 
     previousSignalsRef.current = { threadId: focusedKey, signals };
-  }, [focusedThreadId, reactMode, signals]);
+  }, [engineKey, focusedThreadId, reactMode, signals]);
 
   // Background fallback when no thread is focused (dashboard, settings):
   // a slow bounded poll keeps the sky honest about running work elsewhere.
@@ -465,7 +467,7 @@ function AmbianceCanvas() {
     syncAggregate();
     const interval = window.setInterval(syncAggregate, AGGREGATE_POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [focusedThreadId, reactMode, workspaceEnvironmentId]);
+  }, [engineKey, focusedThreadId, reactMode, workspaceEnvironmentId]);
 
   // State color + composer ring CSS variables. Written at a slow cadence and
   // only on change; the CSS side owns the smoothing transition.
@@ -510,7 +512,7 @@ function AmbianceCanvas() {
       window.clearInterval(interval);
       clearAmbianceCssVariables();
     };
-  }, [surfaceComposer]);
+  }, [engineKey, surfaceComposer]);
 
   // Canvas is a replaced element, and `contain: strict` includes size
   // containment. Chromium therefore cannot derive a used size from `inset: 0`

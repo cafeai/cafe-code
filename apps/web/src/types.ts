@@ -116,6 +116,8 @@ export interface Thread {
   worktreePath: string | null;
   turnDiffSummaries: TurnDiffSummary[];
   activities: OrchestrationThreadActivity[];
+  /** Display-only bounded-detail omission; never native request authority. */
+  pendingRequestRetentionTruncated?: boolean | undefined;
   goal?: ProviderThreadGoal | null;
 }
 

@@ -1,6 +1,8 @@
 // This file owns only its feature journeys; the shared module owns fixture lifecycle.
 import {
   registerChatViewBrowserHooks,
+  chatViewFixture,
+  rpcHarness,
   THREAD_ID,
   THREAD_REF,
   wsRequests,
@@ -12,6 +14,7 @@ import {
   waitForSendButton,
   mountChatView,
   createSnapshotWithActiveSubagent,
+  toShellThread,
 } from "./ChatViewBrowser.shared";
 import {
   EventId,
@@ -19,17 +22,186 @@ import {
   ORCHESTRATION_WS_METHODS,
   type OrchestrationReadModel,
   ProviderInstanceId,
+  SubagentRuntimeId,
 } from "@cafecode/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { page } from "vitest/browser";
 import { type NormalizedWsRpcRequestBody } from "../../test/wsRpcHarness";
 import { useComposerDraftStore } from "../composerDraftStore";
-import { selectThreadByRef, useStore } from "../store";
+import { selectSidebarThreadSummaryByRef, selectThreadByRef, useStore } from "../store";
 import { toastManager } from "./ui/toast";
 import { createChatViewCallerOwner } from "./chatViewCallerOwner.test.fixture";
 
 describe("ChatView full app (recovery-footer)", () => {
   registerChatViewBrowserHooks();
+
+  it("keeps the native Tasks roster and warning aligned with exact-runtime source hints", async (context) => {
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "subagent-owner-release",
+    });
+    await owner.run(async () => {
+      const base = createSnapshotWithActiveSubagent();
+      const source = base.threads.find((thread) => thread.id === THREAD_ID)!;
+      const first = source.activities[0]!;
+      const firstPayload = first.payload as Record<string, unknown>;
+      const firstChild = firstPayload.subagent as Record<string, unknown>;
+      if (typeof firstPayload.taskId !== "string")
+        throw new Error("Synthetic native task identity missing");
+      const firstId = firstPayload.taskId;
+      const secondId = "provider-child-independent-audit";
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        threads: base.threads.map((thread) =>
+          thread.id !== THREAD_ID
+            ? thread
+            : {
+                ...thread,
+                activities: [
+                  ...thread.activities,
+                  {
+                    ...first,
+                    id: EventId.make("activity-independent-subagent"),
+                    sequence: 2,
+                    payload: {
+                      ...firstPayload,
+                      taskId: secondId,
+                      subagent: {
+                        ...firstChild,
+                        threadId: secondId,
+                        label: "Independent lifecycle audit",
+                      },
+                    },
+                  },
+                ],
+              },
+        ),
+      };
+      await owner.mount({ viewport: WIDE_FOOTER_VIEWPORT, snapshot });
+      await owner.own("editor", () => waitForComposerEditor());
+      let sequence = snapshot.snapshotSequence;
+      const publish = async (
+        runtimeId: string,
+        agentCount: number,
+        unconfirmedAgentIds: string[],
+      ) => {
+        owner.assertActive();
+        const liveWork = {
+          runtimeId: SubagentRuntimeId.make(runtimeId),
+          taskCount: agentCount,
+          agentCount,
+          unconfirmedAgentIds,
+          unconfirmedAgentIdsTruncated: false,
+        };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
+          kind: "thread-upserted",
+          sequence: ++sequence,
+          thread: { ...toShellThread(source), liveWork },
+        });
+        await owner.own("snapshot", () =>
+          vi.waitFor(() => {
+            owner.assertActive();
+            expect(
+              selectSidebarThreadSummaryByRef(useStore.getState(), THREAD_REF)?.liveWork,
+            ).toEqual(liveWork);
+          }),
+        );
+      };
+      const counter = (count: number) =>
+        page.getByRole("button", {
+          name: `${count} active subagent${count === 1 ? "" : "s"}. Show task list`,
+          exact: true,
+        });
+      const roster = page.getByRole("region", { name: "Active subagents" });
+      const firstRow = roster.getByRole("button", { name: /^Browser lifecycle audit, Working\./ });
+      const secondRow = roster.getByRole("button", {
+        name: /^Independent lifecycle audit, Working\./,
+      });
+      const warning = page.getByText("Some agent status information is unavailable.", {
+        exact: true,
+      });
+      await publish(SUBAGENT_RUNTIME_ID, 2, []);
+      await owner.own("controls", () => counter(2).click());
+      await owner.own("rail", () => expect.element(firstRow).toBeVisible());
+      await owner.own("rail", () => expect.element(secondRow).toBeVisible());
+
+      // A shell observation from another native runtime has no authority over
+      // the current worker roster or its uncertainty warning.
+      await publish("b73284bf-01be-4dbf-94c8-b54e54f17802", 1, [firstId]);
+      await owner.own("rail", () => expect.element(counter(2)).toBeVisible());
+      await owner.own("rail", () => expect.element(firstRow).toBeVisible());
+      await owner.own("prompt", () => expect.element(warning).not.toBeInTheDocument());
+
+      await publish(SUBAGENT_RUNTIME_ID, 1, [firstId]);
+      await owner.own("rail", () => expect.element(counter(1)).toBeVisible());
+      await owner.own("rail", () => expect.element(firstRow).not.toBeInTheDocument());
+      await owner.own("rail", () => expect.element(secondRow).toBeVisible());
+      await owner.own("prompt", () => expect.element(warning).toBeVisible());
+
+      await publish(SUBAGENT_RUNTIME_ID, 2, []);
+      await owner.own("rail", () => expect.element(counter(2)).toBeVisible());
+      await owner.own("rail", () => expect.element(firstRow).toBeVisible());
+      await owner.own("rail", () => expect.element(secondRow).toBeVisible());
+      await owner.own("prompt", () => expect.element(warning).not.toBeInTheDocument());
+    });
+  });
+
+  it("shows pending-request omission only while the authoritative detail remains incomplete", async (context) => {
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "composer-unanswered",
+    });
+    await owner.run(async () => {
+      const base = createSnapshotWithActiveSubagent();
+      await owner.mount({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot: {
+          ...base,
+          threads: base.threads.map((thread) => ({
+            ...thread,
+            pendingRequestRetentionTruncated: false,
+          })),
+        },
+      });
+      await owner.own("editor", () => waitForComposerEditor());
+      const warning = page.getByText("Some pending requests are not shown.", { exact: true });
+      await owner.own("prompt", () => expect.element(warning).not.toBeInTheDocument());
+
+      for (const incomplete of [true, false]) {
+        owner.assertActive();
+        const current = chatViewFixture.fixture.snapshot;
+        const snapshotSequence = current.snapshotSequence + 1;
+        const thread = {
+          ...current.threads.find((candidate) => candidate.id === THREAD_ID)!,
+          pendingRequestRetentionTruncated: incomplete,
+        };
+        chatViewFixture.fixture.snapshot = {
+          ...current,
+          snapshotSequence,
+          threads: current.threads.map((candidate) =>
+            candidate.id === THREAD_ID ? thread : candidate,
+          ),
+        };
+        // Use the ordinary authoritative detail stream, rather than writing
+        // the store or component state that owns the warning directly.
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence, thread },
+        });
+        await owner.own("snapshot", () =>
+          vi.waitFor(() => {
+            owner.assertActive();
+            expect(
+              selectThreadByRef(useStore.getState(), THREAD_REF)?.pendingRequestRetentionTruncated,
+            ).toBe(incomplete);
+          }),
+        );
+        await owner.own("prompt", () =>
+          incomplete
+            ? expect.element(warning).toBeVisible()
+            : expect.element(warning).not.toBeInTheDocument(),
+        );
+      }
+    });
+  });
 
   const snapshotWithTerminalRoot = (
     mode: "retry" | "agents" | "uncertain" | "foreign" | "cancelled",

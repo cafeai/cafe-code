@@ -385,6 +385,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               updatedAt: "2026-02-24T00:00:05.500Z",
             },
           ],
+          pendingRequestRetentionTruncated: false,
           activities: [
             {
               id: asEventId("activity-1"),

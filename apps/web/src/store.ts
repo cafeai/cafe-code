@@ -31,6 +31,7 @@ import {
 import type { ThreadId, TurnId } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import { resolveModelSlugForProvider } from "@cafecode/shared/model";
+import { derivePendingRequestRetention } from "@cafecode/shared/pendingRequestRetention";
 import { create } from "zustand";
 import {
   type ChatMessage,
@@ -97,6 +98,8 @@ export interface EnvironmentState {
   messageByThreadId: Record<ThreadId, Record<MessageId, ChatMessage>>;
   activityIdsByThreadId: Record<ThreadId, string[]>;
   activityByThreadId: Record<ThreadId, Record<string, OrchestrationThreadActivity>>;
+  /** Detail-only display omission; absence on a legacy snapshot stays unknown. */
+  pendingRequestRetentionTruncatedByThreadId?: Record<ThreadId, boolean | undefined>;
   proposedPlanIdsByThreadId: Record<ThreadId, string[]>;
   proposedPlanByThreadId: Record<ThreadId, Record<string, ProposedPlan>>;
   turnDiffIdsByThreadId: Record<ThreadId, TurnId[]>;
@@ -133,6 +136,7 @@ const initialEnvironmentState: EnvironmentState = {
   messageByThreadId: {},
   activityIdsByThreadId: {},
   activityByThreadId: {},
+  pendingRequestRetentionTruncatedByThreadId: {},
   proposedPlanIdsByThreadId: {},
   proposedPlanByThreadId: {},
   turnDiffIdsByThreadId: {},
@@ -319,6 +323,7 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     worktreePath: thread.projectId === null ? null : thread.worktreePath,
     turnDiffSummaries: thread.checkpoints.map(mapTurnDiffSummary),
     activities: thread.activities.map((activity) => ({ ...activity })),
+    pendingRequestRetentionTruncated: thread.pendingRequestRetentionTruncated,
     goal: thread.goal ?? null,
   };
 }
@@ -622,7 +627,13 @@ function sidebarThreadSummariesEqual(
     left.hasActionableProposedPlan === right.hasActionableProposedPlan &&
     left.liveWork?.runtimeId === right.liveWork?.runtimeId &&
     left.liveWork?.taskCount === right.liveWork?.taskCount &&
-    left.liveWork?.agentCount === right.liveWork?.agentCount
+    left.liveWork?.agentCount === right.liveWork?.agentCount &&
+    left.liveWork?.unconfirmedAgentIdsTruncated === right.liveWork?.unconfirmedAgentIdsTruncated &&
+    (left.liveWork?.unconfirmedAgentIds === right.liveWork?.unconfirmedAgentIds ||
+      (left.liveWork?.unconfirmedAgentIds?.length === right.liveWork?.unconfirmedAgentIds?.length &&
+        left.liveWork?.unconfirmedAgentIds?.every(
+          (id, index) => id === right.liveWork?.unconfirmedAgentIds?.[index],
+        ) === true))
   );
 }
 
@@ -944,6 +955,18 @@ function writeThreadState(
     };
   }
 
+  if (
+    previousThread?.pendingRequestRetentionTruncated !== nextThread.pendingRequestRetentionTruncated
+  ) {
+    nextState = {
+      ...nextState,
+      pendingRequestRetentionTruncatedByThreadId: {
+        ...nextState.pendingRequestRetentionTruncatedByThreadId,
+        [nextThread.id]: nextThread.pendingRequestRetentionTruncated,
+      },
+    };
+  }
+
   if (previousThread?.proposedPlans !== nextThread.proposedPlans) {
     const nextProposedPlanSlice = buildProposedPlanSlice(nextThread);
     nextState = {
@@ -1113,6 +1136,10 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
   const { [threadId]: _removedMessages, ...messageByThreadId } = state.messageByThreadId;
   const { [threadId]: _removedActivityIds, ...activityIdsByThreadId } = state.activityIdsByThreadId;
   const { [threadId]: _removedActivities, ...activityByThreadId } = state.activityByThreadId;
+  const {
+    [threadId]: _removedPendingRequestRetention,
+    ...pendingRequestRetentionTruncatedByThreadId
+  } = state.pendingRequestRetentionTruncatedByThreadId ?? {};
   const { [threadId]: _removedPlanIds, ...proposedPlanIdsByThreadId } =
     state.proposedPlanIdsByThreadId;
   const { [threadId]: _removedPlans, ...proposedPlanByThreadId } = state.proposedPlanByThreadId;
@@ -1135,6 +1162,7 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
     messageByThreadId,
     activityIdsByThreadId,
     activityByThreadId,
+    pendingRequestRetentionTruncatedByThreadId,
     proposedPlanIdsByThreadId,
     proposedPlanByThreadId,
     turnDiffIdsByThreadId,
@@ -1403,11 +1431,18 @@ function retainThreadActivityWindow(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   currentTurnId: TurnId | null | undefined,
   session: Thread["session"],
-): OrchestrationThreadActivity[] {
+): {
+  readonly activities: OrchestrationThreadActivity[];
+  readonly pendingRequestRetentionTruncated: boolean;
+} {
   const byId = new Map<string, OrchestrationThreadActivity>();
   for (const activity of activities) byId.set(activity.id, activity);
   const ordered = [...byId.values()].toSorted(compareActivities);
-  const retainedIds = new Set(ordered.slice(-MAX_THREAD_ACTIVITIES).map((activity) => activity.id));
+  const retainedIds = new Set<string>(
+    ordered.slice(-MAX_THREAD_ACTIVITIES).map((activity) => activity.id),
+  );
+  const pendingRequestRetention = derivePendingRequestRetention(ordered, retainedIds);
+  for (const activityId of pendingRequestRetention.activityIds) retainedIds.add(activityId);
 
   const latestPlan = ordered.findLast((activity) => activity.kind === "turn.plan.updated");
   if (latestPlan) retainedIds.add(latestPlan.id);
@@ -1455,7 +1490,10 @@ function retainThreadActivityWindow(
   }
   for (const activity of latestSubagentLifecycleByKey.values()) retainedIds.add(activity.id);
 
-  return ordered.filter((activity) => retainedIds.has(activity.id));
+  return {
+    activities: ordered.filter((activity) => retainedIds.has(activity.id)),
+    pendingRequestRetentionTruncated: pendingRequestRetention.truncated,
+  };
 }
 
 function buildLatestTurn(params: {
@@ -1973,6 +2011,10 @@ function syncEnvironmentShellSnapshot(
     messageByThreadId: retainThreadScopedRecord(state.messageByThreadId, nextThreadIds),
     activityIdsByThreadId: retainThreadScopedRecord(state.activityIdsByThreadId, nextThreadIds),
     activityByThreadId: retainThreadScopedRecord(state.activityByThreadId, nextThreadIds),
+    pendingRequestRetentionTruncatedByThreadId: retainThreadScopedRecord(
+      state.pendingRequestRetentionTruncatedByThreadId ?? {},
+      nextThreadIds,
+    ),
     proposedPlanIdsByThreadId: retainThreadScopedRecord(
       state.proposedPlanIdsByThreadId,
       nextThreadIds,
@@ -2671,7 +2713,7 @@ function applyEnvironmentOrchestrationEvent(
           ...event.payload.activity,
           sequence: event.sequence,
         };
-        const activities = retainThreadActivityWindow(
+        const retained = retainThreadActivityWindow(
           [
             ...thread.activities.filter((activity) => activity.id !== appendedActivity.id),
             appendedActivity,
@@ -2703,7 +2745,13 @@ function applyEnvironmentOrchestrationEvent(
             : thread.latestTurn;
         return {
           ...thread,
-          activities,
+          activities: retained.activities,
+          // Once a snapshot/earlier live update omitted requests, the retained
+          // subset cannot prove that the omitted callbacks settled. Only a
+          // fresh authoritative detail snapshot may clear that display flag.
+          pendingRequestRetentionTruncated: retained.pendingRequestRetentionTruncated
+            ? true
+            : thread.pendingRequestRetentionTruncated,
           latestTurn,
           updatedAt: event.occurredAt,
         };

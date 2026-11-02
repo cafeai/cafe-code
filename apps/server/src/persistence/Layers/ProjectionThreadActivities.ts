@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
+import { upsertNativeAgentBinding } from "../nativeAgentBindings.ts";
 
 import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 
@@ -25,6 +26,8 @@ const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
     sequence: Schema.NullOr(NonNegativeInt),
   }),
 );
+const encodePayloadJson = Schema.encodeEffect(Schema.UnknownFromJsonString);
+const decodePayloadJson = Schema.decodeEffect(Schema.UnknownFromJsonString);
 
 const ProjectionUserInputActivityAccountingDbRowSchema =
   ProjectionUserInputActivityAccountingRow.mapFields(
@@ -44,7 +47,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
   const upsertProjectionThreadActivityRow = SqlSchema.void({
-    Request: ProjectionThreadActivity,
+    Request: Schema.Struct({ ...ProjectionThreadActivity.fields, payloadJson: Schema.String }),
     execute: (row) =>
       sql`
             INSERT INTO projection_thread_activities (
@@ -65,7 +68,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
               ${row.tone},
               ${row.kind},
               ${row.summary},
-              ${JSON.stringify(row.payload)},
+              ${row.payloadJson},
               ${row.sequence ?? null},
               ${row.createdAt}
             )
@@ -125,7 +128,10 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
             'provider.user-input.respond.failed'
           )
         ORDER BY
+          CASE WHEN sequence IS NULL THEN 0 ELSE 1 END ASC,
+          sequence ASC,
           created_at ASC,
+          CASE WHEN kind = 'user-input.resolved' THEN 2 ELSE 1 END ASC,
           activity_id ASC
       `,
   });
@@ -140,7 +146,12 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
             activity_id,
             kind,
             json_extract(payload_json, '$.requestId') AS request_id,
-            lower(COALESCE(json_extract(payload_json, '$.detail'), '')) AS detail,
+            -- Only provider-authored string details can carry a canonical
+            -- stale-request observation. JSON objects must not be coerced to
+            -- text and accidentally retire a still-pending callback.
+            CASE WHEN json_type(payload_json, '$.detail') = 'text'
+              THEN lower(json_extract(payload_json, '$.detail')) ELSE '' END AS detail,
+            sequence,
             created_at
           FROM projection_thread_activities
           WHERE thread_id = ${threadId}
@@ -149,6 +160,13 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
               'user-input.resolved',
               'provider.user-input.respond.failed'
             )
+            -- Malformed opaque identities cannot name a native callback and
+            -- must not create shell attention with no renderable request.
+            -- Keep the same nonempty string admission as detail retention.
+            AND CASE WHEN json_valid(payload_json) THEN
+              json_type(payload_json, '$.requestId') = 'text'
+              AND length(json_extract(payload_json, '$.requestId')) > 0
+            ELSE 0 END
         )
         SELECT COUNT(DISTINCT requested.request_id) AS "count"
         FROM user_input_accounting requested
@@ -158,12 +176,24 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
             SELECT 1
             FROM user_input_accounting later
             WHERE later.request_id = requested.request_id
+              -- Match the canonical lifecycle fold: known orchestration
+              -- sequences follow legacy unsequenced rows and outrank wall
+              -- clocks. At a genuine tie a resolution follows its request,
+              -- even when its opaque activity id sorts before that request.
+              -- A failed response keeps its ordinary tie rank; only the
+              -- existing stale/unknown whitelist below can retire a callback.
               AND (
-                later.created_at > requested.created_at
-                OR (
-                  later.created_at = requested.created_at
-                  AND later.activity_id > requested.activity_id
-                )
+                CASE WHEN later.sequence IS NULL THEN 0 ELSE 1 END,
+                COALESCE(later.sequence, 0),
+                later.created_at,
+                CASE WHEN later.kind = 'user-input.resolved' THEN 2 ELSE 1 END,
+                later.activity_id
+              ) > (
+                CASE WHEN requested.sequence IS NULL THEN 0 ELSE 1 END,
+                COALESCE(requested.sequence, 0),
+                requested.created_at,
+                1,
+                requested.activity_id
               )
               AND (
                 later.kind = 'user-input.resolved'
@@ -188,30 +218,42 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
       `,
   });
 
-  const upsert: ProjectionThreadActivityRepositoryShape["upsert"] = (row) => {
-    const work = readLiveWorkObservation(row);
-    const write = work
-      ? sql.withTransaction(
-          Effect.gen(function* () {
-            yield* upsertProjectionThreadActivityRow(row);
-            yield* sql`INSERT INTO projection_live_work
+  const upsert: ProjectionThreadActivityRepositoryShape["upsert"] = (row) =>
+    Effect.gen(function* () {
+      // One qualified encoding owns the persisted bytes. Decode those exact
+      // bytes into a private object before reading work identity, so an input
+      // getter/toJSON cannot make the head disagree with its stored activity.
+      // Unsupported input remains a typed schema failure before any SQL write.
+      const payloadJson = yield* encodePayloadJson(row.payload);
+      const payload = yield* decodePayloadJson(payloadJson);
+      const prepared = { ...row, payload, payloadJson };
+      const work = readLiveWorkObservation(prepared);
+      const write =
+        work || prepared.kind === "task.started"
+          ? sql.withTransaction(
+              Effect.gen(function* () {
+                yield* upsertProjectionThreadActivityRow(prepared);
+                if (work)
+                  yield* sql`INSERT INTO projection_live_work
         (thread_id, runtime_id, turn_id, lane, work_id, is_agent, active, sequence, created_at, activity_id)
-        VALUES (${row.threadId}, ${work.runtimeId}, ${row.turnId ?? ""}, ${work.lane}, ${work.workId},
-          ${work.agent ? 1 : 0}, ${work.active ? 1 : 0}, ${row.sequence ?? null}, ${row.createdAt}, ${row.activityId})
+        VALUES (${prepared.threadId}, ${work.runtimeId}, ${prepared.turnId ?? ""}, ${work.lane}, ${work.workId},
+          ${work.agent ? 1 : 0}, ${work.active ? 1 : 0}, ${prepared.sequence ?? null}, ${prepared.createdAt}, ${prepared.activityId})
         ON CONFLICT (thread_id, runtime_id, turn_id, lane, work_id) DO UPDATE SET
           is_agent = excluded.is_agent, active = excluded.active, sequence = excluded.sequence,
           created_at = excluded.created_at, activity_id = excluded.activity_id
-        WHERE CASE
-          WHEN excluded.sequence IS NOT NULL AND projection_live_work.sequence IS NOT NULL
-            AND excluded.sequence != projection_live_work.sequence
-            THEN excluded.sequence > projection_live_work.sequence
-          ELSE excluded.created_at > projection_live_work.created_at
-            OR (excluded.created_at = projection_live_work.created_at AND excluded.activity_id >= projection_live_work.activity_id)
-          END`;
-          }),
-        )
-      : upsertProjectionThreadActivityRow(row);
-    return write.pipe(
+        WHERE
+          (CASE WHEN excluded.sequence IS NULL THEN 0 ELSE 1 END,
+            COALESCE(excluded.sequence, -1), excluded.created_at, excluded.activity_id) >=
+          (CASE WHEN projection_live_work.sequence IS NULL THEN 0 ELSE 1 END,
+            COALESCE(projection_live_work.sequence, -1),
+            projection_live_work.created_at, projection_live_work.activity_id)`;
+                if (prepared.kind === "task.started")
+                  yield* upsertNativeAgentBinding(sql, prepared, payloadJson);
+              }),
+            )
+          : upsertProjectionThreadActivityRow(prepared);
+      return yield* write;
+    }).pipe(
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
           "ProjectionThreadActivityRepository.upsert:query",
@@ -219,7 +261,6 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
         ),
       ),
     );
-  };
 
   const listByThreadId: ProjectionThreadActivityRepositoryShape["listByThreadId"] = (input) =>
     listProjectionThreadActivityRows(input).pipe(
@@ -271,6 +312,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
     sql
       .withTransaction(
         Effect.gen(function* () {
+          yield* sql`DELETE FROM projection_native_agent_bindings WHERE thread_id = ${input.threadId}`;
           yield* sql`DELETE FROM projection_live_work WHERE thread_id = ${input.threadId}`;
           yield* deleteProjectionThreadActivityRows(input);
         }),

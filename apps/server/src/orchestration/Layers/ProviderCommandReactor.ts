@@ -2059,7 +2059,15 @@ const make = Effect.gen(function* () {
     const existingSessionThreadId =
       thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
     if (existingSessionThreadId && activeSession !== undefined) {
-      const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
+      // A turn-start intent updates both projected modes before this reactor
+      // opens or reconfigures the native owner. Projection equality therefore
+      // cannot attest adoption: the still-live provider can retain its former
+      // access policy after an earlier mode-replacement refusal. Keep the
+      // existing projected reconciliation guard and
+      // additionally require the exact selected native session to agree.
+      const runtimeModeChanged =
+        desiredRuntimeMode !== thread.session?.runtimeMode ||
+        desiredRuntimeMode !== activeSession.runtimeMode;
       const grokInteractionModeChanged =
         activeSession.provider === ProviderDriverKind.make("grok") &&
         (activeSession.interactionMode ?? "default") !== desiredInteractionMode;
@@ -2162,6 +2170,7 @@ const make = Effect.gen(function* () {
         desiredInstanceId,
         desiredProvider: desiredModelSelection.instanceId,
         currentRuntimeMode: thread.session?.runtimeMode,
+        currentNativeRuntimeMode: activeSession.runtimeMode,
         desiredRuntimeMode: thread.runtimeMode,
         runtimeModeChanged,
         grokInteractionModeChanged,

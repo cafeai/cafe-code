@@ -12,6 +12,10 @@ const ambianceHarness = vi.hoisted(() => {
   });
   const listeners = new Set<() => void>();
   return {
+    state,
+    params: {} as { environmentId?: string; threadId?: string },
+    environmentId: null as string | null,
+    anyThreadRunning: false,
     listeners,
     notify: () => {
       for (const listener of listeners) listener();
@@ -35,14 +39,14 @@ const ambianceHarness = vi.hoisted(() => {
 
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-router")>()),
-  useParams: () => ({}),
+  useParams: () => ambianceHarness.params,
 }));
 
-// These canvas fixtures have no selected workspace or thread. Keep that input
-// explicit so the workspace hook cannot load saved-host bootstrap/persistence
-// through this fixture's intentionally isolated settings and store modules.
+// Workspace/thread inputs stay test-owned so the workspace hook cannot load
+// saved-host bootstrap/persistence through this fixture's intentionally
+// isolated settings and store modules.
 vi.mock("../environments/workspace", () => ({
-  useWorkspaceEnvironmentId: () => null,
+  useWorkspaceEnvironmentId: () => ambianceHarness.environmentId,
 }));
 
 // The app is built with the React Compiler, which memoizes AmbianceCanvas, so a
@@ -67,11 +71,12 @@ vi.mock("../hooks/useTheme", () => ({
 }));
 
 vi.mock("../store", () => ({
-  selectAnyThreadRunning: () => false,
+  selectAnyThreadRunning: () => ambianceHarness.anyThreadRunning,
   useStore: ambianceHarness.useStore,
 }));
 
 import { AmbianceLayer } from "../ambiance/AmbianceLayer";
+import { AmbianceEngine } from "../ambiance/ambianceEngine";
 
 /**
  * Lets a test change the mocked settings and push a re-render, so effect
@@ -83,8 +88,17 @@ function selectEffect(effect: string) {
 }
 
 type AmbianceScreen = Awaited<ReturnType<typeof render>>;
+type EngineObservation = {
+  readonly engine: AmbianceEngine;
+  disposed: boolean;
+  session: Parameters<AmbianceEngine["setSession"]>[0] | null;
+  holding: boolean | null;
+  ringReads: number;
+  retiredRingReads: number;
+};
 type AmbianceFixture = {
   readonly host: HTMLDivElement;
+  readonly engines: ReadonlyArray<EngineObservation>;
   render: () => Promise<AmbianceScreen>;
   poll: <A>(start: () => Promise<A>) => Promise<A>;
   assertLive: () => void;
@@ -133,6 +147,27 @@ function createAmbianceFixture(context: TestContext): AmbianceFixture {
     original: PropertyDescriptor;
     wrapper: unknown;
   }[] = [];
+  const engines = new Map<AmbianceEngine, EngineObservation>();
+  const engineRecorders: {
+    method: "setConfig" | "setSession" | "setHolding" | "currentDrive" | "dispose";
+    original: PropertyDescriptor;
+    wrapper: unknown;
+  }[] = [];
+  const observeEngine = (engine: AmbianceEngine): EngineObservation => {
+    let observation = engines.get(engine);
+    if (!observation) {
+      observation = {
+        engine,
+        disposed: false,
+        session: null,
+        holding: null,
+        ringReads: 0,
+        retiredRingReads: 0,
+      };
+      engines.set(engine, observation);
+    }
+    return observation;
+  };
   const bounded = (value: number) =>
     Number.isFinite(value) ? Math.min(10_000_000, Math.max(0, Math.round(value))) : null;
   const assertLive = () => {
@@ -203,6 +238,12 @@ function createAmbianceFixture(context: TestContext): AmbianceFixture {
       const acquired = screen ?? (settled?.status === "fulfilled" ? settled.value : undefined);
       await acquired?.unmount();
       host?.remove();
+      for (const recorder of engineRecorders) {
+        const current = Object.getOwnPropertyDescriptor(AmbianceEngine.prototype, recorder.method);
+        if (current?.value !== recorder.wrapper)
+          throw new Error("Ambiance engine recorder ownership changed before cleanup");
+        Object.defineProperty(AmbianceEngine.prototype, recorder.method, recorder.original);
+      }
       for (const recorder of recorders) {
         const current = Object.getOwnPropertyDescriptor(
           CanvasRenderingContext2D.prototype,
@@ -233,6 +274,9 @@ function createAmbianceFixture(context: TestContext): AmbianceFixture {
     get host() {
       if (!host) throw new Error("Ambiance fixture host was not acquired");
       return host;
+    },
+    get engines() {
+      return [...engines.values()];
     },
     assertLive,
     async render() {
@@ -284,6 +328,50 @@ function createAmbianceFixture(context: TestContext): AmbianceFixture {
   assertLive();
   // Registration precedes host/native-recorder/render acquisition.
   host = document.createElement("div");
+  // Observe the exact real engine owners without replacing their behavior.
+  // These are state/resource receipts, not frame, pixel or animation samples:
+  // a replaced owner must receive current levels, and its predecessor must
+  // not remain the composer ring's timer target after native disposal.
+  const recordEngine = (method: (typeof engineRecorders)[number]["method"], wrapper: unknown) => {
+    const original = Object.getOwnPropertyDescriptor(AmbianceEngine.prototype, method);
+    if (!original) throw new Error("Native ambiance engine method is unavailable");
+    Object.defineProperty(AmbianceEngine.prototype, method, { ...original, value: wrapper });
+    engineRecorders.push({ method, original, wrapper });
+  };
+  const originalSetConfig = AmbianceEngine.prototype.setConfig;
+  const originalSetSession = AmbianceEngine.prototype.setSession;
+  const originalSetHolding = AmbianceEngine.prototype.setHolding;
+  const originalCurrentDrive = AmbianceEngine.prototype.currentDrive;
+  const originalDispose = AmbianceEngine.prototype.dispose;
+  recordEngine(
+    "setConfig",
+    function (this: AmbianceEngine, config: Parameters<typeof originalSetConfig>[0]) {
+      originalSetConfig.call(this, config);
+      observeEngine(this);
+    },
+  );
+  recordEngine(
+    "setSession",
+    function (this: AmbianceEngine, session: Parameters<typeof originalSetSession>[0]) {
+      originalSetSession.call(this, session);
+      observeEngine(this).session = session;
+    },
+  );
+  recordEngine("setHolding", function (this: AmbianceEngine, holding: boolean) {
+    originalSetHolding.call(this, holding);
+    observeEngine(this).holding = holding;
+  });
+  recordEngine("currentDrive", function (this: AmbianceEngine) {
+    const drive = originalCurrentDrive.call(this);
+    const observation = observeEngine(this);
+    observation.ringReads += 1;
+    if (observation.disposed) observation.retiredRingReads += 1;
+    return drive;
+  });
+  recordEngine("dispose", function (this: AmbianceEngine) {
+    originalDispose.call(this);
+    observeEngine(this).disposed = true;
+  });
   const complete = (context: CanvasRenderingContext2D, operation: "clear" | "stroke") => {
     if (observationsClosed) return;
     try {
@@ -393,7 +481,12 @@ beforeEach(() => {
 });
 afterEach(async () => {
   await activeAmbianceFixture?.cleanup();
+  ambianceHarness.params = {};
+  ambianceHarness.environmentId = null;
+  ambianceHarness.anyThreadRunning = false;
+  ambianceHarness.state.environmentStateById = {};
   ambianceHarness.settings.ambianceEffect = "rain";
+  ambianceHarness.settings.ambianceReactMode = "off";
   ambianceHarness.settings.continueBackgroundAnimations = true;
   ambianceHarness.notify();
   document.documentElement.style.removeProperty("--cafe-ambiance-state-color");
@@ -437,6 +530,60 @@ describe("AmbianceLayer", () => {
 describe("AmbianceLayer effect switching", () => {
   const canvasOf = (host: HTMLElement) =>
     host.querySelector<HTMLCanvasElement>('[data-cafe-ambiance-canvas="true"]');
+  it.for(["focused", "aggregate"] as const)(
+    "transfers current %s attention state and ring ownership to a replacement engine",
+    async (source, context) => {
+      const environmentId = "ambiance-owner-environment";
+      const threadId = "ambiance-owner-thread";
+      ambianceHarness.environmentId = environmentId;
+      ambianceHarness.params = source === "focused" ? { environmentId, threadId } : {};
+      ambianceHarness.anyThreadRunning = true;
+      ambianceHarness.settings.ambianceReactMode = "live";
+      Object.assign(ambianceHarness.state.environmentStateById, {
+        [environmentId]: {
+          threadIds: [threadId],
+          sidebarThreadSummaryById: {
+            [threadId]: {
+              session: { orchestrationStatus: "running" },
+              hasPendingApprovals: source === "aggregate",
+              hasPendingUserInput: source === "focused",
+            },
+          },
+          threadSessionById: {},
+          threadTurnStateById: {},
+          activityIdsByThreadId: {},
+          activityByThreadId: {},
+        },
+      });
+      await withAmbianceFixture(context, async (fixture) => {
+        await fixture.render();
+        const firstCanvas = canvasOf(fixture.host);
+        const predecessor = fixture.engines[0];
+        expect(predecessor?.session).toBe("running");
+        expect(predecessor?.holding).toBe(true);
+        expect(predecessor?.ringReads).toBeGreaterThan(0);
+
+        // Only the effect changes. Session/request state stays identical, so
+        // the new native resource must acquire those existing levels itself.
+        selectEffect("aurora");
+        await fixture.poll(() =>
+          vi.waitFor(() => {
+            fixture.assertLive();
+            const replacement = fixture.engines.find((engine) => engine !== predecessor);
+            expect(canvasOf(fixture.host)).not.toBe(firstCanvas);
+            expect(predecessor?.disposed).toBe(true);
+            expect(replacement?.disposed).toBe(false);
+            expect(replacement?.session).toBe("running");
+            expect(replacement?.holding).toBe(true);
+            // Initial sync alone does not cross a timer boundary. Observe the
+            // replacement's own interval before checking retired-owner reads.
+            expect(replacement?.ringReads).toBeGreaterThan(1);
+            expect(predecessor?.retiredRingReads).toBe(0);
+          }),
+        );
+      });
+    },
+  );
   it("rebuilds the canvas when switching between two shader effects", async (context) => {
     await withAmbianceFixture(context, async (fixture) => {
       await fixture.render();

@@ -36,7 +36,12 @@ import {
   type AppState,
   type EnvironmentState,
 } from "./store";
-import { deriveActiveSubagentWorkEntries, deriveSubagentWorkEntries } from "./session-logic";
+import {
+  deriveActiveSubagentWorkEntries,
+  derivePendingApprovals,
+  derivePendingUserInputs,
+  deriveSubagentWorkEntries,
+} from "./session-logic";
 import { deriveWorkflowTasks } from "./workflowTaskActivity";
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Thread } from "./types";
 import { threadForkPrefix } from "./lib/threadForkPrefix";
@@ -207,6 +212,9 @@ function makeState(thread: Thread): AppState {
       [thread.id]: Object.fromEntries(
         thread.activities.map((activity) => [activity.id, activity] as const),
       ) as EnvironmentState["activityByThreadId"][ThreadId],
+    },
+    pendingRequestRetentionTruncatedByThreadId: {
+      [thread.id]: thread.pendingRequestRetentionTruncated,
     },
     proposedPlanIdsByThreadId: {
       [thread.id]: thread.proposedPlans.map((plan) => plan.id),
@@ -934,6 +942,106 @@ describe("thread selection memoization", () => {
       localEnvironmentStateOf(populated).threadShellById,
     );
     expect(localEnvironmentStateOf(repeated).subagentPolicySequenceByThreadId?.[thread.id]).toBe(2);
+  });
+
+  it("refreshes native-agent retirement hints without count changes and preserves equal summary references", () => {
+    const thread = makeThread();
+    const state = makeState(thread);
+    const liveWork = {
+      runtimeId: SubagentRuntimeId.make("10000000-0000-4000-8000-000000000207"),
+      taskCount: 3,
+      agentCount: 2,
+    };
+    const shellEvent: Extract<OrchestrationShellStreamEvent, { kind: "thread-upserted" }> = {
+      kind: "thread-upserted",
+      sequence: 1,
+      thread: {
+        id: thread.id,
+        projectId: thread.projectId,
+        title: thread.title,
+        modelSelection: thread.modelSelection,
+        runtimeMode: thread.runtimeMode,
+        interactionMode: thread.interactionMode,
+        branch: thread.branch,
+        worktreePath: thread.worktreePath,
+        latestTurn: thread.latestTurn,
+        createdAt: thread.createdAt,
+        updatedAt: thread.updatedAt ?? thread.createdAt,
+        archivedAt: thread.archivedAt,
+        deletedAt: null,
+        session: null,
+        latestUserMessageAt: null,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        hasActionableProposedPlan: false,
+        liveWork: { ...liveWork, unconfirmedAgentIds: ["retired-agent-a"] },
+      },
+    };
+    const first = applyShellEvent(state, shellEvent, localEnvironmentId);
+    const firstSummary = localEnvironmentStateOf(first).sidebarThreadSummaryById[thread.id];
+    expect(firstSummary?.liveWork?.unconfirmedAgentIds).toEqual(["retired-agent-a"]);
+
+    const cloned = applyShellEvent(
+      first,
+      {
+        ...shellEvent,
+        sequence: 2,
+        thread: {
+          ...shellEvent.thread,
+          liveWork: { ...liveWork, unconfirmedAgentIds: ["retired-agent-a"] },
+        },
+      },
+      localEnvironmentId,
+    );
+    // Identical hint bytes do not need a new UI object, but the exact-thread
+    // policy stream must still advance to the newly received sequence.
+    expect(localEnvironmentStateOf(cloned).sidebarThreadSummaryById[thread.id]).toBe(firstSummary);
+    expect(localEnvironmentStateOf(cloned).subagentPolicySequenceByThreadId?.[thread.id]).toBe(2);
+
+    const replaced = applyShellEvent(
+      cloned,
+      {
+        ...shellEvent,
+        sequence: 3,
+        thread: {
+          ...shellEvent.thread,
+          liveWork: { ...liveWork, unconfirmedAgentIds: ["retired-agent-b"] },
+        },
+      },
+      localEnvironmentId,
+    );
+    const replacedSummary = localEnvironmentStateOf(replaced).sidebarThreadSummaryById[thread.id];
+    expect(replacedSummary).not.toBe(firstSummary);
+    expect(replacedSummary?.liveWork).toEqual({
+      ...liveWork,
+      unconfirmedAgentIds: ["retired-agent-b"],
+    });
+
+    const cleared = applyShellEvent(
+      replaced,
+      { ...shellEvent, sequence: 4, thread: { ...shellEvent.thread, liveWork: { ...liveWork } } },
+      localEnvironmentId,
+    );
+    const clearedSummary = localEnvironmentStateOf(cleared).sidebarThreadSummaryById[thread.id];
+    expect(clearedSummary).not.toBe(replacedSummary);
+    expect(clearedSummary?.liveWork).toEqual(liveWork);
+
+    const omitted = applyShellEvent(
+      cleared,
+      {
+        ...shellEvent,
+        sequence: 5,
+        thread: {
+          ...shellEvent.thread,
+          liveWork: { ...liveWork, unconfirmedAgentIdsTruncated: true },
+        },
+      },
+      localEnvironmentId,
+    );
+    const omittedSummary = localEnvironmentStateOf(omitted).sidebarThreadSummaryById[thread.id];
+    expect(omittedSummary).not.toBe(clearedSummary);
+    expect(omittedSummary?.liveWork?.unconfirmedAgentIdsTruncated).toBe(true);
+    expect(localEnvironmentStateOf(omitted).subagentPolicySequenceByThreadId?.[thread.id]).toBe(5);
   });
 
   it("returns stable thread references for repeated reads of the same state", () => {
@@ -2785,6 +2893,251 @@ describe("incremental orchestration updates", () => {
       ).toEqual([configurations[2]]);
     },
   );
+
+  it.each(["approval", "user-input"] as const)(
+    "keeps an unresolved %s visible beyond the tool tail until its exact resolution",
+    (kind) => {
+      const oldTurn = TurnId.make("completed-request-owner");
+      const currentTurn = TurnId.make("current-request-tail");
+      const requested: Thread["activities"][number] = {
+        id: EventId.make(`${kind}-request-before-tail`),
+        turnId: oldTurn,
+        tone: "info",
+        kind: `${kind}.requested`,
+        summary: "Pending request",
+        sequence: 1,
+        createdAt: "2026-02-27T00:00:01.000Z",
+        payload:
+          kind === "approval"
+            ? {
+                requestId: "request-before-tail",
+                requestKind: "command",
+                defaultToNo: true,
+                suppressAlwaysAllowRule: true,
+              }
+            : {
+                requestId: "request-before-tail",
+                isBlocking: true,
+                questions: [
+                  {
+                    id: "question-before-tail",
+                    header: "Choice",
+                    question: "Keep this pending question visible?",
+                    options: [{ label: "Yes", description: "Keep the original request" }],
+                  },
+                ],
+              },
+      };
+      const ordinaryTail = Array.from({ length: 500 }, (_, index) => ({
+        id: EventId.make(`request-tail-${index}`),
+        turnId: currentTurn,
+        tone: "tool" as const,
+        kind: "tool.completed",
+        summary: "Unrelated work",
+        payload: null,
+        sequence: index + 2,
+        createdAt: "2026-02-27T00:01:00.000Z",
+      }));
+      const thread = makeThread({
+        latestTurn: {
+          turnId: currentTurn,
+          state: "running",
+          requestedAt: "2026-02-27T00:00:30.000Z",
+          startedAt: "2026-02-27T00:00:31.000Z",
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        activities: [requested, ...ordinaryTail],
+      });
+      const newest = {
+        ...ordinaryTail[0]!,
+        id: EventId.make("request-tail-newest"),
+        sequence: 502,
+      };
+      const retainedState = applyOrchestrationEvent(
+        makeState(thread),
+        makeEvent(
+          "thread.activity-appended",
+          { threadId: thread.id, activity: newest },
+          { sequence: 502 },
+        ),
+        localEnvironmentId,
+      );
+      const retained = threadsOf(retainedState)[0]!.activities;
+      expect(retained.find((activity) => activity.id === requested.id)).toEqual(requested);
+      expect(retained.filter((activity) => activity.kind === "tool.completed")).toHaveLength(500);
+      const pending =
+        kind === "approval" ? derivePendingApprovals(retained) : derivePendingUserInputs(retained);
+      expect(pending).toHaveLength(1);
+      expect(pending[0]?.requestId).toBe("request-before-tail");
+      if (kind === "approval") {
+        expect(pending[0]).toMatchObject({ defaultToNo: true, suppressAlwaysAllowRule: true });
+      }
+
+      // The terminal witness has a lower wall clock deliberately. Its newer
+      // canonical sequence still settles only this exact request; age and the
+      // unrelated current turn did not authorize retiring it earlier.
+      const resolved = {
+        ...requested,
+        id: EventId.make(`${kind}-resolved-before-clock`),
+        kind: `${kind}.resolved`,
+        sequence: 503,
+        createdAt: "2026-02-27T00:00:00.000Z",
+        payload: { requestId: "request-before-tail" },
+      };
+      const settledState = applyOrchestrationEvent(
+        retainedState,
+        makeEvent(
+          "thread.activity-appended",
+          { threadId: thread.id, activity: resolved },
+          { sequence: 503 },
+        ),
+        localEnvironmentId,
+      );
+      const settled = threadsOf(settledState)[0]!.activities;
+      expect(derivePendingApprovals(settled)).toEqual([]);
+      expect(derivePendingUserInputs(settled)).toEqual([]);
+      expect(settled.some((activity) => activity.id === requested.id)).toBe(false);
+    },
+  );
+
+  it("retains terminal context when a legacy requested row stays in the ordinary activity tail", () => {
+    const requestId = "legacy-tail-request";
+    const requested: Thread["activities"][number] = {
+      id: EventId.make("z-legacy-requested"),
+      turnId: null,
+      tone: "info",
+      kind: "approval.requested",
+      summary: "Approval requested",
+      payload: { requestId, requestKind: "command" },
+      createdAt: "2026-02-27T00:00:00.000Z",
+    };
+    const resolved = {
+      ...requested,
+      id: EventId.make("a-legacy-resolved"),
+      kind: "approval.resolved",
+      payload: { requestId, decision: "cancel" },
+    };
+    const ordinaryTail = Array.from({ length: 500 }, (_, index) => ({
+      ...requested,
+      id: EventId.make(`m-legacy-tool-${String(index).padStart(3, "0")}`),
+      kind: "tool.completed",
+      payload: null,
+    }));
+    const thread = makeThread({ activities: [resolved, ...ordinaryTail, requested] });
+    const next = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent(
+        "thread.activity-appended",
+        {
+          threadId: thread.id,
+          activity: { ...ordinaryTail[0]!, id: EventId.make("legacy-newest-tool") },
+        },
+        { sequence: 1 },
+      ),
+      localEnvironmentId,
+    );
+    const retained = threadsOf(next)[0]!.activities;
+    expect(retained.find((activity) => activity.id === requested.id)).toEqual(requested);
+    expect(retained.find((activity) => activity.id === resolved.id)).toEqual(resolved);
+    expect(derivePendingApprovals(retained)).toEqual([]);
+  });
+
+  it("publishes bounded request omission and accepts a fresh complete detail snapshot", () => {
+    const requests: Thread["activities"] = Array.from({ length: 65 }, (_, index) => ({
+      id: EventId.make(`overflow-request-${index}`),
+      turnId: null,
+      tone: "info",
+      kind: "approval.requested",
+      summary: "Approval requested",
+      payload: { requestId: `overflow-${index}`, requestKind: "command" },
+      sequence: index,
+      createdAt: "2026-02-27T00:00:00.000Z",
+    }));
+    const ordinaryTail: Thread["activities"] = Array.from({ length: 500 }, (_, index) => ({
+      id: EventId.make(`overflow-tool-${index}`),
+      turnId: null,
+      tone: "tool",
+      kind: "tool.completed",
+      summary: "Unrelated work",
+      payload: null,
+      sequence: index + 65,
+      createdAt: "2026-02-27T00:01:00.000Z",
+    }));
+    const thread = makeThread({
+      activities: [...requests, ...ordinaryTail],
+      pendingRequestRetentionTruncated: false,
+    });
+    const newest = { ...ordinaryTail[0]!, id: EventId.make("overflow-newest"), sequence: 565 };
+    const bounded = applyOrchestrationEvent(
+      makeState(thread),
+      makeEvent(
+        "thread.activity-appended",
+        { threadId: thread.id, activity: newest },
+        { sequence: 565 },
+      ),
+      localEnvironmentId,
+    );
+    const current = threadsOf(bounded)[0]!;
+    expect(current.pendingRequestRetentionTruncated).toBe(true);
+    expect(derivePendingApprovals(current.activities)).toHaveLength(64);
+    expect(current.activities.some((activity) => activity.id === requests[0]!.id)).toBe(false);
+    expect(
+      current.activities.filter((activity) => activity.kind === "tool.completed"),
+    ).toHaveLength(500);
+
+    const resolved = {
+      ...requests[64]!,
+      id: EventId.make("overflow-latest-resolved"),
+      kind: "approval.resolved",
+      payload: { requestId: "overflow-64", decision: "cancel" },
+      sequence: 566,
+    };
+    const afterResolution = applyOrchestrationEvent(
+      bounded,
+      makeEvent(
+        "thread.activity-appended",
+        { threadId: thread.id, activity: resolved },
+        { sequence: 566 },
+      ),
+      localEnvironmentId,
+    );
+    // The omitted request is not in this retained subset. Settling a visible
+    // request cannot prove that the hidden one disappeared as well.
+    expect(threadsOf(afterResolution)[0]?.pendingRequestRetentionTruncated).toBe(true);
+
+    const refreshed = syncServerThreadDetail(
+      afterResolution,
+      {
+        id: thread.id,
+        projectId: thread.projectId,
+        title: thread.title,
+        modelSelection: thread.modelSelection,
+        runtimeMode: thread.runtimeMode,
+        interactionMode: thread.interactionMode,
+        branch: thread.branch,
+        worktreePath: thread.worktreePath,
+        latestTurn: null,
+        createdAt: thread.createdAt,
+        updatedAt: "2026-02-27T00:02:00.000Z",
+        archivedAt: null,
+        deletedAt: null,
+        messages: [],
+        proposedPlans: [],
+        activities: [...requests.slice(0, 64), ...ordinaryTail.slice(2), newest, resolved],
+        checkpoints: [],
+        session: null,
+        goal: null,
+        pendingRequestRetentionTruncated: false,
+      },
+      localEnvironmentId,
+      566,
+    );
+    const complete = threadsOf(refreshed)[0]!;
+    expect(complete.pendingRequestRetentionTruncated).toBe(false);
+    expect(derivePendingApprovals(complete.activities)).toHaveLength(64);
+    expect(complete.activities.some((activity) => activity.id === requests[0]!.id)).toBe(true);
+  });
 
   it("retains only admitted workflow root lifecycle beyond the tail and binds runtime/account incarnations", () => {
     const turnId = TurnId.make("turn-long-workflow");

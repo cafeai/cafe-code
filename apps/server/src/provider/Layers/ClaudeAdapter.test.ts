@@ -541,6 +541,7 @@ function emitWorkflowFixtureInit(
   version = "2.1.288",
   sessionId = WORKFLOW_FIXTURE_SESSION_ID,
   capabilities: string[] = [],
+  permissionMode: PermissionMode = "default",
 ): void {
   // Use a complete typed public init envelope; only workflow_progress itself
   // needs the received-extension cast above. The cwd is inert fixture metadata.
@@ -555,7 +556,7 @@ function emitWorkflowFixtureInit(
     tools: [],
     mcp_servers: [],
     model: "claude-opus-5-5",
-    permissionMode: "default",
+    permissionMode,
     slash_commands: [],
     output_style: "default",
     skills: [],
@@ -15601,6 +15602,81 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect.each<{
+    readonly reason: string | undefined;
+    readonly decision: "accept" | "decline";
+  }>([
+    { reason: undefined, decision: "decline" },
+    { reason: "Your organization requires approval for this tool", decision: "accept" },
+  ])(
+    "requires a user decision for a native bypass callback ($decision, $reason)",
+    ({ reason, decision }) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+        });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        const options = harness.getLastCreateQueryInput()!.options;
+        // Normal bypass execution remains the native CLI's responsibility.
+        // This callback represents a decision that survived those native
+        // checks, including older CLIs which omit the optional reason flags.
+        assert.equal(options.permissionMode, "bypassPermissions");
+        assert.equal(options.allowDangerouslySkipPermissions, true);
+        const controller = new AbortController();
+        yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()));
+        const permission = options.canUseTool!(
+          "Bash",
+          { command: "pwd" },
+          {
+            signal: controller.signal,
+            toolUseID: "native-bypass-tool",
+            requestId: "native-bypass-request",
+            ...(reason === undefined ? {} : { decisionReason: reason }),
+          },
+        );
+        // Race two actual outcomes, not a timer: the broken host bypass returns
+        // allow without ever producing the native request's approval surface.
+        const outcome = yield* Effect.raceFirst(
+          adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "request.opened"),
+            Stream.runHead,
+            Effect.map((event) => ({ kind: "requested" as const, event })),
+          ),
+          Effect.promise(() => permission).pipe(
+            Effect.map((result) => ({ kind: "settled" as const, result })),
+          ),
+        );
+        assert.equal(outcome.kind, "requested");
+        if (outcome.kind !== "requested" || outcome.event._tag !== "Some")
+          return assert.fail("Expected a pending native approval");
+        const requested = outcome.event.value;
+        if (requested.type !== "request.opened" || requested.requestId === undefined)
+          return assert.fail("Expected the native callback's exact approval identity");
+        assert.equal(requested.payload.requestType, "command_execution_approval");
+        assert.deepEqual(requested.payload.args, {
+          toolName: "Bash",
+          input: { command: "pwd" },
+          toolUseId: "native-bypass-tool",
+        });
+        yield* adapter.respondToRequest(
+          session.threadId,
+          ApprovalRequestId.make(requested.requestId),
+          decision,
+        );
+        const result = yield* Effect.promise(() => permission);
+        assert.deepEqual(
+          result,
+          decision === "accept"
+            ? { behavior: "allow", updatedInput: { command: "pwd" } }
+            : { behavior: "deny", message: "User declined tool execution." },
+        );
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
   it.effect("enforces provider one-time-only approval hints even for older clients", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -17431,6 +17507,368 @@ describe("ClaudeAdapterLive", () => {
         Effect.provide(harness.layer),
       );
     },
+  );
+
+  it.effect.each<{
+    readonly source: "init" | "status";
+    readonly observedMode: PermissionMode;
+  }>([
+    { source: "init", observedMode: "plan" },
+    { source: "status", observedMode: "auto" },
+  ])(
+    "reconciles a primary native $observedMode observation from $source before the next turn",
+    ({ source, observedMode }) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "first",
+          interactionMode: "default",
+          attachments: [],
+        });
+        yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+        const nativeSessionId = "71000000-0000-4000-8000-000000000207";
+        emitWorkflowFixtureInit(
+          harness.query,
+          "2.1.314",
+          nativeSessionId,
+          [],
+          source === "init" ? observedMode : "bypassPermissions",
+        );
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "session.configured"),
+          Stream.runHead,
+        );
+        if (source === "status") {
+          harness.query.emit({
+            type: "system",
+            subtype: "status",
+            status: null,
+            permissionMode: observedMode,
+            session_id: nativeSessionId,
+            uuid: "71000000-0000-4000-8000-000000000208",
+          });
+          yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "session.state.changed"),
+            Stream.runHead,
+          );
+        }
+        const completed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        harness.query.emit(makeSuccessfulClaudeResult(nativeSessionId));
+        yield* Fiber.join(completed);
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "continue with the selected access policy",
+          interactionMode: "default",
+          attachments: [],
+        });
+        assert.deepEqual(harness.query.setPermissionModeCalls, ["bypassPermissions"]);
+        assert.equal(
+          harness.getLastCreateQueryInput()!.options.permissionMode,
+          "bypassPermissions",
+        );
+        assert.equal(
+          harness.getLastCreateQueryInput()!.options.allowDangerouslySkipPermissions,
+          true,
+        );
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "does not establish permission-mode ownership from pre-init status or a foreign resumed init",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const nativeSessionId = "71000000-0000-4000-8000-000000000211";
+        const foreignSessionId = "71000000-0000-4000-8000-000000000213";
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          runtimeMode: "full-access",
+          // A zero-turn cursor is intentionally not durable. This fixture
+          // needs a real resumed opening so the foreign init cannot become
+          // the first legitimate owner of an otherwise fresh query.
+          resumeCursor: { threadId: THREAD_ID, resume: nativeSessionId, turnCount: 1 },
+        });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        assert.equal(harness.getLastCreateQueryInput()!.options.resume, nativeSessionId);
+        assert.equal(
+          harness.getLastCreateQueryInput()!.options.permissionMode,
+          "bypassPermissions",
+        );
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "first",
+          interactionMode: "default",
+        });
+        yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+        // sendTurn has completed its setter path before any candidate frame.
+        // Keep that completed opening baseline separate from observations.
+        assert.deepEqual(harness.query.setPermissionModeCalls, []);
+        harness.query.emit({
+          type: "system",
+          subtype: "status",
+          status: null,
+          permissionMode: "plan",
+          session_id: nativeSessionId,
+          uuid: "71000000-0000-4000-8000-000000000212",
+        });
+        emitWorkflowFixtureInit(harness.query, "2.1.314", foreignSessionId, [], "auto");
+        harness.query.emit({
+          type: "system",
+          subtype: "status",
+          status: null,
+          permissionMode: "auto",
+          session_id: foreignSessionId,
+          uuid: "71000000-0000-4000-8000-000000000214",
+        });
+        const firstCompleted = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        harness.query.emit(makeSuccessfulClaudeResult(nativeSessionId));
+        yield* Fiber.join(firstCompleted);
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "second",
+          interactionMode: "default",
+        });
+        assert.deepEqual(harness.query.setPermissionModeCalls, []);
+
+        // A later valid init is still allowed to establish the first native
+        // owner. The earlier status must not fabricate or permanently poison it.
+        emitWorkflowFixtureInit(harness.query, "2.1.314", nativeSessionId, [], "plan");
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "session.configured"),
+          Stream.runHead,
+        );
+        const secondCompleted = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        harness.query.emit(makeSuccessfulClaudeResult(nativeSessionId));
+        yield* Fiber.join(secondCompleted);
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "third",
+          interactionMode: "default",
+        });
+        assert.deepEqual(harness.query.setPermissionModeCalls, ["bypassPermissions"]);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "keeps foreign init/status chains and malformed or child observations outside the permission owner",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "first",
+          interactionMode: "default",
+        });
+        yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+        const nativeSessionId = "71000000-0000-4000-8000-000000000221";
+        const foreignSessionId = "71000000-0000-4000-8000-000000000222";
+        emitWorkflowFixtureInit(harness.query, "2.1.314", nativeSessionId, [], "bypassPermissions");
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "session.configured"),
+          Stream.runHead,
+        );
+        // The legacy history path may observe another id. It must not let this
+        // two-frame chain replace the independent native permission owner.
+        emitWorkflowFixtureInit(harness.query, "2.1.314", foreignSessionId, [], "auto");
+        const status = {
+          type: "system" as const,
+          subtype: "status" as const,
+          status: null,
+          permissionMode: "auto" as const,
+          session_id: nativeSessionId,
+          uuid: "71000000-0000-4000-8000-000000000223" as const,
+        };
+        harness.query.emit({ ...status, session_id: foreignSessionId });
+        for (const fields of [
+          // This ordinary child frame first restores the legacy history cursor
+          // to the primary id. The task-scoped negatives must then be rejected
+          // by permission ownership, not by a leftover foreign-session guard.
+          { parent_tool_use_id: "foreign-child" },
+          { task_id: "foreign-task", parent_task_id: "foreign-parent" },
+          { task_id: "foreign-task" },
+          { agent_id: "foreign-agent" },
+          { permissionMode: "unsupported-mode" },
+          { permissionMode: undefined },
+          { session_id: ` ${nativeSessionId} ` },
+        ]) {
+          harness.query.emit({ ...status, ...fields } as unknown as SDKMessage);
+        }
+        const inherited = Object.assign(Object.create({ permissionMode: "auto" }), {
+          type: status.type,
+          subtype: status.subtype,
+          status: status.status,
+          session_id: nativeSessionId,
+          uuid: "71000000-0000-4000-8000-000000000224",
+        }) as SDKMessage;
+        harness.query.emit(inherited);
+        // Even an undefined inherited/accessor task field is not an absent
+        // native JSON scope. Neither shape may qualify query-level mode proof.
+        const inheritedTaskScope = Object.assign(Object.create({ task_id: undefined }), status);
+        harness.query.emit(inheritedTaskScope as SDKMessage);
+        const accessorTaskScope = Object.defineProperty({ ...status }, "task_id", {
+          get: () => undefined,
+        });
+        harness.query.emit(accessorTaskScope as SDKMessage);
+        const completed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        // The exact primary result is an ordered public completion barrier after
+        // every candidate, not a fabricated success for the ignored metadata.
+        harness.query.emit(makeSuccessfulClaudeResult(nativeSessionId));
+        yield* Fiber.join(completed);
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "second",
+          interactionMode: "default",
+        });
+        assert.deepEqual(harness.query.setPermissionModeCalls, []);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "retires a held old-query mode observation before the replacement establishes its own owner",
+    () =>
+      Effect.gen(function* () {
+        const enteredLogger = yield* Deferred.make<void>();
+        const releaseLogger = yield* Deferred.make<void>();
+        const oldQueryClosed = yield* Deferred.make<void>();
+        const heldUuid = "71000000-0000-4000-8000-000000000231";
+        const isStatusLog = Schema.is(
+          Schema.Struct({
+            event: Schema.Struct({ method: Schema.Literal("claude/system/status") }),
+          }),
+        );
+        let holdStatus = true;
+        const harness = makeHarness({
+          newQueryPerSession: true,
+          nativeEventLogger: {
+            filePath: "memory://permission-mode-retirement",
+            write: (entry) =>
+              holdStatus && isStatusLog(entry)
+                ? Deferred.succeed(enteredLogger, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseLogger)),
+                    Effect.uninterruptible,
+                  )
+                : Effect.void,
+            close: () => Effect.void,
+          },
+        });
+        const originalClose = harness.query.close;
+        const closeObserver = vi.spyOn(harness.query, "close").mockImplementation(() => {
+          originalClose();
+          // This acknowledges the exact synthetic Query.close implementation,
+          // never an OS process exit or a successful provider installation.
+          Effect.runSync(Deferred.succeed(oldQueryClosed, undefined));
+        });
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const original = yield* adapter.startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+          });
+          yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+          yield* adapter.sendTurn({
+            threadId: THREAD_ID,
+            input: "first",
+            interactionMode: "default",
+          });
+          yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+          const oldNativeSession = "71000000-0000-4000-8000-000000000232";
+          emitWorkflowFixtureInit(
+            harness.query,
+            "2.1.314",
+            oldNativeSession,
+            [],
+            "bypassPermissions",
+          );
+          yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "session.configured"),
+            Stream.runHead,
+          );
+          harness.query.emit({
+            type: "system",
+            subtype: "status",
+            status: null,
+            permissionMode: "auto",
+            session_id: oldNativeSession,
+            uuid: heldUuid,
+          });
+          yield* Deferred.await(enteredLogger);
+          holdStatus = false;
+          const replacementFiber = yield* adapter
+            .startSession({ threadId: THREAD_ID, runtimeMode: "full-access" })
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(oldQueryClosed);
+          yield* Deferred.succeed(releaseLogger, undefined);
+          const replacement = yield* Fiber.join(replacementFiber);
+          assert.notEqual(replacement.subagentRuntimeId, original.subagentRuntimeId);
+          const query = harness.queries[1];
+          assert.ok(query);
+          const turn = yield* adapter.sendTurn({
+            threadId: THREAD_ID,
+            input: "new query",
+            interactionMode: "default",
+          });
+          assert.deepEqual(query!.setPermissionModeCalls, []);
+          assert.deepEqual(harness.query.setPermissionModeCalls, []);
+
+          const newNativeSession = "71000000-0000-4000-8000-000000000233";
+          emitWorkflowFixtureInit(query!, "2.1.314", newNativeSession, [], "plan");
+          yield* adapter.streamEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "session.configured" && event.raw?.method === "claude/system/init",
+            ),
+            Stream.runHead,
+          );
+          const completed = yield* adapter.streamEvents.pipe(
+            Stream.filter(
+              (event) => event.type === "turn.completed" && event.turnId === turn.turnId,
+            ),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          query!.emit(makeSuccessfulClaudeResult(newNativeSession));
+          yield* Fiber.join(completed);
+          yield* adapter.sendTurn({
+            threadId: THREAD_ID,
+            input: "next",
+            interactionMode: "default",
+          });
+          assert.deepEqual(query!.setPermissionModeCalls, ["bypassPermissions"]);
+        }).pipe(
+          // Install unconditional gate retirement around the body before any
+          // native-message acquisition can block teardown of the scoped adapter.
+          Effect.ensuring(Deferred.succeed(releaseLogger, undefined)),
+          Effect.ensuring(Effect.sync(() => closeObserver.mockRestore())),
+          Effect.provide(harness.layer),
+        );
+      }),
   );
 
   it.effect("skips redundant default permission mode control request on first sendTurn", () => {

@@ -181,6 +181,14 @@ export const purgeHardDeletedThreadPersistence = Effect.fn("purgeHardDeletedThre
         DELETE FROM projection_pending_approvals
         WHERE thread_id = ${input.threadId}
       `;
+        // The materialized owner keeps an ordering watermark even when its
+        // activity evidence is removed. Permanent deletion must erase that
+        // thread-owned witness explicitly before deleting source activities,
+        // including on legacy handles with foreign-key enforcement disabled.
+        yield* sql`
+        DELETE FROM projection_native_agent_bindings
+        WHERE thread_id = ${input.threadId}
+      `;
         yield* sql`
         DELETE FROM projection_thread_activities
         WHERE thread_id = ${input.threadId}

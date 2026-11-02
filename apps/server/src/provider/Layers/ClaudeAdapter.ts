@@ -332,6 +332,88 @@ function resolveClaudePermissionMode(input: {
   return input.basePermissionMode;
 }
 
+interface ClaudePermissionModeOwner {
+  readonly nativeSessionId: string;
+  readonly runtimeId: string;
+}
+
+interface ClaudePermissionModeObservation {
+  readonly mode: PermissionMode;
+  readonly nativeSessionId: string;
+  readonly runtimeId: string;
+  readonly owner: ClaudePermissionModeOwner | undefined;
+}
+
+/** Admit only the public SDK modes, never provider prose or inherited flags. */
+function readClaudePermissionMode(value: unknown): PermissionMode | undefined {
+  switch (value) {
+    case "default":
+    case "acceptEdits":
+    case "bypassPermissions":
+    case "plan":
+    case "dontAsk":
+    case "auto":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Capture authority before ordinary message normalization may adopt a legacy
+ * conversation id. A primary init seeds one independent owner per query; a
+ * status, child, malformed or foreign frame cannot manufacture that owner by
+ * first changing the mutable history cursor. The caller separately verifies
+ * the live context map both before capture and after its awaited processing.
+ */
+function captureClaudePermissionModeObservation(
+  context: ClaudeSessionContext,
+  message: SDKMessage,
+): ClaudePermissionModeObservation | undefined {
+  const ownValue = (key: string): unknown => {
+    const descriptor = Object.getOwnPropertyDescriptor(message, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  };
+  const subtype = ownValue("subtype");
+  if (
+    context.stopped ||
+    context.authFailureSeen ||
+    ownValue("type") !== "system" ||
+    (subtype !== "init" && subtype !== "status") ||
+    !hasExactPrimaryClaudeParent(message)
+  )
+    return undefined;
+  // Public init/status permission modes describe the query, never a scoped
+  // task. Missing or own undefined scope is legacy-compatible; inherited,
+  // accessor, malformed and concrete task identities cannot mint query proof.
+  // Keep this stricter boundary local rather than changing task event routing.
+  for (const key of ["task_id", "parent_task_id"] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(message, key);
+    if (descriptor ? !("value" in descriptor) || descriptor.value !== undefined : key in message)
+      return undefined;
+  }
+  const mode = readClaudePermissionMode(ownValue("permissionMode"));
+  const sessionId = ownValue("session_id");
+  if (
+    !mode ||
+    typeof sessionId !== "string" ||
+    exactClaudeProviderIdentity(sessionId) !== sessionId
+  )
+    return undefined;
+
+  const owner = context.permissionModeOwner;
+  if (owner === undefined) {
+    if (
+      subtype !== "init" ||
+      (context.permissionModeInitialResumeSessionId !== undefined &&
+        sessionId !== context.permissionModeInitialResumeSessionId)
+    )
+      return undefined;
+  } else if (owner.nativeSessionId !== sessionId || owner.runtimeId !== context.subagentRuntimeId)
+    return undefined;
+  return { mode, nativeSessionId: sessionId, runtimeId: context.subagentRuntimeId, owner };
+}
+
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
 type ClaudeToolResultStreamKind = Extract<
   RuntimeContentStreamKind,
@@ -815,6 +897,10 @@ interface ClaudeSessionContext {
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
   readonly basePermissionMode: PermissionMode | undefined;
+  /** Frozen opening identity, independent of later legacy cursor adoption. */
+  readonly permissionModeInitialResumeSessionId: string | undefined;
+  /** Seeded once by a qualified primary SDK init; never a permission grant. */
+  permissionModeOwner: ClaudePermissionModeOwner | undefined;
   currentPermissionMode: PermissionMode;
   currentApiModelId: string | undefined;
   /** Requested flag state only; native eligibility and managed policy remain authoritative. */
@@ -8882,6 +8968,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     incomingMessage: SDKMessage,
   ) {
+    const permissionModeObservation =
+      sessions.get(context.session.threadId) === context
+        ? captureClaudePermissionModeObservation(context, incomingMessage)
+        : undefined;
     const identityFrame = incomingMessage as unknown as Record<string, unknown>;
     const extensionRecords = [identityFrame];
     if (
@@ -9234,6 +9324,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       !(message.type === "system" && message.subtype === "commands_changed")
     ) {
       yield* ensureThreadId(context, message);
+    }
+    if (
+      permissionModeObservation &&
+      !context.stopped &&
+      !context.authFailureSeen &&
+      sessions.get(context.session.threadId) === context &&
+      context.subagentRuntimeId === permissionModeObservation.runtimeId &&
+      context.permissionModeOwner === permissionModeObservation.owner &&
+      context.resumeSessionId === permissionModeObservation.nativeSessionId &&
+      context.lastThreadStartedId === permissionModeObservation.nativeSessionId
+    ) {
+      context.permissionModeOwner ??= Object.freeze({
+        nativeSessionId: permissionModeObservation.nativeSessionId,
+        runtimeId: permissionModeObservation.runtimeId,
+      });
+      // This updates the next-turn setter's observed state only. Native
+      // callback decisions remain authoritative even when the mode is bypass.
+      context.currentPermissionMode = permissionModeObservation.mode;
     }
     yield* recordTurnSdkMessage(context, message);
 
@@ -10145,21 +10253,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // of being silently auto-approved. Do not persist ruleContent here: it
         // can contain sensitive project policy and is not needed to honor the
         // upstream decision.
-        // Only true bypass mode may skip Cafe's callback. Auto mode can be
-        // layered over a historical full-access runtime policy, but upstream's
-        // classifier must remain authoritative. If Auto falls back to a human
-        // prompt, silently allowing it here would defeat the safety model.
-        if (
-          context.currentPermissionMode === "bypassPermissions" &&
-          !matchedAskRule &&
-          callbackOptions.defaultToNo !== true &&
-          callbackOptions.suppressAlwaysAllowRule !== true
-        ) {
-          return {
-            behavior: "allow",
-            updatedInput: toolInput,
-          } satisfies PermissionResult;
-        }
+        // Ordinary bypass approvals are resolved inside the native CLI before
+        // canUseTool is consulted. Reaching this callback is therefore an
+        // unresolved native decision, even when Cafe requested bypass and the
+        // older optional safety flags are absent. Organization/MCP policies,
+        // hooks and native critical-path checks must not be silently approved
+        // by a second host-side bypass. Keep AskUserQuestion/ExitPlanMode's
+        // distinct routes above and return only the user's exact decision.
+        // https://code.claude.com/docs/en/agent-sdk/permissions
 
         if (pendingApprovals.size >= 64)
           return {
@@ -10716,6 +10817,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         streamFiber: undefined,
         startedAt,
         basePermissionMode: permissionMode,
+        permissionModeInitialResumeSessionId: existingResumeSessionId,
+        permissionModeOwner: undefined,
         currentPermissionMode: initialPermissionMode ?? "default",
         currentApiModelId: apiModelId,
         currentEffort: effectiveEffort,

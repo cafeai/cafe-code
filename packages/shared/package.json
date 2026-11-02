@@ -80,6 +80,10 @@
       "types": "./src/liveWork.ts",
       "import": "./src/liveWork.ts"
     },
+    "./pendingRequestRetention": {
+      "types": "./src/pendingRequestRetention.ts",
+      "import": "./src/pendingRequestRetention.ts"
+    },
     "./providerTaskOwnership": {
       "types": "./src/providerTaskOwnership.ts",
       "import": "./src/providerTaskOwnership.ts"

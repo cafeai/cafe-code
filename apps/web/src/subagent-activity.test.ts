@@ -8,6 +8,7 @@ import {
 
 import { deriveSubagentActivities, type SubagentRuntimeContext } from "./subagent-activity";
 import { deriveActiveSubagentWorkEntries, deriveHistoricalWorkLogSummaries } from "./session-logic";
+import { deriveLiveWorkObservations } from "@cafecode/shared/liveWork";
 
 const oldTurn = TurnId.make("older-parent-turn");
 const currentTurn = TurnId.make("current-parent-turn");
@@ -47,6 +48,301 @@ function activity(
 }
 
 describe("subagent native runtime liveness overlay", () => {
+  it("does not revive a completed native owner from an unsequenced future-clock start", () => {
+    const runtimeId = "00000000-0000-4000-8000-000000000213";
+    const session = { subagentRuntimeId: runtimeId, orchestrationStatus: "ready" as const };
+    const first = activity("task.started", 1, runtimeId, "Completing worker", "first-worker");
+    const independent = activity(
+      "task.started",
+      2,
+      runtimeId,
+      "Independent worker",
+      "independent-worker",
+    );
+    const terminal = activity("task.completed", 3, runtimeId, "Completing worker", "first-worker");
+    const { sequence: _legacySequence, ...legacyBase } = first;
+    const legacy: OrchestrationThreadActivity = {
+      ...legacyBase,
+      id: EventId.make("legacy-future-clock-start"),
+      createdAt: "2027-01-01T00:00:00.000Z",
+    };
+    const rows = [first, independent, terminal, legacy];
+    expect(deriveLiveWorkObservations(rows, session)).toHaveLength(1);
+    expect(
+      deriveActiveSubagentWorkEntries(rows, null, { runtimeSession: session }).map(
+        (entry) => entry.subagent?.id,
+      ),
+    ).toEqual(["independent-worker"]);
+    expect(
+      deriveSubagentActivities(rows, { runtimeSession: session }).find(
+        (row) => row.id === "first-worker",
+      ),
+    ).toMatchObject({ status: "completed", completedAt: terminal.createdAt });
+  });
+
+  it("retires an exact descriptor-free native owner while independent agents remain in the roster", () => {
+    const runtimeId = "00000000-0000-4000-8000-000000000211";
+    const session = { subagentRuntimeId: runtimeId, orchestrationStatus: "ready" as const };
+    const first = activity("task.started", 1, runtimeId, "Completing worker", "first-worker");
+    const independent = activity(
+      "task.started",
+      2,
+      runtimeId,
+      "Independent worker",
+      "independent-worker",
+    );
+    const terminal: OrchestrationThreadActivity = {
+      ...first,
+      id: EventId.make("native-descriptor-free-owner-terminal"),
+      kind: "task.completed",
+      sequence: 3,
+      payload: { taskId: "first-worker", nativeWorkRuntimeId: runtimeId, status: "completed" },
+    };
+    const foreign = {
+      ...terminal,
+      payload: {
+        taskId: "first-worker",
+        status: "completed",
+        nativeWorkRuntimeId: "00000000-0000-4000-8000-000000000212",
+      },
+    };
+    expect(
+      deriveActiveSubagentWorkEntries([first, independent, foreign], null, {
+        runtimeSession: session,
+      }),
+    ).toHaveLength(2);
+    const rows = [first, independent, terminal];
+    expect(deriveLiveWorkObservations(rows, session)).toHaveLength(1);
+    const roster = deriveActiveSubagentWorkEntries(rows, null, { runtimeSession: session });
+    expect(roster.map((entry) => entry.subagent?.id)).toEqual(["independent-worker"]);
+    const history = deriveSubagentActivities(rows, { runtimeSession: session });
+    expect(history.find((row) => row.id === "first-worker")).toMatchObject({
+      turnId: oldTurn,
+      status: "completed",
+      historyId: "exact-public-history",
+    });
+    expect(deriveSubagentActivities([terminal], { runtimeSession: session })).toEqual([]);
+  });
+
+  it("withholds unconfirmed native owners without hiding independent work or rewriting history", () => {
+    const runtimeId = "00000000-0000-4000-8000-000000000207";
+    const session = { subagentRuntimeId: runtimeId, orchestrationStatus: "ready" as const };
+    const rows = [
+      activity("task.started", 1, runtimeId, "Unconfirmed worker", "unconfirmed-worker"),
+      activity("task.started", 2, runtimeId, "Independent worker", "independent-worker"),
+    ];
+    const before = structuredClone(rows);
+    const liveWork = {
+      runtimeId,
+      taskCount: 0,
+      agentCount: 1,
+      unconfirmedAgentIds: ["unconfirmed-worker"],
+    };
+    expect(
+      deriveActiveSubagentWorkEntries(rows, null, { runtimeSession: session, liveWork }).map(
+        (entry) => entry.subagent?.id,
+      ),
+    ).toEqual(["independent-worker"]);
+    expect(
+      deriveActiveSubagentWorkEntries(rows, null, {
+        runtimeSession: session,
+        liveWork: { ...liveWork, runtimeId: "00000000-0000-4000-8000-000000000208" },
+      }),
+    ).toHaveLength(2);
+    expect(
+      deriveActiveSubagentWorkEntries(rows, null, {
+        runtimeSession: session,
+        liveWork: { ...liveWork, unconfirmedAgentIdsTruncated: true },
+      }),
+    ).toEqual([]);
+    expect(deriveSubagentActivities(rows, { runtimeSession: session })).toHaveLength(2);
+    expect(rows).toEqual(before);
+  });
+
+  it("shows current inter-root native agents read-only and supersedes them only on an explicit owning turn", () => {
+    const runtimeId = "00000000-0000-4000-8000-000000000208";
+    const session = { subagentRuntimeId: runtimeId, orchestrationStatus: "ready" as const };
+    const base = activity("task.started", 1, runtimeId);
+    const taskControl = {
+      providerInstanceId: ProviderInstanceId.make("claude-account"),
+      taskGeneration: "00000000-0000-4000-8000-000000000209",
+      canStop: true,
+      canBackground: true,
+    };
+    const betweenRoots: OrchestrationThreadActivity = {
+      ...base,
+      turnId: null,
+      payload: { ...base.payload, subagent: { ...base.payload.subagent, taskControl } },
+    };
+    const before = structuredClone(betweenRoots);
+    expect(deriveLiveWorkObservations([betweenRoots], session)).toHaveLength(1);
+    const [current] = deriveActiveSubagentWorkEntries([betweenRoots], null, {
+      runtimeSession: session,
+    });
+    expect(current).toMatchObject({
+      turnId: null,
+      subagent: { id: "exact-child", status: "active" },
+    });
+    expect(current?.subagent?.historyId).toBeUndefined();
+    expect(current?.subagent?.taskControl).toBeUndefined();
+
+    const descriptorFreeCompletion: OrchestrationThreadActivity = {
+      ...betweenRoots,
+      id: EventId.make("inter-root-native-completion"),
+      kind: "task.completed",
+      sequence: 2,
+      payload: { taskId: "exact-child", nativeWorkRuntimeId: runtimeId, status: "completed" },
+    };
+    const foreignCompletion = {
+      ...descriptorFreeCompletion,
+      payload: {
+        taskId: "exact-child",
+        status: "completed",
+        nativeWorkRuntimeId: "00000000-0000-4000-8000-000000000210",
+      },
+    };
+    for (const rejected of [
+      foreignCompletion,
+      {
+        ...descriptorFreeCompletion,
+        payload: { taskId: "exact-child", status: "completed" },
+      },
+      {
+        ...descriptorFreeCompletion,
+        payload: {
+          taskId: "exact-child",
+          nativeWorkRuntimeId: runtimeId,
+          status: "unqualified-state",
+        },
+      },
+    ]) {
+      expect(
+        deriveActiveSubagentWorkEntries([betweenRoots, rejected], null, {
+          runtimeSession: session,
+        }),
+      ).toHaveLength(1);
+    }
+    const completed = deriveSubagentActivities([betweenRoots, descriptorFreeCompletion], {
+      runtimeSession: session,
+    });
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toMatchObject({ turnId: null, runtimeId, status: "completed" });
+    expect(completed[0]?.historyId).toBeUndefined();
+    expect(completed[0]?.taskControl).toBeUndefined();
+    expect(deriveLiveWorkObservations([betweenRoots, descriptorFreeCompletion], session)).toEqual(
+      [],
+    );
+    expect(
+      deriveActiveSubagentWorkEntries([betweenRoots, descriptorFreeCompletion], null, {
+        runtimeSession: session,
+      }),
+    ).toEqual([]);
+    const descriptorFreeAmbient: OrchestrationThreadActivity = {
+      ...descriptorFreeCompletion,
+      kind: "task.progress",
+      payload: { taskId: "exact-child", nativeWorkRuntimeId: runtimeId, visibility: "ambient" },
+    };
+    expect(
+      deriveSubagentActivities([betweenRoots, descriptorFreeAmbient], {
+        runtimeSession: session,
+      }),
+    ).toEqual([]);
+    for (const retirement of [descriptorFreeCompletion, descriptorFreeAmbient, foreignCompletion]) {
+      expect(deriveSubagentActivities([retirement], { runtimeSession: session })).toEqual([]);
+    }
+
+    const foreign = {
+      ...activity("task.completed", 2, "00000000-0000-4000-8000-000000000210"),
+      turnId: null,
+    };
+    const malformed = {
+      ...activity("task.completed", 3, runtimeId),
+      turnId: null,
+      payload: {
+        ...base.payload,
+        subagent: { ...base.payload.subagent, status: "unqualified-state" },
+      },
+    };
+    const unbound = {
+      ...activity("task.completed", 4, runtimeId),
+      turnId: null,
+      payload: { ...base.payload, subagent: { ...base.payload.subagent, runtimeId: undefined } },
+    };
+    const wrongTask = {
+      ...activity("task.completed", 5, runtimeId),
+      turnId: null,
+      payload: { ...base.payload, taskId: "another-task" },
+    };
+    for (const rejected of [foreign, malformed, unbound, wrongTask]) {
+      const rows = deriveSubagentActivities([betweenRoots, rejected], { runtimeSession: session });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ turnId: null, runtimeId, status: "active" });
+      expect(rows[0]?.historyId).toBeUndefined();
+      expect(rows[0]?.taskControl).toBeUndefined();
+    }
+    expect(deriveSubagentActivities([betweenRoots], { runtimeSession: null })).toEqual([]);
+    expect(
+      deriveSubagentActivities(
+        [
+          {
+            ...base,
+            turnId: null,
+            payload: { itemType: "collab_agent_tool_call", detail: "Started /root/audit" },
+          },
+        ],
+        { runtimeSession: session },
+      ),
+    ).toEqual([]);
+
+    const replacement = {
+      ...betweenRoots,
+      id: EventId.make("inter-root-agent-owned-start"),
+      turnId: currentTurn,
+      sequence: 6,
+    };
+    const history = deriveSubagentActivities([betweenRoots, replacement], {
+      runtimeSession: session,
+    });
+    expect(history).toHaveLength(2);
+    const historicalInterRoot = history.find((row) => row.turnId === null);
+    expect(historicalInterRoot?.historyId).toBeUndefined();
+    expect(historicalInterRoot?.taskControl).toBeUndefined();
+    const active = deriveActiveSubagentWorkEntries([betweenRoots, replacement], currentTurn, {
+      runtimeSession: session,
+    });
+    expect(active).toHaveLength(1);
+    expect(active[0]?.turnId).toBe(currentTurn);
+    expect(active[0]?.subagent?.historyId).toBe("exact-public-history");
+    expect(active[0]?.subagent?.taskControl).toEqual(taskControl);
+    expect(betweenRoots).toEqual(before);
+  });
+
+  it("shows only the current explicit native owner while preserving both historical incarnations", () => {
+    const runtimeId = "00000000-0000-4000-8000-000000000207";
+    const session = { subagentRuntimeId: runtimeId, orchestrationStatus: "ready" as const };
+    const first = activity("task.started", 1, runtimeId);
+    const replacement = { ...activity("task.started", 2, runtimeId), turnId: currentTurn };
+    const delayedOldCompletion = activity("task.completed", 3, runtimeId);
+    const rows = [first, replacement, delayedOldCompletion];
+    const before = structuredClone(rows);
+    const history = deriveSubagentActivities(rows, { runtimeSession: session });
+    expect(history).toHaveLength(2);
+    expect(new Set(history.map((child) => JSON.stringify([child.turnId, child.status])))).toEqual(
+      new Set([JSON.stringify([oldTurn, "completed"]), JSON.stringify([currentTurn, "active"])]),
+    );
+    const active = deriveActiveSubagentWorkEntries(rows, currentTurn, { runtimeSession: session });
+    expect(active.map((entry) => [entry.turnId, entry.subagent?.id])).toEqual([
+      [currentTurn, "exact-child"],
+    ]);
+    const completed = { ...activity("task.completed", 4, runtimeId), turnId: currentTurn };
+    expect(
+      deriveActiveSubagentWorkEntries([first, replacement, completed], null, {
+        runtimeSession: session,
+      }),
+    ).toEqual([]);
+    expect(rows).toEqual(before);
+  });
+
   it("revokes an older task receipt on liveness-only progress without hiding the live child", () => {
     const capability = {
       providerInstanceId: ProviderInstanceId.make("claude-account"),

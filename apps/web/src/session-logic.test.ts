@@ -67,6 +67,113 @@ describe("turn duration formatting", () => {
 });
 
 describe("derivePendingApprovals", () => {
+  it.each(["approval", "question"] as const)(
+    "uses persisted BINARY tie order for stale responses in the %s channel",
+    (lane) => {
+      // These equal-clock edges share lifecycle rank. Locale collation can
+      // reverse mixed-case ids, while UTF-16 comparison reverses the final
+      // Unicode pair. Both would disagree with persisted SQLite BINARY order.
+      const cases = [
+        { requestedId: "A-request", failedId: "a-response", pending: false },
+        { requestedId: "a-request", failedId: "A-response", pending: true },
+        { requestedId: "\uE000-request", failedId: "\u{10000}-response", pending: false },
+      ];
+      for (const sequence of [undefined, 100]) {
+        for (const scenario of cases) {
+          const requestId = "same-clock-request";
+          const requested = makeActivity({
+            id: scenario.requestedId,
+            kind: lane === "approval" ? "approval.requested" : "user-input.requested",
+            ...(sequence !== undefined ? { sequence } : {}),
+            payload:
+              lane === "approval"
+                ? { requestId, requestKind: "command", defaultToNo: true }
+                : {
+                    requestId,
+                    questions: [
+                      {
+                        id: "choice",
+                        header: "Choice",
+                        question: "Continue?",
+                        options: [{ label: "Continue", description: "Continue this request" }],
+                        multiSelect: false,
+                      },
+                    ],
+                  },
+          });
+          const failed = makeActivity({
+            id: scenario.failedId,
+            kind:
+              lane === "approval"
+                ? "provider.approval.respond.failed"
+                : "provider.user-input.respond.failed",
+            ...(sequence !== undefined ? { sequence } : {}),
+            payload: {
+              requestId,
+              detail:
+                lane === "approval"
+                  ? "unknown pending permission request"
+                  : "unknown pending user-input request",
+            },
+          });
+          // Delivery order is deliberately opposite one of the persisted
+          // orders; folding must use canonical evidence rather than insertion.
+          const pending =
+            lane === "approval"
+              ? derivePendingApprovals([failed, requested])
+              : derivePendingUserInputs([failed, requested]);
+          expect(pending.map((entry) => entry.requestId)).toEqual(
+            scenario.pending ? [requestId] : [],
+          );
+        }
+      }
+    },
+  );
+
+  it("does not retire either request channel on the other channel's stale response text", () => {
+    const rows = [
+      makeActivity({
+        id: EventId.make("approval-request"),
+        sequence: 1,
+        kind: "approval.requested",
+        payload: { requestId: "shared-id", requestKind: "command", defaultToNo: true },
+      }),
+      makeActivity({
+        id: EventId.make("question-request"),
+        sequence: 2,
+        kind: "user-input.requested",
+        payload: {
+          requestId: "shared-id",
+          questions: [
+            {
+              id: "choice",
+              header: "Choice",
+              question: "Continue?",
+              options: [{ label: "Continue", description: "Continue this request" }],
+              multiSelect: false,
+            },
+          ],
+        },
+      }),
+      makeActivity({
+        id: EventId.make("approval-wrong-channel-error"),
+        sequence: 3,
+        kind: "provider.approval.respond.failed",
+        payload: { requestId: "shared-id", detail: "unknown pending user-input request" },
+      }),
+      makeActivity({
+        id: EventId.make("question-wrong-channel-error"),
+        sequence: 4,
+        kind: "provider.user-input.respond.failed",
+        payload: { requestId: "shared-id", detail: "unknown pending approval request" },
+      }),
+    ];
+    expect(derivePendingApprovals(rows)).toMatchObject([
+      { requestId: "shared-id", defaultToNo: true },
+    ]);
+    expect(derivePendingUserInputs(rows)).toMatchObject([{ requestId: "shared-id" }]);
+  });
+
   it("preserves only boolean provider approval safety hints", () => {
     const rows = derivePendingApprovals([
       makeActivity({
@@ -1775,6 +1882,7 @@ describe("deriveWorkLogEntries", () => {
     };
     const started = makeActivity({
       id: "subagent-start",
+      sequence: 40,
       createdAt: "2026-02-23T00:00:01.000Z",
       kind: "task.started",
       summary: "Subagent started",
@@ -1803,6 +1911,7 @@ describe("deriveWorkLogEntries", () => {
     });
     const completed = makeActivity({
       id: "subagent-complete",
+      sequence: 43,
       createdAt: "2026-02-23T00:01:06.000Z",
       kind: "task.completed",
       summary: "Subagent completed",
@@ -1817,6 +1926,7 @@ describe("deriveWorkLogEntries", () => {
     });
     const ordinaryStart = makeActivity({
       id: "ordinary-task-start",
+      sequence: 41,
       createdAt: "2026-02-23T00:00:03.000Z",
       kind: "task.started",
       summary: "Default task started",
@@ -1879,6 +1989,7 @@ describe("deriveWorkLogEntries", () => {
 
     const delayedProgress = makeActivity({
       id: "subagent-delayed-progress",
+      sequence: 44,
       createdAt: "2026-02-23T00:01:07.000Z",
       kind: "task.progress",
       summary: "Subagent update",
@@ -1902,6 +2013,10 @@ describe("deriveWorkLogEntries", () => {
 
     const restarted = makeActivity({
       id: "subagent-restarted",
+      // This is a genuinely newer restart in canonical provider order. A
+      // future legacy clock without a sequence is covered separately and must
+      // never move an old start beyond the known completion watermark.
+      sequence: 45,
       createdAt: "2026-02-23T00:02:00.000Z",
       kind: "task.started",
       summary: "Subagent started",

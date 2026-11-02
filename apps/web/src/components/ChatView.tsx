@@ -2319,6 +2319,33 @@ export default function ChatView(props: ChatViewProps) {
   const versionMismatchServerLabel = uiText("server", undefined, undefined, uiLocale);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const items: ComposerBannerStackItem[] = [];
+    if (
+      liveWork &&
+      (liveWork?.unconfirmedAgentIds?.length || liveWork?.unconfirmedAgentIdsTruncated) &&
+      isLiveWorkRuntimeCurrent(liveWork.runtimeId, activeThread?.session ?? null)
+    ) {
+      items.push({
+        id: "unconfirmed-agent-status",
+        variant: "warning",
+        icon: <TriangleAlertIcon />,
+        title: uiText(
+          "Some agent status information is unavailable.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
+      });
+    }
+    if (activeThread?.pendingRequestRetentionTruncated === true) {
+      // Omission is presentation evidence, never permission to dismiss or
+      // answer a request whose exact native owner is not currently shown.
+      items.push({
+        id: "pending-request-retention",
+        variant: "warning",
+        icon: <TriangleAlertIcon />,
+        title: uiText("Some pending requests are not shown.", undefined, undefined, uiLocale),
+      });
+    }
     if (showVersionMismatchBanner && versionMismatch && versionMismatchDismissKey) {
       items.push({
         id: `version-mismatch:${versionMismatchDismissKey}`,
@@ -2343,6 +2370,9 @@ export default function ChatView(props: ChatViewProps) {
     }
     return items;
   }, [
+    liveWork,
+    activeThread?.session,
+    activeThread?.pendingRequestRetentionTruncated,
     showVersionMismatchBanner,
     versionMismatch,
     versionMismatchDismissKey,
@@ -2461,7 +2491,7 @@ export default function ChatView(props: ChatViewProps) {
         : uiPresentation.deriveActiveSubagentWorkEntries(
             threadActivities,
             activeLatestTurn?.state === "running" ? activeLatestTurn.turnId : null,
-            { runtimeSession: subagentRuntimeSession },
+            { runtimeSession: subagentRuntimeSession, liveWork },
           ),
     [
       activeLatestTurn?.state,
@@ -7293,6 +7323,10 @@ export default function ChatView(props: ChatViewProps) {
           currentThread.activities,
           null,
           {
+            liveWork: selectSidebarThreadSummaryByRef(
+              useStore.getState(),
+              scopeThreadRef(currentThread.environmentId, currentThread.id),
+            )?.liveWork,
             runtimeSession: currentThread.session
               ? {
                   subagentRuntimeId: currentThread.session.subagentRuntimeId,

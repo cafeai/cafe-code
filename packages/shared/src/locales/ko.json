@@ -2292,8 +2292,10 @@
   "Slowest spans": "가장 느린 스팬",
   "Snow": "눈",
   "Some activity couldn’t be loaded.": "일부 활동을 불러오지 못했습니다.",
+  "Some agent status information is unavailable.": "일부 에이전트의 상태를 확인할 수 없습니다.",
   "Some chats may remain. Reconnect before trying again.": "일부 대화가 남아 있을 수 있습니다. 다시 시도하기 전에 다시 연결하세요.",
   "Some messages couldn’t be loaded.": "일부 메시지를 불러오지 못했습니다.",
+  "Some pending requests are not shown.": "일부 대기 중인 요청이 표시되지 않습니다.",
   "Some trace files couldn''t be read: {value0}": "일부 추적 파일을 읽지 못했습니다: {value0}",
   "Some workflow details were omitted.": "일부 워크플로 세부 정보가 생략되었습니다.",
   "Something went wrong.": "문제가 발생했습니다.",
@@ -3551,5 +3553,6 @@
   "The updated version could not be verified": "업데이트된 버전을 확인하지 못했습니다",
   "Update preparation failed": "업데이트 준비에 실패했습니다",
   "Includes costs reported by Axiom and OpenCode, with standard API-rate estimates for other usage. OpenCode may report zero when pricing is unavailable. Only recorded requests are included; this is not the account-wide bill.": "Axiom과 OpenCode가 보고한 비용을 포함하며, 다른 사용량에는 표준 API 요금으로 추정한 비용을 적용합니다. 요금 정보가 없으면 OpenCode가 0을 보고할 수 있습니다. 기록된 요청만 포함되며 계정 전체 청구액이 아닙니다.",
-  "Axiom and OpenCode report costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.": "Axiom과 OpenCode는 비용을 보고하지만 캐시 절감액의 내역은 제공하지 않습니다. 다른 제공자의 캐시 절감액은 추정 요금을 사용합니다."
+  "Axiom and OpenCode report costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.": "Axiom과 OpenCode는 비용을 보고하지만 캐시 절감액의 내역은 제공하지 않습니다. 다른 제공자의 캐시 절감액은 추정 요금을 사용합니다.",
+  "Your provider requested a one-time confirmation. This can still appear with automatic permissions enabled.": "공급자가 일회성 확인을 요청했습니다. 자동 권한 승인이 켜져 있어도 이 확인이 표시될 수 있습니다."
 }

@@ -10951,8 +10951,172 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.lastError).toBeNull();
   });
 
+  it.each([
+    { initialMode: "approval-required", requestedMode: "full-access" },
+    { initialMode: "full-access", requestedMode: "approval-required" },
+  ] as const)(
+    "reconciles native $initialMode before accepting projected $requestedMode intent",
+    async ({ initialMode, requestedMode }) => {
+      const harness = await createHarness({
+        distinctNativeTurns: true,
+        threadModelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-opus-4-6",
+        },
+      });
+      const threadId = ThreadId.make("thread-1");
+      // Ordinary turn-start commands retain the saved thread mode. Establish
+      // the initial intent through its public control before opening a query.
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("native-mode-initial-policy"),
+          threadId,
+          runtimeMode: initialMode,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+      const firstMessageId = asMessageId("native-mode-initial-message");
+      const firstOwner = harness.observeNextProviderTurn(firstMessageId, {
+        threadId,
+        opening: true,
+      });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("native-mode-initial-command"),
+          threadId,
+          message: {
+            messageId: firstMessageId,
+            role: "user",
+            text: "first",
+            attachments: [],
+          },
+          runtimeMode: initialMode,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: "2026-01-01T00:00:01.000Z",
+        }),
+      );
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z", firstOwner);
+      const originalSession = harness.runtimeSessions[0]!;
+      expect(originalSession).toMatchObject({
+        provider: "claudeAgent",
+        providerInstanceId: "claudeAgent",
+        runtimeMode: initialMode,
+        status: "ready",
+      });
+      expect(harness.startSession.mock.calls).toHaveLength(1);
+
+      // A refused materialization preserves the old native owner while the
+      // public mode control durably changes the requested policy. Observe the
+      // exact failed effect before draining its admitted worker; a mock call
+      // alone would precede the failure and cannot qualify this divergence.
+      const refusal = new ProviderAdapterRequestError({
+        provider: "claudeAgent",
+        method: "startSession",
+        detail: "Synthetic replacement refused before changing the native owner.",
+      });
+      const refusedOpening = Effect.runSync(
+        Deferred.make<{
+          readonly threadId: ThreadId;
+          readonly request: Parameters<ProviderServiceShape["startSession"]>[1];
+          readonly error: ProviderAdapterRequestError;
+        }>(),
+      );
+      harness.startSession.mockImplementationOnce((requestedThreadId, request) =>
+        Effect.fail(refusal).pipe(
+          Effect.tapError((error) =>
+            Deferred.succeed(refusedOpening, { threadId: requestedThreadId, request, error }),
+          ),
+        ),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("native-mode-requested-policy"),
+          threadId,
+          runtimeMode: requestedMode,
+          createdAt: "2026-01-01T00:00:02.500Z",
+        }),
+      );
+      const failedOpening = await harness.awaitOwnedObserver(Deferred.await(refusedOpening));
+      expect(failedOpening.error).toBe(refusal);
+      expect(failedOpening).toMatchObject({
+        threadId,
+        request: {
+          threadId,
+          providerInstanceId: "claudeAgent",
+          runtimeMode: requestedMode,
+          resumeCursor: originalSession.resumeCursor,
+        },
+      });
+      await harness.drain();
+      expect(harness.runtimeSessions[0]).toBe(originalSession);
+      expect((await harness.readThreadDetail(threadId))?.runtimeMode).toBe(requestedMode);
+      expect((await harness.readThreadDetail(threadId))?.session?.runtimeMode).toBe(initialMode);
+      expect(harness.startSession.mock.calls).toHaveLength(2);
+      expect(harness.sendTurn.mock.calls).toHaveLength(1);
+      expect(harness.stopSession.mock.calls).toHaveLength(0);
+      const openingAttemptsBeforeRetry = harness.startSession.mock.calls.length;
+
+      // Arm exact opening and acceptance receipts before committing the new
+      // intent. The real projection pipeline will update both visible modes;
+      // do not manufacture projected equality or replace the original fake
+      // provider's opening/acceptance behavior in order to assert the result.
+      const opened = Effect.runSync(Deferred.make<ProviderSession>());
+      const originalStart = harness.startSession.getMockImplementation()!;
+      harness.startSession.mockImplementationOnce((requestedThreadId, request) =>
+        originalStart(requestedThreadId, request).pipe(
+          Effect.tap((session) => Deferred.succeed(opened, session)),
+        ),
+      );
+      const secondMessageId = asMessageId("native-mode-updated-message");
+      const secondOwner = harness.observeNextProviderTurn(secondMessageId, { threadId });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("native-mode-updated-command"),
+          threadId,
+          message: {
+            messageId: secondMessageId,
+            role: "user",
+            text: "continue with the selected access policy",
+            attachments: [],
+          },
+          runtimeMode: requestedMode,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: "2026-01-01T00:00:03.000Z",
+        }),
+      );
+      await secondOwner.waitForRunning();
+      // The broken path accepts the second message on its original owner
+      // without making a successful replacement. Fail there directly, then
+      // qualify positive opening through the original effect's exact receipt.
+      expect(harness.startSession.mock.calls).toHaveLength(openingAttemptsBeforeRetry + 1);
+      const replacement = await harness.awaitOwnedObserver(Deferred.await(opened));
+      expect(replacement).toMatchObject({
+        threadId,
+        provider: "claudeAgent",
+        providerInstanceId: "claudeAgent",
+        runtimeMode: requestedMode,
+        resumeCursor: originalSession.resumeCursor,
+      });
+      expect(replacement).not.toBe(originalSession);
+      expect(harness.runtimeSessions[0]?.runtimeMode).toBe(requestedMode);
+      expect(harness.startSession.mock.calls[openingAttemptsBeforeRetry]?.[1]).toMatchObject({
+        threadId,
+        providerInstanceId: "claudeAgent",
+        runtimeMode: requestedMode,
+        resumeCursor: originalSession.resumeCursor,
+      });
+      expect(harness.sendTurn.mock.calls).toHaveLength(2);
+      expect(harness.stopSession.mock.calls).toHaveLength(0);
+      expect((await harness.readThreadDetail(threadId))?.session?.runtimeMode).toBe(requestedMode);
+    },
+  );
+
   it("restarts the provider session when runtime mode is updated on the thread", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ distinctNativeTurns: true });
     const now = "2026-01-01T00:00:00.000Z";
 
     await Effect.runPromise(
@@ -10965,6 +11129,10 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
+    const firstOwner = harness.observeNextProviderTurn(asMessageId("user-message-runtime-mode-1"), {
+      threadId: ThreadId.make("thread-1"),
+      opening: true,
+    });
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.start",
@@ -10982,10 +11150,15 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await waitFor(() => harness.startSession.mock.calls.length === 1);
-    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-    await harness.markThreadReady();
+    await harness.markThreadReady(ThreadId.make("thread-1"), now, firstOwner);
 
+    const manualOpening = Effect.runSync(Deferred.make<ProviderSession>());
+    const originalStart = harness.startSession.getMockImplementation()!;
+    harness.startSession.mockImplementationOnce((threadId, request) =>
+      originalStart(threadId, request).pipe(
+        Effect.tap((session) => Deferred.succeed(manualOpening, session)),
+      ),
+    );
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.runtime-mode.set",
@@ -11001,7 +11174,13 @@ describe("ProviderCommandReactor", () => {
       const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
       return thread?.runtimeMode === "approval-required";
     });
-    await waitFor(() => harness.startSession.mock.calls.length === 2);
+    const manualSession = await harness.awaitOwnedObserver(Deferred.await(manualOpening));
+    expect(manualSession.runtimeMode).toBe("approval-required");
+    await harness.drain();
+    const secondOwner = harness.observeNextProviderTurn(
+      asMessageId("user-message-runtime-mode-2"),
+      { threadId: ThreadId.make("thread-1") },
+    );
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.start",
@@ -11019,7 +11198,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await secondOwner.waitForRunning();
 
     expect(harness.stopSession.mock.calls.length).toBe(0);
     expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
@@ -11030,6 +11209,9 @@ describe("ProviderCommandReactor", () => {
     expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
       threadId: ThreadId.make("thread-1"),
     });
+    // Turn-start's legacy mode field cannot override the saved Manual policy.
+    // The successful control above already materialized its exact native owner.
+    expect(harness.startSession.mock.calls).toHaveLength(2);
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));

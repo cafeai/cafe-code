@@ -24,6 +24,7 @@ import {
   type TurnId,
 } from "@cafecode/contracts";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
+import { deriveCurrentNativeAgentStarts } from "@cafecode/shared/liveWork";
 import { codexRecoveryWorkLogLabel, nativeRetryWorkLogLabel } from "./codexRecovery";
 import {
   deriveProviderDiagnosticWorkLogRecord,
@@ -353,18 +354,22 @@ function requestKindFromRequestType(requestType: unknown): PendingApproval["requ
   }
 }
 
-function isStalePendingRequestFailureDetail(detail: string | undefined): boolean {
+function isStalePendingRequestFailureDetail(
+  detail: string | undefined,
+  lane: "approval" | "question",
+): boolean {
   const normalized = detail?.toLowerCase();
   if (!normalized) {
     return false;
   }
-  return (
-    normalized.includes("stale pending approval request") ||
-    normalized.includes("stale pending user-input request") ||
-    normalized.includes("unknown pending approval request") ||
-    normalized.includes("unknown pending permission request") ||
-    normalized.includes("unknown pending user-input request")
-  );
+  // A stale response belongs to its exact interaction channel. An unrelated
+  // error's prose must not hide a still-pending permission or question card.
+  return lane === "approval"
+    ? normalized.includes("stale pending approval request") ||
+        normalized.includes("unknown pending approval request") ||
+        normalized.includes("unknown pending permission request")
+    : normalized.includes("stale pending user-input request") ||
+        normalized.includes("unknown pending user-input request");
 }
 
 export function derivePendingApprovals(
@@ -417,7 +422,7 @@ export function derivePendingApprovals(
     if (
       activity.kind === "provider.approval.respond.failed" &&
       requestId &&
-      isStalePendingRequestFailureDetail(detail)
+      isStalePendingRequestFailureDetail(detail, "approval")
     ) {
       openByRequestId.delete(requestId);
       continue;
@@ -525,7 +530,7 @@ export function derivePendingUserInputs(
     if (
       activity.kind === "provider.user-input.respond.failed" &&
       requestId &&
-      isStalePendingRequestFailureDetail(detail)
+      isStalePendingRequestFailureDetail(detail, "question")
     ) {
       openByRequestId.delete(requestId);
     }
@@ -981,8 +986,35 @@ export function deriveActiveSubagentWorkEntries(
   }
   if (runningTurnId) terminalTurnIds.delete(runningTurnId);
 
+  const nativeOwners = new Map(
+    deriveCurrentNativeAgentStarts(activities).map(({ activity, observation }) => [
+      JSON.stringify([observation.runtimeId, observation.workId]),
+      activity.turnId,
+    ]),
+  );
+  const sourceHints = isSubagentRuntimeCurrent(
+    options.liveWork?.runtimeId,
+    options.runtimeSession ?? null,
+  )
+    ? options.liveWork
+    : undefined;
+  const unconfirmedAgentIds = new Set(sourceHints?.unconfirmedAgentIds);
+
   return deriveSubagentWorkEntries(activities, undefined, { ...options, terminalTurnIds }).filter(
-    (entry) => entry.subagent?.status === "active" || entry.subagent?.status === "waiting",
+    (entry) => {
+      const child = entry.subagent;
+      if (!child || (child.status !== "active" && child.status !== "waiting")) return false;
+      if (
+        child.runtimeId === sourceHints?.runtimeId &&
+        (sourceHints?.unconfirmedAgentIdsTruncated === true || unconfirmedAgentIds.has(child.id))
+      )
+        return false;
+      // Keep full historical rows and their exact history/control capabilities.
+      // Only the live roster uses the explicit current native owner, matching
+      // the shell counter and footer. A delayed old-turn edge cannot replace it.
+      const key = JSON.stringify([child.runtimeId, child.id]);
+      return !nativeOwners.has(key) || nativeOwners.get(key) === entry.turnId;
+    },
   );
 }
 
@@ -2365,19 +2397,11 @@ function compareActivitiesByOrder(
   left: OrchestrationThreadActivity,
   right: OrchestrationThreadActivity,
 ): number {
-  if (left.sequence !== undefined && right.sequence !== undefined) {
-    if (left.sequence !== right.sequence) {
-      return left.sequence - right.sequence;
-    }
-  } else if (left.sequence !== undefined) {
-    return 1;
-  } else if (right.sequence !== undefined) {
-    return -1;
-  }
-
-  const createdAtComparison = left.createdAt.localeCompare(right.createdAt);
-  if (createdAtComparison !== 0) {
-    return createdAtComparison;
+  // Match the SQLite/retention total order independently of the viewer's
+  // locale. Lifecycle rank applies only at a genuine sequence/clock tie; it
+  // cannot override a newer owner observation or a known sequence boundary.
+  if (left.sequence !== right.sequence || left.createdAt !== right.createdAt) {
+    return compareActivityWindowOrder(left, right);
   }
 
   const lifecycleRankComparison =
@@ -2386,7 +2410,7 @@ function compareActivitiesByOrder(
     return lifecycleRankComparison;
   }
 
-  return left.id.localeCompare(right.id);
+  return compareActivityWindowOrder(left, right);
 }
 
 function compareActivityLifecycleRank(kind: string): number {

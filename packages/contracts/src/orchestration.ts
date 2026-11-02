@@ -433,6 +433,10 @@ export const OrchestrationThread = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   activities: Schema.Array(OrchestrationThreadActivity),
+  // Presentation-only omission evidence. A bounded detail snapshot cannot
+  // silently imply that every pending interaction was delivered; omission
+  // never cancels a request or grants permission to answer a different owner.
+  pendingRequestRetentionTruncated: Schema.optional(Schema.Boolean),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
   session: Schema.NullOr(OrchestrationSession),
   // Older snapshots predate durable provider goals. Keep the field optional at
@@ -463,10 +467,21 @@ export const OrchestrationProjectShell = Schema.Struct({
 });
 export type OrchestrationProjectShell = typeof OrchestrationProjectShell.Type;
 
+// Keep this optional shell metadata small independently of historical roster
+// retention. Overflow remains explicit instead of emitting an oversized frame.
+export const MAX_UNCONFIRMED_NATIVE_AGENTS = 64;
 export const OrchestrationLiveWork = Schema.Struct({
   runtimeId: SubagentRuntimeId,
   taskCount: NonNegativeInt,
   agentCount: NonNegativeInt,
+  // Presentation-only source-retirement hints. They never end native work,
+  // grant a task control or erase historical lifecycle records.
+  unconfirmedAgentIds: Schema.optional(
+    Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(512))).check(
+      Schema.isMaxLength(MAX_UNCONFIRMED_NATIVE_AGENTS),
+    ),
+  ),
+  unconfirmedAgentIdsTruncated: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationLiveWork = typeof OrchestrationLiveWork.Type;
 
