@@ -3493,6 +3493,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       let calls = 0;
       let enabled = true;
       let replaceDuringRead = false;
+      let sequence = 0;
+      let disableDuringAssembly = false;
       yield* buildAppUnderTest({
         layers: {
           providerRegistry: {
@@ -3524,12 +3526,21 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           },
           projectionSnapshotQuery: {
             getShellSnapshot: () =>
-              Effect.succeed({
-                ...makeDefaultOrchestrationReadModel(),
-                threads: [],
-                snapshotSequence: 0,
+              Effect.sync(() => {
+                const snapshot = {
+                  ...makeDefaultOrchestrationReadModel(),
+                  threads: [],
+                  snapshotSequence: sequence,
+                };
+                // Another chat commits after every coherent shell transaction.
+                sequence++;
+                if (disableDuringAssembly) {
+                  disableDuringAssembly = false;
+                  enabled = false;
+                }
+                return snapshot;
               }),
-            getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
+            getSnapshotSequence: () => Effect.sync(() => ({ snapshotSequence: sequence })),
           },
         },
       });
@@ -3556,6 +3567,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         );
       assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report }]);
       assert.equal(calls, 1);
+      disableDuringAssembly = true;
+      assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report: null }]);
+      assert.equal(calls, 1);
+      enabled = true;
       assert.deepEqual(
         yield* first(wsUrl, { instanceId: ProviderInstanceId.make("different-account") }),
         [{ report: null }],
@@ -3608,15 +3623,42 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       let present = true;
       let archived = false;
       let sequence = 0;
-      let replaceDuringInventory = false;
+      let replaceDuringInventory: "runtime" | "workspace" | "configuration" | undefined;
       let unrelatedDuringInventory = false;
       let moveDuringAssembly = false;
+      let unrelatedDuringEveryAssembly = false;
+      let replaceDuringAssembly: "runtime" | "workspace" | "configuration" | undefined;
       let currentRuntimeId = runtimeId;
+      let currentWorkspace = cwd;
       let inventoryReads = 0;
       let configuredEnabled = true;
       let environmentChanged = false;
       const quotaChanges = yield* PubSub.unbounded<ProviderRuntimeEvent>();
       const project = makeDefaultOrchestrationReadModel().projects[0]!;
+      const settingsSnapshot = () => ({
+        ...DEFAULT_SERVER_SETTINGS,
+        providerInstances: {
+          [instanceId]: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            // No envelope enabled: exercise the inherited driver flag.
+            config: {
+              ...DEFAULT_SERVER_SETTINGS.providers.claudeAgent,
+              enabled: configuredEnabled,
+            },
+            ...(environmentChanged
+              ? {
+                  environment: [
+                    {
+                      name: "ANTHROPIC_BASE_URL",
+                      value: "https://synthetic.invalid",
+                      sensitive: false,
+                    },
+                  ],
+                }
+              : {}),
+          },
+        },
+      });
       yield* buildAppUnderTest({
         layers: {
           providerService: {
@@ -3626,7 +3668,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 inventoryReads++;
                 if (replaceDuringInventory) {
                   sequence++;
-                  currentRuntimeId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+                  if (replaceDuringInventory === "runtime")
+                    currentRuntimeId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+                  else if (replaceDuringInventory === "workspace")
+                    currentWorkspace = path.join(process.cwd(), "different-quota-worktree");
+                  else environmentChanged = true;
                 }
                 if (unrelatedDuringInventory) sequence++;
                 return [
@@ -3655,70 +3701,57 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             refreshInstance: () => Effect.die("passive quota must not probe providers"),
           },
           serverSettings: {
-            getSettings: Effect.sync(() => ({
-              ...DEFAULT_SERVER_SETTINGS,
-              providerInstances: {
-                [instanceId]: {
-                  driver: ProviderDriverKind.make("claudeAgent"),
-                  // No envelope enabled: exercise the inherited driver flag.
-                  config: {
-                    ...DEFAULT_SERVER_SETTINGS.providers.claudeAgent,
-                    enabled: configuredEnabled,
-                  },
-                  ...(environmentChanged
-                    ? {
-                        environment: [
-                          {
-                            name: "ANTHROPIC_BASE_URL",
-                            value: "https://synthetic.invalid",
-                            sensitive: false,
-                          },
-                        ],
-                      }
-                    : {}),
-                },
-              },
-            })),
+            getSettings: Effect.sync(settingsSnapshot),
           },
           projectionSnapshotQuery: {
             getShellSnapshot: () =>
-              Effect.sync(() => ({
-                snapshotSequence: sequence,
-                projects: [
-                  {
-                    ...project,
-                    workspaceRoot: cwd,
-                    additionalWorkspaceRoots: [],
-                    repositoryIdentity: null,
-                  },
-                ],
-                threads: [
-                  makeDefaultOrchestrationThreadShell({
-                    modelSelection: { instanceId, model: "claude-sonnet-5" },
-                    archivedAt: archived ? now : null,
-                    session: {
-                      threadId: defaultThreadId,
-                      providerName: "claudeAgent",
-                      providerInstanceId: instanceId,
-                      subagentRuntimeId: currentRuntimeId,
-                      status: "ready",
-                      runtimeMode: "full-access",
-                      activeTurnId: null,
-                      lastError: null,
-                      updatedAt: now,
-                    },
-                  }),
-                ],
-                updatedAt: now,
-              })),
-            getSnapshotSequence: () =>
               Effect.sync(() => {
-                if (moveDuringAssembly) {
-                  moveDuringAssembly = false;
+                const snapshot = {
+                  snapshotSequence: sequence,
+                  projects: [
+                    {
+                      ...project,
+                      workspaceRoot: currentWorkspace,
+                      additionalWorkspaceRoots: [],
+                      repositoryIdentity: null,
+                    },
+                  ],
+                  threads: [
+                    makeDefaultOrchestrationThreadShell({
+                      modelSelection: { instanceId, model: "claude-sonnet-5" },
+                      archivedAt: archived ? now : null,
+                      session: {
+                        threadId: defaultThreadId,
+                        providerName: "claudeAgent",
+                        providerInstanceId: instanceId,
+                        subagentRuntimeId: currentRuntimeId,
+                        status: "ready",
+                        runtimeMode: "full-access",
+                        activeTurnId: null,
+                        lastError: null,
+                        updatedAt: now,
+                      },
+                    }),
+                  ],
+                  updatedAt: now,
+                };
+                // One-shot and continuous rows both advance only unrelated
+                // projection metadata after a coherent selected shell.
+                if (moveDuringAssembly || unrelatedDuringEveryAssembly) sequence++;
+                moveDuringAssembly = false;
+                if (replaceDuringAssembly) {
+                  const replacement = replaceDuringAssembly;
+                  replaceDuringAssembly = undefined;
                   sequence++;
+                  if (replacement === "runtime")
+                    currentRuntimeId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+                  else if (replacement === "workspace")
+                    currentWorkspace = path.join(process.cwd(), "different-quota-worktree");
+                  else environmentChanged = true;
                 }
-                return { snapshotSequence: sequence };
+                return snapshot;
               }),
+            getSnapshotSequence: () => Effect.sync(() => ({ snapshotSequence: sequence })),
           },
         },
       });
@@ -3744,17 +3777,34 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       present = false;
       assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
       present = true;
-      replaceDuringInventory = true;
-      assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
-      replaceDuringInventory = false;
-      currentRuntimeId = runtimeId;
-      assert.equal(inventoryReads, 4);
+      for (const replacement of ["runtime", "workspace", "configuration"] as const) {
+        replaceDuringInventory = replacement;
+        assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
+        replaceDuringInventory = undefined;
+        currentRuntimeId = runtimeId;
+        currentWorkspace = cwd;
+        environmentChanged = false;
+      }
+      assert.equal(inventoryReads, 6);
       unrelatedDuringInventory = true;
       assert.deepEqual(yield* first(wsUrl, input), [{ report }]);
       unrelatedDuringInventory = false;
       moveDuringAssembly = true;
       assert.deepEqual(yield* first(wsUrl, input), [{ report }]);
-      assert.equal(inventoryReads, 6);
+      unrelatedDuringEveryAssembly = true;
+      assert.deepEqual(yield* first(wsUrl, input), [{ report }]);
+      unrelatedDuringEveryAssembly = false;
+      assert.equal(inventoryReads, 9);
+      for (const replacement of ["runtime", "workspace", "configuration"] as const) {
+        replaceDuringAssembly = replacement;
+        assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
+        currentRuntimeId = runtimeId;
+        currentWorkspace = cwd;
+        environmentChanged = false;
+      }
+      // A selected binding changing inside authority assembly never admits
+      // an inventory read, even if its invalidation has not been consumed.
+      assert.equal(inventoryReads, 9);
       for (const wrong of [
         { ...input, instanceId: ProviderInstanceId.make("different-account") },
         {
@@ -3765,15 +3815,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.deepEqual(yield* first(wsUrl, wrong), [{ report: null }]);
       archived = true;
       assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
-      assert.equal(inventoryReads, 6);
+      assert.equal(inventoryReads, 9);
       archived = false;
       configuredEnabled = false;
       assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
-      assert.equal(inventoryReads, 6);
+      assert.equal(inventoryReads, 9);
       configuredEnabled = true;
       environmentChanged = true;
       assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
-      assert.equal(inventoryReads, 7);
+      assert.equal(inventoryReads, 10);
       environmentChanged = false;
       const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
         headers: { cookie: ownerCookie },
@@ -3784,7 +3834,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         yield* getAuthenticatedSessionCookieHeader(credential),
       );
       assert.deepEqual(yield* first(guestUrl, input), [{ report: null }]);
-      assert.equal(inventoryReads, 7);
+      assert.equal(inventoryReads, 10);
       yield* Effect.scoped(
         withWsRpcClient(guestUrl, (client) =>
           Effect.gen(function* () {
@@ -3810,7 +3860,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 50)));
             assert.equal(yield* Deferred.isDone(finished), false);
             assert.deepEqual(denied, [{ report: null }]);
-            assert.equal(inventoryReads, 7);
+            assert.equal(inventoryReads, 10);
             yield* Fiber.interrupt(receiver);
             assert.equal(yield* Deferred.isDone(finished), true);
           }),
@@ -3852,7 +3902,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           }),
         ),
       );
-      assert.equal(inventoryReads, 9);
+      assert.equal(inventoryReads, 12);
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 
