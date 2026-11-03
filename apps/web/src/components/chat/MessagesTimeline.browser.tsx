@@ -15,7 +15,7 @@ import {
 import { createRef } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
 import { page, userEvent } from "vitest/browser";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { render } from "vitest-browser-react";
 import { applyInterfaceScalePercent } from "../../interfaceScale";
 import {
@@ -127,6 +127,85 @@ import { MessagesTimeline } from "./MessagesTimeline";
 import { SubagentDetailView, type SubagentDetailSelection } from "./SubagentDetailView";
 import { deriveTimelineEntries, deriveWorkLogEntries } from "../../session-logic";
 import { getUiLocale, setUiLocale } from "@cafecode/shared/i18n";
+import { createChatViewFixtureRetirement } from "../chatViewFixtureRetirement.test.fixture";
+
+const publicSummaryFixtureRetirement = createChatViewFixtureRetirement();
+beforeEach(() => publicSummaryFixtureRetirement.assertIdle());
+afterEach(async () => {
+  // These journeys are top-level tests, outside the nested timeline reset
+  // hook. Join their exact owner before a successor can reset shared mocks.
+  await publicSummaryFixtureRetirement.retire();
+});
+
+function createPublicSummaryFixture(context: TestContext, afterUnmount?: () => void) {
+  const pending = new Set<Promise<unknown>>();
+  let mounted: Awaited<ReturnType<typeof render>> | undefined;
+  let retired = false;
+  let completion: Promise<void> | undefined;
+  const assertActive = () => {
+    if (retired || context.signal.aborted) throw new Error("Public summary fixture has retired.");
+  };
+  const own = async <T,>(operation: () => PromiseLike<T>): Promise<T> => {
+    assertActive();
+    const original = Promise.resolve(operation());
+    pending.add(original);
+    try {
+      const result = await original;
+      assertActive();
+      return result;
+    } finally {
+      pending.delete(original);
+    }
+  };
+  const cleanup = (): Promise<void> => {
+    retired = true;
+    context.signal.removeEventListener("abort", onAbort);
+    return (completion ??= Promise.resolve().then(async () => {
+      // Retain late render results and native targets until the exact admitted
+      // operations settle. Retirement is never a successful input receipt.
+      while (pending.size) await Promise.allSettled([...pending]);
+      await mounted?.unmount();
+      mounted = undefined;
+      afterUnmount?.();
+    }));
+  };
+  const onAbort = () => {
+    // Shared afterEach/onTestFinished still join and report this same promise.
+    void cleanup().catch(() => undefined);
+  };
+  publicSummaryFixtureRetirement.admit(cleanup);
+  context.onTestFinished(cleanup);
+  context.signal.addEventListener("abort", onAbort, { once: true });
+  if (context.signal.aborted) onAbort();
+  return {
+    assertActive,
+    own,
+    async render(...args: Parameters<typeof render>) {
+      return own(async () => {
+        mounted = await render(...args);
+        return mounted;
+      });
+    },
+    async run(body: () => Promise<void>) {
+      let failed = false;
+      try {
+        assertActive();
+        await body();
+      } catch (failure) {
+        failed = true;
+        throw failure;
+      } finally {
+        try {
+          await cleanup();
+        } catch (failure) {
+          // Keep an original assertion/input failure opaque. The registered
+          // public/shared completion separately reports any cleanup failure.
+          if (!failed) throw failure;
+        }
+      }
+    },
+  };
+}
 
 const MESSAGE_CREATED_AT = "2026-04-13T12:00:00.000Z";
 
@@ -666,7 +745,8 @@ it("marks a provider error hidden behind current Work Log overflow without readi
   }
 });
 
-it("renders public summaries and inspectable command work separately from ordinary assistant prose", async () => {
+it("renders public Claude prose in the primary timeline while command inspection stays independently open", async (context) => {
+  const fixture = createPublicSummaryFixture(context);
   const turnId = TurnId.make("operation-turn");
   const activities = [
     {
@@ -682,7 +762,7 @@ it("renders public summaries and inspectable command work separately from ordina
         streamKind: "reasoning_summary_text",
         summaryVersion: 1,
         provider: "claudeAgent",
-        detail: "Checking the repository.",
+        detail: "Checking **the repository**. [Blocked action](javascript:alert(1))",
         status: "inProgress",
         truncated: false,
       },
@@ -732,27 +812,51 @@ it("renders public summaries and inspectable command work separately from ordina
     text: "I will check the existing implementation.",
     turnId,
   });
-  const screen = await render(
-    <MessagesTimeline
-      {...buildProps()}
-      activeProvider={ProviderDriverKind.make("claudeAgent")}
-      timelineEntries={deriveTimelineEntries(
-        [intro.message],
-        [],
-        deriveWorkLogEntries(activities.slice(0, 2), turnId),
-      )}
-    />,
-  );
-  try {
-    await expect
-      .element(page.getByText("I will check the existing implementation.", { exact: true }))
-      .toBeVisible();
-    await expect.element(page.getByText("Checking the repository.", { exact: true })).toBeVisible();
-    await expect
-      .element(page.getByRole("button", { name: "Inspect command: Run focused checks" }))
-      .toBeVisible();
-    await page.getByRole("button", { name: "Inspect command: Run focused checks" }).click();
-    await expect.element(page.getByText("No output received yet.", { exact: true })).toBeVisible();
+  await fixture.run(async () => {
+    const screen = await fixture.render(
+      <MessagesTimeline
+        {...buildProps()}
+        activeProvider={ProviderDriverKind.make("claudeAgent")}
+        timelineEntries={deriveTimelineEntries(
+          [intro.message],
+          [],
+          deriveWorkLogEntries(activities.slice(0, 2), turnId),
+        )}
+      />,
+    );
+    await fixture.own(() =>
+      expect
+        .element(page.getByText("I will check the existing implementation.", { exact: true }))
+        .toBeVisible(),
+    );
+    // Public prose is visible before opening any work log or command. Native
+    // Markdown receives the text, while the ordinary renderer still refuses
+    // an executable link; this does not grant message/attachment authority.
+    await fixture.own(() =>
+      expect.element(page.getByText("the repository", { exact: true })).toBeVisible(),
+    );
+    const primarySummary = document.querySelector('[data-primary-provider-summary="true"]')!;
+    expect(primarySummary.querySelector("strong")?.textContent).toBe("the repository");
+    expect(primarySummary.closest('[data-timeline-row-kind="work"]')).toBeNull();
+    expect(primarySummary.querySelector('a[href^="javascript:"]')).toBeNull();
+    expect(document.querySelectorAll('[data-message-role="assistant"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-provider-public-summary="claudeAgent"]')).toHaveLength(
+      1,
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Claude summary", { exact: true })).not.toBeInTheDocument(),
+    );
+    await fixture.own(() =>
+      expect
+        .element(page.getByRole("button", { name: "Inspect command: Run focused checks" }))
+        .toBeVisible(),
+    );
+    await fixture.own(() =>
+      page.getByRole("button", { name: "Inspect command: Run focused checks" }).click(),
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("No output received yet.", { exact: true })).toBeVisible(),
+    );
     const settled = [
       ...activities,
       {
@@ -764,29 +868,51 @@ it("renders public summaries and inspectable command work separately from ordina
           ...activities[0]!.payload,
           detail: "Checks received before the response stopped.",
           status: "failed",
+          truncated: true,
         },
       },
     ];
-    await screen.rerender(
-      <MessagesTimeline
-        {...buildProps()}
-        activeProvider={ProviderDriverKind.make("claudeAgent")}
-        timelineEntries={deriveTimelineEntries(
-          [intro.message],
-          [],
-          deriveWorkLogEntries(settled, turnId),
-        )}
-      />,
+    await fixture.own(() =>
+      screen.rerender(
+        <MessagesTimeline
+          {...buildProps()}
+          activeProvider={ProviderDriverKind.make("claudeAgent")}
+          timelineEntries={deriveTimelineEntries(
+            [intro.message],
+            [],
+            deriveWorkLogEntries(settled, turnId),
+          )}
+        />,
+      ),
     );
-    await expect
-      .element(page.getByRole("button", { name: "Inspect command: Run focused checks" }))
-      .toHaveAttribute("aria-expanded", "true");
-    await expect.element(page.getByText("Partial", { exact: true })).toBeVisible();
-    await expect
-      .element(page.getByText("Checks received before the response stopped.", { exact: true }))
-      .toBeVisible();
-    await expect.element(page.getByText("Received test failure", { exact: true })).toBeVisible();
-    await expect.element(page.getByText("Observed duration 1s", { exact: true })).toBeVisible();
+    await fixture.own(() =>
+      expect
+        .element(page.getByRole("button", { name: "Inspect command: Run focused checks" }))
+        .toHaveAttribute("aria-expanded", "true"),
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Partial", { exact: true })).toBeVisible(),
+    );
+    await fixture.own(() =>
+      expect
+        .element(page.getByText("Checks received before the response stopped.", { exact: true }))
+        .toBeVisible(),
+    );
+    await fixture.own(() =>
+      expect
+        .element(page.getByText("Summary truncated to the retained preview.", { exact: true }))
+        .toBeVisible(),
+    );
+    expect(document.querySelector('[data-primary-provider-summary="true"]')).toBe(primarySummary);
+    expect(document.querySelectorAll('[data-provider-public-summary="claudeAgent"]')).toHaveLength(
+      1,
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Received test failure", { exact: true })).toBeVisible(),
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Observed duration 1s", { exact: true })).toBeVisible(),
+    );
     expect(document.querySelectorAll("[data-claude-command-inspection]")).toHaveLength(1);
     expect(intro.message.text).toBe("I will check the existing implementation.");
     const history = document.querySelector('[data-testid="legend-list"]')!;
@@ -797,26 +923,31 @@ it("renders public summaries and inspectable command work separately from ordina
     ).toBeTruthy();
     // Replaying the same received lifecycle reconstructs one unchanged row;
     // inspector state remains local and no fork/revert/provider call occurs.
-    await screen.rerender(
-      <MessagesTimeline
-        {...buildProps()}
-        activeProvider={ProviderDriverKind.make("claudeAgent")}
-        timelineEntries={deriveTimelineEntries(
-          [intro.message],
-          [],
-          deriveWorkLogEntries(settled, turnId),
-        )}
-      />,
+    await fixture.own(() =>
+      screen.rerender(
+        <MessagesTimeline
+          {...buildProps()}
+          activeProvider={ProviderDriverKind.make("claudeAgent")}
+          timelineEntries={deriveTimelineEntries(
+            [intro.message],
+            [],
+            deriveWorkLogEntries(settled, turnId),
+          )}
+        />,
+      ),
     );
-    await expect
-      .element(page.getByRole("button", { name: "Inspect command: Run focused checks" }))
-      .toHaveAttribute("aria-expanded", "true");
-  } finally {
-    await screen.unmount();
-  }
+    await fixture.own(() =>
+      expect
+        .element(page.getByRole("button", { name: "Inspect command: Run focused checks" }))
+        .toHaveAttribute("aria-expanded", "true"),
+    );
+  });
 });
 
-it("replays historical Claude operation rows through the existing bounded work-log page", async () => {
+it("keeps retained historical Claude prose primary while paging command history without duplicates", async (context) => {
+  const fixture = createPublicSummaryFixture(context, () =>
+    __resetEnvironmentApiOverridesForTests(),
+  );
   const threadId = ThreadId.make("historical-operation-thread");
   const turnId = TurnId.make("historical-operation-turn");
   const activities = [
@@ -863,54 +994,85 @@ it("replays historical Claude operation rows through the existing bounded work-l
       },
     },
   ];
-  const getThreadTurnActivityPage = vi.fn(async (input: { offset: number; limit: number }) => ({
-    threadId,
-    turnId,
-    offset: input.offset,
-    limit: input.limit,
-    totalCount: activities.length,
-    activities: activities.slice(input.offset, input.offset + input.limit),
-  }));
+  const getThreadTurnActivityPage = vi.fn((input: { offset: number; limit: number }) =>
+    fixture.own(async () => ({
+      threadId,
+      turnId,
+      offset: input.offset,
+      limit: input.limit,
+      totalCount: activities.length,
+      activities: activities.slice(input.offset, input.offset + input.limit),
+    })),
+  );
+  fixture.assertActive();
   __setEnvironmentApiOverrideForTests(EnvironmentId.make("environment-local"), {
     orchestration: { getThreadTurnActivityPage },
   } as unknown as EnvironmentApi);
-  const screen = await render(
-    <MessagesTimeline
-      {...buildProps()}
-      activeThreadId={threadId}
-      timelineEntries={[
-        buildAssistantTimelineEntry({ turnId, text: "Historical final answer remains separate." }),
-      ]}
-      historicalWorkLogSummariesByTurnId={
-        new Map([[turnId, { turnId, previewEntries: [], snapshotEntryCount: 2 }]])
-      }
-    />,
-  );
-  try {
-    await page.getByRole("button", { name: /Work log/ }).click();
-    await expect
-      .element(page.getByText("Received historical summary.", { exact: true }))
-      .toBeVisible();
-    await expect
-      .element(page.getByText("Summary truncated to the retained preview.", { exact: true }))
-      .toBeVisible();
-    await page.getByRole("button", { name: "Inspect command: Historical check" }).click();
-    await expect
-      .element(page.getByText("Historical received output", { exact: true }))
-      .toBeVisible();
-    await expect
-      .element(page.getByText("Output truncated to the retained preview.", { exact: true }))
-      .toBeVisible();
-    await expect.element(page.getByText("Observed duration 1s", { exact: true })).toBeVisible();
-    await expect
-      .element(page.getByText("Historical final answer remains separate.", { exact: true }))
-      .toBeVisible();
+  await fixture.run(async () => {
+    const screen = await fixture.render(
+      <MessagesTimeline
+        {...buildProps()}
+        activeThreadId={threadId}
+        timelineEntries={deriveTimelineEntries(
+          [
+            buildAssistantTimelineEntry({
+              turnId,
+              text: "Historical final answer remains separate.",
+            }).message,
+          ],
+          [],
+          [],
+          [],
+          [activities[0]!],
+        )}
+        historicalWorkLogSummariesByTurnId={
+          new Map([[turnId, { turnId, previewEntries: [], snapshotEntryCount: 2 }]])
+        }
+      />,
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Received historical summary.", { exact: true })).toBeVisible(),
+    );
+    expect(getThreadTurnActivityPage).not.toHaveBeenCalled();
+    await fixture.own(() => page.getByRole("button", { name: /Work log/ }).click());
+    await fixture.own(() =>
+      expect.element(page.getByText("Received historical summary.", { exact: true })).toBeVisible(),
+    );
+    await fixture.own(() =>
+      expect
+        .element(page.getByText("Summary truncated to the retained preview.", { exact: true }))
+        .toBeVisible(),
+    );
+    await fixture.own(() =>
+      page.getByRole("button", { name: "Inspect command: Historical check" }).click(),
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Historical received output", { exact: true })).toBeVisible(),
+    );
+    await fixture.own(() =>
+      expect
+        .element(page.getByText("Output truncated to the retained preview.", { exact: true }))
+        .toBeVisible(),
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Observed duration 1s", { exact: true })).toBeVisible(),
+    );
+    await fixture.own(() =>
+      expect
+        .element(page.getByText("Historical final answer remains separate.", { exact: true }))
+        .toBeVisible(),
+    );
+    expect(document.querySelectorAll('[data-provider-public-summary="claudeAgent"]')).toHaveLength(
+      1,
+    );
+    expect(
+      document
+        .querySelector('[data-primary-provider-summary="true"]')
+        ?.closest('[data-timeline-row-kind="work"]'),
+    ).toBeNull();
     expect(getThreadTurnActivityPage).toHaveBeenCalledTimes(2);
     expect(getThreadTurnActivityPage.mock.calls.every(([input]) => input.limit <= 6)).toBe(true);
-  } finally {
-    await screen.unmount();
-    __resetEnvironmentApiOverridesForTests();
-  }
+  });
 });
 
 it("retranslates a retained historical page error without restarting the bounded owner query", async () => {

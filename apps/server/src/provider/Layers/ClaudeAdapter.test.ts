@@ -32,6 +32,7 @@ import type {
   SDKMessage,
   SDKResultError,
   SDKResultSuccess,
+  SDKSessionWritesLostMessage,
   SDKSystemMessage,
   SDKUserMessage,
   SessionMessage,
@@ -335,6 +336,20 @@ function makeSuccessfulClaudeResult(sessionId: string): SDKResultSuccess {
     permission_denials: [],
     session_id: sessionId,
     uuid: "00000000-0000-4000-8000-000000000000",
+  };
+}
+
+function makeSessionWriteLoss(sessionId: string): SDKSessionWritesLostMessage {
+  return {
+    type: "system",
+    subtype: "session_writes_lost",
+    error_code: "EDQUOT",
+    lost: ["transcript", "global_config"],
+    // The public protocol permits a previous conversation after /clear. This
+    // is lost-write bookkeeping, not authority to replace the current session.
+    transcript_session_ids: ["72000000-0000-4000-8000-000000000199"],
+    session_id: sessionId,
+    uuid: "72000000-0000-4000-8000-000000000200",
   };
 }
 
@@ -15675,6 +15690,265 @@ describe("ClaudeAdapterLive", () => {
         );
       }).pipe(Effect.provide(harness.layer));
     },
+  );
+
+  it.effect(
+    "reports lost session writes after a successful result without changing that result or exposing native details",
+    () => {
+      const nativeLogs: unknown[] = [];
+      const harness = makeHarness({
+        nativeEventLogger: {
+          filePath: "memory://session-write-loss",
+          write: (entry) =>
+            Effect.sync(() => {
+              nativeLogs.push(entry);
+            }),
+          close: () => Effect.void,
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "first" });
+        yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+        const nativeSession = "72000000-0000-4000-8000-000000000201";
+        emitWorkflowFixtureInit(harness.query, "2.1.317", nativeSession, [], "bypassPermissions");
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "session.configured"),
+          Stream.runHead,
+        );
+        const completed = yield* Deferred.make<void>();
+        const collected = yield* adapter.streamEvents.pipe(
+          Stream.tap((event) =>
+            event.type === "turn.completed" ? Deferred.succeed(completed, undefined) : Effect.void,
+          ),
+          Stream.takeUntil((event) => event.type === "runtime.warning"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit(makeSuccessfulClaudeResult(nativeSession));
+        yield* Deferred.await(completed);
+        const secret = "private-session-write-error-and-path";
+        harness.query.emit(
+          Object.assign(makeSessionWriteLoss(nativeSession), {
+            error: secret,
+            file_path: "/private/" + secret,
+            future_detail: secret,
+          }),
+        );
+        const events = yield* Fiber.join(collected);
+        const terminals = events.filter((event) => event.type === "turn.completed");
+        assert.equal(terminals.length, 1);
+        const terminal = terminals[0]!;
+        assert.equal(terminal.turnId, turn.turnId);
+        assert.equal(terminal.payload.state, "completed");
+        const warning = events.find((event) => event.type === "runtime.warning");
+        assert.equal(
+          warning?.payload.message,
+          "Some Claude session data could not be saved. Recent conversation or settings changes may be missing after reconnecting.",
+        );
+        assert.equal(warning?.turnId, undefined);
+        assert.deepEqual(warning?.payload.detail, {
+          transcriptLost: true,
+          globalConfigLost: true,
+          otherLossKindCount: 0,
+          transcriptSessionCount: 1,
+          diskFull: false,
+          quotaExceeded: true,
+          otherErrorCode: false,
+        });
+        const terminalIndex = events.findIndex((event) => event.type === "turn.completed");
+        assert.isFalse(
+          events
+            .slice(terminalIndex + 1)
+            .some(
+              (event) =>
+                event.type === "turn.started" ||
+                event.type === "thread.usage-accounting.updated" ||
+                event.type === "thread.started" ||
+                event.type === "runtime.error",
+            ),
+        );
+        const session = (yield* adapter.listSessions())[0]!;
+        assert.equal(session.status, "ready");
+        assert.deepEqual(session.resumeCursor, terminal.payload.resumeCursor);
+        assert.deepEqual(session.subagentHistoryResumeCursor, { resume: nativeSession });
+        assert.equal(harness.createInputs.length, 1);
+        assert.equal(harness.query.closeCalls, 0);
+        assert.isFalse(JSON.stringify(events).includes(secret));
+        assert.isFalse(JSON.stringify(nativeLogs).includes(secret));
+        assert.isFalse(JSON.stringify(warning).includes("72000000-0000-4000-8000-000000000199"));
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "keeps pre-init, foreign, child and malformed persistence notices outside session identity",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        const nativeSession = "72000000-0000-4000-8000-000000000211";
+        const foreignSession = "72000000-0000-4000-8000-000000000212";
+        const initialized = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "session.configured"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit(makeSessionWriteLoss(foreignSession));
+        emitWorkflowFixtureInit(harness.query, "2.1.317", nativeSession, [], "bypassPermissions");
+        const initial = yield* Fiber.join(initialized);
+        assert.equal(initial.filter((event) => event.type === "runtime.warning").length, 0);
+        assert.deepEqual(
+          initial
+            .filter((event) => event.type === "thread.started")
+            .map((event) => event.payload.providerThreadId),
+          [nativeSession],
+        );
+        const checked = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "session.state.changed" &&
+              event.payload.reason === "session_state_changed:idle",
+          ),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit(makeSessionWriteLoss(foreignSession));
+        harness.query.emit(
+          Object.assign(makeSessionWriteLoss(nativeSession), { parent_tool_use_id: "child-tool" }),
+        );
+        harness.query.emit(
+          Object.assign(makeSessionWriteLoss(nativeSession), { task_id: "child-task" }),
+        );
+        harness.query.emit({ ...makeSessionWriteLoss(nativeSession), lost: [] });
+        // A private transcript list still needs an exact finite native shape;
+        // malformed slots must not manufacture a public persistence warning.
+        for (const transcript_session_ids of [
+          [null],
+          new Array(1),
+          [""],
+          new Array(65).fill(nativeSession),
+        ]) {
+          harness.query.emit({
+            ...makeSessionWriteLoss(nativeSession),
+            transcript_session_ids,
+          } as unknown as SDKMessage);
+        }
+        harness.query.emit({
+          type: "system",
+          subtype: "session_state_changed",
+          state: "idle",
+          session_id: nativeSession,
+          uuid: "72000000-0000-4000-8000-000000000213",
+        });
+        const events = yield* Fiber.join(checked);
+        assert.equal(events.filter((event) => event.type === "runtime.warning").length, 0);
+        assert.equal(events.filter((event) => event.type === "thread.started").length, 0);
+        assert.deepEqual((yield* adapter.listSessions())[0]?.subagentHistoryResumeCursor, {
+          resume: nativeSession,
+        });
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "retires a held persistence notice before its query replacement publishes warnings",
+    () =>
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const closed = yield* Deferred.make<void>();
+        let hold = true;
+        const isLossLog = Schema.is(
+          Schema.Struct({
+            event: Schema.Struct({
+              method: Schema.Literal("claude/system/session_writes_lost"),
+            }),
+          }),
+        );
+        const harness = makeHarness({
+          newQueryPerSession: true,
+          nativeEventLogger: {
+            filePath: "memory://retired-session-write-loss",
+            write: (entry) =>
+              hold && isLossLog(entry)
+                ? Deferred.succeed(entered, undefined).pipe(
+                    Effect.andThen(Deferred.await(release)),
+                    Effect.uninterruptible,
+                  )
+                : Effect.void,
+            close: () => Effect.void,
+          },
+        });
+        const originalClose = harness.query.close;
+        const observer = vi.spyOn(harness.query, "close").mockImplementation(() => {
+          originalClose();
+          Effect.runSync(Deferred.succeed(closed, undefined));
+        });
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const original = yield* adapter.startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+          });
+          yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+          const oldNative = "72000000-0000-4000-8000-000000000221";
+          emitWorkflowFixtureInit(harness.query, "2.1.317", oldNative, [], "bypassPermissions");
+          yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "session.configured"),
+            Stream.runHead,
+          );
+          harness.query.emit(makeSessionWriteLoss(oldNative));
+          yield* Deferred.await(entered);
+          hold = false;
+          const replacing = yield* adapter
+            .startSession({ threadId: THREAD_ID, runtimeMode: "full-access" })
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(closed);
+          yield* Deferred.succeed(release, undefined);
+          const replacement = yield* Fiber.join(replacing);
+          assert.notEqual(replacement.subagentRuntimeId, original.subagentRuntimeId);
+          const query = harness.queries[1]!;
+          const observed = yield* adapter.streamEvents.pipe(
+            Stream.takeUntil(
+              (event) =>
+                event.type === "session.configured" && event.raw?.method === "claude/system/init",
+            ),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          const newNative = "72000000-0000-4000-8000-000000000222";
+          emitWorkflowFixtureInit(query, "2.1.317", newNative, [], "bypassPermissions");
+          const events = yield* Fiber.join(observed);
+          assert.equal(events.filter((event) => event.type === "runtime.warning").length, 0);
+          const warning = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "runtime.warning"),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          query.emit(makeSessionWriteLoss(newNative));
+          const current = yield* Fiber.join(warning);
+          assert.equal(current._tag, "Some");
+          if (current._tag === "Some" && current.value.type === "runtime.warning")
+            assert.equal(
+              current.value.payload.message,
+              "Some Claude session data could not be saved. Recent conversation or settings changes may be missing after reconnecting.",
+            );
+          assert.deepEqual((yield* adapter.listSessions())[0]?.subagentHistoryResumeCursor, {
+            resume: newNative,
+          });
+        }).pipe(
+          // The release is installed before acquisition and runs before the
+          // scoped adapter finalizer can join its held original SDK reader.
+          Effect.ensuring(Deferred.succeed(release, undefined)),
+          Effect.ensuring(Effect.sync(() => observer.mockRestore())),
+          Effect.provide(harness.layer),
+        );
+      }),
   );
 
   it.effect("enforces provider one-time-only approval hints even for older clients", () => {

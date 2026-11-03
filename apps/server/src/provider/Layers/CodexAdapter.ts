@@ -4743,10 +4743,10 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "turn/moderationMetadata") {
-    // Upstream Codex rust-v0.143.0 marks this notification experimental and the
-    // TUI routes it to the thread but does not render it in chat. Do the same
-    // and avoid persisting arbitrary moderation metadata into work-log/debug
-    // activity payloads.
+    // Codex 0.166.0 exposes this notification as experimental metadata. Cafe
+    // deliberately keeps its arbitrary moderation details out of durable
+    // work-log/debug activity. Native policy errors already follow Cafe's guarded
+    // diagnostic path; upstream TUI recourse rendering is a separate UI choice.
     return [];
   }
 

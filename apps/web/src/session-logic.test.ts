@@ -3642,6 +3642,165 @@ describe("deriveWorkLogEntries", () => {
 });
 
 describe("deriveTimelineEntries", () => {
+  it("promotes retained Claude public blocks across turns without moving tools or inventing messages", () => {
+    const summary = (
+      id: string,
+      turnId: string,
+      sequence: number,
+      createdAt: string,
+      itemId: string,
+      detail: string,
+      provider = "claudeAgent",
+      status = "completed",
+    ) =>
+      makeActivity({
+        id,
+        turnId,
+        sequence,
+        createdAt,
+        kind: "reasoning.summary",
+        payload: {
+          itemId,
+          streamKind: "reasoning_summary_text",
+          summaryVersion: 1,
+          provider,
+          detail,
+          status,
+          truncated: false,
+        },
+      });
+    const currentTurnId = TurnId.make("turn-current");
+    const activities = [
+      summary("older", "turn-older", 1, "2026-02-23T00:00:00.000Z", "block-a", "Earlier answer"),
+      summary(
+        "current-start",
+        "turn-current",
+        2,
+        "2026-02-23T00:00:01.000Z",
+        "block-a",
+        "Checking",
+        "claudeAgent",
+        "inProgress",
+      ),
+      makeActivity({
+        id: "tool-between",
+        turnId: "turn-current",
+        sequence: 3,
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.completed",
+        summary: "Read file",
+      }),
+      summary(
+        "current-end",
+        "turn-current",
+        4,
+        "2026-02-23T00:00:03.000Z",
+        "block-a",
+        "**Checking complete**",
+      ),
+      summary(
+        "another-block",
+        "turn-current",
+        5,
+        "2026-02-23T00:00:04.000Z",
+        "block-b",
+        "**Checking complete**",
+      ),
+      summary(
+        "opencode-start",
+        "turn-current",
+        6,
+        "2026-02-23T00:00:05.000Z",
+        "block-a",
+        "OpenCode thinking in progress",
+        "opencode",
+        "inProgress",
+      ),
+      summary(
+        "opencode-end",
+        "turn-current",
+        7,
+        "2026-02-23T00:00:07.000Z",
+        "block-a",
+        "OpenCode thinking stays secondary",
+        "opencode",
+      ),
+      makeActivity({
+        id: "private-thinking",
+        turnId: "turn-current",
+        sequence: 8,
+        kind: "reasoning.summary",
+        payload: {
+          itemId: "hidden",
+          streamKind: "reasoning_text",
+          summaryVersion: 1,
+          provider: "claudeAgent",
+          detail: "Private thinking must not be promoted",
+          status: "completed",
+          truncated: false,
+        },
+      }),
+    ];
+    const message = {
+      id: MessageId.make("canonical-answer"),
+      turnId: currentTurnId,
+      role: "assistant" as const,
+      text: "The canonical response stays unchanged.",
+      createdAt: "2026-02-23T00:00:06.000Z",
+      streaming: false,
+    };
+    const entries = deriveTimelineEntries(
+      [message],
+      [],
+      deriveWorkLogEntries(activities, currentTurnId),
+      [],
+      activities,
+    );
+
+    expect(entries.map((entry) => [entry.kind, entry.id])).toEqual([
+      ["provider-summary", 'provider-summary:["turn-older","block-a"]'],
+      ["provider-summary", 'provider-summary:["turn-current","block-a"]'],
+      ["work", "tool-between"],
+      ["provider-summary", 'provider-summary:["turn-current","block-b"]'],
+      ["work", "opencode-start"],
+      ["message", "canonical-answer"],
+    ]);
+    expect(
+      entries.flatMap((entry) =>
+        entry.kind === "provider-summary"
+          ? [[entry.createdAt, entry.summary.text, entry.summary.status]]
+          : [],
+      ),
+    ).toEqual([
+      ["2026-02-23T00:00:00.000Z", "Earlier answer", "completed"],
+      ["2026-02-23T00:00:01.000Z", "**Checking complete**", "completed"],
+      ["2026-02-23T00:00:04.000Z", "**Checking complete**", "completed"],
+    ]);
+    expect(entries.filter((entry) => entry.kind === "message")).toEqual([
+      { id: "canonical-answer", kind: "message", createdAt: message.createdAt, message },
+    ]);
+    expect(
+      entries.find((entry) => entry.kind === "work" && entry.id === "opencode-start"),
+    ).toMatchObject({
+      entry: {
+        publicSummary: {
+          provider: "opencode",
+          text: "OpenCode thinking stays secondary",
+          status: "completed",
+        },
+      },
+    });
+    // A terminal summary is not evidence that the native root turn completed.
+    expect(
+      deriveCompletionDividerAfterEntryId(entries, {
+        turnId: currentTurnId,
+        assistantMessageId: null,
+        startedAt: "2026-02-23T00:00:00.000Z",
+        completedAt: null,
+      }),
+    ).toBeNull();
+  });
+
   it("includes proposed plans alongside messages and work entries in chronological order", () => {
     const entries = deriveTimelineEntries(
       [

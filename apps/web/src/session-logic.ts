@@ -139,6 +139,13 @@ export interface WorkLogEntry {
   };
 }
 
+/** Exact presentation identity only; it never grants native session authority. */
+export function primaryClaudeSummaryKey(entry: WorkLogEntry): string | undefined {
+  return entry.publicSummary?.provider === "claudeAgent" && entry.turnId && entry.toolCallId
+    ? JSON.stringify([entry.turnId, entry.toolCallId])
+    : undefined;
+}
+
 /** Render Cafe-owned copy without translating opaque provider/user labels or
  * the canonical strings consumed by legacy operation folding. */
 export function workLogDisplayLabel(entry: WorkLogEntry): string {
@@ -230,6 +237,14 @@ export interface LatestProposedPlanState {
 }
 
 export type TimelineEntry =
+  | {
+      id: string;
+      kind: "provider-summary";
+      createdAt: string;
+      turnId: TurnId;
+      operationKey: string;
+      summary: ProviderPublicSummary;
+    }
   | {
       id: string;
       kind: "visualization";
@@ -1534,7 +1549,14 @@ function foldClaudeOperationSnapshots(entries: DerivedWorkLogEntry[]): DerivedWo
       folded.push(entry);
       continue;
     }
-    const key = JSON.stringify([entry.turnId, kind, entry.toolCallId]);
+    // Provider-native block ids are not a shared namespace. In particular an
+    // OpenCode thinking replay must never replace a Claude public block merely
+    // because their turn and native item labels happen to match.
+    const key = JSON.stringify(
+      kind === "summary"
+        ? [entry.turnId, kind, entry.publicSummary?.provider, entry.toolCallId]
+        : [entry.turnId, kind, entry.toolCallId],
+    );
     const position = positions.get(key);
     const previous = position === undefined ? undefined : folded[position];
     if (!previous || position === undefined) {
@@ -2439,6 +2461,7 @@ export function deriveTimelineEntries(
   proposedPlans: ProposedPlan[],
   workEntries: WorkLogEntry[],
   visualizations: readonly VisualizationTimelineEntry[] = [],
+  retainedActivities: ReadonlyArray<OrchestrationThreadActivity> = [],
 ): TimelineEntry[] {
   const messageRows: TimelineEntry[] = messages.map((message) => ({
     id: message.id,
@@ -2452,21 +2475,54 @@ export function deriveTimelineEntries(
     createdAt: proposedPlan.createdAt,
     proposedPlan,
   }));
-  const workRows: TimelineEntry[] = workEntries.map((entry) => ({
-    id: entry.id,
-    kind: "work",
-    createdAt: entry.createdAt,
-    entry,
-  }));
+  // Public Claude summaries are conversation prose, not a completed root
+  // response. Reuse the existing strict disclosure/folding path so neither
+  // raw thinking nor arbitrary activity detail can enter the primary chat.
+  // The bounded snapshot also contains prior turns: replay their known public
+  // summaries without a database rewrite or an unbounded history fetch.
+  const summaryEntries = deriveWorkLogEntries(
+    retainedActivities.filter((activity) => activity.kind === "reasoning.summary"),
+    undefined,
+  );
+  const summaries = new Map<string, Extract<TimelineEntry, { kind: "provider-summary" }>>();
+  for (const entry of [...summaryEntries, ...workEntries]) {
+    const operationKey = primaryClaudeSummaryKey(entry);
+    if (!operationKey || !entry.turnId || !entry.publicSummary || summaries.has(operationKey))
+      continue;
+    summaries.set(operationKey, {
+      id: `provider-summary:${operationKey}`,
+      kind: "provider-summary",
+      createdAt: entry.createdAt,
+      turnId: entry.turnId,
+      operationKey,
+      summary: entry.publicSummary,
+    });
+  }
+  const placedSummaries = new Set<string>();
+  const workRows = workEntries.flatMap<TimelineEntry>((entry) => {
+    const operationKey = primaryClaudeSummaryKey(entry);
+    if (!operationKey)
+      return [{ id: entry.id, kind: "work" as const, createdAt: entry.createdAt, entry }];
+    const summary = summaries.get(operationKey);
+    if (!summary || placedSummaries.has(operationKey)) return [];
+    placedSummaries.add(operationKey);
+    // Keep an interleaved command's existing position even when its clock
+    // equals this block's first receipt. Later text snapshots never move it.
+    return [summary];
+  });
   const visualizationRows: TimelineEntry[] = visualizations.map((visualization) => ({
     id: `visualization:${visualizationEntryIdentity(visualization)}`,
     kind: "visualization",
     createdAt: visualization.occurredAt,
     visualization,
   }));
-  return [...messageRows, ...proposedPlanRows, ...workRows, ...visualizationRows].toSorted((a, b) =>
-    a.createdAt.localeCompare(b.createdAt),
-  );
+  return [
+    ...messageRows,
+    ...proposedPlanRows,
+    ...workRows,
+    ...[...summaries.values()].filter((summary) => !placedSummaries.has(summary.operationKey)),
+    ...visualizationRows,
+  ].toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
 export function deriveCompletionDividerBeforeEntryId(
@@ -2532,6 +2588,7 @@ export function deriveCompletionDividerAfterEntryId(
     if (
       (timelineEntry.kind === "message" && timelineEntry.message.turnId === latestTurn.turnId) ||
       (timelineEntry.kind === "work" && timelineEntry.entry.turnId === latestTurn.turnId) ||
+      (timelineEntry.kind === "provider-summary" && timelineEntry.turnId === latestTurn.turnId) ||
       (timelineEntry.kind === "visualization" &&
         timelineEntry.visualization.turnId === latestTurn.turnId) ||
       (timelineEntry.kind === "proposed-plan" &&

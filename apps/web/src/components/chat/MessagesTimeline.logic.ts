@@ -1,6 +1,7 @@
 import * as Equal from "effect/Equal";
 import { uiText } from "@cafecode/shared/i18n";
 import {
+  primaryClaudeSummaryKey,
   type HistoricalWorkLogSummary,
   type TimelineEntry,
   type WorkLogEntry,
@@ -20,6 +21,7 @@ export interface TimelineDurationMessage {
 }
 
 export type MessagesTimelineRow =
+  | Extract<TimelineEntry, { kind: "provider-summary" }>
   | {
       kind: "visualization";
       id: string;
@@ -346,6 +348,16 @@ export function deriveMessagesTimelineRows(input: {
   historicalWorkLogSummariesByTurnId?: ReadonlyMap<TurnId, HistoricalWorkLogSummary>;
 }): MessagesTimelineRow[] {
   const nextRows: MessagesTimelineRow[] = [];
+  const primarySummaryKeys = new Set<string>();
+  const primarySummaryCountByTurn = new Map<TurnId, number>();
+  for (const entry of input.timelineEntries) {
+    if (entry.kind !== "provider-summary") continue;
+    primarySummaryKeys.add(entry.operationKey);
+    primarySummaryCountByTurn.set(
+      entry.turnId,
+      (primarySummaryCountByTurn.get(entry.turnId) ?? 0) + 1,
+    );
+  }
   const insertedHistoricalWorkTurnIds = new Set<TurnId>();
   const durationStartByMessageId = computeMessageDurationStart(
     input.timelineEntries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
@@ -354,10 +366,22 @@ export function deriveMessagesTimelineRows(input: {
     if (turnId === null || turnId === undefined || insertedHistoricalWorkTurnIds.has(turnId)) {
       return;
     }
-    const summary = input.historicalWorkLogSummariesByTurnId?.get(turnId);
-    if (!summary) {
+    const savedSummary = input.historicalWorkLogSummariesByTurnId?.get(turnId);
+    if (!savedSummary) {
       return;
     }
+    const primaryCount = primarySummaryCountByTurn.get(turnId) ?? 0;
+    const summary =
+      primaryCount === 0
+        ? savedSummary
+        : {
+            ...savedSummary,
+            previewEntries: savedSummary.previewEntries.filter((entry) => {
+              const key = primaryClaudeSummaryKey(entry);
+              return key === undefined || !primarySummaryKeys.has(key);
+            }),
+            snapshotEntryCount: Math.max(0, savedSummary.snapshotEntryCount - primaryCount),
+          };
     insertedHistoricalWorkTurnIds.add(turnId);
     nextRows.push({
       kind: "historical-work",
@@ -381,7 +405,9 @@ export function deriveMessagesTimelineRows(input: {
           ? entry.message.turnId
           : entry.kind === "work"
             ? entry.entry.turnId
-            : null;
+            : entry.kind === "provider-summary"
+              ? entry.turnId
+              : null;
       return turnId ? [turnId] : [];
     }),
   );
@@ -411,6 +437,20 @@ export function deriveMessagesTimelineRows(input: {
       continue;
     }
     pushUnanchoredWorkBefore(timelineEntry.createdAt);
+
+    if (timelineEntry.kind === "provider-summary") {
+      pushHistoricalWorkRow(timelineEntry.turnId, timelineEntry.createdAt);
+      nextRows.push(timelineEntry);
+      if (input.completionDividerAfterEntryId === timelineEntry.id) {
+        nextRows.push({
+          kind: "completion-divider",
+          id: `completion-divider:${timelineEntry.id}`,
+          createdAt: timelineEntry.createdAt,
+          completionSummary: input.completionSummary ?? null,
+        });
+      }
+      continue;
+    }
 
     if (timelineEntry.kind === "work") {
       const groupedEntries = [timelineEntry.entry];
@@ -553,6 +593,15 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   if (a.kind !== b.kind || a.id !== b.id) return false;
 
   switch (a.kind) {
+    case "provider-summary": {
+      const current = b as typeof a;
+      return (
+        a.createdAt === current.createdAt &&
+        a.turnId === current.turnId &&
+        a.operationKey === current.operationKey &&
+        Equal.equals(a.summary, current.summary)
+      );
+    }
     case "visualization":
       return a.visualization === (b as typeof a).visualization;
     case "working":

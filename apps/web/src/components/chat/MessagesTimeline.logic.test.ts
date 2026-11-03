@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EventId, type TurnId } from "@cafecode/contracts";
+import type { TimelineEntry, WorkLogEntry } from "../../session-logic";
 import {
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
@@ -705,6 +706,90 @@ describe("deriveMessagesTimelineRows", () => {
         row.kind === "message" && row.message.role === "user",
     );
     expect(userRow?.revertTurnCount).toBe(1);
+  });
+
+  it("keeps primary summary updates stable and excludes only their exact Claude history operation", () => {
+    const turnId = "turn-summary" as TurnId;
+    const summary: Extract<TimelineEntry, { kind: "provider-summary" }> = {
+      id: 'provider-summary:["turn-summary","block-0"]',
+      kind: "provider-summary",
+      operationKey: '["turn-summary","block-0"]',
+      turnId,
+      createdAt: "2026-01-01T00:00:01Z",
+      summary: {
+        provider: "claudeAgent",
+        text: "Received public text",
+        status: "completed",
+        truncated: false,
+      },
+    };
+    const duplicate: WorkLogEntry = {
+      id: "summary-activity",
+      turnId,
+      toolCallId: "block-0",
+      createdAt: summary.createdAt,
+      label: "Claude summary",
+      tone: "info",
+      publicSummary: summary.summary,
+    };
+    const input = {
+      timelineEntries: [summary],
+      completionDividerAfterEntryId: null,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      revertTurnCountByUserMessageId: new Map(),
+      historicalWorkLogSummariesByTurnId: new Map([
+        [
+          turnId,
+          {
+            turnId,
+            snapshotEntryCount: 3,
+            previewEntries: [
+              duplicate,
+              {
+                ...duplicate,
+                id: "opencode-same-id",
+                publicSummary: { ...summary.summary, provider: "opencode" as const },
+              },
+              { ...duplicate, id: "unpromoted-legacy-block", toolCallId: "block-older" },
+            ],
+          },
+        ],
+      ]),
+    };
+    const rows = deriveMessagesTimelineRows(input);
+    expect(rows.map((row) => row.kind)).toEqual(["historical-work", "provider-summary"]);
+    expect(rows[0]).toMatchObject({
+      summary: {
+        snapshotEntryCount: 2,
+        previewEntries: [{ id: "opencode-same-id" }, { id: "unpromoted-legacy-block" }],
+      },
+    });
+    const initial = computeStableMessagesTimelineRows(rows, { byId: new Map(), result: [] });
+    const repeated = computeStableMessagesTimelineRows(
+      deriveMessagesTimelineRows({
+        ...input,
+        timelineEntries: [{ ...summary, summary: { ...summary.summary } }],
+      }),
+      initial,
+    );
+    expect(repeated.result).toBe(initial.result);
+    const updated = computeStableMessagesTimelineRows(
+      deriveMessagesTimelineRows({
+        ...input,
+        timelineEntries: [
+          { ...summary, summary: { ...summary.summary, text: "Received corrected public text" } },
+        ],
+      }),
+      repeated,
+    );
+    expect(updated.result[0]).toBe(initial.result[0]);
+    expect(updated.result[1]).not.toBe(initial.result[1]);
+    expect(updated.result[1]).toMatchObject({
+      id: 'provider-summary:["turn-summary","block-0"]',
+      createdAt: "2026-01-01T00:00:01Z",
+      summary: { text: "Received corrected public text" },
+    });
   });
 
   it("inserts collapsed historical work logs between a turn's user and assistant messages", () => {

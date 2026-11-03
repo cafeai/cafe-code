@@ -2908,6 +2908,7 @@ export default function ChatView(props: ChatViewProps) {
         activeThread?.proposedPlans ?? [],
         [...workLogEntries, ...subagentEntries],
         visualizations.entries,
+        threadActivities,
       ),
     [
       activeThread?.proposedPlans,
@@ -2915,6 +2916,7 @@ export default function ChatView(props: ChatViewProps) {
       workLogEntries,
       subagentEntries,
       visualizations.entries,
+      threadActivities,
     ],
   );
   const { turnDiffSummaries, inferredCheckpointTurnCountByTurnId } =

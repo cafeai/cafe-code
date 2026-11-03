@@ -42,6 +42,7 @@ import {
   deriveTimelineEntries,
   deriveSubagentWorkEntries,
   deriveWorkLogEntries,
+  primaryClaudeSummaryKey,
   reconcileSubagentWorkEntryRuntime,
   formatElapsed,
   workLogDisplayLabel,
@@ -178,6 +179,8 @@ interface TimelineRowSharedState {
   activeThreadId: ThreadId | null;
   activeThreadEnvironmentId: EnvironmentId;
   onHistoricalWorkLogPresenceResolved: (turnId: TurnId, hasWorkLog: boolean) => void;
+  /** Known primary prose only; older unloaded history remains independently readable. */
+  primarySummaryKeys: ReadonlySet<string>;
   onRevertUserMessage: (messageId: MessageId) => void;
   onForkMessage?: ((messageId: MessageId) => void) | undefined;
   onImageExpand: (preview: ExpandedImagePreview) => void;
@@ -416,6 +419,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   const timelineElementRef = useRef<HTMLDivElement | null>(null);
   const activeThreadId = activeThreadIdProp ?? null;
+  const primarySummaryKeys = useMemo(
+    () =>
+      new Set(
+        timelineEntries.flatMap((entry) =>
+          entry.kind === "provider-summary" ? [entry.operationKey] : [],
+        ),
+      ),
+    [timelineEntries],
+  );
   const chatCopyFormat = useSettings((settings) => settings.chatCopyFormat);
   const {
     summaries: visibleHistoricalWorkLogSummariesByTurnId,
@@ -1405,6 +1417,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeThreadId,
       activeThreadEnvironmentId,
       onHistoricalWorkLogPresenceResolved: recordHistoricalWorkLogPresence,
+      primarySummaryKeys,
       activeProvider,
       subagentRuntimeSession,
       onRevertUserMessage,
@@ -1428,6 +1441,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeThreadId,
       activeThreadEnvironmentId,
       recordHistoricalWorkLogPresence,
+      primarySummaryKeys,
       activeProvider,
       subagentRuntimeSession,
       onRevertUserMessage,
@@ -1707,7 +1721,8 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
   return (
     <div
       className={cn(
-        row.kind === "message" && row.message.role === "assistant"
+        row.kind === "provider-summary" ||
+          (row.kind === "message" && row.message.role === "assistant")
           ? "pb-4 [@media(hover:hover)]:pb-8"
           : row.kind === "message" && row.message.role === "user"
             ? "pb-4 [@media(hover:hover)]:pb-5"
@@ -1737,12 +1752,56 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}
+      {row.kind === "provider-summary" ? <ProviderSummaryTimelineRow row={row} /> : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "visualization" ? <VisualizationTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
     </div>
   );
 });
+
+/**
+ * Explicitly public Claude text is ordinary conversation prose. It retains its
+ * own operation identity instead of borrowing a canonical message's fork,
+ * checkpoint, attachment or root-completion authority. The normal Markdown
+ * renderer still owns sanitization, links and streaming presentation.
+ */
+function ProviderSummaryTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "provider-summary" }>;
+}) {
+  const uiLocale = useUiLocale();
+  const ctx = use(TimelineRowCtx);
+  return (
+    <div
+      className="relative min-w-0 px-1 py-0.5"
+      data-provider-public-summary={row.summary.provider}
+      data-primary-provider-summary="true"
+    >
+      <ChatMarkdown
+        text={row.summary.text}
+        cwd={ctx.markdownCwd}
+        additionalWorkspaceRoots={ctx.additionalWorkspaceRoots}
+        isStreaming={row.summary.status === "inProgress"}
+        normalizeCodexCitations={false}
+        skills={ctx.skills}
+      />
+      {row.summary.status !== "completed" ? (
+        <p className="mt-1 text-2xs text-subtle-foreground">
+          {row.summary.status === "failed"
+            ? uiText("Partial", undefined, undefined, uiLocale)
+            : uiText("Updating…", undefined, undefined, uiLocale)}
+        </p>
+      ) : null}
+      {row.summary.truncated ? (
+        <p className="mt-1 text-2xs text-subtle-foreground">
+          {uiText("Summary truncated to the retained preview.", undefined, undefined, uiLocale)}
+        </p>
+      ) : null}
+    </div>
+  );
+}
 
 function VisualizationTimelineRow({
   row,
@@ -2440,6 +2499,19 @@ function emptyEarlierWorkLog(owner: string): EarlierWorkLogState {
   };
 }
 
+function withoutPrimarySummaries(
+  entries: ReadonlyArray<WorkLogEntry>,
+  primarySummaryKeys: ReadonlySet<string>,
+): WorkLogEntry[] {
+  // Only suppress the exact Claude turn/block already shown in primary prose.
+  // OpenCode thinking, reused ids in another turn and older unloaded history
+  // keep their existing bounded disclosure; text equality is never identity.
+  return entries.filter((entry) => {
+    const key = primaryClaudeSummaryKey(entry);
+    return key === undefined || !primarySummaryKeys.has(key);
+  });
+}
+
 /**
  * An explicit reader for work evicted from the bounded current-turn window.
  * Its immutable upper filter does not drift as tokens arrive. Every response
@@ -2563,12 +2635,21 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
 
   const visibleEntries = useMemo(
     () =>
-      uiPresentation.deriveEarlierWorkLogEntries({
-        activities: current.activities,
-        liveActivities: row.summary.liveActivities ?? [],
-        turnId: row.turnId,
-      }),
-    [current.activities, row.summary.liveActivities, row.turnId, uiPresentation],
+      withoutPrimarySummaries(
+        uiPresentation.deriveEarlierWorkLogEntries({
+          activities: current.activities,
+          liveActivities: row.summary.liveActivities ?? [],
+          turnId: row.turnId,
+        }),
+        ctx.primarySummaryKeys,
+      ),
+    [
+      current.activities,
+      row.summary.liveActivities,
+      row.turnId,
+      uiPresentation,
+      ctx.primarySummaryKeys,
+    ],
   );
   const showLoading = useDelayedFlag(isExpanded && current.loading && visibleEntries.length === 0);
   const before = row.summary.before;
@@ -2973,17 +3054,25 @@ const HistoricalWorkLogReader = memo(function HistoricalWorkLogReader({
 
   const visibleEntries = useMemo(() => {
     if (activityRows.length > 0) {
-      return uiPresentation.deriveWorkLogEntries(activityRows, row.turnId, {
-        terminalTurnIds: row.summary.isHistoricalTurn === false ? undefined : new Set([row.turnId]),
-      });
+      return withoutPrimarySummaries(
+        uiPresentation.deriveWorkLogEntries(activityRows, row.turnId, {
+          terminalTurnIds:
+            row.summary.isHistoricalTurn === false ? undefined : new Set([row.turnId]),
+        }),
+        ctx.primarySummaryKeys,
+      );
     }
-    return row.summary.previewEntries.slice(-HISTORICAL_WORK_LOG_PREVIEW_LIMIT);
+    return withoutPrimarySummaries(
+      row.summary.previewEntries.slice(-HISTORICAL_WORK_LOG_PREVIEW_LIMIT),
+      ctx.primarySummaryKeys,
+    );
   }, [
     activityRows,
     row.summary.previewEntries,
     row.summary.isHistoricalTurn,
     row.turnId,
     uiPresentation,
+    ctx.primarySummaryKeys,
   ]);
   const subagentEntries = useMemo(() => {
     const hydratedEntries = uiPresentation.deriveSubagentWorkEntries(activityRows, row.turnId, {

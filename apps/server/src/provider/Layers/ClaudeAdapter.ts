@@ -1241,6 +1241,111 @@ function hasCurrentClaudeTaskSession(context: ClaudeSessionContext, message: SDK
   );
 }
 
+/** SDK 0.3.317 reports failed persistence after its last result. These facts
+ * describe lost writes, not a new turn, a failed result or resume authority.
+ * Only finite categories/counts leave this boundary; transcript IDs, native
+ * error text, paths and future provider fields never become warning copy. */
+function readClaudeSessionWriteLoss(message: SDKMessage) {
+  const own = (key: string): unknown => {
+    const field = Object.getOwnPropertyDescriptor(message, key);
+    return field && "value" in field ? field.value : undefined;
+  };
+  if (own("type") !== "system" || own("subtype") !== "session_writes_lost") return undefined;
+  const sessionId = own("session_id"),
+    errorCode = own("error_code"),
+    lost = own("lost");
+  if (
+    typeof sessionId !== "string" ||
+    exactClaudeProviderIdentity(sessionId) !== sessionId ||
+    typeof errorCode !== "string" ||
+    errorCode.length === 0 ||
+    errorCode.length > 128 ||
+    !Array.isArray(lost) ||
+    Object.getPrototypeOf(lost) !== Array.prototype ||
+    lost.length === 0 ||
+    lost.length > 64
+  )
+    return undefined;
+  let transcriptLost = false,
+    globalConfigLost = false,
+    otherLossKindCount = 0;
+  for (let index = 0; index < lost.length; index++) {
+    const field = Object.getOwnPropertyDescriptor(lost, String(index));
+    if (
+      !field ||
+      !("value" in field) ||
+      typeof field.value !== "string" ||
+      field.value.length === 0 ||
+      field.value.length > 128
+    )
+      return undefined;
+    if (field.value === "transcript") transcriptLost = true;
+    else if (field.value === "global_config") globalConfigLost = true;
+    else otherLossKindCount++;
+  }
+  const transcriptSessions = own("transcript_session_ids");
+  if (
+    transcriptLost
+      ? !Array.isArray(transcriptSessions) ||
+        Object.getPrototypeOf(transcriptSessions) !== Array.prototype ||
+        transcriptSessions.length === 0 ||
+        transcriptSessions.length > 64
+      : transcriptSessions !== undefined
+  )
+    return undefined;
+  // Validate a finite list of own string slots without invoking accessors.
+  // Earlier /clear sessions are legitimate: validate their identity shape,
+  // never equate them with the current owner or publish the private values.
+  if (Array.isArray(transcriptSessions)) {
+    for (let index = 0; index < transcriptSessions.length; index++) {
+      const field = Object.getOwnPropertyDescriptor(transcriptSessions, String(index));
+      if (
+        !field ||
+        !("value" in field) ||
+        typeof field.value !== "string" ||
+        exactClaudeProviderIdentity(field.value) !== field.value
+      )
+        return undefined;
+    }
+  }
+  return {
+    sessionId,
+    detail: {
+      transcriptLost,
+      globalConfigLost,
+      otherLossKindCount,
+      transcriptSessionCount: Array.isArray(transcriptSessions) ? transcriptSessions.length : 0,
+      diskFull: errorCode === "ENOSPC",
+      quotaExceeded: errorCode === "EDQUOT",
+      otherErrorCode: errorCode !== "ENOSPC" && errorCode !== "EDQUOT",
+    },
+  };
+}
+
+function isCurrentClaudeSessionWriteLoss(
+  context: ClaudeSessionContext,
+  message: SDKMessage,
+): boolean {
+  const session = Object.getOwnPropertyDescriptor(message, "session_id");
+  if (
+    context.stopped ||
+    context.authFailureSeen ||
+    !session ||
+    !("value" in session) ||
+    context.resumeSessionId === undefined ||
+    context.lastThreadStartedId !== context.resumeSessionId ||
+    session.value !== context.resumeSessionId ||
+    !hasExactPrimaryClaudeParent(message)
+  )
+    return false;
+  // A query-level persistence notice cannot borrow task-scoped authority.
+  for (const key of ["task_id", "parent_task_id", "run_id"] as const) {
+    const field = Object.getOwnPropertyDescriptor(message, key);
+    if (field ? !("value" in field) || field.value !== undefined : key in message) return false;
+  }
+  return true;
+}
+
 function claudeStreamBlockKey(parentToolUseId: string | undefined, blockIndex: number): string {
   // A length prefix makes this unambiguous even if an upstream tool id itself
   // contains separators. This key remains internal and is never persisted.
@@ -2257,6 +2362,11 @@ function boundedClaudeNativeMessagePayload(message: SDKMessage): unknown {
   if (source.type !== "system") return source;
 
   switch (source.subtype) {
+    case "session_writes_lost":
+      return {
+        ...boundedClaudeNativeSystemEnvelope(source, "session_writes_lost"),
+        ...readClaudeSessionWriteLoss(message)?.detail,
+      };
     case "init":
       return boundedClaudeInitPluginDiagnostics(source);
     case "hook_started": {
@@ -8968,6 +9078,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     incomingMessage: SDKMessage,
   ) {
+    const sessionWriteLossFrame =
+      sdkMessageType(incomingMessage) === "system" &&
+      sdkMessageSubtype(incomingMessage) === "session_writes_lost";
+    // Capture before logging/normalization awaits and before the legacy path
+    // may adopt a received session ID. An observation never establishes one.
+    const sessionWriteLoss =
+      sessionWriteLossFrame &&
+      sessions.get(context.session.threadId) === context &&
+      isCurrentClaudeSessionWriteLoss(context, incomingMessage)
+        ? readClaudeSessionWriteLoss(incomingMessage)
+        : undefined;
+    const writeLossRuntimeId = context.subagentRuntimeId;
     const permissionModeObservation =
       sessions.get(context.session.threadId) === context
         ? captureClaudePermissionModeObservation(context, incomingMessage)
@@ -9220,6 +9342,39 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (!primary || !sameNativeSession || !context.turnState || context.stopped) return;
     } else {
       yield* logNativeSdkMessage(context, message);
+    }
+    if (sessionWriteLossFrame) {
+      const stamp = yield* makeEventStamp();
+      if (
+        sessionWriteLoss &&
+        sessions.get(context.session.threadId) === context &&
+        context.subagentRuntimeId === writeLossRuntimeId &&
+        isCurrentClaudeSessionWriteLoss(context, incomingMessage) &&
+        context.resumeSessionId === sessionWriteLoss.sessionId
+      ) {
+        // Results already received stand. Publish a session-level notice even
+        // with no active turn; do not rewrite completion, accounting, pending
+        // callbacks or the saved cursor, and never retry paid input here.
+        yield* offerRuntimeEvent(context, {
+          ...stamp,
+          type: "runtime.warning",
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          providerRefs: nativeProviderRefs(context),
+          payload: {
+            message:
+              "Some Claude session data could not be saved. Recent conversation or settings changes may be missing after reconnecting.",
+            detail: sessionWriteLoss.detail,
+          },
+          raw: {
+            source: "claude.sdk.message",
+            method: "claude/system/session_writes_lost",
+            messageType: "system:session_writes_lost",
+            payload: { type: "system", subtype: "session_writes_lost", ...sessionWriteLoss.detail },
+          },
+        });
+      }
+      return;
     }
     if (message.type === "system") {
       const frame = message as unknown as Record<string, unknown>;

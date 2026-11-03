@@ -1,7 +1,7 @@
 # Dependency maintenance with Renovate
 
 Created: 2026-10-03 01:30:40 JST (UTC+0900)
-Last updated: 2026-10-23
+Last updated: 2026-11-03 14:26:25 JST (UTC+0900)
 
 Cafe is configured to use the Mend-hosted [Renovate GitHub App](https://github.com/apps/renovate)
 to propose dependency updates once activated. The checked-in repository policy is
@@ -14,6 +14,10 @@ trust boundary and why Yarn catalogs require this approach. The
 manual-only Node exclusion without changing the other safety boundaries.
 The [qualified October provider update](provider-updates-2026-10-22.md) records
 the separately coordinated Claude/Codex pins, protocol review and replay limits.
+The [November 3 provider review](provider-updates-2026-11-03.md) records the
+coordinated Claude 317 package admission and exact user-approved age exception,
+unchanged Codex stable 166 target, and pending integration verification. The
+historical October 30 exception for 314 does not authorize this or later pairs.
 
 ## Activation
 
