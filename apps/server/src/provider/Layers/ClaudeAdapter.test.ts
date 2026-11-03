@@ -15776,9 +15776,11 @@ describe("ClaudeAdapterLive", () => {
         assert.deepEqual(session.subagentHistoryResumeCursor, { resume: nativeSession });
         assert.equal(harness.createInputs.length, 1);
         assert.equal(harness.query.closeCalls, 0);
-        assert.isFalse(JSON.stringify(events).includes(secret));
-        assert.isFalse(JSON.stringify(nativeLogs).includes(secret));
-        assert.isFalse(JSON.stringify(warning).includes("72000000-0000-4000-8000-000000000199"));
+        assert.isFalse(encodeProviderJsonString(events).includes(secret));
+        assert.isFalse(encodeProviderJsonString(nativeLogs).includes(secret));
+        assert.isFalse(
+          encodeProviderJsonString(warning).includes("72000000-0000-4000-8000-000000000199"),
+        );
       }).pipe(Effect.provide(harness.layer));
     },
   );
