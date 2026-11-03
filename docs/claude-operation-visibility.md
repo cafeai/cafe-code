@@ -1,6 +1,6 @@
 # Claude operation visibility
 
-Last updated: 2026-11-03 14:26:25 JST (UTC+0900)
+Last updated: 2026-11-03 18:38:38 JST (UTC+0900)
 
 ## What the chat can show
 
@@ -132,8 +132,8 @@ billing usage, and their numeric rows never authorize history or controls. See
 [native workflow details](claude-runtime-options.md) for compatibility, privacy
 and unavailable-data rules.
 
-The November 3 source changes and regressions are prepared; integration
-verification is pending. Synthetic adapter/ingestion fixtures must exercise
+The November 3 source changes have synthetic regressions; complete integration
+qualification must bind the exact checked source. Adapter/ingestion fixtures must exercise
 exact query/turn/block ownership, live updates and snapshot fallback, duplicate/divergent/foreign
 frames, partial terminal flushes, command output/status retention and privacy
 bounds. Renderer tests cover chronological coalescing, expanded detail,

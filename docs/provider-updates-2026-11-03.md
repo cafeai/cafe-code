@@ -1,12 +1,13 @@
 # Claude 317 and current Codex compatibility
 
 Created: 2026-11-03 14:26:25 JST (UTC+0900)
-Last updated: 2026-11-03 14:26:25 JST (UTC+0900)
+Last updated: 2026-11-03 18:38:38 JST (UTC+0900)
 
 This review updates Claude Agent SDK **0.3.314** and managed Claude Code
 **2.1.314** to the coordinated **0.3.317 / 2.1.317** pair. Codex stable
 **0.166.0** remains current and unchanged. Package admission and repository
-dependency installation have passed; integration verification is pending.
+dependency installation have passed. Integration results must separately bind
+the exact checked source and dependency inputs.
 No native provider installation, running-session adoption or publication is
 claimed by this record.
 
@@ -118,13 +119,14 @@ compaction scheduler or paid recovery loop. Native model eligibility remains
 authoritative, including Fast-mode availability; this update does not switch
 models or pricing settings.
 
-## Verification and adoption status
+## Verification and adoption boundaries
 
-Source implementation and synthetic regressions are prepared. Format, lint,
-audit, typechecking, appropriate complete Node/browser suites and the final fresh
-forced desktop build have **not yet been qualified for this changeset**.
-Package admission and immutable installation are not substitutes for those
-checks. Normal rebuilt backend/app adoption is separate, as are hosted CI and
+Source implementation includes synthetic adapter, selector and native browser
+regressions. Delivery requires format, lint, audit, typechecking, appropriate
+complete Node/browser suites and a fresh forced desktop build run last, with
+results bound to their actual inputs. Package admission and immutable
+installation are not substitutes for those checks. Normal rebuilt backend/app
+adoption is separate, as are hosted CI and
 any specifically authorized dev push. No app/provider restart, credential or
 profile inspection, live inference or native executable update was performed.
 

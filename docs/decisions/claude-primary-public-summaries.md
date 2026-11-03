@@ -1,10 +1,10 @@
 # Primary-chat presentation of Claude public summaries
 
-Decision status: Accepted — implementation verification remains pending.
+Decision status: Accepted — implementation qualification and runtime adoption are separately evidenced.
 Created: 2026-11-03 14:26:25 JST (UTC+0900)
-Last updated: 2026-11-03 14:26:25 JST (UTC+0900)
+Last updated: 2026-11-03 18:38:38 JST (UTC+0900)
 Decision authority: the user's explicit request to show received public Claude summaries as normal text in the primary chat.
-Implementation status: source and synthetic regressions prepared; repository checks, final build and runtime adoption remain separate.
+Implementation status: implemented with synthetic regressions; repository qualification, final build and runtime adoption remain separate.
 Supersedes: [Claude public operation visibility](claude-operation-visibility.md), only its placement of admitted Claude summaries in the secondary work log.
 Superseded by: none.
 
@@ -62,11 +62,12 @@ derives distinct provider-summary timeline entries and separates provider item
 namespaces; `MessagesTimeline` renders them and filters exact work-log duplicates.
 The normal Markdown renderer retains its existing sanitization and link policy.
 
-Synthetic selector and native browser regressions are prepared for admission,
+Synthetic selector and native browser regressions cover admission,
 identity, ordering, live replacement, prior-turn retention, duplicate suppression
 and visible normal-text rendering. Their execution, complete repository checks
-and the final forced desktop build are pending for this changeset. A local pass
-would not prove live-account/model behavior or adoption by an existing process.
+and a fresh forced desktop build run last must qualify the exact delivered
+source. Local results do not prove hosted CI, live-account/model behavior or
+adoption by an existing process.
 See [the November 3 provider review](../provider-updates-2026-11-03.md) for package
 admission and the separate SDK durability notice.
 
