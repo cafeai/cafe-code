@@ -3467,5 +3467,16 @@
   "Update Cafe and Codex on the server to use device-code sign-in.": "デバイスコードでサインインするには、サーバーの Cafe と Codex を更新してください。",
   "Update Codex to use device-code sign-in on this server.": "このサーバーでデバイスコードによるサインインを使用するには、Codex を更新してください。",
   "Update the Cafe server to use Codex device-code sign-in.": "Codex のデバイスコードによるサインインを使用するには、Cafe サーバーを更新してください。",
-  "Waiting for Codex to confirm sign-in…": "Codex によるサインインの確認を待機中…"
+  "Waiting for Codex to confirm sign-in…": "Codex によるサインインの確認を待機中…",
+  "Amalgamating Schnozzle": "Amalgamating Schnozzle",
+  "Could not open the project. Check your browser settings.": "プロジェクトを開けませんでした。ブラウザーの設定を確認してください。",
+  "Open Schnozzle": "Schnozzle を開く",
+  "Shared project room": "共有プロジェクトルーム",
+  "Connect independent work in Club Code, Cafe Code, or a browser. This optional feature opens a separate project room. It shares no chat history or repository access automatically.": "Club Code、Cafe Code、ブラウザーでの個別の作業をつなぎます。この任意機能は専用のプロジェクトルームを開きます。チャット履歴やリポジトリへのアクセス権限を自動的に共有することはありません。",
+  "Enable Amalgamating Schnozzle": "Amalgamating Schnozzle を有効にする",
+  "Relay address": "中継サーバーのアドレス",
+  "Use your team''s HTTPS relay address. Paste invitations in the project room. Keep invitation codes out of this setting.": "チームの HTTPS 中継サーバーのアドレスを使用してください。招待コードはプロジェクトルームに貼り付けてください。この設定には招待コードを入力しないでください。",
+  "Schnozzle relay address": "Schnozzle 中継サーバーのアドレス",
+  "Send it via the Amalgamating Schnozzle": "Amalgamating Schnozzle で送る",
+  "A peculiar, indispensable attachment connecting otherwise separate contraptions. Review selected text, then paste it into your lane in the project room. Each member keeps control of their own AI context.": "別々の仕掛けをつなぐ、風変わりで欠かせない接続装置です。選択したテキストを確認してから、プロジェクトルームの自分の作業レーンに貼り付けてください。各メンバーが自分の AI コンテキストを管理します。"
 }
