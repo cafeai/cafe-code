@@ -1,3 +1,4 @@
+import { SchnozzleSettings } from "./SchnozzleSettings";
 import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiFormatDateTime, uiText, type UiLocale } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
@@ -2226,6 +2227,7 @@ export function ConnectionsSettings() {
       title={uiText("Connections & remote access", undefined, undefined, uiLocale)}
     >
       <SavedEnvironmentsSettings />
+      <SchnozzleSettings />
       {canManageLocalBackend ? (
         <>
           <SettingsSection

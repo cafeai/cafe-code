@@ -245,11 +245,11 @@
   },
   "<slot1></slot1>Client <slot3></slot3> and server<slot5></slot5><slot7></slot7> differ; update both if connections fail.": {
     "message": "<slot1></slot1>Client <slot3></slot3> and server<slot5></slot5><slot7></slot7> differ; update both if connections fail.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2243"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2245"]
   },
   "<slot1></slot1>Restarting…": {
     "message": "<slot1></slot1>Restarting…",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1451"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1452"]
   },
   "<slot1></slot1>Retrying…": {
     "message": "<slot1></slot1>Retrying…",
@@ -286,6 +286,10 @@
   "A newer {branch} commit is available at {hash}.": {
     "message": "A newer {branch} commit is available at {hash}.",
     "locations": ["apps/desktop/src/updates/DesktopSourceUpdates.ts:350"]
+  },
+  "A peculiar, indispensable attachment connecting otherwise separate contraptions. Review selected text, then paste it into your lane in the project room. Each member keeps control of their own AI context.": {
+    "message": "A peculiar, indispensable attachment connecting otherwise separate contraptions. Review selected text, then paste it into your lane in the project room. Each member keeps control of their own AI context.",
+    "locations": ["apps/web/src/components/settings/SchnozzleSettings.tsx:106"]
   },
   "A specific commit": {
     "message": "A specific commit",
@@ -371,7 +375,7 @@
   },
   "About the certificate": {
     "message": "About the certificate",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2172"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2173"]
   },
   "About the default context window": {
     "message": "About the default context window",
@@ -722,19 +726,19 @@
     "message": "Admin password",
     "locations": [
       "apps/web/src/components/auth/PairingRouteSurface.tsx:192",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:1113",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:1185",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:1114",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:1186",
       "apps/web/src/components/settings/SavedEnvironmentsSettings.tsx:556",
       "apps/web/src/components/settings/settingsSearchIndex.ts:612"
     ]
   },
   "Admin password must be at least 8 characters.": {
     "message": "Admin password must be at least 8 characters.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:132"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:133"]
   },
   "Admin password updated": {
     "message": "Admin password updated",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1749"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1750"]
   },
   "Advanced": {
     "message": "Advanced",
@@ -877,6 +881,10 @@
     "message": "Always allow this session",
     "locations": ["apps/web/src/components/chat/ComposerPendingApprovalActions.tsx:64"]
   },
+  "Amalgamating Schnozzle": {
+    "message": "Amalgamating Schnozzle",
+    "locations": ["apps/web/src/components/settings/SchnozzleSettings.tsx:64"]
+  },
   "Ambiance intensity": {
     "message": "Ambiance intensity",
     "locations": ["apps/web/src/components/settings/AmbianceSettings.tsx:237"]
@@ -949,7 +957,7 @@
   },
   "Another device can use this one-time link to connect.": {
     "message": "Another device can use this one-time link to connect.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:988"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:989"]
   },
   "Any day": {
     "message": "Any day",
@@ -1469,7 +1477,7 @@
   },
   "Bot": {
     "message": "Bot",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:813"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:814"]
   },
   "Branding name": {
     "message": "Branding name",
@@ -1647,15 +1655,15 @@
   },
   "Cafe Code will restart and limit this environment back to this machine.": {
     "message": "Cafe Code will restart and limit this environment back to this machine.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2326"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2328"]
   },
   "Cafe Code will restart to apply this.": {
     "message": "Cafe Code will restart to apply this.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2377"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2379"]
   },
   "Cafe Code will restart to expose this environment over the network.": {
     "message": "Cafe Code will restart to expose this environment over the network.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2320"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2322"]
   },
   "Cafe Code will send this follow-up as soon as the active turn can accept it.": {
     "message": "Cafe Code will send this follow-up as soon as the active turn can accept it.",
@@ -1803,11 +1811,11 @@
       "apps/web/src/components/global-dictation/GlobalDictationOverlay.tsx:1020",
       "apps/web/src/components/settings/AddProviderInstanceDialog.tsx:469",
       "apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:278",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:1016",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:1221",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:1269",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2339",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2385",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:1017",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:1222",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:1270",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2341",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2387",
       "apps/web/src/components/settings/DictationSettings.tsx:724",
       "apps/web/src/components/settings/DictationSettings.tsx:769",
       "apps/web/src/components/settings/GrokSandboxSettings.tsx:196",
@@ -1853,13 +1861,13 @@
   "Change": {
     "message": "Change",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:1137",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:1138",
       "apps/web/src/components/settings/DictationSettings.tsx:725"
     ]
   },
   "Change admin password": {
     "message": "Change admin password",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1171"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1172"]
   },
   "Change the title everywhere this chat appears.": {
     "message": "Change the title everywhere this chat appears.",
@@ -1867,7 +1875,7 @@
   },
   "Change this where the server is started.": {
     "message": "Change this where the server is started.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2195"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2196"]
   },
   "Changes against a base branch": {
     "message": "Changes against a base branch",
@@ -2190,7 +2198,7 @@
   },
   "Choose endpoint to copy": {
     "message": "Choose endpoint to copy",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:686"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:687"]
   },
   "Choose how this project should be grouped in the sidebar.": {
     "message": "Choose how this project should be grouped in the sidebar.",
@@ -2322,8 +2330,8 @@
   "Client": {
     "message": "Client",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:489",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:853",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:490",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:854",
       "apps/web/src/components/settings/diagnosticsRuntimeViewModel.ts:24"
     ]
   },
@@ -2345,7 +2353,7 @@
   },
   "Clipboard copy unavailable": {
     "message": "Clipboard copy unavailable",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:459"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:460"]
   },
   "Clipboard is unavailable outside a browser window.": {
     "message": "Clipboard is unavailable outside a browser window.",
@@ -2475,7 +2483,7 @@
   },
   "Code only": {
     "message": "Code only",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:526"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:527"]
   },
   "Code review": {
     "message": "Code review",
@@ -2835,7 +2843,7 @@
   },
   "Confirm password": {
     "message": "Confirm password",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1198"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1199"]
   },
   "Confirmations": {
     "message": "Confirmations",
@@ -2871,6 +2879,10 @@
       "apps/web/src/components/OnboardingScreen.tsx:714"
     ]
   },
+  "Connect independent work in Club Code, Cafe Code, or a browser. This optional feature opens a separate project room. It shares no chat history or repository access automatically.": {
+    "message": "Connect independent work in Club Code, Cafe Code, or a browser. This optional feature opens a separate project room. It shares no chat history or repository access automatically.",
+    "locations": ["apps/web/src/components/settings/SchnozzleSettings.tsx:67"]
+  },
   "Connect to this server before signing in.": {
     "message": "Connect to this server before signing in.",
     "locations": ["apps/web/src/components/settings/SettingsPanels.tsx:2699"]
@@ -2878,7 +2890,7 @@
   "Connected": {
     "message": "Connected",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:841",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:842",
       "apps/web/src/components/settings/SavedEnvironmentsSettings.tsx:150"
     ]
   },
@@ -2892,7 +2904,7 @@
   },
   "Connected for {value0}": {
     "message": "Connected for {value0}",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:833"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:834"]
   },
   "Connecting": {
     "message": "Connecting",
@@ -2945,7 +2957,7 @@
   "Connections & remote access": {
     "message": "Connections & remote access",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2226",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2227",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:152",
       "apps/web/src/components/settings/settingsSearchIndex.ts:577"
     ]
@@ -3148,9 +3160,9 @@
       "apps/web/src/components/ChatMarkdown.tsx:261",
       "apps/web/src/components/ChatMarkdown.tsx:266",
       "apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:224",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:522",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:704",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:770"
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:523",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:705",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:771"
     ]
   },
   "Copy command": {
@@ -3220,7 +3232,7 @@
   },
   "Copy pairing URL for: <slot1></slot1>": {
     "message": "Copy pairing URL for: <slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:673"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:674"]
   },
   "Copy path": {
     "message": "Copy path",
@@ -3240,7 +3252,7 @@
   },
   "Copy selected endpoint": {
     "message": "Copy selected endpoint",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:664"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:665"]
   },
   "Copy source": {
     "message": "Copy source",
@@ -3248,7 +3260,7 @@
   },
   "Copy the code and pair using this server''s network address.": {
     "message": "Copy the code and pair using this server''s network address.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:649"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:650"]
   },
   "Copy to clipboard": {
     "message": "Copy to clipboard",
@@ -3275,11 +3287,11 @@
   },
   "Copying isn''t available here, so copy this code by hand.": {
     "message": "Copying isn''t available here, so copy this code by hand.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:730"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:731"]
   },
   "Copying isn''t available here, so copy this link by hand or scan the code.": {
     "message": "Copying isn''t available here, so copy this link by hand or scan the code.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:724"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:725"]
   },
   "Core": {
     "message": "Core",
@@ -3358,11 +3370,11 @@
   },
   "Could not copy pairing URL": {
     "message": "Could not copy pairing URL",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:457"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:458"]
   },
   "Could not copy pairing code": {
     "message": "Could not copy pairing code",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:458"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:459"]
   },
   "Could not copy path": {
     "message": "Could not copy path",
@@ -3390,7 +3402,7 @@
   },
   "Could not create pairing URL": {
     "message": "Could not create pairing URL",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:941"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:942"]
   },
   "Could not delete chat": {
     "message": "Could not delete chat",
@@ -3405,7 +3417,7 @@
   },
   "Could not disable password authentication": {
     "message": "Could not disable password authentication",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1799"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1800"]
   },
   "Could not download update": {
     "message": "Could not download update",
@@ -3506,6 +3518,10 @@
     "message": "Could not open the browser. Open the verification address above manually.",
     "locations": ["apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:255"]
   },
+  "Could not open the project. Check your browser settings.": {
+    "message": "Could not open the project. Check your browser settings.",
+    "locations": ["apps/web/src/components/settings/SchnozzleSettings.tsx:41"]
+  },
   "Could not open {value0} login": {
     "message": "Could not open {value0} login",
     "locations": [
@@ -3592,15 +3608,15 @@
   },
   "Could not revoke client access": {
     "message": "Could not revoke client access",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1695"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1696"]
   },
   "Could not revoke other clients": {
     "message": "Could not revoke other clients",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1731"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1732"]
   },
   "Could not revoke pairing link": {
     "message": "Could not revoke pairing link",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1671"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1672"]
   },
   "Could not save certificate approval. Check that Cafe Code can write its local app data, then try again.": {
     "message": "Could not save certificate approval. Check that Cafe Code can write its local app data, then try again.",
@@ -3684,11 +3700,11 @@
   },
   "Could not update HTTPS": {
     "message": "Could not update HTTPS",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1643"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1644"]
   },
   "Could not update admin password": {
     "message": "Could not update admin password",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1764"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1765"]
   },
   "Could not update global dictation. Try again.": {
     "message": "Could not update global dictation. Try again.",
@@ -3696,7 +3712,7 @@
   },
   "Could not update network access": {
     "message": "Could not update network access",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1609"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1610"]
   },
   "Could not update notifications.": {
     "message": "Could not update notifications.",
@@ -3857,8 +3873,8 @@
   "Create link": {
     "message": "Create link",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:1024",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:978"
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:1025",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:979"
     ]
   },
   "Create new ref \"<slot1></slot1>\"": {
@@ -3867,7 +3883,7 @@
   },
   "Create pairing link": {
     "message": "Create pairing link",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:985"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:986"]
   },
   "Created at": {
     "message": "Created at",
@@ -4141,7 +4157,7 @@
   "Default": {
     "message": "Default",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:1415",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:1416",
       "apps/web/src/components/settings/KeybindingsSettings.logic.ts:120",
       "apps/web/src/components/settings/ProviderInstanceCard.tsx:1577"
     ]
@@ -4345,7 +4361,7 @@
     "message": "Desktop",
     "locations": [
       "apps/desktop/src/backend/DesktopServerExposure.ts:65",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:807",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:808",
       "apps/web/src/components/settings/SettingsPanels.tsx:1931",
       "apps/web/src/components/settings/diagnosticsRuntimeViewModel.ts:14",
       "apps/web/src/components/settings/settingsSearchIndex.ts:36"
@@ -4387,7 +4403,7 @@
   },
   "Device name (optional)": {
     "message": "Device name (optional)",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:999"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1000"]
   },
   "Diagnostic JSON — secrets redacted": {
     "message": "Diagnostic JSON — secrets redacted",
@@ -4516,22 +4532,22 @@
   "Disable": {
     "message": "Disable",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:1278",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:1279",
       "apps/web/src/components/settings/TwoFactorManagementRow.tsx:175",
       "apps/web/src/components/settings/TwoFactorManagementRow.tsx:280"
     ]
   },
   "Disable HTTPS?": {
     "message": "Disable HTTPS?",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2374"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2376"]
   },
   "Disable network access?": {
     "message": "Disable network access?",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2316"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2318"]
   },
   "Disable password authentication?": {
     "message": "Disable password authentication?",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1250"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1251"]
   },
   "Disable two-factor authentication": {
     "message": "Disable two-factor authentication",
@@ -4648,7 +4664,7 @@
       "apps/web/src/components/atrium/taskAtriumData.ts:256",
       "apps/web/src/components/chat/GlideSetupDialog.tsx:274",
       "apps/web/src/components/chat/WorkflowTasks.tsx:21",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:766",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:767",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:32"
     ]
   },
@@ -4675,7 +4691,7 @@
     "message": "Download certificate",
     "locations": [
       "apps/server/src/http.ts:321",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2170"
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2171"
     ]
   },
   "Download failed for {availableVersion}. Click to retry.": {
@@ -4842,10 +4858,14 @@
   "Enable": {
     "message": "Enable",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:1230",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:1231",
       "apps/web/src/components/settings/TwoFactorManagementRow.tsx:176",
       "apps/web/src/components/settings/TwoFactorManagementRow.tsx:279"
     ]
+  },
+  "Enable Amalgamating Schnozzle": {
+    "message": "Enable Amalgamating Schnozzle",
+    "locations": ["apps/web/src/components/settings/SchnozzleSettings.tsx:72"]
   },
   "Enable Cafe management tools": {
     "message": "Enable Cafe management tools",
@@ -4857,11 +4877,11 @@
   },
   "Enable HTTPS": {
     "message": "Enable HTTPS",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2054"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2055"]
   },
   "Enable HTTPS?": {
     "message": "Enable HTTPS?",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2373"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2375"]
   },
   "Enable Mac global dictation": {
     "message": "Enable Mac global dictation",
@@ -4873,7 +4893,7 @@
   },
   "Enable admin password": {
     "message": "Enable admin password",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1170"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1171"]
   },
   "Enable ambiance": {
     "message": "Enable ambiance",
@@ -4890,13 +4910,13 @@
   "Enable network access": {
     "message": "Enable network access",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2043",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2211"
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2044",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2212"
     ]
   },
   "Enable network access?": {
     "message": "Enable network access?",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2315"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2317"]
   },
   "Enable on this Mac<slot1></slot1>": {
     "message": "Enable on this Mac<slot1></slot1>",
@@ -4904,7 +4924,7 @@
   },
   "Enable password authentication": {
     "message": "Enable password authentication",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1151"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1152"]
   },
   "Enable sidebar image": {
     "message": "Enable sidebar image",
@@ -5058,13 +5078,13 @@
   "Enter an admin password.": {
     "message": "Enter an admin password.",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:130",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:131",
       "apps/web/src/environments/primary/auth.ts:406"
     ]
   },
   "Enter it on the device you want to pair.": {
     "message": "Enter it on the device you want to pair.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:447"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:448"]
   },
   "Enter path (e.g. ~/projects/my-app)": {
     "message": "Enter path (e.g. ~/projects/my-app)",
@@ -5268,7 +5288,7 @@
   },
   "Expires <slot1></slot1>": {
     "message": "Expires <slot1></slot1>",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:644"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:645"]
   },
   "Expires at": {
     "message": "Expires at",
@@ -5391,7 +5411,7 @@
   },
   "Failed to create pairing URL.": {
     "message": "Failed to create pairing URL.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:937"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:938"]
   },
   "Failed to create pairing credential ({status}).": {
     "message": "Failed to create pairing credential ({status}).",
@@ -5403,7 +5423,7 @@
   },
   "Failed to disable admin password.": {
     "message": "Failed to disable admin password.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:138"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:139"]
   },
   "Failed to fetch remote environment.": {
     "message": "Failed to fetch remote environment.",
@@ -5426,11 +5446,11 @@
   },
   "Failed to load admin password status.": {
     "message": "Failed to load admin password status.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:140"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:141"]
   },
   "Failed to load network exposure state.": {
     "message": "Failed to load network exposure state.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:152"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:153"]
   },
   "Failed to load paired clients ({status}).": {
     "message": "Failed to load paired clients ({status}).",
@@ -5442,7 +5462,7 @@
   },
   "Failed to load reachable endpoints.": {
     "message": "Failed to load reachable endpoints.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:154"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:155"]
   },
   "Failed to load server auth session state ({status}).": {
     "message": "Failed to load server auth session state ({status}).",
@@ -5481,7 +5501,7 @@
   },
   "Failed to revoke client access.": {
     "message": "Failed to revoke client access.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:148"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:149"]
   },
   "Failed to revoke client session ({status}).": {
     "message": "Failed to revoke client session ({status}).",
@@ -5493,7 +5513,7 @@
   },
   "Failed to revoke other clients.": {
     "message": "Failed to revoke other clients.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:150"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:151"]
   },
   "Failed to revoke pairing link ({status}).": {
     "message": "Failed to revoke pairing link ({status}).",
@@ -5501,7 +5521,7 @@
   },
   "Failed to revoke pairing link.": {
     "message": "Failed to revoke pairing link.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:146"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:147"]
   },
   "Failed to save action.": {
     "message": "Failed to save action.",
@@ -5544,7 +5564,7 @@
   },
   "Failed to update HTTPS.": {
     "message": "Failed to update HTTPS.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:144"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:145"]
   },
   "Failed to update admin password ({status}).": {
     "message": "Failed to update admin password ({status}).",
@@ -5552,11 +5572,11 @@
   },
   "Failed to update admin password.": {
     "message": "Failed to update admin password.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:136"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:137"]
   },
   "Failed to update network exposure.": {
     "message": "Failed to update network exposure.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:142"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:143"]
   },
   "Failures": {
     "message": "Failures",
@@ -6029,7 +6049,7 @@
   "HTTPS": {
     "message": "HTTPS",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2154",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2155",
       "apps/web/src/components/settings/settingsSearchIndex.ts:602"
     ]
   },
@@ -6051,7 +6071,7 @@
   },
   "Hide": {
     "message": "Hide",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1484"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1485"]
   },
   "Hide Others": {
     "message": "Hide Others",
@@ -6588,7 +6608,7 @@
   },
   "Last connected at {value0}": {
     "message": "Last connected at {value0}",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:843"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:844"]
   },
   "Last event": {
     "message": "Last event",
@@ -6702,7 +6722,7 @@
   },
   "Lets owners sign in from the pairing screen with a password.": {
     "message": "Lets owners sign in from the pairing screen with a password.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1114"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1115"]
   },
   "Level": {
     "message": "Level",
@@ -6732,7 +6752,7 @@
   },
   "Link created at {timestamp}": {
     "message": "Link created at {timestamp}",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:588"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:589"]
   },
   "Links can''t be opened here": {
     "message": "Links can''t be opened here",
@@ -6794,7 +6814,7 @@
   },
   "Loading password status": {
     "message": "Loading password status",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1125"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1126"]
   },
   "Loading projects and chats.": {
     "message": "Loading projects and chats.",
@@ -6881,7 +6901,7 @@
     "message": "Local server",
     "locations": [
       "apps/web/src/components/WorkspaceEnvironmentSelector.tsx:33",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2234",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2236",
       "apps/web/src/components/settings/settingsSearchIndex.ts:49"
     ]
   },
@@ -7104,7 +7124,7 @@
   },
   "Mobile": {
     "message": "Mobile",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:809"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:810"]
   },
   "Mode": {
     "message": "Mode",
@@ -7405,8 +7425,8 @@
   "Network access": {
     "message": "Network access",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2109",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2192",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2110",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2193",
       "apps/web/src/components/settings/settingsSearchIndex.ts:593"
     ]
   },
@@ -7436,7 +7456,7 @@
   },
   "New browser logins will need a pairing link.": {
     "message": "New browser logins will need a pairing link.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1785"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1786"]
   },
   "New chat": {
     "message": "New chat",
@@ -7778,7 +7798,7 @@
   },
   "No pairing links or devices yet.": {
     "message": "No pairing links or devices yet.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1348"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1349"]
   },
   "No phase activity reported.": {
     "message": "No phase activity reported.",
@@ -7982,7 +8002,7 @@
   },
   "Not connected yet.": {
     "message": "Not connected yet.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:849"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:850"]
   },
   "Not currently reported by this provider.": {
     "message": "Not currently reported by this provider.",
@@ -8170,7 +8190,7 @@
   },
   "Only the owner can manage pairing and paired devices.": {
     "message": "Only the owner can manage pairing and paired devices.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2406"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2408"]
   },
   "Opacity": {
     "message": "Opacity",
@@ -8196,6 +8216,10 @@
   "Open Device Control and Data Access settings": {
     "message": "Open Device Control and Data Access settings",
     "locations": ["apps/web/src/components/chat/GlideSetupDialog.tsx:89"]
+  },
+  "Open Schnozzle": {
+    "message": "Open Schnozzle",
+    "locations": ["apps/web/src/components/settings/SchnozzleSettings.tsx:45"]
   },
   "Open Screen & System Audio Recording settings": {
     "message": "Open Screen & System Audio Recording settings",
@@ -8262,7 +8286,7 @@
   },
   "Open it on the device you want to pair.": {
     "message": "Open it on the device you want to pair.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:446"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:447"]
   },
   "Open keybindings.json": {
     "message": "Open keybindings.json",
@@ -8486,7 +8510,7 @@
   },
   "Other devices must install and trust this certificate before they can open the WebUI over HTTPS.": {
     "message": "Other devices must install and trust this certificate before they can open the WebUI over HTTPS.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2173"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2174"]
   },
   "Output": {
     "message": "Output",
@@ -8507,8 +8531,8 @@
   "Owner": {
     "message": "Owner",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:488",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:852",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:489",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:853",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1277"
     ]
   },
@@ -8549,21 +8573,21 @@
   "Paired devices": {
     "message": "Paired devices",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2288",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2290",
       "apps/web/src/components/settings/settingsSearchIndex.ts:630"
     ]
   },
   "Pairing URL": {
     "message": "Pairing URL",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:421",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:422",
       "apps/web/src/components/settings/SavedEnvironmentsSettings.tsx:493",
       "apps/web/src/components/settings/SavedEnvironmentsSettings.tsx:525"
     ]
   },
   "Pairing URL copied": {
     "message": "Pairing URL copied",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:442"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:443"]
   },
   "Pairing URL is missing its token.": {
     "message": "Pairing URL is missing its token.",
@@ -8571,31 +8595,31 @@
   },
   "Pairing URLs": {
     "message": "Pairing URLs",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:560"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:561"]
   },
   "Pairing code": {
     "message": "Pairing code",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:552",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:569",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:720",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:553",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:570",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:721",
       "apps/web/src/components/settings/SavedEnvironmentsSettings.tsx:572",
       "apps/web/src/components/settings/SavedEnvironmentsSettings.tsx:578"
     ]
   },
   "Pairing code copied": {
     "message": "Pairing code copied",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:443"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:444"]
   },
   "Pairing link": {
     "message": "Pairing link",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:719"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:720"]
   },
   "Pairing link — scan to open on another device": {
     "message": "Pairing link — scan to open on another device",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:622",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:754"
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:623",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:755"
     ]
   },
   "Pairing required": {
@@ -8639,15 +8663,15 @@
   },
   "Password authentication disabled": {
     "message": "Password authentication disabled",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1784"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1785"]
   },
   "Password login is available from the pairing screen.": {
     "message": "Password login is available from the pairing screen.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1750"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1751"]
   },
   "Passwords do not match.": {
     "message": "Passwords do not match.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:134"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:135"]
   },
   "Paste": {
     "message": "Paste",
@@ -9392,11 +9416,11 @@
   },
   "Reachable at": {
     "message": "Reachable at",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1492"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1493"]
   },
   "Reachable at {url}": {
     "message": "Reachable at {url}",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2119"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2120"]
   },
   "Reachable from devices on the same network.": {
     "message": "Reachable from devices on the same network.",
@@ -9404,11 +9428,11 @@
   },
   "Reachable on your network.": {
     "message": "Reachable on your network.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2134"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2135"]
   },
   "Reachable on your network; pairing links use {host}.": {
     "message": "Reachable on your network; pairing links use {host}.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2126"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2127"]
   },
   "React to chat": {
     "message": "React to chat",
@@ -9679,6 +9703,10 @@
       "apps/web/src/components/CommandPalette.tsx:1276",
       "apps/web/src/components/CommandPalette.tsx:1765"
     ]
+  },
+  "Relay address": {
+    "message": "Relay address",
+    "locations": ["apps/web/src/components/settings/SchnozzleSettings.tsx:81"]
   },
   "Reload": {
     "message": "Reload",
@@ -10079,15 +10107,15 @@
   "Restart and disable": {
     "message": "Restart and disable",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2353",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2397"
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2355",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2399"
     ]
   },
   "Restart and enable": {
     "message": "Restart and enable",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2352",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:2396"
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2354",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:2398"
     ]
   },
   "Restart provider": {
@@ -10100,7 +10128,7 @@
   },
   "Restart the server so other devices on your network can reach it.": {
     "message": "Restart the server so other devices on your network can reach it.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2196"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2197"]
   },
   "Restart to update": {
     "message": "Restart to update",
@@ -10252,21 +10280,21 @@
   "Revoke": {
     "message": "Revoke",
     "locations": [
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:784",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:896"
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:785",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:897"
     ]
   },
   "Revoke others": {
     "message": "Revoke others",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:962"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:963"]
   },
   "Revoked 1 other device": {
     "message": "Revoked 1 other device",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1715"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1716"]
   },
   "Revoked {value0} devices": {
     "message": "Revoked {value0} devices",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1716"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1717"]
   },
   "Rewriting is unavailable right now.": {
     "message": "Rewriting is unavailable right now.",
@@ -10466,9 +10494,10 @@
       "apps/web/src/components/chat/SubagentConcurrencyControl.tsx:294",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:422",
       "apps/web/src/components/desk/DeskWorkspace.tsx:1568",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:1231",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:1232",
       "apps/web/src/components/settings/KeybindingsSettings.tsx:1138",
       "apps/web/src/components/settings/KeybindingsSettings.tsx:945",
+      "apps/web/src/components/settings/SchnozzleSettings.tsx:99",
       "apps/web/src/hooks/useRenameChat.tsx:117"
     ]
   },
@@ -10713,6 +10742,10 @@
     "message": "Scheduling uses this timezone. Your computer''s local timezone is {timeZone}.",
     "locations": ["apps/web/src/components/chat/ScheduledFollowupEditor.tsx:548"]
   },
+  "Schnozzle relay address": {
+    "message": "Schnozzle relay address",
+    "locations": ["apps/web/src/components/settings/SchnozzleSettings.tsx:88"]
+  },
   "Screen & System Audio Recording": {
     "message": "Screen & System Audio Recording",
     "locations": ["apps/web/src/components/chat/GlideSetupDialog.tsx:84"]
@@ -10851,7 +10884,7 @@
   },
   "Selected server": {
     "message": "Selected server",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2235"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2237"]
   },
   "Send": {
     "message": "Send",
@@ -10891,6 +10924,10 @@
   "Send answer": {
     "message": "Send answer",
     "locations": ["apps/web/src/components/chat/ComposerAsyncQuestionsPanel.tsx:434"]
+  },
+  "Send it via the Amalgamating Schnozzle": {
+    "message": "Send it via the Amalgamating Schnozzle",
+    "locations": ["apps/web/src/components/settings/SchnozzleSettings.tsx:105"]
   },
   "Send message": {
     "message": "Send message",
@@ -11014,11 +11051,11 @@
   },
   "Set as default": {
     "message": "Set as default",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1420"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1421"]
   },
   "Set the password used for owner login from the pairing screen.": {
     "message": "Set the password used for owner login from the pairing screen.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1174"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1175"]
   },
   "Set up computer use": {
     "message": "Set up computer use",
@@ -11026,7 +11063,7 @@
   },
   "Set where the server is started.": {
     "message": "Set where the server is started.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2217"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2218"]
   },
   "Set {value0} as default provider": {
     "message": "Set {value0} as default provider",
@@ -11091,6 +11128,10 @@
     "message": "Shadow home folder",
     "locations": ["apps/web/src/components/settings/providerSettingsPresentation.ts:58"]
   },
+  "Shared project room": {
+    "message": "Shared project room",
+    "locations": ["apps/web/src/components/settings/SchnozzleSettings.tsx:66"]
+  },
   "Shell command": {
     "message": "Shell command",
     "locations": ["apps/web/src/components/chat/providerTaskPresentation.ts:60"]
@@ -11112,7 +11153,7 @@
   },
   "Show QR code": {
     "message": "Show QR code",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:610"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:611"]
   },
   "Show all": {
     "message": "Show all",
@@ -11132,7 +11173,7 @@
   },
   "Show code": {
     "message": "Show code",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:712"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:713"]
   },
   "Show current schedules": {
     "message": "Show current schedules",
@@ -11198,7 +11239,7 @@
   },
   "Show link": {
     "message": "Show link",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:711"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:712"]
   },
   "Show notes": {
     "message": "Show notes",
@@ -11249,7 +11290,7 @@
   },
   "Showing the full value instead.": {
     "message": "Showing the full value instead.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:462"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:463"]
   },
   "Showing {shown} of {total} refs": {
     "message": "Showing {shown} of {total} refs",
@@ -12045,7 +12086,7 @@
   },
   "Tablet": {
     "message": "Tablet",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:811"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:812"]
   },
   "Task Atrium": {
     "message": "Task Atrium",
@@ -12554,7 +12595,7 @@
   },
   "They need a new pairing link to reconnect.": {
     "message": "They need a new pairing link to reconnect.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1717"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1718"]
   },
   "Thinking": {
     "message": "Thinking",
@@ -12654,7 +12695,7 @@
   },
   "This clears the saved admin password. Existing sessions stay active until revoked or expired.": {
     "message": "This clears the saved admin password. Existing sessions stay active until revoked or expired.",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1253"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1254"]
   },
   "This connection is inactive.": {
     "message": "This connection is inactive.",
@@ -12668,7 +12709,7 @@
     "message": "This device",
     "locations": [
       "apps/web/src/components/BranchToolbar.logic.ts:40",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:878"
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:879"
     ]
   },
   "This downloads the document with its declared assets, not the current interactive state. Inline visualizations already run unsandboxed under Full access. Opening this file uses your browser’s authority. App tools and permissions are not exported.": {
@@ -13158,7 +13199,7 @@
   },
   "URL": {
     "message": "URL",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:503"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:504"]
   },
   "Ultra": {
     "message": "Ultra",
@@ -13317,7 +13358,7 @@
     "message": "Unavailable",
     "locations": [
       "apps/web/src/components/chat/ModelPickerSidebar.tsx:24",
-      "apps/web/src/components/settings/ConnectionsSettings.tsx:1409",
+      "apps/web/src/components/settings/ConnectionsSettings.tsx:1410",
       "apps/web/src/components/settings/DataProfileSettings.tsx:21",
       "apps/web/src/components/settings/DataProfileSettings.tsx:45",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:2281",
@@ -13776,6 +13817,10 @@
       "apps/web/src/components/settings/GrokSandboxSettings.tsx:201"
     ]
   },
+  "Use your team''s HTTPS relay address. Paste invitations in the project room. Keep invitation codes out of this setting.": {
+    "message": "Use your team''s HTTPS relay address. Paste invitations in the project room. Keep invitation codes out of this setting.",
+    "locations": ["apps/web/src/components/settings/SchnozzleSettings.tsx:82"]
+  },
   "Use {value0} accent": {
     "message": "Use {value0} accent",
     "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:264"]
@@ -13896,7 +13941,7 @@
   },
   "Version drift": {
     "message": "Version drift",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2240"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:2242"]
   },
   "Version mismatch. Try syncing the client and server to the same Cafe Code version.": {
     "message": "Version mismatch. Try syncing the client and server to the same Cafe Code version.",
@@ -14626,7 +14671,7 @@
   },
   "e.g. Living room iPad": {
     "message": "e.g. Living room iPad",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1004"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:1005"]
   },
   "e.g. Work": {
     "message": "e.g. Work",
@@ -15746,7 +15791,7 @@
   },
   "{role, select, owner {Owner link} other {Client link}}": {
     "message": "{role, select, owner {Owner link} other {Client link}}",
-    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:492"]
+    "locations": ["apps/web/src/components/settings/ConnectionsSettings.tsx:493"]
   },
   "{root, select, yes {Root} other {Child}} process {name}": {
     "message": "{root, select, yes {Root} other {Child}} process {name}",

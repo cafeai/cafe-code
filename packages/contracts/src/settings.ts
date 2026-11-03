@@ -286,6 +286,8 @@ export type ChatClickBehavior = typeof ChatClickBehavior.Type;
 export const DEFAULT_CHAT_CLICK_BEHAVIOR: ChatClickBehavior = "preview";
 
 export const ClientSettingsSchema = Schema.Struct({
+  schnozzleEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  schnozzleRelayOrigin: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   languagePreference: UiLanguagePreference.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_UI_LANGUAGE_PREFERENCE)),
   ),
@@ -1126,6 +1128,8 @@ export const ServerSettingsPatch = Schema.Struct({
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
 export const ClientSettingsPatch = Schema.Struct({
+  schnozzleEnabled: Schema.optionalKey(Schema.Boolean),
+  schnozzleRelayOrigin: Schema.optionalKey(Schema.String),
   languagePreference: Schema.optionalKey(UiLanguagePreference),
   chatClickBehavior: Schema.optionalKey(ChatClickBehavior),
   showDeskTabs: Schema.optionalKey(Schema.Boolean),

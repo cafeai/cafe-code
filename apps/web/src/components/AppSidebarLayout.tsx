@@ -1,3 +1,4 @@
+import { SchnozzleLauncher } from "./settings/SchnozzleSettings";
 import { useEffect, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
@@ -74,6 +75,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         }}
       >
         <ThreadSidebar />
+        <SchnozzleLauncher />
         <SidebarRail />
       </Sidebar>
       {children}

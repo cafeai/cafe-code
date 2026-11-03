@@ -3467,5 +3467,16 @@
   "Update Cafe and Codex on the server to use device-code sign-in.": "기기 코드 로그인을 사용하려면 서버의 Cafe와 Codex를 업데이트하세요.",
   "Update Codex to use device-code sign-in on this server.": "이 서버에서 기기 코드 로그인을 사용하려면 Codex를 업데이트하세요.",
   "Update the Cafe server to use Codex device-code sign-in.": "Codex 기기 코드 로그인을 사용하려면 Cafe 서버를 업데이트하세요.",
-  "Waiting for Codex to confirm sign-in…": "Codex의 로그인 확인 대기 중…"
+  "Waiting for Codex to confirm sign-in…": "Codex의 로그인 확인 대기 중…",
+  "Amalgamating Schnozzle": "Amalgamating Schnozzle",
+  "Could not open the project. Check your browser settings.": "프로젝트를 열 수 없습니다. 브라우저 설정을 확인하세요.",
+  "Open Schnozzle": "Schnozzle 열기",
+  "Shared project room": "공유 프로젝트 공간",
+  "Connect independent work in Club Code, Cafe Code, or a browser. This optional feature opens a separate project room. It shares no chat history or repository access automatically.": "Club Code, Cafe Code 또는 브라우저에서 수행하는 개별 작업을 연결합니다. 이 선택 기능은 별도의 프로젝트 공간을 엽니다. 채팅 기록이나 저장소 접근 권한을 자동으로 공유하지 않습니다.",
+  "Enable Amalgamating Schnozzle": "Amalgamating Schnozzle 활성화",
+  "Relay address": "중계 서버 주소",
+  "Use your team''s HTTPS relay address. Paste invitations in the project room. Keep invitation codes out of this setting.": "팀의 HTTPS 중계 서버 주소를 사용하세요. 초대 코드는 프로젝트 공간에 붙여넣으세요. 이 설정에는 초대 코드를 입력하지 마세요.",
+  "Schnozzle relay address": "Schnozzle 중계 서버 주소",
+  "Send it via the Amalgamating Schnozzle": "Amalgamating Schnozzle로 보내기",
+  "A peculiar, indispensable attachment connecting otherwise separate contraptions. Review selected text, then paste it into your lane in the project room. Each member keeps control of their own AI context.": "서로 떨어진 장치들을 연결하는 독특하고 필수적인 연결 장치입니다. 선택한 텍스트를 검토한 다음 프로젝트 공간의 내 작업 영역에 붙여넣으세요. 각 구성원은 자신의 AI 맥락을 직접 관리합니다."
 }
