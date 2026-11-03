@@ -1,8 +1,19 @@
 import "../index.css";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { renderMermaid } from "../lib/mermaid/renderService";
 import { sanitizeMermaidSvg } from "../lib/mermaid/sanitizeSvg";
 import { GANTT_SCHEDULE, GANTT_TASK_DATES } from "./mermaidGantt.test.fixture";
+
+// Only the queue-refusal case below acquires this owner. A test deadline does
+// not unwind its async loop: join the original admitted render before another
+// case may use this module's serialized renderer or its native document.
+let activeQueueCleanup: (() => Promise<void>) | undefined;
+beforeEach(() => {
+  if (activeQueueCleanup) throw new Error("Previous Mermaid queue fixture is still retiring.");
+});
+afterEach(async () => {
+  await activeQueueCleanup?.();
+});
 
 const EXAMPLE = `flowchart TD
     I["Program + public inputs + protected private inputs"] --> A["Compile and admit original sources through CHL"]
@@ -458,19 +469,94 @@ describe("real isolated Mermaid rendering", () => {
     expect(document.querySelector('iframe[title="Isolated diagram renderer"]')).toBeNull();
   });
 
-  it("rejects malformed, unsupported and oversized graphs without poisoning the queue", async () => {
-    for (const source of [
-      "flowchart TD\nA[unterminated",
-      "notAMermaidFamily\ntitle Unsupported diagram\nsection Build\nCompile: 5: Team",
-      "xychart-beta\nbar [1, broken]",
-      'pie\n"a" nope',
-      `flowchart TD\n${Array.from({ length: 251 }, (_, i) => `n${i}[Node]`).join("\n")}`,
-      `sequenceDiagram\n${Array.from({ length: 251 }, (_, i) => `participant n${i}`).join("\n")}`,
-      `xychart-beta\nbar [${Array.from({ length: 251 }, () => 1).join(",")}]`,
-      `pie\n${Array.from({ length: 251 }, (_, i) => `"Section ${i}":1`).join("\n")}`,
-    ])
-      await expect(renderMermaid(source, "dark")).rejects.toThrow("Diagram unavailable");
-    expect((await renderMermaid("flowchart LR\nA-->B", "dark")).svg).toContain("<svg");
+  it("rejects malformed, unsupported and oversized graphs without poisoning the queue", async ({
+    signal,
+    onTestFinished,
+    onTestFailed,
+  }) => {
+    let retired = false;
+    let pendingRender: ReturnType<typeof renderMermaid> | undefined;
+    let cleanupPromise: Promise<void> | undefined;
+    let phase:
+      | "prepared"
+      | "refusal-requested"
+      | "refusal-settled"
+      | "recovery-requested"
+      | "recovery-settled" = "prepared";
+    let index = 0;
+    let reportedFailure = false;
+    const reportFailure = () => {
+      if (reportedFailure) return;
+      reportedFailure = true;
+      // One fixed phase/index only: never expose source, parser errors, SVG,
+      // identities or paths, and never use this observation to infer a cause.
+      console.error("Mermaid queue fixture failed", { phase, index });
+    };
+    const requireActive = () => {
+      if (retired || signal.aborted) throw new Error("Mermaid queue fixture already retired.");
+    };
+    const cleanup = () => {
+      retired = true;
+      if (!cleanupPromise) {
+        cleanupPromise = (async () => {
+          // Expected refusals still reject the original promise. Observe that
+          // rejection only for retirement; the body independently checks it.
+          // The renderer retains ownership of its exact frame, ports and 15s
+          // timer until settlement. Do not remove unrelated native resources.
+          await pendingRender?.then(
+            () => undefined,
+            () => undefined,
+          );
+          signal.removeEventListener("abort", onAbort);
+          if (activeQueueCleanup === cleanup) activeQueueCleanup = undefined;
+        })();
+      }
+      return cleanupPromise;
+    };
+    const onAbort = () => {
+      reportFailure();
+      // afterEach joins and reports this same cleanup before the next case.
+      void cleanup().catch(() => {
+        /* afterEach retains and reports the exact cleanup rejection. */
+      });
+    };
+    activeQueueCleanup = cleanup;
+    onTestFinished(cleanup);
+    onTestFailed(reportFailure);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    try {
+      for (const [sourceIndex, source] of [
+        "flowchart TD\nA[unterminated",
+        "notAMermaidFamily\ntitle Unsupported diagram\nsection Build\nCompile: 5: Team",
+        "xychart-beta\nbar [1, broken]",
+        'pie\n"a" nope',
+        `flowchart TD\n${Array.from({ length: 251 }, (_, i) => `n${i}[Node]`).join("\n")}`,
+        `sequenceDiagram\n${Array.from({ length: 251 }, (_, i) => `participant n${i}`).join("\n")}`,
+        `xychart-beta\nbar [${Array.from({ length: 251 }, () => 1).join(",")}]`,
+        `pie\n${Array.from({ length: 251 }, (_, i) => `"Section ${i}":1`).join("\n")}`,
+      ].entries()) {
+        requireActive();
+        index = sourceIndex;
+        phase = "refusal-requested";
+        // Retain the original promise before yielding: abort cleanup must join
+        // exactly this admission, never a wrapper or a replacement render.
+        pendingRender = renderMermaid(source, "dark");
+        await expect(pendingRender).rejects.toThrow("Diagram unavailable");
+        requireActive();
+        phase = "refusal-settled";
+      }
+      requireActive();
+      index = 8;
+      phase = "recovery-requested";
+      pendingRender = renderMermaid("flowchart LR\nA-->B", "dark");
+      const recovered = await pendingRender;
+      requireActive();
+      phase = "recovery-settled";
+      expect(recovered.svg).toContain("<svg");
+    } finally {
+      await cleanup();
+    }
   });
 
   it("lays out a substantial admitted graph with the real bundled engine", async () => {
