@@ -884,21 +884,70 @@ it("ignores a stale status read that resolves after a newer native result", asyn
   expect(permissionState("accessibility")).toBe("granted");
 });
 
-it("copies and reveals only the native host app path", async () => {
-  fixture.control.mockResolvedValue(missing);
-  await render(
-    <GlideControl environmentId={environmentId} threadId={threadId} runtimeMode="full-access" />,
-  );
-  await expect.element(button()).toBeEnabled();
-  await button().click();
-  await page.getByRole("button", { name: "Copy path" }).click();
-  await expect.poll(() => fixture.copy.mock.calls).toEqual([[hostApp.path]]);
-  await expect.element(page.getByRole("button", { name: "Copied" })).toBeVisible();
-  await page.getByRole("button", { name: "Show in Finder" }).click();
-  await expect
-    .poll(() => fixture.control.mock.calls.at(-1)?.[0])
-    .toEqual({ action: "reveal-host-app", threadId });
-});
+it("copies and reveals only the native host app path", async (context) =>
+  withActivityFixture(context, async ({ mount, owned }) => {
+    let phase = "mount";
+    let reported = false;
+    const reportFailure = () => {
+      if (reported) return;
+      reported = true;
+      // Fixed phases and counts only: preserve the original failure without
+      // logging a copied path, RPC payload, native error or environment.
+      console.info("glide-host-path-failure", {
+        phase,
+        copies: fixture.copy.mock.calls.length,
+        statusReads: fixture.control.mock.calls.filter(([input]) => input.action === "status")
+          .length,
+        actions: fixture.control.mock.calls.filter(([input]) => input.action !== "status").length,
+      });
+    };
+    context.signal.addEventListener("abort", reportFailure, { once: true });
+    context.onTestFailed(reportFailure);
+    context.onTestFinished(() => context.signal.removeEventListener("abort", reportFailure));
+    fixture.control.mockResolvedValue(missing);
+    await mount(
+      <GlideControl environmentId={environmentId} threadId={threadId} runtimeMode="full-access" />,
+    );
+    phase = "button-ready";
+    await owned(() => expect.element(button()).toBeEnabled());
+    // Bind the owned toggle before the modal makes background controls inert.
+    // Later state inspection must not search through that accessibility mask.
+    const toggle = document.querySelector<HTMLButtonElement>("[data-computer-use]");
+    expect(toggle).not.toBeNull();
+    phase = "setup-click";
+    await owned(() => button().click());
+    phase = "copy-click";
+    await owned(() => page.getByRole("button", { name: "Copy path" }).click());
+    phase = "copied-path";
+    await owned(() => expect.poll(() => fixture.copy.mock.calls).toEqual([[hostApp.path]]));
+    phase = "copied-feedback";
+    await owned(() => expect.element(page.getByRole("button", { name: "Copied" })).toBeVisible());
+    phase = "reveal-click";
+    await owned(() => page.getByRole("button", { name: "Show in Finder" }).click());
+    // Setup still polls while permissions are missing. Its reads may follow
+    // the real native click; retain the exact ordered action authority instead
+    // of depending on a global last-call position. No path is sent to reveal.
+    phase = "reveal-actions";
+    await owned(() =>
+      expect
+        .poll(() =>
+          fixture.control.mock.calls
+            .map(([input]) => input)
+            .filter((input) => input.action !== "status"),
+        )
+        .toEqual([{ action: "reveal-host-app", threadId }]),
+    );
+    for (const [input] of fixture.control.mock.calls) {
+      if (input.action === "status") expect(input).toEqual({ action: "status", threadId });
+    }
+    phase = "permission-state";
+    expect(permissionState("accessibility")).toBe("missing");
+    expect(permissionState("screen-recording")).toBe("missing");
+    phase = "disabled-switch";
+    expect(toggle?.isConnected).toBe(true);
+    expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+    phase = "complete";
+  }));
 
 it("omits Finder for remote servers and explains an unidentified app", async () => {
   fixture.local = false;
