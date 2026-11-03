@@ -101,6 +101,38 @@ import { createChatViewCallerOwner } from "./chatViewCallerOwner.test.fixture";
 import { createFollowUpQueuePersistence } from "./chat/followUpQueuePersistence";
 import { toastManager } from "./ui/toast";
 
+const attachmentUploadObservation = vi.hoisted(() => ({
+  capture: undefined as
+    | ((
+        input: Parameters<typeof import("../attachments/fileAttachments").uploadFileAttachment>[0],
+        operation: ReturnType<typeof import("../attachments/fileAttachments").uploadFileAttachment>,
+      ) => void)
+    | undefined,
+  hasFailure: false,
+  failure: undefined as unknown,
+}));
+vi.mock("../attachments/fileAttachments", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../attachments/fileAttachments")>();
+  return {
+    ...original,
+    uploadFileAttachment: (...args: Parameters<typeof original.uploadFileAttachment>) => {
+      // Preserve the real helper's exact arguments and Promise. This observes
+      // native fetch/body/decode completion without replacing transport, a
+      // response stream, a deadline or the caller's error/result semantics.
+      const operation = original.uploadFileAttachment(...args);
+      try {
+        attachmentUploadObservation.capture?.(args[0], operation);
+      } catch (failure) {
+        if (!attachmentUploadObservation.hasFailure) {
+          attachmentUploadObservation.hasFailure = true;
+          attachmentUploadObservation.failure = failure;
+        }
+      }
+      return operation;
+    },
+  };
+});
+
 describe("ChatView full app (composer)", () => {
   registerChatViewBrowserHooks();
 
@@ -4984,11 +5016,99 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
-  it("keeps pending and failed document uploads visible and blocks sending until retry succeeds", async () => {
+  it("keeps pending and failed document uploads visible and blocks sending until retry succeeds", async (context) => {
     let releaseFailure: (() => void) | undefined;
     const failureGate = new Promise<void>((resolve) => {
       releaseFailure = resolve;
     });
+    type UploadPromise = ReturnType<
+      typeof import("../attachments/fileAttachments").uploadFileAttachment
+    >;
+    type UploadOperation = { original: UploadPromise; joined: UploadPromise };
+    const uploads: UploadOperation[] = [];
+    const handlerCompletions: Promise<unknown>[] = [];
+    let selectedFile: File | undefined;
+    let retired = false;
+    let observerInstalled = false;
+    let handlerInstalled = false;
+    let resolveRetry!: (operation: UploadOperation) => void;
+    let retireRetry!: (failure: Error) => void;
+    const retryAdmission = new Promise<UploadOperation>((resolve, reject) => {
+      resolveRetry = resolve;
+      retireRetry = reject;
+    });
+    // Early body failure may retire before the admission is awaited. Observe
+    // that private waiter without changing its rejection for the real await.
+    void retryAdmission.catch(() => undefined);
+    const joinOriginalOperations = async () => {
+      let uploadIndex = 0;
+      let handlerIndex = 0;
+      while (uploadIndex < uploads.length || handlerIndex < handlerCompletions.length) {
+        const uploadEnd = uploads.length;
+        const handlerEnd = handlerCompletions.length;
+        await Promise.allSettled([
+          ...uploads.slice(uploadIndex, uploadEnd).map((operation) => operation.original),
+          ...handlerCompletions.slice(handlerIndex, handlerEnd),
+        ]);
+        uploadIndex = uploadEnd;
+        handlerIndex = handlerEnd;
+      }
+    };
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "document-upload-retry",
+      beforeDrain: () => {
+        retired = true;
+        // This gate is resolved even before the first handler arrives. A late
+        // admitted original request must never strand retirement behind it.
+        releaseFailure?.();
+        // Only the private admission waiter is retired; native uploads keep
+        // their original signals, results, errors and sixty-second transport.
+        retireRetry(new Error("The exact upload admission waiter was retired."));
+      },
+      afterUnmount: async () => {
+        // Keep observing through exact native input/mount disposal and late
+        // helper admission. These are original client promises, including body
+        // read/cancel/decode, not MSW handler-return or request:end receipts.
+        await joinOriginalOperations();
+        if (observerInstalled) {
+          if (attachmentUploadObservation.capture !== capture)
+            throw new Error("The exact attachment upload observer was replaced.");
+          attachmentUploadObservation.capture = undefined;
+          observerInstalled = false;
+        }
+        if (handlerInstalled) worker.resetHandlers();
+        if (attachmentUploadObservation.hasFailure) {
+          const failure = attachmentUploadObservation.failure;
+          attachmentUploadObservation.failure = undefined;
+          attachmentUploadObservation.hasFailure = false;
+          throw failure;
+        }
+      },
+    });
+    const capture: NonNullable<typeof attachmentUploadObservation.capture> = (input, original) => {
+      if (
+        input.environmentId !== LOCAL_ENVIRONMENT_ID ||
+        input.targetThreadId !== THREAD_ID ||
+        selectedFile === undefined ||
+        input.file !== selectedFile
+      )
+        return;
+      // Register the actual Promise synchronously before returning it to the
+      // composer. The caller owns that original directly, never its own body or
+      // cleanup. A late retired admission is still retained for final joining.
+      const operation = { original, joined: original };
+      uploads.push(operation);
+      if (!retired && !context.signal.aborted)
+        operation.joined = owner.own("upload", () => original);
+      void operation.joined.catch(() => undefined);
+      owner.mark("request");
+      void original.then(
+        () => owner.mark("receipt"),
+        () => owner.mark("receipt"),
+      );
+      if (uploads.length === 2) resolveRetry(operation);
+      if (retired) releaseFailure?.();
+    };
     const contents = "<html>source only</html>";
     const attachment = {
       type: "file" as const,
@@ -4998,81 +5118,114 @@ describe("ChatView full app (composer)", () => {
       sizeBytes: contents.length,
     };
     let attempts = 0;
-    worker.use(
-      http.post("*/api/attachments", async () => {
-        attempts += 1;
-        if (attempts === 1) {
-          await failureGate;
-          return HttpResponse.json({}, { status: 500 });
-        }
-        return HttpResponse.json(attachment);
-      }),
-    );
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-upload-retry" as MessageId,
-        targetText: "upload retry target",
-      }),
-      resolveRpc: (body) =>
-        body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
-          ? { sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1 }
-          : undefined,
-    });
     const draft = () => useComposerDraftStore.getState().getComposerDraft(THREAD_REF);
     const turnRequests = () =>
       wsRequests.filter(
         (request) => request.type === "thread.turn.start" || request.type === "thread.turn.steer",
       );
-    try {
-      const input = await waitForElement(
-        () =>
-          document.querySelector<HTMLInputElement>(
-            '[data-chat-composer-form="true"] input[type="file"]',
-          ),
-        "Attachment input was not available.",
+    await owner.run(async () => {
+      owner.assertActive();
+      if (
+        attachmentUploadObservation.capture !== undefined ||
+        attachmentUploadObservation.hasFailure
+      )
+        throw new Error("A previous attachment upload observer remains owned.");
+      attachmentUploadObservation.capture = capture;
+      observerInstalled = true;
+      worker.use(
+        http.post("*/api/attachments", () => {
+          const response = (async () => {
+            attempts += 1;
+            if (attempts === 1) {
+              await failureGate;
+              return HttpResponse.json({}, { status: 500 });
+            }
+            return HttpResponse.json(attachment);
+          })();
+          handlerCompletions.push(response);
+          return response;
+        }),
       );
+      handlerInstalled = true;
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-upload-retry" as MessageId,
+          targetText: "upload retry target",
+        }),
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1 }
+            : undefined,
+      });
+      const input = await owner.own("attachments", () =>
+        waitForElement(
+          () =>
+            document.querySelector<HTMLInputElement>(
+              '[data-chat-composer-form="true"] input[type="file"]',
+            ),
+          "Attachment input was not available.",
+        ),
+      );
+      owner.assertActive();
       const transfer = new DataTransfer();
       transfer.items.add(new File([contents], attachment.name, { type: attachment.mimeType }));
       input.files = transfer.files;
+      selectedFile = input.files[0];
       input.dispatchEvent(new Event("change", { bubbles: true }));
       useComposerDraftStore.getState().setPrompt(THREAD_REF, "Read the attached source");
-      await vi.waitFor(() => {
-        expect(attempts).toBe(1);
-        expect(draft()?.files[0]?.status).toBe("uploading");
-      });
+      await owner.own("upload", () =>
+        vi.waitFor(() => {
+          expect(attempts).toBe(1);
+          expect(draft()?.files[0]?.status).toBe("uploading");
+        }),
+      );
       const form = document.querySelector<HTMLFormElement>('[data-chat-composer-form="true"]')!;
+      owner.assertActive();
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      await waitForLayout();
+      await owner.own("layout", () => waitForLayout());
       expect(turnRequests()).toHaveLength(0);
       releaseFailure!();
-      await vi.waitFor(() => {
-        expect(draft()?.files[0]?.status).toBe("failed");
-        expect(document.body.textContent).toContain("Upload failed.");
-      });
+      await owner.own("upload", () =>
+        vi.waitFor(() => {
+          expect(draft()?.files[0]?.status).toBe("failed");
+          expect(document.body.textContent).toContain("Upload failed.");
+        }),
+      );
+      owner.assertActive();
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      await waitForLayout();
+      await owner.own("layout", () => waitForLayout());
       expect(turnRequests()).toHaveLength(0);
+      owner.assertActive();
       buttonWithText("Retry upload")!.click();
-      await vi.waitFor(() => {
-        expect(draft()?.files[0]?.status).toBe("ready");
-        expect(attempts).toBe(2);
-      });
-      await vi.waitFor(() =>
-        expect(form.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(
-          false,
+      const retry = await owner.own("request", () => retryAdmission);
+      // The original short state poll is meaningful after the exact existing
+      // retry helper finishes native fetch/body/decode. Waiting for that real
+      // operation does not manufacture a ready receipt or change its deadline.
+      await retry.joined;
+      owner.assertActive();
+      await owner.own("receipt", () =>
+        vi.waitFor(() => {
+          expect(draft()?.files[0]?.status).toBe("ready");
+          expect(attempts).toBe(2);
+        }),
+      );
+      await owner.own("send-target", () =>
+        vi.waitFor(() =>
+          expect(form.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(
+            false,
+          ),
         ),
       );
+      owner.assertActive();
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      await vi.waitFor(() => {
-        expect(turnRequests()).toHaveLength(1);
-        expect(turnRequests()[0]).toMatchObject({ message: { attachments: [attachment] } });
-      });
-    } finally {
-      releaseFailure?.();
-      worker.resetHandlers();
-      await mounted.cleanup();
-    }
+      await owner.own("receipt", () =>
+        vi.waitFor(() => {
+          expect(turnRequests()).toHaveLength(1);
+          expect(turnRequests()[0]).toMatchObject({ message: { attachments: [attachment] } });
+        }),
+      );
+    });
   });
 
   it("uploads a document and saves or cancels queue edits without losing the prior draft", async () => {

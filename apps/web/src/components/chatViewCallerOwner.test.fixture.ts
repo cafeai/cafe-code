@@ -12,6 +12,7 @@ const labels = [
   "restored-compaction",
   "worktree-overrides",
   "image-only-send",
+  "document-upload-retry",
   "pending-steer",
   "reconnect-exhaustion",
   "desk-preview",
