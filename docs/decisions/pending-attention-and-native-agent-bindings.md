@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Last updated: 2026-11-03 07:38:13 JST (UTC+0900)
+Last updated: 2026-11-03 08:26:26 JST (UTC+0900)
 
 The shell's pending-decision counts describe the whole chat. The ordinary
 500-activity detail window must therefore retain unresolved approval and question
@@ -63,6 +63,14 @@ start cannot revive finished work. Inactive, unselected bindings remain private
 metadata and do not trigger historical payload comparisons or output. Missing
 owner-head sources are unconfirmed, including when no other worker remains.
 Total metadata work still depends on the stored binding count.
+
+The Task Atrium keeps full historical rows and their exact detail/control identities,
+but derives running membership from the same current-owner and source-hint policy
+as the composer. Its bounded input must include descriptor-free terminal edges.
+Exact-current-runtime zero counts can suppress stale running claims without
+inventing completion or deleting history. Include the immutable live-work object
+in its cache identity: shell-only hint changes must retire stale membership while
+clock-only updates can still reuse it.
 
 The current-runtime shell also carries at most 64 `unconfirmedAgentIds` display
 hints after source retirement. The active roster applies them only to that exact

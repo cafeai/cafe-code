@@ -101,9 +101,13 @@ type AmbianceFixture = {
   readonly engines: ReadonlyArray<EngineObservation>;
   render: () => Promise<AmbianceScreen>;
   poll: <A>(start: () => Promise<A>) => Promise<A>;
+  runPendingIntervals: () => void;
   assertLive: () => void;
   finish: () => void;
   cleanup: () => Promise<void>;
+};
+type AmbianceFixtureOptions = {
+  readonly controlledIntervals?: boolean;
 };
 type CanvasObservations = {
   clears: number;
@@ -123,7 +127,10 @@ let activeAmbianceFixture: AmbianceFixture | undefined;
  * Failure observations are passive fixed scalars captured before teardown;
  * they neither schedule a frame nor explain an unobserved historical timeout.
  */
-function createAmbianceFixture(context: TestContext): AmbianceFixture {
+function createAmbianceFixture(
+  context: TestContext,
+  options: AmbianceFixtureOptions,
+): AmbianceFixture {
   if (activeAmbianceFixture) throw new Error("Previous ambiance fixture is still retiring");
   let host: HTMLDivElement | undefined;
   let owner: AmbianceFixture;
@@ -136,6 +143,14 @@ function createAmbianceFixture(context: TestContext): AmbianceFixture {
   let screen: AmbianceScreen | undefined;
   let cleanupPromise: Promise<void> | undefined;
   let failureObservation: object | undefined;
+  let intervalClock:
+    | {
+        readonly originalSetInterval: typeof window.setInterval;
+        readonly originalClearInterval: typeof window.clearInterval;
+        readonly setInterval: typeof window.setInterval;
+        readonly clearInterval: typeof window.clearInterval;
+      }
+    | undefined;
   const pending = new Set<Promise<unknown>>();
   const counts = new WeakMap<HTMLCanvasElement, CanvasObservations>();
   const knownContexts = new WeakMap<
@@ -173,6 +188,15 @@ function createAmbianceFixture(context: TestContext): AmbianceFixture {
   const assertLive = () => {
     if (retired || context.signal.aborted || activeAmbianceFixture !== owner)
       throw new Error("Ambiance fixture has retired");
+  };
+  const assertIntervalClock = () => {
+    if (
+      !intervalClock ||
+      !vi.isFakeTimers() ||
+      window.setInterval !== intervalClock.setInterval ||
+      window.clearInterval !== intervalClock.clearInterval
+    )
+      throw new Error("Ambiance interval clock ownership changed");
   };
   const captureFailure = (phase: "render-rejected" | "poll-rejected" | "retirement") => {
     if (failureObservation) return;
@@ -238,6 +262,21 @@ function createAmbianceFixture(context: TestContext): AmbianceFixture {
       const acquired = screen ?? (settled?.status === "fulfilled" ? settled.value : undefined);
       await acquired?.unmount();
       host?.remove();
+      if (intervalClock) {
+        // The real component must retire its registered callbacks during the
+        // exact unmount. Restore only this fixture's clock, after all original
+        // render/poll work and native resource teardown have joined.
+        assertIntervalClock();
+        const remainingIntervals = vi.getTimerCount();
+        vi.useRealTimers();
+        if (
+          window.setInterval !== intervalClock.originalSetInterval ||
+          window.clearInterval !== intervalClock.originalClearInterval
+        )
+          throw new Error("Ambiance interval clock did not restore its native methods");
+        if (remainingIntervals !== 0)
+          throw new Error("Ambiance interval callbacks survived their owning unmount");
+      }
       for (const recorder of engineRecorders) {
         const current = Object.getOwnPropertyDescriptor(AmbianceEngine.prototype, recorder.method);
         if (current?.value !== recorder.wrapper)
@@ -306,6 +345,15 @@ function createAmbianceFixture(context: TestContext): AmbianceFixture {
       assertLive();
       return result;
     },
+    runPendingIntervals() {
+      assertLive();
+      assertIntervalClock();
+      // Deliver only callbacks actually registered through the controlled
+      // interval API. Cleared predecessor handles cannot be replayed. Timeout,
+      // RAF, Date, canvas and the browser's real input/readiness stay native.
+      vi.runOnlyPendingTimers();
+      assertLive();
+    },
     finish() {
       assertLive();
       finished = true;
@@ -326,7 +374,21 @@ function createAmbianceFixture(context: TestContext): AmbianceFixture {
     }
   });
   assertLive();
-  // Registration precedes host/native-recorder/render acquisition.
+  // Registration precedes clock/host/native-recorder/render acquisition. Only
+  // owner-transfer cases control intervals; pixel and motion cases retain the
+  // native clock, and another fixture's fake clock can never be adopted here.
+  if (options.controlledIntervals) {
+    if (vi.isFakeTimers()) throw new Error("Ambiance fixture cannot adopt an existing fake clock");
+    const originalSetInterval = window.setInterval;
+    const originalClearInterval = window.clearInterval;
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    intervalClock = {
+      originalSetInterval,
+      originalClearInterval,
+      setInterval: window.setInterval,
+      clearInterval: window.clearInterval,
+    };
+  }
   host = document.createElement("div");
   // Observe the exact real engine owners without replacing their behavior.
   // These are state/resource receipts, not frame, pixel or animation samples:
@@ -456,8 +518,9 @@ function createAmbianceFixture(context: TestContext): AmbianceFixture {
 async function withAmbianceFixture(
   context: TestContext,
   body: (fixture: AmbianceFixture) => Promise<void>,
+  options: AmbianceFixtureOptions = {},
 ): Promise<void> {
-  const fixture = createAmbianceFixture(context);
+  const fixture = createAmbianceFixture(context, options);
   let bodyFailed = false;
   try {
     await body(fixture);
@@ -555,33 +618,45 @@ describe("AmbianceLayer effect switching", () => {
           activityByThreadId: {},
         },
       });
-      await withAmbianceFixture(context, async (fixture) => {
-        await fixture.render();
-        const firstCanvas = canvasOf(fixture.host);
-        const predecessor = fixture.engines[0];
-        expect(predecessor?.session).toBe("running");
-        expect(predecessor?.holding).toBe(true);
-        expect(predecessor?.ringReads).toBeGreaterThan(0);
+      await withAmbianceFixture(
+        context,
+        async (fixture) => {
+          await fixture.render();
+          const firstCanvas = canvasOf(fixture.host);
+          const predecessor = fixture.engines[0];
+          expect(predecessor?.session).toBe("running");
+          expect(predecessor?.holding).toBe(true);
+          expect(predecessor?.ringReads).toBeGreaterThan(0);
 
-        // Only the effect changes. Session/request state stays identical, so
-        // the new native resource must acquire those existing levels itself.
-        selectEffect("aurora");
-        await fixture.poll(() =>
-          vi.waitFor(() => {
-            fixture.assertLive();
-            const replacement = fixture.engines.find((engine) => engine !== predecessor);
-            expect(canvasOf(fixture.host)).not.toBe(firstCanvas);
-            expect(predecessor?.disposed).toBe(true);
-            expect(replacement?.disposed).toBe(false);
-            expect(replacement?.session).toBe("running");
-            expect(replacement?.holding).toBe(true);
-            // Initial sync alone does not cross a timer boundary. Observe the
-            // replacement's own interval before checking retired-owner reads.
-            expect(replacement?.ringReads).toBeGreaterThan(1);
-            expect(predecessor?.retiredRingReads).toBe(0);
-          }),
-        );
-      });
+          // Only the effect changes. Session/request state stays identical, so
+          // the new native resource must acquire those existing levels itself.
+          selectEffect("aurora");
+          const replacement = await fixture.poll(() =>
+            vi.waitFor(() => {
+              fixture.assertLive();
+              const replacement = fixture.engines.find((engine) => engine !== predecessor);
+              expect(canvasOf(fixture.host)).not.toBe(firstCanvas);
+              expect(predecessor?.disposed).toBe(true);
+              expect(replacement?.disposed).toBe(false);
+              expect(replacement?.session).toBe("running");
+              expect(replacement?.holding).toBe(true);
+              return replacement;
+            }),
+          );
+          // Readiness retains its original one-second poll. Once the actual
+          // replacement is ready, deliver its pending interval callbacks in
+          // one controlled step instead of sampling native timer progress.
+          // The read delta proves callback ownership even if waitFor advanced
+          // fake intervals while acquiring readiness; it is not pixel, CPU or
+          // native elapsed-time evidence.
+          const readsBeforeDelivery = replacement?.ringReads ?? 0;
+          fixture.runPendingIntervals();
+          expect(replacement?.ringReads).toBeGreaterThan(readsBeforeDelivery);
+          expect(replacement?.ringReads).toBeGreaterThan(1);
+          expect(predecessor?.retiredRingReads).toBe(0);
+        },
+        { controlledIntervals: true },
+      );
     },
   );
   it("rebuilds the canvas when switching between two shader effects", async (context) => {

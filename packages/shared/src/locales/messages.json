@@ -4739,7 +4739,7 @@
     "locations": [
       "apps/web/src/components/ProviderUsageResetButton.tsx:307",
       "apps/web/src/components/atrium/TaskAtrium.tsx:703",
-      "apps/web/src/components/atrium/taskAtriumData.ts:256",
+      "apps/web/src/components/atrium/taskAtriumData.ts:262",
       "apps/web/src/components/chat/GlideSetupDialog.tsx:274",
       "apps/web/src/components/chat/WorkflowTasks.tsx:21",
       "apps/web/src/components/settings/ConnectionsSettings.tsx:766",
@@ -11939,7 +11939,7 @@
     "locations": [
       "apps/server/src/glide/trayPresentation.ts:29",
       "apps/web/src/components/atrium/TaskAtrium.tsx:702",
-      "apps/web/src/components/atrium/taskAtriumData.ts:255",
+      "apps/web/src/components/atrium/taskAtriumData.ts:261",
       "apps/web/src/components/chat/SubagentDetailView.tsx:144",
       "apps/web/src/components/chat/WorkflowTasks.tsx:30",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:30",
@@ -13774,7 +13774,7 @@
   },
   "Untitled chat": {
     "message": "Untitled chat",
-    "locations": ["apps/web/src/components/atrium/taskAtriumData.ts:562"]
+    "locations": ["apps/web/src/components/atrium/taskAtriumData.ts:570"]
   },
   "Untitled phase": {
     "message": "Untitled phase",
@@ -14371,7 +14371,7 @@
     "message": "Waiting",
     "locations": [
       "apps/web/src/components/atrium/TaskAtrium.tsx:694",
-      "apps/web/src/components/atrium/taskAtriumData.ts:251",
+      "apps/web/src/components/atrium/taskAtriumData.ts:257",
       "apps/web/src/components/chat/ChatComposer.tsx:452",
       "apps/web/src/components/chat/SubagentDetailView.tsx:134",
       "apps/web/src/components/chat/WorkflowTasks.tsx:15",
@@ -14603,7 +14603,7 @@
       "apps/web/src/components/Sidebar.logic.ts:168",
       "apps/web/src/components/atrium/TaskAtrium.tsx:135",
       "apps/web/src/components/atrium/TaskAtrium.tsx:696",
-      "apps/web/src/components/atrium/taskAtriumData.ts:253",
+      "apps/web/src/components/atrium/taskAtriumData.ts:259",
       "apps/web/src/components/chat/SubagentDetailView.tsx:136",
       "apps/web/src/components/chat/WorkflowTasks.tsx:18",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:24",
@@ -15924,7 +15924,7 @@
   "{hours}h {minutes}m": {
     "message": "{hours}h {minutes}m",
     "locations": [
-      "apps/web/src/components/atrium/taskAtriumData.ts:623",
+      "apps/web/src/components/atrium/taskAtriumData.ts:631",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:96"
     ]
   },
@@ -16004,7 +16004,7 @@
   "{minutes}m {seconds}s": {
     "message": "{minutes}m {seconds}s",
     "locations": [
-      "apps/web/src/components/atrium/taskAtriumData.ts:618",
+      "apps/web/src/components/atrium/taskAtriumData.ts:626",
       "apps/web/src/components/settings/usageStatsPresentation.ts:38"
     ]
   },
@@ -16153,7 +16153,7 @@
   "{seconds}s": {
     "message": "{seconds}s",
     "locations": [
-      "apps/web/src/components/atrium/taskAtriumData.ts:615",
+      "apps/web/src/components/atrium/taskAtriumData.ts:623",
       "apps/web/src/components/chat/ConnectionStatusIndicator.tsx:63",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:105",
       "apps/web/src/components/settings/usageStatsPresentation.ts:39",

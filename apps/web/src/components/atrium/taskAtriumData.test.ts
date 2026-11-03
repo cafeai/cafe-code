@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { ProviderInstanceId, SubagentRuntimeId, TurnId } from "@cafecode/contracts";
 import type {
   EnvironmentId,
   EventId,
   OrchestrationThreadActivity,
   ProjectId,
+  ProviderTaskControlCapability,
   ProviderTurnConfiguration,
   TaskAtriumErrorDismissal,
   ThreadId,
-  TurnId,
 } from "@cafecode/contracts";
 
 import type { AppState } from "../../store";
@@ -92,7 +93,9 @@ function activity(
       payload.subagent && typeof payload.subagent === "object"
         ? { ...payload, subagent: { runtimeId: "native-runtime-a", ...payload.subagent } }
         : payload,
-    turnId: null,
+    // Ordinary history belongs to the fixture's root. Inter-root native cases
+    // must explicitly override this with null and provide their exact owner.
+    turnId: TurnId.make("turn-1"),
     createdAt: new Date(NOW - 1000).toISOString(),
   } as OrchestrationThreadActivity;
 }
@@ -730,6 +733,274 @@ describe("selectAtriumSnapshot", () => {
       "first-turn-start",
     ]);
     expect(new Set(snapshot.cards[0]?.subagents.map((subagent) => subagent.rowKey)).size).toBe(2);
+  });
+
+  describe("current native agent membership", () => {
+    const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000201");
+    const foreignRuntimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000202");
+    const firstTurn = TurnId.make("native-first-root");
+    const nextTurn = TurnId.make("native-next-root");
+    const oldControl: ProviderTaskControlCapability = {
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      taskGeneration: "00000000-0000-4000-8000-000000000211",
+      canStop: true,
+      canBackground: false,
+    };
+    const newControl: ProviderTaskControlCapability = {
+      ...oldControl,
+      taskGeneration: "00000000-0000-4000-8000-000000000212",
+    };
+    const otherControl: ProviderTaskControlCapability = {
+      ...oldControl,
+      taskGeneration: "00000000-0000-4000-8000-000000000213",
+    };
+
+    function started(input: {
+      id: string;
+      childId: string;
+      turnId: TurnId;
+      sequence: number;
+      historyId: string;
+      taskControl: ProviderTaskControlCapability;
+    }): OrchestrationThreadActivity {
+      return {
+        ...activity(input.id, "task.started", "Native worker started", {
+          taskId: input.childId,
+          subagent: {
+            threadId: input.childId,
+            runtimeId,
+            label: input.childId,
+            status: "active",
+            historyId: input.historyId,
+            taskControl: input.taskControl,
+          },
+        }),
+        turnId: input.turnId,
+        sequence: input.sequence,
+        createdAt: new Date(NOW - 10_000 + input.sequence * 1_000).toISOString(),
+      };
+    }
+
+    function nativeState(activities: OrchestrationThreadActivity[], turnId: TurnId): AppState {
+      const state = buildState({ activities, turnId });
+      const summary = state.environmentStateById[ENV]!.sidebarThreadSummaryById[THREAD]!;
+      summary.session = { ...summary.session!, subagentRuntimeId: runtimeId };
+      return state;
+    }
+
+    it.each(["full", "descriptor-free"] as const)(
+      "settles an exact worker from a %s terminal while preserving its independent sibling",
+      (terminalShape) => {
+        const first = started({
+          id: "first-start",
+          childId: "child-a",
+          turnId: firstTurn,
+          sequence: 1,
+          historyId: "first-exact-history",
+          taskControl: oldControl,
+        });
+        const sibling = started({
+          id: "sibling-start",
+          childId: "child-b",
+          turnId: firstTurn,
+          sequence: 2,
+          historyId: "sibling-exact-history",
+          taskControl: otherControl,
+        });
+        expect(
+          selectAtriumSnapshot(nativeState([first, sibling], firstTurn), NOW).subagentCount,
+        ).toBe(2);
+        const terminal: OrchestrationThreadActivity = {
+          ...activity("first-terminal", "task.completed", "Native worker completed", {
+            taskId: "child-a",
+            nativeWorkRuntimeId: runtimeId,
+            status: "completed",
+            ...(terminalShape === "full"
+              ? {
+                  subagent: {
+                    threadId: "child-a",
+                    runtimeId,
+                    historyId: "first-exact-history",
+                    label: "child-a",
+                    status: "completed",
+                  },
+                }
+              : {}),
+          }),
+          turnId: firstTurn,
+          sequence: 3,
+          createdAt: new Date(NOW - 7_000).toISOString(),
+        };
+        const state = nativeState([first, sibling, terminal], firstTurn);
+        const before = structuredClone(state);
+        const snapshot = selectAtriumSnapshot(state, NOW);
+        expect(snapshot.subagentCount).toBe(1);
+        const rows = snapshot.cards[0]!.subagents;
+        expect(rows).toHaveLength(2);
+        const settled = rows.find((row) => row.id === "child-a");
+        expect(settled).toMatchObject({
+          rowKey: "first-start",
+          status: "completed",
+          running: false,
+          completedAt: NOW - 7_000,
+          activity: { turnId: firstTurn, historyId: "first-exact-history", runtimeId },
+        });
+        expect(settled?.activity.taskControl).toBeUndefined();
+        expect(rows.find((row) => row.id === "child-b")).toMatchObject({
+          rowKey: "sibling-start",
+          status: "active",
+          running: true,
+          completedAt: null,
+          activity: {
+            turnId: firstTurn,
+            historyId: "sibling-exact-history",
+            runtimeId,
+            taskControl: otherControl,
+          },
+        });
+        expect(state).toEqual(before);
+      },
+    );
+
+    it("counts the current native incarnation after late old-root progress without losing either history owner", () => {
+      const old = started({
+        id: "old-root-start",
+        childId: "reused-child",
+        turnId: firstTurn,
+        sequence: 1,
+        historyId: "old-root-history",
+        taskControl: oldControl,
+      });
+      const replacement = started({
+        id: "new-root-start",
+        childId: "reused-child",
+        turnId: nextTurn,
+        sequence: 2,
+        historyId: "new-root-history",
+        taskControl: newControl,
+      });
+      const sibling = started({
+        id: "independent-start",
+        childId: "independent-child",
+        turnId: nextTurn,
+        sequence: 3,
+        historyId: "independent-history",
+        taskControl: otherControl,
+      });
+      const lateOld: OrchestrationThreadActivity = {
+        ...activity("late-old-root", "task.progress", "Late old-root metadata", {
+          taskId: "reused-child",
+          subagent: {
+            threadId: "reused-child",
+            runtimeId,
+            label: "reused-child",
+            status: "active",
+            historyId: "old-root-history",
+            taskControl: oldControl,
+          },
+        }),
+        turnId: firstTurn,
+        sequence: 4,
+        createdAt: new Date(NOW - 6_000).toISOString(),
+      };
+      const state = nativeState([old, replacement, sibling, lateOld], nextTurn);
+      const before = structuredClone(state);
+      const snapshot = selectAtriumSnapshot(state, NOW);
+      expect(snapshot.subagentCount).toBe(2);
+      const rows = snapshot.cards[0]!.subagents;
+      expect(rows).toHaveLength(3);
+      expect(rows.find((row) => row.rowKey === "old-root-start")).toMatchObject({
+        status: "active",
+        running: false,
+        completedAt: null,
+        activity: { turnId: firstTurn, historyId: "old-root-history", taskControl: oldControl },
+      });
+      expect(rows.find((row) => row.rowKey === "new-root-start")).toMatchObject({
+        status: "active",
+        running: true,
+        completedAt: null,
+        activity: { turnId: nextTurn, historyId: "new-root-history", taskControl: newControl },
+      });
+      expect(rows.find((row) => row.id === "independent-child")).toMatchObject({
+        running: true,
+        activity: { historyId: "independent-history", taskControl: otherControl },
+      });
+      expect(state).toEqual(before);
+    });
+
+    it("refreshes cached running membership from exact-runtime source hints without erasing history", () => {
+      const activities = [
+        started({
+          id: "hint-a-start",
+          childId: "child-a",
+          turnId: firstTurn,
+          sequence: 1,
+          historyId: "hint-a-history",
+          taskControl: oldControl,
+        }),
+        started({
+          id: "hint-b-start",
+          childId: "child-b",
+          turnId: firstTurn,
+          sequence: 2,
+          historyId: "hint-b-history",
+          taskControl: otherControl,
+        }),
+      ];
+      const state = nativeState(activities, firstTurn);
+      const before = structuredClone(activities);
+      const summary = state.environmentStateById[ENV]!.sidebarThreadSummaryById[THREAD]!;
+      const expectRunning = (ids: string[]) => {
+        const snapshot = selectAtriumSnapshot(state, NOW);
+        expect(snapshot.subagentCount).toBe(ids.length);
+        const rows = snapshot.cards[0]!.subagents;
+        expect(rows).toHaveLength(2);
+        expect(rows.filter((row) => row.running).map((row) => row.id)).toEqual(ids);
+        expect(rows.find((row) => row.id === "child-a")).toMatchObject({
+          status: "active",
+          completedAt: null,
+          activity: { turnId: firstTurn, historyId: "hint-a-history", taskControl: oldControl },
+        });
+        expect(rows.find((row) => row.id === "child-b")).toMatchObject({
+          status: "active",
+          completedAt: null,
+          activity: { turnId: firstTurn, historyId: "hint-b-history", taskControl: otherControl },
+        });
+      };
+      summary.liveWork = {
+        runtimeId,
+        taskCount: 1,
+        agentCount: 1,
+        unconfirmedAgentIds: ["child-a"],
+      };
+      expectRunning(["child-b"]);
+      // Activities, runtime, count and clock are identical. Only source-hint
+      // identity changes, so an activity-only cache must not retain child B.
+      summary.liveWork = {
+        runtimeId,
+        taskCount: 1,
+        agentCount: 1,
+        unconfirmedAgentIds: ["child-b"],
+      };
+      expectRunning(["child-a"]);
+      summary.liveWork = { ...summary.liveWork, unconfirmedAgentIdsTruncated: true };
+      expectRunning([]);
+      // Even zero/overflow evidence from another runtime has no authority over
+      // the exact current owner whose historical rows are still retained.
+      summary.liveWork = {
+        runtimeId: foreignRuntimeId,
+        taskCount: 0,
+        agentCount: 0,
+        unconfirmedAgentIds: ["child-a"],
+        unconfirmedAgentIdsTruncated: true,
+      };
+      expectRunning(["child-a", "child-b"]);
+      summary.liveWork = { runtimeId, taskCount: 0, agentCount: 0 };
+      expectRunning([]);
+      summary.liveWork = { runtimeId, taskCount: 2, agentCount: 2 };
+      expectRunning(["child-a", "child-b"]);
+      expect(activities).toEqual(before);
+    });
   });
 
   it("settles a legacy child row when its owning turn is terminal", () => {
