@@ -15999,7 +15999,7 @@ describe("ClaudeAdapterLive", () => {
             is_error: true,
             num_turns: 0,
             errors: ["Invalid retired configuration"],
-            startup_failure_reason: "config_file_invalid",
+            startup_failure_reason: "config_file_invalid" as const,
             result_index: 2,
             credential_expires_at: "2026-12-01T00:00:00.000Z",
           });
