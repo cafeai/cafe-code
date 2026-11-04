@@ -141,6 +141,14 @@ queryLayer("indexed historical question reads", (it) => {
         assert.equal(Object.hasOwn(context, "checkpoints"), false);
         assert.equal(context.pendingRequestRetentionTruncated, false);
 
+        // Invalid admission must be a typed query refusal, never a defect or
+        // an unbounded/clamped database read.
+        for (const limit of [0, 65, Number.NaN, Number.POSITIVE_INFINITY]) {
+          const refusal = yield* query
+            .getThreadAsyncQuestionActivitiesPage({ threadId, limit })
+            .pipe(Effect.flip);
+          assert.equal(refusal._tag, "PersistenceDecodeError");
+        }
         const first = yield* query.getThreadAsyncQuestionActivitiesPage({ threadId, limit: 2 });
         assert.deepEqual(first.activities, []);
         assert.equal(first.omittedCount, 2);
@@ -341,7 +349,10 @@ queryLayer("indexed historical question reads", (it) => {
           retainedNotices.map((row) => row.id),
           ["budget-y-newer", "budget-z-recent"],
         );
-        assert.deepEqual(retainedNotices[0]!.payload, JSON.parse(largePayload));
+        assert.deepEqual(
+          retainedNotices[0]!.payload,
+          Schema.decodeUnknownSync(Schema.UnknownFromJsonString)(largePayload),
+        );
         assert.equal(budgetDetail.pendingRequestRetentionTruncated, false);
       }),
   );

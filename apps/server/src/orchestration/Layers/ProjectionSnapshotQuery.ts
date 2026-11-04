@@ -60,6 +60,7 @@ import { readThreadForkSourceVersion } from "../threadForkSourceVersion.ts";
 
 import {
   isPersistenceError,
+  PersistenceDecodeError,
   toPersistenceDecodeError,
   toPersistenceSqlError,
   type ProjectionRepositoryError,
@@ -5584,11 +5585,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       Effect.gen(function* () {
         const limit = input.limit ?? 20;
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64)
-          return yield* Effect.fail(
-            toPersistenceDecodeError("ProjectionSnapshotQuery.questionPage:limit")(
-              new Error("Question pages require a finite limit from 1 to 64."),
-            ),
-          );
+          return yield* new PersistenceDecodeError({
+            operation: "ProjectionSnapshotQuery.questionPage:limit",
+            issue: "Question pages require a finite limit from 1 to 64.",
+          });
         const before =
           input.before === undefined
             ? undefined
