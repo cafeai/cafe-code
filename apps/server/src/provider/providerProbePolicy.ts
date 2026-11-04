@@ -1,4 +1,5 @@
 import type { ServerProvider } from "@cafecode/contracts";
+import { withoutClaudeCredentialExpiry } from "./claudeCredentialExpiry.ts";
 
 /**
  * Two isolated inconclusive probes retain a known-good provider presentation;
@@ -49,7 +50,9 @@ export const retainConclusiveProviderState = (
   return {
     ...inconclusiveWithoutPresentation,
     status: previous.status,
-    auth: previous.auth,
+    // Retain the authenticated label under this existing bounded policy;
+    // native query expiry is reprojected only by its still-live owning driver.
+    auth: withoutClaudeCredentialExpiry(previous).auth,
     // `checkedAt` describes the public status/auth assertion. Keep its last
     // conclusive timestamp; the separate probe diagnostics record exactly
     // when the inconclusive attempt ran and how long it took.

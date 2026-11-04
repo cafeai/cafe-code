@@ -138,7 +138,7 @@ const fixture = (
     );
     const runtime = yield* makeCodexSessionRuntime({
       threadId: ThreadId.make("synthetic-cafe-thread"),
-      binaryPath: "never-launched-provider",
+      binaryPath: "/test-only/never-launched-provider.exe",
       environment: {},
       cwd: process.cwd(),
       runtimeMode: "full-access",

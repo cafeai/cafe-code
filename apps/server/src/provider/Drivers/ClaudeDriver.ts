@@ -61,6 +61,7 @@ import { CLAUDE_PROVIDER_MAINTENANCE } from "../claudeMaintenance.ts";
 import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
 import { makeClaudeAuthenticationEnvironment } from "./ClaudeAuthenticationEnvironment.ts";
 import { makeClaudeAccountQuotaReader } from "../claudeAccountQuota.ts";
+import { makeClaudeCredentialExpiry } from "../claudeCredentialExpiry.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
@@ -196,6 +197,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       // flip, re-run the snapshot check immediately so the provider tile
       // shows needs-login (or recovers) without waiting for the periodic
       // refresh.
+      // Result expiry stays a volatile level of exact live query owners. It
+      // neither selects an auth environment nor requests another native probe.
+      const credentialExpiry = yield* makeClaudeCredentialExpiry();
       const authFailureRef = yield* Ref.make(false);
       const snapshotRefreshRef = yield* Ref.make<Effect.Effect<unknown> | undefined>(undefined);
       const scope = yield* Effect.scope;
@@ -228,6 +232,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         resolveEnvironment,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         onAuthStatusChanged,
+        onCredentialExpiryOwner: credentialExpiry.onOwner,
         getModelCapabilities: (model: string) =>
           Ref.get(nativeModelsRef).pipe(
             Effect.map((models) =>
@@ -278,7 +283,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         Effect.provideService(Path.Path, path),
       );
 
-      const snapshot = yield* makeManagedServerProvider<ClaudeSettings>({
+      const baseSnapshot = yield* makeManagedServerProvider<ClaudeSettings>({
         maintenanceCapabilities,
         getSettings: Effect.succeed(effectiveConfig),
         streamSettings: Stream.never,
@@ -310,6 +315,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         ),
       );
 
+      const snapshot = credentialExpiry.decorate(baseSnapshot);
       yield* Ref.set(snapshotRefreshRef, snapshot.refresh);
 
       return {

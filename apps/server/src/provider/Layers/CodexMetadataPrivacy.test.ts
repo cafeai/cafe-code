@@ -43,7 +43,7 @@ it("never logs rejected private metadata wire JSON through the real disposable d
   await Effect.runPromise(
     withCodexMetadataClient(
       {
-        binaryPath: "synthetic-no-process",
+        binaryPath: "/test-only/synthetic-no-process.exe",
         cwd: "synthetic-cwd",
         environment: {},
       },

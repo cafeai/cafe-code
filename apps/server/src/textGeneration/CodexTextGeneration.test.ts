@@ -3,6 +3,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { writeFileSync } from "node:fs";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Cause from "effect/Cause";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -327,7 +329,13 @@ function withFakeCodexCli<A, E, R>(
       // its exact freshly generated executable; no ambient provider command
       // can reach the real spawner if a future test accidentally changes the
       // settings. Keep argv, stdin, cwd and native/batch shell policy intact.
-      if (command._tag !== "StandardCommand" || command.command !== codexPath) {
+      const admittedPath =
+        command._tag === "StandardCommand" && process.platform === "win32"
+          ? command.command.replace(/\^(.)/gu, "$1")
+          : command._tag === "StandardCommand"
+            ? command.command
+            : undefined;
+      if (command._tag !== "StandardCommand" || admittedPath !== codexPath) {
         return Effect.die(new Error("Unexpected synthetic Codex fixture command."));
       }
       const commandEnvironment = command.options.env ?? {};
@@ -369,6 +377,15 @@ type CapturedCodexCommand = {
   };
 };
 
+// This mock represents the native peer after cmd.exe and %* forwarding.
+// Real Windows client fixtures separately verify the transport round trip.
+function decodeBatchFixtureArgument(value: string): string {
+  const quoted = value.replace(/\^(.)/gu, "$1").replace(/\^(.)/gu, "$1");
+  return quoted
+    .slice(1, -1)
+    .replace(/(\\+)(?="|$)/gu, (slashes) => "\\".repeat(Math.floor(slashes.length / 2)));
+}
+
 function makeCodexHandle(input: { stdout?: string; stderr?: string; exitCode?: number }) {
   const encoder = new TextEncoder();
   return ChildProcessSpawner.makeHandle({
@@ -408,11 +425,24 @@ function withFakeCodexSpawner<A, E, R>(
   effectFn: (textGeneration: TextGenerationShape) => Effect.Effect<A, E, R>,
 ) {
   return Effect.gen(function* () {
-    const binaryPath = input.binaryPath ?? "fake-codex";
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const fixtureRoot = yield* fs.makeTempDirectoryScoped({ prefix: "cafe-mocked-codex-command-" });
+    // Every mocked launch has an explicit absent native spelling, so the
+    // Windows resolver never scans an ambient provider PATH before interception.
+    const binaryPath = input.binaryPath ?? path.join(fixtureRoot, "absent-codex.exe");
     const config = decodeCodexSettings({ binaryPath, homePath: input.homePath ?? "" });
     const spawner = ChildProcessSpawner.make((unknownCommand) =>
       Effect.gen(function* () {
-        const command = unknownCommand as unknown as CapturedCodexCommand;
+        const transported = unknownCommand as unknown as CapturedCodexCommand;
+        const batch = process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(binaryPath);
+        const command = batch
+          ? {
+              ...transported,
+              command: transported.command.replace(/\^(.)/gu, "$1"),
+              args: transported.args.map(decodeBatchFixtureArgument),
+            }
+          : transported;
         const prompt = command.options.stdin?.stream
           ? yield* command.options.stdin.stream.pipe(
               Stream.decodeText(),
@@ -501,6 +531,8 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
         const environment = {
           CAFE_CODE_EXEC_FIXTURE: "synthetic",
           CODEX_HOME: path.join(fixtureRoot, "unused-environment-home"),
+          PATH: "",
+          NoDefaultCurrentDirectoryInExePath: "1",
         };
         const message = 'Preserve "quotes", & | < > %PATH% !VALUE! ^ and 日本語.';
         const modelSelection = createModelSelection(
@@ -512,7 +544,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           ],
         );
         let commandCount = 0;
-        const generated = yield* withFakeCodexSpawner(
+        const generation = withFakeCodexSpawner(
           {
             binaryPath,
             homePath,
@@ -523,7 +555,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
               // Exercise the real text-generation builder with an in-memory
               // process. Native executable paths must retain structured argv,
               // including metacharacters in paths and literal stdin, while
-              // batch/bare commands keep the host's established shell policy.
+              // recognized batch shims keep their shared forwarding policy.
               expect(command.options.shell).toBe(
                 process.platform === "win32" && fixture.windowsUsesShell,
               );
@@ -565,6 +597,15 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           },
           (generation) => generation.generateThreadTitle({ cwd, message, modelSelection }),
         );
+        if (process.platform === "win32" && fixture.filename === undefined) {
+          const result = yield* generation.pipe(Effect.exit);
+          expect(commandCount).toBe(0);
+          if (Exit.isSuccess(result)) return expect.fail("Expected command preparation failure");
+          expect(Cause.squash(result.cause)).toBeInstanceOf(TextGenerationError);
+          expect(environment.CODEX_HOME).toBe(path.join(fixtureRoot, "unused-environment-home"));
+          return;
+        }
+        const generated = yield* generation;
         expect(generated.title).toBe("Preserve structured metadata input");
         expect(commandCount).toBe(1);
         expect(environment.CODEX_HOME).toBe(path.join(fixtureRoot, "unused-environment-home"));

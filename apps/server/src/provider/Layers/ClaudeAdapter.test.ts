@@ -4,7 +4,10 @@ import { GENERATED_VISUALIZATION_INSTRUCTIONS } from "../../visualizations/mcp.t
 import { installVisualizationSessionRuntime } from "../../visualizations/sessionRuntime.ts";
 import { installGlideSessionRuntime } from "../../glide/sessionRuntime.ts";
 import { buildCafeInstructions } from "../CafeInstructions.ts";
-import { deriveProviderDiagnosticCategory } from "@cafecode/shared/providerDiagnostic";
+import {
+  deriveProviderDiagnosticCategory,
+  readProviderDiagnosticErrorBody,
+} from "@cafecode/shared/providerDiagnostic";
 import { providerDiagnosticOccurrenceKey } from "../../persistence/Layers/ProviderActivityDiagnostics.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import {
@@ -411,6 +414,7 @@ function makeHarness(config?: {
   readonly instanceId?: ProviderInstanceId;
   readonly createQueryError?: Error;
   readonly onAuthStatusChanged?: ClaudeAdapterLiveOptions["onAuthStatusChanged"];
+  readonly onCredentialExpiryOwner?: ClaudeAdapterLiveOptions["onCredentialExpiryOwner"];
   readonly forkNativeSession?: ClaudeAdapterLiveOptions["forkNativeSession"];
   readonly deleteNativeSession?: ClaudeAdapterLiveOptions["deleteNativeSession"];
   readonly listNativeSubagents?: ClaudeAdapterLiveOptions["listNativeSubagents"];
@@ -462,6 +466,9 @@ function makeHarness(config?: {
       ? {
           onAuthStatusChanged: config.onAuthStatusChanged,
         }
+      : {}),
+    ...(config?.onCredentialExpiryOwner
+      ? { onCredentialExpiryOwner: config.onCredentialExpiryOwner }
       : {}),
     ...(config?.forkNativeSession ? { forkNativeSession: config.forkNativeSession } : {}),
     ...(config?.deleteNativeSession ? { deleteNativeSession: config.deleteNativeSession } : {}),
@@ -15693,6 +15700,383 @@ describe("ClaudeAdapterLive", () => {
   );
 
   it.effect(
+    "observes ordered credential expiry only from an independently initialized primary query owner",
+    () => {
+      const observations: Array<{
+        readonly resultIndex: number;
+        readonly expiresAt: string | undefined;
+        readonly observedAt: string;
+      }> = [];
+      const owners: Array<() => boolean> = [];
+      const retiredWhileCurrent: boolean[] = [];
+      const harness = makeHarness({
+        onCredentialExpiryOwner: (isCurrent) =>
+          Effect.sync(() => {
+            owners.push(isCurrent);
+            return {
+              observe: (observation) =>
+                Effect.sync(() => {
+                  observations.push(observation);
+                }),
+              retire: Effect.sync(() => {
+                retiredWhileCurrent.push(isCurrent());
+              }),
+            };
+          }),
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({ threadId: THREAD_ID, runtimeMode: "full-access" });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "first" });
+        yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+        const nativeSession = "72000000-0000-4000-8000-000000000231";
+        const foreignSession = "72000000-0000-4000-8000-000000000232";
+        const resetSession = "72000000-0000-4000-8000-000000000234";
+        let fenceSession = nativeSession;
+        const firstExpiry = "2026-12-01T00:00:00.000Z";
+        const nextExpiry = "2026-12-02T00:00:00.000Z";
+        // A normal ordered native event fences each received frame. Waiting
+        // for an advisory callback would make the old implementation time out
+        // instead of exposing the missing observation as an ordinary failure.
+        const deliver = (message: SDKMessage) =>
+          Effect.gen(function* () {
+            const drained = yield* adapter.streamEvents.pipe(
+              Stream.filter(
+                (event) =>
+                  event.type === "session.state.changed" &&
+                  event.payload.reason === "session_state_changed:idle",
+              ),
+              Stream.runHead,
+              Effect.forkChild,
+            );
+            harness.query.emit(message);
+            harness.query.emit({
+              type: "system",
+              subtype: "session_state_changed",
+              state: "idle",
+              session_id: fenceSession,
+              uuid: "72000000-0000-4000-8000-000000000233",
+            });
+            yield* Fiber.join(drained);
+          });
+        const result = (resultIndex: number, expiresAt: string | undefined): SDKResultSuccess => ({
+          ...makeSuccessfulClaudeResult(nativeSession),
+          result_index: resultIndex,
+          ...(expiresAt === undefined ? {} : { credential_expires_at: expiresAt }),
+        });
+        // A result can adopt the ordinary mutable cursor; that is deliberately
+        // insufficient to establish the new advisory's independent init owner.
+        yield* deliver(result(99, nextExpiry));
+        assert.deepEqual(observations, []);
+        emitWorkflowFixtureInit(harness.query, "2.1.318", nativeSession);
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "session.configured"),
+          Stream.runHead,
+        );
+        yield* deliver(result(0, firstExpiry));
+        assert.deepEqual(
+          observations.map(({ resultIndex, expiresAt }) => ({ resultIndex, expiresAt })),
+          [{ resultIndex: 0, expiresAt: firstExpiry }],
+        );
+        assert.equal(owners.length, 1);
+        assert.equal(owners[0]!(), true);
+        // Legacy/unnumbered, fractional, negative and unsafe indices cannot
+        // clear a known advisory or establish an ordering watermark.
+        yield* deliver({
+          ...makeSuccessfulClaudeResult(nativeSession),
+          credential_expires_at: nextExpiry,
+        });
+        for (const result_index of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+          yield* deliver({ ...result(0, nextExpiry), result_index });
+        }
+        yield* deliver(result(0, nextExpiry));
+        yield* deliver({ ...result(1000, nextExpiry), session_id: foreignSession });
+        for (const scope of [
+          "parent_tool_use_id",
+          "task_id",
+          "parent_task_id",
+          "run_id",
+          "agent_id",
+          "subagent_id",
+        ]) {
+          yield* deliver({
+            ...result(1001, nextExpiry),
+            [scope]: "child-owner",
+          } as unknown as SDKMessage);
+        }
+        assert.equal(observations.length, 1);
+        // Error results carry the same advisory contract; observing a date
+        // neither changes the failure nor turns it into a login verdict.
+        const { result: _text, ...errorFields } = result(1, nextExpiry);
+        yield* deliver({
+          ...errorFields,
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["Synthetic provider failure"],
+        });
+        yield* deliver(result(2, undefined));
+        const malformed = result(4, "not-an-instant");
+        yield* deliver(malformed);
+        yield* deliver(result(3, firstExpiry));
+        // Repeated same-owner init must not reset result ordering.
+        emitWorkflowFixtureInit(harness.query, "2.1.318", nativeSession);
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "session.configured"),
+          Stream.runHead,
+        );
+        yield* deliver(result(3, nextExpiry));
+        yield* deliver(result(5, firstExpiry));
+        assert.deepEqual(
+          observations.map(({ resultIndex, expiresAt }) => ({ resultIndex, expiresAt })),
+          [
+            { resultIndex: 0, expiresAt: firstExpiry },
+            { resultIndex: 1, expiresAt: nextExpiry },
+            { resultIndex: 2, expiresAt: undefined },
+            { resultIndex: 5, expiresAt: firstExpiry },
+          ],
+        );
+        assert.equal(owners.length, 1);
+        // Numbering is process/run-wide. A new conversation init gets a new
+        // lease, but /clear must not let an older result number be replayed.
+        yield* deliver({
+          type: "conversation_reset",
+          session_id: nativeSession,
+          new_conversation_id: resetSession,
+          uuid: "72000000-0000-4000-8000-000000000235",
+        });
+        fenceSession = resetSession;
+        emitWorkflowFixtureInit(harness.query, "2.1.318", resetSession);
+        yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "session.configured"),
+          Stream.runHead,
+        );
+        yield* deliver({ ...result(4, nextExpiry), session_id: resetSession });
+        assert.equal(observations.length, 4);
+        yield* deliver({ ...result(6, nextExpiry), session_id: resetSession });
+        assert.deepEqual(
+          observations.map(({ resultIndex, expiresAt }) => ({ resultIndex, expiresAt })),
+          [
+            { resultIndex: 0, expiresAt: firstExpiry },
+            { resultIndex: 1, expiresAt: nextExpiry },
+            { resultIndex: 2, expiresAt: undefined },
+            { resultIndex: 5, expiresAt: firstExpiry },
+            { resultIndex: 6, expiresAt: nextExpiry },
+          ],
+        );
+        assert.equal(owners.length, 2);
+        assert.equal(owners[0]!(), false);
+        assert.equal(owners[1]!(), true);
+        yield* adapter.stopSession(THREAD_ID);
+        assert.deepEqual(retiredWhileCurrent, [false, false]);
+        assert.equal(owners[0]!(), false);
+        assert.equal(harness.createInputs.length, 1);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect(
+    "does not evaluate malformed expiry slots or let a late old result overwrite a replacement query",
+    () =>
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const closed = yield* Deferred.make<void>();
+        const observations: Array<{
+          readonly owner: number;
+          readonly resultIndex: number;
+          readonly expiresAt: string | undefined;
+        }> = [];
+        const owners: Array<() => boolean> = [];
+        const retiredWhileCurrent: boolean[] = [];
+        const nativeLogs: unknown[] = [];
+        let getterReads = 0;
+        let hold = false;
+        const isResultLog = Schema.is(
+          Schema.Struct({
+            event: Schema.Struct({
+              method: Schema.Literals([
+                "claude/result/success",
+                "claude/result/error_during_execution",
+              ]),
+            }),
+          }),
+        );
+        const harness = makeHarness({
+          newQueryPerSession: true,
+          onCredentialExpiryOwner: (isCurrent) =>
+            Effect.sync(() => {
+              const owner = owners.length;
+              owners.push(isCurrent);
+              return {
+                observe: (observation) =>
+                  Effect.sync(() => {
+                    observations.push({ owner, ...observation });
+                  }),
+                retire: Effect.sync(() => {
+                  retiredWhileCurrent.push(isCurrent());
+                }),
+              };
+            }),
+          nativeEventLogger: {
+            filePath: "memory://credential-expiry-owner",
+            write: (entry) =>
+              Effect.sync(() => {
+                nativeLogs.push(entry);
+              }).pipe(
+                Effect.andThen(
+                  hold && isResultLog(entry)
+                    ? Deferred.succeed(entered, undefined).pipe(
+                        Effect.andThen(Deferred.await(release)),
+                        Effect.uninterruptible,
+                      )
+                    : Effect.void,
+                ),
+              ),
+            close: () => Effect.void,
+          },
+        });
+        const originalClose = harness.query.close;
+        const observer = vi.spyOn(harness.query, "close").mockImplementation(() => {
+          originalClose();
+          Effect.runSync(Deferred.succeed(closed, undefined));
+        });
+        yield* Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const original = yield* adapter.startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "full-access",
+          });
+          yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+          const nativeSession = "72000000-0000-4000-8000-000000000241";
+          const newNative = "72000000-0000-4000-8000-000000000242";
+          emitWorkflowFixtureInit(harness.query, "2.1.318", nativeSession);
+          yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "session.configured"),
+            Stream.runHead,
+          );
+          const malformed = Object.defineProperty(
+            {
+              ...makeSuccessfulClaudeResult(nativeSession),
+              result_index: 1,
+            },
+            "credential_expires_at",
+            {
+              enumerable: true,
+              get: () => {
+                getterReads += 1;
+                return "2026-12-01T00:00:00.000Z";
+              },
+            },
+          );
+          const malformedDrained = yield* adapter.streamEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "session.state.changed" &&
+                event.payload.reason === "session_state_changed:idle",
+            ),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          harness.query.emit(malformed);
+          harness.query.emit({
+            type: "system",
+            subtype: "session_state_changed",
+            state: "idle",
+            session_id: nativeSession,
+            uuid: "72000000-0000-4000-8000-000000000243",
+          });
+          yield* Fiber.join(malformedDrained);
+          assert.equal(getterReads, 0);
+          assert.deepEqual(observations, []);
+          yield* adapter.sendTurn({ threadId: THREAD_ID, input: "configuration failure fixture" });
+          yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+          hold = true;
+          const { result: _text, ...failureFields } = makeSuccessfulClaudeResult(nativeSession);
+          harness.query.emit({
+            ...failureFields,
+            subtype: "error_during_execution",
+            is_error: true,
+            num_turns: 0,
+            errors: ["Invalid retired configuration"],
+            startup_failure_reason: "config_file_invalid",
+            result_index: 2,
+            credential_expires_at: "2026-12-01T00:00:00.000Z",
+          });
+          yield* Deferred.await(entered);
+          hold = false;
+          const replacing = yield* adapter
+            .startSession({ threadId: THREAD_ID, runtimeMode: "full-access" })
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(closed);
+          if (owners[0]) assert.equal(owners[0](), false);
+          yield* Deferred.succeed(release, undefined);
+          const replacement = yield* Fiber.join(replacing);
+          assert.notEqual(replacement.subagentRuntimeId, original.subagentRuntimeId);
+          const query = harness.queries[1]!;
+          const retiredEvents = yield* adapter.streamEvents.pipe(
+            Stream.takeUntil(
+              (event) =>
+                event.type === "session.configured" && event.raw?.method === "claude/system/init",
+            ),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          emitWorkflowFixtureInit(query, "2.1.318", newNative);
+          const retired = yield* Fiber.join(retiredEvents);
+          assert.isFalse(
+            retired.some(
+              (event) =>
+                event.diagnostic &&
+                readProviderDiagnosticErrorBody(event.diagnostic.snapshot.json)
+                  ?.startupFailureReason === "config_file_invalid",
+            ),
+          );
+          const drained = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "turn.completed"),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          query.emit({
+            ...makeSuccessfulClaudeResult(newNative),
+            result_index: 0,
+            credential_expires_at: "2026-12-02T00:00:00.000Z",
+          });
+          yield* Fiber.join(drained);
+          assert.deepEqual(
+            observations.map(({ owner, resultIndex, expiresAt }) => ({
+              owner,
+              resultIndex,
+              expiresAt,
+            })),
+            [{ owner: 1, resultIndex: 0, expiresAt: "2026-12-02T00:00:00.000Z" }],
+          );
+          assert.equal(owners.length, 2);
+          assert.deepEqual(retiredWhileCurrent, [false]);
+          assert.isTrue(
+            nativeLogs.some(
+              Schema.is(
+                Schema.Struct({
+                  event: Schema.Struct({
+                    method: Schema.Literal("claude/result/error_during_execution"),
+                    payload: Schema.Struct({ result_index: Schema.Literal(2) }),
+                  }),
+                }),
+              ),
+            ),
+          );
+          assert.notInclude(encodeProviderJsonString(nativeLogs), "credential_expires_at");
+        }).pipe(
+          // Release the exact held logger before the scoped adapter finalizer
+          // joins its native reader, including cancellation and failed asserts.
+          Effect.ensuring(Deferred.succeed(release, undefined)),
+          Effect.ensuring(Effect.sync(() => observer.mockRestore())),
+          Effect.provide(harness.layer),
+        );
+      }),
+  );
+
+  it.effect(
     "reports lost session writes after a successful result without changing that result or exposing native details",
     () => {
       const nativeLogs: unknown[] = [];
@@ -17278,6 +17662,195 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect.each([
+    { kind: "structured", reason: "config_file_invalid", scope: undefined, guidance: true },
+    { kind: "unknown reason", reason: "future_config_failure", scope: undefined, guidance: false },
+    { kind: "prose lookalike", reason: undefined, scope: undefined, guidance: false },
+    {
+      kind: "child result",
+      reason: "config_file_invalid",
+      scope: "parent_tool_use_id",
+      guidance: false,
+    },
+    { kind: "agent result", reason: "config_file_invalid", scope: "agent_id", guidance: false },
+    {
+      kind: "subagent result",
+      reason: "config_file_invalid",
+      scope: "subagent_id",
+      guidance: false,
+    },
+    {
+      kind: "HTTP 401",
+      reason: "config_file_invalid",
+      scope: undefined,
+      guidance: false,
+      apiStatus: 401,
+    },
+    {
+      kind: "HTTP 403",
+      reason: "config_file_invalid",
+      scope: undefined,
+      guidance: false,
+      apiStatus: 403,
+    },
+    {
+      kind: "typed primary authentication",
+      reason: "config_file_invalid",
+      scope: undefined,
+      guidance: false,
+      primaryAuthError: "oauth_org_not_allowed" as const,
+    },
+  ])(
+    "explains a structured pre-init configuration failure without changing its failed result or durable cursor ($kind)",
+    ({ reason, scope, guidance, apiStatus, primaryAuthError }) => {
+      const authChanges: boolean[] = [];
+      const harness = makeHarness({
+        onAuthStatusChanged: (failed) =>
+          Effect.sync(() => {
+            authChanges.push(failed);
+          }),
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const durableSessionId = "550e8400-e29b-41d4-a716-446655440000";
+        const failedSessionId = "7368d0c7-40a3-4d8a-bcc1-ac80c49f2719";
+        const lifecycleError =
+          "config_file_invalid: Invalid Claude configuration at /private/config-fixture-marker.json";
+        const completed = yield* Deferred.make<ProviderRuntimeEvent>();
+        const exited = yield* Deferred.make<void>();
+        const childFrameDrained = yield* Deferred.make<void>();
+        const events: ProviderRuntimeEvent[] = [];
+        // This is one destructive queue. Keep one scoped consumer through
+        // both receipts: runHead followed by a new subscription can discard
+        // an exit already removed in the first consumer's native batch.
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) => {
+            if (event.threadId !== RESUME_THREAD_ID) return Effect.void;
+            events.push(event);
+            if (event.type === "turn.completed") return Deferred.succeed(completed, event);
+            if (event.type === "session.exited") return Deferred.succeed(exited, undefined);
+            if (
+              event.type === "session.state.changed" &&
+              event.payload.reason === "session_state_changed:idle"
+            )
+              return Deferred.succeed(childFrameDrained, undefined);
+            return Effect.void;
+          }),
+          Effect.forkChild,
+        );
+        const session = yield* adapter.startSession({
+          threadId: RESUME_THREAD_ID,
+          resumeCursor: { resume: durableSessionId, turnCount: 3 },
+          runtimeMode: "full-access",
+        });
+        const turn = yield* adapter.sendTurn({ threadId: session.threadId, input: "hello" });
+        const { result: _result, ...resultFields } = makeSuccessfulClaudeResult(failedSessionId);
+        if (primaryAuthError)
+          harness.query.emit(
+            makeClaudeResponseLimitAssistant({
+              sessionId: durableSessionId,
+              text: "Synthetic primary sign-in restriction",
+              error: primaryAuthError,
+            }),
+          );
+        const failureFields = {
+          ...resultFields,
+          subtype: "error_during_execution",
+          is_error: true,
+          num_turns: 0,
+          stop_reason: null,
+          errors: [lifecycleError],
+          ...(apiStatus === undefined ? {} : { api_error_status: apiStatus }),
+        };
+        harness.query.emit({
+          ...failureFields,
+          ...(reason === undefined ? {} : { startup_failure_reason: reason }),
+          ...(scope ? { [scope]: "child-config-owner" } : {}),
+        } as unknown as SDKMessage);
+        if (scope === "agent_id") {
+          // An unknown child on a foreign failed session is rejected before
+          // result handling. Observe an ordinary native idle frame behind it,
+          // rather than requiring that refused frame to finish the root turn.
+          harness.query.emit({
+            type: "system",
+            subtype: "session_state_changed",
+            state: "idle",
+            session_id: durableSessionId,
+            uuid: "72000000-0000-4000-8000-000000000251",
+          } as unknown as SDKMessage);
+          yield* Deferred.await(childFrameDrained);
+          assert.isFalse(events.some((event) => event.type === "turn.completed"));
+          assert.isFalse(
+            events.some(
+              (event) =>
+                event.diagnostic &&
+                readProviderDiagnosticErrorBody(event.diagnostic.snapshot.json)
+                  ?.startupFailureReason === "config_file_invalid",
+            ),
+          );
+          assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+          // This separate primary control owns fixture completion. Its native
+          // error is unchanged, but it deliberately makes no startup claim.
+          harness.query.emit(failureFields as unknown as SDKMessage);
+        }
+        const terminal = yield* Deferred.await(completed);
+        assert.equal(terminal.type, "turn.completed");
+        if (terminal.type !== "turn.completed")
+          return assert.fail("Expected the configuration failure's terminal result.");
+        assert.equal(terminal.turnId, turn.turnId);
+        assert.equal(terminal.payload.state, "failed");
+        // Recovery keeps its canonical native error. Only the diagnostic's
+        // presentation body uses fixed guidance and the closed native reason.
+        assert.equal(terminal.payload.errorMessage, lifecycleError);
+        assert.isDefined(terminal.diagnostic);
+        assert.deepEqual(
+          readProviderDiagnosticErrorBody(terminal.diagnostic!.snapshot.json),
+          guidance
+            ? {
+                message:
+                  "Claude could not start because a configuration file is invalid. Correct the Claude configuration before sending your message again.",
+                startupFailureReason: "config_file_invalid",
+              }
+            : {
+                message: lifecycleError,
+                ...(apiStatus === 401
+                  ? { errorType: "authentication_failed" }
+                  : primaryAuthError
+                    ? { errorType: primaryAuthError }
+                    : {}),
+                ...(apiStatus === undefined ? {} : { apiErrorStatus: apiStatus }),
+              },
+        );
+        if (guidance)
+          assert.notInclude(terminal.diagnostic!.snapshot.json, "config-fixture-marker");
+        const savedCursor = terminal.payload.resumeCursor as {
+          resume?: string;
+          turnCount?: number;
+        };
+        assert.equal(savedCursor.resume, durableSessionId);
+        assert.equal(savedCursor.turnCount, 3);
+        if (apiStatus === 401) {
+          // The contradictory native 401 retains its existing session
+          // retirement. The new presentation gate must not override it.
+          yield* Deferred.await(exited);
+          assert.equal(events.filter((event) => event.type === "session.exited").length, 1);
+          assert.deepEqual(yield* adapter.listSessions(), []);
+          assert.equal(harness.query.closeCalls, 1);
+        } else {
+          const current = (yield* adapter.listSessions())[0]!;
+          assert.deepEqual(current.resumeCursor, terminal.payload.resumeCursor);
+          assert.equal((current.resumeCursor as { resume?: string }).resume, durableSessionId);
+          assert.equal((current.resumeCursor as { turnCount?: number }).turnCount, 3);
+          assert.equal(current.lastError, lifecycleError);
+          assert.equal(harness.query.closeCalls, 0);
+        }
+        assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
+        assert.deepEqual(authChanges, []);
+        assert.equal(harness.createInputs.length, 1);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   it.effect("lets Claude allocate fresh session ids without persisting a zero-turn cursor", () => {
     const harness = makeHarness();

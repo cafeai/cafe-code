@@ -628,7 +628,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         Effect.gen(function* () {
           const killCalls = yield* Ref.make(0);
           const statusFiber = yield* checkCodexProviderStatus(
-            defaultCodexSettings,
+            { ...defaultCodexSettings, binaryPath: "/cafecode-fixture-missing/codex.exe" },
             undefined,
             isolatedCodexProbeEnvironment,
           ).pipe(Effect.provide(hangingScopedSpawnerLayer(killCalls)), Effect.forkChild);
@@ -3385,7 +3385,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 code: 1,
               }));
               const status = yield* checkCodexCliProviderStatus(
-                defaultCodexSettings,
+                { ...defaultCodexSettings, binaryPath: "/cafecode-fixture-missing/codex.exe" },
                 isolatedCodexProbeEnvironment,
               ).pipe(Effect.provide(layer));
 
@@ -3422,7 +3422,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             "Unknown launcher failure with private-secret-sentinel at /private/user/provider-install; Node.js v25.9.0",
           ]) {
             const status = yield* checkCodexCliProviderStatus(
-              defaultCodexSettings,
+              { ...defaultCodexSettings, binaryPath: "/cafecode-fixture-missing/codex.exe" },
               isolatedCodexProbeEnvironment,
             ).pipe(
               Effect.provide(mockSpawnerLayer(() => ({ stdout: detail, stderr: detail, code: 1 }))),
@@ -3441,7 +3441,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       it.effect("does not expose a failed version probe's spawn exception", () =>
         Effect.gen(function* () {
           const status = yield* checkCodexCliProviderStatus(
-            defaultCodexSettings,
+            { ...defaultCodexSettings, binaryPath: "/cafecode-fixture-missing/codex.exe" },
             isolatedCodexProbeEnvironment,
           ).pipe(
             Effect.provide(
@@ -3502,7 +3502,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         Effect.gen(function* () {
           const probeArgs: string[] = [];
           const status = yield* checkCodexCliProviderStatus(
-            defaultCodexSettings,
+            { ...defaultCodexSettings, binaryPath: "/cafecode-fixture-missing/codex.exe" },
             isolatedCodexProbeEnvironment,
           ).pipe(
             Effect.provide(
@@ -3616,7 +3616,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           yield* fileSystem.chmod(authPath, 0o600);
 
           const status = yield* checkCodexCliProviderStatus(
-            decodeCodexSettings({ homePath }),
+            decodeCodexSettings({ homePath, binaryPath: "/cafecode-fixture-missing/codex.exe" }),
             isolatedCodexProbeEnvironment,
           ).pipe(
             Effect.provide(
@@ -3699,7 +3699,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               throw new Error(`Unexpected subscription probe: ${command}`);
             });
             const status = yield* checkCodexCliProviderStatus(
-              decodeCodexSettings({ homePath }),
+              decodeCodexSettings({ homePath, binaryPath: "/cafecode-fixture-missing/codex.exe" }),
               isolatedCodexProbeEnvironment,
             ).pipe(Effect.provide(layer));
             assert.strictEqual(status.auth.label, testCase.label);
@@ -3728,7 +3728,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               return Response.json({ plan_type: "promax" });
             }) as typeof fetch;
             const status = yield* checkCodexCliProviderStatus(
-              decodeCodexSettings({ homePath }),
+              decodeCodexSettings({ homePath, binaryPath: "/cafecode-fixture-missing/codex.exe" }),
               isolatedCodexProbeEnvironment,
             ).pipe(
               Effect.provide(
@@ -3873,7 +3873,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           }) as typeof fetch;
 
           const status = yield* checkCodexCliProviderStatus(
-            decodeCodexSettings({ homePath }),
+            decodeCodexSettings({ homePath, binaryPath: "/cafecode-fixture-missing/codex.exe" }),
             isolatedCodexProbeEnvironment,
           ).pipe(
             Effect.provide(
@@ -4213,7 +4213,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           );
 
           const status = yield* checkCodexCliProviderStatus(
-            decodeCodexSettings({ homePath }),
+            decodeCodexSettings({ homePath, binaryPath: "/cafecode-fixture-missing/codex.exe" }),
             isolatedCodexProbeEnvironment,
           ).pipe(
             Effect.provide(
@@ -4254,7 +4254,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           });
 
           const status = yield* checkCodexCliProviderStatus(
-            decodeCodexSettings({ homePath }),
+            decodeCodexSettings({ homePath, binaryPath: "/cafecode-fixture-missing/codex.exe" }),
             isolatedCodexProbeEnvironment,
           ).pipe(Effect.provide(layer));
 
@@ -4273,7 +4273,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       it.effect("returns unauthenticated when Codex CLI reports not logged in", () =>
         Effect.gen(function* () {
           const status = yield* checkCodexCliProviderStatus(
-            defaultCodexSettings,
+            { ...defaultCodexSettings, binaryPath: "/cafecode-fixture-missing/codex.exe" },
             isolatedCodexProbeEnvironment,
           ).pipe(
             Effect.provide(

@@ -13,7 +13,7 @@ import * as Scope from "effect/Scope";
 import * as Types from "effect/Types";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
-import { codexCommandUsesShell } from "effect-codex-app-server/command";
+import { makeCodexCommand } from "effect-codex-app-server/command";
 import * as CodexSchema from "effect-codex-app-server/schema";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
@@ -1299,13 +1299,12 @@ export function makeCodexModelListCommand(input: {
   readonly environment?: NodeJS.ProcessEnv;
 }): ChildProcess.StandardCommand {
   const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
-  return ChildProcess.make(input.binaryPath, ["app-server"], {
+  return makeCodexCommand(input.binaryPath, ["app-server"], {
     cwd: input.cwd,
     env: {
       ...(input.environment ?? process.env),
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     },
-    shell: codexCommandUsesShell(input.binaryPath, process.platform),
     // Match disposable CLI probe ownership: isolate the POSIX child tree and
     // leave an unconditional SIGKILL scope-finalizer backstop. The explicit
     // cleanup below still gives the provider one bounded graceful interval.
@@ -1345,8 +1344,12 @@ export const withCodexMetadataClient = <A, E, R>(
 ) =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const command = yield* Effect.try({
+      try: () => makeCodexModelListCommand(input),
+      catch: (cause) => new CodexErrors.CodexAppServerSpawnError({ cause }),
+    });
     return yield* Effect.acquireUseRelease(
-      spawner.spawn(makeCodexModelListCommand(input)).pipe(
+      spawner.spawn(command).pipe(
         Effect.mapError(
           (cause) =>
             // Deliberately omit the configured binary/home paths. Picker refresh
@@ -1525,12 +1528,11 @@ export function makeCodexHealthProbeCommand(
   environment: NodeJS.ProcessEnv = process.env,
 ): ChildProcess.StandardCommand {
   const resolvedHomePath = codexSettings.homePath ? expandHomePath(codexSettings.homePath) : "";
-  return ChildProcess.make(codexSettings.binaryPath, [...args], {
+  return makeCodexCommand(codexSettings.binaryPath, [...args], {
     env: {
       ...environment,
       ...(resolvedHomePath.length > 0 ? { CODEX_HOME: resolvedHomePath } : {}),
     },
-    shell: codexCommandUsesShell(codexSettings.binaryPath, process.platform),
     // POSIX probes use their own process group so cleanup reaches descendants;
     // Windows keeps the platform default and uses taskkill. The scoped
     // backstop is SIGKILL because runCodexCommand performs the graceful,
@@ -1545,7 +1547,10 @@ const runCodexCommand = Effect.fn("runCodexCommand")(function* (
   args: ReadonlyArray<string>,
   environment: NodeJS.ProcessEnv = process.env,
 ) {
-  const command = makeCodexHealthProbeCommand(codexSettings, args, environment);
+  const command = yield* Effect.try({
+    try: () => makeCodexHealthProbeCommand(codexSettings, args, environment),
+    catch: (cause) => new CodexErrors.CodexAppServerSpawnError({ cause }),
+  });
   return yield* spawnAndCollect(codexSettings.binaryPath, command, {
     terminationGrace: Duration.seconds(1),
   });
@@ -1863,6 +1868,10 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
     phases.push({ phase: "login-status", outcome: "skipped", durationMs: 0 });
     phases.push({ phase: "account-usage", outcome: "skipped", durationMs: 0 });
     const error = versionProbe.failure;
+    // A refused construction has not established an installed executable or
+    // attempted authentication. Keep availability unverified and distinguish
+    // it from an actual native ENOENT; filesystem uncertainty is not absence.
+    const preparationRefused = error instanceof CodexErrors.CodexAppServerSpawnError;
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
       enabled: codexSettings.enabled,
@@ -1871,14 +1880,16 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
       codexModelCatalogSource: "fallback",
       skills: [],
       probe: {
-        installed: !isCommandMissingCause(error),
+        installed: !preparationRefused && !isCommandMissingCause(error),
         version: null,
         status: "error",
         auth: { status: "unknown" },
         phases,
-        message: isCommandMissingCause(error)
-          ? "Codex CLI (`codex`) is not installed or not on PATH."
-          : "Failed to execute the Codex CLI health check. Check the binary selected in provider settings.",
+        message: preparationRefused
+          ? "Codex command availability could not be verified. Check the executable selected in provider settings."
+          : isCommandMissingCause(error)
+            ? "Codex CLI (`codex`) is not installed or not on PATH."
+            : "Failed to execute the Codex CLI health check. Check the binary selected in provider settings.",
       },
     });
   }

@@ -358,7 +358,7 @@ for (const request of [
         let accessorReads = 0;
         const runtimeOptions = {
           threadId: ThreadId.make("synthetic-goal-cafe-thread"),
-          binaryPath: "never-launched-provider",
+          binaryPath: "/test-only/never-launched-provider.exe",
           environment: {},
           cwd: process.cwd(),
           runtimeMode: "full-access",
@@ -2846,7 +2846,7 @@ describe("Codex subagent thread ownership validation", () => {
           );
         });
         const failure = yield* readCodexSubagentThreadTransient({
-          binaryPath: "synthetic-provider-never-spawned",
+          binaryPath: "/test-only/synthetic-provider-never-spawned.exe",
           appServerCwd: "synthetic-cwd",
           rootProviderThreadId: root.id,
           subagentThreadId: nestedChild.id,

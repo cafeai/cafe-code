@@ -72,6 +72,7 @@ import {
   getProviderVersionAdvisoryPresentation,
   PROVIDER_STATUS_STYLES,
   getProviderSummary,
+  getProviderCredentialExpiryPresentation,
   getProviderVersionLabel,
   type ProviderStatusKey,
 } from "./providerStatus";
@@ -1113,11 +1114,17 @@ export function ProviderInstanceCard({
   // "Checking" is a neutral pulse: no probe has reported a problem yet.
   const statusKey: ProviderStatusKey =
     (liveProvider?.status as ProviderStatusKey | undefined) ?? (enabled ? "checking" : "disabled");
-  const statusStyle = PROVIDER_STATUS_STYLES[statusKey];
+  const expiry = uiPresentation.getProviderCredentialExpiryPresentation(
+    liveProvider,
+    Date.now(),
+    uiLocale,
+  );
+  const statusStyle =
+    PROVIDER_STATUS_STYLES[statusKey === "ready" && expiry ? "warning" : statusKey];
   const summary =
     !liveProvider && !enabled
       ? { headline: "Disabled", detail: null }
-      : uiPresentation.getProviderSummary(liveProvider);
+      : uiPresentation.getProviderSummary(liveProvider, Date.now(), uiLocale);
   const authEmail = liveProvider?.auth.email;
   const hasSandboxFailure =
     instance.driver === "grok" && liveProvider?.sandbox?.status === "unavailable";
@@ -1913,5 +1920,6 @@ const UI_PRESENTATION_SOURCES = {
   deriveProviderSettingsFields,
   formatCodexRateLimitPresentation,
   getProviderSummary,
+  getProviderCredentialExpiryPresentation,
   getProviderVersionAdvisoryPresentation,
 };

@@ -64,6 +64,7 @@
     "src/components/ProviderAccountQuotaDetails.browser.tsx",
     "src/components/chat/useProviderQuota.browser.tsx",
     "src/components/chat/ProviderQuotaSurfaces.browser.tsx",
+    "src/components/chat/ProviderCredentialExpiry.browser.tsx",
     "src/components/chat/ContextWindowDetails.browser.tsx",
     "src/components/chat/SessionRail.browser.tsx",
     "src/components/chat/ClaudeTaskControls.browser.tsx",

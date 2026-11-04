@@ -88,6 +88,10 @@ import {
 } from "../claudePublicSummary.ts";
 import { publicClaudeCommands, UNAVAILABLE_COMMAND_CATALOG } from "../claudeCommands.ts";
 import { mapClaudeSessionQuotaReport, stripClaudeUsageReport } from "../claudeSessionQuota.ts";
+import {
+  parseClaudeCredentialExpiry,
+  type ClaudeCredentialExpiryLease,
+} from "../claudeCredentialExpiry.ts";
 import { resolveConfiguredSubagentLimit } from "../Drivers/SubagentConcurrency.ts";
 import { observeClaudeResponseGeneration } from "../claudeResponseGeneration.ts";
 import { ResponseGenerationClock } from "../responseGenerationClock.ts";
@@ -337,6 +341,23 @@ interface ClaudePermissionModeOwner {
   readonly runtimeId: string;
 }
 
+/** Advisory ownership is independent of permission mode and mutable history. */
+interface ClaudeCredentialExpiryOwner {
+  readonly nativeSessionId: string;
+  readonly runtimeId: string;
+  readonly query: ClaudeQueryRuntime;
+  lease: ClaudeCredentialExpiryLease | undefined;
+}
+
+interface ClaudeConfigurationFailureObservation {
+  readonly turn: ClaudeTurnState;
+  readonly runtimeId: string;
+  readonly query: ClaudeQueryRuntime;
+}
+
+const CLAUDE_INVALID_CONFIGURATION_MESSAGE =
+  "Claude could not start because a configuration file is invalid. Correct the Claude configuration before sending your message again.";
+
 interface ClaudePermissionModeObservation {
   readonly mode: PermissionMode;
   readonly nativeSessionId: string;
@@ -580,6 +601,7 @@ interface ClaudeFailureDiagnostic {
     readonly message: string;
     readonly errorType?: ClaudeTypedAssistantError;
     readonly apiErrorStatus?: number;
+    readonly startupFailureReason?: "config_file_invalid";
   };
 }
 
@@ -588,12 +610,14 @@ function makeClaudeFailureDiagnostic(
   method: ClaudeFailureDiagnostic["method"],
   message: string,
   displayMessage: string = message,
+  startupFailureReason?: "config_file_invalid",
 ): ClaudeFailureDiagnostic {
   return {
     method,
     lifecycleMessage: message,
     body: {
       message: displayMessage,
+      ...(startupFailureReason ? { startupFailureReason } : {}),
       ...(turnState?.primaryAssistantError !== undefined
         ? { errorType: turnState.primaryAssistantError }
         : {}),
@@ -901,6 +925,12 @@ interface ClaudeSessionContext {
   readonly permissionModeInitialResumeSessionId: string | undefined;
   /** Seeded once by a qualified primary SDK init; never a permission grant. */
   permissionModeOwner: ClaudePermissionModeOwner | undefined;
+  /** Only a qualified primary init can establish this advisory owner. */
+  credentialExpiryOwner: ClaudeCredentialExpiryOwner | undefined;
+  /** Immutable opening resume, then an exact qualified reset's next init. */
+  credentialExpiryExpectedInitSessionId: string | undefined;
+  /** Native result_index belongs to the run, including conversation resets. */
+  credentialExpiryLastResultIndex: number;
   currentPermissionMode: PermissionMode;
   currentApiModelId: string | undefined;
   /** Requested flag state only; native eligibility and managed policy remain authoritative. */
@@ -1065,6 +1095,10 @@ export interface ClaudeAdapterLiveOptions {
    * never performs an authenticated API request.
    */
   readonly onAuthStatusChanged?: (failed: boolean) => Effect.Effect<void>;
+  /** Inert in-memory acquisition; the lease never grants authentication. */
+  readonly onCredentialExpiryOwner?: (
+    isCurrent: () => boolean,
+  ) => Effect.Effect<ClaudeCredentialExpiryLease>;
 }
 
 function isUuid(value: string): boolean {
@@ -1339,7 +1373,7 @@ function isCurrentClaudeSessionWriteLoss(
   )
     return false;
   // A query-level persistence notice cannot borrow task-scoped authority.
-  for (const key of ["task_id", "parent_task_id", "run_id"] as const) {
+  for (const key of ["task_id", "parent_task_id", "run_id", "agent_id", "subagent_id"] as const) {
     const field = Object.getOwnPropertyDescriptor(message, key);
     if (field ? !("value" in field) || field.value !== undefined : key in message) return false;
   }
@@ -3029,6 +3063,172 @@ function hasExactPrimaryClaudeParent(message: SDKMessage): boolean {
   return descriptor
     ? "value" in descriptor && (descriptor.value === null || descriptor.value === undefined)
     : !("parent_tool_use_id" in message);
+}
+
+function ownClaudeData(message: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(message, key);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
+}
+
+/** New account/startup presentation never borrows a task-scoped identity. */
+function hasExactPrimaryClaudeAdvisoryScope(message: SDKMessage): boolean {
+  if (!hasExactPrimaryClaudeParent(message)) return false;
+  for (const key of ["task_id", "parent_task_id", "run_id", "subagent_id"] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(message, key);
+    if (descriptor ? !("value" in descriptor) || descriptor.value !== undefined : key in message)
+      return false;
+  }
+  return true;
+}
+
+/** Strip observational slots before generic redaction/logging can read them.
+ * Inherited/accessor slots are not native JSON. Neither can invoke code or
+ * leak an unbounded timestamp into ordinary result/accounting snapshots. */
+function stripClaudeCredentialExpiry(message: SDKMessage): SDKMessage {
+  const index = Object.getOwnPropertyDescriptor(message, "result_index");
+  const validIndex =
+    index &&
+    "value" in index &&
+    typeof index.value === "number" &&
+    Number.isSafeInteger(index.value) &&
+    index.value >= 0;
+  if (!("credential_expires_at" in message) && (!("result_index" in message) || validIndex))
+    return message;
+  const descriptors = Object.getOwnPropertyDescriptors(message);
+  delete descriptors.credential_expires_at;
+  // Valid delivery sequence metadata was already part of the public result
+  // contract. Preserve it in native diagnostics; only unsafe slots are removed.
+  if (!validIndex) delete descriptors.result_index;
+  return Object.defineProperties({}, descriptors) as SDKMessage;
+}
+
+function captureClaudeCredentialInit(context: ClaudeSessionContext, message: SDKMessage) {
+  if (
+    context.stopped ||
+    context.authFailureSeen ||
+    ownClaudeData(message, "type") !== "system" ||
+    ownClaudeData(message, "subtype") !== "init" ||
+    !hasExactPrimaryClaudeAdvisoryScope(message)
+  )
+    return undefined;
+  const nativeSessionId = ownClaudeData(message, "session_id");
+  if (
+    typeof nativeSessionId !== "string" ||
+    nativeSessionId.length > 1_024 ||
+    exactClaudeProviderIdentity(nativeSessionId) !== nativeSessionId
+  )
+    return undefined;
+  const owner = context.credentialExpiryOwner;
+  if (
+    owner
+      ? owner.nativeSessionId !== nativeSessionId
+      : context.credentialExpiryExpectedInitSessionId !== undefined &&
+        context.credentialExpiryExpectedInitSessionId !== nativeSessionId
+  )
+    return undefined;
+  return { nativeSessionId, owner, runtimeId: context.subagentRuntimeId, query: context.query };
+}
+
+function captureClaudeCredentialResult(context: ClaudeSessionContext, message: SDKMessage) {
+  const owner = context.credentialExpiryOwner;
+  const subtype = ownClaudeData(message, "subtype");
+  if (
+    !owner ||
+    context.stopped ||
+    context.authFailureSeen ||
+    ownClaudeData(message, "type") !== "result" ||
+    typeof subtype !== "string" ||
+    ![
+      "success",
+      "error_during_execution",
+      "error_max_turns",
+      "error_max_budget_usd",
+      "error_max_structured_output_retries",
+    ].includes(subtype) ||
+    typeof ownClaudeData(message, "is_error") !== "boolean" ||
+    ownClaudeData(message, "session_id") !== owner.nativeSessionId ||
+    !hasExactPrimaryClaudeAdvisoryScope(message)
+  )
+    return undefined;
+  const resultIndex = ownClaudeData(message, "result_index");
+  if (typeof resultIndex !== "number" || !Number.isSafeInteger(resultIndex) || resultIndex < 0)
+    return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(message, "credential_expires_at");
+  const absent = descriptor
+    ? "value" in descriptor && descriptor.value === undefined
+    : !("credential_expires_at" in message);
+  const expiresAt =
+    descriptor && "value" in descriptor ? parseClaudeCredentialExpiry(descriptor.value) : undefined;
+  return { owner, resultIndex, valid: absent || expiresAt !== undefined, expiresAt };
+}
+
+/** Stronger primary authentication evidence keeps its existing presentation. */
+function hasClaudePrimaryAuthenticationFailure(turn: ClaudeTurnState | undefined): boolean {
+  return (
+    turn?.primaryAssistantError === "authentication_failed" ||
+    turn?.primaryAssistantError === "oauth_org_not_allowed" ||
+    turn?.primaryAssistantError === "cloud_credential_error"
+  );
+}
+
+/** A startup result may precede init and name a newly allocated failed
+ * session. Its held query/active Cafe turn, not that failed id, owns copy. */
+function captureClaudeConfigurationFailure(
+  context: ClaudeSessionContext,
+  message: SDKMessage,
+): ClaudeConfigurationFailureObservation | undefined {
+  if (
+    context.stopped ||
+    context.authFailureSeen ||
+    !context.turnState ||
+    hasClaudePrimaryAuthenticationFailure(context.turnState) ||
+    ownClaudeData(message, "api_error_status") === 401 ||
+    ownClaudeData(message, "api_error_status") === 403 ||
+    context.session.activeTurnId !== context.turnState.turnId ||
+    ownClaudeData(message, "type") !== "result" ||
+    ownClaudeData(message, "subtype") !== "error_during_execution" ||
+    ownClaudeData(message, "is_error") !== true ||
+    ownClaudeData(message, "num_turns") !== 0 ||
+    ownClaudeData(message, "startup_failure_reason") !== "config_file_invalid" ||
+    !hasExactPrimaryClaudeAdvisoryScope(message)
+  )
+    return undefined;
+  const failedSessionId = ownClaudeData(message, "session_id");
+  if (
+    typeof failedSessionId !== "string" ||
+    failedSessionId.length > 1_024 ||
+    exactClaudeProviderIdentity(failedSessionId) !== failedSessionId
+  )
+    return undefined;
+  // Copy only inert bounded prompt stamps before using the legacy correlation
+  // reader. An explicit foreign stamp cannot borrow its absent-stamp fallback.
+  const correlation: { user_message_uuid?: unknown; user_message_uuids?: unknown } = {};
+  for (const key of ["user_message_uuid", "user_message_uuids"] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(message, key);
+    if (!descriptor) {
+      if (key in message) return undefined;
+      continue;
+    }
+    if (!("value" in descriptor)) return undefined;
+    if (key === "user_message_uuid" || descriptor.value === undefined) {
+      correlation[key] = descriptor.value;
+      continue;
+    }
+    if (!Array.isArray(descriptor.value)) return undefined;
+    const length = Object.getOwnPropertyDescriptor(descriptor.value, "length")?.value;
+    if (!Number.isSafeInteger(length) || length < 0 || length > CLAUDE_PROMPT_CORRELATION_LIMIT)
+      return undefined;
+    const values: unknown[] = [];
+    for (let index = 0; index < length; index++) {
+      const value = Object.getOwnPropertyDescriptor(descriptor.value, String(index));
+      if (!value || !("value" in value)) return undefined;
+      values.push(value.value);
+    }
+    correlation.user_message_uuids = values;
+  }
+  const prompts = knownClaudePromptUuids(context, correlation);
+  if (prompts !== undefined && prompts.length === 0) return undefined;
+  return { turn: context.turnState, runtimeId: context.subagentRuntimeId, query: context.query };
 }
 
 /** New presentation witnesses need an actual bounded opaque API identity. */
@@ -4809,6 +5009,114 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const getNativeSubagentMessages = options?.getNativeSubagentMessages ?? getSubagentMessages;
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
+  const hasCurrentCredentialExpiryOwner = (
+    context: ClaudeSessionContext,
+    owner: ClaudeCredentialExpiryOwner,
+  ) =>
+    !context.stopped &&
+    !context.authFailureSeen &&
+    !context.sdkStreamEnded &&
+    !context.queryClosureUncertain &&
+    sessions.get(context.session.threadId) === context &&
+    context.credentialExpiryOwner === owner &&
+    context.query === owner.query &&
+    context.subagentRuntimeId === owner.runtimeId;
+
+  const retireCredentialExpiryOwner = Effect.fn("retireClaudeCredentialExpiryOwner")(function* (
+    context: ClaudeSessionContext,
+    owner: ClaudeCredentialExpiryOwner | undefined = context.credentialExpiryOwner,
+  ) {
+    if (!owner) return;
+    // Invalidate before any publication await, including uncertain native
+    // closure. The driver's pure predicate cannot reproject this old lease.
+    if (context.credentialExpiryOwner === owner) context.credentialExpiryOwner = undefined;
+    const lease = owner.lease;
+    owner.lease = undefined;
+    if (lease)
+      yield* lease.retire.pipe(
+        Effect.catchCause(() =>
+          Effect.logWarning("Claude credential expiry retirement remains unavailable."),
+        ),
+      );
+  });
+
+  const admitCredentialExpiryInit = Effect.fn("admitClaudeCredentialExpiryInit")(function* (
+    context: ClaudeSessionContext,
+    initialization: NonNullable<ReturnType<typeof captureClaudeCredentialInit>>,
+  ) {
+    if (
+      context.stopped ||
+      context.authFailureSeen ||
+      sessions.get(context.session.threadId) !== context ||
+      context.query !== initialization.query ||
+      context.subagentRuntimeId !== initialization.runtimeId ||
+      context.credentialExpiryOwner !== initialization.owner ||
+      initialization.owner
+    )
+      return;
+    const owner: ClaudeCredentialExpiryOwner = {
+      nativeSessionId: initialization.nativeSessionId,
+      runtimeId: initialization.runtimeId,
+      query: initialization.query,
+      lease: undefined,
+    };
+    context.credentialExpiryOwner = owner;
+    if (!options?.onCredentialExpiryOwner) return;
+    // The production factory is inert, bounded in-memory allocation. Admit
+    // its returned resource atomically so cancellation cannot lose a lease
+    // between creation and assignment. It performs no IO or publication.
+    yield* Effect.uninterruptible(
+      Effect.gen(function* () {
+        const lease = yield* options.onCredentialExpiryOwner!(() =>
+          hasCurrentCredentialExpiryOwner(context, owner),
+        ).pipe(
+          Effect.catchCause(() =>
+            Effect.logWarning("Claude credential expiry remains unavailable.").pipe(
+              Effect.as(undefined),
+            ),
+          ),
+        );
+        if (!lease) return;
+        if (!hasCurrentCredentialExpiryOwner(context, owner)) {
+          yield* lease.retire.pipe(
+            Effect.catchCause(() =>
+              Effect.logWarning("Claude credential expiry retirement remains unavailable."),
+            ),
+          );
+          return;
+        }
+        owner.lease = lease;
+      }),
+    );
+  });
+
+  const observeCredentialExpiryResult = Effect.fn("observeClaudeCredentialExpiryResult")(function* (
+    context: ClaudeSessionContext,
+    observation: NonNullable<ReturnType<typeof captureClaudeCredentialResult>>,
+  ) {
+    const { owner, resultIndex } = observation;
+    if (
+      !hasCurrentCredentialExpiryOwner(context, owner) ||
+      resultIndex <= context.credentialExpiryLastResultIndex
+    )
+      return;
+    // A malformed newer date cannot publish/retimestamp the previous date,
+    // but it still fences older result replays. Absence is a valid unknown.
+    context.credentialExpiryLastResultIndex = resultIndex;
+    if (!observation.valid || !owner.lease) return;
+    const lease = owner.lease;
+    const observedAt = yield* nowIso;
+    if (!hasCurrentCredentialExpiryOwner(context, owner) || owner.lease !== lease) return;
+    yield* lease
+      .observe({ resultIndex, expiresAt: observation.expiresAt, observedAt })
+      .pipe(
+        Effect.catchCause(() =>
+          Effect.logWarning("Claude credential expiry observation remains unavailable."),
+        ),
+      );
+    if (!hasCurrentCredentialExpiryOwner(context, owner))
+      yield* retireCredentialExpiryOwner(context, owner);
+  });
   /** A request snapshot is not enduring native authority. Both response
    * consumption and final callback settlement consult the same live witness. */
   const hasCurrentUnansweredOwner = (context: ClaudeSessionContext, pending: PendingUserInput) => {
@@ -7307,6 +7615,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const handleResultMessage = Effect.fn("handleResultMessage")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
+    configurationFailure?: ClaudeConfigurationFailureObservation,
   ) {
     if (message.type !== "result") {
       return;
@@ -7362,6 +7671,29 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ? CLAUDE_RESPONSE_LIMIT_MESSAGE
           : (resultPrimaryError(message) ?? resultErrors[0] ?? "Claude turn failed.")
         : undefined;
+    if (
+      configurationFailure &&
+      errorMessage &&
+      !authFailure &&
+      !context.authFailureSeen &&
+      !hasClaudePrimaryAuthenticationFailure(context.turnState) &&
+      !context.stopped &&
+      sessions.get(context.session.threadId) === context &&
+      context.turnState === configurationFailure.turn &&
+      context.session.activeTurnId === configurationFailure.turn.turnId &&
+      context.subagentRuntimeId === configurationFailure.runtimeId &&
+      context.query === configurationFailure.query
+    ) {
+      // Preserve lifecycle/recovery text and the result's native status. Only
+      // the closed diagnostic body receives safe fixed configuration guidance.
+      configurationFailure.turn.failureDiagnostic = makeClaudeFailureDiagnostic(
+        configurationFailure.turn,
+        "claude/result/error",
+        errorMessage,
+        CLAUDE_INVALID_CONFIGURATION_MESSAGE,
+        "config_file_invalid",
+      );
+    }
     const completedPromptCount = consumeClaudeResultPrompt(context, message);
     // Claude Code 2.1.245 / Agent SDK 0.3.245 adds queued_turn_count to the
     // result boundary. Local UUID lifecycle remains the strongest attribution
@@ -9078,6 +9410,32 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     incomingMessage: SDKMessage,
   ) {
+    // Snapshot new observational authority before logger/normalizer awaits or
+    // ensureThreadId's legacy mutable cursor adoption. Never infer init from
+    // a result, status, permission mode or saved native history coordinate.
+    const currentQuery = sessions.get(context.session.threadId) === context;
+    const credentialInitialization = currentQuery
+      ? captureClaudeCredentialInit(context, incomingMessage)
+      : undefined;
+    const credentialResult = currentQuery
+      ? captureClaudeCredentialResult(context, incomingMessage)
+      : undefined;
+    const configurationFailure = currentQuery
+      ? captureClaudeConfigurationFailure(context, incomingMessage)
+      : undefined;
+    const resetOwner = context.credentialExpiryOwner;
+    const resetSessionId = ownClaudeData(incomingMessage, "new_conversation_id");
+    const credentialReset =
+      currentQuery &&
+      resetOwner &&
+      hasCurrentCredentialExpiryOwner(context, resetOwner) &&
+      ownClaudeData(incomingMessage, "type") === "conversation_reset" &&
+      ownClaudeData(incomingMessage, "session_id") === resetOwner.nativeSessionId &&
+      typeof resetSessionId === "string" &&
+      isUuid(resetSessionId) &&
+      hasExactPrimaryClaudeAdvisoryScope(incomingMessage)
+        ? { owner: resetOwner, nextSessionId: resetSessionId }
+        : undefined;
     const sessionWriteLossFrame =
       sdkMessageType(incomingMessage) === "system" &&
       sdkMessageSubtype(incomingMessage) === "session_writes_lost";
@@ -9225,7 +9583,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // Redaction is deliberately before every logger, accounting mapper, raw
     // event and transcript projection. Even rejected/foreign/subagent reports
     // must not bypass privacy simply because they cannot update the metadata.
-    const stripped = stripClaudeUsageReport(incomingMessage);
+    const stripped = stripClaudeUsageReport(stripClaudeCredentialExpiry(incomingMessage));
     if (
       context.visualizationBinding &&
       context.visualizationCompletion &&
@@ -9343,6 +9701,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     } else {
       yield* logNativeSdkMessage(context, message);
     }
+    if (credentialReset && hasCurrentCredentialExpiryOwner(context, credentialReset.owner)) {
+      context.credentialExpiryExpectedInitSessionId = credentialReset.nextSessionId;
+      yield* retireCredentialExpiryOwner(context, credentialReset.owner);
+    }
+    if (credentialInitialization)
+      yield* admitCredentialExpiryInit(context, credentialInitialization);
+    if (credentialResult) yield* observeCredentialExpiryResult(context, credentialResult);
     if (sessionWriteLossFrame) {
       const stamp = yield* makeEventStamp();
       if (
@@ -9594,7 +9959,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         yield* handleAssistantMessage(context, message, publicSummaryAdmitted);
         return;
       case "result":
-        yield* handleResultMessage(context, message);
+        yield* handleResultMessage(context, message, configurationFailure);
         return;
       case "system":
         yield* handleSystemMessage(context, message);
@@ -9749,6 +10114,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const { quotaReport: _stoppedQuota, ...stoppedSession } = context.session;
     context.session = stoppedSession;
     context.stopped = true;
+    const credentialExpiryOwner = context.credentialExpiryOwner;
+    context.credentialExpiryOwner = undefined;
     if (context.turnState) context.turnState.responseLimitError = undefined;
     // A caller may already have requested native closure, but the exact
     // reader is still owned until its required join completes. Keep the fence
@@ -9768,6 +10135,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         Effect.logWarning("Private visualization session cleanup remains incomplete."),
       ),
     );
+    // All advisory reads were already fenced synchronously above. Keep the
+    // original native capability-revocation order ahead of this publication.
+    yield* retireCredentialExpiryOwner(context, credentialExpiryOwner);
     if (hadQuotaReport) {
       // The coalesced publisher is stopped-fenced; explicitly invalidate this
       // revoked level without waiting for provider close/exit acknowledgement.
@@ -10974,6 +11344,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         basePermissionMode: permissionMode,
         permissionModeInitialResumeSessionId: existingResumeSessionId,
         permissionModeOwner: undefined,
+        credentialExpiryOwner: undefined,
+        credentialExpiryExpectedInitSessionId: existingResumeSessionId,
+        credentialExpiryLastResultIndex: -1,
         currentPermissionMode: initialPermissionMode ?? "default",
         currentApiModelId: apiModelId,
         currentEffort: effectiveEffort,

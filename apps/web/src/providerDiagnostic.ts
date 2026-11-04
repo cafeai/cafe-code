@@ -349,6 +349,17 @@ export function providerDiagnosticCategoryPresentation(
           locale,
         ),
       };
+    case "configuration":
+      return {
+        title: uiText("Claude configuration needs attention", undefined, undefined, locale),
+        guidance: uiText(
+          "Claude could not start because a configuration file is invalid. Correct the Claude configuration before sending your message again.",
+          undefined,
+          undefined,
+          locale,
+        ),
+        action: "provider-settings",
+      };
     case "request-rejected":
       return {
         title: uiText("Request rejected", undefined, undefined, locale),

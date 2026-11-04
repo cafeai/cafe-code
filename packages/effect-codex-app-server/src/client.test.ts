@@ -43,6 +43,17 @@ const expectRequestFailure = Effect.match({
   onSuccess: () => assert.fail("Expected the fixture request to fail"),
   onFailure: (error: CodexError.CodexAppServerError) => error,
 });
+const decodeFixtureArgv = Schema.decodeUnknownSync(
+  Schema.Struct({ argv: Schema.Array(Schema.String) }),
+);
+// Decode the inert intercepted representation only to retain caller-input
+// assertions. The copied native peer below owns actual cmd.exe argv proof.
+const decodeMockBatchArgument = (value: string) =>
+  value
+    .replace(/\^(.)/gu, "$1")
+    .replace(/\^(.)/gu, "$1")
+    .slice(1, -1)
+    .replace(/(\\+)(?="|$)/gu, (slashes) => "\\".repeat(Math.floor(slashes.length / 2)));
 
 for (const loggerStage of ["raw", "decoded"] as const) {
   for (const shape of ["multiline", "multi-chunk"] as const) {
@@ -206,6 +217,7 @@ const commandPolicies = [
   { command: "codex.exe.cmd", windowsShell: true },
   { command: "C:\\codex.exe\\codex", windowsShell: true },
   { command: "codex", windowsShell: true },
+  { command: "C:\\tools & fixtures\\codex.ps1", windowsShell: true },
   { command: "/usr/local/bin/codex", windowsShell: true },
   { command: "/tmp/native executable & fixture.exe", windowsShell: false },
 ] as const;
@@ -408,7 +420,10 @@ it.effect.each(["darwin", "linux"] as const)(
     }),
 );
 
-const makeNativePeerFixture = (executableSource: "copied" | "current" = "copied") =>
+const makeNativePeerFixture = (
+  executableSource: "copied" | "current" = "copied",
+  binaryDirectoryName = "native executable & fixtures",
+) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -416,7 +431,7 @@ const makeNativePeerFixture = (executableSource: "copied" | "current" = "copied"
     // macOS resolves /var temporary paths through /private/var in cwd;
     // use one canonical usable spelling for all fixture paths and homes.
     const fixtureRoot = yield* fs.realPath(temporaryRoot);
-    const binaryDir = path.join(fixtureRoot, "native executable & fixtures");
+    const binaryDir = path.join(fixtureRoot, binaryDirectoryName);
     yield* fs.makeDirectory(binaryDir);
     const executable =
       executableSource === "copied" ? path.join(binaryDir, "mock codex.EXE") : process.execPath;
@@ -830,23 +845,163 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
           command,
           args: literalCommandArgs,
           cwd,
+          env: { PATH: "", NoDefaultCurrentDirectoryInExePath: "1" },
         }).pipe(
           Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
           Layer.build,
           Effect.exit,
         );
         assert.equal(Exit.isFailure(result), true);
+        if (process.platform === "win32" && windowsShell && !/\.(?:cmd|bat)$/iu.test(command)) {
+          assert.equal(commands.length, 0);
+          if (Exit.isSuccess(result)) return assert.fail("Expected command preparation failure");
+          const error = Cause.squash(result.cause);
+          if (!(error instanceof CodexError.CodexAppServerSpawnError)) {
+            return assert.fail("Expected the existing typed spawn failure");
+          }
+          assert.equal(error.command, undefined);
+          assert.equal(error.message, "Failed to spawn Codex App Server process");
+          return;
+        }
         assert.equal(commands.length, 1);
         const observed = commands[0];
         if (observed?._tag !== "StandardCommand") {
           return assert.fail("Expected one standard command");
         }
-        assert.equal(observed.command, command);
-        assert.deepEqual(observed.args, literalCommandArgs);
+        const batch = process.platform === "win32" && windowsShell;
+        assert.equal(batch ? observed.command.replace(/\^(.)/gu, "$1") : observed.command, command);
+        assert.deepEqual(
+          batch ? observed.args.map(decodeMockBatchArgument) : observed.args,
+          literalCommandArgs,
+        );
         assert.equal(observed.options.cwd, cwd);
         assert.equal(observed.options.shell, process.platform === "win32" && windowsShell);
       }),
   );
+
+  for (const kind of [
+    "absolute batch",
+    "absolute .bat",
+    "literal-percent batch path",
+    "PATH batch",
+    "PATH native",
+    "PATH custom PATHEXT",
+    "quoted-semicolon PATH native",
+    "quoted-semicolon PATH batch",
+  ] as const) {
+    it.effect.skipIf(process.platform !== "win32")(
+      `preserves scheduling TOML and literal argv through a Windows ${kind} launcher`,
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const realSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          // Node selects the parent ComSpec before applying the isolated child
+          // environment. Admit the real system interpreter only; an ambient
+          // custom wrapper must never run as part of this synthetic fixture.
+          const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+          const parentShell = process.env.ComSpec;
+          if (
+            !systemRoot ||
+            !parentShell ||
+            path.resolve(parentShell).toLowerCase() !==
+              path.resolve(path.join(systemRoot, "System32", "cmd.exe")).toLowerCase()
+          ) {
+            return yield* Effect.die(
+              new Error("Windows fixture requires the system command interpreter."),
+            );
+          }
+          const quotedPath = kind.startsWith("quoted-semicolon PATH ");
+          const native = kind === "PATH native" || kind === "quoted-semicolon PATH native";
+          const { fixtureRoot, executable, peer, fixtureEnv } = yield* makeNativePeerFixture(
+            "copied",
+            quotedPath ? "native; executable & fixtures" : undefined,
+          );
+          if (quotedPath) {
+            // A semicolon belongs to this one real directory, not to the PATH
+            // separator grammar. Keep the peer's exact environment witness in
+            // the same quoted spelling actually passed to the native child.
+            fixtureEnv.PATH = `"${path.dirname(executable)}"`;
+            fixtureEnv.CAFE_CODE_MOCK_PEER_PATH = fixtureEnv.PATH;
+          }
+          const shim = path.join(path.dirname(executable), "mock-batch.cmd");
+          const batchText = `@echo off\r\n"${executable}" "${peer}" %*\r\n`;
+          yield* fs.writeFileString(shim, batchText);
+          const bat = path.join(path.dirname(executable), "mock-batch.bat");
+          const percentPath = path.join(path.dirname(executable), "mock %CAFE_ARG% batch.cmd");
+          yield* fs.writeFileString(bat, batchText);
+          yield* fs.writeFileString(percentPath, batchText);
+          yield* fs.writeFileString(
+            path.join(path.dirname(executable), "mock codex.cmd"),
+            batchText,
+          );
+          fixtureEnv.PATHEXT =
+            kind === "PATH custom PATHEXT" ? ".CMD;.EXE;.BAT;.COM" : ".COM;.EXE;.BAT;.CMD";
+          const config =
+            'mcp_servers.cafe-fixture={command="C:\\\\tools & notes\\\\node.exe",args=["C:\\\\private\\\\bridge.mjs"],env={ELECTRON_RUN_AS_NODE="1"},required=true}';
+          const expected = ["app-server", "-c", config, ...literalCommandArgs];
+          const args = [...(native ? [peer] : []), "--echo-argv", ...expected];
+          const handles: Array<ChildProcessSpawner.ChildProcessHandle> = [];
+          const isolatedSpawner = ChildProcessSpawner.make((observed) => {
+            if (observed._tag !== "StandardCommand") {
+              return Effect.die("Unexpected fixture pipeline");
+            }
+            assert.equal(observed.options.cwd, fixtureRoot);
+            assert.equal(observed.options.shell, !native);
+            if (native) assert.equal(observed.command, executable);
+            return realSpawner
+              .spawn(
+                ChildProcess.make(observed.command, observed.args, {
+                  ...observed.options,
+                  env: fixtureEnv,
+                  extendEnv: false,
+                }),
+              )
+              .pipe(Effect.tap((handle) => Effect.sync(() => handles.push(handle))));
+          });
+          const initialized = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const context = yield* CodexClient.layerCommand({
+                command:
+                  kind === "absolute batch"
+                    ? shim
+                    : kind === "absolute .bat"
+                      ? bat
+                      : kind === "literal-percent batch path"
+                        ? percentPath
+                        : kind === "PATH batch" || kind === "quoted-semicolon PATH batch"
+                          ? "mock-batch"
+                          : "mock codex",
+                args,
+                cwd: fixtureRoot,
+                env: fixtureEnv,
+              }).pipe(
+                Layer.provide(
+                  Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, isolatedSpawner),
+                ),
+                Layer.build,
+              );
+              return yield* Effect.gen(function* () {
+                const client = yield* CodexClient.CodexAppServerClient;
+                return yield* client.request("initialize", {
+                  clientInfo: {
+                    name: "cafe-windows-shim-test",
+                    title: "Synthetic peer",
+                    version: "0.0.0",
+                  },
+                  capabilities: { experimentalApi: true, optOutNotificationMethods: null },
+                });
+              }).pipe(Effect.provide(context));
+            }),
+          );
+          assert.equal(handles.length, 1);
+          assert.equal(yield* handles[0]!.isRunning, false);
+          const echoed = decodeFixtureArgv(decodeJson(initialized.userAgent));
+          assert.deepEqual(echoed.argv, expected);
+        }),
+      20_000,
+    );
+  }
 
   it.effect.each([
     { name: "initializes a command-backed app-server client", echo: false, failDuringBuild: false },

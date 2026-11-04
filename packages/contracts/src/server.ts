@@ -51,11 +51,30 @@ export const ServerProviderAuthStatus = Schema.Literals([
 ]);
 export type ServerProviderAuthStatus = typeof ServerProviderAuthStatus.Type;
 
+// The native result supplies a finite estimate of the stored login refresh
+// chain's end. It is current-runtime advisory metadata, never auth evidence.
+const CredentialExpiryInstant = Schema.String.check(
+  Schema.isMaxLength(24),
+  Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+  Schema.makeFilter((value) => {
+    const milliseconds = Date.parse(value);
+    return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+  }),
+);
+
+export const ServerProviderCredentialExpiry = Schema.Struct({
+  expiresAt: CredentialExpiryInstant,
+  observedAt: CredentialExpiryInstant,
+  source: Schema.Literal("native-result"),
+});
+export type ServerProviderCredentialExpiry = typeof ServerProviderCredentialExpiry.Type;
+
 export const ServerProviderAuth = Schema.Struct({
   status: ServerProviderAuthStatus,
   type: Schema.optional(TrimmedNonEmptyString),
   label: Schema.optional(TrimmedNonEmptyString),
   email: Schema.optional(TrimmedNonEmptyString),
+  credentialExpiry: Schema.optional(ServerProviderCredentialExpiry),
 });
 export type ServerProviderAuth = typeof ServerProviderAuth.Type;
 

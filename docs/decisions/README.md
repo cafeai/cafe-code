@@ -1,6 +1,6 @@
 # Verification decision index
 
-Last updated: 2026-11-02 10:01:53 JST (UTC+0900)
+Last updated: 2026-11-04 11:22:32 JST (UTC+0900)
 
 This index covers verification decisions; independent feature decisions remain
 in this directory.
@@ -38,3 +38,7 @@ Related provider lifecycle decisions:
   `max_output_tokens` incomplete-response message under `other` adds one guarded
   classification; native proof, one-use submission, Stop and uncertain-ACK
   restrictions remain unchanged.
+
+- [Claude provider metadata advisories](claude-provider-metadata-advisories.md):
+  volatile native-owner sign-in expiry observations and bounded invalid-config
+  guidance, separate from authentication, recovery and execution authority.

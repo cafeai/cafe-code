@@ -1,7 +1,7 @@
 # Dependency maintenance with Renovate
 
 Created: 2026-10-03 01:30:40 JST (UTC+0900)
-Last updated: 2026-11-03 18:38:38 JST (UTC+0900)
+Last updated: 2026-11-04 11:22:32 JST (UTC+0900)
 
 Cafe is configured to use the Mend-hosted [Renovate GitHub App](https://github.com/apps/renovate)
 to propose dependency updates once activated. The checked-in repository policy is
@@ -18,6 +18,9 @@ The [November 3 provider review](provider-updates-2026-11-03.md) records the
 coordinated Claude 317 package admission and exact user-approved age exception,
 unchanged Codex stable 166 target, and separate integration/adoption gates. The
 historical October 30 exception for 314 does not authorize this or later pairs.
+The [November4 provider review](provider-updates-2026-11-04.md) records the
+separate exact human waiver and coordinated318 admission; earlier exceptions
+are not reused. The persistent age policy remains unchanged.
 
 ## Activation
 

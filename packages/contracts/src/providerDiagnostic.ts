@@ -50,7 +50,7 @@ export type ProviderDiagnosticSnapshot = typeof ProviderDiagnosticSnapshot.Type;
  * Closed Cafe-authored presentation category for a provider retry/error.
  *
  * Derived only from structured fields in the bounded private copy (Codex
- * `codexErrorInfo`/HTTP status, Claude typed SDK error codes, Cafe-owned
+ * `codexErrorInfo`/HTTP status, Claude typed SDK error/startup codes, Cafe-owned
  * process-exit facts), never from provider prose. It is published beside the
  * summary as the activity payload key `providerDiagnosticCategory` rather than
  * inside the strict v1 summary, so older renderers keep reading summaries.
@@ -74,6 +74,7 @@ export const PROVIDER_DIAGNOSTIC_CATEGORIES = [
   "connection",
   "server-error",
   "request-rejected",
+  "configuration",
   "sandbox",
   "too-many-denials",
   "process-exit",

@@ -120,6 +120,53 @@ describe("Codex subscription provider summary", () => {
   });
 });
 
+describe("native Claude sign-in expiry advisory", () => {
+  const now = Date.parse("2026-11-04T00:00:00.000Z");
+  const provider = (expiresAt: string) =>
+    makeProvider({
+      instanceId: ProviderInstanceId.make("claude-owned"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      status: "ready",
+      auth: {
+        status: "authenticated",
+        credentialExpiry: {
+          source: "native-result",
+          expiresAt,
+          observedAt: "2026-11-04T00:00:00.000Z",
+        },
+      } as ServerProvider["auth"],
+    });
+
+  it.each([
+    ["2026-11-14T00:00:00.000Z", "Claude sign-in may expire soon."],
+    ["2026-11-04T00:00:00.000Z", "Claude sign-in may have expired."],
+    ["2026-11-03T00:00:00.000Z", "Claude sign-in may have expired."],
+  ])("warns truthfully about the reported refresh-chain deadline %s", (expiresAt, headline) => {
+    const current = provider(expiresAt);
+    const summary = getProviderSummary(current, now);
+    expect(summary.headline).toBe("Authenticated");
+    expect(summary.detail).toContain(headline);
+    expect(summary.detail).toContain("estimate");
+    expect(summary.detail).toContain("up to 3 days earlier");
+    expect(current.auth.status).toBe("authenticated");
+    expect(current.status).toBe("ready");
+  });
+
+  it("keeps older, distant and other-provider metadata out of the advance warning", () => {
+    expect(getProviderSummary(provider("2026-11-14T00:00:00.001Z"), now).detail).toBeNull();
+    expect(
+      getProviderSummary(makeProvider({ status: "ready", auth: { status: "authenticated" } }), now)
+        .detail,
+    ).toBeNull();
+    expect(
+      getProviderSummary(
+        { ...provider("2026-11-10T00:00:00.000Z"), driver: ProviderDriverKind.make("codex") },
+        now,
+      ).detail,
+    ).toBeNull();
+  });
+});
+
 describe("Grok sandbox provider summary", () => {
   it("uses the typed sandbox failure even when authentication was previously verified", () => {
     expect(

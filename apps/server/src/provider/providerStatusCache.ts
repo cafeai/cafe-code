@@ -11,6 +11,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { writeFileStringAtomically } from "../atomicWrite.ts";
+import { withoutClaudeCredentialExpiry } from "./claudeCredentialExpiry.ts";
 
 const decodeProviderStatusCache = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ServerProviderSchema),
@@ -85,7 +86,9 @@ export const hydrateCachedProvider = (input: {
     installed: input.cachedProvider.installed,
     version: input.cachedProvider.version,
     status: input.cachedProvider.status,
-    auth: input.cachedProvider.auth,
+    // A reusable instance id cannot re-adopt a previous native query's
+    // estimated sign-in deadline after provider/backend reconstruction.
+    auth: withoutClaudeCredentialExpiry(input.cachedProvider).auth,
     checkedAt: input.cachedProvider.checkedAt,
     slashCommands: input.cachedProvider.slashCommands,
     skills: input.cachedProvider.skills,
@@ -185,7 +188,7 @@ export const readProviderStatusCache = (filePath: string) =>
             path: filePath,
             issues: Cause.pretty(cause),
           }).pipe(Effect.as(undefined)),
-        onSuccess: Effect.succeed,
+        onSuccess: (provider) => Effect.succeed(withoutClaudeCredentialExpiry(provider)),
       }),
     );
   });
@@ -194,7 +197,9 @@ export const writeProviderStatusCache = (input: {
   readonly filePath: string;
   readonly provider: ServerProvider;
 }) => {
-  const { updateState: _updateState, ...cacheableProvider } = input.provider;
+  const { updateState: _updateState, ...cacheableProvider } = withoutClaudeCredentialExpiry(
+    input.provider,
+  );
   return writeFileStringAtomically({
     filePath: input.filePath,
     contents: `${JSON.stringify(cacheableProvider, null, 2)}\n`,

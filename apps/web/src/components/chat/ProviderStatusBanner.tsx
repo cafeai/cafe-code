@@ -5,6 +5,7 @@ import { memo, useState } from "react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../ui/alert";
 import { CircleAlertIcon, XIcon } from "lucide-react";
 import { formatProviderDriverKindLabel } from "../../providerModels";
+import { getProviderCredentialExpiryPresentation } from "../settings/providerStatus";
 
 export const ProviderStatusBanner = memo(function ProviderStatusBanner({
   status,
@@ -15,23 +16,31 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
 
   const [dismissedStatusKey, setDismissedStatusKey] = useState<string | null>(null);
 
-  if (!status || status.status === "ready" || status.status === "disabled") {
+  const expiry = getProviderCredentialExpiryPresentation(status ?? undefined, Date.now(), uiLocale);
+  if (!status || status.status === "disabled" || (status.status === "ready" && !expiry))
     return null;
-  }
+  const expiryOnly = status.status === "ready" && expiry !== null;
 
   // Health checks can refresh checkedAt while reporting the same actionable
   // state. Keep a dismissal stable across those polls so a transient provider
   // probe timeout does not keep reappearing over the active chat.
-  const statusDismissKey = [status.instanceId, status.status, status.message ?? ""].join("\u0000");
+  const statusDismissKey = expiryOnly
+    ? [status.instanceId, "credential-expiry", expiry.expiresAt].join("\u0000")
+    : [status.instanceId, status.status, status.message ?? ""].join("\u0000");
   const isDismissed = dismissedStatusKey === statusDismissKey;
   const providerLabel = status.displayName?.trim() || formatProviderDriverKindLabel(status.driver);
   // The title already states the condition, so the body carries only the
   // provider's own explanation when it supplied one.
-  const title =
-    status.status === "error"
+  const title = expiryOnly
+    ? expiry.headline
+    : status.status === "error"
       ? uiText("{provider} unavailable", { provider: providerLabel }, undefined, uiLocale)
       : uiText("{provider} limited", { provider: providerLabel }, undefined, uiLocale);
-  const message = status.message?.trim() || null;
+  const message = expiryOnly
+    ? expiry.detail
+    : [status.message?.trim(), status.status === "warning" ? expiry?.detail : null]
+        .filter(Boolean)
+        .join(" ") || null;
 
   if (isDismissed) {
     return null;

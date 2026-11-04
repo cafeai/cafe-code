@@ -95,7 +95,7 @@ import * as Stream from "effect/Stream";
 import * as SchemaIssue from "effect/SchemaIssue";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
-import { codexCommandUsesShell } from "effect-codex-app-server/command";
+import { makeCodexCommand } from "effect-codex-app-server/command";
 import {
   acknowledgeCodexServiceTier,
   observeCodexServiceTier,
@@ -6728,9 +6728,9 @@ export const makeCodexSessionRuntime = (
       transportPolicy: options.transportPolicy,
     });
     const appServerCwd = options.appServerCwd ?? process.cwd();
-    const child = yield* spawner
-      .spawn(
-        ChildProcess.make(options.binaryPath, appServerArgs, {
+    const command = yield* Effect.try({
+      try: () =>
+        makeCodexCommand(options.binaryPath, appServerArgs, {
           // Codex app-server resolves absolute request cwd values through
           // `std::env::current_dir()` as of 0.142. Running the app-server
           // process from a project directory that macOS later denies can make
@@ -6746,19 +6746,19 @@ export const makeCodexSessionRuntime = (
           // Use the same command policy as disposable Codex probes.
           // Native executables must receive structured argv, not a shell's
           // interpretation of generated configuration or configured paths.
-          shell: codexCommandUsesShell(options.binaryPath, process.platform),
         }),
-      )
-      .pipe(
-        Effect.provideService(Scope.Scope, runtimeScope),
-        Effect.mapError(
-          (cause) =>
-            new CodexErrors.CodexAppServerSpawnError({
-              command: `${options.binaryPath} ${appServerArgs.join(" ")}`,
-              cause,
-            }),
-        ),
-      );
+      catch: (cause) => new CodexErrors.CodexAppServerSpawnError({ cause }),
+    });
+    const child = yield* spawner.spawn(command).pipe(
+      Effect.provideService(Scope.Scope, runtimeScope),
+      Effect.mapError(
+        (cause) =>
+          new CodexErrors.CodexAppServerSpawnError({
+            command: `${options.binaryPath} ${appServerArgs.join(" ")}`,
+            cause,
+          }),
+      ),
+    );
 
     const protocolTerminationRef = yield* Ref.make<
       | {

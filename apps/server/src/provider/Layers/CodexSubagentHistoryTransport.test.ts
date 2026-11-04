@@ -219,7 +219,7 @@ const makeTransportFixture = (
       }),
     );
     const rawRead = readCodexSubagentThreadTransient({
-      binaryPath: "synthetic-history-provider-never-launched",
+      binaryPath: "/test-only/synthetic-history-provider-never-launched.exe",
       appServerCwd: process.cwd(),
       rootProviderThreadId: rootId,
       subagentThreadId: childId,

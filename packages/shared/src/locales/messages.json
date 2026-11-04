@@ -185,7 +185,7 @@
   },
   "1–64. Inherited by new and existing chats without an override, at their next safe idle turn. Blank uses legacy runtime configuration or the provider default.": {
     "message": "1–64. Inherited by new and existing chats without an override, at their next safe idle turn. Blank uses legacy runtime configuration or the provider default.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:721"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:722"]
   },
   "24-hour": {
     "message": "24-hour",
@@ -213,7 +213,7 @@
   },
   "<slot0></slot0> settings": {
     "message": "<slot0></slot0> settings",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1692"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1699"]
   },
   "<slot1></slot1> The most recent matching binding wins when both conditions can apply.": {
     "message": "<slot1></slot1> The most recent matching binding wins when both conditions can apply.",
@@ -265,7 +265,7 @@
   },
   "<slot1></slot1>Sensitive": {
     "message": "<slot1></slot1>Sensitive",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:449"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:450"]
   },
   "<slot1></slot1>–<slot3></slot3> of <slot5></slot5> · Page<slot7></slot7><slot9></slot9> of <slot11></slot11>": {
     "message": "<slot1></slot1>–<slot3></slot3> of <slot5></slot5> · Page<slot7></slot7><slot9></slot9> of <slot11></slot11>",
@@ -343,7 +343,7 @@
   },
   "About reloading": {
     "message": "About reloading",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:993"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:994"]
   },
   "About scheduled follow-ups": {
     "message": "About scheduled follow-ups",
@@ -351,7 +351,7 @@
   },
   "About sensitive values": {
     "message": "About sensitive values",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:472"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:473"]
   },
   "About session approval": {
     "message": "About session approval",
@@ -375,11 +375,11 @@
   },
   "About the default context window": {
     "message": "About the default context window",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:742"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:743"]
   },
   "About the default subagent limit": {
     "message": "About the default subagent limit",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:675"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:676"]
   },
   "About the external step": {
     "message": "About the external step",
@@ -445,7 +445,7 @@
     "message": "Accent color",
     "locations": [
       "apps/web/src/components/OnboardingScreen.tsx:604",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1802",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1809",
       "apps/web/src/components/settings/SettingsPanels.tsx:1103",
       "apps/web/src/components/settings/settingsReset.ts:24",
       "apps/web/src/components/settings/settingsSearchIndex.ts:184"
@@ -507,7 +507,7 @@
   },
   "Account defaults": {
     "message": "Account defaults",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:664"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:665"]
   },
   "Account on hold": {
     "message": "Account on hold",
@@ -608,7 +608,7 @@
     "locations": [
       "apps/web/src/components/CommandPalette.tsx:1414",
       "apps/web/src/components/Sidebar.tsx:3377",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:393",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:394",
       "apps/web/src/components/settings/ProviderModelsSection.tsx:469"
     ]
   },
@@ -742,7 +742,7 @@
   "Advanced": {
     "message": "Advanced",
     "locations": [
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:969",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:970",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:183"
     ]
   },
@@ -825,8 +825,8 @@
   "Allow shared native provider state": {
     "message": "Allow shared native provider state",
     "locations": [
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1741",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1759"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1748",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1766"
     ]
   },
   "Allow the agent to finish this schedule when the instructions are satisfied.": {
@@ -1201,16 +1201,16 @@
     "locations": [
       "apps/web/src/components/settings/SourceControlSettings.tsx:103",
       "apps/web/src/components/settings/SourceControlSettings.tsx:180",
-      "apps/web/src/components/settings/providerStatus.ts:65"
+      "apps/web/src/components/settings/providerStatus.ts:121"
     ]
   },
   "Authenticated as": {
     "message": "Authenticated as",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1342"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1349"]
   },
   "Authenticated · {authLabel}": {
     "message": "Authenticated · {authLabel}",
-    "locations": ["apps/web/src/components/settings/providerStatus.ts:64"]
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:120"]
   },
   "Authentication failed.": {
     "message": "Authentication failed.",
@@ -1448,7 +1448,7 @@
   },
   "Blank follows your Codex settings and model defaults.": {
     "message": "Blank follows your Codex settings and model defaults.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:783"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:784"]
   },
   "Blank reuses your existing grok login.": {
     "message": "Blank reuses your existing grok login.",
@@ -2163,7 +2163,7 @@
     "locations": [
       "apps/web/src/components/desktopUpdate.logic.ts:117",
       "apps/web/src/components/settings/SettingsPanels.tsx:348",
-      "apps/web/src/components/settings/providerStatus.ts:38"
+      "apps/web/src/components/settings/providerStatus.ts:93"
     ]
   },
   "Checkout <slot1></slot1>": {
@@ -2271,6 +2271,14 @@
     "message": "Claude commands unavailable. Reopen to retry, or type one.",
     "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4118"]
   },
+  "Claude configuration needs attention": {
+    "message": "Claude configuration needs attention",
+    "locations": ["apps/web/src/providerDiagnostic.ts:354"]
+  },
+  "Claude could not start because a configuration file is invalid. Correct the Claude configuration before sending your message again.": {
+    "message": "Claude could not start because a configuration file is invalid. Correct the Claude configuration before sending your message again.",
+    "locations": ["apps/web/src/providerDiagnostic.ts:355"]
+  },
   "Claude estimates cannot account for provider-side custom pricing or fallback after a refusal.": {
     "message": "Claude estimates cannot account for provider-side custom pricing or fallback after a refusal.",
     "locations": ["apps/web/src/components/settings/UsageCostSection.tsx:790"]
@@ -2285,7 +2293,7 @@
   },
   "Claude limits Agent-tool spawning, not all running work.": {
     "message": "Claude limits Agent-tool spawning, not all running work.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:684"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:685"]
   },
   "Claude limits are unavailable.": {
     "message": "Claude limits are unavailable.",
@@ -2303,6 +2311,14 @@
     "message": "Claude reported quota meters and extra usage",
     "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:143"]
   },
+  "Claude sign-in may expire soon.": {
+    "message": "Claude sign-in may expire soon.",
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:62"]
+  },
+  "Claude sign-in may have expired.": {
+    "message": "Claude sign-in may have expired.",
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:61"]
+  },
   "Claude summary": {
     "message": "Claude summary",
     "locations": [
@@ -2319,7 +2335,7 @@
     "locations": [
       "apps/web/src/components/chat/ChatComposer.tsx:604",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:433",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:307"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:308"
     ]
   },
   "Clear Task Atrium errors": {
@@ -2340,7 +2356,7 @@
   },
   "Clear {value0} as default provider": {
     "message": "Clear {value0} as default provider",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1571"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1578"]
   },
   "Click archive twice to confirm.": {
     "message": "Click archive twice to confirm.",
@@ -2546,7 +2562,7 @@
       "apps/web/src/codexContextWindow.ts:219",
       "apps/web/src/codexContextWindow.ts:223",
       "apps/web/src/codexContextWindow.ts:69",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:764"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:765"
     ]
   },
   "Codex didn''t report reset availability. Try refreshing or updating Codex.": {
@@ -2571,7 +2587,7 @@
   },
   "Codex limits spawned agents that stay open.": {
     "message": "Codex limits spawned agents that stay open.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:690"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:691"]
   },
   "Codex limits spawned resident agents. The primary agent is not counted.": {
     "message": "Codex limits spawned resident agents. The primary agent is not counted.",
@@ -3158,7 +3174,7 @@
       "apps/web/src/components/chat/ProviderDiagnosticWorkEntry.tsx:532",
       "apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:223",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:363",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1486",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1493",
       "apps/web/src/components/visualizations/VisualizationCard.tsx:882"
     ]
   },
@@ -3231,7 +3247,7 @@
     "message": "Copy command",
     "locations": [
       "apps/web/src/components/OnboardingScreen.tsx:224",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1487"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1494"
     ]
   },
   "Copy current PNG": {
@@ -3337,7 +3353,7 @@
   },
   "Copy update command": {
     "message": "Copy update command",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1469"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1476"]
   },
   "Copy {path}": {
     "message": "Copy {path}",
@@ -3452,7 +3468,7 @@
   },
   "Could not copy {value0} update command": {
     "message": "Could not copy {value0} update command",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1153"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1160"]
   },
   "Could not create chat": {
     "message": "Could not create chat",
@@ -4195,7 +4211,7 @@
   },
   "Debug-only opt-in: this provider may use external or Production sign-in, configuration and history. The same online account still shares quota. Changing this setting reloads the provider and can end its active sessions.": {
     "message": "Debug-only opt-in: this provider may use external or Production sign-in, configuration and history. The same online account still shares quota. Changing this setting reloads the provider and can end its active sessions.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1749"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1756"]
   },
   "Dec": {
     "message": "Dec",
@@ -4225,7 +4241,7 @@
     "locations": [
       "apps/web/src/components/settings/ConnectionsSettings.tsx:1415",
       "apps/web/src/components/settings/KeybindingsSettings.logic.ts:120",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1581"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1588"
     ]
   },
   "Default Grok home": {
@@ -4238,7 +4254,7 @@
   },
   "Default context window (tokens)": {
     "message": "Default context window (tokens)",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:739"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:740"]
   },
   "Default editor": {
     "message": "Default editor",
@@ -4260,7 +4276,7 @@
   "Default model": {
     "message": "Default model",
     "locations": [
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:810",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:811",
       "apps/web/src/turnConfiguration.ts:172"
     ]
   },
@@ -4274,7 +4290,7 @@
   },
   "Default subagent limit": {
     "message": "Default subagent limit",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:671"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:672"]
   },
   "Default variant": {
     "message": "Default variant",
@@ -4306,7 +4322,7 @@
       "apps/web/src/components/ProjectScriptsControl.tsx:498",
       "apps/web/src/components/chat/AxiomMcpControl.tsx:220",
       "apps/web/src/components/chat/ScheduledFollowups.tsx:444",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1330",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1337",
       "apps/web/src/components/settings/SavedEnvironmentsSettings.tsx:488"
     ]
   },
@@ -4348,7 +4364,7 @@
   },
   "Delete provider instance {value0}": {
     "message": "Delete provider instance {value0}",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1318"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1325"]
   },
   "Delete schedule": {
     "message": "Delete schedule",
@@ -4480,7 +4496,7 @@
     "message": "Diagnostic JSON — secrets redacted",
     "locations": [
       "apps/web/src/components/chat/ProviderDiagnosticWorkEntry.tsx:502",
-      "apps/web/src/providerDiagnostic.ts:477"
+      "apps/web/src/providerDiagnostic.ts:488"
     ]
   },
   "Diagnostic copy with secrets removed before storage{redacted, select, yes {; secret values redacted} other {}}{omitted, select, yes {; some fields omitted} other {}}{truncated, select, yes {; truncated to the size limit} other {}}. Not the complete provider payload.": {
@@ -4626,7 +4642,7 @@
   },
   "Disabled": {
     "message": "Disabled",
-    "locations": ["apps/web/src/components/settings/providerStatus.ts:42"]
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:97"]
   },
   "Disabled in settings": {
     "message": "Disabled in settings",
@@ -4692,7 +4708,7 @@
   },
   "Dismiss provider status": {
     "message": "Dismiss provider status",
-    "locations": ["apps/web/src/components/chat/ProviderStatusBanner.tsx:56"]
+    "locations": ["apps/web/src/components/chat/ProviderStatusBanner.tsx:65"]
   },
   "Dismiss provider update notice": {
     "message": "Dismiss provider update notice",
@@ -4720,7 +4736,7 @@
   },
   "Display name": {
     "message": "Display name",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1788"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1795"]
   },
   "Display name <slot1></slot1>": {
     "message": "Display name <slot1></slot1>",
@@ -5031,7 +5047,7 @@
   },
   "Enable {value0}": {
     "message": "Enable {value0}",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1649"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1656"]
   },
   "Enabled": {
     "message": "Enabled",
@@ -5144,7 +5160,7 @@
     "message": "Enter a positive whole token count within the supported numeric range.",
     "locations": [
       "apps/web/src/components/chat/CodexContextWindowControl.tsx:200",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:774"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:775"
     ]
   },
   "Enter a replacement key": {
@@ -5235,15 +5251,15 @@
   },
   "Environment variable name {value0}": {
     "message": "Environment variable name {value0}",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:417"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:418"]
   },
   "Environment variable value {value0}": {
     "message": "Environment variable value {value0}",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:440"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:441"]
   },
   "Environment variables": {
     "message": "Environment variables",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:374"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:375"]
   },
   "Environment: <slot1></slot1>": {
     "message": "Environment: <slot1></slot1>",
@@ -5758,7 +5774,7 @@
   },
   "Fields omitted": {
     "message": "Fields omitted",
-    "locations": ["apps/web/src/providerDiagnostic.ts:476"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:487"]
   },
   "File": {
     "message": "File",
@@ -5933,15 +5949,15 @@
   },
   "For manual sign-in, set CODEX_HOME to this folder when running codex login. Cafe creates the private home only after you enable the provider.": {
     "message": "For manual sign-in, set CODEX_HOME to this folder when running codex login. Cafe creates the private home only after you enable the provider.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1713"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1720"]
   },
   "For manual sign-in, set GROK_HOME to this folder when running grok login. Enable the provider first to create its private home.": {
     "message": "For manual sign-in, set GROK_HOME to this folder when running grok login. Enable the provider first to create its private home.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1726"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1733"]
   },
   "For manual sign-in, set HOME to this folder and CLAUDE_CONFIG_DIR to its .claude subfolder. Cafe does not reuse your default terminal login. Enable the provider first to create its private home.": {
     "message": "For manual sign-in, set HOME to this folder and CLAUDE_CONFIG_DIR to its .claude subfolder. Cafe does not reuse your default terminal login. Enable the provider first to create its private home.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1720"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1727"]
   },
   "For this chat (1–64). Blank uses the account default.": {
     "message": "For this chat (1–64). Blank uses the account default.",
@@ -6112,7 +6128,7 @@
   },
   "Grok could not start its protected connection check.": {
     "message": "Grok could not start its protected connection check.",
-    "locations": ["apps/web/src/components/settings/providerStatus.ts:57"]
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:112"]
   },
   "Grok home folder": {
     "message": "Grok home folder",
@@ -6449,11 +6465,11 @@
   },
   "Install the CLI or set its binary path in Advanced settings.": {
     "message": "Install the CLI or set its binary path in Advanced settings.",
-    "locations": ["apps/web/src/components/settings/providerStatus.ts:48"]
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:103"]
   },
   "Install the latest version.": {
     "message": "Install the latest version.",
-    "locations": ["apps/web/src/components/settings/providerStatus.ts:128"]
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:184"]
   },
   "Install the update now or review provider settings.": {
     "message": "Install the update now or review provider settings.",
@@ -6465,11 +6481,11 @@
   },
   "Install {versionLabel}.": {
     "message": "Install {versionLabel}.",
-    "locations": ["apps/web/src/components/settings/providerStatus.ts:127"]
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:183"]
   },
   "Installed, but it couldn't be fully verified.": {
     "message": "Installed, but it couldn't be fully verified.",
-    "locations": ["apps/web/src/components/settings/providerStatus.ts:78"]
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:134"]
   },
   "Instance ID": {
     "message": "Instance ID",
@@ -6489,7 +6505,7 @@
   },
   "Instance label": {
     "message": "Instance label",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1796"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1803"]
   },
   "Instructions": {
     "message": "Instructions",
@@ -6585,7 +6601,7 @@
   },
   "It failed its startup checks.": {
     "message": "It failed its startup checks.",
-    "locations": ["apps/web/src/components/settings/providerStatus.ts:84"]
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:140"]
   },
   "It is no longer running under Cafe Code.": {
     "message": "It is no longer running under Cafe Code.",
@@ -6813,7 +6829,7 @@
   },
   "Leave this off for private Debug Codex, Claude and Grok homes. Other drivers require explicit sharing. Provider executable updates can affect installations shared with Production.": {
     "message": "Leave this off for private Debug Codex, Claude and Grok homes. Other drivers require explicit sharing. Provider executable updates can affect installations shared with Production.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1772"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1779"]
   },
   "Left": {
     "message": "Left",
@@ -7040,7 +7056,7 @@
     "message": "Log in",
     "locations": [
       "apps/web/src/components/OnboardingScreen.tsx:208",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1517"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1524"
     ]
   },
   "Log in by running": {
@@ -7238,7 +7254,7 @@
     "locations": [
       "apps/web/src/components/chat/ProviderDiagnosticWorkEntry.tsx:435",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1467",
-      "apps/web/src/providerDiagnostic.ts:468"
+      "apps/web/src/providerDiagnostic.ts:479"
     ]
   },
   "Microphone access was denied. Allow microphone access to use dictation.": {
@@ -7292,7 +7308,7 @@
   },
   "Model default: {value0}": {
     "message": "Model default: {value0}",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:893"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:894"]
   },
   "Model not reported": {
     "message": "Model not reported",
@@ -7521,7 +7537,7 @@
     "locations": [
       "apps/web/src/components/chat/ScheduledFollowupNotices.tsx:43",
       "apps/web/src/components/chat/ScheduledFollowups.tsx:98",
-      "apps/web/src/components/settings/providerStatus.ts:77"
+      "apps/web/src/components/settings/providerStatus.ts:133"
     ]
   },
   "Needs reconciliation": {
@@ -7580,11 +7596,11 @@
   },
   "New and existing Codex chats inherit this unless they have a chat override. Changes wait for a safe idle turn and never interrupt active work. Codex controls supported capacity and compaction; the usage meter keeps its reported capacity.": {
     "message": "New and existing Codex chats inherit this unless they have a chat override. Changes wait for a safe idle turn and never interrupt active work. Codex controls supported capacity and compaction; the usage meter keeps its reported capacity.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:744"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:745"]
   },
   "New and existing chats inherit this unless they have a per-chat override. Changing it doesn''t interrupt active work; inherited chats use the new setting at their next safe idle turn. The main agent isn''t counted.": {
     "message": "New and existing chats inherit this unless they have a per-chat override. Changing it doesn''t interrupt active work; inherited chats use the new setting at their next safe idle turn. The main agent isn''t counted.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:677"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:678"]
   },
   "New browser logins will need a pairing link.": {
     "message": "New browser logins will need a pairing link.",
@@ -7610,7 +7626,7 @@
   },
   "New chat defaults": {
     "message": "New chat defaults",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:797"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:798"]
   },
   "New chat in <project></project>": {
     "message": "New chat in <project></project>",
@@ -7641,11 +7657,11 @@
   },
   "New chats keep the last model used.": {
     "message": "New chats keep the last model used.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:604"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:605"]
   },
   "New chats start on this provider. Click to clear.": {
     "message": "New chats start on this provider. Click to clear.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1586"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1593"]
   },
   "New dictation sessions will no longer start until an owner saves another key.": {
     "message": "New dictation sessions will no longer start until an owner saves another key.",
@@ -7822,9 +7838,9 @@
   "No default": {
     "message": "No default",
     "locations": [
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:603",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:854",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:890"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:604",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:855",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:891"
     ]
   },
   "No displayable output retained.": {
@@ -8158,11 +8174,11 @@
   },
   "Not currently reported by this provider.": {
     "message": "Not currently reported by this provider.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:619"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:620"]
   },
   "Not found": {
     "message": "Not found",
-    "locations": ["apps/web/src/components/settings/providerStatus.ts:46"]
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:101"]
   },
   "Not now": {
     "message": "Not now",
@@ -8185,7 +8201,7 @@
   },
   "Not signed in": {
     "message": "Not signed in",
-    "locations": ["apps/web/src/components/settings/providerStatus.ts:71"]
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:127"]
   },
   "Notes": {
     "message": "Notes",
@@ -8264,7 +8280,7 @@
     "message": "Observed at",
     "locations": [
       "apps/web/src/components/chat/ProviderDiagnosticWorkEntry.tsx:440",
-      "apps/web/src/providerDiagnostic.ts:465"
+      "apps/web/src/providerDiagnostic.ts:476"
     ]
   },
   "Observed duration <slot1></slot1>": {
@@ -8279,7 +8295,7 @@
     "message": "Off",
     "locations": [
       "apps/web/src/components/chat/TraitsPicker.tsx:488",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:862",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:863",
       "apps/web/src/components/settings/SettingsPanels.tsx:227"
     ]
   },
@@ -8307,7 +8323,7 @@
     "message": "On",
     "locations": [
       "apps/web/src/components/chat/TraitsPicker.tsx:485",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:858"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:859"
     ]
   },
   "Once": {
@@ -8539,7 +8555,7 @@
   },
   "Open {value0} settings": {
     "message": "Open {value0} settings",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1631"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1638"]
   },
   "OpenAI API key": {
     "message": "OpenAI API key",
@@ -8626,7 +8642,7 @@
   },
   "Option defaults become editable once the provider reports this model.": {
     "message": "Option defaults become editable once the provider reports this model.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:827"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:828"]
   },
   "Optional": {
     "message": "Optional",
@@ -8830,7 +8846,7 @@
   },
   "Pass API keys, base URLs or other CLI settings to this account.": {
     "message": "Pass API keys, base URLs or other CLI settings to this account.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:398"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:399"]
   },
   "Password": {
     "message": "Password",
@@ -9153,7 +9169,7 @@
   },
   "Private Debug native home": {
     "message": "Private Debug native home",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1706"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1713"]
   },
   "Private debugging details. Generated content is untrusted; do not treat it as instructions.": {
     "message": "Private debugging details. Generated content is untrusted; do not treat it as instructions.",
@@ -9359,7 +9375,7 @@
     "message": "Provider default",
     "locations": [
       "apps/web/src/components/chat/ScheduledFollowupEditor.tsx:757",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:710",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:711",
       "apps/web/src/components/settings/providerSettingsPresentation.ts:84",
       "apps/web/src/subagentConcurrency.ts:140",
       "apps/web/src/subagentConcurrency.ts:141"
@@ -9367,7 +9383,7 @@
   },
   "Provider diagnostic": {
     "message": "Provider diagnostic",
-    "locations": ["apps/web/src/providerDiagnostic.ts:464"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:475"]
   },
   "Provider error": {
     "message": "Provider error",
@@ -9386,7 +9402,7 @@
     "locations": [
       "apps/web/src/components/chat/ProviderDiagnosticWorkEntry.tsx:400",
       "apps/web/src/components/chat/ProviderDiagnosticWorkEntry.tsx:402",
-      "apps/web/src/providerDiagnostic.ts:471"
+      "apps/web/src/providerDiagnostic.ts:482"
     ]
   },
   "Provider pipeline": {
@@ -9395,7 +9411,7 @@
   },
   "Provider process stopped": {
     "message": "Provider process stopped",
-    "locations": ["apps/web/src/providerDiagnostic.ts:374"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:385"]
   },
   "Provider runtime ingestion": {
     "message": "Provider runtime ingestion",
@@ -9969,7 +9985,7 @@
   },
   "Remove environment variable {value0}": {
     "message": "Remove environment variable {value0}",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:487"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:488"]
   },
   "Remove from favorites": {
     "message": "Remove from favorites",
@@ -10194,7 +10210,7 @@
   },
   "Request rejected": {
     "message": "Request rejected",
-    "locations": ["apps/web/src/providerDiagnostic.ts:354"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:365"]
   },
   "Requested compaction threshold. An explicit value takes precedence.": {
     "message": "Requested compaction threshold. An explicit value takes precedence.",
@@ -10301,7 +10317,7 @@
   },
   "Response limit reached": {
     "message": "Response limit reached",
-    "locations": ["apps/web/src/providerDiagnostic.ts:384"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:395"]
   },
   "Response stopped": {
     "message": "Response stopped",
@@ -10327,7 +10343,7 @@
   },
   "Restart provider": {
     "message": "Restart provider",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1559"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1566"]
   },
   "Restart the app from the update button to install it.": {
     "message": "Restart the app from the update button to install it.",
@@ -10343,7 +10359,7 @@
   },
   "Restart {value0} runtime": {
     "message": "Restart {value0} runtime",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1543"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1550"]
   },
   "Restart {value0}? Running turns may be interrupted.": {
     "message": "Restart {value0}? Running turns may be interrupted.",
@@ -10680,7 +10696,7 @@
   },
   "Sandbox error": {
     "message": "Sandbox error",
-    "locations": ["apps/web/src/providerDiagnostic.ts:359"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:370"]
   },
   "Sandbox support hasn''t been checked yet.": {
     "message": "Sandbox support hasn''t been checked yet.",
@@ -10688,7 +10704,7 @@
   },
   "Sandbox unavailable": {
     "message": "Sandbox unavailable",
-    "locations": ["apps/web/src/components/settings/providerStatus.ts:56"]
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:111"]
   },
   "Sat": {
     "message": "Sat",
@@ -10853,7 +10869,7 @@
   "Saved. Type a new value to replace it.": {
     "message": "Saved. Type a new value to replace it.",
     "locations": [
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:431",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:432",
       "apps/web/src/components/settings/ProviderSettingsForm.tsx:539"
     ]
   },
@@ -10867,7 +10883,7 @@
   },
   "Saving these reloads the account and can end active chats.": {
     "message": "Saving these reloads the account and can end active chats.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:985"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:986"]
   },
   "Saving your progress before Cafe Code takes a nap.": {
     "message": "Saving your progress before Cafe Code takes a nap.",
@@ -11062,7 +11078,7 @@
   },
   "Secrets redacted": {
     "message": "Secrets redacted",
-    "locations": ["apps/web/src/providerDiagnostic.ts:474"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:485"]
   },
   "See ya later...": {
     "message": "See ya later...",
@@ -11191,7 +11207,7 @@
   },
   "Sensitive values are stored separately and aren''t shown again after saving.": {
     "message": "Sensitive values are stored separately and aren''t shown again after saving.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:473"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:474"]
   },
   "Sep": {
     "message": "Sep",
@@ -11289,7 +11305,7 @@
   },
   "Set {value0} as default provider": {
     "message": "Set {value0} as default provider",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1604"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1611"]
   },
   "Sets CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS (Claude Code 2.1.217+). Saving reloads this account. Limits Agent-tool spawning, not all running work: resumes and manual forks can exceed it, ultracode is exempt, and workflows/teams use separate limits.": {
     "message": "Sets CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS (Claude Code 2.1.217+). Saving reloads this account. Limits Agent-tool spawning, not all running work: resumes and manual forks can exceed it, ultracode is exempt, and workflows/teams use separate limits.",
@@ -11318,7 +11334,7 @@
       "apps/web/src/components/ProviderUpdateLaunchNotification.tsx:398",
       "apps/web/src/components/ProviderUpdateLaunchNotification.tsx:412",
       "apps/web/src/components/SidebarFooterNavigation.tsx:83",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1643",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1650",
       "apps/web/src/routes/settings.tsx:101",
       "apps/web/src/routes/settings.tsx:119"
     ]
@@ -11646,7 +11662,7 @@
   },
   "Sign-in not verified": {
     "message": "Sign-in not verified",
-    "locations": ["apps/web/src/components/settings/providerStatus.ts:88"]
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:144"]
   },
   "Sign-in required": {
     "message": "Sign-in required",
@@ -11760,7 +11776,7 @@
     "locations": [
       "apps/web/src/components/MermaidBlock.tsx:389",
       "apps/web/src/components/chat/ProviderDiagnosticWorkEntry.tsx:430",
-      "apps/web/src/providerDiagnostic.ts:466"
+      "apps/web/src/providerDiagnostic.ts:477"
     ]
   },
   "Source Debug build is missing, outdated or inconsistent. Rebuild using yarn build:desktop before starting Cafe Code. No application or provider was started.": {
@@ -12085,7 +12101,7 @@
   },
   "Stopped after repeated denials": {
     "message": "Stopped after repeated denials",
-    "locations": ["apps/web/src/providerDiagnostic.ts:364"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:375"]
   },
   "Stopped before sending. Select this queued message to send it.": {
     "message": "Stopped before sending. Select this queued message to send it.",
@@ -12491,7 +12507,7 @@
   },
   "The agent stopped after several of its requests were denied.": {
     "message": "The agent stopped after several of its requests were denied.",
-    "locations": ["apps/web/src/providerDiagnostic.ts:365"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:376"]
   },
   "The answer draft limit is reached. Send or skip an existing answer before adding more.": {
     "message": "The answer draft limit is reached. Send or skip an existing answer before adding more.",
@@ -12670,7 +12686,7 @@
   },
   "The provider rejected this request.": {
     "message": "The provider rejected this request.",
-    "locations": ["apps/web/src/providerDiagnostic.ts:355"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:366"]
   },
   "The provider reported a billing or spend limit for this account. Check the account's usage and billing.": {
     "message": "The provider reported a billing or spend limit for this account. Check the account's usage and billing.",
@@ -12702,11 +12718,11 @@
   },
   "The provider's command sandbox failed.": {
     "message": "The provider's command sandbox failed.",
-    "locations": ["apps/web/src/providerDiagnostic.ts:360"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:371"]
   },
   "The provider's local process stopped unexpectedly. Your next message starts it again and resumes this chat.": {
     "message": "The provider's local process stopped unexpectedly. Your next message starts it again and resumes this chat.",
-    "locations": ["apps/web/src/providerDiagnostic.ts:375"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:386"]
   },
   "The remote Cafe Code server returned an invalid response. Check the server address and port.": {
     "message": "The remote Cafe Code server returned an invalid response. Check the server address and port.",
@@ -12734,7 +12750,7 @@
   },
   "The response hit the provider's output or context limit. Ask for a shorter answer or split the work.": {
     "message": "The response hit the provider's output or context limit. Ask for a shorter answer or split the work.",
-    "locations": ["apps/web/src/providerDiagnostic.ts:385"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:396"]
   },
   "The response was not confirmed. You can retry the same response while this request is active.": {
     "message": "The response was not confirmed. You can retry the same response while this request is active.",
@@ -13074,7 +13090,7 @@
   },
   "This model does not report configurable options.": {
     "message": "This model does not report configurable options.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:817"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:818"]
   },
   "This project still has hidden or stale chats. Force remove clears them too.": {
     "message": "This project still has hidden or stale chats. Force remove clears them too.",
@@ -13082,7 +13098,7 @@
   },
   "This provider (<slot1></slot1>) isn''t in this version of Cafe Code. Its settings are kept but can''t be edited here.": {
     "message": "This provider (<slot1></slot1>) isn''t in this version of Cafe Code. Its settings are kept but can''t be edited here.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1859"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1866"]
   },
   "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset.": {
     "message": "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset.",
@@ -13434,7 +13450,7 @@
   },
   "Truncated": {
     "message": "Truncated",
-    "locations": ["apps/web/src/providerDiagnostic.ts:475"]
+    "locations": ["apps/web/src/providerDiagnostic.ts:486"]
   },
   "Trust remote Cafe Code server": {
     "message": "Trust remote Cafe Code server",
@@ -13680,7 +13696,7 @@
       "apps/web/src/components/settings/DataProfileSettings.tsx:45",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:2281",
       "apps/web/src/components/settings/DictationSettings.tsx:226",
-      "apps/web/src/components/settings/providerStatus.ts:83"
+      "apps/web/src/components/settings/providerStatus.ts:139"
     ]
   },
   "Unavailable chat": {
@@ -13824,14 +13840,14 @@
   "Update available": {
     "message": "Update available",
     "locations": [
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1414",
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1421",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:219",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:50"
     ]
   },
   "Update available — view details": {
     "message": "Update available — view details",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1395"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1402"]
   },
   "Update available: {provider} {version}": {
     "message": "Update available: {provider} {version}",
@@ -13867,7 +13883,7 @@
   },
   "Update now": {
     "message": "Update now",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1439"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1446"]
   },
   "Update preparation failed": {
     "message": "Update preparation failed",
@@ -13902,7 +13918,7 @@
   },
   "Update this installation outside Cafe Code.": {
     "message": "Update this installation outside Cafe Code.",
-    "locations": ["apps/web/src/components/settings/providerStatus.ts:124"]
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:180"]
   },
   "Update {version} can be installed from its GitHub release": {
     "message": "Update {version} can be installed from its GitHub release",
@@ -13956,7 +13972,7 @@
     "locations": [
       "apps/web/src/components/chat/MessagesTimeline.tsx:1794",
       "apps/web/src/components/chat/ProviderOperationWorkEntry.tsx:48",
-      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1438"
+      "apps/web/src/components/settings/ProviderInstanceCard.tsx:1445"
     ]
   },
   "Upload": {
@@ -14104,7 +14120,7 @@
   },
   "Use for new chats by default": {
     "message": "Use for new chats by default",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1618"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1625"]
   },
   "Use global default": {
     "message": "Use global default",
@@ -14149,7 +14165,7 @@
   },
   "Use {value0} accent": {
     "message": "Use {value0} accent",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:265"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:266"]
   },
   "Used for buttons, focus rings, and highlights.": {
     "message": "Used for buttons, focus rings, and highlights.",
@@ -14161,7 +14177,7 @@
   },
   "Used for new chats. “No default” uses the model''s default.": {
     "message": "Used for new chats. “No default” uses the model''s default.",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:800"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:801"]
   },
   "Used: Unavailable": {
     "message": "Used: Unavailable",
@@ -14215,11 +14231,11 @@
   },
   "VARIABLE_NAME": {
     "message": "VARIABLE_NAME",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:415"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:416"]
   },
   "Value": {
     "message": "Value",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:437"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:438"]
   },
   "Verification could not be refreshed. Check this session and try again.": {
     "message": "Verification could not be refreshed. Check this session and try again.",
@@ -15157,7 +15173,7 @@
   },
   "or update manually": {
     "message": "or update manually",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1445"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1452"]
   },
   "phase": {
     "message": "phase",
@@ -15920,6 +15936,10 @@
     "message": "{hasHours, select, yes {{hours}h{hasMinutes, select, yes { {minutes}m} other {}}} other {{hasMinutes, select, yes {{minutes}m{hasSeconds, select, yes { {seconds}s} other {}}} other {{seconds}s}}}} generating",
     "locations": ["apps/web/src/components/stats/ActivityHeatmap.tsx:122"]
   },
+  "{headline} An active Claude session reported this estimated sign-in expiry: {expiresAt}. This is an estimate; sign-in may end up to 3 days earlier or be revoked sooner.": {
+    "message": "{headline} An active Claude session reported this estimated sign-in expiry: {expiresAt}. This is an estimate; sign-in may end up to 3 days earlier or be revoked sooner.",
+    "locations": ["apps/web/src/components/settings/providerStatus.ts:71"]
+  },
   "{hours}h": {
     "message": "{hours}h",
     "locations": [
@@ -16109,7 +16129,7 @@
   },
   "{provider} limited": {
     "message": "{provider} limited",
-    "locations": ["apps/web/src/components/chat/ProviderStatusBanner.tsx:33"]
+    "locations": ["apps/web/src/components/chat/ProviderStatusBanner.tsx:38"]
   },
   "{provider} still needs an update": {
     "message": "{provider} still needs an update",
@@ -16120,7 +16140,7 @@
   },
   "{provider} unavailable": {
     "message": "{provider} unavailable",
-    "locations": ["apps/web/src/components/chat/ProviderStatusBanner.tsx:32"]
+    "locations": ["apps/web/src/components/chat/ProviderStatusBanner.tsx:37"]
   },
   "{provider} update failed": {
     "message": "{provider} update failed",
@@ -16457,7 +16477,7 @@
   },
   "· <slot1></slot1> customized": {
     "message": "· <slot1></slot1> customized",
-    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:972"]
+    "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:973"]
   },
   "—": {
     "message": "—",

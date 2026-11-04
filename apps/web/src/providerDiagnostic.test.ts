@@ -264,6 +264,25 @@ describe("provider diagnostic received-data presentation", () => {
     expect(providerDiagnosticCategoryPresentation("sign-in-required").action).toBe(
       "provider-settings",
     );
+    const configuration = deriveProviderDiagnosticWorkLogRecord(
+      activity(
+        {
+          providerDiagnostic: { version: 1, status: "error", subject: { kind: "root" } },
+          providerDiagnosticCategory: "configuration",
+        },
+        "runtime.error",
+      ),
+    );
+    expect(configuration?.category).toBe("configuration");
+    expect(providerDiagnosticWorkLogLabel(configuration!)).toBe(
+      "Claude configuration needs attention",
+    );
+    expect(providerDiagnosticCategoryPresentation("configuration")).toEqual({
+      title: "Claude configuration needs attention",
+      guidance:
+        "Claude could not start because a configuration file is invalid. Correct the Claude configuration before sending your message again.",
+      action: "provider-settings",
+    });
     // Unknown/forged category values are ignored rather than displayed.
     expect(
       deriveProviderDiagnosticWorkLogRecord(

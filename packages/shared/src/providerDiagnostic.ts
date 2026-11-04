@@ -455,5 +455,12 @@ export function deriveProviderDiagnosticCategory(snapshot: {
   if (typeof claudeType === "string" && Object.hasOwn(CLAUDE_ERROR_CATEGORIES, claudeType)) {
     return CLAUDE_ERROR_CATEGORIES[claudeType];
   }
-  return httpStatusCategory(ownJsonValue(error, "apiErrorStatus"));
+  const httpCategory = httpStatusCategory(ownJsonValue(error, "apiErrorStatus"));
+  if (httpCategory) return httpCategory;
+  // Only Cafe's exact primary result diagnostic may publish this startup
+  // category. Native wording, other methods and future reasons are inert.
+  return snapshot.method === "claude/result/error" &&
+    ownJsonValue(error, "startupFailureReason") === "config_file_invalid"
+    ? "configuration"
+    : undefined;
 }
