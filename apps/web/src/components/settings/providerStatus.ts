@@ -1,4 +1,4 @@
-import { uiFormatDateTime, uiText } from "@cafecode/shared/i18n";
+import { uiFormatDateTime, uiText, type UiLocale } from "@cafecode/shared/i18n";
 import type { ServerProvider, ServerProviderVersionAdvisory } from "@cafecode/contracts";
 
 /**
@@ -34,7 +34,7 @@ const CLAUDE_SIGN_IN_WARNING_MS = 10 * 24 * 60 * 60 * 1_000;
 export function getProviderCredentialExpiryPresentation(
   provider: ServerProvider | undefined,
   nowMs = Date.now(),
-  locale?: string,
+  locale?: UiLocale,
 ): { readonly headline: string; readonly detail: string; readonly expiresAt: string } | null {
   const expiry = provider?.auth.credentialExpiry;
   if (
@@ -87,7 +87,7 @@ export function getProviderCredentialExpiryPresentation(
 export function getProviderSummary(
   provider: ServerProvider | undefined,
   nowMs = Date.now(),
-  locale?: string,
+  locale?: UiLocale,
 ) {
   if (!provider) {
     return { headline: uiText("Checking…"), detail: null };

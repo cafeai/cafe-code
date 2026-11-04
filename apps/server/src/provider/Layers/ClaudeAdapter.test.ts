@@ -15811,7 +15811,7 @@ describe("ClaudeAdapterLive", () => {
         const { result: _text, ...errorFields } = result(1, nextExpiry);
         yield* deliver({
           ...errorFields,
-          subtype: "error_during_execution",
+          subtype: "error_during_execution" as const,
           is_error: true,
           errors: ["Synthetic provider failure"],
         });
@@ -15995,7 +15995,7 @@ describe("ClaudeAdapterLive", () => {
           const { result: _text, ...failureFields } = makeSuccessfulClaudeResult(nativeSession);
           harness.query.emit({
             ...failureFields,
-            subtype: "error_during_execution",
+            subtype: "error_during_execution" as const,
             is_error: true,
             num_turns: 0,
             errors: ["Invalid retired configuration"],

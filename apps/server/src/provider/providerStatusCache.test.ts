@@ -102,7 +102,7 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       yield* writeProviderStatusCache({ filePath, provider: live });
       assert.notInclude(yield* fs.readFileString(filePath), '"credentialExpiry"');
       const expectedAuth = {
-        status: "authenticated",
+        status: "authenticated" as const,
         type: "claude.ai",
         email: "owned@example.invalid",
       };

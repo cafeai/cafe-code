@@ -1871,7 +1871,7 @@ export const checkCodexCliProviderStatus = Effect.fn("checkCodexCliProviderStatu
     // A refused construction has not established an installed executable or
     // attempted authentication. Keep availability unverified and distinguish
     // it from an actual native ENOENT; filesystem uncertainty is not absence.
-    const preparationRefused = error instanceof CodexErrors.CodexAppServerSpawnError;
+    const preparationRefused = isCodexAppServerSpawnError(error);
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
       enabled: codexSettings.enabled,

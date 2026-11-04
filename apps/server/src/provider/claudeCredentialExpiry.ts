@@ -3,6 +3,7 @@ import {
   type ServerProvider,
   type ServerProviderCredentialExpiry,
 } from "@cafecode/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -64,7 +65,7 @@ export function parseClaudeCredentialExpiry(value: unknown): string | undefined 
   }
   const milliseconds = Date.parse(value);
   if (!Number.isFinite(milliseconds)) return undefined;
-  const canonical = new Date(milliseconds).toISOString();
+  const canonical = DateTime.formatIso(DateTime.makeUnsafe(milliseconds));
   return canonical.length === 24 ? canonical : undefined;
 }
 

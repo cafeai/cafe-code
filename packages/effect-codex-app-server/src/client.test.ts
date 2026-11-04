@@ -29,6 +29,8 @@ import * as Ref from "effect/Ref";
 import * as CodexProtocol from "./protocol.ts";
 import { makeInMemoryStdio } from "./_internal/stdio.ts";
 
+const isCodexAppServerSpawnError = Schema.is(CodexError.CodexAppServerSpawnError);
+
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(import.meta.dirname, "../test/fixtures/codex-app-server-mock-peer.ts"),
 );
@@ -856,7 +858,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
           assert.equal(commands.length, 0);
           if (Exit.isSuccess(result)) return assert.fail("Expected command preparation failure");
           const error = Cause.squash(result.cause);
-          if (!(error instanceof CodexError.CodexAppServerSpawnError)) {
+          if (!isCodexAppServerSpawnError(error)) {
             return assert.fail("Expected the existing typed spawn failure");
           }
           assert.equal(error.command, undefined);

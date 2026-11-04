@@ -24,6 +24,8 @@ import {
   resetProcessShutdownObservationForTests,
 } from "../../processShutdownObservation.ts";
 
+const isCodexAppServerSpawnError = ProviderJsonSchema.is(CodexAppServerSpawnError);
+
 const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
   ProviderJsonSchema.UnknownFromJsonString,
 );
@@ -89,7 +91,7 @@ it.effect.each([
           assert.equal(commands.length, 0);
           if (Exit.isSuccess(result)) return assert.fail("Expected command preparation failure");
           const error = Cause.squash(result.cause);
-          if (!(error instanceof CodexAppServerSpawnError)) {
+          if (!isCodexAppServerSpawnError(error)) {
             return assert.fail("Expected the existing typed spawn failure");
           }
           assert.equal(error.command, undefined);
