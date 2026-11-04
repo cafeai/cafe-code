@@ -1,6 +1,6 @@
 # Verification decision index
 
-Last updated: 2026-11-04 11:22:32 JST (UTC+0900)
+Last updated: 2026-11-05 07:47:16 JST (UTC+0900)
 
 This index covers verification decisions; independent feature decisions remain
 in this directory.
@@ -28,6 +28,10 @@ in this directory.
   with exact acknowledgement, confirmed exit and preserved legacy-owner limits.
 
 Related provider lifecycle decisions:
+
+- [MCP pending questions](mcp-pending-questions.md): owner-only question
+  discovery and exact responses, atomic inline handling, canonical native
+  settlement and visible question/answer receipts in the primary chat.
 
 - [Phased Codex failed-root recovery](codex-phased-failed-root-recovery.md):
   private zero-paid preparation, exact joined ownership and one-use paid

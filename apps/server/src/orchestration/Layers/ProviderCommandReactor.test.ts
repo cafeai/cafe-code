@@ -14291,6 +14291,296 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  it.for([
+    "native-first",
+    "ack-first",
+    "cancelled",
+    "automatic",
+    "different-answer",
+    "different-disposition",
+    "replaced",
+    "owner-retired",
+    "rejected",
+  ] as const)(
+    "joins MCP question ownership and canonical settlement: %s",
+    async (outcome, context) => {
+      const reply = Promise.withResolvers<void>();
+      let entered = false;
+      const retire = () => reply.resolve();
+      // The fixture owns its held fake-native operation before acquiring the
+      // reactor. Hard timeout must release it before shared harness teardown.
+      context.signal.addEventListener("abort", retire, { once: true });
+      onTestFinished(() => {
+        retire();
+        context.signal.removeEventListener("abort", retire);
+      });
+      try {
+        const harness = await createHarness();
+        const now = "2026-01-01T00:00:00.000Z";
+        harness.respondToUserInput.mockImplementation(() =>
+          Effect.promise(() => {
+            entered = true;
+            return reply.promise;
+          }).pipe(
+            Effect.andThen(
+              outcome !== "rejected"
+                ? Effect.void
+                : Effect.fail(
+                    new ProviderAdapterRequestError({
+                      provider: ProviderDriverKind.make("codex"),
+                      method: "item/tool/respondToUserInput",
+                      detail: "The fake native response was rejected.",
+                    }),
+                  ),
+            ),
+          ),
+        );
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("mcp-notice-session"),
+            threadId: ThreadId.make("thread-1"),
+            session: {
+              threadId: ThreadId.make("thread-1"),
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: now,
+            },
+            createdAt: now,
+          }),
+        );
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make("mcp-notice-request"),
+            threadId: ThreadId.make("thread-1"),
+            activity: {
+              id: EventId.make("mcp-notice-request-activity"),
+              tone: "info",
+              kind: "user-input.requested",
+              summary: "User input requested",
+              turnId: null,
+              createdAt: now,
+              payload: {
+                requestId: "mcp-notice-request-id",
+                supportsUnanswered: true,
+                questions: [
+                  { id: "answer", header: "Answer", question: "Answer this?", options: [] },
+                  { id: "skip", header: "Skip", question: "Skip this?", options: [] },
+                  { id: "clear", header: "Clear", question: "Clear this?", options: [] },
+                ],
+              },
+            },
+            createdAt: now,
+          }),
+        );
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.mcp-user-input.respond",
+            commandId: CommandId.make("mcp-notice-reply"),
+            threadId: ThreadId.make("thread-1"),
+            requestId: asApprovalRequestId("mcp-notice-request-id"),
+            expectedRequestCreatedAt: now,
+            answers: { answer: "Private answer text" },
+            unanswered: { skip: "skipped", clear: "dismissed" },
+            action: "answered",
+            noticeMessageId: MessageId.make("mcp-notice-primary"),
+            createdAt: now,
+          }),
+        );
+        await waitFor(() => entered);
+        const pending = (await harness.readModel()).threads.find(
+          (entry) => entry.id === "thread-1",
+        )!;
+        expect(
+          pending.activities.some((activity) => activity.kind === "mcp.question.resolved"),
+        ).toBe(false);
+        if (outcome === "replaced") {
+          const original = pending.activities.find(
+            (activity) => activity.kind === "user-input.requested",
+          )!;
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.activity.append",
+              commandId: CommandId.make("mcp-notice-replaced"),
+              threadId: ThreadId.make("thread-1"),
+              createdAt: now,
+              activity: {
+                ...original,
+                id: EventId.make("mcp-notice-new-incarnation"),
+                payload: {
+                  ...(original.payload as Record<string, unknown>),
+                  questions: [
+                    {
+                      id: "answer",
+                      header: "Replacement",
+                      question: "A new question?",
+                      options: [],
+                    },
+                  ],
+                },
+              },
+            }),
+          );
+        }
+        if (outcome === "owner-retired") {
+          await Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.session.set",
+              commandId: CommandId.make("mcp-notice-new-owner"),
+              threadId: ThreadId.make("thread-1"),
+              createdAt: now,
+              session: {
+                ...pending.session!,
+                subagentRuntimeId: SubagentRuntimeId.make("3155d875-4ac5-4911-9b56-73c2ccf0eaa8"),
+              },
+            }),
+          );
+        }
+        const settle = () =>
+          Effect.runPromise(
+            harness.engine.dispatch({
+              type: "thread.activity.append",
+              commandId: CommandId.make("mcp-notice-native-settlement"),
+              threadId: ThreadId.make("thread-1"),
+              activity: {
+                id: EventId.make("mcp-notice-native-settlement"),
+                tone: "info",
+                kind: "user-input.resolved",
+                summary: "Native question settled",
+                turnId: null,
+                createdAt: now,
+                payload: {
+                  requestId: "mcp-notice-request-id",
+                  answers:
+                    outcome === "cancelled"
+                      ? {}
+                      : {
+                          answer:
+                            outcome === "different-answer"
+                              ? "Another caller's answer"
+                              : "Private answer text",
+                        },
+                  ...(outcome === "automatic" ? { autoResolved: true } : {}),
+                  ...(outcome === "cancelled"
+                    ? { cancelled: true }
+                    : {
+                        unanswered:
+                          outcome === "different-disposition"
+                            ? { skip: "dismissed", clear: "skipped" }
+                            : { skip: "skipped", clear: "dismissed" },
+                      }),
+                },
+              },
+              createdAt: now,
+            }),
+          );
+        if (outcome !== "ack-first" && outcome !== "rejected") {
+          await settle();
+          expect(
+            (await harness.readModel()).threads
+              .find((entry) => entry.id === "thread-1")!
+              .activities.some((activity) => activity.kind === "mcp.question.resolved"),
+          ).toBe(false);
+        }
+        retire();
+        // A later command on the same serial reactor proves the response
+        // handler has returned. It does not substitute a mock invocation for
+        // native callback resolution, which is supplied separately above/below.
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "thread.user-input.snooze",
+            commandId: CommandId.make("mcp-notice-drain"),
+            threadId: ThreadId.make("thread-1"),
+            requestId: asApprovalRequestId("mcp-notice-request-id"),
+            createdAt: now,
+          }),
+        );
+        await waitFor(() => harness.snoozeUserInput.mock.calls.length === 1);
+        if (outcome === "ack-first") {
+          expect(
+            (await harness.readModel()).threads
+              .find((entry) => entry.id === "thread-1")!
+              .activities.some((activity) => activity.kind === "mcp.question.resolved"),
+          ).toBe(false);
+          await settle();
+        }
+        const succeeds = outcome === "native-first" || outcome === "ack-first";
+        await waitFor(async () => {
+          const thread = (await harness.readModel()).threads.find(
+            (entry) => entry.id === "thread-1",
+          )!;
+          return succeeds
+            ? thread.activities.filter((activity) => activity.kind === "mcp.question.resolved")
+                .length === 3
+            : outcome !== "rejected" ||
+                thread.activities.some(
+                  (activity) => activity.kind === "provider.user-input.respond.failed",
+                );
+        });
+        const thread = (await harness.readModel()).threads.find(
+          (entry) => entry.id === "thread-1",
+        )!;
+        const notices = thread.activities.filter(
+          (activity) => activity.kind === "mcp.question.resolved",
+        );
+        if (succeeds) {
+          expect(notices.map((activity) => activity.payload)).toEqual([
+            {
+              version: 2,
+              source: "mcp",
+              action: "answered",
+              questionCount: 1,
+              items: [
+                {
+                  question: { id: "answer", header: "Answer", question: "Answer this?" },
+                  answer: "Private answer text",
+                },
+              ],
+            },
+            {
+              version: 2,
+              source: "mcp",
+              action: "skipped",
+              questionCount: 1,
+              items: [
+                {
+                  question: { id: "skip", header: "Skip", question: "Skip this?" },
+                  disposition: "skipped",
+                },
+              ],
+            },
+            {
+              version: 2,
+              source: "mcp",
+              action: "cleared",
+              questionCount: 1,
+              items: [
+                {
+                  question: { id: "clear", header: "Clear", question: "Clear this?" },
+                  disposition: "dismissed",
+                },
+              ],
+            },
+          ]);
+        } else {
+          expect(notices).toEqual([]);
+          expect(
+            thread.activities.some((activity) => activity.kind === "user-input.requested"),
+          ).toBe(true);
+          expect(
+            thread.activities.some((activity) => activity.kind === "user-input.resolved"),
+          ).toBe(outcome !== "rejected");
+        }
+      } finally {
+        retire();
+      }
+    },
+  );
+
   it("reacts to thread.user-input.snooze without resolving the request", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

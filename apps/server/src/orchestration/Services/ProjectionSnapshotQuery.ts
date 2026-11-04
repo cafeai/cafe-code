@@ -16,6 +16,7 @@ import type {
   OrchestrationShellSnapshot,
   OrchestrationThread,
   OrchestrationThreadActivity,
+  OrchestrationThreadActivityCursor,
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadTurnActivityPage,
   OrchestrationThreadTurnActivityPageInput,
@@ -42,6 +43,30 @@ export interface ProjectionSnapshotCounts {
 
 export interface ProjectionSnapshotSequence {
   readonly snapshotSequence: number;
+}
+
+/** A keyset page inspects only one thread's indexed asynchronous-question
+ * lane. Unreadable payloads consume their page position and are reported, so
+ * callers cannot mistake omitted history for a complete empty question list. */
+export interface ProjectionAsyncQuestionActivitiesPageInput {
+  readonly threadId: ThreadId;
+  readonly limit?: number;
+  readonly before?: OrchestrationThreadActivityCursor;
+}
+
+export interface ProjectionAsyncQuestionActivitiesPage {
+  readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
+  readonly hasMore: boolean;
+  readonly nextCursor: OrchestrationThreadActivityCursor | null;
+  readonly omittedCount: number;
+}
+
+/** Management question reads deliberately exclude transcript, plan and
+ * checkpoint hydration while preserving the same pending callback retention
+ * and honest omission evidence as the ordinary detail projection. */
+export interface ProjectionThreadQuestionContext extends OrchestrationThreadShell {
+  readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
+  readonly pendingRequestRetentionTruncated: boolean;
 }
 
 export interface ProjectionThreadCheckpointContext {
@@ -296,6 +321,10 @@ export interface ProjectionSnapshotQueryShape {
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
 
+  readonly getThreadQuestionContextById: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<ProjectionThreadQuestionContext>, ProjectionRepositoryError>;
+
   /**
    * Read only the newest persisted context report. The dedicated partial
    * ordering index avoids hydrating messages or scanning an ordinary tool
@@ -304,6 +333,17 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadContextWindowActivity: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThreadActivity>, ProjectionRepositoryError>;
+
+  readonly getThreadAsyncQuestionActivitiesPage: (
+    input: ProjectionAsyncQuestionActivitiesPageInput,
+  ) => Effect.Effect<ProjectionAsyncQuestionActivitiesPage, ProjectionRepositoryError>;
+
+  /** Exact immutable activity lookup remains available after a question leaves
+   * every ordinary detail/history window. It never expands to another thread. */
+  readonly getThreadAsyncQuestionActivity: (input: {
+    readonly threadId: ThreadId;
+    readonly activityId: string;
+  }) => Effect.Effect<Option.Option<OrchestrationThreadActivity>, ProjectionRepositoryError>;
 
   /**
    * Find active Codex threads with either a shell-proven legacy latest-turn

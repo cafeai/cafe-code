@@ -83,6 +83,9 @@ const dependencies = {
         id === threadId || id === otherThreadId ? Option.some(shell(id)) : Option.none(),
       ),
     getThreadContextWindowActivity: () => Effect.succeed(Option.none()),
+    getThreadAsyncQuestionActivitiesPage: () => Effect.die("unused"),
+    getThreadAsyncQuestionActivity: () => Effect.die("unused"),
+    getThreadQuestionContextById: () => Effect.die("unused"),
   },
   providerRegistry: {
     getProviders: Effect.succeed([]),

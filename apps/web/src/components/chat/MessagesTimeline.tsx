@@ -1,6 +1,6 @@
 import { useUiLocale, useUiPresentation } from "~/i18n";
 import { flushSync } from "react-dom";
-import { uiText, type UiLocale } from "@cafecode/shared/i18n";
+import { uiFormatNumber, uiText, type UiLocale } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
 import { FileAttachmentPill } from "./FileAttachmentPill";
 import { TurnConfigurationWorkEntry } from "./TurnConfigurationWorkEntry";
@@ -1753,12 +1753,85 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         <AssistantTimelineRow row={row} />
       ) : null}
       {row.kind === "provider-summary" ? <ProviderSummaryTimelineRow row={row} /> : null}
+      {row.kind === "question-resolution" ? <QuestionResolutionTimelineRow row={row} /> : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "visualization" ? <VisualizationTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
     </div>
   );
 });
+
+/**
+ * MCP completion belongs in the primary conversation even while every Work
+ * Log stays collapsed. Fixed copy identifies the actor and disposition without
+ * impersonating the assistant. A v2 receipt shows the exact submitted question
+ * and response as inert React text, including whitespace and literal markup.
+ */
+function QuestionResolutionTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "question-resolution" }>;
+}) {
+  const uiLocale = useUiLocale();
+  const count = uiFormatNumber(row.questionCount, undefined, uiLocale);
+  let text: string;
+  switch (row.action) {
+    case "answered":
+      text =
+        row.questionCount === 1
+          ? uiText("Question answered via MCP.", undefined, undefined, uiLocale)
+          : uiText("{count} questions answered via MCP.", { count }, undefined, uiLocale);
+      break;
+    case "skipped":
+      text =
+        row.questionCount === 1
+          ? uiText("Question skipped via MCP.", undefined, undefined, uiLocale)
+          : uiText("{count} questions skipped via MCP.", { count }, undefined, uiLocale);
+      break;
+    case "cleared":
+      text =
+        row.questionCount === 1
+          ? uiText("Question cleared via MCP.", undefined, undefined, uiLocale)
+          : uiText("{count} questions cleared via MCP.", { count }, undefined, uiLocale);
+      break;
+  }
+  return (
+    <section className="space-y-3 px-1 py-1 text-sm" data-primary-question-resolution="true">
+      <p className="flex items-center gap-2 text-muted-foreground">
+        <CheckIcon className="size-4 shrink-0" aria-hidden="true" />
+        <span>{text}</span>
+      </p>
+      {row.items?.map((item) => (
+        <dl key={item.question.id} className="space-y-1 border-l-2 border-border pl-3">
+          <dt className="font-medium">
+            {item.question.header || uiText("Question", undefined, undefined, uiLocale)}
+          </dt>
+          <dd className="whitespace-pre-wrap break-words">{item.question.question}</dd>
+          <dt className="font-medium text-muted-foreground">
+            {uiText("Answer", undefined, undefined, uiLocale)}
+          </dt>
+          <dd className="whitespace-pre-wrap break-words">
+            {"answer" in item ? (
+              typeof item.answer === "string" ? (
+                item.answer
+              ) : (
+                <ul className="list-inside list-disc space-y-1">
+                  {item.answer.map((answer, index) => (
+                    <li key={index}>{answer}</li>
+                  ))}
+                </ul>
+              )
+            ) : item.disposition === "skipped" ? (
+              uiText("Skipped via MCP.", undefined, undefined, uiLocale)
+            ) : (
+              uiText("Cleared via MCP.", undefined, undefined, uiLocale)
+            )}
+          </dd>
+        </dl>
+      ))}
+    </section>
+  );
+}
 
 /**
  * Explicitly public Claude text is ordinary conversation prose. It retains its

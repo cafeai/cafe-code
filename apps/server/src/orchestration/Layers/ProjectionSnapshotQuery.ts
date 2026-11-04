@@ -12,6 +12,7 @@ import {
   OrchestrationReadModel,
   OrchestrationShellSnapshot,
   OrchestrationThread,
+  OrchestrationThreadActivity,
   OrchestrationThreadTurnActivityPageInput,
   OrchestrationThreadTurnSubagentDetailInput,
   OrchestrationThreadActivityCursor,
@@ -29,7 +30,6 @@ import {
   type OrchestrationProposedPlan,
   type OrchestrationProject,
   type OrchestrationSession,
-  type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
   type OrchestrationLiveWork,
   ModelSelection,
@@ -108,6 +108,41 @@ import {
 const decodeReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
 const decodeShellSnapshot = Schema.decodeUnknownEffect(OrchestrationShellSnapshot);
 const decodeThread = Schema.decodeUnknownEffect(OrchestrationThread);
+const decodeQuestionActivity = Schema.decodeUnknownOption(OrchestrationThreadActivity);
+const MAX_QUESTION_ACTIVITY_BYTES = 1_048_576;
+const ASYNC_QUESTION_ACTIVITY_ID = /^codex-async-questions:[a-f0-9]{64}$/u;
+
+interface BoundedQuestionActivityRow {
+  readonly id: string;
+  readonly turnId: string | null;
+  readonly tone: string;
+  readonly kind: string;
+  readonly summary: string;
+  readonly payloadJson: string | null;
+  readonly sequence: number | null;
+  readonly createdAt: string;
+}
+
+/** The SQL boundary replaces oversized bodies with null before they enter JS.
+ * Decode one finite body at a time; malformed records are omission evidence,
+ * never error text containing provider-authored question or answer content. */
+function decodeBoundedQuestionActivity(row: BoundedQuestionActivityRow) {
+  if (!ASYNC_QUESTION_ACTIVITY_ID.test(row.id) || row.payloadJson === null) return Option.none();
+  try {
+    return decodeQuestionActivity({
+      id: row.id,
+      turnId: row.turnId,
+      tone: row.tone,
+      kind: row.kind,
+      summary: row.summary,
+      payload: JSON.parse(row.payloadJson),
+      ...(row.sequence !== null ? { sequence: row.sequence } : {}),
+      createdAt: row.createdAt,
+    });
+  } catch {
+    return Option.none();
+  }
+}
 export const THREAD_DETAIL_ACTIVITY_LIMIT = THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT;
 export const THREAD_DETAIL_MESSAGE_LIMIT = 2_000;
 const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
@@ -2744,6 +2779,47 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             WHERE lifecycle.kind NOT IN ('approval.requested', 'user-input.requested')
           ) WHERE terminal_rank = 1
         ),
+        mcp_question_notice_candidates AS MATERIALIZED (
+          -- Primary-chat notices must survive an ordinary burst of tool work.
+          -- Legacy v1 notices contain only metadata. V2 includes exact bounded
+          -- questions/answers, so count and encoded-byte budgets are distinct.
+          -- Ordinary-tail rows cost no additional hydration bytes here.
+          SELECT activity_id, created_at,
+            CASE WHEN activity_id IN (SELECT activity_id FROM recent_activity_ids)
+              THEN 0 ELSE length(CAST(payload_json AS BLOB)) END AS extra_bytes
+          FROM projection_thread_activities
+            INDEXED BY idx_projection_thread_activities_thread_kind_created_id
+          WHERE thread_id = ${threadId} AND kind = 'mcp.question.resolved'
+            AND length(CAST(payload_json AS BLOB)) <= 1048576
+            AND CASE WHEN json_valid(payload_json) THEN
+              json_type(payload_json, '$.version') = 'integer'
+              AND json_extract(payload_json, '$.source') = 'mcp'
+              AND json_extract(payload_json, '$.action') IN ('answered', 'skipped', 'cleared')
+              AND json_type(payload_json, '$.questionCount') = 'integer'
+              AND json_extract(payload_json, '$.questionCount') BETWEEN 1 AND 64
+              AND (
+                (json_extract(payload_json, '$.version') = 1
+                  AND length(CAST(payload_json AS BLOB)) <= 1024)
+                OR (json_extract(payload_json, '$.version') = 2
+                  AND json_type(payload_json, '$.items') = 'array'
+                  AND json_array_length(payload_json, '$.items') = json_extract(payload_json, '$.questionCount'))
+              )
+            ELSE 0 END
+          ORDER BY created_at DESC, activity_id DESC
+          LIMIT 64
+        ),
+        retained_mcp_question_notice_ids AS (
+          -- Retain the newest prefix that fits a cumulative 1 MiB *extra*
+          -- budget. Older small receipts do not jump over an omitted newer
+          -- one. UI still applies the exact versioned payload policy; this
+          -- storage envelope never grants callback or MCP response authority.
+          SELECT activity_id FROM (
+            SELECT activity_id, SUM(extra_bytes) OVER (
+              ORDER BY created_at DESC, activity_id DESC ROWS UNBOUNDED PRECEDING
+            ) AS retained_extra_bytes
+            FROM mcp_question_notice_candidates
+          ) WHERE retained_extra_bytes <= 1048576
+        ),
         latest_task_plan_activity_id AS (
           SELECT activity_id
           FROM projection_thread_activities
@@ -3143,6 +3219,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           SELECT activity_id FROM retained_pending_request_heads
           UNION
           SELECT activity_id FROM retained_request_terminal_ids
+          UNION
+          SELECT activity_id FROM retained_mcp_question_notice_ids
           UNION
           SELECT work.activity_id
           FROM current_live_work_heads AS work WHERE work.active = 1
@@ -5335,7 +5413,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       };
     });
 
-  const repairLegacyThreadActivityOrder = (thread: OrchestrationThread) =>
+  const repairLegacyThreadActivityOrder = <
+    Thread extends {
+      readonly id: ThreadId;
+      readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
+    },
+  >(
+    thread: Thread,
+  ) =>
     Effect.gen(function* () {
       const repairRows = thread.activities.map((activity) => ({
         ...activity,
@@ -5359,8 +5444,57 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           const { threadId: _threadId, activityId: _activityId, ...activity } = row;
           return activity;
         }),
-      } satisfies OrchestrationThread;
+      };
     });
+
+  const getThreadQuestionContextById: ProjectionSnapshotQueryShape["getThreadQuestionContextById"] =
+    (threadId) =>
+      Effect.gen(function* () {
+        // Reuse the detail projection's exact pending lifecycle selection and
+        // bounded extra retention. This read needs no messages, plans,
+        // checkpoints or subagent-history hydration to expose callback state.
+        const [shell, rows] = yield* sql
+          .withTransaction(
+            Effect.all([
+              getThreadShellById(threadId),
+              listThreadActivityRowsByThread({ threadId }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadQuestionContextById:listActivities:query",
+                    "ProjectionSnapshotQuery.getThreadQuestionContextById:listActivities:decodeRows",
+                  ),
+                ),
+              ),
+            ]),
+          )
+          .pipe(
+            Effect.mapError((error) =>
+              isPersistenceError(error)
+                ? error
+                : toPersistenceSqlError(
+                    "ProjectionSnapshotQuery.getThreadQuestionContextById:query",
+                  )(error),
+            ),
+          );
+        if (Option.isNone(shell)) return Option.none();
+        const context = {
+          ...shell.value,
+          activities: rows.map(mapActivityRow),
+          pendingRequestRetentionTruncated: rows[0]?.pendingRequestRetentionTruncated === 1,
+        };
+        // Legacy rows may lack ledger sequences. The same ordering repair as
+        // full detail preserves exact request/resolution order without
+        // pretending an empty transcript was hydrated.
+        return Option.some(
+          yield* repairLegacyThreadActivityOrder(context).pipe(
+            Effect.mapError(
+              toPersistenceSqlError(
+                "ProjectionSnapshotQuery.getThreadQuestionContextById:repairLegacyActivityOrder",
+              ),
+            ),
+          ),
+        );
+      });
 
   const repairLoadedThreadDetail = (
     loaded: Effect.Success<ReturnType<typeof loadThreadDetailById>>,
@@ -5445,6 +5579,93 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     `,
   });
 
+  const getThreadAsyncQuestionActivitiesPage: ProjectionSnapshotQueryShape["getThreadAsyncQuestionActivitiesPage"] =
+    (input) =>
+      Effect.gen(function* () {
+        const limit = input.limit ?? 20;
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64)
+          return yield* Effect.fail(
+            toPersistenceDecodeError("ProjectionSnapshotQuery.questionPage:limit")(
+              new Error("Question pages require a finite limit from 1 to 64."),
+            ),
+          );
+        const before =
+          input.before === undefined
+            ? undefined
+            : yield* Schema.decodeUnknownEffect(OrchestrationThreadActivityCursor)(
+                input.before,
+              ).pipe(
+                Effect.mapError(
+                  toPersistenceDecodeError("ProjectionSnapshotQuery.questionPage:cursor"),
+                ),
+              );
+        const predicate =
+          before === undefined
+            ? sql`thread_id = ${input.threadId} AND kind = 'provider.async-questions'`
+            : sql`thread_id = ${input.threadId} AND kind = 'provider.async-questions'
+              AND (created_at < ${before.createdAt}
+                OR (created_at = ${before.createdAt} AND activity_id < ${before.activityId}))`;
+        // Creation time/id are immutable when handled indexes are updated.
+        // The existing index therefore bounds both scanning and hydration,
+        // whereas ordering by the mutable sequence would sort the whole lane
+        // and could move a handled question across an already issued cursor.
+        const rows = yield* sql<BoundedQuestionActivityRow>`
+          SELECT activity_id AS id, turn_id AS "turnId", tone, kind, summary,
+            CASE WHEN length(CAST(payload_json AS BLOB)) <= ${MAX_QUESTION_ACTIVITY_BYTES}
+              THEN payload_json ELSE NULL END AS "payloadJson",
+            sequence, created_at AS "createdAt"
+          FROM projection_thread_activities
+            INDEXED BY idx_projection_thread_activities_thread_kind_created_id
+          WHERE ${predicate}
+          ORDER BY created_at DESC, activity_id DESC
+          LIMIT ${limit + 1}
+        `.pipe(
+          Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.questionPage:query")),
+        );
+        const selected = rows.slice(0, limit);
+        const activities: OrchestrationThreadActivity[] = [];
+        let omittedCount = 0;
+        for (const row of selected) {
+          const decoded = decodeBoundedQuestionActivity(row);
+          if (Option.isSome(decoded)) activities.push(decoded.value);
+          else omittedCount += 1;
+        }
+        const hasMore = rows.length > limit;
+        const last = selected.at(-1);
+        const nextCursor =
+          hasMore && last
+            ? yield* Schema.decodeUnknownEffect(OrchestrationThreadActivityCursor)({
+                sequence: last.sequence,
+                createdAt: last.createdAt,
+                activityId: last.id,
+              }).pipe(
+                Effect.mapError(
+                  toPersistenceDecodeError("ProjectionSnapshotQuery.questionPage:nextCursor"),
+                ),
+              )
+            : null;
+        return { activities, hasMore, nextCursor, omittedCount };
+      });
+
+  const getThreadAsyncQuestionActivity: ProjectionSnapshotQueryShape["getThreadAsyncQuestionActivity"] =
+    (input) =>
+      Effect.gen(function* () {
+        if (!ASYNC_QUESTION_ACTIVITY_ID.test(input.activityId)) return Option.none();
+        const [row] = yield* sql<BoundedQuestionActivityRow>`
+          SELECT activity_id AS id, turn_id AS "turnId", tone, kind, summary,
+            CASE WHEN length(CAST(payload_json AS BLOB)) <= ${MAX_QUESTION_ACTIVITY_BYTES}
+              THEN payload_json ELSE NULL END AS "payloadJson",
+            sequence, created_at AS "createdAt"
+          FROM projection_thread_activities
+          WHERE activity_id = ${input.activityId} AND thread_id = ${input.threadId}
+            AND kind = 'provider.async-questions'
+          LIMIT 1
+        `.pipe(
+          Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.exactQuestion:query")),
+        );
+        return row ? decodeBoundedQuestionActivity(row) : Option.none();
+      });
+
   return {
     getCommandReadModel,
     hasPendingContextBootstrap: (threadId) =>
@@ -5494,6 +5715,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
         Effect.map(Option.map(mapActivityRow)),
       ),
+    getThreadAsyncQuestionActivitiesPage,
+    getThreadAsyncQuestionActivity,
     getPostTerminalStaleSteerCandidates,
     getPostTerminalStaleSteerCandidateThreadIds,
     getCodexSteerAcceptanceEvidence,
@@ -5504,6 +5727,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadTurnWorkLogPresence,
     hasThreadTurnSubagentActivity,
     getThreadDetailById,
+    getThreadQuestionContextById,
     getThreadDetailSnapshotById,
   } satisfies ProjectionSnapshotQueryShape;
 });

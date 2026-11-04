@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  ApprovalRequestId,
   type ChatAttachment,
   CheckpointRef,
   CommandId,
@@ -72,6 +73,7 @@ import {
   SESSION_LIFECYCLE_SUPERSEDED,
   sessionLifecycleSnapshot,
 } from "../sessionLifecycle.ts";
+import { derivePendingQuestionRequests } from "../pendingQuestions.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
@@ -200,6 +202,441 @@ describe("durable inline question handling", () => {
     });
     return { threadId, activityId, resolution };
   }
+
+  it("atomically answers a cold saved question and refuses another client's stale answer", async () => {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "cafe-mcp-question-answer-"));
+    const first = await createPersistentOrchestrationSystem(
+      path.join(baseDir, "state.sqlite"),
+      baseDir,
+    );
+    let second: Awaited<ReturnType<typeof createPersistentOrchestrationSystem>> | undefined;
+    try {
+      const { threadId, activityId } = await seedQuestions(first);
+      // Startup deliberately omits ordinary activity bodies. The answer must
+      // re-read this exact saved item rather than treating a cold cache as a
+      // missing question or authorizing another client's stale cached copy.
+      second = await createPersistentOrchestrationSystem(
+        path.join(baseDir, "state.sqlite"),
+        baseDir,
+      );
+      const command: OrchestrationCommand = {
+        type: "thread.async-question.answer",
+        commandId: CommandId.make("mcp-cold-answer"),
+        threadId,
+        activityId,
+        questionIndex: 0,
+        answer: "A",
+        messageId: MessageId.make("mcp-cold-answer-message"),
+        noticeMessageId: MessageId.make("mcp-cold-answer-notice"),
+        createdAt: now(),
+      };
+      const receipt = await second.run(second.engine.dispatch(command));
+      expect(await second.run(second.engine.dispatch(command))).toEqual(receipt);
+      const rejected = await first.run(
+        Effect.exit(
+          first.engine.dispatch({
+            ...command,
+            commandId: CommandId.make("mcp-stale-answer"),
+            messageId: MessageId.make("mcp-stale-answer-message"),
+          }),
+        ),
+      );
+      expect(rejected._tag).toBe("Failure");
+      // Another unhandled question cannot reuse the durable message identity
+      // with different quoted content, even through this internal command.
+      expect(
+        (
+          await first.run(
+            Effect.exit(
+              first.engine.dispatch({
+                ...command,
+                commandId: CommandId.make("mcp-answer-reused-message"),
+                questionIndex: 1,
+              }),
+            ),
+          )
+        )._tag,
+      ).toBe("Failure");
+      const thread = (await second.run(second.snapshotQuery.getSnapshot())).threads[0]!;
+      expect(thread.messages.map((message) => ({ id: message.id, text: message.text }))).toEqual([
+        { id: "mcp-cold-answer-message", text: "> Which route?\n\nA" },
+      ]);
+      expect(thread.activities.find((entry) => entry.id === activityId)).toMatchObject({
+        payload: { handledQuestionIndexes: [0] },
+      });
+      expect(
+        thread.activities.filter((entry) => entry.kind === "mcp.question.resolved"),
+      ).toMatchObject([
+        {
+          payload: {
+            version: 2,
+            source: "mcp",
+            action: "answered",
+            questionCount: 1,
+            items: [
+              {
+                question: { id: `${activityId}:0`, header: "", question: "Which route?" },
+                answer: "A",
+              },
+            ],
+          },
+        },
+      ]);
+      expect(
+        (
+          await first.run(first.sql<{ count: number }>`SELECT COUNT(*) AS count
+        FROM orchestration_events WHERE command_id = 'mcp-stale-answer'`)
+        )[0]?.count,
+      ).toBe(0);
+    } finally {
+      await second?.dispose();
+      await first.dispose();
+      fs.rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it("explicitly skips and clears asynchronous questions with atomic notices and no new turn", async () => {
+    const system = await createOrchestrationSystem();
+    try {
+      const { threadId, activityId } = await seedQuestions(system);
+      for (const [index, action] of [
+        [0, "skipped"],
+        [1, "cleared"],
+      ] as const)
+        await system.run(
+          system.engine.dispatch({
+            type: "thread.mcp-async-questions.resolve",
+            commandId: CommandId.make(`mcp-${action}`),
+            threadId,
+            activityId,
+            questionIndexes: [index],
+            action,
+            noticeMessageId: MessageId.make(`mcp-${action}-notice`),
+            createdAt: now(),
+          }),
+        );
+      const thread = (await system.run(system.snapshotQuery.getSnapshot())).threads[0]!;
+      expect(thread.messages).toEqual([]);
+      expect(thread.activities.find((entry) => entry.id === activityId)).toMatchObject({
+        payload: { handledQuestionIndexes: [0, 1] },
+      });
+      expect(
+        thread.activities
+          .filter((entry) => entry.kind === "mcp.question.resolved")
+          .map((entry) => entry.payload),
+      ).toEqual([
+        {
+          version: 2,
+          source: "mcp",
+          action: "skipped",
+          questionCount: 1,
+          items: [
+            {
+              question: { id: `${activityId}:0`, header: "", question: "Which route?" },
+              disposition: "skipped",
+            },
+          ],
+        },
+        {
+          version: 2,
+          source: "mcp",
+          action: "cleared",
+          questionCount: 1,
+          items: [
+            {
+              question: { id: `${activityId}:1`, header: "", question: "Anything else?" },
+              disposition: "dismissed",
+            },
+          ],
+        },
+      ]);
+      expect(
+        (
+          await system.run(system.sql<{ count: number }>`SELECT COUNT(*) AS count
+        FROM orchestration_events WHERE event_type = 'thread.turn-start-requested'`)
+        )[0]?.count,
+      ).toBe(0);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("rolls the answer and handled state back when its primary notice cannot commit", async () => {
+    const system = await createOrchestrationSystem();
+    try {
+      const { threadId, activityId } = await seedQuestions(system);
+      await system.run(system.sql`CREATE TRIGGER reject_mcp_notice
+          BEFORE INSERT ON projection_thread_activities
+          WHEN NEW.kind = 'mcp.question.resolved'
+          BEGIN SELECT RAISE(ABORT, 'Synthetic notice commit refusal'); END`);
+      const result = await system.run(
+        Effect.exit(
+          system.engine.dispatch({
+            type: "thread.async-question.answer",
+            commandId: CommandId.make("mcp-answer-rollback"),
+            threadId,
+            activityId,
+            questionIndex: 0,
+            answer: "A",
+            messageId: MessageId.make("mcp-answer-rollback-message"),
+            noticeMessageId: MessageId.make("mcp-answer-rollback-notice"),
+            createdAt: now(),
+          }),
+        ),
+      );
+      expect(result._tag).toBe("Failure");
+      const thread = (await system.run(system.snapshotQuery.getSnapshot())).threads[0]!;
+      expect(thread.messages).toEqual([]);
+      expect(
+        thread.activities.find((entry) => entry.id === activityId)?.payload,
+      ).not.toHaveProperty("handledQuestionIndexes");
+      expect(thread.activities.some((entry) => entry.kind === "mcp.question.resolved")).toBe(false);
+      expect(
+        (
+          await system.run(system.sql<{ count: number }>`SELECT COUNT(*) AS count
+        FROM orchestration_events WHERE command_id = 'mcp-answer-rollback'`)
+        )[0]?.count,
+      ).toBe(0);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("revalidates native question incarnation and keeps dispatch acknowledgement distinct from resolution", async () => {
+    const system = await createOrchestrationSystem();
+    try {
+      const { threadId } = await seedQuestions(system);
+      const requestId = ApprovalRequestId.make(" mcp-native-request ");
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("mcp-native-request-event"),
+          threadId,
+          activity: {
+            id: EventId.make("mcp-native-request-event"),
+            turnId: null,
+            tone: "info",
+            kind: "user-input.requested",
+            summary: "Question",
+            payload: {
+              requestId,
+              supportsUnanswered: true,
+              questions: [
+                { id: "__proto__", header: "Choice", question: "Which route?", options: [] },
+                {
+                  id: " route ",
+                  header: " Exact header ",
+                  question: " Exact wording? ",
+                  options: [],
+                },
+              ],
+            },
+            createdAt: now(),
+          },
+          createdAt: now(),
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("mcp-native-nonterminal-failure"),
+          threadId,
+          activity: {
+            id: EventId.make("mcp-native-nonterminal-failure"),
+            turnId: null,
+            tone: "error",
+            kind: "provider.user-input.respond.failed",
+            summary: "Question response failed",
+            payload: { requestId, detail: "Temporary response failure" },
+            createdAt: now(),
+          },
+          createdAt: now(),
+        }),
+      );
+      const pendingBefore = derivePendingQuestionRequests(
+        (await system.run(system.snapshotQuery.getSnapshot())).threads[0]!.activities,
+      ).find((request) => request.requestId === requestId);
+      expect(pendingBefore).toBeDefined();
+      const response: Extract<OrchestrationCommand, { type: "thread.mcp-user-input.respond" }> = {
+        type: "thread.mcp-user-input.respond",
+        commandId: CommandId.make("mcp-native-response"),
+        threadId,
+        requestId,
+        expectedRequestCreatedAt: pendingBefore!.createdAt,
+        answers: Object.fromEntries([
+          ["__proto__", "A"],
+          [" route ", " Exact answer "],
+        ]),
+        action: "answered",
+        noticeMessageId: MessageId.make("mcp-native-notice"),
+        createdAt: now(),
+      };
+      for (const invalid of [
+        {
+          ...response,
+          commandId: CommandId.make("mcp-native-stale-incarnation"),
+          expectedRequestCreatedAt: "2026-01-02T00:00:00.000Z",
+        },
+        { ...response, commandId: CommandId.make("mcp-native-incomplete"), answers: {} },
+      ])
+        expect((await system.run(Effect.exit(system.engine.dispatch(invalid))))._tag).toBe(
+          "Failure",
+        );
+      await system.run(system.engine.dispatch(response));
+      const thread = (await system.run(system.snapshotQuery.getSnapshot())).threads[0]!;
+      expect(thread.activities.some((entry) => entry.kind === "mcp.question.resolved")).toBe(false);
+      const [row] = await system.run(system.sql<{ payload: string }>`SELECT payload_json AS payload
+        FROM orchestration_events WHERE command_id = ${response.commandId}`);
+      expect(JSON.parse(row!.payload)).toMatchObject({
+        requestId,
+        mcpResponse: {
+          requestCreatedAt: now(),
+          noticeMessageId: "mcp-native-notice",
+          action: "answered",
+          questions: [
+            { id: "__proto__", header: "Choice", question: "Which route?" },
+            { id: " route ", header: " Exact header ", question: " Exact wording? " },
+          ],
+        },
+      });
+      const decodedEvent = Array.from(
+        await system.run(system.engine.readEvents(0).pipe(Stream.runCollect)),
+      ).find((event) => event.commandId === response.commandId);
+      // Raw SQL bytes alone miss normalization on event-store decoding. The
+      // actual replayed event must still address the exact opaque callback.
+      expect(decodedEvent).toMatchObject({
+        payload: {
+          requestId,
+          mcpResponse: {
+            questions: [
+              { id: "__proto__", header: "Choice", question: "Which route?" },
+              { id: " route ", header: " Exact header ", question: " Exact wording? " },
+            ],
+          },
+        },
+      });
+      const savedAnswers = (JSON.parse(row!.payload) as { answers: Record<string, string> })
+        .answers;
+      expect(Object.hasOwn(savedAnswers, "__proto__")).toBe(true);
+      expect(savedAnswers["__proto__"]).toBe("A");
+      expect(savedAnswers[" route "]).toBe(" Exact answer ");
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("mcp-native-resolved"),
+          threadId,
+          activity: {
+            id: EventId.make("mcp-native-resolved"),
+            turnId: null,
+            tone: "info",
+            kind: "user-input.resolved",
+            summary: "Resolved",
+            payload: { requestId, answers: response.answers },
+            createdAt: now(),
+          },
+          createdAt: now(),
+        }),
+      );
+      expect(
+        (
+          await system.run(
+            Effect.exit(
+              system.engine.dispatch({
+                ...response,
+                commandId: CommandId.make("mcp-native-after-resolution"),
+              }),
+            ),
+          )
+        )._tag,
+      ).toBe("Failure");
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("refuses an oversized exact native receipt before admitting its response intent", async () => {
+    const system = await createOrchestrationSystem();
+    try {
+      const { threadId } = await seedQuestions(system);
+      const requestId = ApprovalRequestId.make("mcp-native-large-receipt");
+      const activityId = EventId.make("mcp-native-large-receipt-request");
+      const questions = Array.from({ length: 5 }, (_, index) => ({
+        id: `q${index}`,
+        header: index === 0 ? "文".repeat(7_000) : "H",
+        question: "文".repeat(65_000),
+        options: [],
+      }));
+      const answers = Object.fromEntries(
+        questions.map((question, index) => [question.id, index === 0 ? "a".repeat(60_000) : "A"]),
+      );
+      const payload = { requestId, questions };
+      // Both earlier storage and native-response guards admit these exact
+      // inputs. Combining the full question text and answer exceeds the
+      // receipt's independent 1 MiB UTF-8 budget; UTF-16 counts alone miss it.
+      expect(Buffer.byteLength(JSON.stringify(payload), "utf8")).toBeLessThan(1_048_576);
+      expect(Buffer.byteLength(JSON.stringify({ answers, unanswered: {} }), "utf8")).toBeLessThan(
+        65_536,
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("mcp-native-large-request"),
+          threadId,
+          activity: {
+            id: activityId,
+            turnId: null,
+            tone: "info",
+            kind: "user-input.requested",
+            summary: "Question",
+            payload,
+            createdAt: now(),
+          },
+          createdAt: now(),
+        }),
+      );
+      const before = await system.readModel();
+      const pendingBefore = derivePendingQuestionRequests(before.threads[0]!.activities).find(
+        (request) => request.requestId === requestId,
+      );
+      expect(pendingBefore?.unsupportedReason).toBeNull();
+      const commandId = CommandId.make("mcp-native-large-response");
+      const result = await system.run(
+        system.engine
+          .dispatch({
+            type: "thread.mcp-user-input.respond",
+            commandId,
+            threadId,
+            requestId,
+            expectedRequestCreatedAt: pendingBefore!.createdAt,
+            answers,
+            action: "answered",
+            noticeMessageId: MessageId.make("mcp-native-large-notice"),
+            createdAt: now(),
+          })
+          .pipe(Effect.match({ onSuccess: () => null, onFailure: (error) => error })),
+      );
+      expect(result).toMatchObject({
+        _tag: "OrchestrationCommandInvariantError",
+        detail: "The complete question and response are too large or invalid to record safely.",
+      });
+      const after = await system.readModel();
+      expect(after.snapshotSequence).toBe(before.snapshotSequence);
+      expect(after.threads[0]!.activities.find((activity) => activity.id === activityId)).toEqual(
+        before.threads[0]!.activities.find((activity) => activity.id === activityId),
+      );
+      expect(
+        after.threads[0]!.activities.some((activity) => activity.kind === "mcp.question.resolved"),
+      ).toBe(false);
+      expect(
+        (
+          await system.run(system.sql<{ count: number }>`SELECT COUNT(*) AS count
+        FROM orchestration_events WHERE command_id = ${commandId}`)
+        )[0]?.count,
+      ).toBe(0);
+    } finally {
+      await system.dispose();
+    }
+  });
 
   it("resolves a saved question after it leaves the 500-activity command cache", async () => {
     const system = await createOrchestrationSystem();
@@ -2169,6 +2606,9 @@ describe("OrchestrationEngine", () => {
           getThreadTurnActivityPage: () => Effect.die("unused"),
           getThreadActivityDiagnostic: () => Effect.die("unused"),
           getThreadContextWindowActivity: () => Effect.die("unused"),
+          getThreadAsyncQuestionActivitiesPage: () => Effect.die("unused"),
+          getThreadAsyncQuestionActivity: () => Effect.die("unused"),
+          getThreadQuestionContextById: () => Effect.die("unused"),
           getThreadTurnWorkLogPresence: () => Effect.die("unused"),
           hasThreadTurnSubagentActivity: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.succeed(Option.none()),

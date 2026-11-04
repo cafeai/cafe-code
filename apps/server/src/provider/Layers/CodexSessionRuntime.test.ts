@@ -67,6 +67,7 @@ import {
   CODEX_SUMMARY_HISTORY_MAX_PAGES,
   CODEX_SUMMARY_HISTORY_MAX_TURNS,
   CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
+  CodexSessionRuntimePendingUserInputNotFoundError,
   acceptsCodexChildNotification,
   acknowledgeCodexPendingSteerProcessing,
   acknowledgeCodexReasoningEffortRequest,
@@ -216,6 +217,7 @@ for (const request of [
     expected: 600_000,
   },
   { label: "failed-opening", context: 800_000, failed: true, expected: 800_000 },
+  { label: "native-question-response-winner", questionRace: true, expected: null },
   {
     label: "diagnostic-source",
     context: 800_000,
@@ -225,7 +227,9 @@ for (const request of [
   },
 ] as const)
   effectIt.effect(
-    `records ${request.label} opening request before retaining explicit goal controls`,
+    "questionRace" in request
+      ? "accepts only one concurrent answer for an exact native question and emits one acknowledgement"
+      : `records ${request.label} opening request before retaining explicit goal controls`,
     () =>
       Effect.gen(function* () {
         // The real runtime and typed JSONL client run against a scoped in-memory
@@ -238,6 +242,11 @@ for (const request of [
         const resumeWillFailRecoverably = "recoverable" in request;
         const responseWillBeMismatched = "mismatched" in request;
         const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+        const nativeQuestionReplies: unknown[] = [];
+        const nativeQuestionReturned = yield* Deferred.make<{
+          readonly result?: unknown;
+          readonly error?: unknown;
+        }>();
         const nativeThreadId = "synthetic-goal-thread";
         const goal = {
           threadId: nativeThreadId,
@@ -293,7 +302,17 @@ for (const request of [
                       id?: string | number;
                       method: string;
                       params?: Record<string, unknown>;
+                      result?: unknown;
+                      error?: unknown;
                     };
+                    if (
+                      request.id === "single-winner-native-question" &&
+                      request.method === undefined
+                    ) {
+                      nativeQuestionReplies.push(request);
+                      yield* Deferred.succeed(nativeQuestionReturned, request);
+                      continue;
+                    }
                     calls.push({
                       method: request.method,
                       ...(request.params ? { params: request.params } : {}),
@@ -452,6 +471,97 @@ for (const request of [
             ? { model_auto_compact_token_limit: request.expected }
             : {}),
         });
+        if ("questionRace" in request) {
+          // Exercise the public runtime and its real typed JSONL request
+          // handler. The peer owns one native callback; no injected callback,
+          // copied Deferred or implementation helper supplies its outcome.
+          const questionObserved = yield* Deferred.make<ProviderEvent>();
+          const isBarrier = (event: ProviderEvent) =>
+            event.method === "warning" &&
+            event.payload !== null &&
+            typeof event.payload === "object" &&
+            Reflect.get(event.payload, "message") === "Question response fixture barrier";
+          const events = yield* runtime.events.pipe(
+            Stream.tap((event) =>
+              event.method === "item/tool/requestUserInput"
+                ? Deferred.succeed(questionObserved, event)
+                : Effect.void,
+            ),
+            Stream.takeUntil(isBarrier),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          yield* Queue.offer(
+            output,
+            encoder.encode(
+              `${encodeProviderJsonString({
+                id: "single-winner-native-question",
+                method: "item/tool/requestUserInput",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: "native-question-turn",
+                  itemId: "native-question-item",
+                  isBlocking: true,
+                  questions: [
+                    {
+                      id: "route",
+                      header: "Route",
+                      question: "Which route?",
+                      options: [
+                        { label: "A", description: "Take route A" },
+                        { label: "B", description: "Take route B" },
+                      ],
+                    },
+                  ],
+                },
+              })}\n`,
+            ),
+          );
+          const question = yield* Deferred.await(questionObserved);
+          const requestId = question.requestId;
+          assert.ok(requestId);
+          const attempts = yield* Effect.all(
+            ["A", "B"].map((value) =>
+              runtime.respondToUserInput(requestId, { route: value }).pipe(
+                Effect.match({
+                  onFailure: (error) => ({ accepted: false as const, value, error }),
+                  onSuccess: () => ({ accepted: true as const, value }),
+                }),
+              ),
+            ),
+            { concurrency: "unbounded" },
+          );
+          const accepted = attempts.filter((attempt) => attempt.accepted);
+          const rejected = attempts.filter((attempt) => !attempt.accepted);
+          assert.equal(accepted.length, 1);
+          assert.equal(rejected.length, 1);
+          const loser = rejected[0]!;
+          if (!Schema.is(CodexSessionRuntimePendingUserInputNotFoundError)(loser.error))
+            return assert.fail("Expected the exact native pending-question loser error");
+          assert.equal(loser.error.requestId, requestId);
+          const nativeReply = yield* Deferred.await(nativeQuestionReturned);
+          const expectedAnswer = { answers: { route: { answers: [accepted[0]!.value] } } };
+          assert.equal(nativeReply.error, undefined);
+          assert.deepEqual(nativeReply.result, expectedAnswer);
+          yield* Queue.offer(
+            output,
+            encoder.encode(
+              `${encodeProviderJsonString({
+                method: "warning",
+                params: { threadId: nativeThreadId, message: "Question response fixture barrier" },
+              })}\n`,
+            ),
+          );
+          const observed = Array.from(yield* Fiber.join(events));
+          const answered = observed.filter(
+            (event) => event.method === "item/tool/requestUserInput/answered",
+          );
+          assert.equal(answered.length, 1);
+          assert.equal(answered[0]!.requestId, requestId);
+          assert.deepEqual(answered[0]!.payload, expectedAnswer);
+          assert.equal(nativeQuestionReplies.length, 1);
+          return;
+        }
         if ("diagnostic" in request) {
           // Exercise the real runtime's typed JSONL notification admission,
           // not merely the pure tracker. Install the exact output observer

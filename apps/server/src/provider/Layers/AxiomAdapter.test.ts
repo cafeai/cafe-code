@@ -745,27 +745,43 @@ describe("Axiom scoped ACP adapter", () => {
       expect(events.filter((event) => event.type === "turn.completed")).toHaveLength(1);
     }).pipe(Effect.provide(layer), Effect.scoped),
   );
-  it.effect("validates multi-choice answers and resolves only the pending native question", () =>
-    Effect.gen(function* () {
-      const { adapter, question, complete, readReport } = yield* setup;
-      yield* adapter.sendTurn({ threadId, input: "question prompt" });
-      const request = yield* Deferred.await(question);
-      if (!request.requestId) return yield* Effect.die("Missing exact question identity");
-      const requestId = ApprovalRequestId.make(request.requestId);
-      expect(
-        (yield* adapter
-          .respondToUserInput(threadId, requestId, { choices: ["unoffered"] })
-          .pipe(Effect.result))._tag,
-      ).toBe("Failure");
-      yield* adapter.respondToUserInput(threadId, requestId, { choices: ["first"] });
-      yield* Deferred.await(complete);
-      expect((yield* readReport)?.reply.state).toBe("verified");
-      expect(
-        (yield* adapter
-          .respondToUserInput(threadId, requestId, { choices: ["first"] })
-          .pipe(Effect.result))._tag,
-      ).toBe("Failure");
-    }).pipe(Effect.provide(layer), Effect.scoped),
+  it.effect(
+    "validates multi-choice answers and acknowledges only one concurrent native response",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, question, complete, readReport } = yield* setup;
+        yield* adapter.sendTurn({ threadId, input: "question prompt" });
+        const request = yield* Deferred.await(question);
+        if (!request.requestId) return yield* Effect.die("Missing exact question identity");
+        const requestId = ApprovalRequestId.make(request.requestId);
+        expect(
+          (yield* adapter
+            .respondToUserInput(threadId, requestId, { choices: ["unoffered"] })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
+        const attempts = yield* Effect.all(
+          [
+            adapter
+              .respondToUserInput(threadId, requestId, { choices: ["first"] })
+              .pipe(Effect.result),
+            adapter
+              .respondToUserInput(threadId, requestId, { choices: ["first"] })
+              .pipe(Effect.result),
+          ],
+          { concurrency: "unbounded" },
+        );
+        // The native callback can accept only one reply even while its terminal
+        // event/finalizer is still queued. A losing caller must not get an ACK.
+        expect(attempts.filter((attempt) => attempt._tag === "Success")).toHaveLength(1);
+        expect(attempts.filter((attempt) => attempt._tag === "Failure")).toHaveLength(1);
+        yield* Deferred.await(complete);
+        expect((yield* readReport)?.reply.state).toBe("verified");
+        expect(
+          (yield* adapter
+            .respondToUserInput(threadId, requestId, { choices: ["first"] })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
+      }).pipe(Effect.provide(layer), Effect.scoped),
   );
   it.effect("continues after two UUID-bound choice answers and accepts the next prompt", () =>
     Effect.gen(function* () {

@@ -10965,11 +10965,17 @@ export const makeCodexSessionRuntime = (
           }
           const codexAnswers = yield* toCodexUserInputAnswers(answers);
           yield* Ref.update(pendingUserInputsRef, (current) => {
+            if (current.get(requestId) !== pending) return current;
             const next = new Map(current);
             next.delete(requestId);
             return next;
           });
-          yield* Deferred.succeed(pending.answers, answers);
+          // Validation can yield after another caller has acquired this same
+          // request. Only the actual Deferred winner may acknowledge or emit
+          // a submitted-answer event; a duplicate is not another resolution.
+          const accepted = yield* Deferred.succeed(pending.answers, answers);
+          if (!accepted)
+            return yield* new CodexSessionRuntimePendingUserInputNotFoundError({ requestId });
           yield* emitEvent({
             kind: "notification",
             threadId: options.threadId,

@@ -16,6 +16,7 @@ import { ProviderDiagnosticSnapshot } from "./providerDiagnostic.ts";
 import { RepositoryIdentity } from "./environment.ts";
 import { CodexReviewTarget } from "./codexReview.ts";
 import { ProviderUserInputUnanswered, hasDisjointUserInputAnswers } from "./providerUserInput.ts";
+import { UserInputQuestion } from "./providerRuntime.ts";
 import {
   ApprovalRequestId,
   CheckpointRef,
@@ -1426,6 +1427,54 @@ const ThreadAsyncQuestionsResolveCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+/** Management-only operations retain an exact question incarnation and their
+ * own notice identity. They are deliberately excluded from the public client
+ * command union: provider payloads and ordinary renderer input cannot mint MCP
+ * provenance or turn an acknowledgement into a completed native response. */
+const ThreadMcpUserInputRespondCommand = Schema.Struct({
+  type: Schema.Literal("thread.mcp-user-input.respond"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  // An MCP target copies an existing opaque callback identity. Decoding must
+  // not normalize it into a different native owner's request.
+  requestId: Schema.toType(ApprovalRequestId),
+  expectedRequestCreatedAt: IsoDateTime,
+  answers: ProviderUserInputAnswers,
+  unanswered: Schema.optional(ProviderUserInputUnanswered),
+  noticeMessageId: MessageId,
+  action: Schema.Literals(["answered", "skipped", "cleared"]),
+  createdAt: IsoDateTime,
+}).check(Schema.makeFilter(hasDisjointUserInputAnswers));
+
+const ThreadAsyncQuestionAnswerCommand = Schema.Struct({
+  type: Schema.Literal("thread.async-question.answer"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  activityId: EventId,
+  questionIndex: NonNegativeInt.check(Schema.isLessThanOrEqualTo(15)),
+  answer: Schema.String.check(
+    Schema.isNonEmpty(),
+    Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS),
+  ),
+  messageId: MessageId,
+  noticeMessageId: MessageId,
+  createdAt: IsoDateTime,
+});
+
+const ThreadMcpAsyncQuestionsResolveCommand = Schema.Struct({
+  type: Schema.Literal("thread.mcp-async-questions.resolve"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  activityId: EventId,
+  questionIndexes: Schema.Array(NonNegativeInt).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(16),
+  ),
+  noticeMessageId: MessageId,
+  action: Schema.Literals(["skipped", "cleared"]),
+  createdAt: IsoDateTime,
+});
+
 const ThreadCheckpointRevertCommand = Schema.Struct({
   type: Schema.Literal("thread.checkpoint.revert"),
   commandId: CommandId,
@@ -1728,6 +1777,9 @@ const ThreadGoalSyncCommand = Schema.Struct({
 });
 
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadMcpUserInputRespondCommand,
+  ThreadAsyncQuestionAnswerCommand,
+  ThreadMcpAsyncQuestionsResolveCommand,
   ThreadForkCommitCommand,
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -2000,9 +2052,30 @@ export const ThreadApprovalResponseRequestedPayload = Schema.Struct({
 
 const ThreadUserInputResponseRequestedPayload = Schema.Struct({
   threadId: ThreadId,
-  requestId: ApprovalRequestId,
+  // The public renderer command retains its existing ingress normalization;
+  // persisted canonical/MCP identities must survive later decode unchanged.
+  requestId: Schema.toType(ApprovalRequestId),
   answers: ProviderUserInputAnswers,
   unanswered: Schema.optional(ProviderUserInputUnanswered),
+  // Only the management-only command writes this intent. A later native
+  // resolution must independently join its exact request incarnation before
+  // publishing the primary-chat acknowledgement.
+  mcpResponse: Schema.optional(
+    Schema.Struct({
+      requestCreatedAt: IsoDateTime,
+      noticeMessageId: MessageId,
+      action: Schema.Literals(["answered", "skipped", "cleared"]),
+      // Exact canonical wording is captured before the callback is consumed;
+      // the successful reactor must never recover it from a later projection.
+      // Provider decoding trims fields at initial ingestion. This is a saved
+      // canonical snapshot: re-running those transformations here would change
+      // opaque IDs or exact wording after validation and before settlement.
+      questions: Schema.Array(Schema.toType(UserInputQuestion)).check(
+        Schema.isMinLength(1),
+        Schema.isMaxLength(64),
+      ),
+    }),
+  ),
   createdAt: IsoDateTime,
 }).check(Schema.makeFilter(hasDisjointUserInputAnswers));
 

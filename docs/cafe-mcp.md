@@ -69,6 +69,89 @@ query parameters and extra thread headers cannot choose it. Existing manually
 issued owner tokens retain explicit-target access. See
 [the resource-status decision](decisions/mcp-thread-resource-status.md).
 
+## Pending questions and answers
+
+The owner-authorized management connection provides five question tools. Each
+requires an explicit Cafe `threadId`; these tools do not infer a native child
+thread or use the currently selected window.
+
+| Tool                     | Behavior                                                                                                |
+| ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| `list_thread_questions`  | List current native callback requests and one page of saved inline questions, without question wording. |
+| `get_thread_question`    | Read the complete questionnaire or selected inline question, including every available option.          |
+| `answer_thread_question` | Submit a complete native response, or durably record an inline answer as an ordinary chat message.      |
+| `skip_thread_question`   | Explicitly skip the selected inline question, or every question in a supported native callback.         |
+| `clear_thread_question`  | Explicitly dismiss the selected inline question, or every question in a supported native callback.      |
+
+Start with `list_thread_questions`, then copy its exact `target` to
+`get_thread_question`. Callback targets contain `kind: "callback"`, the opaque
+`requestId` and its exact `createdAt`; inline targets contain `kind: "async"`,
+the saved `activityId` and zero-based `questionIndex`. Preserve these values
+unchanged. A reused ID with a different creation time is another callback
+incarnation, not permission to answer the original one.
+
+The list's `limit` is 1–64 **inline activity records**, default 20; one activity
+can contain several questions. `asyncPendingQuestionCount` counts only the
+current page. Native requests repeat on every page. Follow `nextCursor` while
+`hasMore` is true, deduplicating repeated native targets. Pagination uses the
+immutable creation-time/activity-ID tuple, so marking an inline question
+handled does not move it across a cursor. Unreadable, oversized or unsupported
+records remain explicit omission/availability evidence. An empty incomplete
+view reports `hasPendingQuestions: null`; only a complete first-page view can
+report `false`. Do not interpret a page count, a missing card, or a truncated
+native-retention budget as proof that the entire chat has no questions.
+
+For a callback, `answer_thread_question` takes an `answers` map keyed by the
+exact question IDs. Values are nonempty text or text arrays. Every question
+must occur exactly once across `answers` and any `unanswered` map. Explicit
+`"skipped"` or `"dismissed"` dispositions require the callback's advertised
+unanswered capability. `canAnswer`, `canSkip`, `canClear` and
+`unsupportedReason` explain availability; an absent capability never means
+support. Provider-specific interaction forms and malformed/duplicate question
+IDs are not treated as ordinary questionnaires. Permission approvals remain
+separate: none of these tools approves a command or changes provider policy.
+
+For an inline question, use the single `answer` text field. Cafe rechecks the
+exact saved question under its database writer and atomically records the
+quoted question/answer message, ordinary start-or-steer intent, handled index,
+and primary-chat notice. Skip and clear record handling plus a notice without
+starting a turn or supplying an invented answer. Neither operation deletes
+chat history. A stale, already handled, malformed or foreign question is
+refused; concurrent callers cannot consume the same question twice.
+
+Mutation receipts distinguish `resolution: "recorded"` for durable inline
+handling from `resolution: "provider-confirmation-required"` for a queued
+native callback response. `accepted: true` and a dispatch sequence do **not**
+prove native resolution, provider submission or completed work. Native
+responses retain their exact provider/session ownership and require canonical
+callback settlement. A native method returning or an ordinary response-failed
+activity alone is not settlement. Re-read pending questions after confirmation;
+never automatically retry an uncertain mutation response.
+
+Successful MCP handling appears as normal primary-chat content identifying
+that the question was resolved through MCP and showing the exact question and
+submitted answer, skip, or dismissal. It is not hidden solely in the work log
+and is not inserted into the provider's model conversation as a system
+message. Native notices appear only after actual canonical settlement; inline
+notices share the answer/handling transaction. Native dispatch receipts do not
+guarantee a later notice across backend interruption: uncertain correlation
+is not reconstructed from a matching answer or saved intent. Reconcile the
+current callback state rather than treating that receipt as resolution.
+Additional notice retention is limited to the newest prefix of at most 64
+eligible notices and 1 MiB of encoded payload beyond the ordinary activity
+tail. A large receipt can exhaust the byte budget before 64 notices; this
+does not promise unlimited visible history or erase pending callbacks.
+
+Reads use a dedicated question context: thread metadata plus the existing
+bounded native pending-attention projection, without hydrating messages,
+plans or checkpoints. Indexed inline pages and exact saved-activity lookups
+reach questions older than the recent tool tail. Full question details are
+bounded and refused rather than silently truncated. Fixed public errors do
+not expose native errors, database details, credentials or unrelated chat
+content. Listing or reading never starts a provider, refreshes credentials,
+answers a callback or invokes paid inference. See
+[the pending-question decision](decisions/mcp-pending-questions.md).
+
 ## External MCP clients
 
 External clients can connect to Cafe's authenticated Streamable HTTP endpoint at

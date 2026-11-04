@@ -2592,15 +2592,36 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     ) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
-        const pending = ctx.pendingUserInputs.get(requestId);
-        if (!pending) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "_x.ai/ask_user_question",
-            detail: `Unknown pending user-input request: ${requestId}`,
-          });
-        }
-        yield* Deferred.succeed(pending.resolution, { _tag: "answered", answers });
+        return yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            const pending = ctx.pendingUserInputs.get(requestId);
+            if (!pending) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "_x.ai/ask_user_question",
+                detail: `Unknown pending user-input request: ${requestId}`,
+              });
+            }
+            // Consume this exact callback synchronously before any scheduler
+            // boundary. Its waiting native handler deletes the entry later, so
+            // relying on that cleanup lets another UI/MCP caller acknowledge the
+            // same Deferred even after the first response already won. Keep the
+            // claim and completion interruption-safe; an already cancelled
+            // Deferred is not an accepted answer.
+            ctx.pendingUserInputs.delete(requestId);
+            const accepted = yield* Deferred.succeed(pending.resolution, {
+              _tag: "answered",
+              answers,
+            });
+            if (!accepted) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "_x.ai/ask_user_question",
+                detail: `Unknown pending user-input request: ${requestId}`,
+              });
+            }
+          }),
+        );
       });
 
     const getGoal: NonNullable<GrokAdapterShape["getGoal"]> = (threadId) =>

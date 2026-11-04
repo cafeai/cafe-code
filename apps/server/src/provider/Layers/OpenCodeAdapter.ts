@@ -177,6 +177,12 @@ interface OpenCodeSessionContext {
   readonly openCodeSessionId: string;
   readonly pendingPermissions: Map<string, PermissionRequest>;
   readonly pendingQuestions: Map<string, QuestionRequest>;
+  /**
+   * One-use reply claims are separate from SSE-owned pending metadata. A lost
+   * HTTP acknowledgement is not permission to submit another native answer;
+   * only the canonical terminal event or exact context retirement releases it.
+   */
+  readonly claimedQuestionResponses: Set<string>;
   readonly messageRoleById: Map<string, "user" | "assistant">;
   readonly partById: Map<string, Part>;
   readonly emittedTextByPartId: Map<string, string>;
@@ -553,6 +559,7 @@ function updateProviderSession(
 
 const closeOpenCodeContext = (context: OpenCodeSessionContext) =>
   Effect.gen(function* () {
+    context.claimedQuestionResponses.clear();
     context.manualCompaction?.controller.abort();
 
     // Best-effort remote abort. The scope close below tears down the local
@@ -1294,10 +1301,13 @@ export function makeOpenCodeAdapter(
         case "question.replied": {
           const request = context.pendingQuestions.get(event.properties.requestID);
           context.pendingQuestions.delete(event.properties.requestID);
+          context.claimedQuestionResponses.delete(event.properties.requestID);
           const answers = Object.fromEntries(
             (request?.questions ?? []).map((question, index) => [
               openCodeQuestionId(index, question),
-              event.properties.answers[index]?.join(", ") ?? "",
+              event.properties.answers[index]?.length === 1
+                ? event.properties.answers[index]![0]!
+                : [...(event.properties.answers[index] ?? [])],
             ]),
           );
           yield* emit({
@@ -1315,6 +1325,7 @@ export function makeOpenCodeAdapter(
 
         case "question.rejected": {
           context.pendingQuestions.delete(event.properties.requestID);
+          context.claimedQuestionResponses.delete(event.properties.requestID);
           yield* emit({
             ...(yield* buildEventBase({
               threadId: context.session.threadId,
@@ -1710,6 +1721,7 @@ export function makeOpenCodeAdapter(
           openCodeSessionId: started.openCodeSession.id,
           pendingPermissions: new Map(),
           pendingQuestions: new Map(),
+          claimedQuestionResponses: new Set(),
           partById: new Map(),
           emittedTextByPartId: new Map(),
           messageRoleById: new Map(),
@@ -2120,12 +2132,39 @@ export function makeOpenCodeAdapter(
         });
       }
 
-      yield* runOpenCodeSdk("question.reply", () =>
-        context.client.question.reply({
-          requestID: requestId,
-          answers: toOpenCodeQuestionAnswers(request, answers),
-        }),
+      // Complete answer conversion before reserving this one-use native
+      // action. No asynchronous work separates the claim check from insertion.
+      const nativeAnswers = toOpenCodeQuestionAnswers(request, answers);
+      if (context.claimedQuestionResponses.has(requestId))
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "question.reply",
+          detail:
+            "The OpenCode question response is already submitted or awaiting confirmation. Review the pending question before retrying.",
+        });
+      context.claimedQuestionResponses.add(requestId);
+      // Keep the claim on transport failure or interruption: the server may
+      // already have accepted the answer. SSE remains authoritative for the
+      // pending card and releases the exact claim after a terminal observation.
+      const acknowledgement = yield* runOpenCodeSdk("question.reply", (signal) =>
+        context.client.question.reply(
+          {
+            requestID: requestId,
+            answers: nativeAnswers,
+          },
+          { signal },
+        ),
       ).pipe(Effect.mapError(toRequestError));
+      // The reviewed SDK contract is a boolean success body. A resolved HTTP
+      // request alone (false/missing data included) cannot prove this caller
+      // won the native question; keep its one-use claim on this uncertainty.
+      if (acknowledgement.data !== true)
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "question.reply",
+          detail:
+            "OpenCode did not confirm the question response. Review the pending question before retrying.",
+        });
     });
 
     const stopSession: OpenCodeAdapterShape["stopSession"] = Effect.fn("stopSession")(

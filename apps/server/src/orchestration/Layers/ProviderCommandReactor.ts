@@ -82,6 +82,10 @@ import {
   type ProviderRuntimeBinding,
 } from "../../provider/Services/ProviderSessionDirectory.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import {
+  makeMcpQuestionResolutionActivity,
+  makeNativeMcpQuestionResolutionItems,
+} from "../mcpQuestionNotice.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   ProviderCommandReactor,
@@ -578,6 +582,29 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  // A successful response call only claims the native callback; Claude can
+  // still cancel before publishing its canonical settlement. Keep these two
+  // independent witnesses joined to the exact immutable MCP intent. The live
+  // observer is registered before native I/O, so either arrival order works.
+  // This bounded, scope-owned join never retries a mutation after an unknown
+  // result, nor guesses attribution from matching answers after a restart.
+  type McpNativeResponse = Extract<
+    ProviderIntentEvent,
+    { type: "thread.user-input-response-requested" }
+  >;
+  type McpSettlement = {
+    readonly event: McpNativeResponse;
+    readonly owner: Pick<
+      OrchestrationSession,
+      "providerName" | "providerInstanceId" | "subagentRuntimeId"
+    >;
+    accepted: boolean;
+    resolved: boolean;
+  };
+  const mcpSettlements = new Map<string, McpSettlement>();
+  const mcpSettlementKey = (threadId: ThreadId, requestId: string) =>
+    JSON.stringify([threadId, requestId]);
+  yield* Effect.addFinalizer(() => Effect.sync(() => mcpSettlements.clear()));
   // Inventory presentation is optional in synthetic/older service graphs.
   // Read only an already-cached catalog; never refresh/probe to decorate a turn.
   const providerAdapterRegistry = yield* Effect.serviceOption(ProviderAdapterRegistry);
@@ -5335,6 +5362,99 @@ const make = Effect.gen(function* () {
       );
   });
 
+  const publishMcpSettlement = Effect.fnUntraced(function* (key: string, state: McpSettlement) {
+    if (mcpSettlements.get(key) !== state || !state.accepted || !state.resolved) return;
+    // Reserve synchronously before any write. Stable command/activity IDs
+    // additionally make a completed publication idempotent in durable storage.
+    mcpSettlements.delete(key);
+    const source = state.event.payload.mcpResponse;
+    if (source === undefined) return;
+    for (const action of ["answered", "skipped", "cleared"] as const) {
+      const items = makeNativeMcpQuestionResolutionItems({
+        questions: source.questions,
+        answers: state.event.payload.answers,
+        ...(state.event.payload.unanswered !== undefined
+          ? { unanswered: state.event.payload.unanswered }
+          : {}),
+        action,
+      });
+      if (items.length === 0) continue;
+      const createdAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(
+          `server:mcp-question-resolution:${source.noticeMessageId}:${action}`,
+        ),
+        threadId: state.event.payload.threadId,
+        activity: makeMcpQuestionResolutionActivity({
+          noticeMessageId: source.noticeMessageId,
+          action,
+          items,
+          createdAt,
+        }),
+        createdAt,
+      });
+    }
+  });
+
+  /** Native Codex canonicalizes a singleton selection to a scalar. Compare
+   * only that documented equivalence, preserving exact keys, text and order. */
+  const sameQuestionMap = (expected: unknown, observed: unknown, answers: boolean): boolean => {
+    const left = readRecord(expected ?? {});
+    const right = readRecord(observed ?? {});
+    if (left === undefined || right === undefined) return false;
+    const keys = Object.keys(left);
+    if (keys.length !== Object.keys(right).length) return false;
+    return keys.every((key) => {
+      if (!Object.hasOwn(right, key)) return false;
+      const a = left[key];
+      const b = right[key];
+      if (!answers) return a === b;
+      const valuesA = typeof a === "string" ? [a] : a;
+      const valuesB = typeof b === "string" ? [b] : b;
+      return (
+        Array.isArray(valuesA) &&
+        Array.isArray(valuesB) &&
+        valuesA.length === valuesB.length &&
+        valuesA.every((value, index) => typeof value === "string" && value === valuesB[index])
+      );
+    });
+  };
+
+  const observeMcpSettlement = Effect.fnUntraced(function* (
+    event: Extract<OrchestrationEvent, { type: "thread.activity-appended" }>,
+  ) {
+    const activity = event.payload.activity;
+    if (activity.kind !== "user-input.resolved" && activity.kind !== "user-input.requested") return;
+    const payload = readRecord(activity.payload);
+    if (typeof payload?.requestId !== "string") return;
+    const key = mcpSettlementKey(event.payload.threadId, payload.requestId);
+    const state = mcpSettlements.get(key);
+    if (state === undefined) return;
+    if (activity.kind === "user-input.requested") {
+      if (
+        event.sequence > state.event.sequence ||
+        activity.createdAt !== state.event.payload.mcpResponse?.requestCreatedAt
+      )
+        mcpSettlements.delete(key);
+      return;
+    }
+    // Earlier callbacks, cancellation, automatic continuation and a different
+    // winning response are terminal observations, never MCP success evidence.
+    if (
+      event.sequence <= state.event.sequence ||
+      payload.cancelled === true ||
+      payload.autoResolved === true ||
+      !sameQuestionMap(state.event.payload.answers, payload.answers, true) ||
+      !sameQuestionMap(state.event.payload.unanswered, payload.unanswered, false)
+    ) {
+      mcpSettlements.delete(key);
+      return;
+    }
+    state.resolved = true;
+    yield* publishMcpSettlement(key, state);
+  });
+
   const processUserInputResponseRequested = Effect.fn("processUserInputResponseRequested")(
     function* (
       event: Extract<ProviderIntentEvent, { type: "thread.user-input-response-requested" }>,
@@ -5356,30 +5476,74 @@ const make = Effect.gen(function* () {
         });
       }
 
-      yield* providerService
+      const key = mcpSettlementKey(event.payload.threadId, event.payload.requestId);
+      const state: McpSettlement | undefined =
+        event.payload.mcpResponse === undefined
+          ? undefined
+          : { event, owner: thread.session!, accepted: false, resolved: false };
+      if (state !== undefined) {
+        // Refuse before native I/O rather than evict an uncertain live owner.
+        // Ordinary renderer responses retain their existing path and budgets.
+        if (mcpSettlements.size >= 64 || mcpSettlements.has(key)) {
+          return yield* appendProviderFailureActivity({
+            threadId: event.payload.threadId,
+            kind: "provider.user-input.respond.failed",
+            summary: "Provider user input response failed",
+            detail:
+              "An MCP question response is still awaiting confirmation. Review the pending question before retrying.",
+            turnId: null,
+            createdAt: event.payload.createdAt,
+            requestId: event.payload.requestId,
+          });
+        }
+        mcpSettlements.set(key, state);
+      }
+      const accepted = yield* providerService
         .respondToUserInput({
           threadId: event.payload.threadId,
           requestId: event.payload.requestId,
-          answers: event.payload.answers,
+          // Native implementations receive their own data; they cannot mutate
+          // the immutable submitted-answer evidence retained for the receipt.
+          answers: structuredClone(event.payload.answers),
           ...(event.payload.unanswered !== undefined
-            ? { unanswered: event.payload.unanswered }
+            ? { unanswered: structuredClone(event.payload.unanswered) }
             : {}),
         })
         .pipe(
+          Effect.as(true),
           Effect.catchCause((cause) =>
-            appendProviderFailureActivity({
-              threadId: event.payload.threadId,
-              kind: "provider.user-input.respond.failed",
-              summary: "Provider user input response failed",
-              detail: isUnknownPendingUserInputRequestError(cause)
-                ? stalePendingRequestDetail("user-input", event.payload.requestId)
-                : Cause.pretty(cause),
-              turnId: null,
-              createdAt: event.payload.createdAt,
-              requestId: event.payload.requestId,
-            }),
+            Effect.sync(() => {
+              // Retire before failure persistence: a failed/interruptible log
+              // write must not retain an uncertain owner or exhaust capacity.
+              if (state !== undefined && mcpSettlements.get(key) === state)
+                mcpSettlements.delete(key);
+            }).pipe(
+              Effect.andThen(
+                appendProviderFailureActivity({
+                  threadId: event.payload.threadId,
+                  kind: "provider.user-input.respond.failed",
+                  summary: "Provider user input response failed",
+                  detail: isUnknownPendingUserInputRequestError(cause)
+                    ? stalePendingRequestDetail("user-input", event.payload.requestId)
+                    : event.payload.mcpResponse !== undefined
+                      ? "The MCP question response was not confirmed. Review the pending question before retrying."
+                      : Cause.pretty(cause),
+                  turnId: null,
+                  createdAt: event.payload.createdAt,
+                  requestId: event.payload.requestId,
+                }),
+              ),
+              Effect.as(false),
+            ),
           ),
         );
+      if (state !== undefined && mcpSettlements.get(key) === state) {
+        if (!accepted) mcpSettlements.delete(key);
+        else {
+          state.accepted = true;
+          yield* publishMcpSettlement(key, state);
+        }
+      }
     },
   );
 
@@ -7510,6 +7674,37 @@ const make = Effect.gen(function* () {
   });
 
   const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
+    if (event.type === "thread.activity-appended")
+      yield* observeMcpSettlement(event).pipe(
+        Effect.catchCause(() =>
+          // Receipt storage is presentation, never authority to replay native
+          // input or terminate the shared domain-event subscription.
+          Effect.logWarning("MCP question resolution notice could not be recorded."),
+        ),
+      );
+    if (
+      event.type === "thread.session-stop-requested" ||
+      event.type === "thread.deleted" ||
+      event.type === "thread.archived" ||
+      event.type === "thread.session-set"
+    ) {
+      for (const [key, state] of mcpSettlements) {
+        if (state.event.payload.threadId !== event.payload.threadId) continue;
+        if (event.type === "thread.session-set") {
+          const session = event.payload.session;
+          if (
+            session !== null &&
+            session.status !== "stopped" &&
+            typeof state.owner.subagentRuntimeId === "string" &&
+            session.providerName === state.owner.providerName &&
+            session.providerInstanceId === state.owner.providerInstanceId &&
+            session.subagentRuntimeId === state.owner.subagentRuntimeId
+          )
+            continue;
+        }
+        mcpSettlements.delete(key);
+      }
+    }
     const isExplicitControl =
       (event.type === "thread.turn-start-requested" &&
         event.payload.runtimeRecovery === undefined) ||

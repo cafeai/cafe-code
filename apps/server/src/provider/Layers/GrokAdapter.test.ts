@@ -2102,6 +2102,18 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         },
       );
 
+      // Exercise the public response boundary again before awaiting native
+      // settlement. A successful duplicate ACK would wrongly let a losing
+      // responder claim the first caller's eventual resolution.
+      const duplicate = yield* Effect.exit(
+        adapter.respondToUserInput(
+          threadId,
+          ApprovalRequestId.make(String(requestedEvent.requestId)),
+          { "Which scope should Grok use?": "Workspace" },
+        ),
+      );
+      assert.equal(duplicate._tag, "Failure");
+
       const resolvedEvent = yield* Deferred.await(resolved);
       assert.deepEqual(resolvedEvent.payload.answers, {
         "Which scope should Grok use?": "Workspace",

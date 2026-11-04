@@ -9,7 +9,10 @@ import type {
 } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import { normalizeCodexAsyncQuestions } from "@cafecode/shared/codexAsyncQuestions";
+import {
+  formatCodexAsyncQuestionAnswer,
+  normalizeCodexAsyncQuestions,
+} from "@cafecode/shared/codexAsyncQuestions";
 
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
@@ -24,6 +27,15 @@ import {
 import { projectEvent } from "./projector.ts";
 import { resolveThreadForkMessageCutoff } from "./threadForkCutoff.ts";
 import { SESSION_LIFECYCLE_SUPERSEDED, sessionLifecycleSnapshot } from "./sessionLifecycle.ts";
+import {
+  derivePendingQuestionRequests,
+  validatePendingQuestionResponse,
+} from "./pendingQuestions.ts";
+import {
+  makeMcpQuestionResolutionActivity,
+  makeNativeMcpQuestionResolutionItems,
+  type McpQuestionResolutionItem,
+} from "./mcpQuestionNotice.ts";
 
 const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
@@ -54,6 +66,34 @@ type PlannedOrchestrationEvent = Omit<OrchestrationEvent, "sequence">;
 type DecideOrchestrationCommandResult =
   | PlannedOrchestrationEvent
   | ReadonlyArray<PlannedOrchestrationEvent>;
+
+/** Only management-only commands call this helper. The public client command
+ * union has no provenance flag which a provider or ordinary renderer could
+ * use to impersonate a completed management action. This is presentation
+ * metadata, never a model message or permission/retry authority. */
+function mcpQuestionNotice(
+  command: Extract<
+    OrchestrationCommand,
+    {
+      readonly type: "thread.async-question.answer" | "thread.mcp-async-questions.resolve";
+    }
+  >,
+  action: "answered" | "skipped" | "cleared",
+  items: readonly McpQuestionResolutionItem[],
+): Extract<OrchestrationCommand, { readonly type: "thread.activity.append" }> {
+  return {
+    type: "thread.activity.append",
+    commandId: command.commandId,
+    threadId: command.threadId,
+    createdAt: command.createdAt,
+    activity: makeMcpQuestionResolutionActivity({
+      noticeMessageId: command.noticeMessageId,
+      action,
+      items,
+      createdAt: command.createdAt,
+    }),
+  };
+}
 
 export function threadHasUnsettledTurnStart(
   thread: OrchestrationReadModel["threads"][number],
@@ -1217,6 +1257,100 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.mcp-user-input.respond": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      if (thread.archivedAt !== null || thread.deletedAt !== null)
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This chat is no longer available for a question response.",
+        });
+      const request = derivePendingQuestionRequests(thread.activities).find(
+        (entry) => entry.requestId === command.requestId,
+      );
+      const validated = validatePendingQuestionResponse(request, {
+        expectedRequestCreatedAt: command.expectedRequestCreatedAt,
+        answers: command.answers,
+        ...(command.unanswered !== undefined ? { unanswered: command.unanswered } : {}),
+      });
+      if (!validated.ok)
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: validated.reason,
+        });
+      // The policy helper refuses an absent request. Keep that ownership
+      // explicit for the saved snapshot instead of reconstructing wording
+      // after the provider has consumed its callback.
+      if (!request)
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This question is no longer available.",
+        });
+      const hasAnswers = Object.keys(validated.answers).length > 0;
+      const dispositions = Object.values(validated.unanswered ?? {});
+      if (
+        (command.action === "answered" && !hasAnswers) ||
+        (command.action !== "answered" && hasAnswers) ||
+        (command.action === "skipped" && dispositions.some((value) => value !== "skipped")) ||
+        (command.action === "cleared" && dispositions.some((value) => value !== "dismissed"))
+      )
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The requested question action does not match its response.",
+        });
+      yield* Effect.try({
+        try: () => {
+          // A mixed answer can contain all three actual dispositions. Check
+          // each eventual receipt now: a native success must not newly fail
+          // because its exact question text exceeds the presentation budget.
+          for (const action of ["answered", "skipped", "cleared"] as const) {
+            const items = makeNativeMcpQuestionResolutionItems({
+              questions: request.questions,
+              answers: validated.answers,
+              ...(validated.unanswered !== undefined ? { unanswered: validated.unanswered } : {}),
+              action,
+            });
+            if (items.length === 0) continue;
+            makeMcpQuestionResolutionActivity({
+              noticeMessageId: command.noticeMessageId,
+              action,
+              items,
+              createdAt: command.createdAt,
+            });
+          }
+        },
+        catch: () =>
+          new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "The complete question and response are too large or invalid to record safely.",
+          }),
+      });
+      // This is an intent acknowledgement only. The provider reactor publishes
+      // the notice after the exact native callback succeeds, not at dispatch.
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+          metadata: { requestId: command.requestId },
+        }),
+        type: "thread.user-input-response-requested",
+        payload: {
+          threadId: command.threadId,
+          requestId: command.requestId,
+          answers: validated.answers,
+          ...(validated.unanswered !== undefined ? { unanswered: validated.unanswered } : {}),
+          mcpResponse: {
+            requestCreatedAt: command.expectedRequestCreatedAt,
+            noticeMessageId: command.noticeMessageId,
+            action: command.action,
+            questions: request.questions,
+          },
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.user-input.respond": {
       yield* requireThread({
         readModel,
@@ -1807,6 +1941,117 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           turnCount: command.turnCount,
         },
       };
+    }
+
+    case "thread.async-question.answer":
+    case "thread.mcp-async-questions.resolve": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const activity = thread.activities.find((entry) => entry.id === command.activityId);
+      const payload = activity?.payload;
+      if (
+        thread.archivedAt !== null ||
+        thread.deletedAt !== null ||
+        activity?.kind !== "provider.async-questions" ||
+        !/^codex-async-questions:[a-f0-9]{64}$/u.test(command.activityId) ||
+        !payload ||
+        typeof payload !== "object" ||
+        Array.isArray(payload)
+      )
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This question is no longer available.",
+        });
+      const source = payload as Record<string, unknown>;
+      const questions = normalizeCodexAsyncQuestions(source.questions);
+      const indexes =
+        command.type === "thread.async-question.answer"
+          ? [command.questionIndex]
+          : command.questionIndexes;
+      const handled =
+        source.handledQuestionIndexes === undefined ? [] : source.handledQuestionIndexes;
+      if (
+        typeof source.itemId !== "string" ||
+        source.itemId.length === 0 ||
+        source.itemId.length > 512 ||
+        indexes.length === 0 ||
+        indexes.length > 16 ||
+        new Set(indexes).size !== indexes.length ||
+        indexes.some(
+          (index) => !Number.isSafeInteger(index) || index < 0 || index >= questions.length,
+        ) ||
+        !Array.isArray(handled) ||
+        handled.length > 16 ||
+        handled.some(
+          (index) => !Number.isSafeInteger(index) || index < 0 || index >= questions.length,
+        )
+      )
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The question selection is invalid.",
+        });
+      if (indexes.some((index) => handled.includes(index)))
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This question has already been handled.",
+        });
+      const commands: OrchestrationCommand[] = [];
+      if (command.type === "thread.async-question.answer") {
+        const text = formatCodexAsyncQuestionAnswer(
+          questions[command.questionIndex]!.title,
+          command.answer,
+        );
+        if (text === null)
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "The answer is empty, invalid, or too long.",
+          });
+        commands.push({
+          type: "thread.turn.start",
+          commandId: command.commandId,
+          threadId: command.threadId,
+          message: { messageId: command.messageId, role: "user", text, attachments: [] },
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+          createdAt: command.createdAt,
+        });
+      }
+      commands.push({
+        type: "thread.async-questions.resolve",
+        commandId: command.commandId,
+        threadId: command.threadId,
+        activityId: command.activityId,
+        questionIndexes: indexes,
+        createdAt: command.createdAt,
+      });
+      const notice = yield* Effect.try({
+        try: () => {
+          const action =
+            command.type === "thread.async-question.answer" ? "answered" : command.action;
+          const items: McpQuestionResolutionItem[] = indexes.map((index) => ({
+            question: {
+              id: `${command.activityId}:${index}`,
+              header: "",
+              question: questions[index]!.title,
+            },
+            ...(command.type === "thread.async-question.answer"
+              ? { answer: command.answer.trim() }
+              : {
+                  disposition: action === "skipped" ? ("skipped" as const) : ("dismissed" as const),
+                }),
+          }));
+          return mcpQuestionNotice(command, action, items);
+        },
+        catch: () =>
+          new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "The complete question and response are too large or invalid to record safely.",
+          }),
+      });
+      commands.push(notice);
+      // The engine rehydrates the exact persisted question under its writer;
+      // all message/turn intent, handled indexes and notice events commit or
+      // roll back together. No provider request is issued by this decision.
+      return yield* decideCommandSequence({ commands, readModel });
     }
 
     case "thread.async-questions.resolve": {

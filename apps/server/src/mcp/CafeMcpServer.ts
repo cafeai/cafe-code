@@ -50,6 +50,7 @@ import type { ScheduledFollowupsShape } from "../scheduledFollowups/service.ts";
 import { registerScheduledFollowupTools } from "../scheduledFollowups/mcp.ts";
 import type { ManagementLaunchContext } from "../auth/managementLaunchContext.ts";
 import { registerThreadUsageTool } from "./threadUsage.ts";
+import { registerThreadQuestionTools } from "./threadQuestions.ts";
 
 const CAFE_MCP_SERVER_NAME = "cafe-code";
 const CAFE_MCP_SERVER_VERSION = "1.0.0";
@@ -143,6 +144,9 @@ export interface CafeMcpDependencies extends ProviderRuntimeControlDependencies 
     | "getThreadDetailById"
     | "getThreadShellById"
     | "getThreadContextWindowActivity"
+    | "getThreadQuestionContextById"
+    | "getThreadAsyncQuestionActivitiesPage"
+    | "getThreadAsyncQuestionActivity"
   >;
   readonly providerRegistry: Pick<ProviderRegistryShape, "getProviders" | "refreshInstance">;
   readonly providerService: Pick<
@@ -1352,12 +1356,13 @@ export function makeCafeMcpServer(
     { name: CAFE_MCP_SERVER_NAME, version: CAFE_MCP_SERVER_VERSION },
     {
       instructions:
-        "Use list_projects, list_threads, and list_providers before mutations so you operate on stable Cafe Code IDs. Use get_thread_usage to inspect last-reported context headroom and shared provider-account quota without loading messages; omitted threadId means only the authenticated launch Cafe chat, including on inherited subagent connections. Deletions, interrupts, provider configuration, and provider restarts are consequential. restart_provider_and_resume returns before teardown, then Cafe Code restarts the provider and submits a durable resume turn to each thread that was running at the restart boundary.",
+        "Use list_projects, list_threads, and list_providers before mutations so you operate on stable Cafe Code IDs. Use get_thread_usage to inspect last-reported context headroom and shared provider-account quota without loading messages; omitted threadId means only the authenticated launch Cafe chat, including on inherited subagent connections. Use list_thread_questions and get_thread_question to read pending questions for an explicit chat before answering, skipping or clearing their exact target. Follow question pagination and omission metadata; a callback acknowledgement is not native resolution, and an uncertain mutation must not be retried automatically. Question tools do not approve permissions or delete chat history. Deletions, interrupts, provider configuration, and provider restarts are consequential. restart_provider_and_resume returns before teardown, then Cafe Code restarts the provider and submits a durable resume turn to each thread that was running at the restart boundary.",
     },
   );
 
   registerDiscoveryTools(server, dependencies);
   registerThreadUsageTool(server, dependencies, options);
+  registerThreadQuestionTools(server, dependencies);
   if (dependencies.scheduledFollowups)
     registerScheduledFollowupTools(server, dependencies.scheduledFollowups);
   registerProjectTools(server, dependencies);

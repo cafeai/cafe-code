@@ -19,6 +19,7 @@ import type { PermissionRuleset } from "@opencode-ai/sdk/v2";
 import * as Deferred from "effect/Deferred";
 
 import {
+  ApprovalRequestId,
   OpenCodeSettings,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -138,6 +139,12 @@ const runtimeMock = {
     revertCalls: [] as Array<{ sessionID: string; messageID?: string }>,
     promptCalls: [] as Array<unknown>,
     summarizeCalls: [] as Array<unknown>,
+    questionReplyCalls: [] as Array<{ requestID: string; answers: string[][] }>,
+    questionReply: ((_input: { requestID: string; answers: string[][] }, _signal?: AbortSignal) =>
+      Promise.resolve({ data: true })) as (
+      input: { requestID: string; answers: string[][] },
+      signal?: AbortSignal,
+    ) => Promise<{ data?: boolean }>,
     nativeSessions: new Map<string, NativeSession>(),
     getCalls: [] as Array<{ sessionID: string; directory?: string }>,
     updateCalls: [] as Array<{
@@ -172,6 +179,8 @@ const runtimeMock = {
     this.state.revertCalls.length = 0;
     this.state.promptCalls.length = 0;
     this.state.summarizeCalls.length = 0;
+    this.state.questionReplyCalls.length = 0;
+    this.state.questionReply = () => Promise.resolve({ data: true });
     this.state.nativeSessions.clear();
     this.state.getCalls.length = 0;
     this.state.updateCalls.length = 0;
@@ -310,6 +319,15 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
               : runtimeMock.state.messages;
         },
       },
+      question: {
+        reply: (
+          input: { requestID: string; answers: string[][] },
+          options?: { signal?: AbortSignal },
+        ) => {
+          runtimeMock.state.questionReplyCalls.push(input);
+          return runtimeMock.state.questionReply(input, options?.signal);
+        },
+      },
       event: {
         subscribe: async () => ({
           stream: runtimeMock.state.liveEvents
@@ -413,6 +431,141 @@ const drainOpenCodeEvents = (feed: ReturnType<typeof makeLiveEventFeed>) =>
   });
 
 it.layer(IsolatedOpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
+  it.effect(
+    "owns one native question reply across overlapping callers and an uncertain acknowledgement",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* OpenCodeAdapter;
+        const threadId = asThreadId("thread-opencode-question-owner");
+        const sessionID = "http://127.0.0.1:9999/session";
+        const feed = makeLiveEventFeed();
+        runtimeMock.state.liveEvents = feed;
+        const received: ProviderRuntimeEvent[] = [];
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) => Effect.sync(() => received.push(event))),
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({
+          threadId,
+          input: "Ask two choices",
+          modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+        });
+        const question = {
+          question: "Which values?",
+          header: "Values",
+          multiple: true,
+          options: [
+            { label: "First", description: "First value" },
+            { label: "Second", description: "Second value" },
+          ],
+        };
+        const asked = (id: string) => ({
+          type: "question.asked",
+          properties: { id, sessionID, questions: [question] },
+        });
+        feed.push(asked("native-question"));
+        yield* drainOpenCodeEvents(feed);
+        const entered = yield* Deferred.make<void>();
+        const overlapOutcome = yield* Deferred.make<
+          "Failure" | "Success" | "duplicate-native-call"
+        >();
+        const release = yield* Deferred.make<void>();
+        // Own every admitted SDK operation before forking either caller. Cleanup
+        // releases and joins the exact promises even on the old-source negative.
+        const pendingReplies: Promise<{ data: boolean }>[] = [];
+        yield* Effect.addFinalizer(() =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(release, undefined);
+            yield* Effect.promise(() => Promise.allSettled(pendingReplies));
+          }),
+        );
+        runtimeMock.state.questionReply = (_input, signal) => {
+          const duplicate = runtimeMock.state.questionReplyCalls.length > 1;
+          const pendingReply = Effect.runPromise(
+            Effect.gen(function* () {
+              if (duplicate) yield* Deferred.succeed(overlapOutcome, "duplicate-native-call");
+              yield* Deferred.succeed(entered, undefined);
+              yield* Deferred.await(release);
+              return { data: true };
+            }),
+            signal ? { signal } : {},
+          );
+          pendingReplies.push(pendingReply);
+          return pendingReply;
+        };
+        const answers = { "question-0-values": ["Second", "First"] };
+        const first = yield* adapter
+          .respondToUserInput(threadId, ApprovalRequestId.make("native-question"), answers)
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(entered);
+        const overlapping = yield* adapter
+          .respondToUserInput(threadId, ApprovalRequestId.make("native-question"), answers)
+          .pipe(
+            Effect.result,
+            Effect.tap((result) => Deferred.succeed(overlapOutcome, result._tag)),
+            Effect.forkScoped,
+          );
+        // Both outcomes are observed boundaries: either the exact second SDK
+        // call was admitted, or its caller completed. No scheduler wait/poll is
+        // used to infer that a still-running operation must have been rejected.
+        assert.equal(yield* Deferred.await(overlapOutcome), "Failure");
+        assert.equal((yield* Fiber.join(overlapping))._tag, "Failure");
+        assert.deepEqual(runtimeMock.state.questionReplyCalls, [
+          { requestID: "native-question", answers: [["Second", "First"]] },
+        ]);
+        // SSE can settle before the HTTP acknowledgement. Preserve each selected
+        // value, rather than replacing a multi-answer with comma-joined prose.
+        feed.push({
+          type: "question.replied",
+          properties: { sessionID, requestID: "native-question", answers: [["Second", "First"]] },
+        });
+        yield* drainOpenCodeEvents(feed);
+        assert.deepEqual(
+          received
+            .filter((event) => event.type === "user-input.resolved")
+            .map((event) => event.payload),
+          [{ answers }],
+        );
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(first);
+        const afterResolution = yield* adapter
+          .respondToUserInput(threadId, ApprovalRequestId.make("native-question"), answers)
+          .pipe(Effect.result);
+        assert.equal(afterResolution._tag, "Failure");
+        assert.equal(runtimeMock.state.questionReplyCalls.length, 1);
+
+        for (const [index, outcome] of [
+          "transport-failure",
+          "negative-ack",
+          "missing-ack",
+        ].entries()) {
+          const requestId = ApprovalRequestId.make(`uncertain-${outcome}`);
+          feed.push(asked(requestId));
+          yield* drainOpenCodeEvents(feed);
+          runtimeMock.state.questionReply = async () => {
+            if (outcome === "transport-failure")
+              throw new Error("Private unknown transport result");
+            // Simulate both the contract's explicit false response and a
+            // malformed successful native body; neither is a winning ACK.
+            return outcome === "negative-ack" ? { data: false } : {};
+          };
+          const uncertain = yield* adapter
+            .respondToUserInput(threadId, requestId, answers)
+            .pipe(Effect.result);
+          assert.equal(uncertain._tag, "Failure");
+          const retried = yield* adapter
+            .respondToUserInput(threadId, requestId, answers)
+            .pipe(Effect.result);
+          assert.equal(retried._tag, "Failure");
+          assert.equal(runtimeMock.state.questionReplyCalls.length, 2 + index);
+        }
+      }),
+  );
   it.effect(
     "publishes settled root step usage and native costs separately from latest-call context",
     () =>

@@ -209,6 +209,150 @@ function createPublicSummaryFixture(context: TestContext, afterUnmount?: () => v
 
 const MESSAGE_CREATED_AT = "2026-04-13T12:00:00.000Z";
 
+it("shows exact MCP questions and submitted responses in the primary chat without opening the work log", async (context) => {
+  const previousLocale = getUiLocale();
+  const fixture = createPublicSummaryFixture(context, () => setUiLocale(previousLocale));
+  setUiLocale("en");
+  const turnId = TurnId.make("mcp-question-turn");
+  const activity: OrchestrationThreadActivity = {
+    id: EventId.make("mcp-question-resolution"),
+    turnId,
+    sequence: 1,
+    createdAt: "2026-04-13T12:00:01.000Z",
+    kind: "mcp.question.resolved",
+    tone: "info",
+    summary: "Private question wording",
+    payload: {
+      version: 2,
+      source: "mcp",
+      action: "answered",
+      questionCount: 2,
+      items: [
+        {
+          question: {
+            id: "details",
+            header: "Details",
+            question: "Which exact text?\nKeep <img data-mcp-exploit> literal.",
+          },
+          answer: "  Exact answer\n第二行  ",
+        },
+        {
+          question: { id: "choices", header: "Choices", question: "Which two values?" },
+          answer: ["First value", "Second value"],
+        },
+      ],
+      rawProviderFields: "Private unrelated provider payload",
+    },
+  };
+  const entries = (activities: OrchestrationThreadActivity[]) =>
+    deriveTimelineEntries([], [], deriveWorkLogEntries(activities, turnId), [], activities);
+
+  await fixture.run(async () => {
+    const screen = await fixture.render(
+      <MessagesTimeline {...buildProps()} timelineEntries={entries([activity])} />,
+    );
+    await fixture.own(() =>
+      expect
+        .element(page.getByText("2 questions answered via MCP.", { exact: true }))
+        .toBeVisible(),
+    );
+    const notice = document.querySelector('[data-primary-question-resolution="true"]')!;
+    expect(notice.closest('[data-timeline-row-kind="work"]')).toBeNull();
+    expect(document.querySelector('[data-message-role="assistant"]')).toBeNull();
+    expect(document.body.textContent).not.toContain("Private question wording");
+    expect(document.body.textContent).not.toContain("Private unrelated provider payload");
+    await fixture.own(() =>
+      expect
+        .element(
+          page.getByText("Which exact text? Keep <img data-mcp-exploit> literal.", { exact: true }),
+        )
+        .toBeVisible(),
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Exact answer 第二行", { exact: true })).toBeVisible(),
+    );
+    expect(page.getByText("Exact answer 第二行", { exact: true }).element().textContent).toBe(
+      "  Exact answer\n第二行  ",
+    );
+    expect(document.querySelector("img[data-mcp-exploit]")).toBeNull();
+    await fixture.own(() =>
+      expect.element(page.getByText("First value", { exact: true })).toBeVisible(),
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Second value", { exact: true })).toBeVisible(),
+    );
+
+    const skipped = {
+      ...activity,
+      id: EventId.make("mcp-question-skipped"),
+      sequence: 2,
+      createdAt: "2026-04-13T12:00:02.000Z",
+      payload: {
+        version: 2,
+        source: "mcp",
+        action: "skipped",
+        questionCount: 1,
+        items: [
+          {
+            question: { id: "later", header: "", question: "Which question was skipped?" },
+            disposition: "skipped",
+          },
+        ],
+      },
+    };
+    await fixture.own(() =>
+      screen.rerender(
+        <MessagesTimeline {...buildProps()} timelineEntries={entries([activity, skipped])} />,
+      ),
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Question skipped via MCP.", { exact: true })).toBeVisible(),
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Which question was skipped?", { exact: true })).toBeVisible(),
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Skipped via MCP.", { exact: true })).toBeVisible(),
+    );
+    const cleared = {
+      ...activity,
+      id: EventId.make("mcp-question-cleared"),
+      sequence: 3,
+      createdAt: "2026-04-13T12:00:03.000Z",
+      payload: {
+        version: 2,
+        source: "mcp",
+        action: "cleared",
+        questionCount: 1,
+        items: [
+          {
+            question: { id: "dismiss", header: "Dismiss", question: "Which question was cleared?" },
+            disposition: "dismissed",
+          },
+        ],
+      },
+    };
+    await fixture.own(() =>
+      screen.rerender(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={entries([activity, skipped, cleared, { ...cleared }])}
+        />,
+      ),
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Question cleared via MCP.", { exact: true })).toBeVisible(),
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Which question was cleared?", { exact: true })).toBeVisible(),
+    );
+    await fixture.own(() =>
+      expect.element(page.getByText("Cleared via MCP.", { exact: true })).toBeVisible(),
+    );
+    expect(document.querySelectorAll('[data-primary-question-resolution="true"]')).toHaveLength(3);
+  });
+});
+
 type HistoryPageInput = Parameters<EnvironmentApi["orchestration"]["getThreadTurnActivityPage"]>[0];
 type HistoryPage = Awaited<
   ReturnType<EnvironmentApi["orchestration"]["getThreadTurnActivityPage"]>

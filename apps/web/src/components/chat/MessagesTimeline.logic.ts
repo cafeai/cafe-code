@@ -22,6 +22,7 @@ export interface TimelineDurationMessage {
 
 export type MessagesTimelineRow =
   | Extract<TimelineEntry, { kind: "provider-summary" }>
+  | Extract<TimelineEntry, { kind: "question-resolution" }>
   | {
       kind: "visualization";
       id: string;
@@ -438,6 +439,13 @@ export function deriveMessagesTimelineRows(input: {
     }
     pushUnanchoredWorkBefore(timelineEntry.createdAt);
 
+    if (timelineEntry.kind === "question-resolution") {
+      // A handling receipt is visible conversation metadata, not a user or
+      // assistant message, root completion, or a new anchor for provider work.
+      nextRows.push(timelineEntry);
+      continue;
+    }
+
     if (timelineEntry.kind === "provider-summary") {
       pushHistoricalWorkRow(timelineEntry.turnId, timelineEntry.createdAt);
       nextRows.push(timelineEntry);
@@ -593,6 +601,38 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   if (a.kind !== b.kind || a.id !== b.id) return false;
 
   switch (a.kind) {
+    case "question-resolution": {
+      const current = b as typeof a;
+      return (
+        a.createdAt === current.createdAt &&
+        a.turnId === current.turnId &&
+        a.action === current.action &&
+        a.questionCount === current.questionCount &&
+        (a.items === current.items ||
+          (a.items !== null &&
+            current.items !== null &&
+            a.items.length === current.items.length &&
+            a.items.every((item, index) => {
+              const other = current.items![index]!;
+              if (
+                item.question.id !== other.question.id ||
+                item.question.header !== other.question.header ||
+                item.question.question !== other.question.question
+              )
+                return false;
+              if (!("answer" in item))
+                return !("answer" in other) && item.disposition === other.disposition;
+              if (!("answer" in other)) return false;
+              return typeof item.answer === "string"
+                ? item.answer === other.answer
+                : typeof other.answer !== "string" &&
+                    item.answer.length === other.answer.length &&
+                    item.answer.every(
+                      (answer, answerIndex) => answer === other.answer[answerIndex],
+                    );
+            })))
+      );
+    }
     case "provider-summary": {
       const current = b as typeof a;
       return (

@@ -18,6 +18,7 @@ import {
   ProviderDriverKind,
   ProviderInteraction,
   ProviderNetworkApproval,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type ToolLifecycleItemType,
   type UserInputQuestion,
   type ThreadId,
@@ -236,7 +237,28 @@ export interface LatestProposedPlanState {
   implementationThreadId: ThreadId | null;
 }
 
+export type McpQuestionResolutionItem = {
+  readonly question: {
+    readonly id: string;
+    readonly header: string;
+    readonly question: string;
+  };
+} & (
+  | { readonly answer: string | readonly string[] }
+  | { readonly disposition: "skipped" | "dismissed" }
+);
+
 export type TimelineEntry =
+  | {
+      id: string;
+      kind: "question-resolution";
+      createdAt: string;
+      turnId: TurnId | null;
+      action: "answered" | "skipped" | "cleared";
+      questionCount: number;
+      /** Null preserves honest count-only receipts written before v2. */
+      items: readonly McpQuestionResolutionItem[] | null;
+    }
   | {
       id: string;
       kind: "provider-summary";
@@ -874,6 +896,10 @@ export function deriveWorkLogEntries(
     // These structured prompts have their own nonblocking composer surface.
     // They must not create a duplicate generic work-log row or waiting state.
     .filter((activity) => activity.kind !== "provider.async-questions")
+    // MCP handling is a primary conversation notice, including on replay. A
+    // malformed/future notice must not fall back to exposing arbitrary detail
+    // or answers through the generic Work Log renderer.
+    .filter((activity) => activity.kind !== "mcp.question.resolved")
     .filter((activity) => activity.summary !== "Checkpoint captured")
     .filter((activity) => !isPlanBoundaryToolActivity(activity))
     .filter((activity) => !isRetryableSteerDeliveryActivity(activity))
@@ -2456,6 +2482,122 @@ export function hasToolActivityForTurn(
   return activities.some((activity) => activity.turnId === turnId && activity.tone === "tool");
 }
 
+/**
+ * Only the server's completed MCP-handling activity enters this display
+ * contract. Requested/failed operations and native user-input envelopes never
+ * become completion receipts just because their payload mentions MCP. The
+ * backend establishes provenance and native acceptance; this reader only
+ * refuses unsupported presentation versions and copies finite public fields.
+ */
+function readMcpQuestionResolution(
+  payload: unknown,
+): Pick<
+  Extract<TimelineEntry, { kind: "question-resolution" }>,
+  "action" | "questionCount" | "items"
+> | null {
+  // Projections arrive as JSON. Copy only own data descriptors into fresh
+  // inert objects before encoding the finite receipt or rendering exact text.
+  // Unknown native fields, accessors and a payload's toJSON are never invoked.
+  const own = (value: unknown, key: string): unknown => {
+    if (value === null || typeof value !== "object") return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  };
+  const array = (value: unknown, limit: number): unknown[] | null => {
+    if (!Array.isArray(value)) return null;
+    const length = own(value, "length");
+    if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > limit)
+      return null;
+    const result: unknown[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !("value" in descriptor)) return null;
+      result.push(descriptor.value);
+    }
+    return result;
+  };
+  const text = (value: unknown, limit: number): value is string =>
+    typeof value === "string" && value.length <= limit && value.trim().length > 0;
+  try {
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+    const version = own(payload, "version");
+    if ((version !== 1 && version !== 2) || own(payload, "source") !== "mcp") return null;
+    const action = own(payload, "action");
+    const questionCount = own(payload, "questionCount");
+    if (
+      (action !== "answered" && action !== "skipped" && action !== "cleared") ||
+      typeof questionCount !== "number" ||
+      !Number.isSafeInteger(questionCount) ||
+      questionCount < 1 ||
+      questionCount > 64
+    )
+      return null;
+    if (version === 1) return { action, questionCount, items: null };
+    const rawItems = array(own(payload, "items"), 64);
+    if (rawItems === null || rawItems.length !== questionCount) return null;
+    const items: McpQuestionResolutionItem[] = [];
+    const seenIds = new Set<string>();
+    let chars = 0;
+    for (const raw of rawItems) {
+      const rawQuestion = own(raw, "question");
+      const id = own(rawQuestion, "id");
+      const header = own(rawQuestion, "header");
+      const questionText = own(rawQuestion, "question");
+      if (
+        !text(id, 16_384) ||
+        typeof header !== "string" ||
+        header.length > 65_536 ||
+        !text(questionText, 65_536) ||
+        seenIds.has(id)
+      )
+        return null;
+      seenIds.add(id);
+      const question = { id, header, question: questionText };
+      chars += id.length + header.length + questionText.length;
+      const rawAnswer = own(raw, "answer");
+      const disposition = own(raw, "disposition");
+      if (action === "answered") {
+        if (disposition !== undefined) return null;
+        let answer: string | readonly string[];
+        if (typeof rawAnswer === "string") {
+          if (!text(rawAnswer, PROVIDER_SEND_TURN_MAX_INPUT_CHARS)) return null;
+          answer = rawAnswer;
+          chars += answer.length;
+        } else {
+          const values = array(rawAnswer, 64);
+          if (
+            values === null ||
+            values.length === 0 ||
+            values.some((value) => !text(value, PROVIDER_SEND_TURN_MAX_INPUT_CHARS))
+          )
+            return null;
+          const selected = values as string[];
+          if (new Set(selected).size !== selected.length) return null;
+          answer = selected;
+          chars += selected.reduce((total, value) => total + value.length, 0);
+        }
+        items.push({ question, answer });
+      } else {
+        const expectedDisposition = action === "skipped" ? "skipped" : "dismissed";
+        if (rawAnswer !== undefined || disposition !== expectedDisposition) return null;
+        items.push({ question, disposition: expectedDisposition });
+      }
+      // Reject cheaply before allocating encoded copies. This is an aggregate
+      // character pre-bound, followed by the actual UTF-8 receipt limit below.
+      if (chars > 1_048_576) return null;
+    }
+    const encoder = new TextEncoder();
+    if (
+      encoder.encode(JSON.stringify({ version: 2, source: "mcp", action, questionCount, items }))
+        .byteLength > 1_048_576
+    )
+      return null;
+    return { action, questionCount, items };
+  } catch {
+    return null;
+  }
+}
+
 export function deriveTimelineEntries(
   messages: ChatMessage[],
   proposedPlans: ProposedPlan[],
@@ -2516,12 +2658,35 @@ export function deriveTimelineEntries(
     createdAt: visualization.occurredAt,
     visualization,
   }));
+  const resolutionActivities = new Map<string, OrchestrationThreadActivity>();
+  for (const activity of retainedActivities
+    .filter((entry) => entry.kind === "mcp.question.resolved")
+    .toSorted(compareActivitiesByOrder)) {
+    // The same immutable activity can be present in both the ordinary tail and
+    // the retained-notice window. It represents one visible handling receipt.
+    resolutionActivities.set(activity.id, activity);
+  }
+  const resolutionRows = [...resolutionActivities.values()].flatMap<TimelineEntry>((activity) => {
+    const resolution = readMcpQuestionResolution(activity.payload);
+    return resolution
+      ? [
+          {
+            id: `question-resolution:${activity.id}`,
+            kind: "question-resolution",
+            createdAt: activity.createdAt,
+            turnId: activity.turnId,
+            ...resolution,
+          },
+        ]
+      : [];
+  });
   return [
     ...messageRows,
     ...proposedPlanRows,
     ...workRows,
     ...[...summaries.values()].filter((summary) => !placedSummaries.has(summary.operationKey)),
     ...visualizationRows,
+    ...resolutionRows,
   ].toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 

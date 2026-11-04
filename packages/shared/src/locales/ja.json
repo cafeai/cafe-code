@@ -3559,5 +3559,14 @@
   "Claude could not start because a configuration file is invalid. Correct the Claude configuration before sending your message again.": "設定ファイルが無効なため、Claude を起動できませんでした。Claude の設定を修正してから、メッセージを再送信してください。",
   "Claude sign-in may expire soon.": "Claude のサインイン期限が近づいている可能性があります。",
   "Claude sign-in may have expired.": "Claude のサインイン期限が切れている可能性があります。",
-  "{headline} An active Claude session reported this estimated sign-in expiry: {expiresAt}. This is an estimate; sign-in may end up to 3 days earlier or be revoked sooner.": "{headline} 実行中の Claude セッションから報告されたサインイン期限の推定値: {expiresAt}。これは推定値です。実際の期限は最大 3 日早い場合があり、それより前にサインインが無効になることもあります。"
+  "{headline} An active Claude session reported this estimated sign-in expiry: {expiresAt}. This is an estimate; sign-in may end up to 3 days earlier or be revoked sooner.": "{headline} 実行中の Claude セッションから報告されたサインイン期限の推定値: {expiresAt}。これは推定値です。実際の期限は最大 3 日早い場合があり、それより前にサインインが無効になることもあります。",
+  "Answer": "回答",
+  "Cleared via MCP.": "MCP 経由でクリアしました。",
+  "Question answered via MCP.": "MCP 経由で質問に回答しました。",
+  "Question cleared via MCP.": "MCP 経由で質問をクリアしました。",
+  "Question skipped via MCP.": "MCP 経由で質問をスキップしました。",
+  "Skipped via MCP.": "MCP 経由でスキップしました。",
+  "{count} questions answered via MCP.": "MCP 経由で {count} 件の質問に回答しました。",
+  "{count} questions cleared via MCP.": "MCP 経由で {count} 件の質問をクリアしました。",
+  "{count} questions skipped via MCP.": "MCP 経由で {count} 件の質問をスキップしました。"
 }
