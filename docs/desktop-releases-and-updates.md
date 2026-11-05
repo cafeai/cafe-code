@@ -1,6 +1,6 @@
 # Desktop Releases And Updates
 
-Last updated: 2026-10-20 22:29:56 JST (UTC+0900)
+Last updated: 2026-11-05 12:01:08 JST (UTC+0900)
 
 Cafe Code publishes desktop artifacts from version tags. macOS apps are Developer ID signed and
 notarized; Windows and Linux artifacts remain unsigned. Stable tags use
@@ -58,6 +58,15 @@ Additional process-lifecycle, native installer/runtime and packaged update-feed
 probes run separately as optional qualification. They are not required by the
 normal release workflow, which does not launch the packaged app or create a
 second lower-version probe build.
+
+Native artifact CI passes `--verbose` to the packaging command so subprocess
+stdout remains in the job log. electron-builder writes error explanations to
+stdout as well as ordinary progress; without this option, a packaging failure
+can leave only the wrapper's nonzero exit code. For a local packaging diagnosis,
+add the same option to the selected `dist:desktop:*` command. It changes output
+visibility, not signing, build inputs, deadlines or artifact validation. Preserve
+the complete failed job log before diagnosing or retrying a failed build; an
+exit code alone does not identify the underlying packaging failure.
 
 An explicitly requested build-only release adds `-f build_only=true` to the
 manual command. It skips normal CI while retaining the same four-target builds,
