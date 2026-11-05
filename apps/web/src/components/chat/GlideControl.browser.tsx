@@ -986,30 +986,35 @@ it("leads a fresh draft into its own saved choice without a server mutation", as
   expect(fixture.control.mock.calls.every(([input]) => !("threadId" in input))).toBe(true);
 });
 
-it("reflects Stop all through an inert activity read without probing permissions again", async () => {
-  const onActivityChange = vi.fn();
-  fixture.control.mockImplementation(async (input) =>
-    input.action === "activity"
-      ? { ...state, enabled: false, stopRevision: "1", activity: { state: "stopped" } }
-      : { ...state, enabled: true, stopRevision: "0", activity: { state: "ready" } },
-  );
-  await render(
-    <GlideControl
-      environmentId={environmentId}
-      threadId={threadId}
-      runtimeMode="full-access"
-      onActivityChange={onActivityChange}
-    />,
-  );
-  await expect.element(button()).toHaveAttribute("aria-pressed", "true");
-  await expect.element(button()).toHaveAttribute("aria-pressed", "false");
-  expect(fixture.control.mock.calls.filter(([input]) => input.action === "status")).toHaveLength(1);
-  expect(
-    fixture.control.mock.calls.some(
-      ([input]) => input.action === "activity" && input.threadId === threadId,
-    ),
-  ).toBe(true);
-  expect(onActivityChange).toHaveBeenCalledWith({ state: "stopped" });
+it("reflects Stop all through an inert activity read without probing permissions again", async (context) => {
+  await withActivityFixture(context, async (lifetime) => {
+    const onActivityChange = vi.fn();
+    fixture.control.mockImplementation((input) =>
+      lifetime.reply(
+        Promise.resolve(
+          input.action === "activity"
+            ? { ...state, enabled: false, stopRevision: "1", activity: { state: "stopped" } }
+            : { ...state, enabled: true, stopRevision: "0", activity: { state: "ready" } },
+        ),
+      ),
+    );
+    await lifetime.mount(<ActivityHarness changed={onActivityChange} />);
+    await lifetime.owned(() => expect.element(button()).toHaveAttribute("aria-pressed", "true"));
+    await lifetime.owned(() => expect.element(button()).toHaveAttribute("aria-pressed", "false"));
+    // The switch commits before GlideControl's passive activity publication.
+    // Observe the real parent projection before asserting that callback; an
+    // OFF button alone does not prove its separate activity update completed.
+    await lifetime.owned(() => expect.element(projectedActivity()).toHaveTextContent("stopped"));
+    expect(fixture.control.mock.calls.filter(([input]) => input.action === "status")).toHaveLength(
+      1,
+    );
+    expect(
+      fixture.control.mock.calls.some(
+        ([input]) => input.action === "activity" && input.threadId === threadId,
+      ),
+    ).toBe(true);
+    expect(onActivityChange).toHaveBeenCalledWith({ state: "stopped" });
+  });
 });
 
 it("clears a stale draft grant after Stop all instead of silently renewing it", async () => {
