@@ -17,6 +17,7 @@ const LAUNCHER_FILES = [
   "apps/desktop/scripts/start-electron.mjs",
   "apps/desktop/scripts/start-electron-launchservices.mjs",
   "apps/desktop/scripts/desktop-child-env.mjs",
+  "apps/desktop/scripts/follow-desktop-logs.mjs",
   "apps/desktop/scripts/electron-launcher.mjs",
   "apps/desktop/scripts/build-mac-dictation-helper.mjs",
   "apps/desktop/scripts/linux-safe-storage.mjs",

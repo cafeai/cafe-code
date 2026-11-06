@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 // Native fixture boundary: exercise actual filesystem and host-path identity semantics.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { expect, it } from "vitest";
 
@@ -27,7 +27,14 @@ it.runIf(process.env.CAFE_CODE_REMOTE_TLS_E2E === "1")(
         new URL("./remoteCertificatePolicy.ts", import.meta.url),
         "utf8",
       );
-      await writeFile(join(directory, "policy.mjs"), stripTypeScriptTypes(source));
+      // The isolated fixture is outside the checkout, so bare package imports
+      // cannot resolve there. Retain the exact installed DateTime dependency
+      // used by this policy without sharing a user profile or weakening TLS.
+      const policy = stripTypeScriptTypes(source).replace(
+        'from "effect/DateTime"',
+        `from ${JSON.stringify(pathToFileURL(require.resolve("effect/DateTime")).href)}`,
+      );
+      await writeFile(join(directory, "policy.mjs"), policy);
       for (const name of ["test-only-cert.pem", "test-only-key.pem"]) {
         await copyFile(
           new URL(`./__fixtures__/remote-tls/${name}`, import.meta.url),

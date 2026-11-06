@@ -17,6 +17,7 @@ import { SavedEnvironmentsSettings } from "./SavedEnvironmentsSettings";
 const runtimeMocks = {
   addSavedEnvironment: vi.fn(),
   reconnectSavedEnvironment: vi.fn(),
+  reviewSavedEnvironmentCertificate: vi.fn(),
   disconnectSavedEnvironment: vi.fn(),
   removeSavedEnvironment: vi.fn(),
   updateSavedEnvironment: vi.fn(),
@@ -25,6 +26,7 @@ const runtimeMocks = {
 const actions = {
   add: runtimeMocks.addSavedEnvironment,
   reconnect: runtimeMocks.reconnectSavedEnvironment,
+  reviewCertificate: runtimeMocks.reviewSavedEnvironmentCertificate,
   disconnect: runtimeMocks.disconnectSavedEnvironment,
   remove: runtimeMocks.removeSavedEnvironment,
   update: runtimeMocks.updateSavedEnvironment,
@@ -177,6 +179,7 @@ describe("SavedEnvironmentsSettings", () => {
     resetSavedEnvironmentRuntimeStoreForTests();
     runtimeMocks.addSavedEnvironment.mockReset();
     runtimeMocks.reconnectSavedEnvironment.mockReset().mockResolvedValue(undefined);
+    runtimeMocks.reviewSavedEnvironmentCertificate.mockReset().mockResolvedValue(undefined);
     runtimeMocks.disconnectSavedEnvironment.mockReset().mockResolvedValue(undefined);
     runtimeMocks.removeSavedEnvironment.mockReset().mockResolvedValue(undefined);
     runtimeMocks.updateSavedEnvironment.mockReset().mockResolvedValue(undefined);
@@ -185,6 +188,76 @@ describe("SavedEnvironmentsSettings", () => {
   afterEach(async () => {
     await fixture.cleanup();
     document.body.innerHTML = "";
+  });
+
+  it("warns about a changed certificate and reviews it only after an explicit click", async () => {
+    const environmentId = EnvironmentId.make("certificate-pc");
+    useSavedEnvironmentRegistryStore.getState().upsert({
+      environmentId,
+      label: "Certificate PC",
+      httpBaseUrl: "https://pc.example:13775/",
+      wsBaseUrl: "wss://pc.example:13775/",
+      createdAt: "2026-11-04T00:00:00.000Z",
+      lastConnectedAt: null,
+    });
+    useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
+      connectionState: "error",
+      reconnectPhase: "exhausted",
+      certificateStatus: "changed",
+    });
+    let finish!: () => void;
+    runtimeMocks.reviewSavedEnvironmentCertificate.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    await fixture.mount();
+    await expect.element(page.getByRole("alert")).toBeVisible();
+    await expect.element(page.getByText("Certificate changed", { exact: true })).toBeVisible();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "intercepting your connection",
+    );
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "saved sign-in credential",
+    );
+    expect(runtimeMocks.reviewSavedEnvironmentCertificate).not.toHaveBeenCalled();
+    const review = page.getByRole("button", { name: "Review certificate" });
+    await fixture.native(() => review.click());
+    expect(runtimeMocks.reviewSavedEnvironmentCertificate).toHaveBeenCalledExactlyOnceWith(
+      environmentId,
+    );
+    await expect.element(review).toBeDisabled();
+    finish();
+    await expect.element(review).toBeEnabled();
+    expect(runtimeMocks.reconnectSavedEnvironment).not.toHaveBeenCalled();
+  });
+
+  it("blocks invalid certificates without offering trust and permits retry after repair", async () => {
+    const environmentId = EnvironmentId.make("invalid-certificate-pc");
+    useSavedEnvironmentRegistryStore.getState().upsert({
+      environmentId,
+      label: "Invalid certificate PC",
+      httpBaseUrl: "https://pc.example:13775/",
+      wsBaseUrl: "wss://pc.example:13775/",
+      createdAt: "2026-11-04T00:00:00.000Z",
+      lastConnectedAt: null,
+    });
+    useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
+      connectionState: "error",
+      certificateStatus: "invalid-certificate",
+    });
+    await fixture.mount();
+    await expect.element(page.getByRole("alert")).toBeVisible();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "expired, invalid, or for another address",
+    );
+    await expect
+      .element(page.getByRole("button", { name: "Review certificate" }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Reconnect Invalid certificate PC" }))
+      .toBeEnabled();
+    expect(runtimeMocks.reviewSavedEnvironmentCertificate).not.toHaveBeenCalled();
   });
 
   it("opens the add dialog and switches pairing methods", async () => {

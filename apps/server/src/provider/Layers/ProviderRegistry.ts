@@ -1299,6 +1299,11 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
         refreshInstanceAccountUsage(instanceId).pipe(Effect.catchCause(recoverRefreshFailure)),
       refreshInstanceModels: (instanceId: ProviderInstanceId) =>
         refreshInstanceModels(instanceId).pipe(Effect.catchCause(recoverRefreshFailure)),
+      observeInstanceAuthenticationRefusal: (instanceId: ProviderInstanceId) =>
+        instanceRegistry.getInstance(instanceId).pipe(
+          Effect.flatMap((instance) => instance?.observeAuthenticationRefusal ?? Effect.void),
+          Effect.ignoreCause({ log: true }),
+        ),
       getProviderMaintenanceCapabilitiesForInstance,
       setProviderMaintenanceActionState,
       updateProviderAccountRateLimits,

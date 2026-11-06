@@ -39,6 +39,25 @@ built desktop. Neither start command builds the app. Run `build:desktop` again
 after changing source; launching an existing desktop package directly also
 requires built output.
 
+On macOS, console starts keep following that launch's stdout and stderr after
+LaunchServices opens the app. Startup output and later entries appear in the
+terminal, while the original private files remain under the Debug profile's
+`restart-logs` directory. Press **Ctrl+C** to stop following and return to the
+shell; Cafe keeps running. Quit Cafe through its normal app controls. The
+follower continues until interrupted, including after the app quits, and does
+not attach to a different launch's logs.
+
+For a script that needs the previous launch-and-return behavior, use:
+
+```bash
+corepack yarn workspace @cafecode/desktop start --no-follow
+```
+
+The same option works with `start:debug`. It controls only the console observer;
+it is not forwarded to Electron or the backend. Development watchers and other
+platforms retain their existing process and console behavior. Profile restart
+control requests automatically return without starting a log follower.
+
 Source launchers require successful Debug-profile build receipts for both the
 desktop and server bundles. These bind their exact emitted JavaScript bytes,
 including shared chunks; missing, legacy or inconsistent output refuses with a

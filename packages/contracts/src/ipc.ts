@@ -394,6 +394,15 @@ export const RemoteCertificatePreparationSchema = Schema.Literals([
 ]);
 export type RemoteCertificatePreparation = typeof RemoteCertificatePreparationSchema.Type;
 
+export const RemoteCertificateInspectionSchema = Schema.Literals([
+  "unchanged",
+  "changed",
+  "untrusted",
+  "invalid-certificate",
+  "unreachable",
+]);
+export type RemoteCertificateInspection = typeof RemoteCertificateInspectionSchema.Type;
+
 export const DesktopDebugEndpointStateSchema = Schema.Struct({
   enabled: Schema.Boolean,
   url: Schema.NullOr(Schema.String),
@@ -462,7 +471,9 @@ export interface DesktopBridge extends VisualizationDesktopBridge {
   getSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<string | null>;
   setSavedEnvironmentSecret: (environmentId: EnvironmentId, secret: string) => Promise<boolean>;
   removeSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<void>;
-  /** Explicit saved-server enrollment only; never called by background reconnects. */
+  /** Read-only TLS inspection. Never grants trust or displays a dialog. */
+  inspectRemoteCertificate?: (httpBaseUrl: string) => Promise<RemoteCertificateInspection>;
+  /** Explicit enrollment or user-requested certificate recovery; never prompts in the background. */
   prepareRemoteCertificate?: (httpBaseUrl: string) => Promise<RemoteCertificatePreparation>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
   setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;

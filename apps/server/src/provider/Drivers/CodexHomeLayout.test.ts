@@ -15,6 +15,7 @@ import {
   shouldShareCodexShadowEntryName,
   withCodexHomeLayoutEnvironment,
 } from "./CodexHomeLayout.ts";
+import { codexLoginFixture } from "../testUtils/codexLoginFixture.ts";
 
 const encodeProviderJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const decodeCodexSettingsValue = Schema.decodeSync(CodexSettings);
@@ -315,6 +316,73 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
 
         expect(authLinkResult._tag).toBe("Failure");
         expect(authContents).toBe('{"token":"fresh"}\n');
+      }),
+    );
+
+    it.effect("publishes a newer renewal of the same login back to the shared auth", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+        const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+        const shadowHome = path.join(shadowRoot, "shadow");
+        // Codex renewed the login inside the shadow home and rotated the
+        // single-use refresh token; the shared copy still holds the consumed one.
+        const consumed = codexLoginFixture({
+          refreshToken: "rt-consumed",
+          lastRefresh: "2026-10-25T18:43:53Z",
+        });
+        const renewed = codexLoginFixture({
+          refreshToken: "rt-renewed",
+          lastRefresh: "2026-11-04T19:00:00Z",
+        });
+        yield* writeTextFile(path.join(sharedHome, "auth.json"), consumed);
+        yield* writeTextFile(path.join(shadowHome, "auth.json"), renewed);
+
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+        );
+        yield* materializeCodexShadowHome(layout);
+
+        expect(yield* fileSystem.readFileString(path.join(shadowHome, "auth.json"))).toBe(renewed);
+        expect(yield* fileSystem.readFileString(path.join(sharedHome, "auth.json"))).toBe(renewed);
+        if (process.platform !== "win32") {
+          const sharedMode = (yield* fileSystem.stat(path.join(sharedHome, "auth.json"))).mode;
+          expect(sharedMode & 0o777).toBe(0o600);
+        }
+        // A later materialization is a no-op once both copies agree.
+        yield* materializeCodexShadowHome(layout);
+        expect(yield* fileSystem.readFileString(path.join(sharedHome, "auth.json"))).toBe(renewed);
+      }),
+    );
+
+    it.effect("keeps a different user's shared login over an older process's renewal", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+        const shadowRoot = yield* makeTempDir("t3code-codex-shadow-root-");
+        const shadowHome = path.join(shadowRoot, "shadow");
+        const newLogin = codexLoginFixture({
+          subject: "user-2",
+          refreshToken: "rt-user-2",
+          lastRefresh: "2026-11-04T18:00:00Z",
+        });
+        const oldUserRenewal = codexLoginFixture({
+          subject: "user-1",
+          refreshToken: "rt-user-1",
+          lastRefresh: "2026-11-04T19:00:00Z",
+        });
+        yield* writeTextFile(path.join(sharedHome, "auth.json"), newLogin);
+        yield* writeTextFile(path.join(shadowHome, "auth.json"), oldUserRenewal);
+
+        const layout = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({ homePath: sharedHome, shadowHomePath: shadowHome }),
+        );
+        yield* materializeCodexShadowHome(layout);
+
+        expect(yield* fileSystem.readFileString(path.join(sharedHome, "auth.json"))).toBe(newLogin);
+        expect(yield* fileSystem.readFileString(path.join(shadowHome, "auth.json"))).toBe(newLogin);
       }),
     );
 

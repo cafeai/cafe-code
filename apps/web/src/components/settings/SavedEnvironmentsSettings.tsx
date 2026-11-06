@@ -74,6 +74,7 @@ export interface SavedEnvironmentActions {
   readonly add: typeof import("~/environments/runtime/service").addSavedEnvironment;
   readonly disconnect: typeof import("~/environments/runtime/service").disconnectSavedEnvironment;
   readonly reconnect: typeof import("~/environments/runtime/service").reconnectSavedEnvironment;
+  readonly reviewCertificate: typeof import("~/environments/runtime/service").reviewSavedEnvironmentCertificate;
   readonly remove: typeof import("~/environments/runtime/service").removeSavedEnvironment;
   readonly update: typeof import("~/environments/runtime/service").updateSavedEnvironment;
 }
@@ -84,6 +85,10 @@ const DEFAULT_SAVED_ENVIRONMENT_ACTIONS: SavedEnvironmentActions = {
     (await import("~/environments/runtime/service")).disconnectSavedEnvironment(environmentId),
   reconnect: async (environmentId) =>
     (await import("~/environments/runtime/service")).reconnectSavedEnvironment(environmentId),
+  reviewCertificate: async (environmentId) =>
+    (await import("~/environments/runtime/service")).reviewSavedEnvironmentCertificate(
+      environmentId,
+    ),
   remove: async (environmentId) =>
     (await import("~/environments/runtime/service")).removeSavedEnvironment(environmentId),
   update: async (environmentId, input) =>
@@ -146,7 +151,7 @@ function SavedEnvironmentRow({
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
   const [pendingAction, setPendingAction] = useState<
-    "reconnect" | "disconnect" | "remove" | "update" | null
+    "reconnect" | "disconnect" | "remove" | "update" | "certificate" | null
   >(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [isRemoveDialogOpen, setIsRemoveDialogOpen] = useState(false);
@@ -166,10 +171,12 @@ function SavedEnvironmentRow({
     disabled: pendingAction !== null || isEditDialogOpen,
   });
 
+  const certificateStatus = runtime?.certificateStatus;
   const isRetrying =
     runtime?.reconnectPhase === "attempting" || runtime?.reconnectPhase === "waiting";
-  const isConnecting = runtime?.connectionState === "connecting" || isRetrying;
-  const isConnected = runtime?.connectionState === "connected";
+  const isConnecting =
+    !certificateStatus && (runtime?.connectionState === "connecting" || isRetrying);
+  const isConnected = !certificateStatus && runtime?.connectionState === "connected";
   const isError = runtime?.connectionState === "error" || runtime?.reconnectPhase === "exhausted";
   const requiresAuth = runtime?.authState === "requires-auth";
   const versionMismatch = uiPresentation.resolveServerConfigVersionMismatch(runtime?.serverConfig);
@@ -180,7 +187,15 @@ function SavedEnvironmentRow({
 
   let statusText = uiText("Disconnected", undefined, undefined, uiLocale);
   let dotColor = "bg-muted-foreground";
-  if (requiresAuth) {
+  if (certificateStatus) {
+    statusText =
+      certificateStatus === "changed"
+        ? uiText("Certificate changed", undefined, undefined, uiLocale)
+        : certificateStatus === "untrusted"
+          ? uiText("Certificate approval required", undefined, undefined, uiLocale)
+          : uiText("Invalid certificate", undefined, undefined, uiLocale);
+    dotColor = "bg-destructive";
+  } else if (requiresAuth) {
     statusText = uiText("Pairing required", undefined, undefined, uiLocale);
     dotColor = "bg-destructive";
   } else if (isConnecting) {
@@ -196,13 +211,16 @@ function SavedEnvironmentRow({
     dotColor = "bg-destructive";
   }
 
-  const runAction = async (action: "reconnect" | "disconnect" | "remove") => {
-    if (actionsDisabled || (action !== "remove" && isConnecting)) return;
+  const runAction = async (action: "reconnect" | "disconnect" | "remove" | "certificate") => {
+    if (actionsDisabled || (action !== "remove" && action !== "certificate" && isConnecting))
+      return;
 
     setPendingAction(action);
     setActionError(null);
     try {
-      if (action === "reconnect") {
+      if (action === "certificate") {
+        await actions.reviewCertificate(record.environmentId);
+      } else if (action === "reconnect") {
         await actions.reconnect(record.environmentId);
       } else if (action === "disconnect") {
         await actions.disconnect(record.environmentId);
@@ -211,21 +229,31 @@ function SavedEnvironmentRow({
         setIsRemoveDialogOpen(false);
         setIsEditDialogOpen(false);
       }
-    } catch {
+    } catch (error) {
       setActionError(
-        action === "remove"
-          ? uiText(
-              "Could not remove this saved environment. Try again.",
-              undefined,
-              undefined,
-              uiLocale,
+        action === "certificate"
+          ? uiPresentation.remoteEnvironmentErrorMessage(
+              error,
+              uiText(
+                "Could not review this certificate. Check the server and try again.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
             )
-          : uiText(
-              "Could not update this connection. Check that the server is reachable and try again.",
-              undefined,
-              undefined,
-              uiLocale,
-            ),
+          : action === "remove"
+            ? uiText(
+                "Could not remove this saved environment. Try again.",
+                undefined,
+                undefined,
+                uiLocale,
+              )
+            : uiText(
+                "Could not update this connection. Check that the server is reachable and try again.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
       );
     } finally {
       setPendingAction(null);
@@ -262,21 +290,23 @@ function SavedEnvironmentRow({
     }
   };
 
-  const runtimeError = requiresAuth
-    ? uiText(
-        "The saved credential is missing or expired. Pair this server again.",
-        undefined,
-        undefined,
-        uiLocale,
-      )
-    : isError
+  const runtimeError = certificateStatus
+    ? null
+    : requiresAuth
       ? uiText(
-          "The server could not be reached or rejected the saved session.",
+          "The saved credential is missing or expired. Pair this server again.",
           undefined,
           undefined,
           uiLocale,
         )
-      : null;
+      : isError
+        ? uiText(
+            "The server could not be reached or rejected the saved session.",
+            undefined,
+            undefined,
+            uiLocale,
+          )
+        : null;
 
   return (
     <li
@@ -343,7 +373,12 @@ function SavedEnvironmentRow({
                 <Button
                   variant="outline"
                   size="icon"
-                  disabled={actionsDisabled || isConnecting}
+                  disabled={
+                    actionsDisabled ||
+                    isConnecting ||
+                    certificateStatus === "changed" ||
+                    certificateStatus === "untrusted"
+                  }
                   aria-label={
                     isConnected
                       ? uiText("Disconnect {value0}", { value0: displayLabel }, undefined, uiLocale)
@@ -402,6 +437,74 @@ function SavedEnvironmentRow({
           </Tooltip>
         </div>
       </div>
+
+      {certificateStatus ? (
+        <div
+          role="alert"
+          className="mt-3 space-y-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive-foreground"
+        >
+          <p className="flex items-start gap-2 font-medium">
+            <TriangleAlertIcon className="mt-0.5 size-4 shrink-0" />
+            {certificateStatus === "changed"
+              ? uiText(
+                  "Security warning: this server's certificate has changed.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
+              : certificateStatus === "untrusted"
+                ? uiText(
+                    "Security warning: this server's certificate is not trusted.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "Connection blocked: the server's certificate is invalid.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
+          </p>
+          <p>
+            {certificateStatus === "invalid-certificate"
+              ? uiText(
+                  "The certificate is expired, invalid, or for another address. Fix the server certificate or edit this connection's address, then try reconnecting.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
+              : uiText(
+                  "An unexpected certificate can mean a different computer is answering or someone is intercepting your connection. Continue only if you expected the change and can verify the new fingerprint directly on the server.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+          </p>
+          {certificateStatus !== "invalid-certificate" ? (
+            <>
+              <p>
+                {uiText(
+                  "Accepting the new certificate allows Cafe Code to send your saved sign-in credential to this server. Review both fingerprints carefully before trusting it.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+              </p>
+              <Button
+                variant="outline"
+                disabled={actionsDisabled}
+                aria-busy={pendingAction === "certificate" || undefined}
+                onClick={() => void runAction("certificate")}
+              >
+                <BusyButtonLabel busy={pendingAction === "certificate"}>
+                  {uiText("Review certificate", undefined, undefined, uiLocale)}
+                </BusyButtonLabel>
+              </Button>
+            </>
+          ) : null}
+        </div>
+      ) : null}
 
       <Dialog
         open={isEditDialogOpen}

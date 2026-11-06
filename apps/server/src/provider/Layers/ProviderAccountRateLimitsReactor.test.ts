@@ -19,6 +19,7 @@ import {
   ProviderAccountRateLimitsReactorLive,
   providerAccountRateLimitUpdateFromEvent,
   providerAccountUsageRefreshInstanceFromEvent,
+  providerAuthenticationRefusalInstanceFromEvent,
 } from "./ProviderAccountRateLimitsReactor.ts";
 
 const settle = Effect.forEach(Array.from({ length: 32 }), () => Effect.yieldNow, {
@@ -79,6 +80,63 @@ describe("providerAccountRateLimitUpdateFromEvent", () => {
         primary: { usedPercent: 1, windowDurationMins: 10_080 },
       },
     });
+  });
+});
+
+describe("providerAuthenticationRefusalInstanceFromEvent", () => {
+  const refusal = (input: {
+    readonly provider?: string;
+    readonly instanceId?: string;
+    readonly createdAt?: string;
+    readonly willRetry?: boolean;
+  }): ProviderRuntimeEvent =>
+    ({
+      type: "runtime.error",
+      eventId: EventId.make("evt-auth-refusal"),
+      provider: ProviderDriverKind.make(input.provider ?? "codex"),
+      ...(input.instanceId === undefined
+        ? {}
+        : { providerInstanceId: ProviderInstanceId.make(input.instanceId) }),
+      threadId: ThreadId.make("thread-auth-refusal"),
+      createdAt: input.createdAt ?? "2026-11-05T01:14:06.406Z",
+      payload: { message: "rejected" },
+      raw: {
+        source: "codex.app-server.notification",
+        method: "error",
+        payload: {
+          willRetry: input.willRetry ?? false,
+          error: { message: "rejected", codexErrorInfo: "unauthorized" },
+        },
+      },
+    }) as ProviderRuntimeEvent;
+  const now = Date.parse("2026-11-05T01:14:10.000Z");
+
+  it("forwards a fresh daemon-observed Codex refusal to its exact instance", () => {
+    expect(
+      providerAuthenticationRefusalInstanceFromEvent(refusal({ instanceId: "codex" }), now),
+    ).toBe(ProviderInstanceId.make("codex"));
+  });
+
+  it("ignores replayed, retrying, unscoped and non-Codex observations", () => {
+    expect(
+      providerAuthenticationRefusalInstanceFromEvent(
+        refusal({ instanceId: "codex", createdAt: "2026-11-05T00:00:00.000Z" }),
+        now,
+      ),
+    ).toBeNull();
+    expect(
+      providerAuthenticationRefusalInstanceFromEvent(
+        refusal({ instanceId: "codex", willRetry: true }),
+        now,
+      ),
+    ).toBeNull();
+    expect(providerAuthenticationRefusalInstanceFromEvent(refusal({}), now)).toBeNull();
+    expect(
+      providerAuthenticationRefusalInstanceFromEvent(
+        refusal({ instanceId: "grok", provider: "grok" }),
+        now,
+      ),
+    ).toBeNull();
   });
 });
 

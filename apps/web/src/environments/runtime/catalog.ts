@@ -285,6 +285,7 @@ export type SavedEnvironmentConnectionState = "connecting" | "connected" | "disc
 export type SavedEnvironmentAuthState = "authenticated" | "requires-auth" | "unknown";
 
 export interface SavedEnvironmentRuntimeState {
+  readonly certificateStatus?: import("../remote/certificate").RemoteCertificateProblem | null;
   readonly connectionState: SavedEnvironmentConnectionState;
   readonly authState: SavedEnvironmentAuthState;
   readonly lastError: string | null;

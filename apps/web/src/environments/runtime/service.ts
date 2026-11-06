@@ -35,6 +35,11 @@ import { projectQueryKeys } from "~/lib/projectReactQuery";
 import { providerQueryKeys } from "~/lib/providerReactQuery";
 import { getPrimaryKnownEnvironment } from "../primary";
 import {
+  RemoteEnvironmentCertificateError,
+  RemoteCertificateReviewError,
+  remoteCertificatePreparationMessage,
+} from "../remote/certificate";
+import {
   bootstrapRemoteBearerSession,
   bootstrapRemotePasswordBearerSession,
   fetchRemoteEnvironmentDescriptor,
@@ -985,9 +990,12 @@ function getRuntimeErrorFields(error: unknown) {
     (error instanceof Error &&
       /credential.*(?:expired|missing)|missing.*credential/iu.test(error.message));
   return {
-    lastError: isAuthError
-      ? uiText("Saved environment credential is missing or expired. Add it again to sign in.")
-      : uiText("Saved environment connection failed."),
+    lastError:
+      error instanceof RemoteEnvironmentCertificateError
+        ? error.message
+        : isAuthError
+          ? uiText("Saved environment credential is missing or expired. Add it again to sign in.")
+          : uiText("Saved environment connection failed."),
     lastErrorAt: new Date().toISOString(),
   } as const;
 }
@@ -1051,6 +1059,7 @@ function transitionSavedEnvironmentConnection(
 }
 
 function setRuntimeConnecting(environmentId: EnvironmentId) {
+  useSavedEnvironmentRuntimeStore.getState().patch(environmentId, { certificateStatus: null });
   transitionSavedEnvironmentConnection(environmentId, beginSavedEnvironmentReconnect);
 }
 
@@ -1062,6 +1071,7 @@ function setRuntimeConnected(environmentId: EnvironmentId) {
   const connectedAt = isoNow();
   useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
     authState: "authenticated",
+    certificateStatus: null,
     ...recordSavedEnvironmentConnectionOpened(connectedAt),
   });
   useSavedEnvironmentRegistryStore.getState().markConnected(environmentId, connectedAt);
@@ -1083,8 +1093,17 @@ function setRuntimeDisconnected(environmentId: EnvironmentId) {
 }
 
 function setRuntimeError(environmentId: EnvironmentId, error: unknown) {
-  const fields = getRuntimeErrorFields(error);
+  const previousCertificateStatus =
+    useSavedEnvironmentRuntimeStore.getState().byId?.[environmentId]?.certificateStatus;
+  const fields = getRuntimeErrorFields(
+    !(error instanceof RemoteEnvironmentCertificateError) && previousCertificateStatus
+      ? new RemoteEnvironmentCertificateError(previousCertificateStatus)
+      : error,
+  );
   useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
+    ...(error instanceof RemoteEnvironmentCertificateError
+      ? { certificateStatus: error.certificateStatus }
+      : {}),
     ...recordSavedEnvironmentTerminalError({
       message: fields.lastError,
       occurredAt: fields.lastErrorAt,
@@ -1343,6 +1362,10 @@ function createSavedEnvironmentClient(
   bearerToken: string,
 ): WsRpcClient {
   useSavedEnvironmentRuntimeStore.getState().ensure(environmentId);
+  // Retain only our finite, sanitized certificate classification. The protocol's
+  // live-session terminal callback owns publication; late retired probes cannot
+  // mutate a replacement environment or expose arbitrary URL-provider errors.
+  let certificateError: RemoteEnvironmentCertificateError | undefined;
 
   return createWsRpcClient(
     new WsTransport(
@@ -1377,13 +1400,17 @@ function createSavedEnvironmentClient(
           setRuntimeConnecting(environmentId);
         },
         onAttempt: () => {
+          certificateError = undefined;
           recordRuntimeConnectionAttempt(environmentId);
         },
         // Only transient token issuance is replayable. The saved bearer is
         // authoritative; enrollment and credential rejection need user action.
-        shouldRetryUrlError: isRetryableRemoteWebSocketUrlError,
+        shouldRetryUrlError: (error) => {
+          certificateError = error instanceof RemoteEnvironmentCertificateError ? error : undefined;
+          return isRetryableRemoteWebSocketUrlError(error);
+        },
         onTerminalError: (message) => {
-          setRuntimeError(environmentId, new Error(message));
+          setRuntimeError(environmentId, certificateError ?? new Error(message));
         },
         onRetryScheduled: (info) => {
           useSavedEnvironmentRuntimeStore
@@ -1859,6 +1886,49 @@ export async function reconnectSavedEnvironment(environmentId: EnvironmentId): P
     setRuntimeError(environmentId, error);
     throw error;
   }
+}
+
+/** Trust changes are admitted only by this explicit user action, never by retrying. */
+export async function reviewSavedEnvironmentCertificate(
+  environmentId: EnvironmentId,
+): Promise<void> {
+  const record = getSavedEnvironmentRecord(environmentId);
+  const prepare = window.desktopBridge?.prepareRemoteCertificate;
+  if (!record || new URL(record.httpBaseUrl).protocol !== "https:" || !prepare) {
+    throw new RemoteCertificateReviewError(
+      uiText("Certificate review is available only for saved HTTPS servers in the desktop app."),
+    );
+  }
+  const assertCurrent = () => {
+    if (getSavedEnvironmentRecord(environmentId) !== record) {
+      throw new RemoteCertificateReviewError(
+        uiText(
+          "The saved server changed during certificate review. Review its current address before reconnecting.",
+        ),
+      );
+    }
+  };
+  const result = await prepare(record.httpBaseUrl);
+  assertCurrent();
+  if (result === "declined") return;
+  if (result !== "approved" && result !== "unchanged") {
+    throw new RemoteCertificateReviewError(remoteCertificatePreparationMessage(result));
+  }
+  // Check the public identity before allowing the saved bearer to be used again.
+  const descriptor = await fetchRemoteEnvironmentDescriptor({ httpBaseUrl: record.httpBaseUrl });
+  assertCurrent();
+  if (descriptor.environmentId !== environmentId) {
+    throw new RemoteCertificateReviewError(
+      uiText(
+        "This address now belongs to a different Cafe Code server. Add it separately to sign in.",
+      ),
+    );
+  }
+  // A failed first connection may still be awaiting its config snapshot. Retire
+  // that exact session so approval cannot rejoin the already failed attempt.
+  await disconnectSavedEnvironment(environmentId);
+  assertCurrent();
+  await reconnectSavedEnvironment(environmentId);
 }
 
 export async function removeSavedEnvironment(environmentId: EnvironmentId): Promise<void> {

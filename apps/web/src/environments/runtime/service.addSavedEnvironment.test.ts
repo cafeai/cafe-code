@@ -209,6 +209,129 @@ describe("direct saved environments", () => {
     });
   });
 
+  it("reviews a certificate and reconnects using the existing bearer without pairing again", async () => {
+    mockSavedRecords = [remoteRecord()];
+    mockReadSavedEnvironmentBearerToken.mockResolvedValue("existing-bearer");
+    const prepareRemoteCertificate = vi.fn().mockResolvedValue("approved");
+    window.desktopBridge = { prepareRemoteCertificate } as unknown as NonNullable<
+      typeof window.desktopBridge
+    >;
+    const { reviewSavedEnvironmentCertificate } = await import("./service");
+    await reviewSavedEnvironmentCertificate(remoteRecord().environmentId);
+    expect(prepareRemoteCertificate).toHaveBeenCalledExactlyOnceWith(remoteRecord().httpBaseUrl);
+    expect(mockFetchRemoteEnvironmentDescriptor).toHaveBeenCalledExactlyOnceWith({
+      httpBaseUrl: remoteRecord().httpBaseUrl,
+    });
+    expect(mockReadSavedEnvironmentBearerToken).toHaveBeenCalledExactlyOnceWith(
+      remoteRecord().environmentId,
+    );
+    expect(mockFetchRemoteSessionState).toHaveBeenCalledWith({
+      httpBaseUrl: remoteRecord().httpBaseUrl,
+      bearerToken: "existing-bearer",
+    });
+    expect(mockBootstrapRemoteBearerSession).not.toHaveBeenCalled();
+    expect(mockBootstrapRemotePasswordBearerSession).not.toHaveBeenCalled();
+    expect(mockWriteSavedEnvironmentBearerToken).not.toHaveBeenCalled();
+  });
+
+  it("retires a pending failed attempt before starting the approved connection", async () => {
+    mockSavedRecords = [remoteRecord()];
+    mockReadSavedEnvironmentBearerToken.mockResolvedValue("existing-bearer");
+    window.desktopBridge = {
+      prepareRemoteCertificate: vi.fn().mockResolvedValue("approved"),
+    } as unknown as NonNullable<typeof window.desktopBridge>;
+    let signalCreated!: () => void;
+    const created = new Promise<void>((resolve) => {
+      signalCreated = resolve;
+    });
+    const dispose = vi.fn();
+    mockCreateEnvironmentConnection.mockImplementationOnce((input) => {
+      signalCreated();
+      dispose.mockImplementation(async () => {
+        input.onConfigSnapshot?.(await mockClientGetConfig());
+      });
+      return {
+        kind: "saved",
+        environmentId: input.knownEnvironment.environmentId,
+        knownEnvironment: input.knownEnvironment,
+        client: input.client,
+        ensureBootstrapped: async () => undefined,
+        reconnect: async () => undefined,
+        dispose,
+      };
+    });
+    const { reconnectSavedEnvironment, reviewSavedEnvironmentCertificate } =
+      await import("./service");
+    const first = reconnectSavedEnvironment(remoteRecord().environmentId);
+    await created;
+    await reviewSavedEnvironmentCertificate(remoteRecord().environmentId);
+    await first;
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(mockCreateEnvironmentConnection).toHaveBeenCalledTimes(2);
+    expect(mockReadSavedEnvironmentBearerToken).toHaveBeenCalledTimes(2);
+    expect(mockBootstrapRemoteBearerSession).not.toHaveBeenCalled();
+    expect(mockBootstrapRemotePasswordBearerSession).not.toHaveBeenCalled();
+  });
+
+  it.each(["declined", "invalid-certificate", "unreachable", "storage-error"])(
+    "does not use saved credentials when review is %s",
+    async (status) => {
+      mockSavedRecords = [remoteRecord()];
+      window.desktopBridge = {
+        prepareRemoteCertificate: vi.fn().mockResolvedValue(status),
+      } as unknown as NonNullable<typeof window.desktopBridge>;
+      const { reviewSavedEnvironmentCertificate } = await import("./service");
+      const result = reviewSavedEnvironmentCertificate(remoteRecord().environmentId);
+      if (status === "declined") await expect(result).resolves.toBeUndefined();
+      else await expect(result).rejects.toThrow();
+      expect(mockFetchRemoteEnvironmentDescriptor).not.toHaveBeenCalled();
+      expect(mockReadSavedEnvironmentBearerToken).not.toHaveBeenCalled();
+      expect(mockCreateEnvironmentConnection).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not send the saved bearer if the address now reports a different server", async () => {
+    mockSavedRecords = [remoteRecord()];
+    window.desktopBridge = {
+      prepareRemoteCertificate: vi.fn().mockResolvedValue("approved"),
+    } as unknown as NonNullable<typeof window.desktopBridge>;
+    mockFetchRemoteEnvironmentDescriptor.mockResolvedValue({
+      environmentId: EnvironmentId.make("different-server"),
+    });
+    const { reviewSavedEnvironmentCertificate } = await import("./service");
+    await expect(reviewSavedEnvironmentCertificate(remoteRecord().environmentId)).rejects.toThrow(
+      "different Cafe Code server",
+    );
+    expect(mockReadSavedEnvironmentBearerToken).not.toHaveBeenCalled();
+  });
+
+  it.each(["edited", "removed", "replaced"])(
+    "does not reconnect a server %s while its trust dialog is open",
+    async (change) => {
+      mockSavedRecords = [remoteRecord()];
+      let accept!: (value: "approved") => void;
+      const pending = new Promise<"approved">((resolve) => {
+        accept = resolve;
+      });
+      window.desktopBridge = {
+        prepareRemoteCertificate: vi.fn().mockReturnValue(pending),
+      } as unknown as NonNullable<typeof window.desktopBridge>;
+      const { reviewSavedEnvironmentCertificate } = await import("./service");
+      const result = reviewSavedEnvironmentCertificate(remoteRecord().environmentId);
+      mockSavedRecords =
+        change === "removed"
+          ? []
+          : change === "edited"
+            ? [{ ...remoteRecord(), httpBaseUrl: "https://other.example/" }]
+            : [remoteRecord()];
+      const failure = expect(result).rejects.toThrow("saved server changed");
+      accept("approved");
+      await failure;
+      expect(mockFetchRemoteEnvironmentDescriptor).not.toHaveBeenCalled();
+      expect(mockReadSavedEnvironmentBearerToken).not.toHaveBeenCalled();
+    },
+  );
+
   it("rolls back metadata when bearer persistence fails", async () => {
     const { addSavedEnvironment } = await import("./service");
 

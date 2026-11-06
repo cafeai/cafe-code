@@ -52,6 +52,8 @@ import {
   formatCodexSubscriptionLabel,
 } from "../codexSubscription.ts";
 import { APPLICATION_VERSION } from "../../applicationVersion.ts";
+import { decodeJwtPayload } from "../codexAuthJson.ts";
+
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 
 const CODEX_PRESENTATION = {
@@ -149,27 +151,6 @@ function hasUnsafeEmailCharacter(value: string): boolean {
 function readEmailField(value: unknown): string | undefined {
   if (!value || typeof value !== "object") return undefined;
   return normalizeProviderEmail((value as Record<string, unknown>).email);
-}
-
-function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
-  const parts = token.split(".");
-  const payload = parts[1];
-  if (!payload) return undefined;
-
-  try {
-    // This payload is only a local metadata source after `codex login status`
-    // says Codex is authenticated. Cafe never treats this unsigned decode as an
-    // auth proof, and `normalizeProviderEmail` bounds and sanitizes the only
-    // field that crosses into the redacted settings UI.
-    const base64 = payload.replaceAll("-", "+").replaceAll("_", "/");
-    const padded = `${base64}${"=".repeat((4 - (base64.length % 4)) % 4)}`;
-    const decoded = JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as unknown;
-    return decoded && typeof decoded === "object" && !Array.isArray(decoded)
-      ? (decoded as Record<string, unknown>)
-      : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function extractCodexAuthEmail(authJson: string): string | undefined {

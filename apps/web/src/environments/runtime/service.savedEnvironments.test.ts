@@ -7,6 +7,8 @@ import {
   type ServerProvider,
 } from "@cafecode/contracts";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { WsProtocolLifecycleHandlers } from "../../rpc/protocol";
+import { RemoteEnvironmentCertificateError } from "../remote/certificate";
 
 const mockCreateEnvironmentConnection = vi.fn();
 const mockCreateWsRpcClient = vi.fn();
@@ -24,7 +26,9 @@ const mockPatchSavedRuntime = vi.fn((environmentId: string, patch: Record<string
   };
 });
 
-function MockWsTransport() {
+let mockSavedSocketHandlers: WsProtocolLifecycleHandlers | undefined;
+function MockWsTransport(_url: unknown, handlers: WsProtocolLifecycleHandlers) {
+  mockSavedSocketHandlers = handlers;
   return undefined;
 }
 
@@ -45,6 +49,7 @@ vi.mock("../remote/api", () => ({
   bootstrapRemoteBearerSession: vi.fn(),
   fetchRemoteEnvironmentDescriptor: vi.fn(),
   fetchRemoteSessionState: mockFetchRemoteSessionState,
+  isRemoteEnvironmentAuthHttpError: vi.fn(() => false),
   resolveRemoteWebSocketConnectionUrl: vi.fn(() => "ws://remote.example.test"),
   isRetryableRemoteWebSocketUrlError: vi.fn(() => false),
 }));
@@ -249,6 +254,7 @@ describe("saved environment startup", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSavedSocketHandlers = undefined;
     for (const environmentId of Object.keys(mockSavedRuntimeById)) {
       delete mockSavedRuntimeById[environmentId];
     }
@@ -319,6 +325,28 @@ describe("saved environment startup", () => {
 
     stop();
     await resetEnvironmentServiceForTests();
+  });
+
+  it("publishes a terminal certificate warning and preserves the saved credential", async () => {
+    const { startEnvironmentConnectionService } = await import("./service");
+    const { removeSavedEnvironmentBearerToken } = await import("./catalog");
+    const stop = startEnvironmentConnectionService(new QueryClient());
+    try {
+      await savedConnectionCreated;
+      await remoteSessionStateRequested;
+      const error = new RemoteEnvironmentCertificateError("changed");
+      expect(mockSavedSocketHandlers?.shouldRetryUrlError?.(error)).toBe(false);
+      mockSavedSocketHandlers?.onTerminalError?.("sanitized transport failure");
+      expect(mockSavedRuntimeById[savedRecord.environmentId]).toMatchObject({
+        certificateStatus: "changed",
+        connectionState: "error",
+        reconnectPhase: "exhausted",
+        lastError: error.message,
+      });
+      expect(removeSavedEnvironmentBearerToken).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
   });
 
   it("updates the remote provider catalogue while retaining its latest settings and other environments", async () => {

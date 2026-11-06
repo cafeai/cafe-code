@@ -2892,6 +2892,99 @@ it.effect(
   },
 );
 
+it.effect("retires an idle app-server after a permanent refresh-token refusal", () => {
+  const factory = makeRuntimeFactory();
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    const threadId = asThreadId("thread-auth-retire");
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      runtimeMode: "full-access",
+    });
+    const runtime = factory.lastRuntime!;
+    const base: ProviderEvent = {
+      id: asEventId("auth-retire"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      kind: "notification",
+      method: "process/stderr",
+      createdAt: "2026-11-05T01:18:11.207Z",
+      message:
+        "2026-11-05T01:18:11.206235Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+    };
+    // Prose that merely resembles the record is not a refusal.
+    yield* runtime.emit({
+      ...base,
+      id: asEventId("auth-prose"),
+      message: "refresh token was already used",
+    });
+    for (let index = 0; index < 32; index += 1) yield* Effect.yieldNow;
+    assert.equal(
+      (yield* adapter.listSessions()).some((session) => session.threadId === threadId),
+      true,
+    );
+    yield* runtime.emit(base);
+    for (let index = 0; index < 64; index += 1) {
+      if (!(yield* adapter.listSessions()).some((session) => session.threadId === threadId)) break;
+      yield* Effect.yieldNow;
+    }
+    assert.equal(
+      (yield* adapter.listSessions()).some((session) => session.threadId === threadId),
+      false,
+    );
+  }).pipe(Effect.provide(makeConcurrencyTestLayer(factory)));
+});
+
+it.effect("keeps a resumed app-server alive when resume replays an old sign-in failure", () => {
+  const factory = makeRuntimeFactory();
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    const threadId = asThreadId("thread-auth-replay");
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      runtimeMode: "full-access",
+    });
+    const runtime = factory.lastRuntime!;
+    const failedTurn = {
+      threadId: "native-thread",
+      turn: {
+        id: "turn-1",
+        items: [],
+        itemsView: "notLoaded",
+        status: "failed",
+        error: { message: "rejected", codexErrorInfo: "unauthorized", additionalDetails: null },
+      },
+    };
+    const turnCompleted: ProviderEvent = {
+      id: asEventId("codex-snapshot:session-resume:native-thread:native-turn:turn-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: asTurnId("turn-1"),
+      kind: "notification",
+      method: "turn/completed",
+      createdAt: "2026-11-05T01:14:06.000Z",
+      payload: failedTurn,
+    };
+    const hasSession = Effect.suspend(() => adapter.listSessions()).pipe(
+      Effect.map((sessions) => sessions.some((session) => session.threadId === threadId)),
+    );
+    // The replayed history of the turn that failed before re-login is not a
+    // fresh refusal: the session the user just resumed must stay usable.
+    yield* runtime.emit(turnCompleted);
+    for (let index = 0; index < 64; index += 1) yield* Effect.yieldNow;
+    assert.equal(yield* hasSession, true);
+    // A live terminal refusal still retires the app-server.
+    yield* runtime.emit({ ...turnCompleted, id: asEventId("live-auth-refusal") });
+    for (let index = 0; index < 64; index += 1) {
+      if (!(yield* hasSession)) break;
+      yield* Effect.yieldNow;
+    }
+    assert.equal(yield* hasSession, false);
+  }).pipe(Effect.provide(makeConcurrencyTestLayer(factory)));
+});
+
 it.effect("binds paired compaction support to the current qualified native owner", () => {
   const factory = makeRuntimeFactory();
   let qualified = false;

@@ -79,6 +79,14 @@ export interface ProviderInstance {
   readonly readAccountQuota?: Effect.Effect<ProviderSessionQuotaReport | null>;
   /** Explicit metadata read scoped to a server-resolved cwd; never a snapshot. */
   readonly discoverSkills?: (cwd: string) => Effect.Effect<ProviderSkillsResult>;
+  /**
+   * A definitive provider authentication refusal was observed by whichever
+   * process owns the native session (often the separate provider daemon).
+   * Re-binds the refusal to this instance's *current* credential revision and
+   * republishes its snapshot. The snapshot owner never trusts a credential
+   * digest from another process; drivers without that state omit this.
+   */
+  readonly observeAuthenticationRefusal?: Effect.Effect<void>;
 }
 
 export interface ProviderContinuationIdentity {

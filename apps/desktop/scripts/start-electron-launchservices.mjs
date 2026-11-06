@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { closeSync, mkdirSync, openSync } from "node:fs";
+import { closeSync, fstatSync, mkdirSync, openSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,8 @@ import { buildDesktopChildEnv } from "./desktop-child-env.mjs";
 import { prepareDebugDataProfile } from "../../../packages/shared/src/dataProfileStorage.ts";
 import { assertSourceDebugDesktopBuilds } from "../../../packages/shared/src/sourceDebugBuild.ts";
 import { prepareMacSourceHost } from "../../../scripts/lib/mac-source-host.ts";
+import { followDesktopLogs } from "./follow-desktop-logs.mjs";
+import { DESKTOP_RESTART_EXISTING_FLAG } from "../src/app/DesktopProfileControl.ts";
 
 export async function runStartElectronLaunchServices({
   args: appArgs = process.argv.slice(2),
@@ -36,7 +38,14 @@ export async function runStartElectronLaunchServices({
   const logName = `source-launch-${new Date().toISOString().replace(/[:.]/gu, "-")}-${process.pid}`;
   const stdoutPath = join(logDir, `${logName}.stdout.log`);
   const stderrPath = join(logDir, `${logName}.stderr.log`);
-  for (const path of [stdoutPath, stderrPath]) closeSync(openSync(path, "wx", 0o600));
+  const identities = [stdoutPath, stderrPath].map((path) => {
+    const descriptor = openSync(path, "wx", 0o600);
+    try {
+      return fstatSync(descriptor, { bigint: true });
+    } finally {
+      closeSync(descriptor);
+    }
+  });
 
   const args = macSourceLaunchArgs({
     appBundlePath: hostBundle,
@@ -45,7 +54,7 @@ export async function runStartElectronLaunchServices({
     stdoutPath,
     stderrPath,
     configuredBaseDir: baseDir,
-    args: appArgs,
+    args: appArgs.filter((argument) => argument !== "--no-follow"),
   });
   const result = spawnSync("/usr/bin/open", args, {
     env: buildDesktopChildEnv(environment),
@@ -56,6 +65,37 @@ export async function runStartElectronLaunchServices({
     throw new Error(result.error?.message || result.stderr.trim() || "macOS app launch failed.");
   }
   console.log(`Cafe Code launched through LaunchServices. Logs: ${stdoutPath}, ${stderrPath}`);
+  // Detached restart helpers issue a control request to the existing profile
+  // owner; they must not leave an idle observer following the helper's log.
+  if (appArgs.includes("--no-follow") || appArgs.includes(DESKTOP_RESTART_EXISTING_FLAG)) return;
+  console.log(
+    "Following desktop logs. Press Ctrl+C to stop following; Cafe Code will keep running.",
+  );
+  const controller = new AbortController();
+  const signals = [
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+    ["SIGHUP", 129],
+  ];
+  const handlers = signals.map(([signal, exitCode]) => {
+    const handler = () => {
+      process.exitCode = exitCode;
+      controller.abort();
+    };
+    process.once(signal, handler);
+    return [signal, handler];
+  });
+  try {
+    await followDesktopLogs({
+      stdoutPath,
+      stderrPath,
+      stdoutIdentity: identities[0],
+      stderrIdentity: identities[1],
+      signal: controller.signal,
+    });
+  } finally {
+    for (const [signal, handler] of handlers) process.off(signal, handler);
+  }
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

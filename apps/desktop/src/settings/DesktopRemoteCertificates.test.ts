@@ -156,6 +156,30 @@ function fixture<E>(
 }
 
 describe("desktop remote certificate approval", () => {
+  it("inspects an unknown certificate without prompting, writing a pin or granting trust", () =>
+    fixture({ response: 1 }, ({ service, check, registryPath, fileSystem, showMessageBox }) =>
+      Effect.gen(function* () {
+        expect(yield* service.inspect(origin)).toBe("untrusted");
+        expect(showMessageBox).not.toHaveBeenCalled();
+        expect(yield* fileSystem.exists(registryPath)).toBe(false);
+        expect(check()).toBe(false);
+      }),
+    ));
+
+  it("distinguishes a changed pin without replacing it, then recognizes explicit approval", () =>
+    fixture(
+      { response: 1, previousFingerprint: Array(32).fill("AA").join(":") },
+      ({ service, fileSystem, registryPath, showMessageBox }) =>
+        Effect.gen(function* () {
+          const original = yield* fileSystem.readFileString(registryPath);
+          expect(yield* service.inspect(origin)).toBe("changed");
+          expect(yield* fileSystem.readFileString(registryPath)).toBe(original);
+          expect(showMessageBox).not.toHaveBeenCalled();
+          expect(yield* service.prepare(origin)).toBe("approved");
+          expect(yield* service.inspect(origin)).toBe("unchanged");
+          expect(showMessageBox).toHaveBeenCalledOnce();
+        }),
+    ));
   it("keeps approved peers quiet and reports rejection without copying URL credentials or received errors", () =>
     fixture({ response: 1 }, ({ service, check, warnings }) =>
       Effect.gen(function* () {
@@ -198,6 +222,17 @@ describe("desktop remote certificate approval", () => {
             expect(showMessageBox.mock.calls[0]?.[0].message).toBe(
               "This server’s certificate has changed.",
             );
+            expect(showMessageBox.mock.calls[0]?.[0]).toMatchObject({
+              defaultId: 0,
+              cancelId: 0,
+              buttons: ["Cancel", "Trust new certificate"],
+            });
+            expect(showMessageBox.mock.calls[0]?.[0].detail).toContain(certificate.fingerprint256);
+            expect(showMessageBox.mock.calls[0]?.[0].detail).toContain(previousFingerprint);
+            expect(showMessageBox.mock.calls[0]?.[0].detail).toContain(
+              "intercepting your connection",
+            );
+            expect(showMessageBox.mock.calls[0]?.[0].detail).toContain("saved sign-in credential");
             const document = yield* decodePinsDocument(
               yield* fileSystem.readFileString(registryPath),
             );
@@ -272,6 +307,7 @@ describe("desktop remote certificate approval", () => {
       probe.mockResolvedValue({ status });
       return fixture({ response: 1 }, ({ service, check, showMessageBox }) =>
         Effect.gen(function* () {
+          expect(yield* service.inspect(origin)).toBe(status);
           expect(yield* service.prepare(origin)).toBe(status);
           expect(check()).toBe(false);
           expect(showMessageBox).not.toHaveBeenCalled();

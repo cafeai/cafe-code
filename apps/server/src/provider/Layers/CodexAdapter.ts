@@ -6351,6 +6351,29 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   );
                   return;
                 }
+                // A definitive sign-in refusal (structured `unauthorized` turn
+                // failure or a permanent refresh-token failure) can never succeed
+                // with this process's in-memory login: the native auth manager
+                // otherwise retries the dead refresh token on every request. Retire
+                // only after the terminal turn has been enqueued (or while idle)
+                // so no turn is cut off; the next send starts from current
+                // credentials, or fails fast if the user has not signed in again.
+                if (
+                  codexAuthenticationObservation(event) === false &&
+                  (event.method === "turn/completed" ||
+                    (event.method === "process/stderr" &&
+                      (yield* runtime.getSession).activeTurnId === undefined))
+                ) {
+                  yield* prepareRuntimeHome.pipe(Effect.ignore);
+                  yield* retireSession(
+                    event.threadId,
+                    "Codex rejected this login; retired the app-server so it stops retrying the rejected credentials.",
+                    "codex.session.retired-after-authentication-refusal",
+                    event.subagentRuntimeId,
+                    true,
+                  );
+                  return;
+                }
                 if (isCodexTurnTerminalEvent(event)) {
                   const session = sessions.get(event.threadId);
                   const pendingRetirement = session?.pendingTransportPolicyRetirement;

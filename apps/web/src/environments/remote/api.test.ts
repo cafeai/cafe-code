@@ -11,6 +11,7 @@ import {
   remoteEnvironmentErrorMessage,
 } from "./api";
 import { resolveRemotePairingTarget, resolveRemoteServerTarget } from "./target";
+import { RemoteEnvironmentCertificateError } from "./certificate";
 
 const originalFetch = globalThis.fetch;
 
@@ -27,6 +28,71 @@ beforeEach(() => {
 });
 
 describe("remote environment api", () => {
+  it.each(["changed", "untrusted", "invalid-certificate"] as const)(
+    "classifies %s certificates without a background prompt or auth replay",
+    async (status) => {
+      const inspectRemoteCertificate = vi.fn().mockResolvedValue(status);
+      const prepareRemoteCertificate = vi.fn();
+      window.desktopBridge = {
+        inspectRemoteCertificate,
+        prepareRemoteCertificate,
+      } as unknown as NonNullable<typeof window.desktopBridge>;
+      const fetchMock = vi.fn().mockRejectedValue(new TypeError("private server detail"));
+      globalThis.fetch = fetchMock;
+      const error = await issueRemoteWebSocketToken({
+        httpBaseUrl: "https://pc.example:3775/",
+        bearerToken: "private-bearer",
+      }).catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(RemoteEnvironmentCertificateError);
+      expect(error).toMatchObject({ certificateStatus: status });
+      expect(isRetryableRemoteWebSocketUrlError(error)).toBe(false);
+      expect(inspectRemoteCertificate).toHaveBeenCalledExactlyOnceWith("https://pc.example:3775/");
+      expect(prepareRemoteCertificate).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(String(error)).not.toMatch(/private/);
+    },
+  );
+
+  it("still permits explicit enrollment to review a changed certificate", async () => {
+    const prepareRemoteCertificate = vi.fn().mockResolvedValue("approved");
+    window.desktopBridge = {
+      inspectRemoteCertificate: vi.fn().mockResolvedValue("changed"),
+      prepareRemoteCertificate,
+    } as unknown as NonNullable<typeof window.desktopBridge>;
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("network"))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ environmentId: "pc" })));
+    await expect(
+      fetchRemoteEnvironmentDescriptor({
+        httpBaseUrl: "https://pc.example/",
+        approveCertificate: true,
+      }),
+    ).resolves.toEqual({ environmentId: "pc" });
+    expect(prepareRemoteCertificate).toHaveBeenCalledExactlyOnceWith("https://pc.example/");
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["unchanged", "unreachable", "probe-failed"])(
+    "keeps %s probes as retryable network failures",
+    async (status) => {
+      const inspection =
+        status === "probe-failed"
+          ? vi.fn().mockRejectedValue(new Error("private probe detail"))
+          : vi.fn().mockResolvedValue(status);
+      window.desktopBridge = { inspectRemoteCertificate: inspection } as unknown as NonNullable<
+        typeof window.desktopBridge
+      >;
+      globalThis.fetch = vi.fn().mockRejectedValue(new TypeError("private request detail"));
+      const error = await issueRemoteWebSocketToken({
+        httpBaseUrl: "https://pc.example/",
+        bearerToken: "private-bearer",
+      }).catch((error: unknown) => error);
+      expect(isRetryableRemoteWebSocketUrlError(error)).toBe(true);
+      expect(String(error)).not.toContain("private");
+    },
+  );
+
   it("distinguishes the recovery-only lock without exposing remote error text", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(
       new Response("private response text", {
