@@ -25,7 +25,7 @@
   },
   " ({percent} left)": {
     "message": " ({percent} left)",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:324"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:310"]
   },
   " Code": {
     "message": " Code",
@@ -205,7 +205,7 @@
   },
   "<percentage></percentage><separator></separator><used></used><divider></divider><capacity>{maximum} context used</capacity>": {
     "message": "<percentage></percentage><separator></separator><used></used><divider></divider><capacity>{maximum} context used</capacity>",
-    "locations": ["apps/web/src/components/chat/ContextWindowDetails.tsx:115"]
+    "locations": ["apps/web/src/components/chat/ContextWindowDetails.tsx:119"]
   },
   "<slot0></slot0> awaiting approval": {
     "message": "<slot0></slot0> awaiting approval",
@@ -257,7 +257,7 @@
   },
   "<slot1></slot1>Scheduled <slot3></slot3>": {
     "message": "<slot1></slot1>Scheduled <slot3></slot3>",
-    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:598"]
+    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:599"]
   },
   "<slot1></slot1>Scheduled follow-ups<slot3></slot3>": {
     "message": "<slot1></slot1>Scheduled follow-ups<slot3></slot3>",
@@ -347,7 +347,7 @@
   },
   "About scheduled follow-ups": {
     "message": "About scheduled follow-ups",
-    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:608"]
+    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:611"]
   },
   "About sensitive values": {
     "message": "About sensitive values",
@@ -520,8 +520,8 @@
   "Account usage": {
     "message": "Account usage",
     "locations": [
-      "apps/web/src/components/ProviderAccountQuotaDetails.tsx:132",
-      "apps/web/src/lib/codexRateLimits.ts:184"
+      "apps/web/src/components/ProviderAccountQuotaDetails.tsx:131",
+      "apps/web/src/lib/codexRateLimits.ts:170"
     ]
   },
   "Account: <slot1></slot1>. This account will execute and pay for these follow-ups.": {
@@ -1335,7 +1335,7 @@
   },
   "Available (balance not reported)": {
     "message": "Available (balance not reported)",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:258"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:244"]
   },
   "Average": {
     "message": "Average",
@@ -2340,7 +2340,7 @@
   },
   "Claude limits are unavailable.": {
     "message": "Claude limits are unavailable.",
-    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:177"]
+    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:176"]
   },
   "Claude message delivery priority": {
     "message": "Claude message delivery priority",
@@ -2348,11 +2348,11 @@
   },
   "Claude reported no quota meters.": {
     "message": "Claude reported no quota meters.",
-    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:161"]
+    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:160"]
   },
   "Claude reported quota meters and extra usage": {
     "message": "Claude reported quota meters and extra usage",
-    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:143"]
+    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:142"]
   },
   "Claude sign-in may expire soon.": {
     "message": "Claude sign-in may expire soon.",
@@ -3129,8 +3129,8 @@
     "message": "Context window",
     "locations": [
       "apps/web/src/components/chat/CodexContextWindowControl.tsx:170",
-      "apps/web/src/components/chat/ContextWindowDetails.tsx:88",
-      "apps/web/src/components/chat/ContextWindowDetails.tsx:95"
+      "apps/web/src/components/chat/ContextWindowDetails.tsx:91",
+      "apps/web/src/components/chat/ContextWindowDetails.tsx:99"
     ]
   },
   "Context window (tokens)": {
@@ -4039,7 +4039,7 @@
   },
   "Credits": {
     "message": "Credits",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:318"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:304"]
   },
   "Ctrl": {
     "message": "Ctrl",
@@ -4233,19 +4233,19 @@
   },
   "Daybreak Blue": {
     "message": "Daybreak Blue",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:240"]
+    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:246"]
   },
   "Daybreak Red": {
     "message": "Daybreak Red",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:242"]
+    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:248"]
   },
   "Daybreak is unavailable for this account and model. Turn the saved setting off to continue.": {
     "message": "Daybreak is unavailable for this account and model. Turn the saved setting off to continue.",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:498"]
+    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:537"]
   },
   "Daybreak level": {
     "message": "Daybreak level",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:380"]
+    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:419"]
   },
   "Daybreak off": {
     "message": "Daybreak off",
@@ -5540,19 +5540,19 @@
   },
   "Extra usage not reported.": {
     "message": "Extra usage not reported.",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:249"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:253"]
   },
   "Extra usage unavailable.": {
     "message": "Extra usage unavailable.",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:251"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:255"]
   },
   "Extra usage: {enabled, select, yes {Enabled} other {Disabled}}": {
     "message": "Extra usage: {enabled, select, yes {Enabled} other {Disabled}}",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:253"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:257"]
   },
   "Extra-usage utilization: Unavailable": {
     "message": "Extra-usage utilization: Unavailable",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:260"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:264"]
   },
   "Failed": {
     "message": "Failed",
@@ -5788,9 +5788,9 @@
   "Fast": {
     "message": "Fast",
     "locations": [
-      "apps/web/src/components/chat/TraitsPicker.tsx:256",
+      "apps/web/src/components/chat/TraitsPicker.tsx:262",
       "apps/web/src/components/chat/schedulePresentation.ts:162",
-      "apps/web/src/providerOptionPresentation.ts:29",
+      "apps/web/src/providerOptionPresentation.ts:42",
       "apps/web/src/turnConfiguration.ts:127"
     ]
   },
@@ -5933,7 +5933,7 @@
   },
   "Finished schedules ({value0})": {
     "message": "Finished schedules ({value0})",
-    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:772"]
+    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:778"]
   },
   "Finishing": {
     "message": "Finishing",
@@ -6483,7 +6483,7 @@
   },
   "Individual spend limit": {
     "message": "Individual spend limit",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:328"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:314"]
   },
   "Individual task controls": {
     "message": "Individual task controls",
@@ -6965,8 +6965,8 @@
   "Limit reached": {
     "message": "Limit reached",
     "locations": [
-      "apps/web/src/lib/codexRateLimits.ts:344",
-      "apps/web/src/lib/codexRateLimits.ts:357"
+      "apps/web/src/lib/codexRateLimits.ts:330",
+      "apps/web/src/lib/codexRateLimits.ts:343"
     ]
   },
   "Limited": {
@@ -7057,11 +7057,11 @@
   },
   "Loading schedules…": {
     "message": "Loading schedules…",
-    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:681"]
+    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:690"]
   },
   "Loading session report…": {
     "message": "Loading session report…",
-    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:176"]
+    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:175"]
   },
   "Loading subagent history…": {
     "message": "Loading subagent history…",
@@ -7406,7 +7406,7 @@
     "message": "Model settings",
     "locations": [
       "apps/web/src/components/chat/ScheduledFollowupEditor.tsx:686",
-      "apps/web/src/components/chat/TraitsPicker.tsx:562"
+      "apps/web/src/components/chat/TraitsPicker.tsx:597"
     ]
   },
   "Model slugs must be {value0} characters or less.": {
@@ -7445,11 +7445,11 @@
   },
   "Monthly limit: Unavailable": {
     "message": "Monthly limit: Unavailable",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:278"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:282"]
   },
   "Monthly limit: {amount}": {
     "message": "Monthly limit: {amount}",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:271"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:275"]
   },
   "Months (1–12)": {
     "message": "Months (1–12)",
@@ -7583,7 +7583,7 @@
   },
   "Native default": {
     "message": "Native default",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:481"]
+    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:520"]
   },
   "Native request ID": {
     "message": "Native request ID",
@@ -7759,7 +7759,7 @@
     "message": "New follow-up",
     "locations": [
       "apps/web/src/components/chat/ScheduledFollowupEditor.tsx:435",
-      "apps/web/src/components/chat/ScheduledFollowups.tsx:630"
+      "apps/web/src/components/chat/ScheduledFollowups.tsx:639"
     ]
   },
   "New model": {
@@ -7832,7 +7832,7 @@
   },
   "Next schedules": {
     "message": "Next schedules",
-    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:755"]
+    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:761"]
   },
   "Next server": {
     "message": "Next server",
@@ -7949,7 +7949,7 @@
   },
   "No finished schedules.": {
     "message": "No finished schedules.",
-    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:686"]
+    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:697"]
   },
   "No folder to copy": {
     "message": "No folder to copy",
@@ -8207,7 +8207,7 @@
   },
   "None available": {
     "message": "None available",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:259"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:245"]
   },
   "Nonprinting and directional controls are shown as Unicode escapes.": {
     "message": "Nonprinting and directional controls are shown as Unicode escapes.",
@@ -8215,7 +8215,7 @@
   },
   "Normal": {
     "message": "Normal",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:256"]
+    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:262"]
   },
   "Not": {
     "message": "Not",
@@ -8386,7 +8386,7 @@
   "Off": {
     "message": "Off",
     "locations": [
-      "apps/web/src/components/chat/TraitsPicker.tsx:488",
+      "apps/web/src/components/chat/TraitsPicker.tsx:527",
       "apps/web/src/components/settings/ProviderInstanceCard.tsx:863",
       "apps/web/src/components/settings/SettingsPanels.tsx:207",
       "apps/web/src/components/settings/SidebarAppearanceSettings.tsx:233"
@@ -8415,7 +8415,7 @@
   "On": {
     "message": "On",
     "locations": [
-      "apps/web/src/components/chat/TraitsPicker.tsx:485",
+      "apps/web/src/components/chat/TraitsPicker.tsx:524",
       "apps/web/src/components/settings/ProviderInstanceCard.tsx:859"
     ]
   },
@@ -9223,7 +9223,7 @@
   },
   "Previous schedules": {
     "message": "Previous schedules",
-    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:744"]
+    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:750"]
   },
   "Previous server": {
     "message": "Previous server",
@@ -9247,7 +9247,7 @@
   },
   "Primary": {
     "message": "Primary",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:296"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:282"]
   },
   "Primary directory": {
     "message": "Primary directory",
@@ -9255,7 +9255,7 @@
   },
   "Primary window": {
     "message": "Primary window",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:284"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:270"]
   },
   "Private Debug native home": {
     "message": "Private Debug native home",
@@ -9305,7 +9305,7 @@
   },
   "Processed: {tokens}": {
     "message": "Processed: {tokens}",
-    "locations": ["apps/web/src/components/chat/ContextWindowDetails.tsx:165"]
+    "locations": ["apps/web/src/components/chat/ContextWindowDetails.tsx:169"]
   },
   "Processes": {
     "message": "Processes",
@@ -9700,7 +9700,7 @@
   },
   "Quota meters unavailable in this report.": {
     "message": "Quota meters unavailable in this report.",
-    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:152"]
+    "locations": ["apps/web/src/components/ProviderAccountQuotaDetails.tsx:151"]
   },
   "Rain": {
     "message": "Rain",
@@ -9794,7 +9794,7 @@
   },
   "Received: {time}": {
     "message": "Received: {time}",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:186"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:188"]
   },
   "Recent": {
     "message": "Recent",
@@ -10000,7 +10000,7 @@
   },
   "Refresh schedules": {
     "message": "Refresh schedules",
-    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:655"]
+    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:664"]
   },
   "Refresh trace diagnostics": {
     "message": "Refresh trace diagnostics",
@@ -10383,7 +10383,7 @@
   },
   "Resets: {count}": {
     "message": "Resets: {count}",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:202"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:188"]
   },
   "Resident memory across backend, provider daemon, provider supervisor, and attributable child processes in the current process snapshot.": {
     "message": "Resident memory across backend, provider daemon, provider supervisor, and attributable child processes in the current process snapshot.",
@@ -10909,7 +10909,7 @@
   },
   "Saved across restarts. Runs while this chat’s Cafe server is online and awake. Existing account permissions apply.": {
     "message": "Saved across restarts. Runs while this chat’s Cafe server is online and awake. Existing account permissions apply.",
-    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:609"]
+    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:612"]
   },
   "Saved environment connection closed unexpectedly.": {
     "message": "Saved environment connection closed unexpectedly.",
@@ -11020,7 +11020,7 @@
   },
   "Schedule a check-in or a repeating task for this chat.": {
     "message": "Schedule a check-in or a repeating task for this chat.",
-    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:687"]
+    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:625"]
   },
   "Schedule deleted.": {
     "message": "Schedule deleted.",
@@ -11179,11 +11179,11 @@
   },
   "Secondary": {
     "message": "Secondary",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:304"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:290"]
   },
   "Secondary window": {
     "message": "Secondary window",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:289"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:275"]
   },
   "Secret icon unlocked.": {
     "message": "Secret icon unlocked.",
@@ -11368,7 +11368,7 @@
   },
   "Service tier": {
     "message": "Service tier",
-    "locations": ["apps/web/src/providerOptionPresentation.ts:24"]
+    "locations": ["apps/web/src/providerOptionPresentation.ts:37"]
   },
   "Service tier: {tier}": {
     "message": "Service tier: {tier}",
@@ -11380,7 +11380,7 @@
   },
   "Session": {
     "message": "Session",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:208"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:210"]
   },
   "Session + activity": {
     "message": "Session + activity",
@@ -11399,7 +11399,7 @@
   },
   "Session window": {
     "message": "Session window",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:214"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:216"]
   },
   "Sessions": {
     "message": "Sessions",
@@ -11532,7 +11532,7 @@
   },
   "Show current schedules": {
     "message": "Show current schedules",
-    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:771"]
+    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:777"]
   },
   "Show details": {
     "message": "Show details",
@@ -11974,11 +11974,11 @@
   },
   "Speed: {rate} tok/s": {
     "message": "Speed: {rate} tok/s",
-    "locations": ["apps/web/src/components/chat/ContextWindowDetails.tsx:175"]
+    "locations": ["apps/web/src/components/chat/ContextWindowDetails.tsx:179"]
   },
   "Spend control": {
     "message": "Spend control",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:344"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:330"]
   },
   "Split below": {
     "message": "Split below",
@@ -12003,7 +12003,7 @@
   "Standard": {
     "message": "Standard",
     "locations": [
-      "apps/web/src/providerOptionPresentation.ts:27",
+      "apps/web/src/providerOptionPresentation.ts:40",
       "apps/web/src/turnConfiguration.ts:124"
     ]
   },
@@ -13080,7 +13080,7 @@
   },
   "This Daybreak setting is unavailable. Choose a supported setting before sending.": {
     "message": "This Daybreak setting is unavailable. Choose a supported setting before sending.",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:399"]
+    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:438"]
   },
   "This Mac has Apple Silicon, but Cafe Code is still running the Intel build under Rosetta. Download the available update to switch to the native Apple Silicon build.": {
     "message": "This Mac has Apple Silicon, but Cafe Code is still running the Intel build under Rosetta. Download the available update to switch to the native Apple Silicon build.",
@@ -13330,7 +13330,7 @@
   },
   "This saved tier is unavailable. Choose an available tier before sending.": {
     "message": "This saved tier is unavailable. Choose an available tier before sending.",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:387"]
+    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:426"]
   },
   "This schedule is no longer available. No changes were made.": {
     "message": "This schedule is no longer available. No changes were made.",
@@ -13346,7 +13346,7 @@
   },
   "This server is disconnected. Schedule controls return when it reconnects.": {
     "message": "This server is disconnected. Schedule controls return when it reconnects.",
-    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:661"]
+    "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:670"]
   },
   "This server uses HTTPS": {
     "message": "This server uses HTTPS",
@@ -13564,7 +13564,7 @@
   },
   "Total processed: {tokens} tokens": {
     "message": "Total processed: {tokens} tokens",
-    "locations": ["apps/web/src/components/chat/ContextWindowDetails.tsx:158"]
+    "locations": ["apps/web/src/components/chat/ContextWindowDetails.tsx:162"]
   },
   "Total resident memory across live child processes of the current server process. The desktop shell and other parent processes are not included.": {
     "message": "Total resident memory across live child processes of the current server process. The desktop shell and other parent processes are not included.",
@@ -13665,7 +13665,7 @@
   },
   "Turn unavailable Daybreak off": {
     "message": "Turn unavailable Daybreak off",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:511"]
+    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:550"]
   },
   "Two-factor authentication": {
     "message": "Two-factor authentication",
@@ -13696,11 +13696,11 @@
   },
   "Ultracode": {
     "message": "Ultracode",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:250"]
+    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:256"]
   },
   "Ultracode Off": {
     "message": "Ultracode Off",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:252"]
+    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:258"]
   },
   "Ultracode requested off": {
     "message": "Ultracode requested off",
@@ -13712,7 +13712,10 @@
   },
   "Ultrathink": {
     "message": "Ultrathink",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:236"]
+    "locations": [
+      "apps/web/src/components/chat/TraitsPicker.tsx:242",
+      "apps/web/src/components/chat/TraitsPicker.tsx:291"
+    ]
   },
   "Unable to browse projects": {
     "message": "Unable to browse projects",
@@ -13911,11 +13914,11 @@
   },
   "Unlimited": {
     "message": "Unlimited",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:255"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:241"]
   },
   "Unlimited (balance: {balance})": {
     "message": "Unlimited (balance: {balance})",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:254"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:240"]
   },
   "Unnamed environment": {
     "message": "Unnamed environment",
@@ -14170,7 +14173,7 @@
   "Usage": {
     "message": "Usage",
     "locations": [
-      "apps/web/src/components/chat/ContextWindowDetails.tsx:89",
+      "apps/web/src/components/chat/ContextWindowDetails.tsx:92",
       "apps/web/src/components/chat/ContextWindowMeter.tsx:56",
       "apps/web/src/components/settings/SettingsSidebarNav.tsx:166",
       "apps/web/src/components/settings/UsageStatsPanel.tsx:185",
@@ -14192,13 +14195,13 @@
   "Usage limit reached": {
     "message": "Usage limit reached",
     "locations": [
-      "apps/web/src/lib/codexRateLimits.ts:351",
+      "apps/web/src/lib/codexRateLimits.ts:337",
       "apps/web/src/providerDiagnostic.ts:232"
     ]
   },
   "Usage limit resets available: {count}": {
     "message": "Usage limit resets available: {count}",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:203"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:189"]
   },
   "Usage limited": {
     "message": "Usage limited",
@@ -14325,11 +14328,11 @@
   },
   "Used: Unavailable": {
     "message": "Used: Unavailable",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:269"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:273"]
   },
   "Used: {amount}": {
     "message": "Used: {amount}",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:262"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:266"]
   },
   "User input continued automatically": {
     "message": "User input continued automatically",
@@ -14599,7 +14602,7 @@
   },
   "Waiting for usage from this chat.": {
     "message": "Waiting for usage from this chat.",
-    "locations": ["apps/web/src/components/chat/ContextWindowDetails.tsx:72"]
+    "locations": ["apps/web/src/components/chat/ContextWindowDetails.tsx:75"]
   },
   "Waiting for your answer": {
     "message": "Waiting for your answer",
@@ -14681,9 +14684,9 @@
     "message": "Weekly",
     "locations": [
       "apps/web/src/components/chat/ScheduledFollowupEditor.tsx:77",
-      "apps/web/src/lib/claudeSessionQuota.ts:210",
-      "apps/web/src/lib/claudeSessionQuota.ts:216",
-      "apps/web/src/lib/claudeSessionQuota.ts:218"
+      "apps/web/src/lib/claudeSessionQuota.ts:212",
+      "apps/web/src/lib/claudeSessionQuota.ts:218",
+      "apps/web/src/lib/claudeSessionQuota.ts:220"
     ]
   },
   "Welcome": {
@@ -14812,19 +14815,19 @@
   },
   "Workspace member credits depleted": {
     "message": "Workspace member credits depleted",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:353"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:339"]
   },
   "Workspace member usage limit reached": {
     "message": "Workspace member usage limit reached",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:355"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:341"]
   },
   "Workspace owner credits depleted": {
     "message": "Workspace owner credits depleted",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:352"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:338"]
   },
   "Workspace owner usage limit reached": {
     "message": "Workspace owner usage limit reached",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:354"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:340"]
   },
   "Workspace path": {
     "message": "Workspace path",
@@ -14931,7 +14934,7 @@
   },
   "Your prompt contains \"ultrathink\" in the text. Remove it to change this option.": {
     "message": "Your prompt contains \"ultrathink\" in the text. Remove it to change this option.",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:409"]
+    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:448"]
   },
   "Your provider requested a one-time confirmation. This can still appear with automatic permissions enabled.": {
     "message": "Your provider requested a one-time confirmation. This can still appear with automatic permissions enabled.",
@@ -15847,8 +15850,8 @@
   "time unavailable": {
     "message": "time unavailable",
     "locations": [
-      "apps/web/src/lib/claudeSessionQuota.ts:187",
-      "apps/web/src/lib/claudeSessionQuota.ts:233"
+      "apps/web/src/lib/claudeSessionQuota.ts:189",
+      "apps/web/src/lib/claudeSessionQuota.ts:237"
     ]
   },
   "unbounded": {
@@ -15899,15 +15902,15 @@
   },
   "{amount} minor units ({currencyKnown, select, yes {currency: {currency}; conversion unavailable} other {currency unavailable}})": {
     "message": "{amount} minor units ({currencyKnown, select, yes {currency: {currency}; conversion unavailable} other {currency unavailable}})",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:143"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:145"]
   },
   "{available, select, yes {Available} other {None available}} (balance: {balance})": {
     "message": "{available, select, yes {Available} other {None available}} (balance: {balance})",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:271"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:257"]
   },
   "{balance} available": {
     "message": "{balance} available",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:270"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:256"]
   },
   "{branch} branch": {
     "message": "{branch} branch",
@@ -16120,7 +16123,7 @@
     "message": "{days}d",
     "locations": [
       "apps/web/src/components/chat/ThreadGoalControl.tsx:101",
-      "apps/web/src/lib/codexRateLimits.ts:120"
+      "apps/web/src/lib/codexRateLimits.ts:122"
     ]
   },
   "{days}d {hours}h": {
@@ -16145,7 +16148,7 @@
   },
   "{expired, select, yes {Reset passed} other {Resets}}: {time}": {
     "message": "{expired, select, yes {Reset passed} other {Resets}}: {time}",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:231"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:233"]
   },
   "{hasHours, select, yes {{hours}h{hasMinutes, select, yes { {minutes}m} other {}}} other {{hasMinutes, select, yes {{minutes}m{hasSeconds, select, yes { {seconds}s} other {}}} other {{seconds}s}}}} generating": {
     "message": "{hasHours, select, yes {{hours}h{hasMinutes, select, yes { {minutes}m} other {}}} other {{hasMinutes, select, yes {{minutes}m{hasSeconds, select, yes { {seconds}s} other {}}} other {{seconds}s}}}} generating",
@@ -16159,7 +16162,7 @@
     "message": "{hours}h",
     "locations": [
       "apps/web/src/components/chat/ThreadGoalControl.tsx:102",
-      "apps/web/src/lib/codexRateLimits.ts:121",
+      "apps/web/src/lib/codexRateLimits.ts:123",
       "apps/web/src/session-logic.ts:317"
     ]
   },
@@ -16195,11 +16198,14 @@
   },
   "{label} ({duration})": {
     "message": "{label} ({duration})",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:163"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:149"]
   },
   "{label} {state, select, on {On} other {Off}}": {
     "message": "{label} {state, select, on {On} other {Off}}",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:258"]
+    "locations": [
+      "apps/web/src/components/chat/TraitsPicker.tsx:264",
+      "apps/web/src/components/chat/TraitsPicker.tsx:301"
+    ]
   },
   "{label} · after {count, plural, one {# reconnect} other {# reconnects}}": {
     "message": "{label} · after {count, plural, one {# reconnect} other {# reconnects}}",
@@ -16221,14 +16227,14 @@
     "message": "{label}: {value}",
     "locations": [
       "apps/web/src/components/chat/schedulePresentation.ts:164",
-      "apps/web/src/lib/codexRateLimits.ts:169",
-      "apps/web/src/lib/codexRateLimits.ts:314",
-      "apps/web/src/lib/codexRateLimits.ts:418"
+      "apps/web/src/lib/codexRateLimits.ts:155",
+      "apps/web/src/lib/codexRateLimits.ts:300",
+      "apps/web/src/lib/codexRateLimits.ts:404"
     ]
   },
   "{label}{isDefault, select, yes { (default)} other {}}": {
     "message": "{label}{isDefault, select, yes { (default)} other {}}",
-    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:434"]
+    "locations": ["apps/web/src/components/chat/TraitsPicker.tsx:473"]
   },
   "{message} Hint: {hint}": {
     "message": "{message} Hint: {hint}",
@@ -16239,7 +16245,7 @@
     "locations": [
       "apps/web/src/components/chat/ThreadGoalControl.tsx:103",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:97",
-      "apps/web/src/lib/codexRateLimits.ts:122",
+      "apps/web/src/lib/codexRateLimits.ts:124",
       "apps/web/src/session-logic.ts:320"
     ]
   },
@@ -16296,19 +16302,19 @@
   },
   "{percent} left": {
     "message": "{percent} left",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:165"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:151"]
   },
   "{percent}%": {
     "message": "{percent}%",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:71"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:73"]
   },
   "{percent}% of extra usage used": {
     "message": "{percent}% of extra usage used",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:243"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:247"]
   },
   "{percent}% of extra-usage limit used": {
     "message": "{percent}% of extra-usage limit used",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:257"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:261"]
   },
   "{provider, select, opencode {Variant} other {Effort}}: provider default": {
     "message": "{provider, select, opencode {Variant} other {Effort}}: provider default",
@@ -16419,7 +16425,7 @@
   },
   "{stale, select, yes {Last reported: } other {}}{percent}% left": {
     "message": "{stale, select, yes {Last reported: } other {}}{percent}% left",
-    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:225"]
+    "locations": ["apps/web/src/lib/claudeSessionQuota.ts:227"]
   },
   "{state, select, active {Working for {elapsed}} other {Worked for {elapsed}}}": {
     "message": "{state, select, active {Working for {elapsed}} other {Worked for {elapsed}}}",
@@ -16447,7 +16453,7 @@
   },
   "{tokens} tokens used so far": {
     "message": "{tokens} tokens used so far",
-    "locations": ["apps/web/src/components/chat/ContextWindowDetails.tsx:139"]
+    "locations": ["apps/web/src/components/chat/ContextWindowDetails.tsx:143"]
   },
   "{type} task started": {
     "message": "{type} task started",
@@ -16455,11 +16461,11 @@
   },
   "{unit, select, day {{value, plural, one {# day} other {# days}}} hour {{value, plural, one {# hour} other {# hours}}} other {{value, plural, one {# minute} other {# minutes}}}}": {
     "message": "{unit, select, day {{value, plural, one {# day} other {# days}}} hour {{value, plural, one {# hour} other {# hours}}} other {{value, plural, one {# minute} other {# minutes}}}}",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:90"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:92"]
   },
   "{used} used of {limit}{remaining}{resetKnown, select, yes {, resets {reset}} other {}}": {
     "message": "{used} used of {limit}{remaining}{resetKnown, select, yes {, resets {reset}} other {}}",
-    "locations": ["apps/web/src/lib/codexRateLimits.ts:329"]
+    "locations": ["apps/web/src/lib/codexRateLimits.ts:315"]
   },
   "{value0} (Enter)": {
     "message": "{value0} (Enter)",
@@ -16567,7 +16573,7 @@
   "{value0} quota": {
     "message": "{value0} quota",
     "locations": [
-      "apps/web/src/components/ProviderAccountQuotaDetails.tsx:190",
+      "apps/web/src/components/ProviderAccountQuotaDetails.tsx:189",
       "apps/web/src/components/ProviderAccountQuotaDetails.tsx:24"
     ]
   },
@@ -16686,8 +16692,8 @@
   "{window} reset: {time}": {
     "message": "{window} reset: {time}",
     "locations": [
-      "apps/web/src/lib/codexRateLimits.ts:298",
-      "apps/web/src/lib/codexRateLimits.ts:306"
+      "apps/web/src/lib/codexRateLimits.ts:284",
+      "apps/web/src/lib/codexRateLimits.ts:292"
     ]
   },
   "· <slot1></slot1> customized": {

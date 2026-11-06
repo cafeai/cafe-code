@@ -43,7 +43,6 @@ function ClaudeQuotaMeterRow({
         <UsageMeterBar percent={meter.remainingPercent} testId={`claude-${meter.id}`} />
       ) : null}
       {meter.reset ? <p className="min-w-0 max-w-full">{meter.reset}</p> : null}
-      {meter.severity !== "normal" && meter.severity !== "unknown" ? <p>{meter.severity}</p> : null}
     </section>
   );
 }
@@ -217,16 +216,18 @@ export function ProviderAccountQuotaDetails(props: {
                     {window ? (
                       layout === "panel" ? (
                         <>
-                          {/* The rail already has its one overline ("Context
-                              window"); window names are ordinary labels. */}
-                          <div className="text-xs text-muted-foreground">{window.label}</div>
+                          {/* Same shape as the Claude rows: name and what is
+                              left on one line, then the bar, then the reset. */}
+                          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3">
+                            <span>{window.label}</span>
+                            <span className="font-medium text-foreground tabular-nums">
+                              {window.value}
+                            </span>
+                          </div>
                           <UsageMeterBar
                             percent={window.remainingPercent}
                             testId={`${kind}-window`}
                           />
-                          <div className="text-ui font-medium text-foreground tabular-nums">
-                            {window.value}
-                          </div>
                         </>
                       ) : (
                         <div

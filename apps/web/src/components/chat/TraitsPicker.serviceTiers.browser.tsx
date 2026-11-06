@@ -177,19 +177,18 @@ describe("advertised native Claude Ultracode selector", () => {
     );
     return { screen, onModelOptionsChange, onPromptChange };
   }
-  it("shows the usage caution and preserves Max when requesting Ultracode", async () => {
+  it("keeps the usage caution as the Ultracode tooltip and preserves Max", async () => {
+    const caution =
+      "Native workflow orchestration. May use substantially more tokens and agents; native eligibility and tool approvals apply.";
     const { screen, onModelOptionsChange, onPromptChange } = await mountClaude();
     await expect.element(screen.getByRole("button")).toHaveTextContent("Max");
     expect(onModelOptionsChange).not.toHaveBeenCalled();
     await screen.getByRole("button").click();
+    // The menu just names the option; the caution is its hover tooltip.
     await expect
-      .element(
-        page.getByText(
-          "Native workflow orchestration. May use substantially more tokens and agents; native eligibility and tool approvals apply.",
-          { exact: true },
-        ),
-      )
-      .toBeVisible();
+      .element(page.getByText("Ultracode", { exact: true }))
+      .toHaveAttribute("title", caution);
+    await expect.element(page.getByText(caution, { exact: true })).not.toBeInTheDocument();
     await expect
       .element(page.getByRole("menuitemradio", { name: "Native default", exact: true }))
       .toHaveAttribute("aria-checked", "true");
@@ -204,7 +203,7 @@ describe("advertised native Claude Ultracode selector", () => {
     const { screen, onModelOptionsChange, onPromptChange } = await mountClaude([
       { id: "ultracode", value: true },
     ]);
-    await expect.element(screen.getByRole("button")).toHaveTextContent("Max · Ultracode");
+    await expect.element(screen.getByRole("button")).toHaveTextContent("Max");
     await screen.getByRole("button").click();
     await page.getByRole("menuitemradio", { name: "Off", exact: true }).click();
     expect(onModelOptionsChange).toHaveBeenLastCalledWith([

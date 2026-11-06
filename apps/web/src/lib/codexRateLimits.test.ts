@@ -55,10 +55,12 @@ describe("codexRateLimits", () => {
 
     expect(summary?.primary?.text).toBe("Primary window (5 hours): 75% left");
     expect(summary?.secondary?.text).toBe("Secondary window (7 days): 37.5% left");
-    expect(summary?.primaryReset).toContain("5h reset:");
-    expect(summary?.primaryReset).toContain("2026");
+    // Local date and time, without a zone name (the year only outside the current one).
+    expect(summary?.primaryReset).toContain("5h reset: May 24");
+    expect(summary?.primaryReset).toContain("9:00 AM");
+    expect(summary?.primaryReset).not.toMatch(/GMT|JST/u);
     expect(summary?.secondaryReset).toContain("7d reset:");
-    expect(summary?.secondaryReset).toContain("2026");
+    expect(summary?.secondaryReset).not.toMatch(/GMT|JST/u);
   });
 
   it("formats both window durations as exact days, hours, and minutes", () => {

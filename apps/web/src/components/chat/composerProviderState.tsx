@@ -16,6 +16,7 @@ import type { ReactNode } from "react";
 
 import type { DraftId } from "../../composerDraftStore";
 import { getProviderModelCapabilities } from "../../providerModels";
+import { withoutRetiredProviderOptions } from "../../providerOptionPresentation";
 import {
   getTraitsTriggerLabel,
   shouldRenderTraitsControls,
@@ -87,7 +88,9 @@ export function getModelOptionsForModelChange(
 export function getComposerProviderState(input: ComposerProviderStateInput): ComposerProviderState {
   const { provider, model, models, prompt, modelOptions } = input;
   const caps = getProviderModelCapabilities(models, model, provider);
-  const descriptors = getProviderOptionDescriptors({ caps, selections: modelOptions });
+  const descriptors = withoutRetiredProviderOptions(
+    getProviderOptionDescriptors({ caps, selections: modelOptions }),
+  );
   const primarySelectDescriptor = descriptors.find(
     (descriptor): descriptor is Extract<(typeof descriptors)[number], { type: "select" }> =>
       descriptor.type === "select",

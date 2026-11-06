@@ -83,7 +83,7 @@ describe("Daybreak model settings", () => {
       await userEvent.keyboard("{Escape}");
       await expect.element(page.getByRole("menu")).not.toBeInTheDocument();
       await screen.rerender(<TraitsPicker {...props} modelOptions={saved} />);
-      await page.getByRole("button", { name: `High · Daybreak ${level}`, exact: true }).click();
+      await page.getByRole("button", { name: "High", exact: true }).click();
       await expect
         .element(page.getByRole("menuitemradio", { name: level, exact: true }))
         .toHaveAttribute("aria-checked", "true");
@@ -131,7 +131,7 @@ describe("Daybreak model settings", () => {
       />,
     );
     cleanups.push(() => screen.unmount());
-    await page.getByRole("button", { name: "High · Daybreak Red", exact: true }).click();
+    await page.getByRole("button", { name: "High", exact: true }).click();
     await expect
       .element(page.getByRole("menuitemradio", { name: "Red", exact: true }))
       .not.toBeInTheDocument();
@@ -152,7 +152,7 @@ describe("Daybreak model settings", () => {
         modelOptions={[{ id: "cyberAccessProgram", value: "daybreakBlue" }]}
       />,
     );
-    await page.getByRole("button", { name: "High · Daybreak Blue", exact: true }).click();
+    await page.getByRole("button", { name: "High", exact: true }).click();
     await expect
       .element(page.getByRole("menuitemradio", { name: "Blue", exact: true }))
       .toHaveAttribute("aria-checked", "true");

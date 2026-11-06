@@ -1,6 +1,6 @@
 import type { ProviderOptionDescriptor } from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
-import { getTraitsTriggerLabel } from "./TraitsPicker";
+import { getTraitsTriggerEffortLabel, getTraitsTriggerLabel } from "./TraitsPicker";
 
 function selectDescriptor(
   id: string,
@@ -82,5 +82,59 @@ describe("getTraitsTriggerLabel", () => {
     };
 
     expect(getTraitsTriggerLabel([effort, fastMode], effort, false)).toBe("High · Fast");
+  });
+});
+
+describe("getTraitsTriggerEffortLabel", () => {
+  const effort = selectDescriptor(
+    "effort",
+    "Reasoning",
+    [
+      { id: "high", label: "High", isDefault: true },
+      { id: "xhigh", label: "Extra high" },
+    ],
+    "xhigh",
+  );
+  const contextWindow = selectDescriptor(
+    "contextWindow",
+    "Context Window",
+    [{ id: "1m", label: "1M", isDefault: true }],
+    "1m",
+  );
+  const fastMode: Extract<ProviderOptionDescriptor, { type: "boolean" }> = {
+    id: "fastMode",
+    label: "Fast Mode",
+    type: "boolean",
+    currentValue: false,
+  };
+
+  it("names only the thinking level, leaving speed and context to the menu", () => {
+    expect(getTraitsTriggerEffortLabel([fastMode, contextWindow, effort], false)).toBe(
+      "Extra high",
+    );
+  });
+
+  it("shows Ultrathink when the prompt controls the effort", () => {
+    expect(getTraitsTriggerEffortLabel([effort, contextWindow], true)).toBe("Ultrathink");
+  });
+
+  it("leaves Ultracode and Daybreak to the menu", () => {
+    const ultracode: Extract<ProviderOptionDescriptor, { type: "boolean" }> = {
+      id: "ultracode",
+      label: "Ultracode",
+      type: "boolean",
+      currentValue: true,
+    };
+    const daybreak = selectDescriptor(
+      "cyberAccessProgram",
+      "Daybreak",
+      [{ id: "daybreakRed", label: "Red" }],
+      "daybreakRed",
+    );
+    expect(getTraitsTriggerEffortLabel([daybreak, effort, ultracode], false)).toBe("Extra high");
+  });
+
+  it("is empty when there is no thinking setting, so the caller can name the menu", () => {
+    expect(getTraitsTriggerEffortLabel([fastMode, contextWindow], false)).toBe("");
   });
 });

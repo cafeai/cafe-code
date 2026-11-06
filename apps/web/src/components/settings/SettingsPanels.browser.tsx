@@ -978,9 +978,7 @@ describe("settings panels", () => {
 
     await expect.element(page.getByText("Writes chat titles and branch names.")).toBeVisible();
     await expect.element(page.getByRole("button", { name: /GPT-5.6 Luna/ })).toBeVisible();
-    await expect
-      .element(page.getByRole("button", { name: "High · Fast", exact: true }))
-      .toBeVisible();
+    await expect.element(page.getByRole("button", { name: "High", exact: true })).toBeVisible();
     expect(updateSettings).not.toHaveBeenCalled();
 
     await page.getByRole("button", { name: "Reset automatic naming model to default" }).click();
@@ -993,9 +991,7 @@ describe("settings panels", () => {
       },
     });
     await expect.element(page.getByRole("button", { name: /GPT-6.1 Sol/ })).toBeVisible();
-    await expect
-      .element(page.getByRole("button", { name: "Medium · Normal", exact: true }))
-      .toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Medium", exact: true })).toBeVisible();
     await expect
       .element(page.getByRole("button", { name: "Reset automatic naming model to default" }))
       .not.toBeInTheDocument();

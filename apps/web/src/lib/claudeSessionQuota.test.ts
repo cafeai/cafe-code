@@ -138,7 +138,8 @@ describe("Claude session quota presentation", () => {
       group: "Session",
     });
     expect(result.observed).toContain(localZoneLabel("Asia/Tokyo"));
-    expect(result.meters?.[0]?.reset).toContain(localZoneLabel("Asia/Tokyo"));
+    // Resets are always local time, so they carry no zone name.
+    expect(result.meters?.[0]?.reset).not.toContain(localZoneLabel("Asia/Tokyo"));
   });
   it("marks aged and expired observations stale without refilling allowance", () => {
     const aged = formatClaudeSessionQuota(report, {
@@ -286,6 +287,7 @@ describe("Claude session quota presentation", () => {
     );
     expect(result.observed).toContain(localZoneLabel("America/New_York"));
     expect(result.meters?.[0]?.label).toBe('future_meter · <img src=x onerror="evil()">');
-    expect(result.meters?.[0]?.reset).toContain(localZoneLabel("America/New_York"));
+    // Resets are always local time, so they carry no zone name.
+    expect(result.meters?.[0]?.reset).not.toContain(localZoneLabel("America/New_York"));
   });
 });

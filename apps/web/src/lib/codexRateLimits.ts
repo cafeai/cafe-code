@@ -1,4 +1,6 @@
-import { uiFormatDateTime, uiText } from "@cafecode/shared/i18n";
+import { uiText } from "@cafecode/shared/i18n";
+
+import { formatQuotaResetTime } from "./quotaResetTime";
 import type {
   ServerProvider,
   ServerProviderAccountRateLimitSnapshot,
@@ -126,24 +128,8 @@ function formatShortDuration(minutes: number | null | undefined): string | null 
 }
 
 function formatResetTime(epochSeconds: number, options: FormatOptions): string | null {
-  if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) return null;
-  try {
-    return uiFormatDateTime(
-      new Date(epochSeconds * 1_000),
-      {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
-        timeZoneName: "short",
-        ...(options.timeZone ? { timeZone: options.timeZone } : {}),
-      },
-      options.locale,
-    );
-  } catch {
-    return null;
-  }
+  // Local date and time without a zone name; see formatQuotaResetTime.
+  return formatQuotaResetTime(epochSeconds * 1_000, options);
 }
 
 function formatWindowLine(input: {

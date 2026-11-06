@@ -1188,10 +1188,16 @@ function expectEmptyScheduledSessionRailTasks(): void {
   expect(scheduled).toBeTruthy();
   expect(tasks?.children).toHaveLength(1);
   expect(tasks?.firstElementChild).toBe(scheduled);
-  expect(scheduled?.querySelector("h3")?.textContent).toBe("Scheduled 0");
-  expect(scheduled?.textContent).toContain(
+  // An empty list shows no count or filler line; the hint is the button tooltip.
+  expect(scheduled?.querySelector("h3")?.textContent?.trim()).toBe("Scheduled");
+  expect(scheduled?.textContent).not.toContain(
     "Schedule a check-in or a repeating task for this chat.",
   );
+  expect(
+    scheduled?.querySelector<HTMLButtonElement>(
+      'button[title="Schedule a check-in or a repeating task for this chat."]',
+    ),
+  ).toBeTruthy();
   expect(tasks?.textContent).not.toContain("No tasks yet.");
 }
 

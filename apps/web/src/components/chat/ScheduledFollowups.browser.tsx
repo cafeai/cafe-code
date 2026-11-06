@@ -1168,10 +1168,8 @@ describe("scheduled follow-ups Tasks UI", () => {
         .element(page.getByRole("article", { name: "Scheduled follow-up: Build check 1" }))
         .not.toBeInTheDocument();
       await expect
-        .element(
-          page.getByText("Schedule a check-in or a repeating task for this chat.", { exact: true }),
-        )
-        .toBeVisible();
+        .element(page.getByRole("button", { name: "New follow-up", exact: true }))
+        .toHaveAttribute("title", "Schedule a check-in or a repeating task for this chat.");
       await expect
         .element(page.getByRole("button", { name: "Finished schedules (1)", exact: true }))
         .not.toBeInTheDocument();
