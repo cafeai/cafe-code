@@ -2347,7 +2347,7 @@
     "message": "Claude summary",
     "locations": [
       "apps/web/src/components/chat/ProviderOperationWorkEntry.tsx:44",
-      "apps/web/src/session-logic.ts:1464"
+      "apps/web/src/session-logic.ts:1475"
     ]
   },
   "Claude workflow": {
@@ -2832,7 +2832,7 @@
       "apps/web/src/components/chat/ScheduledFollowups.tsx:118",
       "apps/web/src/components/chat/SubagentDetailView.tsx:138",
       "apps/web/src/components/chat/taskProgressPresentation.ts:32",
-      "apps/web/src/session-logic.ts:1087"
+      "apps/web/src/session-logic.ts:1098"
     ]
   },
   "Completion observed <slot1></slot1>": {
@@ -2865,6 +2865,10 @@
       "apps/server/src/glide/trayPresentation.ts:20",
       "apps/web/src/components/chat/GlideControl.tsx:274"
     ]
+  },
+  "Computer use connections are full. Stop an unused provider session, then try again.": {
+    "message": "Computer use connections are full. Stop an unused provider session, then try again.",
+    "locations": ["packages/shared/src/providerStartupFailure.ts:44"]
   },
   "Computer use could not be confirmed. Click to refresh.": {
     "message": "Computer use could not be confirmed. Click to refresh.",
@@ -5533,7 +5537,7 @@
       "apps/web/src/components/chat/WorkflowTasks.tsx:24",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1956",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:26",
-      "apps/web/src/session-logic.ts:1082"
+      "apps/web/src/session-logic.ts:1093"
     ]
   },
   "Failed RPC calls to the provider daemon.": {
@@ -6107,6 +6111,14 @@
   "Glass": {
     "message": "Glass",
     "locations": ["apps/web/src/ambiance/ambianceEffects.ts:79"]
+  },
+  "Glide desktop tools could not be activated. Check Computer use in the chat controls.": {
+    "message": "Glide desktop tools could not be activated. Check Computer use in the chat controls.",
+    "locations": ["packages/shared/src/providerStartupFailure.ts:37"]
+  },
+  "Glide desktop tools could not be attached. Check Computer use in the chat controls.": {
+    "message": "Glide desktop tools could not be attached. Check Computer use in the chat controls.",
+    "locations": ["packages/shared/src/providerStartupFailure.ts:30"]
   },
   "Global dictation": {
     "message": "Global dictation",
@@ -8649,12 +8661,12 @@
     "message": "OpenCode thinking",
     "locations": [
       "apps/web/src/components/chat/ProviderOperationWorkEntry.tsx:43",
-      "apps/web/src/session-logic.ts:1461"
+      "apps/web/src/session-logic.ts:1472"
     ]
   },
   "Opened web page": {
     "message": "Opened web page",
-    "locations": ["apps/web/src/session-logic.ts:1519"]
+    "locations": ["apps/web/src/session-logic.ts:1530"]
   },
   "Opening a pull request in a chat isn't available.": {
     "message": "Opening a pull request in a chat isn't available.",
@@ -9533,7 +9545,7 @@
   },
   "Provider turn start failed": {
     "message": "Provider turn start failed",
-    "locations": ["apps/web/src/session-logic.ts:931", "apps/web/src/workLogPresentation.ts:210"]
+    "locations": ["apps/web/src/session-logic.ts:939", "apps/web/src/workLogPresentation.ts:210"]
   },
   "Provider turn start interrupted": {
     "message": "Provider turn start interrupted",
@@ -11121,7 +11133,7 @@
   },
   "Searched the web": {
     "message": "Searched the web",
-    "locations": ["apps/web/src/session-logic.ts:1518"]
+    "locations": ["apps/web/src/session-logic.ts:1529"]
   },
   "Searching workspace files…": {
     "message": "Searching workspace files…",
@@ -12037,7 +12049,7 @@
       "apps/web/src/components/chat/SubagentDetailView.tsx:144",
       "apps/web/src/components/chat/WorkflowTasks.tsx:30",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:30",
-      "apps/web/src/session-logic.ts:1086"
+      "apps/web/src/session-logic.ts:1097"
     ]
   },
   "Status unconfirmed": {
@@ -12171,7 +12183,7 @@
       "apps/web/src/components/chat/SubagentDetailView.tsx:142",
       "apps/web/src/components/chat/WorkflowTasks.tsx:27",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:28",
-      "apps/web/src/session-logic.ts:1084"
+      "apps/web/src/session-logic.ts:1095"
     ]
   },
   "Stopped after repeated denials": {
@@ -13592,7 +13604,7 @@
   },
   "Turn accepted · {settings}": {
     "message": "Turn accepted · {settings}",
-    "locations": ["apps/web/src/session-logic.ts:1497"]
+    "locations": ["apps/web/src/session-logic.ts:1508"]
   },
   "Turn it on again from a chat’s composer.": {
     "message": "Turn it on again from a chat’s composer.",
@@ -14502,7 +14514,7 @@
       "apps/web/src/components/chat/SubagentDetailView.tsx:134",
       "apps/web/src/components/chat/WorkflowTasks.tsx:15",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:22",
-      "apps/web/src/session-logic.ts:1078"
+      "apps/web/src/session-logic.ts:1089"
     ]
   },
   "Waiting for Cafe to connect.": {
@@ -14733,7 +14745,7 @@
       "apps/web/src/components/chat/SubagentDetailView.tsx:136",
       "apps/web/src/components/chat/WorkflowTasks.tsx:18",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:24",
-      "apps/web/src/session-logic.ts:1080",
+      "apps/web/src/session-logic.ts:1091",
       "apps/web/src/subagent-activity.ts:607"
     ]
   },
@@ -15942,11 +15954,11 @@
   },
   "{count, plural, one {{formatted} file} other {{formatted} files}}{suffix}": {
     "message": "{count, plural, one {{formatted} file} other {{formatted} files}}{suffix}",
-    "locations": ["apps/web/src/session-logic.ts:2163"]
+    "locations": ["apps/web/src/session-logic.ts:2174"]
   },
   "{count, plural, one {{formatted} line} other {{formatted} lines}}": {
     "message": "{count, plural, one {{formatted} line} other {{formatted} lines}}",
-    "locations": ["apps/web/src/session-logic.ts:2145"]
+    "locations": ["apps/web/src/session-logic.ts:2156"]
   },
   "{count, plural, one {{formatted} token} other {{formatted} tokens}}": {
     "message": "{count, plural, one {{formatted} token} other {{formatted} tokens}}",
@@ -16060,7 +16072,7 @@
     "locations": [
       "apps/web/src/components/chat/ThreadGoalControl.tsx:102",
       "apps/web/src/lib/codexRateLimits.ts:121",
-      "apps/web/src/session-logic.ts:313"
+      "apps/web/src/session-logic.ts:317"
     ]
   },
   "{hours}h {minutes}m": {
@@ -16140,7 +16152,7 @@
       "apps/web/src/components/chat/ThreadGoalControl.tsx:103",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:97",
       "apps/web/src/lib/codexRateLimits.ts:122",
-      "apps/web/src/session-logic.ts:316"
+      "apps/web/src/session-logic.ts:320"
     ]
   },
   "{minutes}m {seconds}s": {
@@ -16299,10 +16311,10 @@
       "apps/web/src/components/chat/ConnectionStatusIndicator.tsx:63",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:105",
       "apps/web/src/components/settings/usageStatsPresentation.ts:39",
-      "apps/web/src/session-logic.ts:296",
-      "apps/web/src/session-logic.ts:304",
-      "apps/web/src/session-logic.ts:319",
-      "apps/web/src/session-logic.ts:322"
+      "apps/web/src/session-logic.ts:300",
+      "apps/web/src/session-logic.ts:308",
+      "apps/web/src/session-logic.ts:323",
+      "apps/web/src/session-logic.ts:326"
     ]
   },
   "{source, select, submitted {Settings Cafe submitted for this accepted turn.} other {Settings of the existing session that accepted this input.}} Provider defaults may be inherited; this is not independent execution or billing confirmation.{nativeFast, select, yes { Fast mode uses the native session routing captured for this turn.} other {}}": {

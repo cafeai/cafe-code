@@ -1,6 +1,6 @@
 # Verification decision index
 
-Last updated: 2026-11-05 07:47:16 JST (UTC+0900)
+Last updated: 2026-11-06 12:50:28 JST (UTC+0900)
 
 This index covers verification decisions; independent feature decisions remain
 in this directory.
@@ -28,6 +28,10 @@ in this directory.
   with exact acknowledgement, confirmed exit and preserved legacy-owner limits.
 
 Related provider lifecycle decisions:
+
+- [Glide catalogue admission](glide-catalogue-admission.md): bounded inert
+  catalogue resources, explicit desktop opt-in and finite startup guidance,
+  separate from executing kernels and provider retry authority.
 
 - [MCP pending questions](mcp-pending-questions.md): owner-only question
   discovery and exact responses, atomic inline handling, canonical native

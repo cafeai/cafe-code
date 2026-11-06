@@ -49,6 +49,10 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeDrainableWorker, type DrainableWorker } from "@cafecode/shared/DrainableWorker";
+import {
+  providerStartupFailureCategoryFromDetail,
+  providerStartupFailureDetail,
+} from "@cafecode/shared/providerStartupFailure";
 
 import {
   resolveThreadWorkspaceCwd,
@@ -450,11 +454,18 @@ function sanitizeProviderFailureDetail(detail: string, processFailure = false): 
   // envelope. Preserve the actionable category without projecting that wrapper,
   // its stack or an arbitrary native cause into the durable work log. A process
   // error class alone proves neither native exit nor a recovery attempt.
+  if (
+    /\bCould not attach Glide desktop tools\. The computer-use connection limit was reached\./.test(
+      detail,
+    )
+  ) {
+    return providerStartupFailureDetail("glide-capacity");
+  }
   if (/\bCould not attach Glide desktop tools\./.test(detail)) {
-    return "Glide desktop tools could not be attached. Check Computer use in the chat controls.";
+    return providerStartupFailureDetail("glide-attach");
   }
   if (/\bCould not activate Glide desktop tools\./.test(detail)) {
-    return "Glide desktop tools could not be activated. Check Computer use in the chat controls.";
+    return providerStartupFailureDetail("glide-activate");
   }
   return processFailure || RAW_PROVIDER_PROCESS_FAILURE_PATTERN.test(detail)
     ? "Provider runtime request failed. Check the selected provider account, model access, and local CLI install."
@@ -894,8 +905,18 @@ const make = Effect.gen(function* () {
     };
     readonly codexNonSteerableTurnKind?: CodexNonSteerableTurnKind;
     readonly recoveryBarrier?: string;
-  }) =>
-    orchestrationEngine.dispatch({
+  }) => {
+    // Only a correlated pre-turn failure may carry this presentation marker.
+    // The detail has already crossed the finite sanitizer above; arbitrary
+    // received payload fields cannot supply the server-authored category.
+    const startupFailureCategory =
+      input.kind === "provider.turn.start.failed" &&
+      input.turnId === null &&
+      input.messageId !== undefined &&
+      input.intentSequence !== undefined
+        ? providerStartupFailureCategoryFromDetail(input.detail)
+        : undefined;
+    return orchestrationEngine.dispatch({
       type: "thread.activity.append",
       commandId: serverCommandId("provider-failure-activity"),
       threadId: input.threadId,
@@ -906,6 +927,7 @@ const make = Effect.gen(function* () {
         summary: input.summary,
         payload: {
           detail: input.detail,
+          ...(startupFailureCategory !== undefined ? { startupFailureCategory } : {}),
           ...(input.requestId ? { requestId: input.requestId } : {}),
           ...(input.messageId ? { messageId: input.messageId } : {}),
           ...(input.intentSequence !== undefined ? { intentSequence: input.intentSequence } : {}),
@@ -927,6 +949,7 @@ const make = Effect.gen(function* () {
       },
       createdAt: input.createdAt,
     });
+  };
 
   const appendProviderDiagnosticActivity = (input: {
     readonly threadId: ThreadId;

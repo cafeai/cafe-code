@@ -2,7 +2,11 @@ import * as Option from "effect/Option";
 import * as Arr from "effect/Array";
 import * as Schema from "effect/Schema";
 import type { VisualizationTimelineEntry } from "@cafecode/contracts/visualizationApi";
-import { uiFormatNumber, uiText } from "@cafecode/shared/i18n";
+import { getUiLocale, uiFormatNumber, uiText } from "@cafecode/shared/i18n";
+import {
+  providerStartupFailureDetail,
+  readProviderStartupFailureCategoryFromPayload,
+} from "@cafecode/shared/providerStartupFailure";
 import {
   ApprovalRequestId,
   EventId,
@@ -922,13 +926,20 @@ export function deriveWorkLogEntries(
       if (admittedUnstartedFailures.has(activity.id)) {
         // A preparation failure has no native turn, but it still belongs next
         // to its accepted user message. Keep opaque failure prose out of the
-        // ordinary entry/debug/preview. No private copy exists for this notice,
-        // so do not manufacture a diagnostic subject or inspection affordance.
+        // ordinary entry/debug/preview. Only the closed server-authored category
+        // selects fixed Cafe copy; no received detail becomes display text or a
+        // diagnostic subject. This marker grants no retry or native authority.
+        const startupFailureCategory = readProviderStartupFailureCategoryFromPayload(
+          activity.payload,
+        );
         return {
           id: activity.id,
           turnId: activity.turnId,
           createdAt: activity.createdAt,
           label: uiText("Provider turn start failed"),
+          ...(startupFailureCategory !== undefined
+            ? { detail: providerStartupFailureDetail(startupFailureCategory, getUiLocale()) }
+            : {}),
           tone: "error" as const,
           activityKind: activity.kind,
         };

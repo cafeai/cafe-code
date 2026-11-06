@@ -20,6 +20,7 @@ import { makeSessionMcpFiles, type SessionMcpFiles } from "../mcp/sessionFiles.t
 import { createGlideNativePeer, GlideNativeHost } from "./nativeHost.ts";
 import { GlideActivity } from "./activity.ts";
 import { recordGlideTrayFailure } from "./diagnostics.ts";
+import { GlideCatalogueCapacityError, makeGlideCatalogueBudget } from "./catalogueBudget.ts";
 import { glideTrayPresentation } from "./trayPresentation.ts";
 import type { UiLocale } from "@cafecode/shared/i18n";
 import { createGlideTrayHost, type GlideTrayHost, type GlideTrayEvent } from "./tray.ts";
@@ -366,6 +367,10 @@ export function makeGlideSessionRuntime(options: {
   const current = new Map<string, Binding>();
   const mutating = new Set<string>();
   const publications = new Set<Promise<void>>();
+  // An inert tool catalogue must remain available for a later explicit click,
+  // without reserving a desktop-execution kernel. Bound retained catalogue
+  // count and actual private-file bytes independently of concurrent file IO.
+  const catalogueBudget = makeGlideCatalogueBudget();
   let metadata: ReturnType<typeof readGlideStatus> | undefined;
   let closed = false;
   let epoch = 0;
@@ -601,7 +606,10 @@ export function makeGlideSessionRuntime(options: {
   } = {
     async bind(input) {
       if (closed || !options.helperPath) return undefined;
-      if (bindings.size + publications.size >= 32) throw denied();
+      // Reserve publication ownership synchronously before reading the bridge.
+      // At most thirty-two bounded source reads may overlap, while idle
+      // catalogues are charged to their separate retained resource budget.
+      if (publications.size >= 32) throw new GlideCatalogueCapacityError();
       let complete!: () => void;
       const publication = new Promise<void>((yes) => {
         complete = yes;
@@ -615,6 +623,7 @@ export function makeGlideSessionRuntime(options: {
           port: options.mcpPort,
           token,
           audience: "cafe-glide",
+          reserveBytes: catalogueBudget.reserve,
         });
         if (closed) {
           await files.remove();

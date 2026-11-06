@@ -3,6 +3,7 @@ import { ProviderAdapterProcessError } from "../provider/Errors.ts";
 import * as Effect from "effect/Effect";
 import { readGlideSessionBroker, type GlideSessionBinding } from "./sessionRuntime.ts";
 import { recordGlideStartupFailure } from "./diagnostics.ts";
+import { GlideCatalogueCapacityError } from "./catalogueBudget.ts";
 
 export type { GlideSessionBinding } from "./sessionRuntime.ts";
 export const bindGlideSession = (input: {
@@ -13,12 +14,18 @@ export const bindGlideSession = (input: {
 }) =>
   Effect.tryPromise({
     try: () => readGlideSessionBroker()?.bind(input) ?? Promise.resolve(undefined),
-    catch: () => {
+    catch: (cause) => {
       recordGlideStartupFailure("attach");
       return new ProviderAdapterProcessError({
         provider: input.provider,
         threadId: input.threadId,
-        detail: "Could not attach Glide desktop tools.",
+        // This is a closed, Cafe-authored resource category. Never copy an
+        // arbitrary filesystem/native exception, token or path into an error
+        // which can cross the daemon boundary or reach a chat activity.
+        detail:
+          cause instanceof GlideCatalogueCapacityError
+            ? "Could not attach Glide desktop tools. The computer-use connection limit was reached."
+            : "Could not attach Glide desktop tools.",
       });
     },
   });

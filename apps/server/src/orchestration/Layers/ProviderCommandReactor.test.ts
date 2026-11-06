@@ -8211,9 +8211,11 @@ describe("ProviderCommandReactor", () => {
   it.each([
     ["local", "attach"],
     ["local", "activate"],
+    ["local", "capacity"],
     ["local", "process"],
     ["daemon", "attach"],
     ["daemon", "activate"],
+    ["daemon", "capacity"],
     ["daemon", "process"],
   ] as const)(
     "reports a %s %s startup failure without inventing native exit or recovery",
@@ -8223,7 +8225,9 @@ describe("ProviderCommandReactor", () => {
       const detail =
         failure === "process"
           ? "Synthetic process startup failure at /private/synthetic-provider-path"
-          : `Could not ${failure} Glide desktop tools.`;
+          : failure === "capacity"
+            ? "Could not attach Glide desktop tools. The computer-use connection limit was reached."
+            : `Could not ${failure} Glide desktop tools.`;
       const processError = new ProviderAdapterProcessError({
         provider: "codex",
         threadId,
@@ -8276,11 +8280,19 @@ describe("ProviderCommandReactor", () => {
       const expectedDetail =
         failure === "process"
           ? "Provider runtime request failed. Check the selected provider account, model access, and local CLI install."
-          : `Glide desktop tools could not be ${failure === "attach" ? "attached" : "activated"}. Check Computer use in the chat controls.`;
-      expect(
-        thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed")
-          ?.payload,
-      ).toMatchObject({ detail: expectedDetail });
+          : failure === "capacity"
+            ? "Computer use connections are full. Stop an unused provider session, then try again."
+            : `Glide desktop tools could not be ${failure === "attach" ? "attached" : "activated"}. Check Computer use in the chat controls.`;
+      const payload = thread?.activities.find(
+        (activity) => activity.kind === "provider.turn.start.failed",
+      )?.payload;
+      expect(payload).toMatchObject({
+        detail: expectedDetail,
+        messageId: "startup-error-category-message",
+      });
+      if (failure === "process") expect(payload).not.toHaveProperty("startupFailureCategory");
+      else expect(payload).toHaveProperty("startupFailureCategory", `glide-${failure}`);
+      expect(encodeJsonString(payload)).not.toContain("/private/");
       expect(thread?.session?.lastError).toBe(expectedDetail);
       expect(harness.startSession).toHaveBeenCalledTimes(1);
       expect(harness.sendTurn).not.toHaveBeenCalled();

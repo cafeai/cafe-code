@@ -26,7 +26,17 @@ const identity = {
   runtimeMode: "full-access",
 };
 async function fixture() {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "glide-session-fixture-")));
+  const temporary = await mkdtemp(join(tmpdir(), "glide-session-fixture-"));
+  try {
+    return await createFixture(await realpath(temporary));
+  } catch (error) {
+    // Acquisition can fail before it returns the ordinary cleanup handle.
+    // Retire only this fixture's freshly minted namespace in that case.
+    await rm(temporary, { recursive: true, force: true });
+    throw error;
+  }
+}
+async function createFixture(root: string) {
   const bridgeSource = join(root, "bridge.mjs");
   await writeFile(bridgeSource, "// Fixture only, never executed.\n");
   let policy = { enabled: false, apps: [] as readonly string[], fullAccess: true, desktop: false };
@@ -129,6 +139,87 @@ async function fixture() {
   };
 }
 describe("Cafe Glide session authority", () => {
+  it("keeps computer use available across many idle provider sessions without granting it", async (context) => {
+    // The fixture owns real private MCP files. Register retirement before their
+    // first asynchronous allocation so an outer test timeout cannot leave a
+    // late catalogue or its capability directory behind.
+    let retired = false;
+    let acquisition: ReturnType<typeof fixture> | undefined;
+    let cleanup: Promise<void> | undefined;
+    const retire = () => {
+      retired = true;
+      cleanup ??= (async () => {
+        const owned = await acquisition?.catch(() => undefined);
+        await owned?.cleanup();
+      })();
+      return cleanup;
+    };
+    const onAbort = () => {
+      void retire().catch(() => undefined);
+    };
+    context.signal.addEventListener("abort", onAbort, { once: true });
+    context.onTestFinished(async () => {
+      context.signal.removeEventListener("abort", onAbort);
+      await retire();
+    });
+    try {
+      if (context.signal.aborted) return;
+      acquisition = fixture();
+      const f = await acquisition;
+      if (retired) return;
+      const retained: GlideSessionBinding[] = [];
+      for (let index = 0; index < 32; index++) {
+        const binding = (await f.runtime.bind({
+          ...identity,
+          threadId: ThreadId.make(`idle-catalogue-${index}`),
+        }))!;
+        if (retired) return;
+        await binding.activate();
+        if (retired) return;
+        retained.push(binding);
+      }
+
+      // Opening an ordinary chat must retain its catalogue for a later button
+      // click. Idle catalogues must not be mistaken for executing kernels.
+      const threadId = ThreadId.make("available-after-idle-catalogues");
+      const binding = (await f.runtime.bind({ ...identity, threadId }))!;
+      if (retired) return;
+      expect(binding).toBeDefined();
+      await binding.activate();
+      if (retired) return;
+      const token = await f.token(binding);
+      await f.start(binding, threadId);
+      if (retired) return;
+      await expect(
+        f.runtime.operation({ kind: "execute", token, input: { code: "not yet authorized" } }),
+      ).rejects.toThrow("Glide");
+      expect(f.kernels).toHaveLength(0);
+      expect(f.nativeFactory).not.toHaveBeenCalled();
+      expect(f.writePolicy).not.toHaveBeenCalled();
+
+      // Exercise the same explicit desktop enable operation as the button,
+      // including positive native permission evidence. The original binding is
+      // reused; no provider restart or replacement catalogue supplies the tool.
+      f.status.mockResolvedValue({ accessibility: true, screenRecording: true, apps: [] });
+      const status = await f.runtime.operation({
+        kind: "control",
+        input: { action: "set-enabled", threadId, enabled: true },
+      });
+      if (retired) return;
+      expect(status).toMatchObject({ enabled: true, connected: true });
+      await expect(
+        f.runtime.operation({ kind: "execute", token, input: { code: "explicitly authorized" } }),
+      ).resolves.toMatchObject({ content: [{ type: "text", text: "owned" }] });
+      expect(f.kernels).toHaveLength(1);
+      for (const prior of [retained[0]!, retained.at(-1)!]) {
+        await expect(
+          f.runtime.operation({ kind: "catalog", token: await f.token(prior) }),
+        ).resolves.toEqual({ connected: true });
+      }
+    } finally {
+      await retire();
+    }
+  });
   it("keeps disabled provider sessions and their cleanup independent of a failed status host", async () => {
     const f = await fixture();
     try {

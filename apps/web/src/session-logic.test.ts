@@ -3977,6 +3977,86 @@ describe("unstarted message failure visibility", () => {
   });
 
   it.each([
+    [
+      "glide-attach",
+      "Glide desktop tools could not be attached. Check Computer use in the chat controls.",
+    ],
+    [
+      "glide-activate",
+      "Glide desktop tools could not be activated. Check Computer use in the chat controls.",
+    ],
+    [
+      "glide-capacity",
+      "Computer use connections are full. Stop an unused provider session, then try again.",
+    ],
+  ] as const)("shows only fixed public guidance for %s", (startupFailureCategory, detail) => {
+    const activity = failure({
+      payload: {
+        messageId: message.id,
+        intentSequence: 42,
+        startupFailureCategory,
+        detail: "private provider body /private/account and prompt text",
+        command: "private provider command",
+      },
+    });
+    const entries = deriveWorkLogEntries([activity], previousTurn.turnId, {
+      unstartedTurnFailures: { messages: [message], latestTurn: previousTurn },
+    });
+    expect(entries).toHaveLength(1);
+    expect(workLogDisplayLabel(entries[0]!)).toBe("Provider turn start failed");
+    expect(entries[0]?.detail).toBe(detail);
+    expect(entries[0]).not.toHaveProperty("command");
+    expect(entries[0]).not.toHaveProperty("providerDiagnostic");
+    expect(JSON.stringify(entries)).not.toContain("private");
+    expect(deriveTimelineEntries([message], [], entries).map((row) => [row.kind, row.id])).toEqual([
+      ["message", "accepted-unstarted-message"],
+      ["work", "unstarted-failure"],
+    ]);
+  });
+
+  it.each([
+    ...[undefined, null, "", "future-category", "GLIDE-ATTACH", 1, true, {}, ["glide-attach"]].map(
+      (startupFailureCategory) => ({ startupFailureCategory, field: "own" as const }),
+    ),
+    { startupFailureCategory: "glide-attach", field: "inherited" as const },
+    { startupFailureCategory: "glide-attach", field: "accessor" as const },
+  ])(
+    "keeps $field unknown or malformed startup category $startupFailureCategory private",
+    ({ startupFailureCategory, field }) => {
+      let getterCalls = 0;
+      const ownFields = {
+        messageId: message.id,
+        intentSequence: 42,
+        detail: "private received error must never be a display fallback",
+      };
+      // Both descriptor negatives retain the same valid own correlation. They
+      // must fail at the new category boundary, not at message admission.
+      const payload: Record<string, unknown> =
+        field === "inherited"
+          ? Object.assign(Object.create({ startupFailureCategory }), ownFields)
+          : { ...ownFields };
+      if (field === "accessor") {
+        Object.defineProperty(payload, "startupFailureCategory", {
+          enumerable: true,
+          get() {
+            getterCalls += 1;
+            throw new Error("private category getter must never run");
+          },
+        });
+      } else if (field === "own") payload.startupFailureCategory = startupFailureCategory;
+      const entries = deriveWorkLogEntries([failure({ payload })], previousTurn.turnId, {
+        unstartedTurnFailures: { messages: [message], latestTurn: previousTurn },
+      });
+      expect(entries).toHaveLength(1);
+      expect(workLogDisplayLabel(entries[0]!)).toBe("Provider turn start failed");
+      expect(entries[0]).not.toHaveProperty("detail");
+      expect(entries[0]).not.toHaveProperty("providerDiagnostic");
+      expect(JSON.stringify(entries)).not.toContain("private");
+      expect(getterCalls).toBe(0);
+    },
+  );
+
+  it.each([
     { name: "missing canonical message", messages: [], overrides: {} },
     {
       name: "assistant message",
@@ -3997,6 +4077,11 @@ describe("unstarted message failure visibility", () => {
       name: "missing intent identity",
       messages: [message],
       overrides: { payload: { messageId: message.id } },
+    },
+    {
+      name: "public category without message and intent ownership",
+      messages: [message],
+      overrides: { payload: { startupFailureCategory: "glide-attach" } },
     },
     {
       name: "partial legacy correlation",

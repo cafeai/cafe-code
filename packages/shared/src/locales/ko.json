@@ -3587,5 +3587,8 @@
   "Trust new certificate": "새 인증서 신뢰",
   "Accepting the new certificate allows Cafe Code to send your saved sign-in credential to this server. Review both fingerprints carefully before trusting it.": "새 인증서를 수락하면 Cafe Code가 저장된 로그인 인증 정보를 이 서버로 전송할 수 있습니다. 신뢰하기 전에 두 지문을 주의 깊게 확인하세요.",
   "The saved server changed during certificate review. Review its current address before reconnecting.": "인증서를 검토하는 동안 저장된 서버가 변경되었습니다. 다시 연결하기 전에 현재 주소를 확인하세요.",
-  "Certificate review is available only for saved HTTPS servers in the desktop app.": "인증서 검토는 데스크톱 앱에 저장된 HTTPS 서버에서만 사용할 수 있습니다."
+  "Certificate review is available only for saved HTTPS servers in the desktop app.": "인증서 검토는 데스크톱 앱에 저장된 HTTPS 서버에서만 사용할 수 있습니다.",
+  "Glide desktop tools could not be attached. Check Computer use in the chat controls.": "Glide 데스크톱 도구를 연결하지 못했습니다. 채팅의 컴퓨터 사용 설정을 확인하세요.",
+  "Glide desktop tools could not be activated. Check Computer use in the chat controls.": "Glide 데스크톱 도구를 활성화하지 못했습니다. 채팅의 컴퓨터 사용 설정을 확인하세요.",
+  "Computer use connections are full. Stop an unused provider session, then try again.": "컴퓨터 사용 연결 수가 한도에 도달했습니다. 사용하지 않는 제공자 세션을 중지한 뒤 다시 시도하세요."
 }

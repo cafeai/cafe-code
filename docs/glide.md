@@ -58,6 +58,10 @@ The tools can remain listed while Computer use is off. Execution still requires
 the exact chat's enabled grant, Full access and current running turn. Both shipped
 MCP entry names use that same broker, including the historical `glide-mcp.mjs`
 name; command-line helper paths and app allowlists cannot authorize execution.
+Catalogue availability is not permission: new chats retain the tools for a later
+button click while their desktop grant starts off. Opening more idle chats does
+not reserve execution kernels. Catalogue admission has separate count, copied-file
+byte and publication limits; see [catalogue admission](decisions/glide-catalogue-admission.md).
 
 ## Menu bar visibility and stopping
 
@@ -66,6 +70,11 @@ bounded attach, activation and tray failure counters plus the last fixed failure
 phase. These process-local observations reset with the owning runtime; an older
 runtime's missing field means unknown. They contain no native error text, paths,
 chat identities or credentials, and grant neither execution nor automatic retry.
+New failed-start activities may also carry a closed, display-only computer-use
+failure category. The chat renders fixed attach, activation or capacity guidance
+from that category; arbitrary provider/daemon error text remains private. Older
+unclassified failures keep their generic label. These labels do not authorize
+desktop control or make an unacknowledged provider request safe to replay.
 
 The macOS **Computer use** cursor icon appears only while a chat with computer
 use enabled is running. An open provider session or a saved permission alone
@@ -446,28 +455,41 @@ links, refusing scripts, styles, resource attributes, declarations and
 unsupported tags. Provider-read/quiet heuristics are not proof of an accepted
 edit: observe the actual target afterwards.
 
-| Resource                                   | Bound                                                           |
-| ------------------------------------------ | --------------------------------------------------------------- |
-| Live bindings / retained workers per owner | 32 / 4; disabling or retiring frees a worker slot               |
-| Worker V8 old generation                   | 256 MiB each; not a total OS-memory cap                         |
-| Active and queued cells per runtime        | 4                                                               |
-| Shared native queued requests              | 64                                                              |
-| Native snapshots / per-session snapshots   | 64 / 16                                                         |
-| Apps per grant / native windows per app    | 16 / 64                                                         |
-| JS source / request body                   | 128 KiB / 1 MiB                                                 |
-| Outstanding worker RPCs / RPCs per cell    | 64 / 256                                                        |
-| Output / ordinary blocks                   | 10 MiB / 128                                                    |
-| Child frame / PNG                          | 12 MiB / 8 MiB                                                  |
-| PNG dimensions                             | 16384 per side, 40 million pixels; native capture 2048 per side |
-| AX tree                                    | 2048 nodes, 32 levels, 128 children/node, 256 KiB rendered text |
-| Native text input                          | 16384 UTF-16 units and at most 64 KiB UTF-8                     |
-| Clipboard preservation                     | 64 items, 64 types/item, 8 MiB after reads                      |
+| Resource                                 | Bound                                                           |
+| ---------------------------------------- | --------------------------------------------------------------- |
+| Retained catalogues per owner            | 128, including allocations whose cleanup is unconfirmed         |
+| Retained catalogue file bytes            | 128 MiB total, charged before private file allocation           |
+| Concurrent catalogue publications        | 32, reserved before reading the bridge source                   |
+| Retained execution kernels per owner     | 4; disabling or retiring frees a worker slot                    |
+| Worker V8 old generation                 | 256 MiB each; not a total OS-memory cap                         |
+| Active and queued cells per runtime      | 4                                                               |
+| Shared native queued requests            | 64                                                              |
+| Native snapshots / per-session snapshots | 64 / 16                                                         |
+| Apps per grant / native windows per app  | 16 / 64                                                         |
+| JS source / request body                 | 128 KiB / 1 MiB                                                 |
+| Outstanding worker RPCs / RPCs per cell  | 64 / 256                                                        |
+| Output / ordinary blocks                 | 10 MiB / 128                                                    |
+| Child frame / PNG                        | 12 MiB / 8 MiB                                                  |
+| PNG dimensions                           | 16384 per side, 40 million pixels; native capture 2048 per side |
+| AX tree                                  | 2048 nodes, 32 levels, 128 children/node, 256 KiB rendered text |
+| Native text input                        | 16384 UTF-16 units and at most 64 KiB UTF-8                     |
+| Clipboard preservation                   | 64 items, 64 types/item, 8 MiB after reads                      |
 
 Native HTTP leases remain owned through response finish/close, with four
 execution lanes and four separately bounded control lanes. Reset/Stop remain
 available under execution saturation. Bodies, chunks, output and response
 lifetimes are bounded. Native readers may allocate before sizes are available;
 data limits are not total OS-memory guarantees.
+
+Retained catalogue capacity includes inert provider connections. Each provider
+may launch a persistent Node stdio relay, and native subagents may open more
+clients against the same connection. The catalogue limit is not a process or
+aggregate RAM cap. Raising catalogue capacity does not raise the four-kernel,
+preview-owner, native-queue or execution limits. File-byte reservations release
+only after confirmed removal of their exact private files and directory; failed
+cleanup remains charged. Turning computer use off revokes desktop authority and
+releases a kernel, but does not retire a provider's catalogue. A catalogue slot
+is released by successful provider-session disposal.
 
 ## Build and development qualification
 
