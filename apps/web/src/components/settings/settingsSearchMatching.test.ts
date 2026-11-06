@@ -76,7 +76,6 @@ describe("settings search ranking", () => {
     expect(groups.map((group) => group.navPath)).toEqual(["/settings/appearance"]);
     expect(groups[0]?.results.map((result) => result.entry.id)).toEqual([
       "appearance.accentColor",
-      "appearance.sidebarEffectsColor",
       "appearance.weatherColor",
       "appearance.atriumColor",
       // "color scheme" is a Theme synonym; synonyms rank below titles.
@@ -109,10 +108,7 @@ describe("settings search ranking", () => {
   it("ranks a title match above a synonym match", () => {
     const results = ids("dark");
     expect(results[0]).toBe("appearance.theme");
-    expect(ids("sidebar image").slice(0, 2)).toEqual([
-      "appearance.sidebarImage",
-      "appearance.sidebarImageEnabled",
-    ]);
+    expect(ids("sidebar image")[0]).toBe("appearance.sidebarImage");
   });
 
   it("requires every word to match", () => {

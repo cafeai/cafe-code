@@ -4,6 +4,7 @@ import {
   applyInterfaceScalePercent,
   normalizeInterfaceScalePercent,
   snapInterfaceScalePercent,
+  stepInterfaceScalePercent,
 } from "./interfaceScale";
 
 afterEach(() => {
@@ -25,6 +26,13 @@ describe("interfaceScale", () => {
     expect(snapInterfaceScalePercent(72)).toBe(80);
     expect(snapInterfaceScalePercent(103)).toBe(105);
     expect(snapInterfaceScalePercent(140)).toBe(130);
+  });
+
+  it("steps one five-percent size at a time within bounds", () => {
+    expect(stepInterfaceScalePercent(100, 1)).toBe(105);
+    expect(stepInterfaceScalePercent(100, -1)).toBe(95);
+    expect(stepInterfaceScalePercent(130, 1)).toBe(130);
+    expect(stepInterfaceScalePercent(80, -1)).toBe(80);
   });
 
   it("applies non-default scale and clears default or invalid values", () => {

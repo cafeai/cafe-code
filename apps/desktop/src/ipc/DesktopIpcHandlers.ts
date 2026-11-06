@@ -29,6 +29,7 @@ import {
   prepareRemoteCertificate,
 } from "./methods/remoteCertificates.ts";
 import { getDebugEndpointState, publishDebugSnapshot } from "./methods/debug.ts";
+import { getAppIconState, setAppIcon } from "./methods/appIcon.ts";
 import { copyPng, savePng } from "./methods/imageExport.ts";
 import { installDesktopNotificationHandlers } from "./methods/notifications.ts";
 import {
@@ -79,6 +80,8 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handle(copyText);
   yield* ipc.handle(copyPng);
   yield* ipc.handle(savePng);
+  yield* ipc.handle(getAppIconState);
+  yield* ipc.handle(setAppIcon);
   yield* installDesktopNotificationHandlers;
 
   yield* ipc.handle(getUpdateState);

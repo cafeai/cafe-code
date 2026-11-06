@@ -22,6 +22,8 @@ export interface SettingsSearchAvailability {
   readonly desktop: boolean;
   /** Mac desktop app (global dictation). */
   readonly macDesktop: boolean;
+  /** Desktop shell that can change this computer's app icon. */
+  readonly appIcon?: boolean;
 }
 
 interface IndexedEntry extends SettingsSearchEntry {
@@ -37,6 +39,7 @@ const section = {
   about: (locale: UiLocale) => uiText("About", undefined, undefined, locale),
   interface: (locale: UiLocale) => uiText("Interface", undefined, undefined, locale),
   sidebar: (locale: UiLocale) => uiText("Sidebar", undefined, undefined, locale),
+  appIcon: (locale: UiLocale) => uiText("App icon", undefined, undefined, locale),
   motion: (locale: UiLocale) => uiText("Motion", undefined, undefined, locale),
   weather: (locale: UiLocale) => uiText("Weather effects", undefined, undefined, locale),
   atrium: (locale: UiLocale) => uiText("Task Atrium", undefined, undefined, locale),
@@ -184,7 +187,12 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
     title: (locale) => uiText("Accent color", undefined, undefined, locale),
     section: section.interface,
     keywords: (locale) =>
-      uiText("colour, highlight, tint", undefined, "settings search keywords", locale),
+      uiText(
+        "colour, highlight, tint, sidebar, stars, glow, mascot",
+        undefined,
+        "settings search keywords",
+        locale,
+      ),
   },
   {
     id: "appearance.brandingPrefix",
@@ -196,15 +204,6 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
       uiText("name, wordmark, logo", undefined, "settings search keywords", locale),
   },
   {
-    id: "appearance.sidebarEffectsColor",
-    path: "/settings/appearance",
-    kind: "setting",
-    title: (locale) => uiText("Sidebar effects color", undefined, undefined, locale),
-    section: section.sidebar,
-    keywords: (locale) =>
-      uiText("colour, stars, glow", undefined, "settings search keywords", locale),
-  },
-  {
     id: "appearance.sidebarSearch",
     path: "/settings/appearance",
     kind: "setting",
@@ -214,15 +213,6 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
       uiText("command palette, search button", undefined, "settings search keywords", locale),
   },
   {
-    id: "appearance.sidebarImageEnabled",
-    path: "/settings/appearance",
-    kind: "setting",
-    title: (locale) => uiText("Enable sidebar image", undefined, undefined, locale),
-    section: section.sidebar,
-    keywords: (locale) =>
-      uiText("background, wallpaper, picture", undefined, "settings search keywords", locale),
-  },
-  {
     id: "appearance.sidebarImage",
     path: "/settings/appearance",
     kind: "setting",
@@ -230,6 +220,16 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
     section: section.sidebar,
     keywords: (locale) =>
       uiText("background, wallpaper, picture", undefined, "settings search keywords", locale),
+  },
+  {
+    id: "appearance.appIcon",
+    path: "/settings/appearance",
+    kind: "setting",
+    title: (locale) => uiText("Icon", undefined, "app icon setting", locale),
+    section: section.appIcon,
+    keywords: (locale) =>
+      uiText("app icon, dock, taskbar, logo", undefined, "settings search keywords", locale),
+    available: (availability) => availability.appIcon === true,
   },
   {
     id: "appearance.sidebarAttribution",
@@ -582,12 +582,12 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
       uiText("GitHub, GitLab, Bitbucket, CLI", undefined, "settings search keywords", locale),
   },
 
-  // Connections & remote access
+  // Connections
   {
     id: "page:connections",
     path: "/settings/connections",
     kind: "page",
-    title: (locale) => uiText("Connections & remote access", undefined, undefined, locale),
+    title: (locale) => uiText("Connections", undefined, undefined, locale),
     keywords: (locale) =>
       uiText("remote, server, pairing", undefined, "settings search keywords", locale),
   },

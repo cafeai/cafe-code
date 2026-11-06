@@ -29,6 +29,7 @@ import type {
 } from "./git.ts";
 import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
 import type { SavePngInput, SavePngResult } from "./imageExport.ts";
+import type { DesktopAppIconState, SetDesktopAppIconInput } from "./appIcon.ts";
 import type {
   DesktopNotificationInput,
   DesktopNotificationResult,
@@ -502,6 +503,10 @@ export interface DesktopBridge extends VisualizationDesktopBridge {
   copyPng: (png: Uint8Array) => Promise<void>;
   /** The renderer supplies bytes and a basename, never a filesystem destination. */
   savePng: (input: SavePngInput) => Promise<SavePngResult>;
+  /** This computer's app icon. Optional for older desktop shells. */
+  getAppIconState?: () => Promise<DesktopAppIconState>;
+  /** Built-in choices or renderer-rendered PNG bytes only; never a filesystem path. */
+  setAppIcon?: (input: SetDesktopAppIconInput) => Promise<DesktopAppIconState>;
   /** Optional for older desktop shells; never fall back to browser permission defaults. */
   showNotification?: (input: DesktopNotificationInput) => Promise<DesktopNotificationResult>;
   onNotificationClick?: (listener: (tag: string) => void) => () => void;

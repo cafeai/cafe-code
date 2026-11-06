@@ -228,28 +228,40 @@
      panels read as surfaces instead of hairline outlines on pure white. */
   --background-light: color-mix(in srgb, var(--color-neutral-100) 55%, var(--color-white));
   --background-dark: color-mix(in srgb, var(--color-neutral-950) 95%, var(--color-white));
-  --background: var(--background-light);
+  /* Every surface carries a faint hint of the accent colour (Settings →
+     Appearance → Accent color), so the app reads as that colour instead of
+     grey and the slightly more tinted sidebar meets the chat without a hard
+     edge. The amounts are small enough to leave text contrast unchanged; a
+     grey accent gives the neutral look. Borders keep their strength and only
+     shift hue. */
+  --cafe-surface-tint: var(--cafe-sidebar-accent);
+  --background: color-mix(in oklab, var(--background-light), var(--cafe-surface-tint) 1.8%);
   --cafe-sidebar-star-drift-duration: 60s;
   --app-chrome-background: var(--background);
   --foreground: var(--color-neutral-800);
   /* Preserve the softer reading colour used by assistant prose before the
      UI refresh, independently of full-strength labels and controls. */
   --chat-foreground: --alpha(var(--foreground) / 80%);
-  --card: var(--color-white);
+  --card: color-mix(in oklab, var(--color-white), var(--cafe-surface-tint) 0.7%);
   --card-foreground: var(--color-neutral-800);
-  --popover: var(--color-white);
+  --popover: color-mix(in oklab, var(--color-white), var(--cafe-surface-tint) 0.7%);
   --popover-foreground: var(--color-neutral-800);
   --primary: oklch(0.488 0.217 264);
   --primary-foreground: var(--color-white);
   --secondary: --alpha(var(--color-black) / 4%);
   --secondary-foreground: var(--color-neutral-800);
   --muted: --alpha(var(--color-black) / 4%);
-  --muted-foreground: color-mix(in srgb, var(--color-neutral-500) 90%, var(--color-black));
+  --muted-foreground: color-mix(
+    in oklab,
+    color-mix(in srgb, var(--color-neutral-500) 90%, var(--color-black)),
+    var(--cafe-surface-tint) 4.5%
+  );
   --accent: --alpha(var(--color-black) / 4%);
   --accent-foreground: var(--color-neutral-800);
   --destructive: var(--color-red-500);
-  --border: --alpha(var(--color-black) / 8%);
-  --input: --alpha(var(--color-black) / 10%);
+  --border-tint: color-mix(in oklab, var(--color-black), var(--cafe-surface-tint) 30%);
+  --border: --alpha(var(--border-tint) / 8%);
+  --input: --alpha(var(--border-tint) / 10%);
   --ring: oklch(0.488 0.217 264);
   --destructive-foreground: var(--color-red-700);
   --info: var(--color-blue-500);
@@ -258,13 +270,24 @@
   --success-foreground: var(--color-emerald-700);
   --warning: var(--color-amber-500);
   --warning-foreground: var(--color-amber-700);
-  --cafe-sidebar-accent: #44beda;
-  --sunken: color-mix(in srgb, var(--color-neutral-100) 80%, var(--color-white));
+  /* Matches the default --primary; the accent color overrides both (themeAccent.ts). */
+  --cafe-sidebar-accent: #1b4ed8;
+  /* The sidebar picture's colour (sidebarGlow.ts); the accent until set. */
+  --cafe-sidebar-glow: var(--cafe-sidebar-accent);
+  --sunken: color-mix(
+    in oklab,
+    color-mix(in srgb, var(--color-neutral-100) 80%, var(--color-white)),
+    var(--cafe-surface-tint) 1.8%
+  );
   --raised: var(--popover);
-  --subtle-foreground: color-mix(in srgb, var(--color-neutral-500) 95%, var(--color-black));
+  --subtle-foreground: color-mix(
+    in oklab,
+    color-mix(in srgb, var(--color-neutral-500) 95%, var(--color-black)),
+    var(--cafe-surface-tint) 4.5%
+  );
   --disabled-foreground: var(--color-neutral-400);
-  --border-subtle: --alpha(var(--color-black) / 5%);
-  --border-strong: --alpha(var(--color-black) / 14%);
+  --border-subtle: --alpha(var(--border-tint) / 5%);
+  --border-strong: --alpha(var(--border-tint) / 14%);
   --sidebar-accent-surface: --alpha(var(--color-black) / 5%);
   --status-running: var(--primary);
   --status-attention: var(--color-amber-500);
@@ -283,7 +306,7 @@
 
   @variant dark {
     color-scheme: dark;
-    --background: var(--background-dark);
+    --background: color-mix(in oklab, var(--background-dark), var(--cafe-surface-tint) 2.2%);
     --app-chrome-background: var(--background);
     --foreground: var(--color-neutral-100);
     --card: color-mix(in srgb, var(--background) 98%, var(--color-white));
@@ -296,12 +319,17 @@
     --secondary: --alpha(var(--color-white) / 4%);
     --secondary-foreground: var(--color-neutral-100);
     --muted: --alpha(var(--color-white) / 4%);
-    --muted-foreground: color-mix(in srgb, var(--color-neutral-500) 90%, var(--color-white));
+    --muted-foreground: color-mix(
+      in oklab,
+      color-mix(in srgb, var(--color-neutral-500) 90%, var(--color-white)),
+      var(--cafe-surface-tint) 4.5%
+    );
     --accent: --alpha(var(--color-white) / 4%);
     --accent-foreground: var(--color-neutral-100);
     --destructive: color-mix(in srgb, var(--color-red-500) 90%, var(--color-white));
-    --border: --alpha(var(--color-white) / 7%);
-    --input: --alpha(var(--color-white) / 8%);
+    --border-tint: color-mix(in oklab, var(--color-white), var(--cafe-surface-tint) 30%);
+    --border: --alpha(var(--border-tint) / 7.5%);
+    --input: --alpha(var(--border-tint) / 8.5%);
     --ring: oklch(0.588 0.217 264);
     --destructive-foreground: var(--color-red-400);
     --info: var(--color-blue-500);
@@ -310,13 +338,17 @@
     --success-foreground: var(--color-emerald-400);
     --warning: var(--color-amber-500);
     --warning-foreground: var(--color-amber-400);
-    --cafe-sidebar-accent: #48cfff;
-    --sunken: #101011;
+    --cafe-sidebar-accent: #366ffb;
+    --sunken: color-mix(in oklab, #101011, var(--cafe-surface-tint) 2.2%);
     --raised: var(--popover);
-    --subtle-foreground: var(--color-neutral-400);
+    --subtle-foreground: color-mix(
+      in oklab,
+      var(--color-neutral-400),
+      var(--cafe-surface-tint) 4.5%
+    );
     --disabled-foreground: var(--color-neutral-600);
-    --border-subtle: --alpha(var(--color-white) / 4%);
-    --border-strong: --alpha(var(--color-white) / 12%);
+    --border-subtle: --alpha(var(--border-tint) / 4.5%);
+    --border-strong: --alpha(var(--border-tint) / 12.5%);
     --sidebar-accent-surface: --alpha(var(--color-white) / 6.5%);
     --status-attention: var(--color-amber-400);
     --status-attention-foreground: var(--color-amber-300);
@@ -408,18 +440,25 @@ body::after {
   }
 }
 
+/* The sidebar takes a little more of the accent than the rest of the app, so
+   it reads as part of the same coloured surface rather than a separate strip.
+   While a picture is shown, a soft glow in the picture's colour rises behind
+   it. Declared before the dark rules so the dark versions win in dark mode. */
 .cafe-thread-sidebar [data-slot="sidebar-inner"] {
   position: relative;
   isolation: isolate;
   overflow: hidden;
+  background: color-mix(in oklab, #f3f4f6, var(--cafe-sidebar-accent) 4%);
+}
+
+.cafe-thread-sidebar.cafe-thread-sidebar--image [data-slot="sidebar-inner"] {
   background:
     radial-gradient(
-      120% 90% at 50% -8%,
-      color-mix(in srgb, var(--cafe-sidebar-accent) 16%, transparent),
-      transparent 42%
+      150% 55% at 50% 104%,
+      color-mix(in oklab, transparent, var(--cafe-sidebar-glow) 8.6%),
+      transparent 66%
     ),
-    radial-gradient(95% 75% at 18% 105%, rgba(126, 137, 151, 0.14), transparent 46%),
-    color-mix(in srgb, var(--card) 96%, #e5edf3);
+    color-mix(in oklab, #f3f4f6, var(--cafe-sidebar-accent) 4%);
 }
 
 .cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
@@ -470,15 +509,19 @@ body::after {
   background:
     radial-gradient(
       ellipse at 16% 24%,
-      color-mix(in srgb, var(--cafe-sidebar-accent) 18%, transparent),
+      color-mix(in srgb, var(--cafe-sidebar-accent) 10%, transparent),
       transparent 36%
     ),
-    radial-gradient(ellipse at 82% 80%, rgba(132, 142, 156, 0.18), transparent 38%),
-    radial-gradient(ellipse at 72% 12%, rgba(94, 109, 126, 0.08), transparent 34%),
+    radial-gradient(
+      ellipse at 82% 80%,
+      color-mix(in oklab, transparent, var(--cafe-sidebar-glow) 11.5%),
+      transparent 38%
+    ),
+    radial-gradient(ellipse at 72% 12%, rgba(94, 109, 126, 0.06), transparent 34%),
     linear-gradient(
       132deg,
       transparent 20%,
-      color-mix(in srgb, var(--cafe-sidebar-accent) 10%, transparent) 48%,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 6%, transparent) 48%,
       transparent 70%
     );
   opacity: 0.42;
@@ -487,13 +530,17 @@ body::after {
 }
 
 .dark .cafe-thread-sidebar [data-slot="sidebar-inner"] {
+  background: color-mix(in oklab, #101011, var(--cafe-sidebar-accent) 4.4%);
+}
+
+.dark .cafe-thread-sidebar.cafe-thread-sidebar--image [data-slot="sidebar-inner"] {
   background:
     radial-gradient(
-      120% 90% at 50% -8%,
-      color-mix(in srgb, var(--cafe-sidebar-accent) 16%, transparent),
-      transparent 42%
+      150% 55% at 50% 104%,
+      color-mix(in oklab, transparent, var(--cafe-sidebar-glow) 8.6%),
+      transparent 66%
     ),
-    radial-gradient(95% 75% at 18% 105%, rgba(166, 176, 188, 0.14), transparent 46%), #101011;
+    color-mix(in oklab, #101011, var(--cafe-sidebar-accent) 4.4%);
 }
 
 .dark .cafe-thread-sidebar [data-slot="sidebar-inner"]::before {
@@ -519,15 +566,19 @@ body::after {
   background:
     radial-gradient(
       ellipse at 16% 24%,
-      color-mix(in srgb, var(--cafe-sidebar-accent) 20%, transparent),
+      color-mix(in srgb, var(--cafe-sidebar-accent) 12%, transparent),
       transparent 36%
     ),
-    radial-gradient(ellipse at 82% 80%, rgba(168, 178, 190, 0.18), transparent 38%),
-    radial-gradient(ellipse at 72% 12%, rgba(218, 225, 234, 0.08), transparent 34%),
+    radial-gradient(
+      ellipse at 82% 80%,
+      color-mix(in oklab, transparent, var(--cafe-sidebar-glow) 11.5%),
+      transparent 38%
+    ),
+    radial-gradient(ellipse at 72% 12%, rgba(218, 225, 234, 0.06), transparent 34%),
     linear-gradient(
       132deg,
       transparent 20%,
-      color-mix(in srgb, var(--cafe-sidebar-accent) 8%, transparent) 48%,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 6%, transparent) 48%,
       transparent 70%
     );
   opacity: 0.46;

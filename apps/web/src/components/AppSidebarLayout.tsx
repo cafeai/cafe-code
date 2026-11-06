@@ -8,6 +8,9 @@ import {
   syncShortcutModifierStateFromKeyboardEvent,
 } from "../shortcutModifierState";
 import { useUiStateStore } from "../uiStateStore";
+import { useSettings } from "../hooks/useSettings";
+import { useDesktopAppIconSync } from "../appIconState";
+import { cn } from "../lib/utils";
 
 const THREAD_SIDEBAR_WIDTH_STORAGE_KEY = "chat_thread_sidebar_width";
 const THREAD_SIDEBAR_MIN_WIDTH = 13 * 16;
@@ -56,6 +59,11 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
     };
   }, [navigate]);
 
+  // Seats the sidebar picture in a soft glow of its own colour (index.css, sidebarGlow.ts).
+  const showSidebarImage = useSettings((settings) => settings.showSidebarMascot);
+  // Desktop only: recolor the Dock/taskbar icon with the accent color and theme.
+  useDesktopAppIconSync();
+
   return (
     <SidebarProvider
       className="h-dvh! min-h-0!"
@@ -65,7 +73,10 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
       <Sidebar
         side="left"
         collapsible="offcanvas"
-        className="cafe-thread-sidebar border-r border-border bg-card text-foreground"
+        className={cn(
+          "cafe-thread-sidebar border-r border-border bg-card text-foreground",
+          showSidebarImage && "cafe-thread-sidebar--image",
+        )}
         resizable={{
           minWidth: THREAD_SIDEBAR_MIN_WIDTH,
           shouldAcceptWidth: ({ nextWidth, wrapper }) =>

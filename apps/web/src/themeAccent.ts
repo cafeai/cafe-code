@@ -4,6 +4,8 @@ import {
   MIN_SIDEBAR_STAR_SPEED,
 } from "@cafecode/contracts/settings";
 
+import { hexToOklch, oklchToHex } from "./lib/oklab";
+
 const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/u;
 
 const APP_ACCENT_VARIABLES = ["--primary", "--ring"] as const;
@@ -17,12 +19,37 @@ export function normalizeAccentColor(value: string | undefined): string | undefi
   return HEX_COLOR_PATTERN.test(trimmed) ? trimmed : undefined;
 }
 
-export function applyAppAccentColor(value: string | undefined): void {
+export type AccentTheme = "light" | "dark";
+
+/** Below this OKLCH chroma an accent reads as grey and is used as chosen. */
+const NEUTRAL_ACCENT_CHROMA = 0.03;
+/** How much more colourful a chosen accent is drawn (sRGB limits still apply). */
+const ACCENT_CHROMA_BOOST = 1.2;
+/** Brighter on light pages, deeper on dark ones, so the accent stands out on each. */
+const ACCENT_LIGHTNESS_SHIFT: Readonly<Record<AccentTheme, number>> = { light: 0.03, dark: -0.04 };
+
+/**
+ * The chosen accent as drawn for buttons, bars and selection: a little more
+ * colourful, brighter in light mode and deeper in dark mode. Greys are used
+ * exactly as chosen. The saved setting is unchanged; only the drawn colour adapts.
+ */
+export function themedAccentColor(hex: string, theme: AccentTheme): string {
+  const oklch = hexToOklch(hex);
+  if (!oklch || oklch.c < NEUTRAL_ACCENT_CHROMA) return hex;
+  return oklchToHex({
+    l: Math.min(0.85, Math.max(0.3, oklch.l + ACCENT_LIGHTNESS_SHIFT[theme])),
+    c: oklch.c * ACCENT_CHROMA_BOOST,
+    h: oklch.h,
+  });
+}
+
+export function applyAppAccentColor(value: string | undefined, theme: AccentTheme): void {
   if (typeof document === "undefined") {
     return;
   }
 
-  const accentColor = normalizeAccentColor(value);
+  const chosenColor = normalizeAccentColor(value);
+  const accentColor = chosenColor ? themedAccentColor(chosenColor, theme) : undefined;
   for (const variable of APP_ACCENT_VARIABLES) {
     if (accentColor) {
       document.documentElement.style.setProperty(variable, accentColor);

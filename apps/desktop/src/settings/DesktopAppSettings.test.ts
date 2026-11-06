@@ -21,6 +21,9 @@ const DesktopSettingsPatch = Schema.Struct({
   updateChannelConfiguredByUser: Schema.optionalKey(Schema.Boolean),
   globalDictationEnabled: Schema.optionalKey(Schema.Boolean),
   globalDictationShortcut: Schema.optionalKey(Schema.String),
+  appIconVariant: Schema.optionalKey(Schema.Literals(["standard", "dekai"])),
+  appIconSource: Schema.optionalKey(Schema.Literals(["default", "custom"])),
+  appIconThemedKey: Schema.optionalKey(Schema.String),
 });
 
 const decodeDesktopSettingsPatch = Schema.decodeEffect(Schema.fromJsonString(DesktopSettingsPatch));
@@ -96,6 +99,9 @@ describe("DesktopSettings", () => {
       updateChannelConfiguredByUser: false,
       globalDictationEnabled: false,
       globalDictationShortcut: "CommandOrControl+Shift+,",
+      appIconVariant: "standard",
+      appIconSource: "default",
+      appIconThemedKey: null,
     } satisfies DesktopSettingsValue);
   });
 
@@ -119,6 +125,9 @@ describe("DesktopSettings", () => {
           updateChannelConfiguredByUser: true,
           globalDictationEnabled: false,
           globalDictationShortcut: "CommandOrControl+Shift+,",
+          appIconVariant: "standard",
+          appIconSource: "default",
+          appIconThemedKey: null,
         } satisfies DesktopSettingsValue);
 
         const exposure = yield* settings.setServerExposureMode("local-only");
@@ -191,6 +200,9 @@ describe("DesktopSettings", () => {
           updateChannelConfiguredByUser: false,
           globalDictationEnabled: false,
           globalDictationShortcut: "CommandOrControl+Shift+,",
+          appIconVariant: "standard",
+          appIconSource: "default",
+          appIconThemedKey: null,
         } satisfies DesktopSettingsValue);
       }),
     ),
@@ -250,6 +262,9 @@ describe("DesktopSettings", () => {
           updateChannelConfiguredByUser: false,
           globalDictationEnabled: false,
           globalDictationShortcut: "CommandOrControl+Shift+,",
+          appIconVariant: "standard",
+          appIconSource: "default",
+          appIconThemedKey: null,
         } satisfies DesktopSettingsValue);
       }),
       { appVersion: "0.0.17-nightly.20260415.1" },
@@ -275,6 +290,9 @@ describe("DesktopSettings", () => {
           updateChannelConfiguredByUser: true,
           globalDictationEnabled: false,
           globalDictationShortcut: "CommandOrControl+Shift+,",
+          appIconVariant: "standard",
+          appIconSource: "default",
+          appIconThemedKey: null,
         } satisfies DesktopSettingsValue);
       }),
       { appVersion: "0.0.17-nightly.20260415.1" },
@@ -300,6 +318,55 @@ describe("DesktopSettings", () => {
             globalDictationShortcut: "CommandOrControl+Shift+D",
           },
         );
+      }),
+    ),
+  );
+
+  it.effect("persists the app icon choice sparsely and heals unknown values", () =>
+    withSettings(
+      Effect.gen(function* () {
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+
+        assert.isTrue((yield* settings.setAppIcon({ variant: "dekai", source: "custom" })).changed);
+        assert.isFalse(
+          (yield* settings.setAppIcon({ variant: "dekai", source: "custom" })).changed,
+        );
+        assert.deepEqual(
+          yield* decodeDesktopSettingsPatch(
+            yield* fileSystem.readFileString(environment.desktopSettingsPath),
+          ),
+          { appIconVariant: "dekai", appIconSource: "custom" },
+        );
+
+        // Restoring both defaults writes nothing for the icon.
+        yield* settings.setAppIcon({ variant: "standard", source: "default" });
+        assert.deepEqual(
+          yield* decodeDesktopSettingsPatch(
+            yield* fileSystem.readFileString(environment.desktopSettingsPath),
+          ),
+          {},
+        );
+
+        // A themed key is remembered, and an invalid one never becomes a file name.
+        yield* settings.setAppIcon({
+          variant: "dekai",
+          source: "default",
+          themedKey: "dekai-amber-light",
+        });
+        assert.equal((yield* settings.get).appIconThemedKey, "dekai-amber-light");
+        yield* settings.setAppIcon({ variant: "dekai", source: "default", themedKey: "../x" });
+        assert.isNull((yield* settings.get).appIconThemedKey);
+
+        yield* fileSystem.writeFileString(
+          environment.desktopSettingsPath,
+          '{"appIconVariant":"spooky","appIconSource":"/etc/passwd","appIconThemedKey":"../../evil"}',
+        );
+        const loaded = yield* settings.load;
+        assert.equal(loaded.appIconVariant, "standard");
+        assert.equal(loaded.appIconSource, "default");
+        assert.isNull(loaded.appIconThemedKey);
       }),
     ),
   );

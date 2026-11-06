@@ -30,12 +30,8 @@ import {
 } from "@cafecode/contracts/settings";
 
 import { APP_BASE_NAME } from "../branding";
-import {
-  DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES,
-  DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET,
-  resolveSidebarBrandImageSrc,
-  uploadSidebarBrandImage,
-} from "../brandingImages";
+import { uploadSidebarBrandImage } from "../brandingImages";
+import { useSidebarImage } from "~/hooks/useSidebarImage";
 import { isElectron } from "~/env";
 import { ensureLocalApi } from "~/localApi";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
@@ -509,7 +505,7 @@ function CustomizePage() {
 
   const brandPrefix = settings.brandWordmarkPrefix.trim() || DEFAULT_BRAND_WORDMARK_PREFIX;
   const usesDefaultImage = settings.sidebarBrandImage === DEFAULT_SIDEBAR_BRAND_IMAGE;
-  const imageSrc = uiPresentation.resolveSidebarBrandImageSrc(settings.sidebarBrandImage);
+  const sidebarImage = useSidebarImage();
 
   const handleImageChange = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
@@ -530,7 +526,11 @@ function CustomizePage() {
       try {
         const sidebarBrandImage = await uploadSidebarBrandImage(file);
         setImageError(null);
-        updateSettings({ sidebarBrandImage, sidebarBrandImageDataUrl: "" });
+        updateSettings({
+          sidebarBrandImage,
+          sidebarBrandImageDataUrl: "",
+          sidebarImageSource: "custom",
+        });
       } catch (error) {
         setImageError(
           error instanceof Error
@@ -643,9 +643,9 @@ function CustomizePage() {
                 aria-hidden="true"
                 className="h-10 w-8 rounded-md object-cover ring-1 ring-border"
                 draggable={false}
-                sizes={usesDefaultImage ? DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES : undefined}
-                src={imageSrc}
-                srcSet={usesDefaultImage ? DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET : undefined}
+                sizes={sidebarImage.sizes}
+                src={sidebarImage.src}
+                srcSet={sidebarImage.srcSet}
               />
               <Button
                 disabled={!settings.showSidebarMascot || imageUploading}
@@ -671,6 +671,7 @@ function CustomizePage() {
                     updateSettings({
                       sidebarBrandImage: DEFAULT_SIDEBAR_BRAND_IMAGE,
                       sidebarBrandImageDataUrl: "",
+                      sidebarImageSource: "match",
                     });
                   }}
                   size="xs"
@@ -838,5 +839,4 @@ const UI_PRESENTATION_SOURCES = {
   STEP_HEADER_LABEL,
   THEME_CHOICES,
   getProviderSummary,
-  resolveSidebarBrandImageSrc,
 };

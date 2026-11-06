@@ -2222,9 +2222,7 @@ export function ConnectionsSettings() {
   );
 
   return (
-    <SettingsPageContainer
-      title={uiText("Connections & remote access", undefined, undefined, uiLocale)}
-    >
+    <SettingsPageContainer title={uiText("Connections", undefined, undefined, uiLocale)}>
       <SavedEnvironmentsSettings />
       {canManageLocalBackend ? (
         <>

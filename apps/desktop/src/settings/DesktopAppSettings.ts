@@ -1,6 +1,10 @@
 import {
+  DesktopAppIconSourceSchema,
+  DesktopAppIconVariantSchema,
   DesktopServerExposureModeSchema,
   DesktopUpdateChannelSchema,
+  type DesktopAppIconSource,
+  type DesktopAppIconVariant,
   type DesktopServerExposureMode,
   type DesktopUpdateChannel,
 } from "@cafecode/contracts";
@@ -28,6 +32,12 @@ export interface DesktopSettings {
   /** Mac global dictation is deliberately opt-in and remains disabled on fresh installs. */
   readonly globalDictationEnabled: boolean;
   readonly globalDictationShortcut: string;
+  /** Which built-in icon "Default" means on this computer (`dekai` is the unlockable one). */
+  readonly appIconVariant: DesktopAppIconVariant;
+  /** `custom` shows the privately stored custom icon instead of the variant. */
+  readonly appIconSource: DesktopAppIconSource;
+  /** Which accent/theme rendering of the variant is stored privately, if any. */
+  readonly appIconThemedKey: string | null;
 }
 
 export interface DesktopSettingsChange {
@@ -42,7 +52,12 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   updateChannelConfiguredByUser: false,
   globalDictationEnabled: false,
   globalDictationShortcut: "CommandOrControl+Shift+,",
+  appIconVariant: "standard",
+  appIconSource: "default",
+  appIconThemedKey: null,
 };
+
+const THEMED_APP_ICON_KEY_PATTERN = /^(?:standard|dekai)-[a-z]{1,16}-(?:dark|light)$/u;
 
 /**
  * Keep a bounded accelerator grammar at the persistence boundary. Global
@@ -64,6 +79,9 @@ const DesktopSettingsDocument = Schema.Struct({
   updateChannelConfiguredByUser: Schema.optionalKey(Schema.Boolean),
   globalDictationEnabled: Schema.optionalKey(Schema.Boolean),
   globalDictationShortcut: Schema.optionalKey(Schema.String),
+  appIconVariant: Schema.optionalKey(DesktopAppIconVariantSchema),
+  appIconSource: Schema.optionalKey(DesktopAppIconSourceSchema),
+  appIconThemedKey: Schema.optionalKey(Schema.String),
 });
 
 type DesktopSettingsDocument = typeof DesktopSettingsDocument.Type;
@@ -115,6 +133,12 @@ export interface DesktopAppSettingsShape {
     DesktopSettingsChange,
     DesktopSettingsWriteError | GlobalDictationShortcutError
   >;
+  readonly setAppIcon: (input: {
+    readonly variant: DesktopAppIconVariant;
+    readonly source: DesktopAppIconSource;
+    /** Omit to keep the stored key; null clears it. */
+    readonly themedKey?: string | null;
+  }) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
 }
 
 export class DesktopAppSettings extends Context.Service<
@@ -153,6 +177,13 @@ function normalizeDesktopSettingsDocument(
       (parsed.globalDictationShortcut &&
         normalizeGlobalDictationShortcut(parsed.globalDictationShortcut)) ||
       defaultSettings.globalDictationShortcut,
+    appIconVariant: parsed.appIconVariant === "dekai" ? "dekai" : "standard",
+    appIconSource: parsed.appIconSource === "custom" ? "custom" : "default",
+    appIconThemedKey:
+      parsed.appIconThemedKey !== undefined &&
+      THEMED_APP_ICON_KEY_PATTERN.test(parsed.appIconThemedKey)
+        ? parsed.appIconThemedKey
+        : null,
   };
 }
 
@@ -179,6 +210,15 @@ function toDesktopSettingsDocument(
   }
   if (settings.globalDictationShortcut !== defaults.globalDictationShortcut) {
     document.globalDictationShortcut = settings.globalDictationShortcut;
+  }
+  if (settings.appIconVariant !== defaults.appIconVariant) {
+    document.appIconVariant = settings.appIconVariant;
+  }
+  if (settings.appIconSource !== defaults.appIconSource) {
+    document.appIconSource = settings.appIconSource;
+  }
+  if (settings.appIconThemedKey !== null) {
+    document.appIconThemedKey = settings.appIconThemedKey;
   }
 
   return document;
@@ -228,6 +268,32 @@ function setGlobalDictationShortcut(settings: DesktopSettings, shortcut: string)
   return settings.globalDictationShortcut === shortcut
     ? settings
     : { ...settings, globalDictationShortcut: shortcut };
+}
+
+function setAppIcon(
+  settings: DesktopSettings,
+  input: {
+    readonly variant: DesktopAppIconVariant;
+    readonly source: DesktopAppIconSource;
+    readonly themedKey?: string | null;
+  },
+): DesktopSettings {
+  const themedKey =
+    input.themedKey === undefined
+      ? settings.appIconThemedKey
+      : input.themedKey !== null && THEMED_APP_ICON_KEY_PATTERN.test(input.themedKey)
+        ? input.themedKey
+        : null;
+  return settings.appIconVariant === input.variant &&
+    settings.appIconSource === input.source &&
+    settings.appIconThemedKey === themedKey
+    ? settings
+    : {
+        ...settings,
+        appIconVariant: input.variant,
+        appIconSource: input.source,
+        appIconThemedKey: themedKey,
+      };
 }
 
 function readSettings(
@@ -335,6 +401,12 @@ export const layer = Layer.effect(
               Effect.withSpan("desktop.settings.setGlobalDictationShortcut"),
             );
       },
+      setAppIcon: (input) =>
+        persist((settings) => setAppIcon(settings, input)).pipe(
+          Effect.withSpan("desktop.settings.setAppIcon", {
+            attributes: { variant: input.variant, source: input.source },
+          }),
+        ),
     });
   }),
 );
@@ -372,6 +444,7 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
             ? Effect.fail(new GlobalDictationShortcutError())
             : update((settings) => setGlobalDictationShortcut(settings, normalized));
         },
+        setAppIcon: (input) => update((settings) => setAppIcon(settings, input)),
       });
     }),
   );

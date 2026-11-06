@@ -178,7 +178,7 @@ it("loads branding with the selected server's session and discards late image re
     sizeBytes: 1,
   };
   function Branding() {
-    return <img alt="Server branding" src={useSidebarBrandImageSrc(asset)} />;
+    return <img alt="Server branding" src={useSidebarBrandImageSrc(asset) ?? undefined} />;
   }
   const localImageSrc = new URL(asset.url, window.location.origin).toString();
   let finishRequest!: (response: Response) => void;

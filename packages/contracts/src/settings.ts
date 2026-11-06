@@ -103,6 +103,16 @@ export const SidebarBrandImageAsset = Schema.Struct({
   ),
 });
 export type SidebarBrandImageAsset = typeof SidebarBrandImageAsset.Type;
+/**
+ * Which picture the sidebar shows while `showSidebarMascot` is on.
+ * - `match`: the built-in mascot scene closest to the sidebar color.
+ * - `custom`: the uploaded `sidebarBrandImage` (falls back to `match` until one exists).
+ * - `auto`: settings saved before this choice existed; `custom` when an image
+ *   was uploaded, otherwise `match`. New writes always store `match` or `custom`.
+ */
+export const SidebarImageSource = Schema.Literals(["auto", "match", "custom"]);
+export type SidebarImageSource = typeof SidebarImageSource.Type;
+export const DEFAULT_SIDEBAR_IMAGE_SOURCE: SidebarImageSource = "auto";
 export const SidebarStarSpeed = Schema.Number.check(
   Schema.isBetween({
     minimum: MIN_SIDEBAR_STAR_SPEED,
@@ -346,6 +356,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_BRAND_WORDMARK_PREFIX))),
   sidebarBrandImage: Schema.NullOr(SidebarBrandImageAsset).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_BRAND_IMAGE)),
+  ),
+  sidebarImageSource: SidebarImageSource.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_IMAGE_SOURCE)),
   ),
   // Legacy migration input only. New upload flows store `sidebarBrandImage`
   // metadata while image bytes live in the authenticated server asset store.
@@ -1152,6 +1165,7 @@ export const ClientSettingsPatch = Schema.Struct({
     TrimmedString.check(Schema.isMaxLength(MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH)),
   ),
   sidebarBrandImage: Schema.optionalKey(Schema.NullOr(SidebarBrandImageAsset)),
+  sidebarImageSource: Schema.optionalKey(SidebarImageSource),
   sidebarStarSpeed: Schema.optionalKey(SidebarStarSpeed),
   ambianceEnabled: Schema.optionalKey(Schema.Boolean),
   ambianceEffect: Schema.optionalKey(AmbianceEffect),

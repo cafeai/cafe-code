@@ -43,6 +43,7 @@ import * as DesktopClientSettings from "./settings/DesktopClientSettings.ts";
 import * as DesktopUiLocale from "./settings/DesktopUiLocale.ts";
 import * as DesktopSavedEnvironments from "./settings/DesktopSavedEnvironments.ts";
 import * as DesktopRemoteCertificates from "./settings/DesktopRemoteCertificates.ts";
+import * as DesktopAppIcon from "./app/DesktopAppIcon.ts";
 import * as DesktopAppSettings from "./settings/DesktopAppSettings.ts";
 import * as DesktopShellEnvironment from "./shell/DesktopShellEnvironment.ts";
 import * as DesktopState from "./app/DesktopState.ts";
@@ -192,9 +193,10 @@ const desktopFoundationLayer = Layer.mergeAll(
   DesktopPowerSaveBlocker.layer,
 ).pipe(Layer.provideMerge(desktopEnvironmentLayer));
 
-const desktopLocalizedFoundationLayer = DesktopUiLocale.layer.pipe(
-  Layer.provideMerge(desktopFoundationLayer),
-);
+const desktopLocalizedFoundationLayer = Layer.mergeAll(
+  DesktopUiLocale.layer,
+  DesktopAppIcon.layer,
+).pipe(Layer.provideMerge(desktopFoundationLayer));
 
 const desktopServerExposureLayer = DesktopServerExposure.layer.pipe(
   Layer.provideMerge(DesktopServerExposure.networkInterfacesLayer),

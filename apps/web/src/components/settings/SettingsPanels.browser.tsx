@@ -6,6 +6,7 @@ import {
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  type DesktopAppIconState,
   type DesktopBridge,
   type DesktopSourceUpdateState,
   type DesktopUpdateChannel,
@@ -18,12 +19,13 @@ import {
   type ServerProvider,
   type ServerProviderDeviceLoginEvent,
   type ServerRuntimeLayerDiagnosticsResult,
+  type SetDesktopAppIconInput,
   type SourceControlDiscoveryResult,
 } from "@cafecode/contracts";
 import { MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES } from "@cafecode/contracts/settings";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
-import { page, userEvent } from "vitest/browser";
+import { page } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import type { ReactNode } from "react";
@@ -1903,8 +1905,7 @@ describe("settings panels", () => {
       .element(page.getByRole("heading", { name: "Accent color", exact: true }))
       .toBeInTheDocument();
     await expect.element(page.getByText("Interface size")).toBeInTheDocument();
-    page.getByRole("slider", { name: "Interface size" }).element().focus();
-    await userEvent.keyboard("{ArrowRight}");
+    await page.getByRole("button", { name: "Larger interface" }).click();
 
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ interfaceScalePercent: 105 });
@@ -1915,6 +1916,8 @@ describe("settings panels", () => {
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ brandWordmarkPrefix: "Acme" });
     });
+    // The live wordmark preview under the field shows the new prefix.
+    await expect.element(page.getByText("Acme", { exact: true })).toBeInTheDocument();
 
     const uploadFetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
       const url = String(input);
@@ -1943,27 +1946,33 @@ describe("settings panels", () => {
     });
     vi.stubGlobal("fetch", uploadFetch);
 
+    const imageModes = page.getByRole("group", { name: "Sidebar image" });
     await expect
-      .element(page.getByRole("heading", { name: "Sidebar image", exact: true }))
-      .toBeInTheDocument();
+      .element(imageModes.getByRole("button", { name: "Off", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
     await expect
-      .element(page.getByRole("switch", { name: "Enable sidebar image" }))
-      .not.toBeChecked();
-    await expect.element(page.getByRole("button", { name: "Choose image" })).toBeDisabled();
-    const imageRow = page
-      .getByRole("heading", { name: "Sidebar image", exact: true })
-      .element()
-      .closest("div.border-t");
-    expect(imageRow?.classList.contains("opacity-50")).toBe(true);
+      .element(page.getByRole("button", { name: "Choose image" }))
+      .not.toBeInTheDocument();
     await page.screenshot({
-      element: page
-        .getByRole("switch", { name: "Enable sidebar image" })
-        .element()
-        .closest("section")!,
+      element: imageModes.element().closest("section")!,
       path: "../../../../../.explorations/settings-reorganization/sidebar-image-disabled.png",
     });
-    await page.getByRole("switch", { name: "Enable sidebar image" }).click();
+    await imageModes.getByRole("button", { name: "Match color" }).click();
+    await vi.waitFor(() => {
+      expect(updateClientSettings).toHaveBeenCalledWith({
+        showSidebarMascot: true,
+        sidebarImageSource: "match",
+      });
+    });
+    await imageModes.getByRole("button", { name: "Custom", exact: true }).click();
+    await vi.waitFor(() => {
+      expect(updateClientSettings).toHaveBeenCalledWith({
+        showSidebarMascot: true,
+        sidebarImageSource: "custom",
+      });
+    });
     await expect.element(page.getByRole("button", { name: "Choose image" })).toBeEnabled();
+    await expect.element(page.getByText("No image", { exact: true })).toBeInTheDocument();
     await page.screenshot({
       path: "../../../../../.explorations/settings-reorganization/appearance.png",
     });
@@ -1989,6 +1998,8 @@ describe("settings panels", () => {
             sizeBytes: 1234,
           },
           sidebarBrandImageDataUrl: "",
+          showSidebarMascot: true,
+          sidebarImageSource: "custom",
         }),
       );
     });
@@ -2029,12 +2040,18 @@ describe("settings panels", () => {
       expect(updateClientSettings).toHaveBeenCalledWith({ appAccentColor: "#dc2626" });
     });
 
-    await expect.element(page.getByText("Sidebar effects color")).toBeInTheDocument();
-    setColorInput("Animated sidebar color", "#16a34a");
-
+    // The sidebar has no separate color: each accent swatch is exactly one
+    // built-in sidebar scene's color.
+    await expect
+      .element(page.getByRole("heading", { name: "Sidebar color", exact: true }))
+      .not.toBeInTheDocument();
+    await page.getByRole("button", { name: "Violet", exact: true }).click();
     await vi.waitFor(() => {
-      expect(updateClientSettings).toHaveBeenCalledWith({ themeAccentColor: "#16a34a" });
+      expect(updateClientSettings).toHaveBeenCalledWith({ appAccentColor: "#9d84ec" });
     });
+    await expect
+      .element(page.getByRole("button", { name: "Violet", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
 
     await expect.element(page.getByText("Sidebar search")).toBeInTheDocument();
     await page.getByLabelText("Show sidebar search").click();
@@ -2043,10 +2060,7 @@ describe("settings panels", () => {
       expect(updateClientSettings).toHaveBeenCalledWith({ showSidebarSearch: false });
     });
 
-    await expect
-      .element(page.getByRole("heading", { name: "Enable sidebar image", exact: true }))
-      .toBeInTheDocument();
-    await page.getByLabelText("Enable sidebar image").click();
+    await imageModes.getByRole("button", { name: "Off", exact: true }).click();
 
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ showSidebarMascot: false });
@@ -2072,6 +2086,82 @@ describe("settings panels", () => {
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ sidebarStarSpeed: 1.25 });
     });
+  });
+
+  it("unlocks the Dekai icon after ten clicks on the Icon title and restores it the same way", async () => {
+    await page.viewport(1100, 900);
+    let iconState: DesktopAppIconState = {
+      variant: "standard",
+      source: "default",
+      themedIconKey: null,
+      customIconPreviewPng: null,
+    };
+    const setAppIcon = vi.fn(async (input: SetDesktopAppIconInput) => {
+      iconState = {
+        ...iconState,
+        variant: input.variant,
+        source: input.source,
+        themedIconKey: input.themedIcon?.key ?? iconState.themedIconKey,
+      };
+      return iconState;
+    });
+    const desktopBridge: DesktopBridge = {
+      ...createDesktopBridgeStub(),
+      getAppIconState: async () => iconState,
+      setAppIcon,
+    };
+    window.desktopBridge = desktopBridge;
+    installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <AppearanceSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    const iconTitle = page.getByRole("button", { name: "Icon", exact: true });
+    await expect
+      .element(page.getByRole("button", { name: "Default", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
+    for (let tap = 1; tap <= 4; tap += 1) await iconTitle.click();
+    expect(document.body.textContent).not.toContain("away from unlocking");
+    await iconTitle.click();
+    await expect
+      .element(page.getByText("You're 5 clicks away from unlocking a secret icon."))
+      .toBeInTheDocument();
+    for (let tap = 6; tap <= 9; tap += 1) await iconTitle.click();
+    await expect
+      .element(page.getByText("You're 1 click away from unlocking a secret icon."))
+      .toBeInTheDocument();
+    expect(setAppIcon).not.toHaveBeenCalled();
+
+    await iconTitle.click();
+    await vi.waitFor(() => {
+      expect(setAppIcon).toHaveBeenCalledWith(
+        expect.objectContaining({ variant: "dekai", source: "default" }),
+      );
+    });
+    // The unlocked icon arrives already colored for the current accent color and theme.
+    await vi.waitFor(() => {
+      expect(setAppIcon.mock.calls[0]?.[0].themedIcon?.key).toMatch(/^dekai-[a-z]+-(dark|light)$/);
+    });
+    await expect.element(page.getByText("Secret icon unlocked.")).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Dekai", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
+
+    for (let tap = 1; tap <= 10; tap += 1) await iconTitle.click();
+    await vi.waitFor(() => {
+      expect(setAppIcon).toHaveBeenLastCalledWith(
+        expect.objectContaining({ variant: "standard", source: "default" }),
+      );
+    });
+    await expect.element(page.getByText("Default icon restored.")).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Default", exact: true }))
+      .toBeInTheDocument();
+    expect(setAppIcon).toHaveBeenCalledTimes(2);
   });
 
   it("shows detected editor icons in the Files default editor selector", async () => {

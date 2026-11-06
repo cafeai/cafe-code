@@ -111,6 +111,8 @@ if (process.isMainFrame === true) {
     copyText: (text: string) => ipcRenderer.invoke(IpcChannels.COPY_TEXT_CHANNEL, text),
     copyPng: (png) => ipcRenderer.invoke(IpcChannels.COPY_PNG_CHANNEL, png),
     savePng: (input) => ipcRenderer.invoke(IpcChannels.SAVE_PNG_CHANNEL, input),
+    getAppIconState: () => ipcRenderer.invoke(IpcChannels.GET_APP_ICON_STATE_CHANNEL),
+    setAppIcon: (input) => ipcRenderer.invoke(IpcChannels.SET_APP_ICON_CHANNEL, input),
     showNotification: (input) => ipcRenderer.invoke(IpcChannels.SHOW_NOTIFICATION_CHANNEL, input),
     onNotificationClick: (listener) => {
       const wrapped = (_event: Electron.IpcRendererEvent, tag: unknown) => {

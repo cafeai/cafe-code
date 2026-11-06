@@ -149,7 +149,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<SettingsNavGroup> = [
       },
       {
         get label() {
-          return uiText("Connections & remote access");
+          return uiText("Connections");
         },
         to: "/settings/connections",
         icon: MonitorSmartphoneIcon,

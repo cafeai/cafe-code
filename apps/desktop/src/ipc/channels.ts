@@ -60,3 +60,5 @@ export const CLAIM_COMPOSER_DICTATION_CAPTURE_CHANNEL = "desktop:dictation-claim
 export const RELEASE_COMPOSER_DICTATION_CAPTURE_CHANNEL =
   "desktop:dictation-release-composer-capture";
 export const GET_ADVERTISED_ENDPOINTS_CHANNEL = "desktop:get-advertised-endpoints";
+export const GET_APP_ICON_STATE_CHANNEL = "desktop:get-app-icon-state";
+export const SET_APP_ICON_CHANNEL = "desktop:set-app-icon";

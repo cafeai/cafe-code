@@ -58,10 +58,8 @@ import {
 } from "@cafecode/client-runtime";
 import { Link, useLocation, useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import {
-  DEFAULT_BRAND_WORDMARK_PREFIX,
   MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
   MIN_SIDEBAR_THREAD_PREVIEW_COUNT,
-  type SidebarBrandImageAsset,
   type SidebarProjectSortOrder,
   type SidebarThreadPreviewCount,
   type SidebarThreadSortOrder,
@@ -71,11 +69,9 @@ import { useWorkspaceProjects, useWorkspaceSidebarThreads } from "../environment
 import { WorkspaceEnvironmentSelector } from "./WorkspaceEnvironmentSelector";
 import { isElectron } from "../env";
 import { APP_STAGE_LABEL, APP_VERSION } from "../branding";
-import {
-  DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES,
-  DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET,
-  useSidebarBrandImageSrc,
-} from "../brandingImages";
+import { CafeCodeWordmark, SIDEBAR_STAGE_BADGE_CLASS_NAME } from "./CafeCodeWordmark";
+import { useSidebarImage } from "../hooks/useSidebarImage";
+import { useSidebarGlow } from "../sidebarGlow";
 import { cn, isMacPlatform, newCommandId, newThreadId } from "../lib/utils";
 import {
   selectBootstrapCompleteForEnvironment,
@@ -3632,26 +3628,6 @@ const SidebarProjectListRow = memo(function SidebarProjectListRow(props: Sidebar
   );
 });
 
-function CafeCodeWordmark({ className }: { className?: string }) {
-  const uiLocale = useUiLocale();
-
-  const prefix = useSettings((s) => {
-    const raw = s.brandWordmarkPrefix?.trim();
-    return raw || DEFAULT_BRAND_WORDMARK_PREFIX;
-  });
-  return (
-    <span
-      aria-label={uiText("{value0} Code", { value0: prefix }, undefined, uiLocale)}
-      className={cn("shrink-0 text-sm text-foreground", className)}
-    >
-      <span className="font-bold">{prefix}</span>
-      <span className="font-medium text-muted-foreground">
-        {uiText(" Code", undefined, undefined, uiLocale)}
-      </span>
-    </span>
-  );
-}
-
 type SortableProjectHandleProps = Pick<
   ReturnType<typeof useSortable>,
   "attributes" | "listeners" | "setActivatorNodeRef"
@@ -3854,8 +3830,6 @@ function SortableProjectItem({
 
 /** The release-stage chip beside the wordmark. Sentence case at the 11px
  * minimum keeps it readable instead of an 8px letter-spaced caption. */
-const SIDEBAR_STAGE_BADGE_CLASS_NAME =
-  "rounded-full bg-muted px-1.5 py-0.5 text-2xs leading-none font-medium text-subtle-foreground";
 
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   isElectron,
@@ -4022,8 +3996,6 @@ interface SidebarProjectsContentProps {
   attachProjectListAutoAnimateRef: (node: HTMLElement | null) => void;
   projectsLength: number;
   showSidebarSearch: boolean;
-  showSidebarMascot: boolean;
-  sidebarBrandImage: SidebarBrandImageAsset | null;
   showSidebarAttribution: boolean;
 }
 
@@ -4095,13 +4067,13 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     attachProjectListAutoAnimateRef,
     projectsLength,
     showSidebarSearch,
-    showSidebarMascot,
-    sidebarBrandImage,
     showSidebarAttribution,
   } = props;
 
   const addProjectHintAnchorRef = useRef<HTMLButtonElement>(null);
-  const sidebarBrandImageSrc = useSidebarBrandImageSrc(sidebarBrandImage);
+  const sidebarImage = useSidebarImage();
+  // Tints the glow behind the picture toward the picture's own colour (index.css).
+  useSidebarGlow(sidebarImage);
 
   const handleProjectSortOrderChange = useCallback(
     (sortOrder: SidebarProjectSortOrder) => {
@@ -4341,7 +4313,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
       )}
       {/* Grow spacer pushes the mascot to the bottom of the sidebar on all sizes. */}
       <div aria-hidden="true" className="min-h-6 flex-1" />
-      {showSidebarMascot ? (
+      {sidebarImage.mode !== "off" ? (
         <div className="flex shrink-0 flex-col items-center justify-center gap-2 px-4 pt-3 pb-4">
           <img
             alt=""
@@ -4349,9 +4321,9 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
             className="h-32 w-[6.4rem] select-none rounded-2xl object-cover ring-1 ring-border"
             draggable={false}
             height={128}
-            sizes={DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES}
-            src={sidebarBrandImageSrc}
-            srcSet={sidebarBrandImage ? undefined : DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET}
+            sizes={sidebarImage.sizes}
+            src={sidebarImage.src}
+            srcSet={sidebarImage.srcSet}
             width={102}
           />
           {showSidebarAttribution ? (
@@ -4416,8 +4388,6 @@ export default function Sidebar() {
   const projectGroupingSettings = useSettings(selectProjectGroupingSettings);
   const sidebarThreadPreviewCount = useSettings((s) => s.sidebarThreadPreviewCount);
   const showSidebarSearch = useSettings((s) => s.showSidebarSearch);
-  const showSidebarMascot = useSettings((s) => s.showSidebarMascot);
-  const sidebarBrandImage = useSettings((s) => s.sidebarBrandImage);
   const showSidebarAttribution = useSettings((s) => s.showSidebarAttribution);
   const desktopDebugEnabled = useDesktopDebugEnabled();
   const { updateSettings } = useUpdateSettings();
@@ -5261,8 +5231,6 @@ export default function Sidebar() {
               attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
               projectsLength={projects.length}
               showSidebarSearch={showSidebarSearch}
-              showSidebarMascot={showSidebarMascot}
-              sidebarBrandImage={sidebarBrandImage}
               showSidebarAttribution={showSidebarAttribution}
             />
 

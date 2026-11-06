@@ -126,20 +126,14 @@ function readCssVariable(name: string): string {
 
 /**
  * Weather tint resolution. An explicit ambiance color wins; otherwise follow
- * the Appearance tab's accent color, then the sidebar color, then the
+ * the Appearance tab's accent color (which also colors the sidebar), then the
  * theme-provided sidebar accent variable.
  */
-function resolveAmbianceTint(
-  ambianceColor: string,
-  appAccentColor: string,
-  themeAccentColor: string,
-): string {
+function resolveAmbianceTint(ambianceColor: string, appAccentColor: string): string {
   const custom = normalizeAccentColor(ambianceColor);
   if (custom) return custom;
   const appAccent = normalizeAccentColor(appAccentColor);
   if (appAccent) return appAccent;
-  const sidebarAccent = normalizeAccentColor(themeAccentColor);
-  if (sidebarAccent) return sidebarAccent;
   return normalizeAmbianceTint(readCssVariable("--cafe-sidebar-accent"));
 }
 
@@ -155,7 +149,6 @@ type AmbianceConfigInputs = {
   reactMode: AmbianceReactMode;
   ambianceColor: string;
   appAccentColor: string;
-  themeAccentColor: string;
   surfaceSidebar: boolean;
   surfaceThread: boolean;
   reducedMotion: boolean;
@@ -167,7 +160,7 @@ function buildEngineConfig(inputs: AmbianceConfigInputs) {
     effect: inputs.effect,
     intensity: inputs.intensity,
     reactMode: inputs.reactMode,
-    tint: resolveAmbianceTint(inputs.ambianceColor, inputs.appAccentColor, inputs.themeAccentColor),
+    tint: resolveAmbianceTint(inputs.ambianceColor, inputs.appAccentColor),
     surfaces: { sidebar: inputs.surfaceSidebar, thread: inputs.surfaceThread },
     reducedMotion: inputs.reducedMotion,
     dark: inputs.dark,
@@ -203,7 +196,6 @@ function AmbianceCanvas() {
   const surfaceComposer = useSettings((settings) => settings.ambianceSurfaceComposer);
   const ambianceColor = useSettings((settings) => settings.ambianceColor);
   const appAccentColor = useSettings((settings) => settings.appAccentColor);
-  const themeAccentColor = useSettings((settings) => settings.themeAccentColor);
   const continueBackgroundAnimations = useSettings(
     (settings) => settings.continueBackgroundAnimations,
   );
@@ -260,7 +252,6 @@ function AmbianceCanvas() {
     reactMode,
     ambianceColor,
     appAccentColor,
-    themeAccentColor,
     surfaceSidebar,
     surfaceThread,
     reducedMotion,
@@ -272,7 +263,6 @@ function AmbianceCanvas() {
     reactMode,
     ambianceColor,
     appAccentColor,
-    themeAccentColor,
     surfaceSidebar,
     surfaceThread,
     reducedMotion,
@@ -293,7 +283,6 @@ function AmbianceCanvas() {
     surfaceSidebar,
     surfaceThread,
     theme,
-    themeAccentColor,
     dark,
   ]);
 

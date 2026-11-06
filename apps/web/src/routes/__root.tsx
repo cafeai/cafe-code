@@ -57,7 +57,7 @@ import {
 } from "../rpc/serverState";
 import { selectAnyThreadRunning, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
-import { syncBrowserChromeTheme } from "../hooks/useTheme";
+import { syncBrowserChromeTheme, useTheme } from "../hooks/useTheme";
 import {
   applyAppAccentColor,
   applySidebarAccentColor,
@@ -403,19 +403,20 @@ function PowerSaveBlockerSync() {
 
 function AppearanceSettingsSync() {
   const appAccentColor = useSettings((settings) => settings.appAccentColor);
+  const { resolvedTheme } = useTheme();
   const interfaceScalePercent = useSettings((settings) => settings.interfaceScalePercent);
-  const sidebarAccentColor = useSettings((settings) => settings.themeAccentColor);
   const continueBackgroundAnimations = useSettings(
     (settings) => settings.continueBackgroundAnimations,
   );
   const sidebarStarSpeed = useSettings((settings) => settings.sidebarStarSpeed);
 
+  // Drawn a little brighter in light mode and deeper in dark mode (themeAccent.ts).
   useEffect(() => {
-    applyAppAccentColor(appAccentColor);
+    applyAppAccentColor(appAccentColor, resolvedTheme);
     return () => {
-      applyAppAccentColor(undefined);
+      applyAppAccentColor(undefined, resolvedTheme);
     };
-  }, [appAccentColor]);
+  }, [appAccentColor, resolvedTheme]);
 
   useEffect(() => {
     applyInterfaceScalePercent(interfaceScalePercent);
@@ -424,12 +425,13 @@ function AppearanceSettingsSync() {
     };
   }, [interfaceScalePercent]);
 
+  // The sidebar's stars, glow and tint always follow the accent color.
   useEffect(() => {
-    applySidebarAccentColor(sidebarAccentColor);
+    applySidebarAccentColor(appAccentColor);
     return () => {
       applySidebarAccentColor(undefined);
     };
-  }, [sidebarAccentColor]);
+  }, [appAccentColor]);
 
   useEffect(() => {
     applyCafeBackgroundAnimations(continueBackgroundAnimations);

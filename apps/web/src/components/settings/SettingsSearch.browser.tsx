@@ -60,9 +60,9 @@ function Page({ pathname }: { pathname: string }) {
       <div style={{ height: 1600 }} />
       <SettingsSection title="Sidebar">
         <SettingsRow
-          searchId="appearance.sidebarEffectsColor"
-          title="Sidebar effects color"
-          control={<button type="button">Effects picker</button>}
+          searchId="appearance.weatherColor"
+          title="Weather color"
+          control={<button type="button">Weather picker</button>}
         />
       </SettingsSection>
     </SettingsPageContainer>
@@ -244,7 +244,7 @@ function observeAppearanceNavigation({
 const searchInput = () => page.getByRole("combobox", { name: "Search settings" });
 const options = () => [...document.querySelectorAll<HTMLElement>('[role="option"]')];
 const effectsRow = () =>
-  document.querySelector<HTMLElement>('[data-settings-search-id="appearance.sidebarEffectsColor"]');
+  document.querySelector<HTMLElement>('[data-settings-search-id="appearance.weatherColor"]');
 const optionTitles = () =>
   [...document.querySelectorAll<HTMLElement>('[role="option"]')].map((option) =>
     option.querySelector("span > span")?.textContent?.trim(),
@@ -277,7 +277,7 @@ function observeSettingsSearchScroll(host: HTMLElement) {
     };
   };
   const readRow = () =>
-    host.querySelector<HTMLElement>('[data-settings-search-id="appearance.sidebarEffectsColor"]');
+    host.querySelector<HTMLElement>('[data-settings-search-id="appearance.weatherColor"]');
   const scrollOwner = (target: HTMLElement | null) => {
     // No selector-derived identity is logged. Include overflow:hidden only
     // when it really has a vertical scroll range, as scrollIntoView can move it.
@@ -505,7 +505,7 @@ describe("Settings search", () => {
       diagnostic.mark("after-fill");
 
       await vi.waitFor(() => {
-        expect(optionTitles().slice(0, 2)).toEqual(["Accent color", "Sidebar effects color"]);
+        expect(optionTitles().slice(0, 2)).toEqual(["Accent color", "Weather color"]);
       });
       assertActive();
       diagnostic.mark("results-observed");
@@ -542,7 +542,7 @@ describe("Settings search", () => {
       diagnostic.mark("navigate-observed");
       await vi.waitFor(() => {
         expect(effectsRow()?.hasAttribute(SETTINGS_SEARCH_HIGHLIGHT_ATTRIBUTE)).toBe(true);
-        expect(document.activeElement?.textContent).toBe("Effects picker");
+        expect(document.activeElement?.textContent).toBe("Weather picker");
       });
       assertActive();
       diagnostic.mark("focus-observed");
@@ -589,7 +589,7 @@ describe("Settings search", () => {
     try {
       await owner.mount();
       owner.assertActive();
-      await owner.native(() => searchInput().fill("sidebar effects"));
+      await owner.native(() => searchInput().fill("weather color"));
       owner.assertActive();
       fixture.navigate.mockImplementation(async ({ to }: SettingsSearchNavigation) => {
         fixture.pathname = to;
@@ -612,7 +612,7 @@ describe("Settings search", () => {
       await vi.waitFor(() => {
         expect(document.querySelector("[data-settings-search-input]")).toBeNull();
         expect(effectsRow()?.hasAttribute(SETTINGS_SEARCH_HIGHLIGHT_ATTRIBUTE)).toBe(true);
-        expect(document.activeElement?.textContent).toBe("Effects picker");
+        expect(document.activeElement?.textContent).toBe("Weather picker");
       });
       owner.assertActive();
       await entered;

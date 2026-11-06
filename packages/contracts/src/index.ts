@@ -8,6 +8,7 @@ export * from "./dictation.ts";
 export * from "./remoteAccess.ts";
 export * from "./ipc.ts";
 export * from "./imageExport.ts";
+export * from "./appIcon.ts";
 export * from "./visualizations.ts";
 export * from "./visualizationApi.ts";
 export * from "./mcpApps.ts";

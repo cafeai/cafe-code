@@ -15,7 +15,7 @@ session storage. Reconnect uses the bearer and mints a fresh short-lived WS toke
 An expired or revoked session requires signing in again.
 
 Owners can optionally enable **Two-factor authentication** in Settings →
-Connections & remote access on the selected server. Scan the QR code in an
+Connections on the selected server. Scan the QR code in an
 authenticator app (or enter the manual key), then confirm a working six-digit
 code. Enrollment expires after ten minutes and belongs to the exact owner
 session that started it. Ten recovery codes are shown once; save them privately.
