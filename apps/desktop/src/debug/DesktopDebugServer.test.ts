@@ -889,6 +889,16 @@ const makeLargeProviderDaemonSnapshot = () => ({
       lastTurnId: "turn-1",
     },
     pipelineDiagnostics: {
+      sqlite: {
+        activeConnectionCount: 1,
+        activeOperationCount: 1,
+        completedOperationCount: 42,
+        failedOperationCount: 2,
+        workerFailureCount: 0,
+        longestActiveOperationMs: 1234,
+        query: "private SQL must not enter compact debug",
+        parameters: ["private bound value must not enter compact debug"],
+      },
       eventLoop: {
         retainedSampleCount: 600,
         currentLagMs: 1,
@@ -1141,6 +1151,81 @@ describe("DesktopDebugServer compact snapshots", () => {
     assert.equal(compactJson.includes("nested-dictation-error-secret"), false);
     assert.equal(compactJson.includes("daemon stream secret"), false);
     assert.equal(compactJson.includes("daemon bridge credential secret"), false);
+    assert.equal(compactJson.includes("private SQL must not enter compact debug"), false);
+    assert.equal(compactJson.includes("private bound value must not enter compact debug"), false);
+    const compactDaemon = compact.providerDaemon as Record<string, unknown>;
+    const compactHealth = compactDaemon.lastHealth as Record<string, unknown>;
+    const compactPipeline = compactHealth.pipelineDiagnostics as Record<string, unknown>;
+    assert.deepEqual(compactPipeline.sqlite, {
+      activeConnectionCount: 1,
+      activeOperationCount: 1,
+      completedOperationCount: 42,
+      failedOperationCount: 2,
+      workerFailureCount: 0,
+      longestActiveOperationMs: 1234,
+    });
+    // The six worker observations are data-only schema fields. A received
+    // accessor/proxy must not execute during compact serialization, and one
+    // malformed field must not erase the other safe observations.
+    const expectedSqlite = {
+      activeConnectionCount: 1,
+      activeOperationCount: 1,
+      completedOperationCount: 42,
+      failedOperationCount: 2,
+      workerFailureCount: 0,
+      longestActiveOperationMs: 1234,
+    };
+    const sqliteFields = Object.keys(expectedSqlite) as Array<keyof typeof expectedSqlite>;
+    const projectSqlite = (pipelineDiagnostics: unknown): Record<string, unknown> | null => {
+      debugServer.publishProviderDaemonSnapshot({ lastHealth: { pipelineDiagnostics } });
+      const daemon = debugServer.buildCompactDebugSnapshot().providerDaemon as Record<
+        string,
+        unknown
+      >;
+      const health = daemon.lastHealth as Record<string, unknown>;
+      const pipeline = health.pipelineDiagnostics as Record<string, unknown>;
+      return pipeline.sqlite as Record<string, unknown> | null;
+    };
+    let receivedCodeCalls = 0;
+    const rejectReceivedCode = () => {
+      receivedCodeCalls += 1;
+      throw new Error("PRIVATE_SQLITE_GETTER_OR_PROXY");
+    };
+    for (const field of sqliteFields) {
+      const accessor = { ...expectedSqlite };
+      Object.defineProperty(accessor, field, { get: rejectReceivedCode });
+      assert.deepEqual(projectSqlite({ sqlite: accessor }), { ...expectedSqlite, [field]: null });
+    }
+    assert.isNull(projectSqlite(Object.defineProperty({}, "sqlite", { get: rejectReceivedCode })));
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    for (const sqlite of [
+      new Proxy(
+        {},
+        {
+          get: rejectReceivedCode,
+          getPrototypeOf: rejectReceivedCode,
+          getOwnPropertyDescriptor: rejectReceivedCode,
+        },
+      ),
+      revoked.proxy,
+    ])
+      assert.isNull(projectSqlite({ sqlite }));
+    const inherited = projectSqlite({ sqlite: Object.create(expectedSqlite) })!;
+    for (const field of sqliteFields) assert.isNull(inherited[field]);
+    assert.equal(receivedCodeCalls, 0);
+    const invalidSqliteValues = [
+      -1,
+      0.5,
+      Number.MAX_SAFE_INTEGER + 1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      "PRIVATE_SQLITE_VALUE",
+    ];
+    for (const [index, field] of sqliteFields.entries()) {
+      const malformed = { ...expectedSqlite, [field]: invalidSqliteValues[index] };
+      assert.deepEqual(projectSqlite({ sqlite: malformed }), { ...expectedSqlite, [field]: null });
+    }
     assert.equal(compactJson.includes('"authenticationFailureCount":2'), true);
     assert.equal(compactJson.includes('"lastAuthenticationFailureStatus":401'), true);
     assert.equal(compactJson.includes('"authenticationRetryDelayMs":30000'), true);
