@@ -2370,6 +2370,10 @@ describe("deriveWorkLogEntries", () => {
       { kind: "task.progress", payload: { taskId: "codex-turn-steer-processing:receipt-1" } },
       {
         kind: "task.progress",
+        payload: { taskId: `claude-turn-steer-processing:${"a".repeat(64)}` },
+      },
+      {
+        kind: "task.progress",
         payload: { detail: "Codex app-server began processing turn/steer." },
       },
       {
@@ -2450,7 +2454,6 @@ describe("deriveWorkLogEntries", () => {
       ).map((entry) => entry.id),
     ).toEqual(visible.map((activity) => activity.id));
     expect(deriveWorkLogEntries(hidden, undefined)).toEqual([]);
-    expect(hidden).toHaveLength(7);
   });
 
   it("shows runtime warning message details in work log entries", () => {

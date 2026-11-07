@@ -18,6 +18,8 @@ import {
  * @module ClaudeAdapterLive
  */
 import { createHash, randomUUID } from "node:crypto";
+// Native received-value boundary: Proxy detection must precede descriptor inspection.
+import { types as nodeUtilTypes } from "node:util";
 import { isClaudeStoppedExecutionResult } from "../claudeTurnInterruption.ts";
 import {
   CLAUDE_UNANSWERED_QUESTION_CAPABILITY,
@@ -258,6 +260,8 @@ const PROVIDER = ProviderDriverKind.make("claudeAgent");
 // SDK 0.3.259 caps merged first-reply/result correlation at 64 prompt UUIDs.
 // Bound inspection as well as retention even if a newer/untrusted CLI sends more.
 const CLAUDE_PROMPT_CORRELATION_LIMIT = 64;
+const CLAUDE_STEER_PROCESSING_PREFIX = "claude-turn-steer-processing:";
+const CLAUDE_STEER_PROCESSING_DESCRIPTION = "Claude began processing the submitted follow-up.";
 const CLAUDE_TASK_BINDING_LIMIT = 4_096;
 const CLAUDE_HIDDEN_TRANSCRIPT_TASK_LIMIT = 4_096;
 const CLAUDE_SUBAGENT_MESSAGE_DEDUPE_LIMIT = 4_096;
@@ -871,6 +875,21 @@ interface ClaudeTaskBinding {
 
 type RuntimeFork = <A, E>(effect: Effect.Effect<A, E, never>) => Fiber.Fiber<A, E>;
 
+/** Fresh, non-persisted primary-init authority for one query/conversation. */
+interface ClaudeSteerReceiptOwner {
+  readonly query: ClaudeQueryRuntime;
+  readonly runtimeId: string;
+  readonly expectedNativeSessionId: string | undefined;
+  nativeSessionId: string | undefined;
+}
+
+interface ClaudeSteerReceipt {
+  readonly owner: ClaudeSteerReceiptOwner;
+  readonly turn: ClaudeTurnState;
+  readonly messageId: string;
+  readonly intentSequence: number | undefined;
+}
+
 interface ClaudeSessionContext {
   /** Small independent budget; ordinary task bindings cannot multiply snapshots. */
   readonly workflowSnapshots: Map<
@@ -985,6 +1004,9 @@ interface ClaudeSessionContext {
   /** Once fallback identities overflow, unknown task visibility fails closed. */
   failClosedTaskVisibilityOverflow: boolean;
   readonly promptLifecycleByUuid: Map<string, ClaudePromptLifecycleState>;
+  /** At most the existing 64-input correlation window; never a native-input queue. */
+  readonly steerReceiptsByUuid: Map<string, ClaudeSteerReceipt>;
+  steerReceiptOwner: ClaudeSteerReceiptOwner;
   readonly capabilities: Set<string>;
   /** A replacement init invalidates all prior unanswered-callback witnesses. */
   unansweredCapability?: { readonly nativeSessionId: string } | undefined;
@@ -1184,7 +1206,13 @@ function canonicalClaudeTaskId(value: unknown): RuntimeTaskId | undefined {
     digestDomain: CLAUDE_TASK_ID_HASH_DOMAIN,
     digestPrefix: CLAUDE_TASK_ID_HASH_PREFIX,
   });
-  return taskId ? RuntimeTaskId.make(taskId) : undefined;
+  // This application-owned namespace carries exact submitted-input evidence.
+  // Provider-authored tasks/progress cannot manufacture it with a lookalike
+  // task id and arbitrary usage fields. Actual receipt emission bypasses this
+  // native-identity normalizer and constructs its own bounded digest below.
+  return taskId && !taskId.startsWith(CLAUDE_STEER_PROCESSING_PREFIX)
+    ? RuntimeTaskId.make(taskId)
+    : undefined;
 }
 
 function canonicalClaudeToolUseBindingKey(value: unknown): string | undefined {
@@ -3068,6 +3096,88 @@ function hasExactPrimaryClaudeParent(message: SDKMessage): boolean {
 function ownClaudeData(message: object, key: string): unknown {
   const descriptor = Object.getOwnPropertyDescriptor(message, key);
   return descriptor && "value" in descriptor ? descriptor.value : undefined;
+}
+
+/** Copy only inert SDK envelope slots needed by new steer presentation proof. */
+function readClaudeSteerFrame(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || nodeUtilTypes.isProxy(value) || Array.isArray(value))
+    return undefined;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return undefined;
+  const fields: Record<string, unknown> = {};
+  for (const key of [
+    "type",
+    "subtype",
+    "session_id",
+    "new_conversation_id",
+    "parent_tool_use_id",
+    "task_id",
+    "parent_task_id",
+    "run_id",
+    "agent_id",
+    "subagent_id",
+    "command_uuid",
+    "state",
+    "user_message_uuid",
+    "user_message_uuids",
+    "error",
+    "event",
+    "is_error",
+  ]) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor) {
+      if (!("value" in descriptor)) return undefined;
+      fields[key] = descriptor.value;
+    } else if (key in value) return undefined;
+  }
+  // A primary result/reply has no task-scoped owner. Null parent_tool_use_id
+  // is the public SDK root form; task/agent aliases must be entirely absent.
+  if (fields.parent_tool_use_id !== null && fields.parent_tool_use_id !== undefined)
+    return undefined;
+  for (const key of ["task_id", "parent_task_id", "run_id", "agent_id", "subagent_id"])
+    if (fields[key] !== undefined) return undefined;
+  return fields;
+}
+
+function readClaudeSteerCorrelationUuids(
+  frame: Readonly<Record<string, unknown>>,
+): ReadonlyArray<string> | undefined {
+  if (frame.user_message_uuid === undefined && frame.user_message_uuids === undefined)
+    return undefined;
+  const uuids = new Set<string>();
+  if (frame.user_message_uuid !== undefined) {
+    if (typeof frame.user_message_uuid !== "string" || frame.user_message_uuid.length > 1_024)
+      return undefined;
+    if (isUuid(frame.user_message_uuid)) uuids.add(frame.user_message_uuid);
+  }
+  if (frame.user_message_uuids !== undefined) {
+    const values = frame.user_message_uuids;
+    if (
+      nodeUtilTypes.isProxy(values) ||
+      !Array.isArray(values) ||
+      Object.getPrototypeOf(values) !== Array.prototype ||
+      Object.hasOwn(values, "constructor")
+    )
+      return undefined;
+    const length = Object.getOwnPropertyDescriptor(values, "length")?.value;
+    if (!Number.isSafeInteger(length) || length < 0 || length > CLAUDE_PROMPT_CORRELATION_LIMIT)
+      return undefined;
+    for (let index = 0; index < length; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(values, String(index));
+      if (
+        !descriptor ||
+        !("value" in descriptor) ||
+        typeof descriptor.value !== "string" ||
+        descriptor.value.length > 1_024
+      )
+        return undefined;
+      // Native batches may contain provider-owned, non-UUID identities beside
+      // Cafe inputs. They neither authorize a receipt nor invalidate an exact
+      // independently matched Cafe UUID elsewhere in this bounded batch.
+      if (isUuid(descriptor.value)) uuids.add(descriptor.value);
+    }
+  }
+  return [...uuids];
 }
 
 /** New account/startup presentation never borrows a task-scoped identity. */
@@ -5298,6 +5408,224 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const offerRuntimeEvent = (context: ClaudeSessionContext, event: ProviderRuntimeEvent) =>
     Queue.offer(runtimeEventQueue, decorateRuntimeEvent(context, event)).pipe(Effect.asVoid);
 
+  const hasCurrentSteerReceiptOwner = (
+    context: ClaudeSessionContext,
+    owner: ClaudeSteerReceiptOwner,
+  ): boolean =>
+    sessions.get(context.session.threadId) === context &&
+    !context.stopped &&
+    !context.authFailureSeen &&
+    !context.queryClosureUncertain &&
+    context.steerReceiptOwner === owner &&
+    context.query === owner.query &&
+    context.subagentRuntimeId === owner.runtimeId;
+
+  const hasCurrentSteerReceipt = (
+    context: ClaudeSessionContext,
+    messageUuid: string,
+    receipt: ClaudeSteerReceipt,
+  ): boolean =>
+    hasCurrentSteerReceiptOwner(context, receipt.owner) &&
+    receipt.owner.nativeSessionId !== undefined &&
+    context.resumeSessionId === receipt.owner.nativeSessionId &&
+    context.lastThreadStartedId === receipt.owner.nativeSessionId &&
+    context.steerReceiptsByUuid.get(messageUuid) === receipt &&
+    context.turnState === receipt.turn &&
+    context.session.activeTurnId === receipt.turn.turnId;
+
+  const rememberClaudeSteerReceipt = (
+    context: ClaudeSessionContext,
+    messageUuid: string,
+    input: ProviderSteerTurnInput,
+    turn: ClaudeTurnState,
+  ): void => {
+    const owner = context.steerReceiptOwner;
+    const sequence = input.intentSequence;
+    if (
+      !hasCurrentSteerReceiptOwner(context, owner) ||
+      context.turnState !== turn ||
+      context.session.activeTurnId !== turn.turnId ||
+      typeof input.messageId !== "string" ||
+      input.messageId.length === 0 ||
+      input.messageId.length > 1_024 ||
+      (sequence !== undefined && (!Number.isSafeInteger(sequence) || sequence < 0)) ||
+      context.steerReceiptsByUuid.size >= CLAUDE_PROMPT_CORRELATION_LIMIT
+    )
+      return;
+    // This is a bounded presentation lease, not the native input queue. At
+    // capacity, keep submitting every original input without eviction/replay;
+    // absence of a lease cannot be upgraded into consumption evidence later.
+    context.steerReceiptsByUuid.set(messageUuid, {
+      owner,
+      turn,
+      messageId: input.messageId,
+      intentSequence: sequence,
+    });
+  };
+
+  const retireClaudeSteerTurn = (context: ClaudeSessionContext, turn: ClaudeTurnState): void => {
+    for (const [uuid, receipt] of context.steerReceiptsByUuid)
+      if (receipt.turn === turn) context.steerReceiptsByUuid.delete(uuid);
+  };
+
+  const captureClaudeSteerEvidence = (context: ClaudeSessionContext, message: SDKMessage) => {
+    const frame = readClaudeSteerFrame(message);
+    const owner = context.steerReceiptOwner;
+    if (!frame || !hasCurrentSteerReceiptOwner(context, owner)) return undefined;
+    const sessionId = frame.session_id;
+    if (
+      typeof sessionId !== "string" ||
+      sessionId.length > 1_024 ||
+      exactClaudeProviderIdentity(sessionId) !== sessionId
+    )
+      return undefined;
+    if (frame.type === "system" && frame.subtype === "init") {
+      if (
+        (owner.expectedNativeSessionId !== undefined &&
+          owner.expectedNativeSessionId !== sessionId) ||
+        (owner.nativeSessionId !== undefined && owner.nativeSessionId !== sessionId)
+      )
+        return undefined;
+      return {
+        owner,
+        initialization: sessionId,
+        receipts: [] as Array<readonly [string, ClaudeSteerReceipt]>,
+      };
+    }
+    if (
+      owner.nativeSessionId !== sessionId ||
+      context.resumeSessionId !== sessionId ||
+      context.lastThreadStartedId !== sessionId
+    )
+      return undefined;
+    if (frame.type === "conversation_reset") {
+      const nextId = frame.new_conversation_id;
+      if (typeof nextId !== "string" || !isUuid(nextId)) return undefined;
+      // Revoke old conversation authority synchronously before native logging
+      // or any other await. A later init must independently bind the new root.
+      context.steerReceiptsByUuid.clear();
+      context.steerReceiptOwner = {
+        query: context.query,
+        runtimeId: context.subagentRuntimeId,
+        expectedNativeSessionId: nextId,
+        nativeSessionId: undefined,
+      };
+      return undefined;
+    }
+    let uuids: ReadonlyArray<string> | undefined;
+    if (frame.type === "command_lifecycle") {
+      const uuid = frame.command_uuid;
+      if (typeof uuid !== "string" || !isUuid(uuid)) return undefined;
+      if (frame.state === "cancelled" || frame.state === "discarded") {
+        // Cancellation/discard is not processing. Retire only this exact live lease; the
+        // existing native failure/recovery path retains its original policy.
+        context.steerReceiptsByUuid.delete(uuid);
+        return undefined;
+      }
+      if (frame.state !== "started" && frame.state !== "completed") return undefined;
+      uuids = [uuid];
+    } else if (
+      (frame.type === "assistant" && frame.error === undefined) ||
+      frame.type === "stream_event" ||
+      (frame.type === "system" && frame.subtype === "thinking_tokens") ||
+      (frame.type === "result" &&
+        typeof frame.is_error === "boolean" &&
+        typeof frame.subtype === "string" &&
+        [
+          "success",
+          "error_during_execution",
+          "error_max_turns",
+          "error_max_budget_usd",
+          "error_max_structured_output_retries",
+        ].includes(frame.subtype))
+    ) {
+      if (frame.type === "stream_event") {
+        const event = frame.event;
+        if (
+          !event ||
+          typeof event !== "object" ||
+          nodeUtilTypes.isProxy(event) ||
+          Array.isArray(event)
+        )
+          return undefined;
+        const type = Object.getOwnPropertyDescriptor(event, "type");
+        if (
+          !type ||
+          !("value" in type) ||
+          ![
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+          ].includes(type.value)
+        )
+          return undefined;
+      }
+      // Explicit correlation only: the ordinary legacy result fallback never
+      // proves which submitted follow-up the provider actually consumed.
+      uuids = readClaudeSteerCorrelationUuids(frame);
+    }
+    if (!uuids) return undefined;
+    const receipts: Array<readonly [string, ClaudeSteerReceipt]> = [];
+    for (const uuid of uuids) {
+      const receipt = context.steerReceiptsByUuid.get(uuid);
+      if (!receipt || !hasCurrentSteerReceipt(context, uuid, receipt)) continue;
+      receipts.push([uuid, receipt]);
+    }
+    return { owner, initialization: undefined, receipts };
+  };
+
+  const emitClaudeSteerEvidence = Effect.fn("emitClaudeSteerEvidence")(function* (
+    context: ClaudeSessionContext,
+    evidence: NonNullable<ReturnType<typeof captureClaudeSteerEvidence>>,
+  ) {
+    if (!hasCurrentSteerReceiptOwner(context, evidence.owner)) return;
+    if (evidence.initialization !== undefined) {
+      evidence.owner.nativeSessionId = evidence.initialization;
+      return;
+    }
+    for (const [messageUuid, receipt] of evidence.receipts) {
+      if (!hasCurrentSteerReceipt(context, messageUuid, receipt)) continue;
+      const stamp = yield* makeEventStamp();
+      // The stamp yields. Recheck and consume the exact object immediately
+      // beside the unbounded event queue's synchronous one-shot publication.
+      // Cancel/reset/replacement cannot lend its authority across that await.
+      if (!hasCurrentSteerReceipt(context, messageUuid, receipt)) continue;
+      context.steerReceiptsByUuid.delete(messageUuid);
+      const digest = createHash("sha256")
+        .update("cafecode/claude-steer-processing/v1\0")
+        .update(messageUuid)
+        .digest("hex");
+      Queue.offerUnsafe(
+        runtimeEventQueue,
+        decorateRuntimeEvent(context, {
+          ...stamp,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          turnId: receipt.turn.turnId,
+          type: "task.progress",
+          payload: {
+            taskId: RuntimeTaskId.make(`${CLAUDE_STEER_PROCESSING_PREFIX}${digest}`),
+            description: CLAUDE_STEER_PROCESSING_DESCRIPTION,
+            visibility: "ambient",
+            usage: {
+              provider: "claudeAgent",
+              messageId: receipt.messageId,
+              ...(receipt.intentSequence !== undefined
+                ? { intentSequence: receipt.intentSequence }
+                : {}),
+              providerInstanceId: boundInstanceId,
+              subagentRuntimeId: context.subagentRuntimeId,
+            },
+          },
+          providerRefs: nativeProviderRefs(context),
+        }),
+      );
+    }
+  });
+
   const emitClaudeProvisionalTaskRetraction = Effect.fn("emitClaudeProvisionalTaskRetraction")(
     function* (
       context: ClaudeSessionContext,
@@ -6558,6 +6886,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
 
     const updatedAt = yield* nowIso;
+    retireClaudeSteerTurn(context, turnState);
     context.deferredTurnResult = undefined;
     context.turnState = undefined;
     context.session = {
@@ -9414,6 +9743,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // ensureThreadId's legacy mutable cursor adoption. Never infer init from
     // a result, status, permission mode or saved native history coordinate.
     const currentQuery = sessions.get(context.session.threadId) === context;
+    const steerEvidence = currentQuery
+      ? captureClaudeSteerEvidence(context, incomingMessage)
+      : undefined;
     const credentialInitialization = currentQuery
       ? captureClaudeCredentialInit(context, incomingMessage)
       : undefined;
@@ -9701,6 +10033,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     } else {
       yield* logNativeSdkMessage(context, message);
     }
+    if (steerEvidence) yield* emitClaudeSteerEvidence(context, steerEvidence);
     if (credentialReset && hasCurrentCredentialExpiryOwner(context, credentialReset.owner)) {
       context.credentialExpiryExpectedInitSessionId = credentialReset.nextSessionId;
       yield* retireCredentialExpiryOwner(context, credentialReset.owner);
@@ -10114,6 +10447,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const { quotaReport: _stoppedQuota, ...stoppedSession } = context.session;
     context.session = stoppedSession;
     context.stopped = true;
+    context.steerReceiptsByUuid.clear();
     const credentialExpiryOwner = context.credentialExpiryOwner;
     context.credentialExpiryOwner = undefined;
     if (context.turnState) context.turnState.responseLimitError = undefined;
@@ -11370,6 +11704,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         terminalTaskIds: new Set(),
         failClosedTaskVisibilityOverflow: false,
         promptLifecycleByUuid: new Map(),
+        steerReceiptsByUuid: new Map(),
+        steerReceiptOwner: {
+          query: queryRuntime,
+          runtimeId: subagentRuntimeId,
+          expectedNativeSessionId: existingResumeSessionId,
+          nativeSessionId: undefined,
+        },
         capabilities: new Set(),
         fastModeRequested: fastMode,
         turnState: undefined,
@@ -12016,6 +12357,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
     function* (threadId, _turnId) {
       const context = yield* requireSession(threadId);
+      if (context.turnState && (_turnId === undefined || context.turnState.turnId === _turnId))
+        retireClaudeSteerTurn(context, context.turnState);
       if (_turnId === undefined || context.turnState?.turnId === _turnId)
         yield* cancelGlideSession(context.glideBinding);
       const interruptedTurn =
@@ -12081,6 +12424,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           if (Exit.isSuccess(cancellation) && cancellation.value === true) {
             confirmedCancellationCount += 1;
             context.promptLifecycleByUuid.delete(messageUuid);
+            context.steerReceiptsByUuid.delete(messageUuid);
           } else {
             unconfirmedCancellationCount += 1;
           }
@@ -12769,8 +13113,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // Keep accounting in the same critical section so completion cannot
         // clear/replace turnState before the accepted prompt is attributed.
         context.promptLifecycleByUuid.set(messageUuid, "submitted");
+        rememberClaudeSteerReceipt(context, messageUuid, input, admittedTurnState);
         if (!Queue.offerUnsafe(context.promptQueue, { type: "message", message })) {
           context.promptLifecycleByUuid.delete(messageUuid);
+          context.steerReceiptsByUuid.delete(messageUuid);
           return Effect.fail(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
@@ -12810,6 +13156,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // steer to its own active turn id before queueing exactly one SDK user
     // message into the already-running prompt stream.
     context.promptLifecycleByUuid.set(messageUuid, "submitted");
+    rememberClaudeSteerReceipt(context, messageUuid, input, admittedTurnState);
     yield* Queue.offer(context.promptQueue, {
       type: "message",
       message,
@@ -12818,6 +13165,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       Effect.tapError(() =>
         Effect.sync(() => {
           context.promptLifecycleByUuid.delete(messageUuid);
+          context.steerReceiptsByUuid.delete(messageUuid);
         }),
       ),
     );

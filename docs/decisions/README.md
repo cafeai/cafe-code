@@ -53,3 +53,5 @@ Related provider lifecycle decisions:
 - [Claude provider metadata advisories](claude-provider-metadata-advisories.md):
   volatile native-owner sign-in expiry observations and bounded invalid-config
   guidance, separate from authentication, recovery and execution authority.
+
+- [Claude steer consumption](claude-steer-consumption.md): exact native input, message, attempt and runtime ownership for steering presentation.

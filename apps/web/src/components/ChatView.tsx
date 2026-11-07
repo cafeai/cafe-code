@@ -278,6 +278,7 @@ import {
   doesSteerActivityMatchPendingAttempt,
   doesRetryableSteerFailureMatchPendingAttempt,
   doesSteerProcessingActivityMatchPending,
+  doesClaudeSteerProcessingActivityMatchPending,
   hasServerAcknowledgedLocalDispatch,
   isSteerProcessingActivityTimely,
   type LocalDispatchSnapshot,
@@ -661,6 +662,9 @@ interface PendingSteerDispatch {
   readonly commandId: CommandId;
   readonly requiresIntentSequence: boolean;
   readonly turnId: TurnId | null;
+  /** Exact native owner observed at the final steer admission boundary. */
+  readonly providerInstanceId: string | null;
+  readonly subagentRuntimeId: string | null;
   readonly snapshot: ComposerSendSnapshot;
   readonly dispatchedAt: string;
   readonly intentSequence: number | null;
@@ -831,6 +835,18 @@ function threadHasSteerRecoveryForMessage(thread: Thread, pending: PendingSteerD
 
 function threadHasSteerProcessingStarted(thread: Thread, pending: PendingSteerDispatch) {
   return thread.activities.some((activity) => {
+    if (thread.session?.provider === "claudeAgent") {
+      return doesClaudeSteerProcessingActivityMatchPending({
+        activity,
+        session: thread.session,
+        pendingMessageId: pending.messageId,
+        pendingIntentSequence: pending.intentSequence,
+        requiresIntentSequence: pending.requiresIntentSequence,
+        pendingTurnId: pending.turnId,
+        pendingProviderInstanceId: pending.providerInstanceId,
+        pendingSubagentRuntimeId: pending.subagentRuntimeId,
+      });
+    }
     if (activity.kind !== "task.progress") {
       return false;
     }
@@ -5858,7 +5874,10 @@ export default function ChatView(props: ChatViewProps) {
           messageId: messageIdForSend,
           commandId: commandIdForSend,
           requiresIntentSequence: options?.queuedItem?.automaticSteerRetry != null,
-          turnId: activeThread.session?.activeTurnId ?? activeThread.latestTurn?.turnId ?? null,
+          turnId:
+            currentSteerSession?.activeTurnId ?? currentSteerThread?.latestTurn?.turnId ?? null,
+          providerInstanceId: currentSteerSession?.providerInstanceId ?? null,
+          subagentRuntimeId: currentSteerSession?.subagentRuntimeId ?? null,
           snapshot,
           dispatchedAt: messageCreatedAt,
           intentSequence: null,

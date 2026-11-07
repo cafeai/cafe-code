@@ -3665,10 +3665,32 @@ describe("incremental orchestration updates", () => {
     });
   });
 
-  it("retains an older visible start and its ambient visibility tombstone together", () => {
+  it("retains ambient visibility and consumption metadata through the tail and detail replacement", () => {
     const olderTurnId = TurnId.make("turn-ambient-background-child");
     const currentTurnId = TurnId.make("turn-after-ambient-child");
     const childId = "provider-ambient-child";
+    const processingReceipt: Thread["activities"][number] = {
+      id: EventId.make("ambient-claude-consumption"),
+      tone: "info",
+      kind: "task.progress",
+      summary: "Reasoning update",
+      payload: {
+        taskId: `claude-turn-steer-processing:${"a".repeat(64)}`,
+        visibility: "ambient",
+        nativeWorkRuntimeId: "16f7d05e-709c-4b84-9638-7f9a0484729b",
+        detail: "Claude began processing the submitted follow-up.",
+        usage: {
+          provider: "claudeAgent",
+          messageId: "ambient-claude-message",
+          intentSequence: 31,
+          providerInstanceId: "claude-retention-account",
+          subagentRuntimeId: "16f7d05e-709c-4b84-9638-7f9a0484729b",
+        },
+      },
+      turnId: currentTurnId,
+      sequence: 3,
+      createdAt: "2026-02-27T00:00:31.000Z",
+    };
     const lifecycle: Thread["activities"] = [
       {
         id: EventId.make("ambient-boundary-start"),
@@ -3702,7 +3724,7 @@ describe("incremental orchestration updates", () => {
       summary: "Ordinary later-turn activity",
       payload: {},
       turnId: currentTurnId,
-      sequence: index + 3,
+      sequence: index + 4,
       createdAt: "2026-02-27T00:01:00.000Z",
     }));
     const thread = makeThread({
@@ -3714,7 +3736,7 @@ describe("incremental orchestration updates", () => {
         completedAt: null,
         assistantMessageId: null,
       },
-      activities: [...lifecycle, ...ordinaryTail],
+      activities: [...lifecycle, processingReceipt, ...ordinaryTail],
     });
     const next = applyOrchestrationEvent(
       makeState(thread),
@@ -3725,7 +3747,7 @@ describe("incremental orchestration updates", () => {
           activity: {
             ...ordinaryTail[0]!,
             id: EventId.make("ambient-boundary-ordinary-newest"),
-            sequence: 503,
+            sequence: 504,
           },
         },
         { sequence: 2_080 },
@@ -3738,6 +3760,61 @@ describe("incremental orchestration updates", () => {
       retained.filter((activity) => activity.turnId === olderTurnId).map((activity) => activity.id),
     ).toEqual(["ambient-boundary-start", "ambient-boundary-hidden"]);
     expect(deriveSubagentWorkEntries(retained, olderTurnId)).toEqual([]);
+    expect(retained.find((activity) => activity.id === processingReceipt.id)).toEqual(
+      processingReceipt,
+    );
+    expect(deriveSubagentWorkEntries(retained, currentTurnId)).toEqual([]);
+
+    // A detail replacement transports the actual retained receipt rather than
+    // re-creating its message/attempt/owner fields. A later live append must
+    // preserve that exact metadata even though it precedes the ordinary tail.
+    const hydrated = syncServerThreadDetail(
+      makeState(makeThread({ id: thread.id })),
+      {
+        id: thread.id,
+        projectId: thread.projectId,
+        title: thread.title,
+        modelSelection: thread.modelSelection,
+        runtimeMode: thread.runtimeMode,
+        interactionMode: thread.interactionMode,
+        branch: thread.branch,
+        worktreePath: thread.worktreePath,
+        latestTurn: thread.latestTurn,
+        createdAt: thread.createdAt,
+        updatedAt: "2026-02-27T00:02:00.000Z",
+        archivedAt: null,
+        deletedAt: null,
+        messages: [],
+        proposedPlans: [],
+        activities: retained,
+        checkpoints: [],
+        session: null,
+        goal: null,
+      },
+      localEnvironmentId,
+      2_081,
+    );
+    const afterReplacement = applyOrchestrationEvent(
+      hydrated,
+      makeEvent(
+        "thread.activity-appended",
+        {
+          threadId: thread.id,
+          activity: {
+            ...ordinaryTail[0]!,
+            id: EventId.make("ambient-boundary-after-detail"),
+            sequence: 505,
+          },
+        },
+        { sequence: 2_082 },
+      ),
+      localEnvironmentId,
+    );
+    expect(
+      threadsOf(afterReplacement)[0]?.activities.find(
+        (activity) => activity.id === processingReceipt.id,
+      ),
+    ).toEqual(processingReceipt);
   });
 
   it.each(["subagent", "workflow"] as const)(

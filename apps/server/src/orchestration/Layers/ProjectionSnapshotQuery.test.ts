@@ -5285,6 +5285,19 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
       const sql = yield* SqlClient.SqlClient;
       const threadId = ThreadId.make("thread-all-turn-subagent-retention");
+      const processingReceiptPayload = {
+        taskId: `claude-turn-steer-processing:${"a".repeat(64)}`,
+        visibility: "ambient",
+        nativeWorkRuntimeId: "16f7d05e-709c-4b84-9638-7f9a0484729b",
+        detail: "Claude began processing the submitted follow-up.",
+        usage: {
+          provider: "claudeAgent",
+          messageId: "hydrated-claude-message",
+          intentSequence: 31,
+          providerInstanceId: "claude-retention-account",
+          subagentRuntimeId: "16f7d05e-709c-4b84-9638-7f9a0484729b",
+        },
+      };
 
       yield* sql`
         INSERT INTO projection_projects(
@@ -5408,6 +5421,18 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             1001, '2026-10-04T00:02:02.000Z'
           )
       `;
+      // This consumption receipt has no subagent presentation or task control.
+      // Its ambient identity must retain the complete input/attempt/owner
+      // metadata through both the legacy lane and real sidecar hydration.
+      yield* sql`
+        INSERT INTO projection_thread_activities(
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        ) VALUES (
+          'claude-consumption-before-tail', ${threadId}, 'turn-current', 'info', 'task.progress',
+          'Reasoning update', ${encodeJsonString(processingReceiptPayload)},
+          1002, '2026-10-04T00:02:03.000Z'
+        )
+      `;
       yield* sql`
         WITH RECURSIVE tail(index_value) AS (
           SELECT 1 UNION ALL SELECT index_value + 1 FROM tail
@@ -5463,6 +5488,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             (activity) => activity.id === asEventId("fallback-utf16-rejected"),
           ),
         );
+        assert.deepStrictEqual(
+          partialDetail.value.activities.find(
+            (activity) => activity.id === asEventId("claude-consumption-before-tail"),
+          )?.payload,
+          processingReceiptPayload,
+        );
       }
 
       yield* hydrateSubagentLifecycleForThread(sql, threadId);
@@ -5473,6 +5504,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           hydratedDetail.value.activities.some(
             (activity) => activity.id === asEventId("older-turn-child-start"),
           ),
+        );
+        assert.deepStrictEqual(
+          hydratedDetail.value.activities.find(
+            (activity) => activity.id === asEventId("claude-consumption-before-tail"),
+          )?.payload,
+          processingReceiptPayload,
         );
       }
 
@@ -5502,6 +5539,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const terminalDetail = yield* snapshotQuery.getThreadDetailById(threadId);
       assert.equal(terminalDetail._tag, "Some");
       if (terminalDetail._tag === "Some") {
+        const processingReceipt = terminalDetail.value.activities.find(
+          (activity) => activity.id === asEventId("claude-consumption-before-tail"),
+        );
+        assert.equal(processingReceipt?.turnId, asTurnId("turn-current"));
+        assert.deepStrictEqual(processingReceipt?.payload, processingReceiptPayload);
         assert.deepStrictEqual(
           terminalDetail.value.activities
             .filter(

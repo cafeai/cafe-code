@@ -8630,7 +8630,7 @@ describe("ProviderCommandReactor", () => {
       updatedAt: now,
     });
 
-    await Effect.runPromise(
+    const startReceipt = await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-routed-to-steer"),
@@ -8659,6 +8659,7 @@ describe("ProviderCommandReactor", () => {
       threadId,
       expectedTurnId: runtimeActiveTurnId,
       messageId: asMessageId("user-message-routed-to-steer"),
+      intentSequence: startReceipt.sequence,
       input: "this should steer the active turn",
     });
 
@@ -11735,7 +11736,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    const steerReceipt = await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.steer",
         commandId: CommandId.make("cmd-turn-steer"),
@@ -11756,6 +11757,7 @@ describe("ProviderCommandReactor", () => {
       threadId: ThreadId.make("thread-1"),
       expectedTurnId: asTurnId("turn-1"),
       messageId: asMessageId("user-message-steer"),
+      intentSequence: steerReceipt.sequence,
       input: "adjust course",
     });
     await waitFor(async () => {

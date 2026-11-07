@@ -18,7 +18,10 @@ import { type ComposerImageAttachment, type DraftThreadState } from "../composer
 import * as Schema from "effect/Schema";
 import { selectThreadByRef, useStore } from "../store";
 import type { DraftThreadEnvMode } from "../composerDraftStore";
-import { readCodexRoutineWarningStatus } from "@cafecode/shared/providerWorkLog";
+import {
+  CLAUDE_STEER_PROCESSING_TASK_PREFIX,
+  readCodexRoutineWarningStatus,
+} from "@cafecode/shared/providerWorkLog";
 
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "cafe-code:last-invoked-script-by-project";
 export const LEGACY_LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "cafecode:last-invoked-script-by-project";
@@ -209,13 +212,15 @@ export function shouldResolvePendingSteerDispatch(input: {
     return true;
   }
 
-  if (input.provider === "codex") {
+  if (input.provider === "codex" || input.provider === "claudeAgent") {
     // Upstream Codex owns the active-turn race inside one UserTurn command:
     // `turn/steer` falls through to exactly one `turn/start` only after
     // app-server reports that the cached active turn is gone. A terminal
     // projection by itself is therefore not permission for the renderer to
     // replay the same input. Wait for provider processing or the backend's
-    // explicit recovery/failure activity instead.
+    // explicit recovery/failure activity instead. Claude's primary native
+    // UUID lifecycle supplies its own exact processing receipt; unrelated
+    // assistant output or root completion cannot acknowledge a queued input.
     return input.steerProcessingStarted;
   }
 
@@ -755,6 +760,109 @@ export function readSteerProcessingMessageId(payloadValue: unknown): string | nu
   // under `usage`. Accept that transport shape during the protocol migration,
   // while preferring the explicit top-level correlation used by new events.
   return readNonEmptyString(readUnknownRecord(payload.usage)?.messageId);
+}
+
+/**
+ * Only Cafe's primary Claude UUID-lifecycle receipt acknowledges consumption.
+ * Generic native task progress, a command ACK and assistant prose are not
+ * evidence that this particular follow-up reached the active query. Bind the
+ * receipt to both the owner captured at dispatch and the still-current owner;
+ * a later account/runtime must not borrow an older receipt. The canonical
+ * active turn may already have advanced when a durable receipt is hydrated:
+ * only the receipt's own turn must still identify this captured input.
+ */
+export function doesClaudeSteerProcessingActivityMatchPending(input: {
+  readonly activity: OrchestrationThreadActivity;
+  readonly session: ThreadSession | null;
+  readonly pendingMessageId: string;
+  readonly pendingIntentSequence: number | null;
+  readonly requiresIntentSequence: boolean;
+  readonly pendingTurnId: TurnId | null;
+  readonly pendingProviderInstanceId: string | null;
+  readonly pendingSubagentRuntimeId: string | null;
+}): boolean {
+  const { activity, session } = input;
+  if (
+    session?.provider !== "claudeAgent" ||
+    typeof input.pendingTurnId !== "string" ||
+    input.pendingTurnId.length === 0 ||
+    typeof input.pendingProviderInstanceId !== "string" ||
+    input.pendingProviderInstanceId.length === 0 ||
+    typeof input.pendingSubagentRuntimeId !== "string" ||
+    input.pendingSubagentRuntimeId.length === 0 ||
+    input.pendingMessageId.length === 0 ||
+    session.providerInstanceId !== input.pendingProviderInstanceId ||
+    session.subagentRuntimeId !== input.pendingSubagentRuntimeId ||
+    activity.kind !== "task.progress" ||
+    activity.turnId !== input.pendingTurnId
+  ) {
+    return false;
+  }
+
+  // New receipt fields are metadata, not display text. Read own data fields
+  // only so malformed/accessor-backed records cannot invoke code or gain the
+  // legacy sequence fallback. Store projections are ordinary data, but this
+  // boundary also fails closed on malformed cached or received records.
+  try {
+    const ownValue = (value: unknown, key: string): unknown => {
+      if (value === null || typeof value !== "object") return undefined;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return descriptor && "value" in descriptor ? descriptor.value : undefined;
+    };
+    const payload = ownValue(activity, "payload");
+    const taskId = ownValue(payload, "taskId");
+    const usage = ownValue(payload, "usage");
+    if (
+      payload === null ||
+      typeof payload !== "object" ||
+      Array.isArray(payload) ||
+      usage === null ||
+      typeof usage !== "object" ||
+      Array.isArray(usage) ||
+      typeof taskId !== "string" ||
+      !taskId.startsWith(CLAUDE_STEER_PROCESSING_TASK_PREFIX) ||
+      !/^[a-f0-9]{64}$/u.test(taskId.slice(CLAUDE_STEER_PROCESSING_TASK_PREFIX.length)) ||
+      ownValue(usage, "provider") !== "claudeAgent" ||
+      ownValue(usage, "messageId") !== input.pendingMessageId ||
+      ownValue(usage, "providerInstanceId") !== input.pendingProviderInstanceId ||
+      ownValue(usage, "subagentRuntimeId") !== input.pendingSubagentRuntimeId ||
+      ownValue(payload, "nativeWorkRuntimeId") !== input.pendingSubagentRuntimeId
+    ) {
+      return false;
+    }
+    const sequenceDescriptor =
+      usage !== null && typeof usage === "object"
+        ? Object.getOwnPropertyDescriptor(usage, "intentSequence")
+        : undefined;
+    // Omission is a narrow legacy shape, not permission to ignore a received
+    // inherited field. Presence checks do not invoke an inherited getter.
+    if (!sequenceDescriptor && Reflect.has(usage, "intentSequence")) return false;
+    if (sequenceDescriptor) {
+      if (
+        !("value" in sequenceDescriptor) ||
+        typeof sequenceDescriptor.value !== "number" ||
+        !Number.isSafeInteger(sequenceDescriptor.value) ||
+        sequenceDescriptor.value < 0
+      )
+        return false;
+    } else if (input.requiresIntentSequence) {
+      return false;
+    }
+    // Feed the explicit native attempt through the existing shared fence.
+    // Reused MessageIds cannot settle before their command ACK, nor from a
+    // missing, malformed or earlier attempt. Unique legacy input can retain
+    // the established sequence-order fallback without inventing consumption.
+    return doesSteerActivityMatchPendingAttempt({
+      activity: {
+        payload: sequenceDescriptor ? { intentSequence: sequenceDescriptor.value } : {},
+        ...(activity.sequence !== undefined ? { sequence: activity.sequence } : {}),
+      },
+      pendingIntentSequence: input.pendingIntentSequence,
+      requiresIntentSequence: input.requiresIntentSequence,
+    });
+  } catch {
+    return false;
+  }
 }
 
 export function doesSteerProcessingActivityMatchPending(input: {
