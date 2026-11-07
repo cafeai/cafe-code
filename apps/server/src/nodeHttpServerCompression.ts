@@ -27,6 +27,41 @@ const make = Effect.fnUntraced(function* (
 ) {
   const scope = yield* Effect.scope;
   const server = evaluate();
+  // Node's HTTP parser normally owns a connection's error event, but removes
+  // that owner when upgrading the connection. The pinned Effect adapter can
+  // still write a rejected/late upgrade response through that same raw socket.
+  // Register before listen: a single disconnected peer must retire only its
+  // exact transport, never become an unhandled process-wide EPIPE exception.
+  const ownedSockets = new WeakSet<NodeNet.Socket>();
+  const ownSocket = (socket: NodeNet.Socket) => {
+    if (ownedSockets.has(socket)) return;
+    ownedSockets.add(socket);
+    socket.on("error", () => {
+      if (!socket.destroyed) socket.destroy();
+    });
+    // Deliberately keep this exact owner's error drain on the socket object
+    // through upgrade, close and any queued late write. Removing it on finish
+    // or close reopens the asynchronous error gap. No global collection keeps
+    // the closed socket alive, and other native/WS error listeners still run.
+  };
+  server.on("connection", ownSocket);
+  yield* Scope.addFinalizer(
+    scope,
+    Effect.sync(() => {
+      server.off("connection", ownSocket);
+    }),
+  );
+  const ownedResponses = new WeakSet<NodeHttp.ServerResponse>();
+  const ownResponse = (response: NodeHttp.ServerResponse) => {
+    if (ownedResponses.has(response)) return;
+    ownedResponses.add(response);
+    // Small ordinary responses also use an asynchronous native write even when
+    // the Effect adapter immediately returns. Keep an object-owned drain after
+    // that return; native close retains the adapter's existing cancellation.
+    response.on("error", () => {
+      if (!response.destroyed) response.destroy();
+    });
+  };
   const shutdown = yield* Effect.callback<void>((resume) => {
     if (!server.listening) {
       return resume(Effect.void);
@@ -95,17 +130,21 @@ const make = Effect.fnUntraced(function* (
         middleware,
         scope: requestScope,
       });
+      const ownedHandler: typeof handler = (request, response) => {
+        ownResponse(response);
+        handler(request, response);
+      };
       // @effect-diagnostics-next-line anyUnknownInErrorContext:off - The public Effect WebSocket adapter accepts generic route effects here.
       const upgradeHandler = yield* NodeHttpServer.makeUpgradeHandler(wssEffect, httpApp, {
         middleware,
         scope: requestScope,
       });
       yield* Scope.addFinalizerExit(serveScope, () => {
-        server.off("request", handler);
+        server.off("request", ownedHandler);
         server.off("upgrade", upgradeHandler);
         return preemptiveShutdown;
       });
-      server.on("request", handler);
+      server.on("request", ownedHandler);
       server.on("upgrade", upgradeHandler);
     }),
   });

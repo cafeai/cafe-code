@@ -1,10 +1,13 @@
 # Verification decision index
 
-Last updated: 2026-11-06 12:50:28 JST (UTC+0900)
+Last updated: 2026-11-08 03:53:13 JST (UTC+0900)
 
 This index covers verification decisions; independent feature decisions remain
 in this directory.
 
+- [Native HTTP transport error ownership](http-transport-error-ownership.md):
+  exact socket/response error lifetimes across asynchronous replies and
+  WebSocket upgrades, without process-wide exception swallowing.
 - [Bounded local Node scheduling](bounded-local-node-scheduling.md): two local
   workspace owners by default, explicit unchanged CI scheduling, and qualified
   exact-input reuse only on eligible local tasks.
