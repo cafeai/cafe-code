@@ -3,7 +3,7 @@
 Decision: accepted for implementation under the user's freeze-repair request.
 Implementation: implemented; each delivery requires the regression and final repository checks described below.
 Created: 2026-11-08 00:38:48 JST (UTC+0900)
-Last updated: 2026-11-08 02:25:42 JST (UTC+0900)
+Last updated: 2026-11-08 04:43:17 JST (UTC+0900)
 
 ## Context
 
@@ -44,11 +44,31 @@ acceptance, recovery and control evidence. Historical event/control discovery
 can still search its authenticated stream; the repair does not claim that every
 legacy lookup is a primary-key probe or replace missing history with a row cap.
 
+### Session-status binding reads follow active native inventory
+
+Status listing already captures the current native sessions before enriching
+them with persisted bindings. It now reads bindings only for the unique active
+thread IDs, rather than enumerating and loading every saved thread. An empty
+native inventory needs no binding reads, and duplicate native entries do not
+repeat the same persisted lookup. Saved history cannot introduce another active
+native session to this response.
+
+Per-binding missing/error fallback, provider and provider-instance validation,
+resume-cursor and runtime-mode enrichment, session ordering and exact-owner
+heartbeat updates remain unchanged. This reduces status-read work as saved
+history grows; it does not change the separate reconciliation of persisted
+owners or assert that these reads caused a particular earlier heartbeat delay.
+
 ## Required qualification
 
 The primary regression holds a real SQLite writer lock, waits for the production client's exact native statement admission, and proves an independent loopback HTTP request remains serviceable before that statement finishes. Releasing the writer must allow the original operation to settle exactly once. Additional boundary coverage verifies cancellation followed by rollback and owner exclusion, native close/reopen, nested ordinary and transactional queries while consuming materialized stream rows, native error classification and structured-clone value/mode compatibility. The original synchronous implementation must fail the responsiveness regression for the intended reason. The forced desktop build and a real compiled-worker query outside the checkout qualify the worker's receipt and runtime dependency boundary; native platform CI remains separate from local evidence.
 
-The analyzed mature-stream fixture separately checks the real legacy lookup's
+The mature-stream fixture separately checks the real legacy lookup's
 complete evidence result and native query plan. It must select the supplied
 acceptance range and probe processing events by command identity after their
 projected witnesses, without changing delayed-acceptance Stop semantics.
+
+The provider-service inventory regression separately protects active-binding
+enrichment and ownership checks while unrelated saved-thread enumeration is
+unavailable. This is a status-work bound, not a wall-clock benchmark or a claim
+that the running native provider has adopted newly built source.

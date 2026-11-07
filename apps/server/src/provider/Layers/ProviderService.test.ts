@@ -5184,13 +5184,15 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
-  it.effect("dies when an active session conflicts with its persisted binding", () =>
+  it.effect("lists only active persisted identities and rejects conflicting owners", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
       const directory = yield* ProviderSessionDirectory;
       const threadId = asThreadId("thread-binding-mismatch");
+      const dormantThreadId = asThreadId("thread-dormant-status-binding");
+      const resumeCursor = { opaque: "active-status-resume-cursor" };
 
-      yield* provider.startSession(threadId, {
+      const session = yield* provider.startSession(threadId, {
         provider: ProviderDriverKind.make("codex"),
         providerInstanceId: codexInstanceId,
         threadId,
@@ -5198,12 +5200,83 @@ routing.layer("ProviderServiceLive routing", (it) => {
         runtimeMode: "full-access",
       });
       yield* directory.upsert({
+        threadId: dormantThreadId,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: claudeAgentInstanceId,
+        runtimeMode: "full-access",
+        resumeCursor: { opaque: "dormant-status-private-cursor" },
+      });
+      yield* directory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "approval-required",
+        resumeCursor,
+      });
+      const nativeSessionWithoutCursor = { ...session };
+      Reflect.deleteProperty(nativeSessionWithoutCursor, "resumeCursor");
+      routing.codex.updateSession(threadId, () => nativeSessionWithoutCursor);
+
+      // Status is an inventory of native-active sessions, not permission to
+      // enumerate or hydrate dormant private history. Model a directory whose
+      // unrelated storage is unavailable, while the exact live key remains
+      // readable. The one-key budget also refuses duplicate hydration work;
+      // the result below must still use the real persisted cursor and mode.
+      let remainingBindingReads = 1;
+      const originalGetBinding = directory.getBinding;
+      const restorers: Array<() => void> = [];
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          for (const restore of restorers.toReversed()) restore();
+        }),
+      );
+      const enumeration = vi.spyOn(directory, "listThreadIds").mockImplementation(() =>
+        Effect.sync(() => {
+          assert.fail("Active session status must not enumerate dormant persisted identities.");
+        }),
+      );
+      restorers.push(() => enumeration.mockRestore());
+      const bindingRead = vi.spyOn(directory, "getBinding").mockImplementation((requestedId) =>
+        Effect.sync(() => {
+          assert.equal(requestedId, threadId, "Status must not read a dormant binding.");
+          assert.isAbove(
+            remainingBindingReads,
+            0,
+            "Status exhausted its live identity read budget.",
+          );
+          remainingBindingReads -= 1;
+        }).pipe(Effect.andThen(originalGetBinding(requestedId))),
+      );
+      restorers.push(() => bindingRead.mockRestore());
+
+      const sessions = yield* provider.listSessions();
+      assert.deepEqual(
+        sessions.map((active) => ({
+          threadId: active.threadId,
+          provider: active.provider,
+          providerInstanceId: active.providerInstanceId,
+          runtimeMode: active.runtimeMode,
+          resumeCursor: active.resumeCursor,
+        })),
+        [
+          {
+            threadId,
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: codexInstanceId,
+            runtimeMode: "approval-required",
+            resumeCursor,
+          },
+        ],
+      );
+
+      yield* directory.upsert({
         threadId,
         provider: ProviderDriverKind.make("claudeAgent"),
         providerInstanceId: claudeAgentInstanceId,
         runtimeMode: "full-access",
       });
 
+      remainingBindingReads = 1;
       const exit = yield* Effect.exit(provider.listSessions());
       assert.equal(Exit.hasDies(exit), true);
       yield* directory.upsert({
@@ -5212,7 +5285,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         providerInstanceId: codexInstanceId,
         runtimeMode: "full-access",
       });
-    }),
+    }).pipe(Effect.scoped),
   );
 
   it.effect("stops stale sessions in other providers after a successful replacement start", () =>
