@@ -1995,10 +1995,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       exactClientCorrelationId,
       exactAcceptedAt,
     }) => {
-      // Do not express the exact form as `(parameter IS NULL OR column =
-      // parameter)`: SQLite cannot reliably select the primary-key access
-      // path through that shape. Startup supplies both immutable primary keys,
-      // so emit plain equalities and keep work independent of thread age.
+      // Emit supplied identities as equalities in both forms. An optional
+      // `(parameter IS NULL OR column = parameter)` hides the legacy caller's
+      // known thread/turn from SQLite's index selection, even when both values
+      // are present. Missing filters still mean complete historical coverage;
+      // this changes the access path, never the admitted evidence set.
       const acceptedIdentityPredicate = exactLookup
         ? sql`
             accepted.activity_id = ${exactActivityId}
@@ -2009,14 +2010,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             AND json_extract(accepted.payload_json, '$.clientCorrelationId') IS
               ${exactClientCorrelationId}
           `
-        : sql`
-            (${threadId} IS NULL OR accepted.thread_id = ${threadId})
-            AND (${acceptedTurnId} IS NULL OR accepted.turn_id = ${acceptedTurnId})
-            AND (
-              ${messageId} IS NULL
-              OR json_extract(accepted.payload_json, '$.messageId') = ${messageId}
-            )
-          `;
+        : sql.and([
+            threadId === null ? sql`1 = 1` : sql`accepted.thread_id = ${threadId}`,
+            acceptedTurnId === null ? sql`1 = 1` : sql`accepted.turn_id = ${acceptedTurnId}`,
+            messageId === null
+              ? sql`1 = 1`
+              : sql`json_extract(accepted.payload_json, '$.messageId') = ${messageId}`,
+          ]);
       const acceptedEventIdentityPredicate = exactLookup
         ? sql`accepted_event.sequence = ${exactEventSequence}`
         : sql`
@@ -2057,7 +2057,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           EXISTS (
             SELECT 1
             FROM projection_thread_activities AS processing
-            INNER JOIN orchestration_events AS processing_event
+              INDEXED BY idx_projection_thread_activities_thread_turn_kind_created_id
+            CROSS JOIN orchestration_events AS processing_event
+              INDEXED BY idx_orch_events_command_id
               ON processing_event.command_id =
                 'provider:codex:' || processing.thread_id || ':' ||
                 processing.activity_id || ':thread-activity-append:' || processing.activity_id
@@ -2193,7 +2195,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             LIMIT 1
           ) AS "sessionStopRequested"
         FROM projection_thread_activities AS accepted
-        INNER JOIN orchestration_events AS accepted_event
+        -- The projected acceptance is the narrow outer owner. In particular,
+        -- do not let a mature thread's event stream drive the correlated
+        -- processing lookup repeatedly before its exact command-id probe.
+        CROSS JOIN orchestration_events AS accepted_event
           ON ${acceptedEventIdentityPredicate}
           AND accepted_event.aggregate_kind = 'thread'
           AND accepted_event.stream_id = accepted.thread_id
@@ -2212,7 +2217,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             accepted_event.payload_json,
             '$.activity.payload.clientCorrelationId'
           ) IS json_extract(accepted.payload_json, '$.clientCorrelationId')
-        INNER JOIN orchestration_events AS accepted_intent
+        CROSS JOIN orchestration_events AS accepted_intent
           ON ${acceptedIntentIdentityPredicate}
           AND accepted_intent.sequence < accepted_event.sequence
           AND accepted_intent.aggregate_kind = 'thread'
@@ -2227,11 +2232,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             json_extract(accepted.payload_json, '$.messageId')
           AND json_extract(accepted_intent.payload_json, '$.createdAt') =
             accepted_intent.occurred_at
-        INNER JOIN projection_thread_messages AS message
+        CROSS JOIN projection_thread_messages AS message
           ON message.thread_id = accepted.thread_id
           AND message.message_id = json_extract(accepted.payload_json, '$.messageId')
           AND message.role = 'user'
-        INNER JOIN projection_turns AS accepted_turn
+        CROSS JOIN projection_turns AS accepted_turn
           ON accepted_turn.thread_id = accepted.thread_id
           AND accepted_turn.turn_id = accepted.turn_id
         WHERE accepted.kind = 'provider.turn.steer.accepted'

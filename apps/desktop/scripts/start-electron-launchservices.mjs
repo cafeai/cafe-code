@@ -54,6 +54,10 @@ export async function runStartElectronLaunchServices({
     stdoutPath,
     stderrPath,
     configuredBaseDir: baseDir,
+    // LaunchServices drops terminal PATH even though /usr/bin/open itself
+    // received it. Forward only this bounded explicit value, never credentials
+    // or the full source-launcher environment, to the existing native host.
+    pathEnvironment: environment.PATH,
     args: appArgs.filter((argument) => argument !== "--no-follow"),
   });
   const result = spawnSync("/usr/bin/open", args, {

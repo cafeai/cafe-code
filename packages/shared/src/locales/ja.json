@@ -2847,6 +2847,7 @@
   "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset.": "このプロバイダーランタイムは、サブエージェント数の数値上限を適用できません。既存のチャットの上書き設定をリセットすることはできます。",
   "This provider runtime does not support the account subagent limit. Clear it in account settings or use a supported runtime before sending.": "このプロバイダーランタイムは、アカウントのサブエージェント上限に対応していません。送信する前にアカウント設定で解除するか、対応するランタイムを使用してください。",
   "This provider runtime does not support the saved subagent limit. Reset it in More composer controls before sending.": "このプロバイダーランタイムは、保存済みのサブエージェント上限に対応していません。送信する前に「入力欄の追加操作」でリセットしてください。",
+  "This provider runtime is unavailable or its subagent-limit support could not be verified. Check the provider status and retry. Your saved limit has been kept.": "このプロバイダーランタイムは利用できないか、サブエージェント上限への対応を確認できませんでした。プロバイダーの状態を確認して、もう一度お試しください。保存済みの上限は保持されています。",
   "This provider session": "このプロバイダーのセッション",
   "This question's answer changed in another view. Review the follow-up queue before trying again.": "この質問への回答が別の画面で変更されました。再試行する前にフォローアップキューを確認してください。",
   "This queued follow-up changed in another view. Reload and review it before trying again.": "キュー内のこのフォローアップが別の画面で変更されました。再読み込みして内容を確認してから、再試行してください。",

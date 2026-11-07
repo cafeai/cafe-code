@@ -56,6 +56,17 @@ uses global provider state. It is a build-compatibility check, not a signature
 against a person able to edit the source checkout. Packaged releases do not use
 this source-launch prerequisite.
 
+On macOS, the source launcher explicitly carries its `PATH` through
+LaunchServices to the immutable Debug host, Electron and the provider daemon.
+The value remains one literal environment argument, preserving executable
+directory order and spaces. It is limited to 16 KiB of UTF-8 and refuses NUL or
+line breaks with a fixed error; no other terminal environment or credentials
+are forwarded by this selection. An absent or empty `PATH` retains the existing
+GUI/login-shell fallback. Desktop login-shell hydration still runs before the
+daemon opens and merges the inherited lookup as a fallback. This preserves
+access to already installed provider executables; it does not install a CLI,
+change the selected account, or alter Debug's private provider homes.
+
 General Settings shows the **active server environment's** reported profile
 and directory. This can differ from the local desktop profile when connected to
 a remote server. An older server that omits profile metadata remains unknown;

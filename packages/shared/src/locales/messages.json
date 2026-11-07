@@ -13260,6 +13260,10 @@
     "message": "This provider runtime does not support the saved subagent limit. Reset it in More composer controls before sending.",
     "locations": ["apps/web/src/lib/subagentConcurrencyAdmission.ts:23"]
   },
+  "This provider runtime is unavailable or its subagent-limit support could not be verified. Check the provider status and retry. Your saved limit has been kept.": {
+    "message": "This provider runtime is unavailable or its subagent-limit support could not be verified. Check the provider status and retry. Your saved limit has been kept.",
+    "locations": ["apps/web/src/lib/subagentConcurrencyAdmission.ts:39"]
+  },
   "This provider session": {
     "message": "This provider session",
     "locations": ["apps/web/src/components/chat/ComposerInteractionCard.tsx:23"]
@@ -14519,7 +14523,7 @@
   },
   "Wait for a safe idle turn before sending with this subagent limit. The active session’s account is not recorded.": {
     "message": "Wait for a safe idle turn before sending with this subagent limit. The active session’s account is not recorded.",
-    "locations": ["apps/web/src/lib/subagentConcurrencyAdmission.ts:39"]
+    "locations": ["apps/web/src/lib/subagentConcurrencyAdmission.ts:47"]
   },
   "Wait for current work to finish and reconnect first.": {
     "message": "Wait for current work to finish and reconnect first.",

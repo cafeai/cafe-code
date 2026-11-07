@@ -33,6 +33,14 @@ export function getUNSUPPORTED_ACCOUNT_SUBAGENT_LIMIT_MESSAGE() {
   );
 }
 
+export const UNVERIFIED_SUBAGENT_LIMIT_MESSAGE =
+  "This provider runtime is unavailable or its subagent-limit support could not be verified. Check the provider status and retry. Your saved limit has been kept.";
+export function getUNVERIFIED_SUBAGENT_LIMIT_MESSAGE() {
+  return uiText(
+    "This provider runtime is unavailable or its subagent-limit support could not be verified. Check the provider status and retry. Your saved limit has been kept.",
+  );
+}
+
 export const UNRECORDED_STEER_SUBAGENT_OWNER_MESSAGE =
   "Wait for a safe idle turn before sending with this subagent limit. The active session’s account is not recorded.";
 export function getUNRECORDED_STEER_SUBAGENT_OWNER_MESSAGE() {
@@ -72,6 +80,8 @@ export function subagentConcurrencyAdmissionError(input: {
         readonly providers: ReadonlyArray<{
           readonly instanceId: ProviderInstanceId;
           readonly driver: ProviderDriverKind;
+          readonly installed?: boolean | undefined;
+          readonly version?: string | null | undefined;
           readonly runtimeCapabilities?:
             | {
                 readonly subagentConcurrency?: boolean | undefined;
@@ -165,9 +175,16 @@ export function subagentConcurrencyAdmissionError(input: {
   // Older servers can discard additive command fields. Refuse before uploads,
   // optimistic messages, queue claims, or RPC dispatch rather than silently
   // losing the user's numeric execution policy. Never strip remembered intent.
-  return account?.runtimeCapabilities?.subagentConcurrency === true || sameMaterializedContinuation
-    ? null
-    : key !== null && input.limits?.[key] !== undefined
-      ? getUNSUPPORTED_SUBAGENT_LIMIT_MESSAGE()
-      : getUNSUPPORTED_ACCOUNT_SUBAGENT_LIMIT_MESSAGE();
+  if (account?.runtimeCapabilities?.subagentConcurrency === true || sameMaterializedContinuation)
+    return null;
+  // A failed executable lookup or an unqualified version is not evidence that
+  // the runtime lacks this feature. Keep the numeric intent and the same
+  // closed admission; only its explanation changes. An exact, already-owned
+  // continuation above does not depend on launching a replacement executable.
+  // Legacy snapshots that omit these fields retain their existing guidance.
+  if (account?.installed === false || account?.version === null)
+    return getUNVERIFIED_SUBAGENT_LIMIT_MESSAGE();
+  return key !== null && input.limits?.[key] !== undefined
+    ? getUNSUPPORTED_SUBAGENT_LIMIT_MESSAGE()
+    : getUNSUPPORTED_ACCOUNT_SUBAGENT_LIMIT_MESSAGE();
 }

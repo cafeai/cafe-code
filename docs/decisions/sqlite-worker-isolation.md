@@ -3,7 +3,7 @@
 Decision: accepted for implementation under the user's freeze-repair request.
 Implementation: implemented; each delivery requires the regression and final repository checks described below.
 Created: 2026-11-08 00:38:48 JST (UTC+0900)
-Last updated: 2026-11-08 01:32:20 JST (UTC+0900)
+Last updated: 2026-11-08 02:25:42 JST (UTC+0900)
 
 ## Context
 
@@ -35,6 +35,20 @@ The worker inherits the process's existing private database access rather than a
 
 Off-thread execution keeps HTTP responsive while storage is slow; it does not make every database operation fast or guarantee an account-dependent request can complete while its required query is blocked. Very large queries still need bounded plans and payloads. Native statement cancellation remains join-before-release rather than a potentially unsafe forced termination.
 
+The legacy Codex steer-acceptance lookup therefore also keeps supplied thread,
+turn and message filters visible to SQLite as direct predicates. Projected
+acceptances drive the join, and each processing witness drives an indexed
+command lookup. This prevents a mature event stream from becoming the outer
+loop of a repeated processing search while retaining complete historical
+acceptance, recovery and control evidence. Historical event/control discovery
+can still search its authenticated stream; the repair does not claim that every
+legacy lookup is a primary-key probe or replace missing history with a row cap.
+
 ## Required qualification
 
 The primary regression holds a real SQLite writer lock, waits for the production client's exact native statement admission, and proves an independent loopback HTTP request remains serviceable before that statement finishes. Releasing the writer must allow the original operation to settle exactly once. Additional boundary coverage verifies cancellation followed by rollback and owner exclusion, native close/reopen, nested ordinary and transactional queries while consuming materialized stream rows, native error classification and structured-clone value/mode compatibility. The original synchronous implementation must fail the responsiveness regression for the intended reason. The forced desktop build and a real compiled-worker query outside the checkout qualify the worker's receipt and runtime dependency boundary; native platform CI remains separate from local evidence.
+
+The analyzed mature-stream fixture separately checks the real legacy lookup's
+complete evidence result and native query plan. It must select the supplied
+acceptance range and probe processing events by command identity after their
+projected witnesses, without changing delayed-acceptance Stop semantics.
