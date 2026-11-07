@@ -5,9 +5,11 @@ Implementation status: Implemented in source; rebuilt runtime adoption required
 Verification status: Contract and synthetic retirement regressions passed locally;
 exact-source GitHub CI and rebuilt runtime adoption remain separate gates
 Created: 2026-10-29 23:00:14 JST (UTC+0900)
-Last updated: 2026-10-30 02:41:31 JST (UTC+0900)
+Last updated: 2026-11-08 02:55:00 JST (UTC+0900)
 Decision authority: User request to automatically stop the obsolete daemon that
 blocks bootstrap, followed by explicit authorization to push dev without local tests.
+Source identity extension authority: the user's Debug startup failure reports and
+request to fix, run targeted checks, publish and rebuild before restarting.
 Supplements: [ownership-safe startup](provider-daemon-migration-startup.md).
 Partially supersedes only the POSIX startup replacement limitation in
 [update retirement](provider-daemon-update-retirement.md); installation consent,
@@ -69,6 +71,31 @@ No process enumeration, executable matching, PID-only signal or compatibility
 bypass is introduced. Incompatible process roles/protocols remain refused.
 
 ## Compatibility and limits
+
+### Source runtime compatibility includes the primary compiled closure
+
+Source desktop builds use a domain-separated compatibility identity derived
+from the application version, exact backend entry path and the existing
+qualified server SourceDebug fingerprint. The fingerprint revalidates the
+bounded emitted primary code and dependency-pointer receipt, then rereads that
+receipt unchanged. A thin `bin.mjs` loader alone is insufficient: its bytes can
+remain identical while `backend.mjs`, an emitted worker/chunk or the reduced
+runtime dependency pointer changes. Missing or inconsistent source receipts
+fail before recovery credentials, marker adoption, leases or spawning. Synthetic
+manager fixtures use the real inert receipt publisher rather than a production
+legacy bypass.
+
+The new source identity cannot adopt an older entry-only identity. Any resulting
+replacement still uses all existing native profile singleton, lifecycle mutex,
+bootstrap-root authentication, nonce/ACK, native exit and private namespace
+guards above. It never manufactures a build mismatch or signals an observed PID.
+Packaged compatibility identity remains unchanged in this source Debug repair;
+ASAR virtual entries need their own native qualification before a broader
+packaged closure claim. The SourceDebug fingerprint binds emitted primary code
+and the runtime pointer, not an independent rehash of every dependency-tree
+byte, secondary bridge build or provider executable. PATH is not included:
+binding it requires a frozen capture propagated identically to the actual child,
+which the current desktop environment interface does not supply.
 
 This protocol cannot retrofit a daemon already running older code. Such a
 legacy POSIX owner still needs an explicit stop through its owning Cafe Code
