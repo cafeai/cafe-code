@@ -5,7 +5,7 @@ Implementation status: Implemented in source; rebuilt runtime adoption pending
 Verification status: Native regression, targeted HTTP compatibility, server
 typecheck, format, lint and repository audit passed locally; runtime adoption pending
 Created: 2026-11-08 03:38:48 JST (UTC+0900)
-Last updated: 2026-11-08 03:53:13 JST (UTC+0900)
+Last updated: 2026-11-08 05:50:35 JST (UTC+0900)
 Decision authority: The user's recurrent Debug disconnection report and request
 to investigate the running application's debug statistics.
 
@@ -59,6 +59,17 @@ native failure, serves an independent healthy request and closes cleanly.
 Its bounded large response holds a real write pending; the historical small
 response's exact `EPIPE` timing was not reproduced. Both errors exercise the
 same missing socket error owner, without synthetic error emission.
+
+The peer keeps its read side open after sending the real TCP FIN. It abandons
+that exact connection only from its first native response-data callback, so
+actual response progress precedes reset. An earlier fixture closed immediately
+after FIN; the Windows CI test timed out without recording the blocked phase.
+That timeout alone does not prove a particular native event ordering. The
+revised fixture removes the premature-close ambiguity while still requiring
+an actual write/writev error, independent healthy response and clean child
+exit. A reset/read error or merely surviving without an observed failed write
+does not qualify this regression. Failure-only diagnostics contain bounded
+phase names, never response bytes or arbitrary native error text.
 
 Cleanup is registered before asynchronous acquisition and joins the exact
 native child, requests and sockets. Existing request, authentication and

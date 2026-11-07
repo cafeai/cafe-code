@@ -31,6 +31,14 @@ interface NativeExit {
   readonly code: number | null;
   readonly signal: NodeJS.Signals | null;
 }
+type FixturePhase =
+  | Phase
+  | "starting"
+  | "fin-sent"
+  | "first-response-data"
+  | "reset-requested"
+  | "healthy-response"
+  | "child-close";
 
 function nativeUpgradeFixture(context: TestContext) {
   let retired = false;
@@ -44,6 +52,21 @@ function nativeUpgradeFixture(context: TestContext) {
   const socketCloses: Promise<void>[] = [];
   const requestCloses: Promise<void>[] = [];
   const operations = new Set<Promise<unknown>>();
+  const pendingAbandonments = new Set<(error: Error) => void>();
+  let abandonedPeer: Net.Socket | undefined;
+  let beginAbandonment: (() => Promise<void>) | undefined;
+  let waitingFor: FixturePhase = "ready";
+  let observedPhase: FixturePhase = "starting";
+  let failureReported = false;
+  const reportFailure = (): void => {
+    if (failureReported) return;
+    failureReported = true;
+    // Both fields are finite fixture-owned enums. No received bytes, peer
+    // addresses, native error text or environment values enter this record.
+    process.stderr.write(
+      `[Cafe Code HTTP fixture] waiting=${waitingFor} observed=${observedPhase}\n`,
+    );
+  };
   const waiters = new Set<{
     readonly type: Phase;
     readonly resolve: (observation: Observation) => void;
@@ -79,6 +102,8 @@ function nativeUpgradeFixture(context: TestContext) {
     retired = true;
     closePromise ??= (async () => {
       failWaiters(retiredError());
+      for (const reject of pendingAbandonments) reject(retiredError());
+      pendingAbandonments.clear();
       for (const request of requests) request.destroy();
       for (const socket of sockets) socket.destroy();
       if (child && !exited) {
@@ -97,6 +122,7 @@ function nativeUpgradeFixture(context: TestContext) {
     return closePromise;
   };
   const onAbort = (): void => {
+    reportFailure();
     retired = true;
     // A hard test timeout cannot wait for its own stuck fixture controller.
     // This is only our retained inert child handle, never a provider or PID.
@@ -104,6 +130,7 @@ function nativeUpgradeFixture(context: TestContext) {
     void close().catch(() => undefined);
   };
   context.signal.addEventListener("abort", onAbort, { once: true });
+  context.onTestFailed(reportFailure);
   context.onTestFinished(async () => {
     await close();
   });
@@ -121,6 +148,7 @@ function nativeUpgradeFixture(context: TestContext) {
   nativeClose = new Promise<NativeExit>((resolve) => {
     owner.once("close", (code, signal) => {
       exited = { code, signal };
+      observedPhase = "child-close";
       const fault = observations.find((observation) => observation.type === "native-error");
       failWaiters(
         new Error(
@@ -163,6 +191,7 @@ function nativeUpgradeFixture(context: TestContext) {
           }
         : {}),
     };
+    observedPhase = observation.type;
     observations.push(observation);
     for (const waiter of waiters) {
       if (waiter.type !== observation.type) continue;
@@ -173,6 +202,7 @@ function nativeUpgradeFixture(context: TestContext) {
 
   const waitFor = (type: Phase): Promise<Observation> => {
     assertLive();
+    waitingFor = type;
     const observation = observations.find((item) => item.type === type);
     if (observation) return Promise.resolve(observation);
     if (exited) return Promise.reject(new Error("The native HTTP child has already closed."));
@@ -185,21 +215,100 @@ function nativeUpgradeFixture(context: TestContext) {
     close,
     openAbandonedUpgrade(port: number): Net.Socket {
       assertLive();
+      if (abandonedPeer !== undefined)
+        throw new Error("The native HTTP fixture already owns its abandoned peer.");
+      let finSent = false;
+      let settled = false;
+      let resolveFirstData!: () => void;
+      let rejectFirstData!: (error: Error) => void;
+      const firstData = track(
+        new Promise<void>((resolve, reject) => {
+          resolveFirstData = resolve;
+          rejectFirstData = reject;
+        }),
+      );
+      const refuseAbandonment = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        pendingAbandonments.delete(refuseAbandonment);
+        rejectFirstData(error);
+      };
+      pendingAbandonments.add(refuseAbandonment);
       const socket = Net.connect({ host: "127.0.0.1", port }, () => {
         if (retired) return socket.destroy();
         socket.write(
           "GET /abandoned-upgrade HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
         );
       });
+      abandonedPeer = socket;
       ownSocket(socket);
-      socket.on("error", () => {});
-      socket.resume();
+      // Register before any FIN or flowing read. The old destroySoon ordering
+      // could close this peer before the child attempted its native response,
+      // leaving no failed-write witness on some hosts.
+      socket.once("data", (chunk: Buffer) => {
+        if (settled) return;
+        if (
+          retired ||
+          context.signal.aborted ||
+          abandonedPeer !== socket ||
+          !sockets.has(socket) ||
+          socket.destroyed
+        ) {
+          refuseAbandonment(retiredError());
+          return;
+        }
+        if (!finSent || !Buffer.isBuffer(chunk) || chunk.length === 0) {
+          refuseAbandonment(new Error("The native HTTP response arrived outside its admission."));
+          return;
+        }
+        observedPhase = "first-response-data";
+        // Real response bytes establish that the server has begun writing.
+        // Retire only this exact peer synchronously in that native callback;
+        // no IPC round trip, timing wait or synthetic error supplies readiness.
+        try {
+          socket.resetAndDestroy();
+        } catch {
+          refuseAbandonment(new Error("The native HTTP peer could not be reset."));
+          return;
+        }
+        observedPhase = "reset-requested";
+        settled = true;
+        pendingAbandonments.delete(refuseAbandonment);
+        resolveFirstData();
+      });
+      socket.once("close", () =>
+        refuseAbandonment(new Error("The native HTTP peer closed before its response arrived.")),
+      );
+      socket.on("error", () =>
+        refuseAbandonment(new Error("The native HTTP peer failed before its response arrived.")),
+      );
+      // A data listener starts flowing reads. Pause this exact peer until the
+      // original route-entered receipt has been awaited by the test below.
+      socket.pause();
+      beginAbandonment = () => {
+        assertLive();
+        if (abandonedPeer !== socket || !sockets.has(socket) || socket.destroyed || finSent)
+          throw new Error("The native HTTP peer cannot admit another abandonment.");
+        finSent = true;
+        waitingFor = "first-response-data";
+        observedPhase = "fin-sent";
+        socket.end();
+        socket.resume();
+        return firstData;
+      };
       return socket;
+    },
+    halfCloseAndAbandonAfterResponse(socket: Net.Socket): Promise<void> {
+      assertLive();
+      if (socket !== abandonedPeer || beginAbandonment === undefined)
+        throw new Error("The native HTTP fixture does not own this peer.");
+      return beginAbandonment();
     },
     requestHealthy(
       port: number,
     ): Promise<{ readonly status: number | undefined; readonly text: string }> {
       assertLive();
+      waitingFor = "healthy-response";
       return track(
         new Promise((resolve, reject) => {
           const request = Http.get(
@@ -262,10 +371,9 @@ it("survives a real failed upgrade write and still serves an independent HTTP re
   assert.isTrue(Number.isInteger(port) && port > 0 && port <= 65535);
   const peer = fixture.openAbandonedUpgrade(port);
   await fixture.waitFor("route-entered");
-  // Gracefully send the real TCP FIN, then abandon the read side. The server
-  // releases its held rejection only when that FIN arrives on its exact peer.
-  peer.end();
-  peer.destroySoon();
+  // Send the same real FIN. Keep the read side until the first actual response
+  // data, then abandon it from that callback so the late write has truly begun.
+  await fixture.halfCloseAndAbandonAfterResponse(peer);
   const failure = await fixture.waitFor("native-error");
   assert.oneOf(failure.code, ["EPIPE", "ECONNRESET"]);
   assert.oneOf(failure.syscall, ["write", "writev"]);
