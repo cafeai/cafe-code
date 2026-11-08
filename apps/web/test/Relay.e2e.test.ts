@@ -320,7 +320,18 @@ async function fixture(test: TestContext, native: "chromium" | "electron") {
     page = await electron.firstWindow();
     await check();
   }
-  return { page, invitation, host, server, authOperations, sessions, close, secret, bearer };
+  return {
+    page,
+    origin,
+    invitation,
+    host,
+    server,
+    authOperations,
+    sessions,
+    close,
+    secret,
+    bearer,
+  };
 }
 
 for (const native of ["chromium", "electron"] as const)
@@ -339,10 +350,65 @@ for (const native of ["chromium", "electron"] as const)
         const url = request.url();
         if (url.includes(f.secret) || url.includes(f.bearer)) leaked = true;
       });
+      let prematureRelayRequests = 0;
+      const observeSetupRequest = (request: import("playwright").Request) => {
+        if (new URL(request.url()).port === String(f.server.port)) prematureRelayRequests++;
+      };
+      f.page.on("request", observeSetupRequest);
+      await f.page.goto(f.origin + "/relay/connect");
+      await f.page
+        .getByRole("heading", { name: "Start in Cafe on your computer", exact: true })
+        .waitFor();
+      expect(await f.page.getByRole("combobox").count()).toBe(0);
+      expect(await f.page.getByRole("textbox").count()).toBe(0);
+      expect(await f.page.getByRole("button", { name: "Connect", exact: true }).count()).toBe(0);
+      await f.page.getByText("Don't see Manage relays?", { exact: true }).waitFor();
+      const screenshotDirectory = process.env.CAFE_RELAY_SCREENSHOTS;
+      if (screenshotDirectory && native === "chromium") {
+        await mkdir(screenshotDirectory, { recursive: true, mode: 0o700 });
+        await f.page.setViewportSize({ width: 390, height: 844 });
+        await f.page.emulateMedia({ reducedMotion: "reduce" });
+        for (const dark of [false, true])
+          for (const scale of [80, 130]) {
+            await f.page.evaluate(
+              ({ dark, scale }) => window.relayQualification.appearance(dark, scale),
+              { dark, scale },
+            );
+            await f.page.screenshot({
+              path: join(
+                screenshotDirectory,
+                "setup-" + (dark ? "dark" : "light") + "-" + scale + ".png",
+              ),
+            });
+          }
+      }
+      if (native === "chromium") {
+        await f.page.setViewportSize({ width: 390, height: 844 });
+        await f.page.evaluate(() => window.relayQualification.appearance(true, 130));
+        await f.page.getByRole("main").hover();
+        await f.page.mouse.wheel(0, 1_000);
+        await f.page.waitForFunction(() => (document.querySelector("main")?.scrollTop ?? 0) > 0);
+        await f.page.getByText("How this connection is protected", { exact: true }).click();
+        await f.page
+          .getByText(
+            "Your trusted Cafe host authenticates this device. Relays carry encrypted traffic and can observe connection addresses, timing and volume.",
+            { exact: true },
+          )
+          .waitFor();
+      }
+      await f.page.goto(f.origin + "/relay/pair#invalid-invitation");
+      await f.page
+        .getByRole("heading", { name: "Start in Cafe on your computer", exact: true })
+        .waitFor();
+      expect(new URL(f.page.url()).hash).toBe("");
+      expect(await f.page.getByRole("status").textContent()).toContain("invalid or expired");
+      expect(await f.page.getByRole("textbox").count()).toBe(0);
+      expect(prematureRelayRequests).toBe(0);
+      expect(f.authOperations).toEqual([]);
+      f.page.off("request", observeSetupRequest);
       await f.page.goto(await f.invitation());
       await f.page.getByRole("button", { name: "Connect", exact: true }).waitFor();
       expect(new URL(f.page.url()).hash).toBe("");
-      const screenshotDirectory = process.env.CAFE_RELAY_SCREENSHOTS;
       if (screenshotDirectory && native === "chromium") {
         await mkdir(screenshotDirectory, { recursive: true, mode: 0o700 });
         await f.page.setViewportSize({ width: 390, height: 844 });
@@ -412,13 +478,17 @@ for (const native of ["chromium", "electron"] as const)
             (key) => key in stored[0],
           ),
       ).toBe(true);
-      const id = await f.page.evaluate(() => sessionStorage.getItem("cafe-relay-active")!);
+      expect(await f.page.evaluate(() => window.relayQualification.hasSavedConnection())).toBe(
+        true,
+      );
       await f.page.evaluate(() => sessionStorage.clear());
       await f.page.goto(new URL("/relay/connect", f.page.url()).href);
-      await f.page.getByRole("combobox").getByText(id.slice(0, 12), { exact: true }).waitFor();
-      await f.page.getByRole("button", { name: "Connect", exact: true }).click();
-      await f.page.getByRole("status").waitFor();
-      expect(await f.page.getByRole("status").textContent()).toContain("fresh invitation");
+      await f.page
+        .getByRole("heading", { name: "Start in Cafe on your computer", exact: true })
+        .waitFor();
+      expect(await f.page.getByRole("combobox").count()).toBe(0);
+      expect(await f.page.getByRole("textbox").count()).toBe(0);
+      expect(await f.page.getByRole("button", { name: "Connect", exact: true }).count()).toBe(0);
       expect(f.authOperations).toEqual(["pair", "pair", "resume", "resume"]);
 
       await f.close();

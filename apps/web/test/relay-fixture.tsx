@@ -4,6 +4,7 @@ import { applyInterfaceScalePercent } from "../src/interfaceScale";
 import ReactDOM from "react-dom/client";
 import { RelayEntry } from "../src/environments/relay/entry";
 import { readPrimaryRelay, fetchAppResource } from "../src/environments/relay/active";
+import { listRelayTargetIds } from "../src/environments/relay/storage";
 
 let exercised: { readonly active: boolean } | undefined;
 
@@ -14,10 +15,13 @@ declare global {
       exercise: () => Promise<{ text: string; length: number; equal: boolean; rpc: boolean }>;
       read: () => Promise<string>;
       retired: () => boolean;
+      hasSavedConnection: () => Promise<boolean>;
     };
   }
 }
 window.relayQualification = {
+  hasSavedConnection: async () =>
+    (await listRelayTargetIds()).includes(sessionStorage.getItem("cafe-relay-active") ?? ""),
   retired: () => exercised?.active === false,
   appearance: (dark, scale) => {
     document.documentElement.classList.toggle("dark", dark);

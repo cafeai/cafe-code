@@ -47,11 +47,22 @@ let initial = readInitialIntent();
 
 export function RelayEntry({ ready }: { readonly ready: () => void }) {
   const [busy, setBusy] = useState(false),
-    [message, setMessage] = useState(""),
+    [message, setMessage] = useState(() =>
+      initial && "invalid" in initial
+        ? uiText(
+            "This pairing link is invalid or expired. Create a new invitation in Cafe on your computer.",
+          )
+        : "",
+    ),
     [secondFactor, setSecondFactor] = useState("");
   const [savedIds, setSavedIds] = useState<readonly string[]>([]),
     [selectedId, setSelectedId] = useState("");
   const [choosing] = useState(() => initial !== undefined && "choose" in initial);
+  const [savedState, setSavedState] = useState<"loading" | "ready" | "unavailable">("loading");
+  const [needsInvitation, setNeedsInvitation] = useState(
+    () => initial === undefined || "invalid" in initial,
+  );
+  const [pairing] = useState(() => initial !== undefined && "invitation" in initial);
   const owner = useRef<Lifetime | undefined>(undefined);
   const connection = useRef<Awaited<ReturnType<typeof connectViewer>> | undefined>(undefined);
   const complete = useRef(false);
@@ -66,7 +77,13 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
           intent.current = undefined;
           initial = undefined;
           void connection.current?.close();
-          setMessage(uiText("Open a fresh invitation from your Cafe host to pair this browser."));
+          setNeedsInvitation(true);
+          setSecondFactor("");
+          setMessage(
+            uiText(
+              "This invitation has expired. Create a new pairing link in Cafe on your computer.",
+            ),
+          );
         }
       });
     if (intent.current && "choose" in intent.current)
@@ -75,11 +92,18 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
           if (lifetime.active) {
             setSavedIds(ids);
             setSelectedId(ids[0] ?? "");
+            setSavedState("ready");
           }
         })
         .catch(() => {
-          if (lifetime.active)
-            setMessage(uiText("Saved hosts could not be read from this browser."));
+          if (lifetime.active) {
+            setSavedState("unavailable");
+            setMessage(
+              uiText(
+                "Saved connections could not be read. Open a new pairing link from Cafe on your computer.",
+              ),
+            );
+          }
         });
     return () => {
       if (owner.current === lifetime) owner.current = undefined;
@@ -101,8 +125,12 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
         intent.current && "choose" in intent.current ? { savedId: selectedId } : intent.current;
       if (!current || "invalid" in current) throw new RelayError("AUTH_REQUIRED");
       if ("savedId" in current) {
-        const saved = await loadRelayTarget(current.savedId),
-          active = new ActiveRelay(saved.target, saved.identity);
+        const saved = await loadRelayTarget(current.savedId).catch(() => {
+          if (lifetime.active) setNeedsInvitation(true);
+          throw new RelayError("AUTH_REQUIRED");
+        });
+        if (!lifetime.active) return;
+        const active = new ActiveRelay(saved.target, saved.identity);
         try {
           await active.session();
           if (!lifetime.active) throw new RelayError("UNAVAILABLE");
@@ -209,12 +237,19 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
         initial = undefined;
         void connection.current?.close();
         connection.current = undefined;
+        setNeedsInvitation(true);
         setMessage(
           uiText(
             "The sign-in response was lost. Ask the host for a new invitation; this credential will not be retried automatically.",
           ),
         );
-      } else
+      } else if (error instanceof RelayError && error.code === "AUTH_REQUIRED")
+        setMessage(
+          uiText(
+            "This browser session cannot reconnect. Create a fresh invitation in Cafe on your computer.",
+          ),
+        );
+      else
         setMessage(
           uiText(
             "The relay connection could not be completed. Check connectivity or ask the host for a fresh invitation.",
@@ -226,63 +261,122 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
   };
   const pairIdentity = useRef<Awaited<ReturnType<typeof createIdentity>> | undefined>(undefined);
   const pairNetwork = useRef<Awaited<ReturnType<typeof discoverNetwork>> | undefined>(undefined);
+  const checkingSaved = choosing && savedState === "loading";
+  const showSetup = needsInvitation || (choosing && !checkingSaved && savedIds.length === 0);
   return (
-    <main className="mx-auto flex min-h-svh max-w-md flex-col justify-center gap-5 p-8">
-      <h1 className="text-2xl font-semibold">{uiText("Connect through a Cafe relay")}</h1>
-      <p className="text-muted-foreground">
-        {uiText(
-          "Your trusted Cafe host authenticates this device. Relays carry encrypted traffic and can observe connection addresses, timing and volume.",
-        )}
-      </p>
-      <form
-        className="flex flex-col gap-4"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void connect();
-        }}
-      >
-        {choosing ? (
-          <label className="flex flex-col gap-2">
-            {uiText("Saved host")}
-            <Select
-              value={selectedId}
-              onValueChange={(value) => setSelectedId(value ?? "")}
-              disabled={busy}
-              items={savedIds.map((id) => ({ value: id, label: id.slice(0, 12) }))}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {savedIds.map((id) => (
-                  <SelectItem key={id} value={id}>
-                    {id.slice(0, 12)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {savedIds.length === 0 ? (
-              <span>
-                {uiText("Open a fresh invitation from your Cafe host to pair this browser.")}
-              </span>
-            ) : null}
-          </label>
+    <main className="h-full overflow-y-auto">
+      <div className="mx-auto flex min-h-full max-w-lg flex-col justify-center gap-6 p-6 sm:p-8">
+        <div className="flex flex-col gap-3">
+          <p className="text-sm font-medium text-muted-foreground">{uiText("Relay preview")}</p>
+          <h1 className="text-2xl font-semibold">
+            {showSetup
+              ? uiText("Start in Cafe on your computer")
+              : pairing
+                ? uiText("Pair this browser with Cafe")
+                : uiText("Reconnect to your Cafe computer")}
+          </h1>
+          <p className="text-muted-foreground">
+            {showSetup
+              ? uiText(
+                  "You need a pairing link from the computer running Cafe. There is no code to enter on this page yet.",
+                )
+              : pairing
+                ? uiText(
+                    "Your invitation is ready. Connect to open Cafe from the computer that sent you this link.",
+                  )
+                : uiText("Reconnect using the connection saved in this browser tab.")}
+          </p>
+        </div>
+        {checkingSaved ? (
+          <p role="status">{uiText("Checking this browser for paired computers…")}</p>
         ) : null}
-        <label className="flex flex-col gap-2">
-          {uiText("Authenticator or recovery code, if enabled")}
-          <Input
-            value={secondFactor}
-            onChange={(event) => setSecondFactor(event.target.value)}
-            autoComplete="one-time-code"
-            maxLength={128}
-            disabled={busy}
-          />
-        </label>
-        <Button type="submit" disabled={busy} className="w-full">
-          {busy ? uiText("Connecting…") : uiText("Connect")}
-        </Button>
-      </form>
-      {message ? <p role="status">{message}</p> : null}
+        {showSetup ? (
+          <>
+            <ol className="list-decimal space-y-3 pl-5">
+              <li>{uiText("Open a relay-enabled Cafe build on your computer.")}</li>
+              <li>
+                {uiText(
+                  "Go to Settings → Connections → Manage relays and create a pairing invitation.",
+                )}
+              </li>
+              <li>
+                {uiText(
+                  "Open the complete invitation link in this browser. It expires after five minutes.",
+                )}
+              </li>
+            </ol>
+            <div className="rounded-xl border bg-muted/30 p-4">
+              <h2 className="mb-2 font-medium">{uiText("Don't see Manage relays?")}</h2>
+              <p className="text-sm text-muted-foreground">
+                {uiText(
+                  "Your Cafe build needs relay support, and the computer must be enrolled in a relay network. If that setup is missing, this browser page cannot connect yet.",
+                )}
+              </p>
+            </div>
+          </>
+        ) : !checkingSaved ? (
+          <form
+            className="flex flex-col gap-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void connect();
+            }}
+          >
+            {choosing ? (
+              <label className="flex flex-col gap-2">
+                {uiText("Paired computer")}
+                <Select
+                  value={selectedId}
+                  onValueChange={(value) => setSelectedId(value ?? "")}
+                  disabled={busy}
+                  items={savedIds.map((id) => ({ value: id, label: id.slice(0, 12) }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {savedIds.map((id) => (
+                      <SelectItem key={id} value={id}>
+                        {id.slice(0, 12)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </label>
+            ) : null}
+            {pairing ? (
+              <label className="flex flex-col gap-2">
+                {uiText("Two-factor code, only if enabled in Cafe")}
+                <Input
+                  value={secondFactor}
+                  onChange={(event) => setSecondFactor(event.target.value)}
+                  autoComplete="one-time-code"
+                  maxLength={128}
+                  disabled={busy}
+                  aria-describedby="relay-two-factor-help"
+                />
+                <span id="relay-two-factor-help" className="text-sm text-muted-foreground">
+                  {uiText(
+                    "Use your authenticator app or a Cafe recovery code. This is separate from the pairing link.",
+                  )}
+                </span>
+              </label>
+            ) : null}
+            <Button type="submit" disabled={busy || (choosing && !selectedId)} className="w-full">
+              {busy ? uiText("Connecting…") : uiText("Connect")}
+            </Button>
+          </form>
+        ) : null}
+        {message ? <p role="status">{message}</p> : null}
+        <details className="border-t pt-4 text-sm text-muted-foreground">
+          <summary className="cursor-pointer">{uiText("How this connection is protected")}</summary>
+          <p className="mt-3">
+            {uiText(
+              "Your trusted Cafe host authenticates this device. Relays carry encrypted traffic and can observe connection addresses, timing and volume.",
+            )}
+          </p>
+        </details>
+      </div>
     </main>
   );
 }

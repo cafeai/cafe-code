@@ -115,10 +115,11 @@ function additionalData(id: string): Uint8Array<ArrayBuffer> {
   return utf8.encode("CafeCode/relay/browser-store/v1\0" + id);
 }
 
+/** Metadata alone cannot resume a device: credentials must still be in this tab. */
 export async function listRelayTargetIds(): Promise<readonly string[]> {
   const database = await open();
   try {
-    return await new Promise((resolve, reject) => {
+    const ids = await new Promise<readonly string[]>((resolve, reject) => {
       const transaction = database.transaction("targets", "readonly"),
         request = transaction.objectStore("targets").getAllKeys(undefined, 17);
       transaction.oncomplete = () => {
@@ -136,6 +137,16 @@ export async function listRelayTargetIds(): Promise<readonly string[]> {
         }
       };
       transaction.onabort = transaction.onerror = () => reject(new RelayError("UNAVAILABLE"));
+    });
+    return ids.filter((id) => {
+      const raw = sessionStorage.getItem(sessionKey(id));
+      if (raw === null || raw.length > 24_000) return false;
+      try {
+        readCanonical(SessionRecord, utf8.encode(raw), 24_000);
+        return true;
+      } catch {
+        return false;
+      }
     });
   } finally {
     database.close();

@@ -1260,10 +1260,6 @@
     "message": "Authenticator or recovery code",
     "locations": ["apps/web/src/components/auth/SecondFactorInput.tsx:22"]
   },
-  "Authenticator or recovery code, if enabled": {
-    "message": "Authenticator or recovery code, if enabled",
-    "locations": ["apps/web/src/environments/relay/entry.tsx:272"]
-  },
   "Authenticator setup QR code": {
     "message": "Authenticator setup QR code",
     "locations": ["apps/web/src/components/settings/TwoFactorManagementRow.tsx:232"]
@@ -2206,6 +2202,10 @@
     "message": "Checking the installed version",
     "locations": ["apps/web/src/components/settings/ProviderUpdateFailureDetails.logic.ts:123"]
   },
+  "Checking this browser for paired computers…": {
+    "message": "Checking this browser for paired computers…",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:291"]
+  },
   "Checking usage…": {
     "message": "Checking usage…",
     "locations": ["apps/web/src/components/ProviderUsageResetButton.tsx:215"]
@@ -3021,7 +3021,7 @@
   },
   "Connect": {
     "message": "Connect",
-    "locations": ["apps/web/src/environments/relay/entry.tsx:282"]
+    "locations": ["apps/web/src/environments/relay/entry.tsx:366"]
   },
   "Connect a provider": {
     "message": "Connect a provider",
@@ -3033,10 +3033,6 @@
   "Connect another device without setting up a tunnel.": {
     "message": "Connect another device without setting up a tunnel.",
     "locations": ["apps/web/src/components/settings/RelayConnectionsSettings.tsx:119"]
-  },
-  "Connect through a Cafe relay": {
-    "message": "Connect through a Cafe relay",
-    "locations": ["apps/web/src/environments/relay/entry.tsx:231"]
   },
   "Connect to this server before signing in.": {
     "message": "Connect to this server before signing in.",
@@ -3093,7 +3089,7 @@
     "message": "Connecting…",
     "locations": [
       "apps/web/src/components/chat/chatActivity.ts:79",
-      "apps/web/src/environments/relay/entry.tsx:282"
+      "apps/web/src/environments/relay/entry.tsx:366"
     ]
   },
   "Connection blocked: the server's certificate is invalid.": {
@@ -4874,6 +4870,10 @@
     "message": "Displays the mobile sidebar.",
     "locations": ["apps/web/src/components/ui/sidebar.tsx:257"]
   },
+  "Don't see Manage relays?": {
+    "message": "Don't see Manage relays?",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:309"]
+  },
   "Done": {
     "message": "Done",
     "locations": [
@@ -5331,7 +5331,7 @@
   },
   "Enter an authenticator code or recovery code, then connect again.": {
     "message": "Enter an authenticator code or recovery code, then connect again.",
-    "locations": ["apps/web/src/environments/relay/entry.tsx:206"]
+    "locations": ["apps/web/src/environments/relay/entry.tsx:234"]
   },
   "Enter it on the device you want to pair.": {
     "message": "Enter it on the device you want to pair.",
@@ -6225,6 +6225,10 @@
     "message": "Global dictation is currently available on macOS only.",
     "locations": ["apps/desktop/src/dictation/GlobalDictationCoordinator.ts:383"]
   },
+  "Go to Settings → Connections → Manage relays and create a pairing invitation.": {
+    "message": "Go to Settings → Connections → Manage relays and create a pairing invitation.",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:298"]
+  },
   "Go to chats": {
     "message": "Go to chats",
     "locations": ["apps/web/src/components/Sidebar.tsx:3918"]
@@ -6455,6 +6459,10 @@
   "How much chat activity changes the weather.": {
     "message": "How much chat activity changes the weather.",
     "locations": ["apps/web/src/components/settings/AmbianceSettings.tsx:298"]
+  },
+  "How this connection is protected": {
+    "message": "How this connection is protected",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:372"]
   },
   "How visible the weather is, without changing its density.": {
     "message": "How visible the weather is, without changing its density.",
@@ -8602,16 +8610,13 @@
     "message": "Open a file from this command",
     "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:4382"]
   },
-  "Open a fresh invitation from your Cafe host to pair this browser.": {
-    "message": "Open a fresh invitation from your Cafe host to pair this browser.",
-    "locations": [
-      "apps/web/src/environments/relay/entry.tsx:266",
-      "apps/web/src/environments/relay/entry.tsx:69"
-    ]
-  },
   "Open a pairing link, or paste a one-time pairing token.": {
     "message": "Open a pairing link, or paste a one-time pairing token.",
     "locations": ["apps/web/src/components/auth/PairingRouteSurface.tsx:293"]
+  },
+  "Open a relay-enabled Cafe build on your computer.": {
+    "message": "Open a relay-enabled Cafe build on your computer.",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:296"]
   },
   "Open authorization page": {
     "message": "Open authorization page",
@@ -8698,6 +8703,10 @@
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:71",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:83"
     ]
+  },
+  "Open the complete invitation link in this browser. It expires after five minutes.": {
+    "message": "Open the complete invitation link in this browser. It expires after five minutes.",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:303"]
   },
   "Open the copy from the chat list. Do not duplicate it again.": {
     "message": "Open the copy from the chat list. Do not duplicate it again.",
@@ -8941,9 +8950,17 @@
     "message": "Page {page} of {total}",
     "locations": ["apps/web/src/components/visualizations/VisualizationPrivateText.tsx:44"]
   },
+  "Pair this browser with Cafe": {
+    "message": "Pair this browser with Cafe",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:275"]
+  },
   "Pair with this environment": {
     "message": "Pair with this environment",
     "locations": ["apps/web/src/components/auth/PairingRouteSurface.tsx:162"]
+  },
+  "Paired computer": {
+    "message": "Paired computer",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:327"]
   },
   "Paired devices": {
     "message": "Paired devices",
@@ -9978,6 +9995,14 @@
     "message": "Reconnect to this server before starting a review.",
     "locations": ["apps/web/src/components/chat/ChatComposer.tsx:1354"]
   },
+  "Reconnect to your Cafe computer": {
+    "message": "Reconnect to your Cafe computer",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:276"]
+  },
+  "Reconnect using the connection saved in this browser tab.": {
+    "message": "Reconnect using the connection saved in this browser tab.",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:287"]
+  },
   "Reconnect with owner access to use attachments.": {
     "message": "Reconnect with owner access to use attachments.",
     "locations": ["apps/web/src/attachments/fileAttachmentErrors.ts:25"]
@@ -10157,6 +10182,10 @@
   "Relay invitation link": {
     "message": "Relay invitation link",
     "locations": ["apps/web/src/components/settings/RelayConnectionsSettings.tsx:150"]
+  },
+  "Relay preview": {
+    "message": "Relay preview",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:270"]
   },
   "Relay unavailable": {
     "message": "Relay unavailable",
@@ -11058,6 +11087,10 @@
     "message": "Saved across restarts. Runs while this chat’s Cafe server is online and awake. Existing account permissions apply.",
     "locations": ["apps/web/src/components/chat/ScheduledFollowups.tsx:612"]
   },
+  "Saved connections could not be read. Open a new pairing link from Cafe on your computer.": {
+    "message": "Saved connections could not be read. Open a new pairing link from Cafe on your computer.",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:102"]
+  },
   "Saved environment connection closed unexpectedly.": {
     "message": "Saved environment connection closed unexpectedly.",
     "locations": ["apps/web/src/environments/runtime/service.ts:1442"]
@@ -11109,14 +11142,6 @@
   "Saved follow-up queue data is invalid or exceeds its safety limit. Existing data was left untouched.": {
     "message": "Saved follow-up queue data is invalid or exceeds its safety limit. Existing data was left untouched.",
     "locations": ["apps/web/src/components/chat/followUpQueuePersistence.ts:139"]
-  },
-  "Saved host": {
-    "message": "Saved host",
-    "locations": ["apps/web/src/environments/relay/entry.tsx:246"]
-  },
-  "Saved hosts could not be read from this browser.": {
-    "message": "Saved hosts could not be read from this browser.",
-    "locations": ["apps/web/src/environments/relay/entry.tsx:82"]
   },
   "Saved input submitted as next turn": {
     "message": "Saved input submitted as next turn",
@@ -12194,6 +12219,10 @@
     "message": "Start dictation",
     "locations": ["apps/web/src/components/chat/ComposerDictationButton.tsx:44"]
   },
+  "Start in Cafe on your computer": {
+    "message": "Start in Cafe on your computer",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:273"]
+  },
   "Start observed <slot1></slot1>": {
     "message": "Start observed <slot1></slot1>",
     "locations": ["apps/web/src/components/chat/ProviderOperationWorkEntry.tsx:204"]
@@ -13017,7 +13046,7 @@
   },
   "The relay connection could not be completed. Check connectivity or ask the host for a fresh invitation.": {
     "message": "The relay connection could not be completed. Check connectivity or ask the host for a fresh invitation.",
-    "locations": ["apps/web/src/environments/relay/entry.tsx:219"]
+    "locations": ["apps/web/src/environments/relay/entry.tsx:254"]
   },
   "The remote Cafe Code server returned an invalid response. Check the server address and port.": {
     "message": "The remote Cafe Code server returned an invalid response. Check the server address and port.",
@@ -13129,7 +13158,7 @@
   },
   "The sign-in response was lost. Ask the host for a new invitation; this credential will not be retried automatically.": {
     "message": "The sign-in response was lost. Ask the host for a new invitation; this credential will not be retried automatically.",
-    "locations": ["apps/web/src/environments/relay/entry.tsx:213"]
+    "locations": ["apps/web/src/environments/relay/entry.tsx:242"]
   },
   "The sleep request could not be released. Turn this off and check your Mac's sleep behavior.": {
     "message": "The sleep request could not be released. Turn this off and check your Mac's sleep behavior.",
@@ -13305,6 +13334,10 @@
     "message": "This browser does not support push notifications. On iOS, add the app to your home screen first.",
     "locations": ["apps/web/src/lib/webPushNotifications.ts:172"]
   },
+  "This browser session cannot reconnect. Create a fresh invitation in Cafe on your computer.": {
+    "message": "This browser session cannot reconnect. Create a fresh invitation in Cafe on your computer.",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:248"]
+  },
   "This cannot be undone.": {
     "message": "This cannot be undone.",
     "locations": ["apps/web/src/components/desk/useDeskChatActions.ts:122"]
@@ -13403,6 +13436,10 @@
     "message": "This install is using the correct architecture.",
     "locations": ["apps/web/src/components/desktopUpdate.logic.ts:53"]
   },
+  "This invitation has expired. Create a new pairing link in Cafe on your computer.": {
+    "message": "This invitation has expired. Create a new pairing link in Cafe on your computer.",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:83"]
+  },
   "This is the selected server's data, not necessarily the desktop app's local profile.": {
     "message": "This is the selected server's data, not necessarily the desktop app's local profile.",
     "locations": ["apps/web/src/components/settings/DataProfileSettings.tsx:32"]
@@ -13414,6 +13451,10 @@
   "This model does not report configurable options.": {
     "message": "This model does not report configurable options.",
     "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:818"]
+  },
+  "This pairing link is invalid or expired. Create a new invitation in Cafe on your computer.": {
+    "message": "This pairing link is invalid or expired. Create a new invitation in Cafe on your computer.",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:52"]
   },
   "This project still has hidden or stale chats. Force remove clears them too.": {
     "message": "This project still has hidden or stale chats. Force remove clears them too.",
@@ -13852,6 +13893,10 @@
       "apps/web/src/components/settings/TwoFactorManagementRow.tsx:153",
       "apps/web/src/components/settings/settingsSearchIndex.ts:673"
     ]
+  },
+  "Two-factor code, only if enabled in Cafe": {
+    "message": "Two-factor code, only if enabled in Cafe",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:349"]
   },
   "Type": {
     "message": "Type",
@@ -14489,6 +14534,10 @@
       "apps/web/src/components/settings/GrokSandboxSettings.tsx:201"
     ]
   },
+  "Use your authenticator app or a Cafe recovery code. This is separate from the pairing link.": {
+    "message": "Use your authenticator app or a Cafe recovery code. This is separate from the pairing link.",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:359"]
+  },
   "Use {value0} accent": {
     "message": "Use {value0} accent",
     "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:266"]
@@ -15093,9 +15142,17 @@
     "message": "You have no earned resets available. Your limits reset on schedule.",
     "locations": ["apps/web/src/components/ProviderUsageResetButton.tsx:255"]
   },
+  "You need a pairing link from the computer running Cafe. There is no code to enter on this page yet.": {
+    "message": "You need a pairing link from the computer running Cafe. There is no code to enter on this page yet.",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:280"]
+  },
   "You''re up to date!": {
     "message": "You''re up to date!",
     "locations": ["apps/desktop/src/window/DesktopApplicationMenu.ts:56"]
+  },
+  "Your Cafe build needs relay support, and the computer must be enrolled in a relay network. If that setup is missing, this browser page cannot connect yet.": {
+    "message": "Your Cafe build needs relay support, and the computer must be enrolled in a relay network. If that setup is missing, this browser page cannot connect yet.",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:311"]
   },
   "Your answer": {
     "message": "Your answer",
@@ -15116,6 +15173,10 @@
   "Your draft may have been pasted. Check the field before trying again; Cafe will not repeat the paste automatically. The draft may remain on the clipboard.": {
     "message": "Your draft may have been pasted. Check the field before trying again; Cafe will not repeat the paste automatically. The draft may remain on the clipboard.",
     "locations": ["apps/web/src/components/global-dictation/GlobalDictationOverlay.tsx:118"]
+  },
+  "Your invitation is ready. Connect to open Cafe from the computer that sent you this link.": {
+    "message": "Your invitation is ready. Connect to open Cafe from the computer that sent you this link.",
+    "locations": ["apps/web/src/environments/relay/entry.tsx:284"]
   },
   "Your message and attachments are preserved. Review the delivery error before retrying.": {
     "message": "Your message and attachments are preserved. Review the delivery error before retrying.",
@@ -15143,7 +15204,7 @@
   },
   "Your trusted Cafe host authenticates this device. Relays carry encrypted traffic and can observe connection addresses, timing and volume.": {
     "message": "Your trusted Cafe host authenticates this device. Relays carry encrypted traffic and can observe connection addresses, timing and volume.",
-    "locations": ["apps/web/src/environments/relay/entry.tsx:233"]
+    "locations": ["apps/web/src/environments/relay/entry.tsx:374"]
   },
   "Your usage limit reset was redeemed.": {
     "message": "Your usage limit reset was redeemed.",

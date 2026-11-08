@@ -92,6 +92,14 @@ not saved. `/relay/connect` lists saved opaque host identifiers; selecting a hos
 resumes only when this tab still holds its saved device key and bearer. A bearer alone cannot enroll a new
 device. Closing the browser session or removing its session storage loses that device’s local credentials.
 
+Opening `/relay/connect` with no usable credentials shows host setup instructions,
+including the requirement for a relay-enabled, enrolled Cafe computer. It does
+not show an empty computer selector, a two-factor field or a Connect action.
+Previously saved public metadata without this tab's credential record is not
+offered as a reconnectable computer. The two-factor field belongs only to a
+valid new invitation and explains that it is an authenticator/recovery code,
+separate from the pairing link. Browser setup does not enroll or upgrade the host.
+
 ## Membership, selection and recovery
 
 The operator's Ed25519 root signs an expiring, increasing-revision descriptor
