@@ -51,6 +51,11 @@ import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
+import {
+  DesktopProviderDaemonNativeControl,
+  ProviderDaemonNativeControlError,
+  type DesktopProviderDaemonNativeController,
+} from "./DesktopProviderDaemonNativeControl.ts";
 import { makeWindowsDesktopProviderDaemonManager } from "./WindowsDesktopProviderDaemonManager.ts";
 import * as NetService from "@cafecode/shared/Net";
 import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
@@ -144,6 +149,7 @@ export interface DesktopProviderDaemonManagerShape {
   readonly restartForStartup?: (
     expectedRecoveryId: string,
   ) => Effect.Effect<ProviderDaemonClientConfig>;
+  readonly cancelStartupRecovery?: (expectedRecoveryId: string) => Effect.Effect<void>;
   /**
    * Replace an unhealthy provider daemon and issue a fresh desktop lease.
    * Callers must restart the backend afterward because its lease capability is
@@ -292,6 +298,9 @@ export type ProviderDaemonStartupRecoveryPhase =
   | "namespace"
   | "compatibility"
   | "process"
+  | "native-control"
+  | "native-identity"
+  | "native-exit"
   | "owned-process";
 
 /** Fixed presentation categories only. A dialog can offer explicit recovery
@@ -718,6 +727,9 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   yield* NetService.NetService;
   const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;
+  // Production composition supplies this Darwin capability. Injected/legacy
+  // test layers omit it and can never start an actual native helper.
+  const nativeControl = yield* Effect.serviceOption(DesktopProviderDaemonNativeControl);
   const daemonScope = yield* Scope.make();
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const state = yield* Ref.make(initialState);
@@ -734,12 +746,24 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
     endpoint?: ProviderDaemonClientConfig;
     health?: ProviderDaemonHealthValue;
     evidence?: ProviderDaemonStartupRetirementEvidence;
+    nativeController?: DesktopProviderDaemonNativeController;
+    nativeFailurePhase?: "native-control" | "native-identity" | "native-exit";
+    nativeForceAttempted: boolean;
     retirementAttempted: boolean;
     confirmationInFlight: boolean;
   }
   // This live owner is established before any dialog/POST await. A later
   // marker cannot replace its authority while the human is deciding.
   let pendingStartupRecovery: PendingStartupRecovery | undefined;
+  const closePendingNative = (pending: PendingStartupRecovery) =>
+    Effect.suspend(() => {
+      const controller = pending.nativeController;
+      delete pending.nativeController;
+      return controller === undefined ? Effect.void : controller.close;
+    });
+  yield* Effect.addFinalizer(() =>
+    pendingStartupRecovery === undefined ? Effect.void : closePendingNative(pendingStartupRecovery),
+  );
   let retiredNamespace:
     | { readonly verifyBeforeSpawn: () => Promise<void>; readonly close: () => Promise<void> }
     | undefined;
@@ -765,33 +789,37 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   const rememberStartupRecovery = (
     marker: ProviderDaemonMarkerValue,
     ownedChild?: ChildProcessSpawner.ChildProcessHandle,
-  ) => {
-    const previous = pendingStartupRecovery;
-    if (previous !== undefined) {
-      const sameOwner =
-        encodeProviderDaemonMarkerJson(previous.marker) ===
-          encodeProviderDaemonMarkerJson(marker) && previous.ownedChild === ownedChild;
-      if (sameOwner) return previous;
-      // Read-only Retry may observe a new owner, but it cannot forget an
-      // uncertain native stop or consumed authenticated retirement attempt.
-      if (
-        previous.confirmationInFlight ||
-        retirementReservation !== undefined ||
-        previous.retirementAttempted ||
-        previous.ownedChild !== undefined
-      )
-        return undefined;
-    }
-    const pending: PendingStartupRecovery = {
-      id: crypto.randomUUID(),
-      marker: { ...marker },
-      ...(ownedChild === undefined ? {} : { ownedChild }),
-      retirementAttempted: false,
-      confirmationInFlight: false,
-    };
-    pendingStartupRecovery = pending;
-    return pending;
-  };
+  ) =>
+    Effect.gen(function* () {
+      const previous = pendingStartupRecovery;
+      if (previous !== undefined) {
+        const sameOwner =
+          encodeProviderDaemonMarkerJson(previous.marker) ===
+            encodeProviderDaemonMarkerJson(marker) && previous.ownedChild === ownedChild;
+        if (sameOwner) return previous;
+        // Read-only Retry may observe a new owner, but it cannot forget an
+        // uncertain native stop or consumed authenticated retirement attempt.
+        if (
+          previous.confirmationInFlight ||
+          retirementReservation !== undefined ||
+          previous.retirementAttempted ||
+          previous.nativeForceAttempted ||
+          previous.ownedChild !== undefined
+        )
+          return undefined;
+        yield* closePendingNative(previous);
+      }
+      const pending: PendingStartupRecovery = {
+        id: crypto.randomUUID(),
+        marker: { ...marker },
+        ...(ownedChild === undefined ? {} : { ownedChild }),
+        retirementAttempted: false,
+        nativeForceAttempted: false,
+        confirmationInFlight: false,
+      };
+      pendingStartupRecovery = pending;
+      return pending;
+    });
 
   const captureStartupEvidence = (
     pending: PendingStartupRecovery,
@@ -811,11 +839,47 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       catch: () => new ProviderDaemonStartupRecoveryRequiredError({ phase: "namespace" }),
     }).pipe(
       Effect.tap((evidence) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           if (pendingStartupRecovery !== pending)
             throw new ProviderDaemonStartupRecoveryRequiredError({ phase: "namespace" });
           pending.endpoint = { ...endpoint };
           pending.evidence = evidence;
+          if (
+            Option.isSome(nativeControl) &&
+            pending.ownedChild === undefined &&
+            pending.nativeController === undefined &&
+            !pending.nativeForceAttempted
+          ) {
+            const captured = yield* nativeControl.value
+              .capture({
+                pid: pending.marker.pid,
+                createdAt: pending.marker.createdAt,
+                expectedExecutable: process.execPath,
+              })
+              .pipe(Effect.result);
+            if (captured._tag === "Failure") {
+              pending.nativeFailurePhase = captured.failure.phase;
+              yield* logWarning("provider daemon native startup control unavailable", {
+                phase: captured.failure.phase,
+              });
+            } else if (captured.success !== undefined) {
+              // Native capture performs no stop. Recheck the private owner after
+              // its readiness await before keeping that kernel lease for UI.
+              yield* Effect.tryPromise({
+                try: (signal) => verifyProviderDaemonStartupRetirementEvidence(evidence, signal),
+                catch: () => new ProviderDaemonStartupRecoveryRequiredError({ phase: "namespace" }),
+              }).pipe(
+                Effect.catchCause((cause) =>
+                  captured.success!.close.pipe(Effect.andThen(Effect.failCause(cause))),
+                ),
+              );
+              if (pendingStartupRecovery !== pending) {
+                yield* captured.success.close;
+                throw new ProviderDaemonStartupRecoveryRequiredError({ phase: "namespace" });
+              }
+              pending.nativeController = captured.success;
+            } else pending.nativeFailurePhase = "native-control";
+          }
         }),
       ),
     );
@@ -839,7 +903,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
           marker.transport === "ipc" &&
           marker.socketPath === providerDaemonIpcSocketPath(environment)
         ) {
-          const pending = rememberStartupRecovery(marker, handle);
+          const pending = yield* rememberStartupRecovery(marker, handle);
           if (pending !== undefined && pending.evidence === undefined)
             yield* captureStartupEvidence(pending, endpoint).pipe(Effect.ignore);
         }
@@ -924,7 +988,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   ): Effect.Effect<Option.Option<ProviderDaemonClientConfig>> =>
     Effect.gen(function* () {
       const adoptionStartedAtMs = performance.now();
-      const pending = rememberStartupRecovery(marker);
+      const pending = yield* rememberStartupRecovery(marker);
       if (pending === undefined)
         return yield* Effect.die(
           new ProviderDaemonStartupRecoveryRequiredError({ phase: "namespace" }),
@@ -994,7 +1058,10 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       if (processObservation === "unknown") return yield* preserveInconclusiveOwner("process");
       if (processObservation === "exited") {
         yield* removeMarker(environment.providerDaemonMarkerPath);
-        if (pendingStartupRecovery === pending) pendingStartupRecovery = undefined;
+        if (pendingStartupRecovery === pending) {
+          yield* closePendingNative(pending);
+          pendingStartupRecovery = undefined;
+        }
         return Option.none();
       }
       const token = yield* readCredential(credentialPath, marker.credentialEncrypted ?? true).pipe(
@@ -1142,7 +1209,10 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         transport,
         runtimeBuildId,
       });
-      if (pendingStartupRecovery === pending) pendingStartupRecovery = undefined;
+      if (pendingStartupRecovery === pending) {
+        yield* closePendingNative(pending);
+        pendingStartupRecovery = undefined;
+      }
       return Option.some(endpoint);
     });
 
@@ -1344,6 +1414,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         yield* writeMarker({ markerPath: environment.providerDaemonMarkerPath, marker });
         yield* closeRetirementEvidence;
         retirementReservation = undefined;
+        if (pendingStartupRecovery !== undefined) yield* closePendingNative(pendingStartupRecovery);
         pendingStartupRecovery = undefined;
       }).pipe(
         Effect.catch((error) =>
@@ -1478,8 +1549,10 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         pending?.ownedChild === current.ownedChild.value &&
         !pending.confirmationInFlight &&
         !pending.retirementAttempted &&
+        !pending.nativeForceAttempted &&
         retirementReservation === undefined
       ) {
+        yield* closePendingNative(pending);
         pendingStartupRecovery = undefined;
       }
     }
@@ -1615,70 +1688,133 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
               yield* removeCredential(environment.providerDaemonCredentialPath);
               yield* removeProviderDaemonIpcSocket(environment);
               yield* Ref.set(state, initialState);
+              yield* closePendingNative(pending);
               pendingStartupRecovery = undefined;
               yield* publishDebugSnapshot;
               return yield* ensureRunningUnlocked;
             }
 
             if (Option.isSome(current.ownedChild)) return yield* refusal();
-            if (pending.retirementAttempted || retirementReservation !== undefined) {
-              // An unknown automatic ACK is already consumed. Human confirmation
-              // permits only read-only reconciliation of that exact old namespace.
-              retiredNamespace = yield* Effect.tryPromise({
-                try: (signal) => reconcileProviderDaemonStartupRetirement(evidence, signal),
-                catch: () =>
-                  new ProviderDaemonStartupRecoveryRequiredError({
-                    phase: "compatibility",
-                    recoveryId: pending.id,
-                  }),
-              }).pipe(Effect.orDie);
-            } else {
-              // A prior timeout is not fabricated health. Ask the same authenticated
-              // old endpoint for a fresh advertised cooperative-retirement receipt.
-              const health = yield* Effect.tryPromise({
-                try: (signal) => fetchProviderDaemonHealth(endpoint, signal),
-                catch: () =>
-                  new ProviderDaemonStartupRecoveryRequiredError({
-                    phase: "health",
-                    recoveryId: pending.id,
-                  }),
-              }).pipe(Effect.orDie);
-              yield* verify;
-              if (pendingStartupRecovery !== pending || !matchesCurrentProfile(health))
-                return yield* refusal();
-              const request = providerDaemonRetirementRequest(pending.marker, health);
-              if (request === undefined)
+            const reconcile = Effect.tryPromise({
+              try: (signal) =>
+                reconcileProviderDaemonStartupRetirement(evidence, signal, {
+                  removeCapturedSocketAfterNativeExit: pending.nativeForceAttempted,
+                }),
+              catch: () =>
+                new ProviderDaemonStartupRecoveryRequiredError({
+                  phase: "native-exit",
+                  recoveryId: pending.id,
+                }),
+            }).pipe(Effect.orDie);
+            const forceNative = Effect.gen(function* () {
+              const controller = pending.nativeController;
+              if (pending.nativeForceAttempted || controller === undefined) {
+                const phase = pending.nativeForceAttempted
+                  ? "native-exit"
+                  : (pending.nativeFailurePhase ?? "native-control");
+                yield* logWarning("provider daemon native startup stop unavailable", { phase });
                 return yield* Effect.die(
-                  new ProviderDaemonStartupRecoveryRequiredError({
-                    phase: "compatibility",
-                    recoveryId: pending.id,
-                  }),
+                  new ProviderDaemonStartupRecoveryRequiredError({ phase, recoveryId: pending.id }),
                 );
-              pending.health = health;
-              // This nonce is reserved once before any log/HTTP await. Failure never
-              // clears it or allows the next explicit action to POST another nonce.
-              pending.retirementAttempted = true;
-              retirementReservation = `${request.pid}:${request.startedAt}:${request.runtimeBuildId}`;
-              retiredNamespace = yield* Effect.tryPromise({
-                try: (signal) =>
-                  retireProviderDaemonForStartup({
-                    endpoint,
-                    marker: pending.marker,
-                    request,
-                    evidence,
-                    markerPath: environment.providerDaemonMarkerPath,
-                    credentialPath: environment.providerDaemonCredentialPath,
-                    socketPath: providerDaemonIpcSocketPath(environment),
-                    signal,
-                    decryptCredential: (bytes) =>
-                      Effect.runPromise(safeStorage.decryptString(bytes)),
-                  }),
-                catch: () =>
-                  new ProviderDaemonStartupRecoveryRequiredError({
-                    phase: "compatibility",
-                    recoveryId: pending.id,
-                  }),
-              }).pipe(Effect.orDie);
+              }
+              // This action exists only inside the exact native dialog choice.
+              // Reserve before ANY await; cancellation/unknown ACK cannot replay
+              // a kernel-generation force or fall through to PID signalling.
+              pending.nativeForceAttempted = true;
+              retirementReservation ??= `native:${pending.id}`;
+              yield* verify;
+              if (pendingStartupRecovery !== pending) return yield* refusal();
+              yield* controller.forceStop.pipe(
+                Effect.catchCause((cause) => {
+                  if (Cause.hasInterrupts(cause)) return Effect.failCause(cause);
+                  const error = Cause.squash(cause);
+                  const phase =
+                    error instanceof ProviderDaemonNativeControlError ? error.phase : "native-exit";
+                  return logWarning("provider daemon native startup stop failed", { phase }).pipe(
+                    Effect.andThen(
+                      Effect.die(
+                        new ProviderDaemonStartupRecoveryRequiredError({
+                          phase,
+                          recoveryId: pending.id,
+                        }),
+                      ),
+                    ),
+                  );
+                }),
+                Effect.ensuring(closePendingNative(pending)),
+              );
+              yield* closePendingNative(pending);
+              // A confirmed kernel-token exit still does not authorize a
+              // replacement until ESRCH and exact private namespace qualify.
+              return yield* reconcile;
+            });
+            const reconcileOrForce = reconcile.pipe(
+              Effect.catchCause((cause) =>
+                Cause.hasInterrupts(cause) ? Effect.failCause(cause) : forceNative,
+              ),
+            );
+            if (
+              pending.nativeForceAttempted ||
+              pending.retirementAttempted ||
+              retirementReservation !== undefined
+            ) {
+              // An unknown automatic ACK is already consumed. First reconcile
+              // its exact namespace; explicit consent may use the independent
+              // one-shot native capability, never replay that HTTP request.
+              retiredNamespace = yield* reconcileOrForce;
+            } else {
+              retiredNamespace = yield* Effect.gen(function* () {
+                // A prior timeout is not fabricated health. Ask the same authenticated
+                // old endpoint for a fresh advertised cooperative-retirement receipt.
+                const health = yield* Effect.tryPromise({
+                  try: (signal) => fetchProviderDaemonHealth(endpoint, signal),
+                  catch: () =>
+                    new ProviderDaemonStartupRecoveryRequiredError({
+                      phase: "health",
+                      recoveryId: pending.id,
+                    }),
+                }).pipe(Effect.orDie);
+                yield* verify;
+                if (pendingStartupRecovery !== pending || !matchesCurrentProfile(health))
+                  return yield* refusal();
+                const request = providerDaemonRetirementRequest(pending.marker, health);
+                if (request === undefined)
+                  return yield* Effect.die(
+                    new ProviderDaemonStartupRecoveryRequiredError({
+                      phase: "compatibility",
+                      recoveryId: pending.id,
+                    }),
+                  );
+                pending.health = health;
+                // This nonce is reserved once before any log/HTTP await. Failure never
+                // clears it or allows the next explicit action to POST another nonce.
+                pending.retirementAttempted = true;
+                retirementReservation = `${request.pid}:${request.startedAt}:${request.runtimeBuildId}`;
+                return yield* Effect.tryPromise({
+                  try: (signal) =>
+                    retireProviderDaemonForStartup({
+                      endpoint,
+                      marker: pending.marker,
+                      request,
+                      evidence,
+                      markerPath: environment.providerDaemonMarkerPath,
+                      credentialPath: environment.providerDaemonCredentialPath,
+                      socketPath: providerDaemonIpcSocketPath(environment),
+                      signal,
+                      decryptCredential: (bytes) =>
+                        Effect.runPromise(safeStorage.decryptString(bytes)),
+                    }),
+                  catch: () =>
+                    new ProviderDaemonStartupRecoveryRequiredError({
+                      phase: "compatibility",
+                      recoveryId: pending.id,
+                    }),
+                }).pipe(Effect.orDie);
+              }).pipe(
+                Effect.catchCause((cause) =>
+                  Cause.hasInterrupts(cause) ? Effect.failCause(cause) : reconcileOrForce,
+                ),
+              );
             }
             // Keep the consumed reservation until spawn's exact guard and durable
             // new marker publication retire it. Do not re-adopt the exited marker.
@@ -1699,6 +1835,22 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
           ),
         );
     });
+
+  const cancelStartupRecovery = (expectedRecoveryId: string) =>
+    lifecycleMutex.withPermits(1)(
+      Effect.gen(function* () {
+        const pending = pendingStartupRecovery;
+        if (pending === undefined || pending.id !== expectedRecoveryId) return;
+        yield* closePendingNative(pending);
+        if (
+          !pending.retirementAttempted &&
+          !pending.nativeForceAttempted &&
+          retirementReservation === undefined &&
+          pending.ownedChild === undefined
+        )
+          pendingStartupRecovery = undefined;
+      }),
+    );
 
   const currentConfig = Ref.get(state).pipe(Effect.map((current) => current.endpoint));
 
@@ -1950,6 +2102,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         : Effect.die(new Error("Invalid Cafe MCP backend port.")),
     ensureRunning,
     restartForStartup,
+    cancelStartupRecovery,
     prepareForUpdate,
     recover,
     currentConfig,

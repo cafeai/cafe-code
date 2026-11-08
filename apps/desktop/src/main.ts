@@ -30,6 +30,7 @@ import * as DesktopAssets from "./app/DesktopAssets.ts";
 import * as DesktopBackendConfiguration from "./backend/DesktopBackendConfiguration.ts";
 import * as DesktopBackendManager from "./backend/DesktopBackendManager.ts";
 import * as DesktopProviderDaemonManager from "./backend/DesktopProviderDaemonManager.ts";
+import * as DesktopProviderDaemonNativeControl from "./backend/DesktopProviderDaemonNativeControl.ts";
 import * as DesktopEnvironment from "./app/DesktopEnvironment.ts";
 import {
   DesktopDataProfileStartup,
@@ -211,6 +212,7 @@ const desktopStartupWindowLayer = DesktopStartupWindow.layer.pipe(
 const desktopWindowLayer = DesktopWindow.layer.pipe(Layer.provideMerge(desktopStartupWindowLayer));
 
 const desktopProviderDaemonLayer = DesktopProviderDaemonManager.layer.pipe(
+  Layer.provideMerge(DesktopProviderDaemonNativeControl.layer),
   Layer.provideMerge(desktopLocalizedFoundationLayer),
 );
 

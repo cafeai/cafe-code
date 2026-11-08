@@ -10,6 +10,9 @@ startup reports an inconclusive compatibility observation, a rebuilt local
 bundle, and tests to run later.
 Supplements: [authenticated startup retirement](provider-daemon-startup-retirement.md)
 and [visible startup](provider-daemon-migration-startup.md).
+Partially superseded: [native macOS startup control](provider-daemon-native-startup-control.md)
+adds a kernel-generation-bound explicit force path; the original automatic
+retirement, dialog and uncertain-request non-replay decisions remain in force.
 
 ## Context
 

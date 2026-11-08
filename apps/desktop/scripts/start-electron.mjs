@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
 import { ensureMacDictationHelper } from "./build-mac-dictation-helper.mjs";
 import { ensureMacKeepAwakeHelper } from "./build-mac-keep-awake-helper.mjs";
+import { ensureMacProviderDaemonControlHelper } from "./build-mac-provider-daemon-control-helper.mjs";
 import { linuxSafeStorageElectronArgs } from "./linux-safe-storage.mjs";
 import { forwardChromiumStderr } from "./chromium-tls-log-filter.mjs";
 import { DESKTOP_RESTART_EXISTING_FLAG } from "../src/app/DesktopProfileControl.ts";
@@ -148,6 +149,7 @@ export async function runStartElectron({
   if (plan.type === "electron") {
     ensureMacDictationHelper();
     ensureMacKeepAwakeHelper();
+    ensureMacProviderDaemonControlHelper();
   }
   const child = spawnLaunchPlan(plan, childEnv);
   // Preserve stdout, stdin and headless-server diagnostics. Only the source

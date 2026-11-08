@@ -299,19 +299,39 @@ export const ensureProviderDaemonWithStartupRecovery = Effect.gen(function* () {
       recoveryDialogOpened = true;
     }
     const canRestart = manager.restartForStartup !== undefined && recoveryId !== undefined;
+    // Only source-owned finite phases add guidance. Native output, paths and
+    // identity tokens are never interpolated into the confirmation surface.
+    const nativeFailureDetail =
+      recoveryError?.phase === "native-control"
+        ? uiText(
+            "The native restart helper is unavailable. Rebuild or reinstall this Cafe Code build, then retry.",
+          )
+        : recoveryError?.phase === "native-identity"
+          ? uiText(
+              "The daemon's operating-system identity could not be confirmed. Its process and recovery files were preserved.",
+            )
+          : recoveryError?.phase === "native-exit"
+            ? uiText(
+                "The daemon's exit could not be confirmed. Its recovery files were preserved. Retry connection to check again.",
+              )
+            : undefined;
+    const recoveryDetail = canRestart
+      ? uiText(
+          "Retry connection leaves running work alone. Restart daemon stops its provider sessions and running work, then starts a new runtime. Cafe Code will verify the exact daemon before stopping it; if its identity or exit cannot be confirmed, it will preserve the process and recovery files.",
+        )
+      : uiText(
+          "Retry connection leaves running work alone. A verified startup restart is not available for this daemon. Stop it from its owning Cafe Code instance, then retry the connection.",
+        );
     const response = yield* dialog.showMessageBox({
       type: "warning",
       title: uiText("Provider runtime could not start"),
       message: restartFailed
         ? uiText("The provider daemon could not be restarted.")
         : uiText("Cafe Code could not reconnect to its provider daemon."),
-      detail: canRestart
-        ? uiText(
-            "Retry connection leaves running work alone. Restart daemon stops its provider sessions and running work, then starts a new runtime. Cafe Code will verify the exact daemon before stopping it; if its identity or exit cannot be confirmed, it will preserve the process and recovery files.",
-          )
-        : uiText(
-            "Retry connection leaves running work alone. A verified startup restart is not available for this daemon. Stop it from its owning Cafe Code instance, then retry the connection.",
-          ),
+      detail:
+        nativeFailureDetail === undefined
+          ? recoveryDetail
+          : `${nativeFailureDetail}\n\n${recoveryDetail}`,
       buttons: canRestart
         ? [uiText("Cancel"), uiText("Retry connection"), uiText("Restart daemon")]
         : [uiText("Cancel"), uiText("Retry connection")],
@@ -341,6 +361,8 @@ export const ensureProviderDaemonWithStartupRecovery = Effect.gen(function* () {
     // error dialog, stop another runtime or erase recovery evidence.
     yield* Effect.gen(function* () {
       yield* Ref.set(state.quitting, true);
+      if (recoveryId !== undefined && manager.cancelStartupRecovery !== undefined)
+        yield* manager.cancelStartupRecovery(recoveryId).pipe(Effect.ignoreCause);
       yield* shutdown.request;
       yield* app.quit;
     }).pipe(Effect.uninterruptible);

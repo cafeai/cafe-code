@@ -5,6 +5,9 @@ import * as fs from "node:fs/promises";
 // Host-native paths must retain the same namespace semantics as the helper.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
+// Real test-owned Unix socket inodes distinguish stale listeners from files.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import * as net from "node:net";
 // Native fixture roots are selected solely beneath the host temporary directory.
 import { tmpdir } from "node:os";
 import * as Schema from "effect/Schema";
@@ -196,6 +199,7 @@ async function nativeFixture(context: TestContext, encrypted = false) {
   let cleanupPromise: Promise<void> | undefined;
   const pending = new Set<Promise<unknown>>();
   const guards = new Set<Awaited<ReturnType<typeof retireProviderDaemonForStartup>>>();
+  const socketListeners = new Set<net.Server>();
   const controller = new AbortController();
   const assertActive = () => {
     if (retired || context.signal.aborted) throw new Error("Synthetic retirement fixture retired.");
@@ -222,6 +226,8 @@ async function nativeFixture(context: TestContext, encrypted = false) {
         while (pending.size) await Promise.allSettled([...pending]);
         const closed = await Promise.allSettled([...guards].map((guard) => guard.close()));
         for (const result of closed) if (result.status === "rejected") throw result.reason;
+        const listeners = await Promise.allSettled([...socketListeners].map(closeSocketListener));
+        for (const result of listeners) if (result.status === "rejected") throw result.reason;
         if (root !== undefined) await fs.rm(root, { recursive: true, force: true });
       } finally {
         context.signal.removeEventListener("abort", retire);
@@ -273,6 +279,48 @@ async function nativeFixture(context: TestContext, encrypted = false) {
   }));
   const observeProcess = vi.fn<typeof observeProviderDaemonProcess>(() => "exited");
   const dependencies = { requestJson, observeProcess };
+  function closeSocketListener(server: net.Server) {
+    return new Promise<void>((resolve, reject) => {
+      server.close((error) => {
+        if (error && (!("code" in error) || error.code !== "ERR_SERVER_NOT_RUNNING")) reject(error);
+        else resolve();
+      });
+    });
+  }
+  const createStaleSocket = async () => {
+    assertActive();
+    const server = net.createServer();
+    // Retain the exact server before its first asynchronous native operation.
+    // Public-signal retirement aborts listen and cleanup joins native close
+    // before removing the fixture's private directory.
+    socketListeners.add(server);
+    await own(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          const aborted = () => reject(new Error("Synthetic socket acquisition retired."));
+          controller.signal.addEventListener("abort", aborted, { once: true });
+          const finish = (error?: Error) => {
+            controller.signal.removeEventListener("abort", aborted);
+            server.removeListener("error", failed);
+            if (error) reject(error);
+            else resolve();
+          };
+          const failed = (error: Error) => finish(error);
+          server.once("error", failed);
+          server.listen(socketPath, () => finish());
+        }),
+    );
+    await own(() => fs.chmod(socketPath, 0o600));
+    const orphan = socketPath + ".orphan";
+    // Closing a server normally removes its pathname. Moving its exact socket
+    // aside first leaves a real stale inode after the listener has closed;
+    // no process is signalled and no replacement listener is manufactured.
+    await own(() => fs.rename(socketPath, orphan));
+    await own(() => closeSocketListener(server));
+    socketListeners.delete(server);
+    await own(() => fs.rename(orphan, socketPath));
+    expect((await own(() => fs.lstat(socketPath))).isSocket()).toBe(true);
+  };
   return {
     directory,
     ipcDirectory,
@@ -287,11 +335,18 @@ async function nativeFixture(context: TestContext, encrypted = false) {
     controller,
     own,
     cleanup,
+    createStaleSocket,
     capture: () => own(() => captureProviderDaemonStartupRetirementEvidence(input)),
-    reconcile: (evidence: ProviderDaemonStartupRetirementEvidence) =>
+    reconcile: (
+      evidence: ProviderDaemonStartupRetirementEvidence,
+      removeCapturedSocketAfterNativeExit?: true,
+    ) =>
       own(async () => {
         const guard = await reconcileProviderDaemonStartupRetirement(evidence, controller.signal, {
           observeProcess,
+          ...(removeCapturedSocketAfterNativeExit === true
+            ? { removeCapturedSocketAfterNativeExit }
+            : {}),
         });
         guards.add(guard);
         assertActive();
@@ -456,6 +511,64 @@ describe.skipIf(process.platform === "win32")("private POSIX startup retirement"
         expect(await f.own(() => fs.readFile(f.credentialPath))).toEqual(f.credentialBytes);
         if (observation === "replacement-socket")
           expect(await f.own(() => fs.readFile(f.socketPath, "utf8"))).toBe("replacement owner");
+      });
+    },
+  );
+
+  it("removes only the captured stale socket after conclusive exit and preserves a later listener", async (context) => {
+    await withNativeFixture(context, async (f) => {
+      await f.createStaleSocket();
+      const capturedSocket = await f.own(() => fs.lstat(f.socketPath, { bigint: true }));
+      const evidence = await f.capture();
+      // An ordinary Retry remains read-only even when the PID is absent.
+      await expect(f.reconcile(evidence)).rejects.toThrow("could not be safely stopped");
+      expect((await f.own(() => fs.lstat(f.socketPath, { bigint: true }))).ino).toBe(
+        capturedSocket.ino,
+      );
+      const guard = await f.reconcile(evidence, true);
+      await expect(f.own(() => fs.lstat(f.socketPath))).rejects.toMatchObject({ code: "ENOENT" });
+      await f.own(() => guard.verifyBeforeSpawn());
+      expect(f.dependencies.requestJson).not.toHaveBeenCalled();
+      expect(f.dependencies.observeProcess).toHaveBeenCalledWith(marker.pid);
+      expect(await f.own(() => fs.readFile(f.markerPath, "utf8"))).toBe(f.markerSource);
+      expect(await f.own(() => fs.readFile(f.credentialPath))).toEqual(f.credentialBytes);
+
+      // Cleanup permission is not renewed by a final spawn fence: an entry
+      // arriving after the captured one was removed belongs to another owner.
+      await f.createStaleSocket();
+      const replacement = await f.own(() => fs.lstat(f.socketPath, { bigint: true }));
+      await expect(f.own(() => guard.verifyBeforeSpawn())).rejects.toThrow(
+        "could not be safely stopped",
+      );
+      expect((await f.own(() => fs.lstat(f.socketPath, { bigint: true }))).ino).toBe(
+        replacement.ino,
+      );
+      expect(f.dependencies.requestJson).not.toHaveBeenCalled();
+    });
+  });
+
+  it.for(["present", "unknown", "replacement", "initially-absent", "cancelled"] as const)(
+    "preserves the exact socket when post-native-exit reconciliation observes %s",
+    async (observation, context) => {
+      await withNativeFixture(context, async (f) => {
+        if (observation !== "initially-absent") await f.createStaleSocket();
+        const evidence = await f.capture();
+        if (observation === "replacement") {
+          await f.own(() => fs.rename(f.socketPath, path.join(f.directory, "captured-old.sock")));
+          await f.createStaleSocket();
+        } else if (observation === "initially-absent") await f.createStaleSocket();
+        const expectedSocket = await f.own(() => fs.lstat(f.socketPath, { bigint: true }));
+        if (observation === "present" || observation === "unknown")
+          f.dependencies.observeProcess.mockReturnValue(observation);
+        else if (observation === "cancelled") f.controller.abort();
+        await expect(f.reconcile(evidence, true)).rejects.toThrow("could not be safely stopped");
+        const preserved = await f.own(() => fs.lstat(f.socketPath, { bigint: true }));
+        expect(preserved.isSocket()).toBe(true);
+        expect(preserved.dev).toBe(expectedSocket.dev);
+        expect(preserved.ino).toBe(expectedSocket.ino);
+        expect(f.dependencies.requestJson).not.toHaveBeenCalled();
+        expect(await f.own(() => fs.readFile(f.markerPath, "utf8"))).toBe(f.markerSource);
+        expect(await f.own(() => fs.readFile(f.credentialPath))).toEqual(f.credentialBytes);
       });
     },
   );

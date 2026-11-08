@@ -32,6 +32,9 @@ in this directory.
 - [Provider daemon startup recovery dialog](provider-daemon-startup-recovery-dialog.md):
   explicit Cancel/reconnect/restart choices, exact-owner consent fences and
   read-only post-exit reconciliation without replaying an uncertain stop.
+- [Native macOS startup control](provider-daemon-native-startup-control.md):
+  explicit one-use audit-token TERM/KILL, cancellation and exact stale-socket
+  cleanup for a live stranded owner without PID-only signalling.
 
 Related provider lifecycle decisions:
 

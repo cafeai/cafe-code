@@ -46,6 +46,7 @@ import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 import * as DesktopProviderDaemonManager from "./DesktopProviderDaemonManager.ts";
+import * as DesktopProviderDaemonNativeControl from "./DesktopProviderDaemonNativeControl.ts";
 
 // Native ESM namespace bindings are not configurable. Keep the real filesystem
 // implementation and record its calls through the imported module boundary;
@@ -264,6 +265,9 @@ function makeManagerLayer(
   overrides?: {
     readonly fileSystem: FileSystem.FileSystem;
     readonly spawner: TestProcessSpawner;
+    readonly nativeControl?: Context.Service.Shape<
+      typeof DesktopProviderDaemonNativeControl.DesktopProviderDaemonNativeControl
+    >;
   },
 ) {
   const safeStorageLayer = Layer.succeed(
@@ -287,6 +291,14 @@ function makeManagerLayer(
         ? Layer.mergeAll(
             Layer.succeed(FileSystem.FileSystem, overrides.fileSystem),
             Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, overrides.spawner),
+            ...(overrides.nativeControl === undefined
+              ? []
+              : [
+                  Layer.succeed(
+                    DesktopProviderDaemonNativeControl.DesktopProviderDaemonNativeControl,
+                    overrides.nativeControl,
+                  ),
+                ]),
           )
         : Layer.empty,
     ),
@@ -893,6 +905,178 @@ describe("DesktopProviderDaemonManager", () => {
           );
         }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
+
+  if (process.platform !== "win32")
+    for (const decision of ["cancel", "unknown-force-ack"] as const) {
+      it.live(
+        `retains exact startup consent and never replays native force after ${decision}`,
+        () =>
+          Effect.gen(function* () {
+            const fileSystem = yield* FileSystem.FileSystem;
+            const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+            const nativeCloseEntered = yield* Deferred.make<void>();
+            const releaseNativeClose = yield* Deferred.make<void>();
+            yield* Effect.addFinalizer(() => Deferred.succeed(releaseNativeClose, undefined));
+            const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+              directory: "/tmp",
+              prefix: "cafe-force-owner-",
+            });
+            const markerPath = `${baseDir}/provider-daemon.json`;
+            const credentialPath = `${baseDir}/provider-daemon-token.bin`;
+            const socketDirectory = `${baseDir}/provider-daemon-ipc`;
+            const socketPath = `${socketDirectory}/provider-daemon.sock`;
+            const backendEntryPath = `${baseDir}/backend.mjs`;
+            yield* writeSyntheticBackend(
+              fileSystem,
+              backendEntryPath,
+              "// inert replacement candidate\n",
+            );
+            yield* fileSystem.makeDirectory(socketDirectory);
+            yield* fileSystem.chmod(socketDirectory, 0o700);
+            yield* fileSystem.writeFileString(credentialPath, TEST_TOKEN);
+            yield* fileSystem.chmod(credentialPath, 0o600);
+            let posts = 0,
+              captures = 0,
+              forces = 0,
+              spawns = 0;
+            let nativeControllerClosed = false;
+            const oldBuild = "a".repeat(64);
+            const fake = yield* startFakeProviderDaemon(
+              baseDir,
+              oldBuild,
+              (pathname) => {
+                if (pathname === PROVIDER_DAEMON_RETIRE_PATH) posts += 1;
+                return false;
+              },
+              "matching",
+              { transport: "ipc", retirementProtocol: 1, startedAt: "2026-10-29T01:00:00.000Z" },
+              socketPath,
+            );
+            yield* Effect.addFinalizer(() => fake.close);
+            const marker = encodeProviderDaemonMarkerJson({
+              version: 2,
+              mode: "provider-daemon",
+              dataProfile: "production",
+              dataProfileId: dataProfileIdentity("production", baseDir),
+              pid: process.pid,
+              ppid: process.ppid,
+              protocolVersion: 1,
+              transport: "ipc",
+              socketPath,
+              httpBaseUrl: "http://provider-daemon.local",
+              credentialPath,
+              credentialEncrypted: false,
+              createdAt: "2026-10-29T01:00:00.000Z",
+              updatedAt: "2026-10-29T01:00:00.000Z",
+              appVersion: "0.0.0-test",
+              runtimeBuildId: oldBuild,
+            });
+            yield* fileSystem.writeFileString(markerPath, marker);
+            yield* fileSystem.chmod(markerPath, 0o600);
+            const signals = vi.spyOn(process, "kill").mockReturnValue(true);
+            const nativeControl: Context.Service.Shape<
+              typeof DesktopProviderDaemonNativeControl.DesktopProviderDaemonNativeControl
+            > = {
+              capture: (input) =>
+                Effect.sync(() => {
+                  assert.equal(input.pid, process.pid);
+                  assert.equal(input.createdAt, "2026-10-29T01:00:00.000Z");
+                  captures += 1;
+                  return {
+                    forceStop: Effect.sync(() => {
+                      forces += 1;
+                    }).pipe(
+                      Effect.andThen(
+                        Effect.die(
+                          new DesktopProviderDaemonNativeControl.ProviderDaemonNativeControlError(
+                            "native-exit",
+                          ),
+                        ),
+                      ),
+                    ),
+                    close: Deferred.succeed(nativeCloseEntered, undefined).pipe(
+                      Effect.andThen(Deferred.await(releaseNativeClose)),
+                      Effect.andThen(
+                        Effect.sync(() => {
+                          nativeControllerClosed = true;
+                        }),
+                      ),
+                    ),
+                  };
+                }),
+            };
+            const guardedSpawner: TestProcessSpawner = {
+              ...spawner,
+              spawn: () =>
+                Effect.sync(() => {
+                  spawns += 1;
+                }).pipe(Effect.andThen(Effect.die("Unexpected replacement child"))),
+            };
+            yield* Effect.gen(function* () {
+              const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
+              const refused = yield* manager.ensureRunning.pipe(Effect.exit);
+              const recoveryId = startupRecoveryId(refused);
+              assert.equal(captures, 1);
+              assert.equal(
+                forces,
+                0,
+                "capturing an owner before the dialog is never consent to stop it",
+              );
+              assert.equal(posts, 1);
+              assert.isTrue(
+                Exit.isFailure(
+                  yield* manager.restartForStartup!("foreign-recovery-owner").pipe(Effect.exit),
+                ),
+              );
+              assert.equal(forces, 0);
+              if (decision === "cancel") {
+                const cancellation = yield* manager.cancelStartupRecovery!(recoveryId).pipe(
+                  Effect.forkScoped,
+                );
+                yield* Deferred.await(nativeCloseEntered);
+                assert.equal(forces, 0);
+                assert.isFalse(nativeControllerClosed);
+                yield* Deferred.succeed(releaseNativeClose, undefined);
+                yield* Fiber.join(cancellation);
+                assert.isTrue(nativeControllerClosed);
+              } else {
+                yield* Deferred.succeed(releaseNativeClose, undefined);
+                assert.isTrue(
+                  Exit.isFailure(yield* manager.restartForStartup!(recoveryId).pipe(Effect.exit)),
+                );
+                assert.equal(forces, 1);
+                assert.isTrue(nativeControllerClosed);
+              }
+              // Neither a cancelled owner nor an uncertain destructive ACK may
+              // be replayed by another confirmation or an ordinary Retry.
+              assert.isTrue(
+                Exit.isFailure(yield* manager.restartForStartup!(recoveryId).pipe(Effect.exit)),
+              );
+              if (decision === "unknown-force-ack")
+                assert.isTrue(Exit.isFailure(yield* manager.ensureRunning.pipe(Effect.exit)));
+              assert.equal(forces, decision === "cancel" ? 0 : 1);
+              assert.equal(captures, 1);
+              assert.equal(posts, 1);
+              assert.equal(spawns, 0);
+              assert.isTrue(signals.mock.calls.every(([, signal]) => signal === 0));
+              assert.equal(yield* fileSystem.readFileString(markerPath), marker);
+              assert.equal(yield* fileSystem.readFileString(credentialPath), TEST_TOKEN);
+              assert.isTrue(yield* fileSystem.exists(socketPath));
+            }).pipe(
+              // Release the held close before the manager layer's finalizer can
+              // join it, including when an assertion or test cancellation wins.
+              Effect.ensuring(Deferred.succeed(releaseNativeClose, undefined)),
+              Effect.provide(
+                makeManagerLayer(baseDir, markerPath, backendEntryPath, undefined, {
+                  fileSystem,
+                  spawner: guardedSpawner,
+                  nativeControl,
+                }),
+              ),
+            );
+          }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+      );
+    }
 
   // This is an actual POSIX socket/manager boundary. Windows exercises its
   // distinct guarded native-owner adapter in WindowsDesktopProviderDaemonManager.test.ts.

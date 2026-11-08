@@ -11,6 +11,7 @@ import {
 import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
 import { ensureMacDictationHelper } from "./build-mac-dictation-helper.mjs";
 import { ensureMacKeepAwakeHelper } from "./build-mac-keep-awake-helper.mjs";
+import { ensureMacProviderDaemonControlHelper } from "./build-mac-provider-daemon-control-helper.mjs";
 import { buildDesktopChildEnv } from "./desktop-child-env.mjs";
 import { prepareDebugDataProfile } from "../../../packages/shared/src/dataProfileStorage.ts";
 import { assertSourceDebugDesktopBuilds } from "../../../packages/shared/src/sourceDebugBuild.ts";
@@ -35,6 +36,7 @@ export async function runStartElectronLaunchServices({
   const hostBundle = prepareMacSourceHost({ homeDirectory: homedir() });
   ensureMacDictationHelper();
   ensureMacKeepAwakeHelper();
+  ensureMacProviderDaemonControlHelper();
   const logDir = join(baseDir, ".debug", "restart-logs");
   mkdirSync(logDir, { recursive: true, mode: 0o700 });
   const logName = `source-launch-${new Date().toISOString().replace(/[:.]/gu, "-")}-${process.pid}`;

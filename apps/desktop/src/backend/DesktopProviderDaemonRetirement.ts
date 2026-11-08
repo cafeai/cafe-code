@@ -150,6 +150,19 @@ interface StartupRetirementRecord {
   readonly input: StartupRetirementInput;
   readonly marker: FileEvidence;
   readonly credential: FileEvidence;
+  readonly socket:
+    | {
+        readonly dev: bigint;
+        readonly ino: bigint;
+        readonly uid: bigint;
+        readonly gid: bigint;
+        readonly mode: bigint;
+        readonly nlink: bigint;
+        readonly size: bigint;
+        readonly mtimeNs: bigint;
+        readonly ctimeNs: bigint;
+      }
+    | undefined;
   readonly parent: {
     readonly dev: bigint;
     readonly ino: bigint;
@@ -157,6 +170,59 @@ interface StartupRetirementRecord {
     readonly gid: bigint;
     readonly mode: bigint;
   };
+}
+
+async function socketEvidence(socketPath: string): Promise<StartupRetirementRecord["socket"]> {
+  try {
+    const socket = await fs.lstat(socketPath, { bigint: true });
+    if (
+      !socket.isSocket() ||
+      socket.isSymbolicLink() ||
+      socket.nlink !== 1n ||
+      socket.uid !== BigInt(process.getuid!())
+    )
+      throw new ProviderDaemonRetirementError();
+    return {
+      dev: socket.dev,
+      ino: socket.ino,
+      uid: socket.uid,
+      gid: socket.gid,
+      mode: socket.mode,
+      nlink: socket.nlink,
+      size: socket.size,
+      mtimeNs: socket.mtimeNs,
+      ctimeNs: socket.ctimeNs,
+    };
+  } catch (error) {
+    if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT")
+      return undefined;
+    throw new ProviderDaemonRetirementError();
+  }
+}
+
+function sameSocket(
+  left: NonNullable<StartupRetirementRecord["socket"]>,
+  right: NonNullable<StartupRetirementRecord["socket"]>,
+) {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.uid === right.uid &&
+    left.gid === right.gid &&
+    left.mode === right.mode &&
+    left.nlink === right.nlink &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+async function verifyCapturedSocket(record: StartupRetirementRecord) {
+  const current = await socketEvidence(record.input.socketPath);
+  // The selected listener may have closed itself. A new entry never inherits
+  // the captured owner, including when the original listener was already absent.
+  if (current !== undefined && (record.socket === undefined || !sameSocket(record.socket, current)))
+    throw new ProviderDaemonRetirementError();
 }
 
 // A structural lookalike cannot mint a captured owner. These records are live
@@ -206,6 +272,7 @@ export async function captureProviderDaemonStartupRetirementEvidence(
     if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected))
       throw new ProviderDaemonRetirementError();
     const parent = await privateSocketParent(input.socketPath);
+    const socket = await socketEvidence(input.socketPath);
     // Keyring decryption may await. Do not publish a capability if either
     // recovery file or the private socket namespace changed during that await.
     const markerAfter = await readPrivateFile(input.markerPath, 65_536);
@@ -225,7 +292,7 @@ export async function captureProviderDaemonStartupRetirementEvidence(
     const evidence: ProviderDaemonStartupRetirementEvidence = Object.freeze({
       _tag: "ProviderDaemonStartupRetirementEvidence",
     });
-    startupRetirementEvidence.set(evidence, {
+    const record: StartupRetirementRecord = {
       input: {
         endpoint: { ...input.endpoint },
         marker: { ...input.marker },
@@ -236,6 +303,7 @@ export async function captureProviderDaemonStartupRetirementEvidence(
       },
       marker: marker.evidence,
       credential: credential.evidence,
+      socket,
       parent: {
         dev: parent.dev,
         ino: parent.ino,
@@ -243,7 +311,10 @@ export async function captureProviderDaemonStartupRetirementEvidence(
         gid: parent.gid,
         mode: parent.mode,
       },
-    });
+    };
+    await verifyCapturedSocket(record);
+    input.signal.throwIfAborted();
+    startupRetirementEvidence.set(evidence, record);
     return evidence;
   } catch {
     throw new ProviderDaemonRetirementError();
@@ -272,6 +343,7 @@ export async function verifyProviderDaemonStartupRetirementEvidence(
       parent.mode !== record.parent.mode
     )
       throw new ProviderDaemonRetirementError();
+    await verifyCapturedSocket(record);
     signal.throwIfAborted();
   } catch {
     throw new ProviderDaemonRetirementError();
@@ -332,6 +404,7 @@ async function holdStartupRetirementNamespace(
   dependencies: {
     readonly requestJson?: typeof requestProviderDaemonJson;
     readonly observeProcess?: typeof observeProviderDaemonProcess;
+    readonly removeCapturedSocketAfterNativeExit?: boolean;
   },
   reconcileOnly: boolean,
 ): Promise<{
@@ -408,6 +481,7 @@ async function holdStartupRetirementNamespace(
       throw new ProviderDaemonRetirementError();
     const signal = AbortSignal.any([input.signal, AbortSignal.timeout(18_000)]);
     signal.throwIfAborted();
+    await verifyCapturedSocket(captured);
     // Exactly one request. A timeout, malformed response or unknown ACK never
     // authorizes replay, evidence deletion or a competing replacement.
     if (!reconcileOnly) {
@@ -440,6 +514,8 @@ async function holdStartupRetirementNamespace(
         await setTimeout(100, undefined, { signal });
       }
     }
+    let socketCleanupAvailable =
+      reconcileOnly && dependencies.removeCapturedSocketAfterNativeExit === true;
     const checkNamespace = async () => {
       input.signal.throwIfAborted();
       if (closed) throw new ProviderDaemonRetirementError();
@@ -466,7 +542,35 @@ async function holdStartupRetirementNamespace(
       // The old listener must remove its own socket during scoped shutdown.
       // Never unlink a possibly new listener merely to make the bind succeed.
       try {
-        await fs.lstat(input.socketPath);
+        const mayRemoveCapturedSocket = socketCleanupAvailable;
+        // This permission belongs to the initial verified transition only.
+        // Unknown unlink results and later spawn fences cannot replay cleanup.
+        socketCleanupAvailable = false;
+        const currentSocket = await socketEvidence(input.socketPath);
+        if (currentSocket === undefined) return;
+        if (
+          !mayRemoveCapturedSocket ||
+          captured.socket === undefined ||
+          !sameSocket(captured.socket, currentSocket)
+        )
+          throw new ProviderDaemonRetirementError();
+        // Only the explicit kernel-generation stop path can retire a leftover
+        // captured socket. ESRCH and held private namespace were checked above;
+        // an unknown/replacement entry is preserved. The profile singleton and
+        // lifecycle mutex remain held across this final namespace publication.
+        await fs.unlink(input.socketPath);
+        try {
+          await fs.lstat(input.socketPath);
+        } catch (error) {
+          if (
+            error !== null &&
+            typeof error === "object" &&
+            "code" in error &&
+            error.code === "ENOENT"
+          )
+            return;
+          throw new ProviderDaemonRetirementError();
+        }
       } catch (error) {
         if (
           error !== null &&
@@ -519,7 +623,10 @@ export function retireProviderDaemonForStartup(
 export function reconcileProviderDaemonStartupRetirement(
   evidence: ProviderDaemonStartupRetirementEvidence,
   signal: AbortSignal,
-  dependencies: { readonly observeProcess?: typeof observeProviderDaemonProcess } = {},
+  dependencies: {
+    readonly observeProcess?: typeof observeProviderDaemonProcess;
+    readonly removeCapturedSocketAfterNativeExit?: boolean;
+  } = {},
 ) {
   const record = startupRetirementEvidence.get(evidence);
   if (record === undefined) return Promise.reject(new ProviderDaemonRetirementError());

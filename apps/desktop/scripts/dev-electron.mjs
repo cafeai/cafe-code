@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
 import { ensureMacDictationHelper } from "./build-mac-dictation-helper.mjs";
 import { ensureMacKeepAwakeHelper } from "./build-mac-keep-awake-helper.mjs";
+import { ensureMacProviderDaemonControlHelper } from "./build-mac-provider-daemon-control-helper.mjs";
 import { terminateDesktopDevApps } from "./dev-process-cleanup.mjs";
 import { linuxSafeStorageElectronArgs } from "./linux-safe-storage.mjs";
 import { waitForResources } from "./wait-for-resources.mjs";
@@ -25,6 +26,7 @@ if (!Number.isInteger(port) || port <= 0) {
 // has the same native prerequisite as the combined development supervisor.
 ensureMacDictationHelper();
 ensureMacKeepAwakeHelper();
+ensureMacProviderDaemonControlHelper();
 
 const requiredFiles = [
   "dist-electron/main.cjs",

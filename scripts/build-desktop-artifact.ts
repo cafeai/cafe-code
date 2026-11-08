@@ -957,6 +957,10 @@ export function resolveMacDesktopBuildConfig(
       },
       { from: "apps/desktop/resources/mac-glide", to: "mac-glide" },
       { from: "apps/desktop/resources/mac-keep-awake", to: "mac-keep-awake" },
+      {
+        from: "apps/desktop/resources/mac-provider-daemon-control",
+        to: "mac-provider-daemon-control",
+      },
       ...(["en", "ja", "ko"] as const).map((locale) => ({
         from: `apps/desktop/resources/ui-locales/${locale}.lproj`,
         to: `${locale}.lproj`,
@@ -1287,6 +1291,20 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
           options.arch,
           "--output",
           path.join(stageResourcesDir, "mac-keep-awake"),
+          "--force",
+        ],
+        { cwd: repoRoot, ...commandOutputOptions(options.verbose), shell: false },
+      ),
+    );
+    yield* runCommand(
+      ChildProcess.make(
+        process.execPath,
+        [
+          path.join(repoRoot, "apps/desktop/scripts/build-mac-provider-daemon-control-helper.mjs"),
+          "--arch",
+          options.arch,
+          "--output",
+          path.join(stageResourcesDir, "mac-provider-daemon-control"),
           "--force",
         ],
         { cwd: repoRoot, ...commandOutputOptions(options.verbose), shell: false },

@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { ensureMacDictationHelper } from "./build-mac-dictation-helper.mjs";
 import { ensureMacKeepAwakeHelper } from "./build-mac-keep-awake-helper.mjs";
+import { ensureMacProviderDaemonControlHelper } from "./build-mac-provider-daemon-control-helper.mjs";
 
 const gracefulShutdownMs = 5_000;
 const require = createRequire(import.meta.url);
@@ -73,6 +74,7 @@ export function runDesktopDevelopment({
   // fail only because the source workspace has never been built.
   ensureMacDictationHelper();
   ensureMacKeepAwakeHelper();
+  ensureMacProviderDaemonControlHelper();
   const children = new Set();
   const childExitPromises = [];
   let shuttingDown = false;

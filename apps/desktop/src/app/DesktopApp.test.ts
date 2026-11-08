@@ -196,6 +196,11 @@ function startupRecoveryFixture(input: {
         actions.push("ensure");
         return input.ensureRunning;
       }),
+      cancelStartupRecovery: (expectedRecoveryId) =>
+        Effect.sync(() => {
+          assert.equal(expectedRecoveryId, "synthetic-startup-owner");
+          actions.push("cancel-native");
+        }),
       ...(restartForStartup === undefined
         ? {}
         : {
@@ -573,6 +578,7 @@ describe("DesktopApp provider daemon startup recovery", () => {
               "ensure",
               "close-startup",
               "dialog",
+              "cancel-native",
               "shutdown-observed",
               "quit",
             ]);

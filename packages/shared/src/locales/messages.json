@@ -1661,7 +1661,7 @@
   },
   "Cafe Code could not reconnect to its provider daemon.": {
     "message": "Cafe Code could not reconnect to its provider daemon.",
-    "locations": ["apps/desktop/src/app/DesktopApp.ts:307"]
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:330"]
   },
   "Cafe Code could not update its private credential store.": {
     "message": "Cafe Code could not update its private credential store.",
@@ -1681,7 +1681,7 @@
   },
   "Cafe Code failed to start": {
     "message": "Cafe Code failed to start",
-    "locations": ["apps/desktop/src/app/DesktopApp.ts:238", "apps/desktop/src/main.ts:139"]
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:238", "apps/desktop/src/main.ts:140"]
   },
   "Cafe Code is not connected.": {
     "message": "Cafe Code is not connected.",
@@ -1845,8 +1845,8 @@
   "Cancel": {
     "message": "Cancel",
     "locations": [
-      "apps/desktop/src/app/DesktopApp.ts:316",
-      "apps/desktop/src/app/DesktopApp.ts:317",
+      "apps/desktop/src/app/DesktopApp.ts:336",
+      "apps/desktop/src/app/DesktopApp.ts:337",
       "apps/desktop/src/settings/DesktopRemoteCertificates.ts:170",
       "apps/desktop/src/updates/DesktopUpdates.ts:448",
       "apps/web/src/components/ProjectScriptsControl.tsx:508",
@@ -9574,7 +9574,7 @@
   },
   "Provider runtime could not start": {
     "message": "Provider runtime could not start",
-    "locations": ["apps/desktop/src/app/DesktopApp.ts:304"]
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:327"]
   },
   "Provider runtime ingestion": {
     "message": "Provider runtime ingestion",
@@ -10528,7 +10528,7 @@
   },
   "Restart daemon": {
     "message": "Restart daemon",
-    "locations": ["apps/desktop/src/app/DesktopApp.ts:316"]
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:336"]
   },
   "Restart provider": {
     "message": "Restart provider",
@@ -10605,17 +10605,17 @@
   "Retry connection": {
     "message": "Retry connection",
     "locations": [
-      "apps/desktop/src/app/DesktopApp.ts:316",
-      "apps/desktop/src/app/DesktopApp.ts:317"
+      "apps/desktop/src/app/DesktopApp.ts:336",
+      "apps/desktop/src/app/DesktopApp.ts:337"
     ]
   },
   "Retry connection leaves running work alone. A verified startup restart is not available for this daemon. Stop it from its owning Cafe Code instance, then retry the connection.": {
     "message": "Retry connection leaves running work alone. A verified startup restart is not available for this daemon. Stop it from its owning Cafe Code instance, then retry the connection.",
-    "locations": ["apps/desktop/src/app/DesktopApp.ts:312"]
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:322"]
   },
   "Retry connection leaves running work alone. Restart daemon stops its provider sessions and running work, then starts a new runtime. Cafe Code will verify the exact daemon before stopping it; if its identity or exit cannot be confirmed, it will preserve the process and recovery files.": {
     "message": "Retry connection leaves running work alone. Restart daemon stops its provider sessions and running work, then starts a new runtime. Cafe Code will verify the exact daemon before stopping it; if its identity or exit cannot be confirmed, it will preserve the process and recovery files.",
-    "locations": ["apps/desktop/src/app/DesktopApp.ts:309"]
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:319"]
   },
   "Retry delivery": {
     "message": "Retry delivery",
@@ -12008,7 +12008,7 @@
   },
   "Source Debug build is missing, outdated or inconsistent. Rebuild using yarn build:desktop before starting Cafe Code. No application or provider was started.": {
     "message": "Source Debug build is missing, outdated or inconsistent. Rebuild using yarn build:desktop before starting Cafe Code. No application or provider was started.",
-    "locations": ["apps/desktop/src/main.ts:141"]
+    "locations": ["apps/desktop/src/main.ts:142"]
   },
   "Source control": {
     "message": "Source control",
@@ -12750,7 +12750,7 @@
   },
   "The application data profile could not be initialized safely. Check its permissions and free space. No other data profile was selected.": {
     "message": "The application data profile could not be initialized safely. Check its permissions and free space. No other data profile was selected.",
-    "locations": ["apps/desktop/src/main.ts:147"]
+    "locations": ["apps/desktop/src/main.ts:148"]
   },
   "The attachment could not be retained. Please retry the upload.": {
     "message": "The attachment could not be retained. Please retry the upload.",
@@ -12812,6 +12812,14 @@
     "message": "The current draft could not be saved. Queue editing was cancelled; your draft is still here.",
     "locations": ["apps/web/src/components/ChatView.tsx:7252"]
   },
+  "The daemon's exit could not be confirmed. Its recovery files were preserved. Retry connection to check again.": {
+    "message": "The daemon's exit could not be confirmed. Its recovery files were preserved. Retry connection to check again.",
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:314"]
+  },
+  "The daemon's operating-system identity could not be confirmed. Its process and recovery files were preserved.": {
+    "message": "The daemon's operating-system identity could not be confirmed. Its process and recovery files were preserved.",
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:310"]
+  },
   "The dictation session expired before it could start. Please try again.": {
     "message": "The dictation session expired before it could start. Please try again.",
     "locations": ["apps/web/src/dictation/realtimeTranscription.ts:172"]
@@ -12868,6 +12876,10 @@
     "message": "The model is busy right now. Try again shortly, or choose another model.",
     "locations": ["apps/web/src/providerDiagnostic.ts:222"]
   },
+  "The native restart helper is unavailable. Rebuild or reinstall this Cafe Code build, then retry.": {
+    "message": "The native restart helper is unavailable. Rebuild or reinstall this Cafe Code build, then retry.",
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:306"]
+  },
   "The new chat keeps this project's workspace context.": {
     "message": "The new chat keeps this project's workspace context.",
     "locations": ["apps/web/src/hooks/useThreadActions.ts:311"]
@@ -12886,7 +12898,7 @@
   },
   "The provider daemon could not be restarted.": {
     "message": "The provider daemon could not be restarted.",
-    "locations": ["apps/desktop/src/app/DesktopApp.ts:306"]
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:329"]
   },
   "The provider declined this request under its usage policy. Try rephrasing it.": {
     "message": "The provider declined this request under its usage policy. Try rephrasing it.",

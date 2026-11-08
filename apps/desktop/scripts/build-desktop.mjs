@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { ensureMacDictationHelper } from "./build-mac-dictation-helper.mjs";
 import { ensureMacGlideHelper } from "./build-mac-glide-helper.mjs";
 import { ensureMacKeepAwakeHelper } from "./build-mac-keep-awake-helper.mjs";
+import { ensureMacProviderDaemonControlHelper } from "./build-mac-provider-daemon-control-helper.mjs";
 import { assertSandboxedPreloadBundles } from "./assert-sandboxed-preloads.mjs";
 
 const scriptsDirectory = dirname(fileURLToPath(import.meta.url));
@@ -20,6 +21,7 @@ const require = createRequire(import.meta.url);
 ensureMacDictationHelper();
 ensureMacGlideHelper();
 ensureMacKeepAwakeHelper();
+ensureMacProviderDaemonControlHelper();
 
 const packagePath = require.resolve("tsdown/package.json");
 const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
