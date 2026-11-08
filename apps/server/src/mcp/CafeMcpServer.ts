@@ -1,3 +1,18 @@
+import {
+  nonEmptyString,
+  entityId,
+  providerInstanceId,
+  runtimeMode,
+  interactionMode,
+  providerOption,
+  modelSelection,
+  projectSummary,
+  threadSummary,
+  providerSummary,
+  summarizeProject,
+  summarizeThread,
+  summarizeProvider,
+} from "./views.ts";
 import * as DateTime from "effect/DateTime";
 // Native namespace boundary retains host drive, separator and canonical path semantics.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
@@ -14,14 +29,9 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ThreadId,
   type ModelSelection,
-  type OrchestrationProject,
-  type OrchestrationProjectShell,
   type OrchestrationReadModel,
-  type OrchestrationThread,
-  type OrchestrationThreadShell,
   type ProviderInstanceConfig,
   type ProviderOptionSelection,
-  type ServerProvider,
   type ServerSettings,
 } from "@cafecode/contracts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -51,9 +61,20 @@ import { registerScheduledFollowupTools } from "../scheduledFollowups/mcp.ts";
 import type { ManagementLaunchContext } from "../auth/managementLaunchContext.ts";
 import { registerThreadUsageTool } from "./threadUsage.ts";
 import { registerThreadQuestionTools } from "./threadQuestions.ts";
+import { installManagementToolResults } from "./managementTools.ts";
+import { McpToolError } from "./results.ts";
+import { matchesQuery, pageInput, pageOutput, paginate } from "./pagination.ts";
+import { registerThreadStatusTools } from "./threadStatus.ts";
+import {
+  operationReference,
+  requestIdSchema,
+  type McpOperationsShape,
+  type McpOperationOwner,
+} from "./operations.ts";
+import { patchProviderEnvironment, patchProviderConfig } from "./providerSettings.ts";
 
 const CAFE_MCP_SERVER_NAME = "cafe-code";
-const CAFE_MCP_SERVER_VERSION = "1.0.0";
+const CAFE_MCP_SERVER_VERSION = "2.0.0";
 export const CAFE_MCP_RESTART_DELAY_MS = 750;
 const BUILT_IN_CONFIG_DECODERS = new Map(
   BUILT_IN_DRIVERS.map((driver) => [
@@ -61,74 +82,6 @@ const BUILT_IN_CONFIG_DECODERS = new Map(
     Schema.decodeUnknownEffect(driver.configSchema),
   ]),
 );
-
-const nonEmptyString = z.string().trim().min(1);
-const entityId = nonEmptyString.describe("Stable Cafe Code entity identifier.");
-const providerInstanceId = nonEmptyString.regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/);
-const runtimeMode = z.enum(["approval-required", "auto-accept-edits", "full-access"]);
-const interactionMode = z.enum(["default", "plan", "auto"]);
-const providerOption = z.object({
-  id: nonEmptyString,
-  value: z.union([nonEmptyString, z.boolean()]),
-});
-const modelSelection = z.object({
-  instanceId: providerInstanceId,
-  model: nonEmptyString,
-  options: z.array(providerOption).optional(),
-});
-const projectSummary = z.object({
-  id: entityId,
-  title: nonEmptyString,
-  workspaceRoot: nonEmptyString,
-  additionalWorkspaceRoots: z.array(nonEmptyString),
-  defaultModelSelection: modelSelection.nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-  deletedAt: z.string().nullable(),
-});
-const latestTurnSummary = z
-  .object({
-    turnId: entityId,
-    state: z.enum(["running", "interrupted", "completed", "error"]),
-    requestedAt: z.string(),
-    startedAt: z.string().nullable(),
-    completedAt: z.string().nullable(),
-  })
-  .nullable();
-const threadSummary = z.object({
-  id: entityId,
-  projectId: entityId.nullable(),
-  title: nonEmptyString,
-  modelSelection,
-  runtimeMode,
-  interactionMode,
-  branch: z.string().nullable(),
-  worktreePath: z.string().nullable(),
-  status: z.enum(["idle", "starting", "running", "ready", "interrupted", "stopped", "error"]),
-  activeTurnId: z.string().nullable(),
-  latestTurn: latestTurnSummary,
-  archivedAt: z.string().nullable(),
-  deletedAt: z.string().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
-const providerSummary = z.object({
-  instanceId: providerInstanceId,
-  driver: nonEmptyString,
-  displayName: z.string().optional(),
-  enabled: z.boolean(),
-  installed: z.boolean(),
-  availability: z.enum(["available", "unavailable"]),
-  status: z.string(),
-  authStatus: z.string(),
-  models: z.array(
-    z.object({
-      slug: nonEmptyString,
-      name: nonEmptyString,
-      capabilities: z.unknown().nullable(),
-    }),
-  ),
-});
 
 export interface CafeMcpDependencies extends ProviderRuntimeControlDependencies {
   readonly scheduledFollowups?: ScheduledFollowupsShape;
@@ -142,6 +95,8 @@ export interface CafeMcpDependencies extends ProviderRuntimeControlDependencies 
     | "getActiveProjectByWorkspaceRoot"
     | "getProjectShellById"
     | "getThreadDetailById"
+    | "getThreadMessageTail"
+    | "getThreadWorkStatusById"
     | "getThreadShellById"
     | "getThreadContextWindowActivity"
     | "getThreadQuestionContextById"
@@ -153,7 +108,10 @@ export interface CafeMcpDependencies extends ProviderRuntimeControlDependencies 
     ProviderServiceShape,
     "getInstanceInfo" | "listSessions" | "restartProviderRuntime"
   >;
-  readonly serverSettings: Pick<ServerSettingsShape, "getSettings" | "updateSettings">;
+  readonly serverSettings: Pick<
+    ServerSettingsShape,
+    "getSettings" | "updateSettings" | "updateSettingsWith"
+  >;
   readonly startup: Pick<ServerRuntimeStartupShape, "enqueueCommand">;
   readonly workspacePaths: Pick<WorkspacePathsShape, "normalizeWorkspaceRoot">;
 }
@@ -161,6 +119,9 @@ export interface CafeMcpDependencies extends ProviderRuntimeControlDependencies 
 export interface CafeMcpServerOptions {
   /** Verified internal launch intent; never derived from caller headers or subject text. */
   readonly managementLaunchContext?: ManagementLaunchContext;
+  readonly operations?: McpOperationsShape;
+  readonly operationOwner?: McpOperationOwner;
+  readonly requestSignal?: AbortSignal;
   /**
    * Schedule a provider restart after its tool acknowledgement is returned.
    * Tests inject a deterministic scheduler; production uses an unref'd timer.
@@ -195,7 +156,7 @@ function toolResult<T extends Record<string, unknown>>(structuredContent: T, tex
 }
 
 function publicErrorMessage(cause: unknown, fallback: string): string {
-  if (cause instanceof Error && cause.message.trim().length > 0) {
+  if (cause instanceof CafeMcpSelectionError && cause.message.trim().length > 0) {
     return cause.message;
   }
   return fallback;
@@ -204,7 +165,9 @@ function publicErrorMessage(cause: unknown, fallback: string): string {
 async function runEffect<A, E>(effect: Effect.Effect<A, E>, fallback: string): Promise<A> {
   const exit = await Effect.runPromiseExit(effect);
   if (exit._tag === "Success") return exit.value;
-  throw new Error(publicErrorMessage(Cause.squash(exit.cause), fallback));
+  const cause = Cause.squash(exit.cause);
+  if (cause instanceof McpToolError) throw cause;
+  throw new McpToolError("unavailable", publicErrorMessage(cause, fallback));
 }
 
 function nowIso(): string {
@@ -223,69 +186,9 @@ function commandId(): CommandId {
   return CommandId.make(crypto.randomUUID());
 }
 
-function summarizeProject(project: OrchestrationProject | OrchestrationProjectShell) {
-  return {
-    id: project.id,
-    title: project.title,
-    workspaceRoot: project.workspaceRoot,
-    additionalWorkspaceRoots: project.additionalWorkspaceRoots ?? [],
-    defaultModelSelection: project.defaultModelSelection,
-    createdAt: project.createdAt,
-    updatedAt: project.updatedAt,
-    deletedAt: "deletedAt" in project ? project.deletedAt : null,
-  };
-}
-
-function summarizeThread(thread: OrchestrationThread | OrchestrationThreadShell) {
-  return {
-    id: thread.id,
-    projectId: thread.projectId,
-    title: thread.title,
-    modelSelection: thread.modelSelection,
-    runtimeMode: thread.runtimeMode,
-    interactionMode: thread.interactionMode,
-    branch: thread.branch,
-    worktreePath: thread.worktreePath,
-    status: thread.session?.status ?? "idle",
-    activeTurnId: thread.session?.activeTurnId ?? null,
-    latestTurn:
-      thread.latestTurn === null
-        ? null
-        : {
-            turnId: thread.latestTurn.turnId,
-            state: thread.latestTurn.state,
-            requestedAt: thread.latestTurn.requestedAt,
-            startedAt: thread.latestTurn.startedAt,
-            completedAt: thread.latestTurn.completedAt,
-          },
-    archivedAt: thread.archivedAt,
-    deletedAt: thread.deletedAt,
-    createdAt: thread.createdAt,
-    updatedAt: thread.updatedAt,
-  };
-}
-
-function summarizeProvider(provider: ServerProvider) {
-  return {
-    instanceId: provider.instanceId,
-    driver: provider.driver,
-    ...(provider.displayName ? { displayName: provider.displayName } : {}),
-    enabled: provider.enabled,
-    installed: provider.installed,
-    availability: provider.availability ?? "available",
-    status: provider.status,
-    authStatus: provider.auth.status,
-    models: provider.models.map((model) => ({
-      slug: model.slug,
-      name: model.name,
-      capabilities: model.capabilities,
-    })),
-  };
-}
-
 function requireProject(snapshot: OrchestrationReadModel, projectId: string) {
   const project = snapshot.projects.find((candidate) => candidate.id === projectId);
-  if (!project) throw new Error(`Project '${projectId}' does not exist.`);
+  if (!project) throw new McpToolError("invalid_request", `Project '${projectId}' does not exist.`);
   return project;
 }
 
@@ -396,7 +299,11 @@ function dispatch(
 function providerSettingsView(settings: ServerSettings, instanceId: ProviderInstanceId) {
   const redacted = redactServerSettingsForClient(settings);
   const effective = effectiveProviderSettings(redacted, instanceId);
-  if (!effective) throw new Error(`Provider instance '${instanceId}' is not configured.`);
+  if (!effective)
+    throw new McpToolError(
+      "invalid_request",
+      `Provider instance '${instanceId}' is not configured.`,
+    );
   return {
     instanceId,
     source: instanceId in redacted.providerInstances ? ("explicit" as const) : ("legacy" as const),
@@ -412,11 +319,13 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
       description: "List Cafe Code projects and their stable IDs before taking project actions.",
       inputSchema: {
         includeDeleted: z.boolean().default(false),
+        workspaceRoot: nonEmptyString.optional(),
+        ...pageInput,
       },
-      outputSchema: z.object({ projects: z.array(projectSummary) }),
+      outputSchema: z.object({ projects: z.array(projectSummary), ...pageOutput }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    async ({ includeDeleted }) => {
+    async ({ includeDeleted, workspaceRoot, query, limit, cursor }) => {
       // The normal discovery path deliberately avoids hydrating every thread
       // transcript. The full snapshot is used only for the explicit request
       // to include soft-deleted projects, which shell snapshots omit.
@@ -433,7 +342,18 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
               "Failed to list projects.",
             )
           ).projects.map(summarizeProject);
-      return toolResult({ projects }, `Found ${projects.length} project(s).`);
+      const page = paginate(
+        projects.filter(
+          (project) =>
+            (workspaceRoot === undefined || project.workspaceRoot === workspaceRoot) &&
+            matchesQuery(query, project.title),
+        ),
+        { limit, ...(cursor ? { cursor } : {}) },
+        { tool: "list_projects", includeDeleted, workspaceRoot, query },
+        (project) => project.id,
+      );
+      const { items, ...metadata } = page;
+      return toolResult({ projects: items, ...metadata }, `Found ${projects.length} project(s).`);
     },
   );
 
@@ -442,11 +362,19 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
     {
       title: "Get a Cafe Code project",
       description: "Get one project and its threads by stable project ID.",
-      inputSchema: { projectId: entityId },
-      outputSchema: z.object({ project: projectSummary, threads: z.array(threadSummary) }),
+      inputSchema: {
+        projectId: entityId,
+        state: z.enum(["active", "archived", "deleted", "all"]).default("active"),
+        ...pageInput,
+      },
+      outputSchema: z.object({
+        project: projectSummary,
+        threads: z.array(threadSummary),
+        ...pageOutput,
+      }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    async ({ projectId }) => {
+    async ({ projectId, state, query, limit, cursor }) => {
       const id = ProjectId.make(projectId);
       const activeProject = await runEffect(
         dependencies.projectionSnapshotQuery.getProjectShellById(id),
@@ -473,8 +401,23 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
         .flatMap((snapshot) => snapshot.threads)
         .filter((thread) => thread.projectId === project.id)
         .map(summarizeThread);
+      const page = paginate(
+        threads.filter(
+          (thread) =>
+            matchesQuery(query, thread.title) &&
+            (state === "all" || state === "deleted"
+              ? state === "all" || thread.deletedAt !== null
+              : state === "archived"
+                ? thread.archivedAt !== null && thread.deletedAt === null
+                : thread.archivedAt === null && thread.deletedAt === null),
+        ),
+        { limit, ...(cursor ? { cursor } : {}) },
+        { tool: "get_project", projectId, state, query },
+        (thread) => thread.id,
+      );
+      const { items, ...metadata } = page;
       return toolResult(
-        { project: summarizeProject(project), threads },
+        { project: summarizeProject(project), threads: items, ...metadata },
         `Loaded project '${project.title}' with ${threads.length} thread(s).`,
       );
     },
@@ -484,15 +427,18 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
     "list_threads",
     {
       title: "List Cafe Code threads",
-      description: "List threads, optionally scoped to one project and lifecycle state.",
+      description:
+        "Find chats by title substring, project, lifecycle state or provider status. Returns a bounded live page with exact IDs; duplicate titles remain separate candidates. Follow nextCursor with the same filters. Reuse a known exact ID without listing other inventories.",
       inputSchema: {
         projectId: entityId.nullable().optional(),
         state: z.enum(["active", "archived", "deleted", "all"]).default("active"),
+        status: threadSummary.shape.status.optional(),
+        ...pageInput,
       },
-      outputSchema: z.object({ threads: z.array(threadSummary) }),
+      outputSchema: z.object({ threads: z.array(threadSummary), ...pageOutput }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    async ({ projectId, state }) => {
+    async ({ projectId, state, status, query, limit, cursor }) => {
       const snapshots = await runEffect(
         state === "active"
           ? Effect.map(dependencies.projectionSnapshotQuery.getShellSnapshot(), (value) => [value])
@@ -517,7 +463,17 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
         .flatMap((snapshot) => snapshot.threads)
         .filter((thread) => projectId === undefined || thread.projectId === projectId)
         .map(summarizeThread);
-      return toolResult({ threads }, `Found ${threads.length} thread(s).`);
+      const page = paginate(
+        threads.filter(
+          (thread) =>
+            matchesQuery(query, thread.title) && (status === undefined || thread.status === status),
+        ),
+        { limit, ...(cursor ? { cursor } : {}) },
+        { tool: "list_threads", projectId, state, status, query },
+        (thread) => thread.id,
+      );
+      const { items, ...metadata } = page;
+      return toolResult({ threads: items, ...metadata }, `Found ${threads.length} thread(s).`);
     },
   );
 
@@ -526,7 +482,7 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
     {
       title: "Get a Cafe Code thread",
       description:
-        "Get thread state and a bounded tail of messages. Use this to inspect status after sending or interrupting work.",
+        "Read a chat and its bounded recent messages. messageLimit=0 reads only lightweight state. Text exceeding the finite response budget is explicitly omitted. Use get_thread_status or wait_for_thread for work/attention checks.",
       inputSchema: {
         threadId: entityId,
         messageLimit: z.number().int().min(0).max(100).default(20),
@@ -542,31 +498,60 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
             streaming: z.boolean(),
             createdAt: z.string(),
             updatedAt: z.string(),
+            textOmitted: z.boolean(),
           }),
         ),
+        hasMoreMessages: z.boolean().nullable(),
+        omittedMessageTexts: z.number().int().nonnegative(),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async ({ threadId, messageLimit }) => {
-      const detail = await runEffect(
-        dependencies.projectionSnapshotQuery.getThreadDetailById(ThreadId.make(threadId)),
+      const shell = await runEffect(
+        dependencies.projectionSnapshotQuery.getThreadShellById(ThreadId.make(threadId)),
         "Failed to load the thread.",
       );
-      if (Option.isNone(detail)) throw new Error(`Thread '${threadId}' does not exist.`);
-      const messages = (messageLimit === 0 ? [] : detail.value.messages.slice(-messageLimit)).map(
-        (message) => ({
-          id: message.id,
-          role: message.role,
-          text: message.text,
-          turnId: message.turnId,
-          streaming: message.streaming,
-          createdAt: message.createdAt,
-          updatedAt: message.updatedAt,
-        }),
-      );
+      if (Option.isNone(shell))
+        throw new McpToolError("not_found", `Thread '${threadId}' does not exist.`);
+      const tail =
+        messageLimit === 0
+          ? { messages: [], hasMore: null }
+          : await runEffect(
+              dependencies.projectionSnapshotQuery.getThreadMessageTail({
+                threadId: ThreadId.make(threadId),
+                limit: messageLimit,
+              }),
+              "Failed to read recent messages.",
+            );
+      let bytes = 0;
+      const messages = tail.messages
+        .toReversed()
+        .map((message) => {
+          const value = {
+            id: message.id,
+            role: message.role,
+            text: message.text,
+            turnId: message.turnId,
+            streaming: message.streaming,
+            createdAt: message.createdAt,
+            updatedAt: message.updatedAt,
+            textOmitted: message.textOmitted,
+          };
+          const size = Buffer.byteLength(JSON.stringify(value), "utf8");
+          if (bytes + size > 1_048_576)
+            return Object.assign(value, { text: "", textOmitted: true });
+          bytes += size;
+          return value;
+        })
+        .toReversed();
       return toolResult(
-        { thread: summarizeThread(detail.value), messages },
-        `Loaded thread '${detail.value.title}' with ${messages.length} recent message(s).`,
+        {
+          thread: summarizeThread(shell.value),
+          messages,
+          hasMoreMessages: tail.hasMore,
+          omittedMessageTexts: messages.filter((message) => message.textOmitted).length,
+        },
+        `Loaded thread '${shell.value.title}' with ${messages.length} recent message(s).`,
       );
     },
   );
@@ -576,18 +561,87 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
     {
       title: "List Cafe Code providers",
       description:
-        "List configured provider instances, authentication state, models, and model option descriptors.",
-      inputSchema: {},
-      outputSchema: z.object({ providers: z.array(providerSummary) }),
+        "Find configured provider instances and authentication state. Compact by default; use list_provider_models for a targeted model/options page. includeModels=true includes at most 100 models per returned provider with an explicit truncation flag.",
+      inputSchema: {
+        instanceId: providerInstanceId.optional(),
+        includeModels: z.boolean().default(false),
+        ...pageInput,
+      },
+      outputSchema: z.object({ providers: z.array(providerSummary), ...pageOutput }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    async () => {
+    async ({ instanceId, includeModels, query, limit, cursor }) => {
       const providerValues = await runEffect(
         dependencies.providerRegistry.getProviders,
         "Failed to list providers.",
       );
-      const providers = providerValues.map(summarizeProvider);
-      return toolResult({ providers }, `Found ${providers.length} provider instance(s).`);
+      const providers = providerValues
+        .filter(
+          (provider) =>
+            (instanceId === undefined || provider.instanceId === instanceId) &&
+            matchesQuery(query, provider.displayName, provider.instanceId, provider.driver),
+        )
+        .map((provider) => summarizeProvider(provider, includeModels));
+      const page = paginate(
+        providers,
+        { limit, ...(cursor ? { cursor } : {}) },
+        { tool: "list_providers", instanceId, includeModels, query },
+        (provider) => provider.instanceId,
+      );
+      const { items, ...metadata } = page;
+      return toolResult(
+        { providers: items, ...metadata },
+        `Found ${providers.length} provider instance(s).`,
+      );
+    },
+  );
+
+  server.registerTool(
+    "list_provider_models",
+    {
+      title: "Find a provider's models and options",
+      description:
+        "Read one configured provider's bounded model catalog. Search matches model name or slug. Set includeOptions=true when selecting reasoning/fast/context options; capabilities are descriptors, not provider adoption or authentication proof. No native refresh or inference.",
+      inputSchema: {
+        instanceId: providerInstanceId,
+        includeOptions: z.boolean().default(false),
+        ...pageInput,
+      },
+      outputSchema: z.object({
+        instanceId: providerInstanceId,
+        models: z.array(
+          z.object({
+            slug: nonEmptyString,
+            name: nonEmptyString,
+            capabilities: z.unknown().optional(),
+          }),
+        ),
+        ...pageOutput,
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ instanceId, includeOptions, query, limit, cursor }) => {
+      const providers = await runEffect(
+        dependencies.providerRegistry.getProviders,
+        "Failed to read provider models.",
+      );
+      const provider = providers.find((provider) => provider.instanceId === instanceId);
+      if (!provider)
+        throw new McpToolError("not_found", "The provider instance is not configured.");
+      const values = provider.models
+        .filter((model) => matchesQuery(query, model.name, model.slug))
+        .map((model) => ({
+          slug: model.slug,
+          name: model.name,
+          ...(includeOptions ? { capabilities: model.capabilities } : {}),
+        }));
+      const { items, ...metadata } = paginate(
+        values,
+        { limit, ...(cursor ? { cursor } : {}) },
+        { tool: "list_provider_models", instanceId, includeOptions, query },
+        (model) => model.slug,
+      );
+      return toolResult({ instanceId, models: items, ...metadata }, "Read provider models.");
     },
   );
 
@@ -602,6 +656,7 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
         instanceId: providerInstanceId,
         source: z.enum(["explicit", "legacy"]),
         settings: z.unknown(),
+        configSchema: z.unknown().nullable(),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
@@ -611,7 +666,25 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
         "Failed to load provider settings.",
       );
       const view = providerSettingsView(settings, ProviderInstanceId.make(instanceId));
-      return toolResult(view, `Loaded redacted settings for provider '${instanceId}'.`);
+      const driver = BUILT_IN_DRIVERS.find((driver) => driver.driverKind === view.settings.driver);
+      let configSchema: unknown = null;
+      if (driver) {
+        try {
+          const document = Schema.toJsonSchemaDocument(driver.configSchema);
+          const candidate = {
+            ...document.schema,
+            ...(document.definitions ? { $defs: document.definitions } : {}),
+          };
+          if (Buffer.byteLength(JSON.stringify(candidate), "utf8") <= 65_536)
+            configSchema = candidate;
+        } catch {
+          /* A schema conversion refusal never exposes native config or causes. */
+        }
+      }
+      return toolResult(
+        { ...view, configSchema },
+        `Loaded redacted settings for provider '${instanceId}'.`,
+      );
     },
   );
 }
@@ -658,7 +731,8 @@ function registerProjectTools(server: McpServer, dependencies: CafeMcpDependenci
         "Failed to inspect existing projects.",
       );
       if (Option.isSome(existing)) {
-        throw new Error(
+        throw new McpToolError(
+          "invalid_request",
           `Project '${existing.value.id}' already uses workspace root '${normalizedRoot}'.`,
         );
       }
@@ -717,7 +791,8 @@ function registerProjectTools(server: McpServer, dependencies: CafeMcpDependenci
       clearDefaultModelSelection,
     }) => {
       if (defaultModelSelection !== undefined && clearDefaultModelSelection) {
-        throw new Error(
+        throw new McpToolError(
+          "invalid_request",
           "Choose either defaultModelSelection or clearDefaultModelSelection, not both.",
         );
       }
@@ -726,7 +801,7 @@ function registerProjectTools(server: McpServer, dependencies: CafeMcpDependenci
         "Failed to load the project.",
       );
       if (Option.isNone(projectOption))
-        throw new Error(`Active project '${projectId}' does not exist.`);
+        throw new McpToolError("invalid_request", `Active project '${projectId}' does not exist.`);
       const project = projectOption.value;
       const nextWorkspaceRoot = workspaceRoot
         ? await runEffect(
@@ -842,7 +917,7 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
               "Failed to load the target project.",
             );
       if (projectId !== null && Option.isNone(projectOption))
-        throw new Error(`Active project '${projectId}' does not exist.`);
+        throw new McpToolError("invalid_request", `Active project '${projectId}' does not exist.`);
       const project = Option.getOrUndefined(projectOption);
       const selection = await runEffect(
         resolveModelSelection(
@@ -915,7 +990,7 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
         "Failed to load the thread.",
       );
       if (Option.isNone(threadOption))
-        throw new Error(`Active thread '${threadId}' does not exist.`);
+        throw new McpToolError("invalid_request", `Active thread '${threadId}' does not exist.`);
       const thread = threadOption.value;
       if (projectId !== undefined && projectId !== null) {
         const projectOption = await runEffect(
@@ -923,7 +998,10 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
           "Failed to load the destination project.",
         );
         if (Option.isNone(projectOption)) {
-          throw new Error(`Active project '${projectId}' does not exist.`);
+          throw new McpToolError(
+            "invalid_request",
+            `Active project '${projectId}' does not exist.`,
+          );
         }
       }
       const selectionRequested =
@@ -1026,7 +1104,7 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
         "Failed to load the thread.",
       );
       if (Option.isNone(threadOption))
-        throw new Error(`Active thread '${threadId}' does not exist.`);
+        throw new McpToolError("invalid_request", `Active thread '${threadId}' does not exist.`);
       const thread = threadOption.value;
       const messageId = MessageId.make(crypto.randomUUID());
       const result = await runEffect(
@@ -1157,7 +1235,7 @@ function registerProviderMutationTools(
     {
       title: "Set provider settings",
       description:
-        "Create or replace settings for one provider instance. Read current redacted settings first; omitted fields are preserved.",
+        "Patch one provider instance. Read get_provider_settings and its configSchema first. Omitted fields and environment names are preserved; redacted or omitted secret values preserve existing secrets. Clear a variable with clear=true or clearEnvironment. Config is a shallow patch; clearConfigKeys removes exact fields. Saved settings do not attest native adoption.",
       inputSchema: {
         instanceId: providerInstanceId,
         driver: providerInstanceId.optional(),
@@ -1165,14 +1243,23 @@ function registerProviderMutationTools(
         accentColor: nonEmptyString.nullable().optional(),
         enabled: z.boolean().optional(),
         config: z.record(z.string(), z.unknown()).optional(),
+        replaceConfig: z.boolean().default(false),
+        clearConfigKeys: z.array(nonEmptyString.max(128)).max(64).default([]),
+        clearEnvironment: z
+          .array(z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/))
+          .max(128)
+          .default([]),
         environment: z
           .array(
             z.object({
               name: z.string().regex(/^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/),
               value: z.string().optional(),
-              sensitive: z.boolean().default(false),
+              sensitive: z.boolean().optional(),
+              valueRedacted: z.boolean().optional(),
+              clear: z.boolean().optional(),
             }),
           )
+          .max(128)
           .optional(),
         defaultModel: nonEmptyString.nullable().optional(),
         defaultModelOptions: z.array(providerOption).nullable().optional(),
@@ -1187,62 +1274,82 @@ function registerProviderMutationTools(
       accentColor,
       enabled,
       config,
+      replaceConfig,
+      clearConfigKeys,
+      clearEnvironment,
       environment,
       defaultModel,
       defaultModelOptions,
     }) => {
       const id = ProviderInstanceId.make(instanceId);
-      const settings = await runEffect(
-        dependencies.serverSettings.getSettings,
-        "Failed to load provider settings.",
-      );
-      const existing = effectiveProviderSettings(settings, id);
-      if (!existing && !driver) {
-        throw new Error("driver is required when creating a new provider instance.");
-      }
-      let next: ProviderInstanceConfig = {
-        ...(existing ?? { driver: ProviderDriverKind.make(driver!) }),
-        ...(driver !== undefined ? { driver: ProviderDriverKind.make(driver) } : {}),
-        ...(enabled !== undefined ? { enabled } : {}),
-        ...(config !== undefined ? { config } : {}),
-        ...(environment !== undefined
-          ? {
-              environment: environment.map((variable) => ({
-                name: variable.name,
-                value: variable.value ?? "",
-                sensitive: variable.sensitive,
-              })),
-            }
-          : {}),
-      };
-      next = withNullableField(next, "displayName", displayName);
-      next = withNullableField(next, "accentColor", accentColor);
-      next = withNullableField(next, "defaultModel", defaultModel);
-      next = withNullableField(next, "defaultModelOptions", defaultModelOptions);
-
-      const builtInDriver = BUILT_IN_DRIVERS.find(
-        (candidate) => candidate.driverKind === next.driver,
-      );
-      if (builtInDriver) {
-        const decodeConfig = BUILT_IN_CONFIG_DECODERS.get(builtInDriver.driverKind);
-        if (!decodeConfig) {
-          throw new Error(`Provider driver '${next.driver}' is not available.`);
-        }
-        const validation = await Effect.runPromiseExit(
-          decodeConfig(next.config ?? builtInDriver.defaultConfig()),
-        );
-        if (validation._tag === "Failure") {
-          // Schema diagnostics can include submitted secret values. Keep the
-          // MCP error deliberately generic and let the provider settings UI
-          // expose its normal redacted validation state.
-          throw new Error(`Invalid settings for provider driver '${next.driver}'.`);
-        }
-      }
-
       await runEffect(
-        dependencies.serverSettings.updateSettings({
-          providerInstances: { ...settings.providerInstances, [id]: next },
-        }),
+        dependencies.serverSettings.updateSettingsWith((settings) =>
+          Effect.gen(function* () {
+            const existing = effectiveProviderSettings(settings, id);
+            if (!existing && !driver) {
+              throw new McpToolError(
+                "invalid_request",
+                "driver is required when creating a new provider instance.",
+              );
+            }
+            let next: ProviderInstanceConfig = {
+              ...(existing ?? { driver: ProviderDriverKind.make(driver!) }),
+              ...(driver !== undefined ? { driver: ProviderDriverKind.make(driver) } : {}),
+              ...(enabled !== undefined ? { enabled } : {}),
+            };
+            if (driver !== undefined && driver !== existing?.driver) {
+              // Materialized driver-specific config can include OpenCode's
+              // password. Never carry it into another driver's plain config.
+              const { config: _retiredConfig, ...retained } = next;
+              next = retained;
+            }
+            const configPatch = patchProviderConfig(
+              driver !== undefined && driver !== existing?.driver ? undefined : existing?.config,
+              config,
+              clearConfigKeys,
+              replaceConfig,
+              next.driver,
+            );
+            if (configPatch !== undefined) next = { ...next, config: configPatch };
+            const environmentPatch = patchProviderEnvironment(
+              existing?.environment,
+              environment,
+              clearEnvironment,
+            );
+            if (environmentPatch !== undefined) next = { ...next, environment: environmentPatch };
+            next = withNullableField(next, "displayName", displayName);
+            next = withNullableField(next, "accentColor", accentColor);
+            next = withNullableField(next, "defaultModel", defaultModel);
+            next = withNullableField(next, "defaultModelOptions", defaultModelOptions);
+
+            const builtInDriver = BUILT_IN_DRIVERS.find(
+              (candidate) => candidate.driverKind === next.driver,
+            );
+            if (builtInDriver) {
+              const decodeConfig = BUILT_IN_CONFIG_DECODERS.get(builtInDriver.driverKind);
+              if (!decodeConfig) {
+                throw new McpToolError(
+                  "invalid_request",
+                  `Provider driver '${next.driver}' is not available.`,
+                );
+              }
+              const validation = yield* Effect.exit(
+                decodeConfig(next.config ?? builtInDriver.defaultConfig()),
+              );
+              if (validation._tag === "Failure") {
+                // Schema diagnostics can include submitted secret values. Keep the
+                // MCP error deliberately generic and let the provider settings UI
+                // expose its normal redacted validation state.
+                throw new McpToolError(
+                  "invalid_request",
+                  `Invalid settings for provider driver '${next.driver}'.`,
+                );
+              }
+            }
+
+            return { providerInstances: { ...settings.providerInstances, [id]: next } };
+          }),
+        ),
         "Failed to save provider settings.",
       );
       return toolResult(
@@ -1267,6 +1374,7 @@ function registerProviderMutationTools(
         description: config.description,
         inputSchema: {
           instanceId: providerInstanceId,
+          requestId: requestIdSchema.optional(),
           ...(config.resumeActiveSessions
             ? {
                 resumeMessage: z
@@ -1283,6 +1391,14 @@ function registerProviderMutationTools(
           scheduled: z.literal(true),
           resumeActiveSessions: z.boolean(),
           delayMs: z.number().int().nonnegative(),
+          completion: z
+            .object({
+              stoppedSessionCount: z.number().int().nonnegative(),
+              activeSessionCount: z.number().int().nonnegative(),
+              resumedThreadCount: z.number().int().nonnegative(),
+              failedResumeThreadCount: z.number().int().nonnegative(),
+            })
+            .optional(),
         }),
         annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
       },
@@ -1293,6 +1409,21 @@ function registerProviderMutationTools(
           `Provider instance '${id}' is not available.`,
         );
 
+        const result = {
+          instanceId: id,
+          scheduled: true as const,
+          resumeActiveSessions: config.resumeActiveSessions,
+          delayMs: CAFE_MCP_RESTART_DELAY_MS,
+        };
+        const settle = (state: "completed" | "failed", completion?: Record<string, unknown>) =>
+          options.operations && options.operationOwner && input.requestId
+            ? options.operations.settle(options.operationOwner, input.requestId, state, {
+                ...result,
+                phase: state,
+                operation: operationReference(options.operationOwner, input.requestId, state),
+                ...(completion ? { completion } : {}),
+              })
+            : Effect.void;
         const backgroundJob = restartProviderRuntimeWithPolicy(dependencies, {
           instanceId: id,
           resumeActiveSessions: config.resumeActiveSessions,
@@ -1309,22 +1440,32 @@ function registerProviderMutationTools(
               failedResumeThreadCount: result.failedResumeThreadIds.length,
             }),
           ),
-          Effect.catchCause((cause) =>
-            Effect.logError("scheduled MCP provider restart failed", {
-              instanceId: id,
-              cause,
-            }),
+          Effect.tap((completed) =>
+            settle("completed", {
+              stoppedSessionCount: completed.stoppedSessionCount,
+              activeSessionCount: completed.activeSessionCount,
+              resumedThreadCount: completed.resumedThreadIds.length,
+              failedResumeThreadCount: completed.failedResumeThreadIds.length,
+            }).pipe(
+              Effect.catchCause(() =>
+                Effect.logWarning("MCP restart completion receipt is unavailable", {
+                  instanceId: id,
+                }),
+              ),
+            ),
+          ),
+          Effect.catchCause(() =>
+            settle("failed").pipe(
+              Effect.catchCause(() => Effect.void),
+              Effect.andThen(
+                Effect.logError("scheduled MCP provider restart failed", { instanceId: id }),
+              ),
+            ),
           ),
           Effect.asVoid,
         );
         (options.scheduleRestart ?? defaultScheduleRestart)(backgroundJob);
 
-        const result = {
-          instanceId: id,
-          scheduled: true as const,
-          resumeActiveSessions: config.resumeActiveSessions,
-          delayMs: CAFE_MCP_RESTART_DELAY_MS,
-        };
         return toolResult(
           result,
           config.resumeActiveSessions
@@ -1356,11 +1497,13 @@ export function makeCafeMcpServer(
     { name: CAFE_MCP_SERVER_NAME, version: CAFE_MCP_SERVER_VERSION },
     {
       instructions:
-        "Use list_projects, list_threads, and list_providers before mutations so you operate on stable Cafe Code IDs. Use get_thread_usage to inspect last-reported context headroom and shared provider-account quota without loading messages; omitted threadId means only the authenticated launch Cafe chat, including on inherited subagent connections. Use list_thread_questions and get_thread_question to read pending questions for an explicit chat before answering, skipping or clearing their exact target. Follow question pagination and omission metadata; a callback acknowledgement is not native resolution, and an uncertain mutation must not be retried automatically. Question tools do not approve permissions or delete chat history. Deletions, interrupts, provider configuration, and provider restarts are consequential. restart_provider_and_resume returns before teardown, then Cafe Code restarts the provider and submits a durable resume turn to each thread that was running at the restart boundary.",
+        "Start with get_cafe_context; discover only missing exact IDs. Follow pagination and omissions. Use each action's receipt to reconcile uncertain outcomes; never auto-retry. Recorded intent is not native completion.",
     },
   );
 
+  installManagementToolResults(server, options);
   registerDiscoveryTools(server, dependencies);
+  registerThreadStatusTools(server, dependencies, options);
   registerThreadUsageTool(server, dependencies, options);
   registerThreadQuestionTools(server, dependencies);
   if (dependencies.scheduledFollowups)

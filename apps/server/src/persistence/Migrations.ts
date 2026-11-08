@@ -127,6 +127,7 @@ import Migration0102 from "./Migrations/102_GlideStopAll.ts";
 import Migration0103 from "./Migrations/103_UsageCacheDurations.ts";
 import Migration0104 from "./Migrations/104_ThreadContextWindowLookup.ts";
 import Migration0105 from "./Migrations/105_CurrentNativeAgentBindings.ts";
+import Migration0106 from "./Migrations/106_McpOperations.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -248,6 +249,7 @@ export const migrationEntries = [
   [103, "UsageCacheDurations", Migration0103],
   [104, "ThreadContextWindowLookup", Migration0104],
   [105, "CurrentNativeAgentBindings", Migration0105],
+  [106, "McpOperations", Migration0106],
 ] as const;
 
 export const makeMigrationLoader = (

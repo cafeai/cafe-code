@@ -81,7 +81,8 @@ function launch(t, args = [], heartbeat = false) {
   let heartbeatTimer;
   let killTimer;
   const send = (command) => {
-    if (!closed && !child.stdin.destroyed) child.stdin.write(JSON.stringify({ command }) + "\n");
+    if (!closed && !child.stdin.destroyed)
+      child.stdin.write(JSON.stringify(typeof command === "string" ? { command } : command) + "\n");
   };
   const stopPings = () => clearInterval(heartbeatTimer);
   retire = () => {
@@ -131,8 +132,9 @@ function launch(t, args = [], heartbeat = false) {
     }
   };
   if (heartbeat) {
-    send("renew");
-    heartbeatTimer = setInterval(() => send("renew"), 500);
+    const renew = () => send(typeof heartbeat === "function" ? heartbeat() : "renew");
+    renew();
+    heartbeatTimer = setInterval(renew, 500);
   }
   return { child, send, event, done, retire, stopPings, events };
 }
@@ -150,6 +152,144 @@ const state = (path) => readFile(join(path, "power-state"), "utf8");
 
 try {
   if (!live) {
+    await test(
+      "screen sleep requires adoption of the exact current lid observation while work remains protected",
+      { timeout: 18000 },
+      async (t) => {
+        const path = await mockDirectory(t);
+        await writeFile(join(path, "lid-state"), "closed", { mode: 0o600 });
+        await writeFile(join(path, "external-displays"), "no", { mode: 0o600 });
+        let sequence = null;
+        let allowed = false;
+        const instance = launch(t, ["--mock-root", path], () => ({
+          command: "renew",
+          lidSequence: sequence,
+          displayMaySleep: allowed,
+        }));
+        await instance.event("active");
+        const first = await instance.event("lid", 2);
+        assert.equal(first.closed, true);
+        await instance.event("test-display-tick");
+        assert.equal(
+          instance.events.some((value) => value.event === "test-display"),
+          false,
+        );
+        assert.equal(await state(path), "1");
+        // Even a true permission cannot adopt a missing/old observation.
+        allowed = true;
+        await instance.event("test-display-tick", 2);
+        assert.equal(
+          instance.events.some((value) => value.event === "test-display"),
+          false,
+        );
+        sequence = first.sequence;
+        assert.equal((await instance.event("test-display")).action, "sleep");
+        await writeFile(join(path, "lid-state"), "open");
+        const opened = await instance.event("lid", 3);
+        assert.equal(opened.closed, false);
+        assert.equal((await instance.event("test-display", 2)).action, "wake");
+        await writeFile(join(path, "lid-state"), "closed");
+        const second = await instance.event("lid", 4);
+        assert.equal(second.closed, true);
+        assert.ok(second.sequence > first.sequence);
+        await instance.event(
+          "test-display-tick",
+          instance.events.filter((value) => value.event === "test-display-tick").length + 1,
+        );
+        assert.equal(instance.events.filter((value) => value.event === "test-display").length, 2);
+        assert.equal(await state(path), "1");
+        sequence = second.sequence;
+        assert.equal((await instance.event("test-display", 3)).action, "sleep");
+        instance.retire();
+        assert.equal((await instance.event("stopped")).resetAccepted, true);
+        await instance.done;
+        assert.equal(await state(path), "0");
+      },
+    );
+    await test(
+      "display topology changes require a fresh built-in-only observation before screen sleep",
+      { timeout: 18000 },
+      async (t) => {
+        const path = await mockDirectory(t);
+        await writeFile(join(path, "lid-state"), "closed", { mode: 0o600 });
+        await writeFile(join(path, "external-displays"), "yes", { mode: 0o600 });
+        let sequence = null;
+        const instance = launch(t, ["--mock-root", path], () => ({
+          command: "renew",
+          lidSequence: sequence,
+          displayMaySleep: true,
+        }));
+        await instance.event("active");
+        const external = await instance.event("lid", 2);
+        assert.equal(external.closed, true);
+        assert.equal(external.internalOnly, false);
+        sequence = external.sequence;
+        await instance.event("test-display-tick");
+        assert.equal(
+          instance.events.some((value) => value.event === "test-display"),
+          false,
+        );
+
+        await writeFile(join(path, "external-displays"), "unknown");
+        const unknown = await instance.event("lid", 3);
+        assert.equal(unknown.internalOnly, null);
+        sequence = unknown.sequence;
+        await instance.event(
+          "test-display-tick",
+          instance.events.filter((value) => value.event === "test-display-tick").length + 1,
+        );
+        assert.equal(
+          instance.events.some((value) => value.event === "test-display"),
+          false,
+        );
+
+        await writeFile(join(path, "external-displays"), "no");
+        const internal = await instance.event("lid", 4);
+        assert.equal(internal.closed, true);
+        assert.equal(internal.internalOnly, true);
+        assert.ok(internal.sequence > unknown.sequence);
+        await instance.event(
+          "test-display-tick",
+          instance.events.filter((value) => value.event === "test-display-tick").length + 1,
+        );
+        assert.equal(
+          instance.events.some((value) => value.event === "test-display"),
+          false,
+        );
+        assert.equal(await state(path), "1");
+        sequence = internal.sequence;
+        assert.equal((await instance.event("test-display")).action, "sleep");
+        instance.retire();
+        await instance.done;
+        assert.equal(await state(path), "0");
+      },
+    );
+    for (const invalid of [false, "2", 1.5]) {
+      await test(
+        `a malformed display acknowledgement cannot authorize a screen action: ${typeof invalid}`,
+        { timeout: 18000 },
+        async (t) => {
+          const path = await mockDirectory(t);
+          await writeFile(join(path, "lid-state"), "closed", { mode: 0o600 });
+          await writeFile(join(path, "external-displays"), "no", { mode: 0o600 });
+          let sequence = null;
+          const instance = launch(t, ["--mock-root", path], () => ({
+            command: "renew",
+            lidSequence: sequence,
+            displayMaySleep: true,
+          }));
+          await instance.event("active");
+          sequence = invalid;
+          assert.equal((await instance.event("stopped")).resetAccepted, true);
+          await instance.done;
+          assert.equal(
+            instance.events.some((value) => value.event === "test-display"),
+            false,
+          );
+          assert.equal(await state(path), "0");
+        },
+      );
+    }
     await test(
       "closed lid darkens only the internal display and reopening wakes it once without releasing work",
       { timeout: 18000 },

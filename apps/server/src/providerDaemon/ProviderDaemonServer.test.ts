@@ -318,6 +318,7 @@ const mockServerSettingsLayer = Layer.succeed(ServerSettingsService, {
   start: Effect.void,
   ready: Effect.void,
   getSettings: Effect.die("unexpected getSettings"),
+  updateSettingsWith: () => Effect.die("unused atomic settings update"),
   updateSettings: () => Effect.die("unexpected updateSettings"),
   streamChanges: Stream.empty,
 });

@@ -36,6 +36,17 @@ private func encode(_ value: [String: Any]) -> Data {
 private func emit(_ value: [String: Any]) { _ = writeBytes(1, encode(value)) }
 private struct Refusal: Error { let reason: String; init(_ reason: String) { self.reason = reason } }
 private struct DisplayRefusal: Error {}
+private func nativeBool(_ value: Any?) -> Bool? {
+    guard let value, CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID() else { return nil }
+    return value as? Bool
+}
+private func safeSequence(_ value: Any?) -> UInt64? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+    let value = number.doubleValue
+    guard value.isFinite, value >= 0, value <= 9_007_199_254_740_991,
+          value.rounded(.towardZero) == value else { return nil }
+    return UInt64(value)
+}
 
 #if KEEP_AWAKE_TEST
 private let mockRoot: String? = {
@@ -259,15 +270,15 @@ private final class LidDisplay {
         return value as? Bool
     }
 
-    func internalDisplayOnly() -> Bool {
+    func internalDisplayOnly() -> Bool? {
         #if KEEP_AWAKE_TEST
         if mockRoot != nil {
             if mockValue("external-displays") == "refused" {
                 if !inventoryRefused { inventoryRefused = true; refused("inventory") }
-                return false
+                return nil
             }
             inventoryRefused = false
-            return mockValue("external-displays") == "no"
+            switch mockValue("external-displays") { case "no": return true; case "yes": return false; default: return nil }
         }
         #endif
         var ids = [CGDirectDisplayID](repeating: 0, count: 32)
@@ -275,13 +286,13 @@ private final class LidDisplay {
         guard CGGetOnlineDisplayList(UInt32(ids.count), &ids, &count) == .success,
               count <= ids.count else {
             if !inventoryRefused { inventoryRefused = true; refused("inventory") }
-            return false
+            return nil
         }
         inventoryRefused = false
         // RequestDisplaysIdle affects all displays. Admit only an observed
         // built-in-only topology; this snapshot cannot make hotplug atomic.
         // macOS retains its ordinary clamshell handling with other monitors.
-        return count > 0 && ids.prefix(Int(count)).allSatisfy { CGDisplayIsBuiltin($0) != 0 }
+        return count > 0 ? ids.prefix(Int(count)).allSatisfy { CGDisplayIsBuiltin($0) != 0 } : nil
     }
 
     func modernDisplayIdle() throws -> Bool {
@@ -348,8 +359,12 @@ private final class LidDisplay {
         guard writeBytes(1, encode(["event": "alive", "displaySleepPending": pending])) else { throw Refusal("native-refused") }
     }
 
-    func update(current: () -> Bool) throws {
-        guard current(), let closed = lidClosed() else { return }
+    func update(current: () -> Bool, maySleep: () -> Bool = { true }, observe: ((Bool?, Bool?) throws -> Void)? = nil) throws {
+        guard current() else { return }
+        let physicalLid = lidClosed()
+        let internalOnly = physicalLid == true ? internalDisplayOnly() : nil
+        try observe?(physicalLid, internalOnly)
+        guard let closed = physicalLid else { return }
         if !closed {
             inventoryRefused = false
             guard requestedSleep, current(), lidClosed() == false else { return }
@@ -358,7 +373,7 @@ private final class LidDisplay {
             requestedSleep = false
             do { try wakeDisplay() } catch is DisplayRefusal { refused("wake"); return }
             try publishSleepOwnership(false)
-        } else if !requestedSleep, internalDisplayOnly() {
+        } else if maySleep(), !requestedSleep, internalOnly == true {
             // Recheck both native time and the actual lid after display lookup.
             guard current(), lidClosed() == true else { return }
             requestedSleep = true
@@ -440,6 +455,12 @@ private final class Worker {
     var heartbeat = leaseNow()
     var retired = false
     var active = false
+    var displayMaySleep = true
+    var coordinatedDisplay: Bool?
+    var observedLid = false
+    var lidObservation: UInt64 = 0
+    var lastLid: Bool?
+    var lastInternalOnly: Bool?
     var lines: Lines?
     var timer: DispatchSourceTimer?
     var signalSources: [DispatchSourceSignal] = []
@@ -455,15 +476,22 @@ private final class Worker {
     }
     func run() {
         lines = Lines(0, line: { [self] value in
-            guard !retired, value.count == 1, value["command"] as? String == "renew",
+            let coordinated = value.count == 3
+            guard !retired, value["command"] as? String == "renew",
+                  value.count == 1 || (value.count == 3 && nativeBool(value["displayMaySleep"]) != nil
+                    && (value["lidObservation"] is NSNull || safeSequence(value["lidObservation"]) != nil)),
+                  coordinatedDisplay == nil || coordinatedDisplay == coordinated,
                   leaseNow() - heartbeat < heartbeatSeconds else { stop(); return }
+            coordinatedDisplay = coordinated
+            displayMaySleep = !coordinated || (nativeBool(value["displayMaySleep"]) == true
+                && safeSequence(value["lidObservation"]) == lidObservation && observedLid && lastLid == true)
             heartbeat = leaseNow()
             do {
                 try power.renew(current: { [self] in !self.retired && leaseNow() - self.heartbeat < heartbeatSeconds })
                 #if KEEP_AWAKE_TEST
                 if mockRoot != nil { emit(["event": "test-power-renewed"]) }
                 #endif
-                try display.update(current: { [self] in !self.retired && leaseNow() - self.heartbeat < heartbeatSeconds })
+                try updateDisplay()
                 if !active { active = true; emit(["event": "active"]) }
                 emit(["event": "alive"])
             }
@@ -475,7 +503,7 @@ private final class Worker {
             if leaseNow() - heartbeat >= heartbeatSeconds { stop(); return }
             if active, let reason = power.refusal() { emit(["event": "paused", "reason": reason]); stop() }
             if active {
-                do { try display.update(current: { [self] in !self.retired && leaseNow() - self.heartbeat < heartbeatSeconds }) }
+                do { try updateDisplay() }
                 catch { emit(["event": "paused", "reason": "native-refused"]); stop() }
                 #if KEEP_AWAKE_TEST
                 if mockRoot != nil {
@@ -487,6 +515,20 @@ private final class Worker {
         }
         timer?.resume(); signalSources = signals { [self] in stop() }
         emit(["event": "ready"])
+    }
+    func updateDisplay() throws {
+        try display.update(current: { [self] in !self.retired && leaseNow() - self.heartbeat < heartbeatSeconds },
+            maySleep: { [self] in self.displayMaySleep }, observe: { [self] closed, internalOnly in
+                if !self.observedLid || self.lastLid != closed || self.lastInternalOnly != internalOnly {
+                    guard self.lidObservation < 9_007_199_254_740_991 else { throw Refusal("native-refused") }
+                    self.lidObservation += 1
+                    if self.coordinatedDisplay == true { self.displayMaySleep = false }
+                    guard writeBytes(1, encode(["event": "alive", "lidClosed": closed.map { $0 as Any } ?? NSNull(),
+                        "internalOnly": internalOnly.map { $0 as Any } ?? NSNull(),
+                        "lidObservation": self.lidObservation])) else { throw Refusal("native-refused") }
+                    self.observedLid = true; self.lastLid = closed; self.lastInternalOnly = internalOnly
+                }
+            })
     }
     func stop() {
         guard !retired else { return }; retired = true; lines?.stop(); timer?.cancel()
@@ -515,6 +557,12 @@ private final class Supervisor {
     var childInputClosed = false
     var workerHeartbeat = leaseNow()
     var displaySleepPending = false
+    var coordinatedDisplay: Bool?
+    var displayMaySleep = false
+    var lidSequence: UInt64 = 0
+    var lidClosed: Bool?
+    var internalOnly: Bool?
+    var workerLidObservation: UInt64?
     init() throws {
         var root = "/private/tmp/cafe-code-keep-awake-\(getuid())"
         #if KEEP_AWAKE_TEST
@@ -530,15 +578,24 @@ private final class Supervisor {
     }
     func run() {
         parentLines = Lines(0, line: { [self] value in
-            guard !retired, value.count == 1, let command = value["command"] as? String else { stop(); return }
+            guard !retired, let command = value["command"] as? String else { stop(); return }
             #if KEEP_AWAKE_TEST
-            if command == "crash-worker", let child { killHeld(child, SIGKILL); return }
-            if command == "freeze-worker", let child { killHeld(child, SIGSTOP); return }
+            if value.count == 1, command == "crash-worker", let child { killHeld(child, SIGKILL); return }
+            if value.count == 1, command == "freeze-worker", let child { killHeld(child, SIGSTOP); return }
             #endif
+            let coordinated = value.count == 3 && nativeBool(value["displayMaySleep"]) != nil
+                && (value["lidSequence"] is NSNull || safeSequence(value["lidSequence"]) != nil)
             // Queued old input cannot revive a lease after this loop stalled.
-            guard command == "renew", leaseNow() - heartbeat < heartbeatSeconds else { stop(); return }
+            guard command == "renew", value.count == 1 || coordinated,
+                  coordinatedDisplay == nil || coordinatedDisplay == coordinated,
+                  leaseNow() - heartbeat < heartbeatSeconds else { stop(); return }
+            coordinatedDisplay = coordinated
+            displayMaySleep = coordinated && nativeBool(value["displayMaySleep"]) == true
+                && safeSequence(value["lidSequence"]) == lidSequence && lidClosed == true
+                && internalOnly == true
+                && child != nil && leaseNow() - workerHeartbeat < heartbeatSeconds
             heartbeat = leaseNow(); renewed = true
-            if let child, armed, !childInputClosed { _ = writeBytes(child.input, encode(["command": "renew"])) }
+            if let child, armed, !childInputClosed { renewWorker(child) }
             else if pauseReason == nil { startWorker() }
         }, end: { [self] in stop() })
         timer = DispatchSource.makeTimerSource(queue: .main)
@@ -584,6 +641,8 @@ private final class Supervisor {
     func startWorker() {
         guard !retired, child == nil, renewed, leaseNow() - heartbeat < heartbeatSeconds else { return }
         if let reason = power.refusal() { pauseReason = reason; emit(["event": "paused", "reason": reason]); return }
+        reportLid(nil, internalOnly: nil, force: true)
+        workerLidObservation = nil
         do {
             let admitted = try spawnWorker(lock); child = admitted
             childInputClosed = false; workerHeartbeat = leaseNow()
@@ -595,10 +654,18 @@ private final class Supervisor {
                 workerHeartbeat = leaseNow()
                 if event == "ready" && !retired && !armed {
                     armed = true
-                    _ = writeBytes(admitted.input, encode(["command": "renew"]))
+                    renewWorker(admitted)
                 } else if event == "active" { emit(["event": "active"]) }
                 else if event == "alive" {
                     if let pending = value["displaySleepPending"] as? Bool { displaySleepPending = pending }
+                    if value.keys.contains("lidObservation") || value.keys.contains("lidClosed") {
+                        guard let observation = safeSequence(value["lidObservation"]),
+                              workerLidObservation == nil || observation > workerLidObservation! else { failed = true; stop(); return }
+                        workerLidObservation = observation
+                        guard nativeBool(value["lidClosed"]) != nil || value["lidClosed"] is NSNull,
+                              nativeBool(value["internalOnly"]) != nil || value["internalOnly"] is NSNull else { failed = true; stop(); return }
+                        reportLid(nativeBool(value["lidClosed"]), internalOnly: nativeBool(value["internalOnly"]), force: true)
+                    }
                 }
                 else if event == "worker-stopped" {
                     if value["attempted"] as? Bool == false { armed = false }
@@ -612,6 +679,23 @@ private final class Supervisor {
             if let born = birth(admitted.pid) { emit(["event": "test-worker", "pid": admitted.pid, "seconds": born.0, "micros": born.1]) }
             #endif
         } catch { failed = true; emit(["event": "paused", "reason": "native-refused"]); stop() }
+    }
+    func reportLid(_ closed: Bool?, internalOnly: Bool?, force: Bool = false) {
+        guard force || lidClosed != closed || self.internalOnly != internalOnly else { return }
+        lidClosed = closed; self.internalOnly = internalOnly; displayMaySleep = false
+        guard lidSequence < 9_007_199_254_740_991 else { failed = true; stop(); return }
+        lidSequence += 1
+        if coordinatedDisplay == true {
+            emit(["event": "lid", "sequence": lidSequence, "closed": closed.map { $0 as Any } ?? NSNull(),
+                  "internalOnly": internalOnly.map { $0 as Any } ?? NSNull()])
+        }
+    }
+    func renewWorker(_ admitted: Child) {
+        let value: [String: Any] = coordinatedDisplay == true
+            ? ["command": "renew", "displayMaySleep": displayMaySleep,
+               "lidObservation": workerLidObservation.map { $0 as Any } ?? NSNull()]
+            : ["command": "renew"]
+        _ = writeBytes(admitted.input, encode(value))
     }
     func killHeld(_ admitted: Child, _ signal: Int32) {
         guard child?.pid == admitted.pid else { return }
@@ -627,6 +711,7 @@ private final class Supervisor {
         childLines?.drain()
         childLines?.stop(); childLines = nil
         closeChildInput(admitted); close(admitted.output); child = nil; stopAt = nil
+        reportLid(nil, internalOnly: nil, force: true)
         // Confirmed native exit precedes our reset. A late worker cannot apply
         // true after cleanup, and flock remains held through this handoff.
         if displaySleepPending {

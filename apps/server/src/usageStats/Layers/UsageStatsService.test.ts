@@ -153,6 +153,7 @@ const withHarness = <A, E>(
           ...DEFAULT_SERVER_SETTINGS,
           usageStatsEnabled,
         })),
+        updateSettingsWith: () => Effect.die("unused atomic settings update"),
         updateSettings: () => unsupported(),
         streamChanges: Stream.fromPubSub(settingsPubSub),
       } as ServerSettingsShape;

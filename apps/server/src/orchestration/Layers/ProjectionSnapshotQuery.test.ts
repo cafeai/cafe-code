@@ -12,6 +12,7 @@ import {
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import type * as Statement from "effect/unstable/sql/Statement";
@@ -84,6 +85,53 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect(
+    "reads only a bounded management message tail and marks oversized text without reading attachments",
+    () =>
+      Effect.gen(function* () {
+        const query = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("mcp-message-tail");
+        const at = "2026-11-08T00:00:00.000Z";
+        yield* sql`INSERT INTO projection_threads (thread_id,project_id,title,model_selection_json,runtime_mode,interaction_mode,created_at,updated_at) VALUES (${threadId},NULL,'Tail fixture','{"instanceId":"codex","model":"gpt-5"}','full-access','default',${at},${at})`;
+        try {
+          yield* sql`INSERT INTO projection_turns (thread_id,turn_id,pending_message_id,state,requested_at,checkpoint_files_json) VALUES (${threadId},NULL,'pending-mcp-message','pending',${at},'[]')`;
+          const status = yield* query.getThreadWorkStatusById(threadId);
+          assert.isTrue(Option.isSome(status));
+          if (Option.isSome(status)) {
+            assert.isNull(status.value.thread.latestTurn);
+            assert.deepEqual(status.value.pendingTurnStart, {
+              messageId: "pending-mcp-message",
+              requestedAt: at,
+            });
+          }
+          for (const [id, text] of [
+            ["tail-1", "old"],
+            ["tail-2", "older"],
+            ["tail-3", "recent"],
+            ["tail-4", "x".repeat(65_537)],
+          ]) {
+            yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,turn_id,role,text,attachments_json,is_streaming,created_at,updated_at) VALUES (${id},${threadId},NULL,'assistant',${text},'invalid-unused-attachment-json',0,${at},${at})`;
+          }
+          const tail = yield* query.getThreadMessageTail({ threadId, limit: 2 });
+          assert.equal(tail.hasMore, true);
+          assert.deepEqual(
+            tail.messages.map(({ id, text, textOmitted }) => ({ id, text, textOmitted })),
+            [
+              { id: "tail-3", text: "recent", textOmitted: false },
+              { id: "tail-4", text: "", textOmitted: true },
+            ],
+          );
+          const complete = yield* query.getThreadMessageTail({ threadId, limit: 4 });
+          assert.equal(complete.hasMore, false);
+          assert.lengthOf(complete.messages, 4);
+        } finally {
+          yield* sql`DELETE FROM projection_thread_messages WHERE thread_id=${threadId}`;
+          yield* sql`DELETE FROM projection_turns WHERE thread_id=${threadId}`;
+          yield* sql`DELETE FROM projection_threads WHERE thread_id=${threadId}`;
+        }
+      }),
+  );
   it.effect(
     "keeps desktop power intent on exact roots and current background work without history hydration",
     () =>

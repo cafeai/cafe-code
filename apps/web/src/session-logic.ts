@@ -44,6 +44,12 @@ import {
 import { visualizationEntryIdentity } from "./components/visualizations/visualizationEntryIdentity";
 import { readTurnConfiguration, presentTurnConfiguration } from "./turnConfiguration";
 import {
+  cafeMcpHistoryTitle,
+  readCafeMcpInvocation,
+  type CafeMcpHistoryAction,
+  type CafeMcpTool,
+} from "./cafeMcpPresentation";
+import {
   readClaudeCommandInspection,
   readProviderPublicSummary,
   mergeClaudeCommandInspections,
@@ -112,6 +118,8 @@ export interface WorkLogEntry {
   tone: "thinking" | "tool" | "info" | "error";
   toolTitle?: string;
   displayToolTitle?: string;
+  /** Fixed presentation from observed MCP lifecycle metadata, never authority. */
+  cafeMcp?: CafeMcpHistoryAction;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
   /** Explicit bounded public presentation, never arbitrary native payloads. */
@@ -158,6 +166,7 @@ export function workLogDisplayLabel(entry: WorkLogEntry): string {
 }
 
 export function workLogDisplayToolTitle(entry: WorkLogEntry): string | undefined {
+  if (entry.cafeMcp) return cafeMcpHistoryTitle(entry.cafeMcp);
   // Resolve the current canonical lifecycle result after folding. Storing only
   // the start's display title would survive a later canonical completion.
   return (
@@ -199,6 +208,8 @@ interface DerivedWorkLogEntry extends WorkLogEntry {
   toolCallId?: string;
   /** Content-free duplicate-occurrence witness; stripped before rendering. */
   diagnosticEchoKey?: string;
+  cafeMcpTool?: CafeMcpTool | null;
+  cafeMcpFailed?: boolean;
 }
 
 export interface PendingApproval {
@@ -954,13 +965,30 @@ export function deriveWorkLogEntries(
     foldProviderDiagnosticEntries(foldClaudeOperationSnapshots(entries)),
   ).map(
     ({
-      activityKind: _activityKind,
-      operationStatus: _operationStatus,
+      activityKind,
+      operationStatus,
       operationCompletedAt: _operationCompletedAt,
       collapseKey: _collapseKey,
       diagnosticEchoKey: _diagnosticEchoKey,
+      cafeMcpTool,
+      cafeMcpFailed,
       ...entry
-    }) => entry,
+    }) => ({
+      ...entry,
+      ...(cafeMcpTool
+        ? {
+            cafeMcp: {
+              tool: cafeMcpTool,
+              state:
+                cafeMcpFailed || operationStatus === "failed" || entry.tone === "error"
+                  ? ("failed" as const)
+                  : activityKind === "tool.completed" || operationStatus === "completed"
+                    ? ("completed" as const)
+                    : ("running" as const),
+            },
+          }
+        : {}),
+    }),
   );
   return collapsed;
 }
@@ -1568,6 +1596,11 @@ function toDerivedWorkLogEntry(
     entry.changedFiles = changedFiles;
   }
   if (title) entry.toolTitle = title;
+  const cafeMcp = readCafeMcpInvocation(payload);
+  if (cafeMcp) {
+    entry.cafeMcpTool = cafeMcp.tool;
+    entry.cafeMcpFailed = cafeMcp.failed;
+  }
   if (itemType === "web_search") {
     const nativeToolName = asRecord(payload?.data)?.nativeToolName;
     if (nativeToolName === "web_search") entry.displayToolTitle = uiText("Searched the web");
@@ -1880,9 +1913,16 @@ function mergeDerivedWorkLogEntries(
   const displayToolTitle =
     next.displayToolTitle ??
     (toolTitle === previous.toolTitle ? previousDisplayToolTitle : undefined);
+  const cafeMcpTool =
+    next.cafeMcpTool !== undefined
+      ? next.cafeMcpTool
+      : next.itemType && next.itemType !== previous.itemType
+        ? null
+        : previous.cafeMcpTool;
   return {
     ...previousCanonical,
     ...next,
+    ...(cafeMcpTool !== undefined ? { cafeMcpTool } : {}),
     ...(displayToolTitle !== undefined ? { displayToolTitle } : {}),
     ...(detail ? { detail } : {}),
     ...(command ? { command } : {}),

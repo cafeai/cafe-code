@@ -1,3 +1,4 @@
+import { McpToolError } from "./results.ts";
 import { ThreadId } from "@cafecode/contracts";
 import {
   deriveAvailableRateLimitResetCount,
@@ -110,7 +111,8 @@ export function registerThreadUsageTool(
       const launch = options.managementLaunchContext;
       const selectedThreadId = requestedThreadId ?? launch?.threadId;
       if (selectedThreadId === undefined) {
-        throw new Error(
+        throw new McpToolError(
+          "invalid_request",
           "Pass threadId explicitly; this connection has no authenticated Cafe launch chat.",
         );
       }
@@ -194,9 +196,16 @@ export function registerThreadUsageTool(
       ).catch(() => {
         // Provider, SQL and decode errors may contain private paths or payloads.
         // This public tool deliberately emits a fixed failure instead.
-        throw new Error("Unable to read thread usage metadata. Retry the read later.");
+        throw new McpToolError(
+          "invalid_request",
+          "Unable to read thread usage metadata. Retry the read later.",
+        );
       });
-      if (result === null) throw new Error("The requested active Cafe thread does not exist.");
+      if (result === null)
+        throw new McpToolError(
+          "invalid_request",
+          "The requested active Cafe thread does not exist.",
+        );
       return {
         structuredContent: result,
         content: [{ type: "text" as const, text: JSON.stringify(result) }],

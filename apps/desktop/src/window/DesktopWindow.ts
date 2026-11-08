@@ -24,6 +24,7 @@ import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import { trustAudioWebContents } from "./TrustedAudioPermissionPolicy.ts";
 import * as DesktopStartupWindow from "./DesktopStartupWindow.ts";
 import * as DesktopUiLocale from "../settings/DesktopUiLocale.ts";
+import { makeImageClipboard } from "./ImageClipboard.ts";
 import {
   DESKTOP_UI_LOCALE_CHANGED_CHANNEL,
   desktopUiLocaleArguments,
@@ -259,8 +260,10 @@ const make = Effect.gen(function* () {
     window.on("enter-full-screen", publishFullScreen);
     window.on("leave-full-screen", publishFullScreen);
 
+    const imageClipboard = makeImageClipboard(window.webContents, rendererUrl);
     window.webContents.on("context-menu", (event, params) => {
       event.preventDefault();
+      const copyImage = imageClipboard.capture(params);
 
       const menuTemplate: Electron.MenuItemConstructorOptions[] = [];
 
@@ -292,7 +295,12 @@ const make = Effect.gen(function* () {
       if (params.mediaType === "image") {
         menuTemplate.push({
           label: uiText("Copy Image"),
-          click: () => window.webContents.copyImageAt(params.x, params.y),
+          enabled: params.hasImageContents,
+          click: () => {
+            void copyImage().then((result) => {
+              if (result === "failed") void runPromise(logWindowWarning("image copy failed"));
+            });
+          },
         });
         menuTemplate.push({ type: "separator" });
       }

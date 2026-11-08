@@ -113,7 +113,7 @@
   },
   "+{count} more": {
     "message": "+{count} more",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:4233"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:4239"]
   },
   ", unexpanded": {
     "message": ", unexpanded",
@@ -2381,7 +2381,7 @@
     "message": "Claude summary",
     "locations": [
       "apps/web/src/components/chat/ProviderOperationWorkEntry.tsx:44",
-      "apps/web/src/session-logic.ts:1519"
+      "apps/web/src/session-logic.ts:1547"
     ]
   },
   "Claude workflow": {
@@ -2875,7 +2875,7 @@
       "apps/web/src/components/chat/ScheduledFollowups.tsx:118",
       "apps/web/src/components/chat/SubagentDetailView.tsx:138",
       "apps/web/src/components/chat/taskProgressPresentation.ts:32",
-      "apps/web/src/session-logic.ts:1098"
+      "apps/web/src/session-logic.ts:1126"
     ]
   },
   "Completion observed <slot1></slot1>": {
@@ -3276,13 +3276,13 @@
   "Copy": {
     "message": "Copy",
     "locations": [
-      "apps/desktop/src/window/DesktopWindow.ts:302",
+      "apps/desktop/src/window/DesktopWindow.ts:310",
       "apps/web/src/components/MermaidBlock.tsx:408"
     ]
   },
   "Copy Image": {
     "message": "Copy Image",
-    "locations": ["apps/desktop/src/window/DesktopWindow.ts:294"]
+    "locations": ["apps/desktop/src/window/DesktopWindow.ts:297"]
   },
   "Copy JSON": {
     "message": "Copy JSON",
@@ -3293,7 +3293,7 @@
   },
   "Copy Link": {
     "message": "Copy Link",
-    "locations": ["apps/desktop/src/window/DesktopWindow.ts:283"]
+    "locations": ["apps/desktop/src/window/DesktopWindow.ts:286"]
   },
   "Copy Mermaid source": {
     "message": "Copy Mermaid source",
@@ -3305,7 +3305,7 @@
   },
   "Copy a file from this command": {
     "message": "Copy a file from this command",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:4383"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:4389"]
   },
   "Copy chat ID": {
     "message": "Copy chat ID",
@@ -3437,9 +3437,9 @@
   "Copy {path}": {
     "message": "Copy {path}",
     "locations": [
-      "apps/web/src/components/chat/MessagesTimeline.tsx:4273",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:4322",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:4353"
+      "apps/web/src/components/chat/MessagesTimeline.tsx:4279",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:4328",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:4359"
     ]
   },
   "Copying isn''t available here, so copy this code by hand.": {
@@ -4182,7 +4182,7 @@
   },
   "Cut": {
     "message": "Cut",
-    "locations": ["apps/desktop/src/window/DesktopWindow.ts:301"]
+    "locations": ["apps/desktop/src/window/DesktopWindow.ts:309"]
   },
   "Daemon queue": {
     "message": "Daemon queue",
@@ -5604,7 +5604,7 @@
       "apps/web/src/components/chat/WorkflowTasks.tsx:24",
       "apps/web/src/components/settings/DiagnosticsSettings.tsx:1956",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:26",
-      "apps/web/src/session-logic.ts:1093"
+      "apps/web/src/session-logic.ts:1121"
     ]
   },
   "Failed RPC calls to the provider daemon.": {
@@ -8201,7 +8201,7 @@
   },
   "No suggestions": {
     "message": "No suggestions",
-    "locations": ["apps/desktop/src/window/DesktopWindow.ts:275"]
+    "locations": ["apps/desktop/src/window/DesktopWindow.ts:278"]
   },
   "No supervisor data.": {
     "message": "No supervisor data.",
@@ -8571,7 +8571,7 @@
   },
   "Open a file from this command": {
     "message": "Open a file from this command",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:4382"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:4388"]
   },
   "Open a pairing link, or paste a one-time pairing token.": {
     "message": "Open a pairing link, or paste a one-time pairing token.",
@@ -8694,9 +8694,9 @@
   "Open {path}": {
     "message": "Open {path}",
     "locations": [
-      "apps/web/src/components/chat/MessagesTimeline.tsx:4265",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:4321",
-      "apps/web/src/components/chat/MessagesTimeline.tsx:4352"
+      "apps/web/src/components/chat/MessagesTimeline.tsx:4271",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:4327",
+      "apps/web/src/components/chat/MessagesTimeline.tsx:4358"
     ]
   },
   "Open {value0}": {
@@ -8763,12 +8763,12 @@
     "message": "OpenCode thinking",
     "locations": [
       "apps/web/src/components/chat/ProviderOperationWorkEntry.tsx:43",
-      "apps/web/src/session-logic.ts:1516"
+      "apps/web/src/session-logic.ts:1544"
     ]
   },
   "Opened web page": {
     "message": "Opened web page",
-    "locations": ["apps/web/src/session-logic.ts:1574"]
+    "locations": ["apps/web/src/session-logic.ts:1607"]
   },
   "Opening a pull request in a chat isn't available.": {
     "message": "Opening a pull request in a chat isn't available.",
@@ -9013,7 +9013,7 @@
   },
   "Paste": {
     "message": "Paste",
-    "locations": ["apps/desktop/src/window/DesktopWindow.ts:303"]
+    "locations": ["apps/desktop/src/window/DesktopWindow.ts:311"]
   },
   "Paste a one-time token or pairing secret": {
     "message": "Paste a one-time token or pairing secret",
@@ -9656,7 +9656,7 @@
   },
   "Provider turn start failed": {
     "message": "Provider turn start failed",
-    "locations": ["apps/web/src/session-logic.ts:939", "apps/web/src/workLogPresentation.ts:210"]
+    "locations": ["apps/web/src/session-logic.ts:950", "apps/web/src/workLogPresentation.ts:210"]
   },
   "Provider turn start interrupted": {
     "message": "Provider turn start interrupted",
@@ -11266,7 +11266,7 @@
   },
   "Searched the web": {
     "message": "Searched the web",
-    "locations": ["apps/web/src/session-logic.ts:1573"]
+    "locations": ["apps/web/src/session-logic.ts:1606"]
   },
   "Searching workspace files…": {
     "message": "Searching workspace files…",
@@ -11310,7 +11310,7 @@
   },
   "Select All": {
     "message": "Select All",
-    "locations": ["apps/desktop/src/window/DesktopWindow.ts:304"]
+    "locations": ["apps/desktop/src/window/DesktopWindow.ts:312"]
   },
   "Select Full access to enable computer use.": {
     "message": "Select Full access to enable computer use.",
@@ -12189,7 +12189,7 @@
       "apps/web/src/components/chat/SubagentDetailView.tsx:144",
       "apps/web/src/components/chat/WorkflowTasks.tsx:30",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:30",
-      "apps/web/src/session-logic.ts:1097"
+      "apps/web/src/session-logic.ts:1125"
     ]
   },
   "Status unconfirmed": {
@@ -12323,7 +12323,7 @@
       "apps/web/src/components/chat/SubagentDetailView.tsx:142",
       "apps/web/src/components/chat/WorkflowTasks.tsx:27",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:28",
-      "apps/web/src/session-logic.ts:1095"
+      "apps/web/src/session-logic.ts:1123"
     ]
   },
   "Stopped after repeated denials": {
@@ -13772,7 +13772,7 @@
   },
   "Turn accepted · {settings}": {
     "message": "Turn accepted · {settings}",
-    "locations": ["apps/web/src/session-logic.ts:1552"]
+    "locations": ["apps/web/src/session-logic.ts:1580"]
   },
   "Turn it on again from a chat’s composer.": {
     "message": "Turn it on again from a chat’s composer.",
@@ -14673,7 +14673,7 @@
       "apps/web/src/components/chat/SubagentDetailView.tsx:134",
       "apps/web/src/components/chat/WorkflowTasks.tsx:15",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:22",
-      "apps/web/src/session-logic.ts:1089"
+      "apps/web/src/session-logic.ts:1117"
     ]
   },
   "Waiting for Cafe to connect.": {
@@ -14922,7 +14922,7 @@
       "apps/web/src/components/chat/SubagentDetailView.tsx:136",
       "apps/web/src/components/chat/WorkflowTasks.tsx:18",
       "apps/web/src/components/subagents/SubagentRosterRow.tsx:24",
-      "apps/web/src/session-logic.ts:1091",
+      "apps/web/src/session-logic.ts:1119",
       "apps/web/src/subagent-activity.ts:607"
     ]
   },
@@ -16126,7 +16126,7 @@
   },
   "{count, plural, one {# more changed file} other {# more changed files}}": {
     "message": "{count, plural, one {# more changed file} other {# more changed files}}",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:4226"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:4232"]
   },
   "{count, plural, one {# needs approval} other {# need approval}}": {
     "message": "{count, plural, one {# needs approval} other {# need approval}}",
@@ -16209,11 +16209,11 @@
   },
   "{count, plural, one {{formatted} file} other {{formatted} files}}{suffix}": {
     "message": "{count, plural, one {{formatted} file} other {{formatted} files}}{suffix}",
-    "locations": ["apps/web/src/session-logic.ts:2218"]
+    "locations": ["apps/web/src/session-logic.ts:2258"]
   },
   "{count, plural, one {{formatted} line} other {{formatted} lines}}": {
     "message": "{count, plural, one {{formatted} line} other {{formatted} lines}}",
-    "locations": ["apps/web/src/session-logic.ts:2200"]
+    "locations": ["apps/web/src/session-logic.ts:2240"]
   },
   "{count, plural, one {{formatted} token} other {{formatted} tokens}}": {
     "message": "{count, plural, one {{formatted} token} other {{formatted} tokens}}",
@@ -16327,7 +16327,7 @@
     "locations": [
       "apps/web/src/components/chat/ThreadGoalControl.tsx:102",
       "apps/web/src/lib/codexRateLimits.ts:123",
-      "apps/web/src/session-logic.ts:317"
+      "apps/web/src/session-logic.ts:328"
     ]
   },
   "{hours}h {minutes}m": {
@@ -16410,7 +16410,7 @@
       "apps/web/src/components/chat/ThreadGoalControl.tsx:103",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:97",
       "apps/web/src/lib/codexRateLimits.ts:124",
-      "apps/web/src/session-logic.ts:320"
+      "apps/web/src/session-logic.ts:331"
     ]
   },
   "{minutes}m {seconds}s": {
@@ -16458,7 +16458,7 @@
   },
   "{path} +{count} more": {
     "message": "{path} +{count} more",
-    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3933"]
+    "locations": ["apps/web/src/components/chat/MessagesTimeline.tsx:3936"]
   },
   "{path} is inside another configured directory.": {
     "message": "{path} is inside another configured directory.",
@@ -16569,10 +16569,10 @@
       "apps/web/src/components/chat/ConnectionStatusIndicator.tsx:63",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:105",
       "apps/web/src/components/settings/usageStatsPresentation.ts:39",
-      "apps/web/src/session-logic.ts:300",
-      "apps/web/src/session-logic.ts:308",
-      "apps/web/src/session-logic.ts:323",
-      "apps/web/src/session-logic.ts:326"
+      "apps/web/src/session-logic.ts:311",
+      "apps/web/src/session-logic.ts:319",
+      "apps/web/src/session-logic.ts:334",
+      "apps/web/src/session-logic.ts:337"
     ]
   },
   "{source, select, submitted {Settings Cafe submitted for this accepted turn.} other {Settings of the existing session that accepted this input.}} Provider defaults may be inherited; this is not independent execution or billing confirmation.{nativeFast, select, yes { Fast mode uses the native session routing captured for this turn.} other {}}": {
@@ -16598,6 +16598,142 @@
   "{state, select, connecting {{environment} is connecting} other {{environment} is disconnected}}": {
     "message": "{state, select, connecting {{environment} is connecting} other {{environment} is disconnected}}",
     "locations": ["apps/web/src/components/chat/ChatComposer.tsx:4335"]
+  },
+  "{state, select, running {Archiving Cafe Code thread} completed {Archived Cafe Code thread} other {Could not archive Cafe Code thread}}": {
+    "message": "{state, select, running {Archiving Cafe Code thread} completed {Archived Cafe Code thread} other {Could not archive Cafe Code thread}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:197"]
+  },
+  "{state, select, running {Checking Cafe Code action receipt} completed {Checked Cafe Code action receipt} other {Could not check Cafe Code action receipt}}": {
+    "message": "{state, select, running {Checking Cafe Code action receipt} completed {Checked Cafe Code action receipt} other {Could not check Cafe Code action receipt}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:157"]
+  },
+  "{state, select, running {Checking Cafe Code context and quota} completed {Checked Cafe Code context and quota} other {Could not check Cafe Code context and quota}}": {
+    "message": "{state, select, running {Checking Cafe Code context and quota} completed {Checked Cafe Code context and quota} other {Could not check Cafe Code context and quota}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:137"]
+  },
+  "{state, select, running {Checking Cafe Code thread status} completed {Checked Cafe Code thread status} other {Could not check Cafe Code thread status}}": {
+    "message": "{state, select, running {Checking Cafe Code thread status} completed {Checked Cafe Code thread status} other {Could not check Cafe Code thread status}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:127"]
+  },
+  "{state, select, running {Creating Cafe Code project} completed {Created Cafe Code project} other {Could not create Cafe Code project}}": {
+    "message": "{state, select, running {Creating Cafe Code project} completed {Created Cafe Code project} other {Could not create Cafe Code project}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:172"]
+  },
+  "{state, select, running {Creating Cafe Code thread} completed {Created Cafe Code thread} other {Could not create Cafe Code thread}}": {
+    "message": "{state, select, running {Creating Cafe Code thread} completed {Created Cafe Code thread} other {Could not create Cafe Code thread}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:187"]
+  },
+  "{state, select, running {Deleting Cafe Code project} completed {Deleted Cafe Code project} other {Could not delete Cafe Code project}}": {
+    "message": "{state, select, running {Deleting Cafe Code project} completed {Deleted Cafe Code project} other {Could not delete Cafe Code project}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:182"]
+  },
+  "{state, select, running {Deleting Cafe Code thread} completed {Deleted Cafe Code thread} other {Could not delete Cafe Code thread}}": {
+    "message": "{state, select, running {Deleting Cafe Code thread} completed {Deleted Cafe Code thread} other {Could not delete Cafe Code thread}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:207"]
+  },
+  "{state, select, running {Pausing Cafe Code scheduled follow-up} completed {Paused Cafe Code scheduled follow-up} other {Could not pause Cafe Code scheduled follow-up}}": {
+    "message": "{state, select, running {Pausing Cafe Code scheduled follow-up} completed {Paused Cafe Code scheduled follow-up} other {Could not pause Cafe Code scheduled follow-up}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:267"]
+  },
+  "{state, select, running {Proposing Cafe Code follow-up} completed {Proposed Cafe Code follow-up} other {Could not propose Cafe Code follow-up}}": {
+    "message": "{state, select, running {Proposing Cafe Code follow-up} completed {Proposed Cafe Code follow-up} other {Could not propose Cafe Code follow-up}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:262"]
+  },
+  "{state, select, running {Requesting Cafe Code provider restart and resume} completed {Requested Cafe Code provider restart and resume} other {Could not request Cafe Code provider restart and resume}}": {
+    "message": "{state, select, running {Requesting Cafe Code provider restart and resume} completed {Requested Cafe Code provider restart and resume} other {Could not request Cafe Code provider restart and resume}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:237"]
+  },
+  "{state, select, running {Requesting Cafe Code provider restart} completed {Requested Cafe Code provider restart} other {Could not request Cafe Code provider restart}}": {
+    "message": "{state, select, running {Requesting Cafe Code provider restart} completed {Requested Cafe Code provider restart} other {Could not request Cafe Code provider restart}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:232"]
+  },
+  "{state, select, running {Requesting Cafe Code question dismissal} completed {Requested Cafe Code question dismissal} other {Could not request Cafe Code question dismissal}}": {
+    "message": "{state, select, running {Requesting Cafe Code question dismissal} completed {Requested Cafe Code question dismissal} other {Could not request Cafe Code question dismissal}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:252"]
+  },
+  "{state, select, running {Requesting Cafe Code question skip} completed {Requested Cafe Code question skip} other {Could not request Cafe Code question skip}}": {
+    "message": "{state, select, running {Requesting Cafe Code question skip} completed {Requested Cafe Code question skip} other {Could not request Cafe Code question skip}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:247"]
+  },
+  "{state, select, running {Requesting Cafe Code thread interruption} completed {Requested Cafe Code thread interruption} other {Could not request Cafe Code thread interruption}}": {
+    "message": "{state, select, running {Requesting Cafe Code thread interruption} completed {Requested Cafe Code thread interruption} other {Could not request Cafe Code thread interruption}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:222"]
+  },
+  "{state, select, running {Restoring Cafe Code thread} completed {Restored Cafe Code thread} other {Could not restore Cafe Code thread}}": {
+    "message": "{state, select, running {Restoring Cafe Code thread} completed {Restored Cafe Code thread} other {Could not restore Cafe Code thread}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:212"]
+  },
+  "{state, select, running {Submitting Cafe Code answer} completed {Submitted Cafe Code answer} other {Could not submit Cafe Code answer}}": {
+    "message": "{state, select, running {Submitting Cafe Code answer} completed {Submitted Cafe Code answer} other {Could not submit Cafe Code answer}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:242"]
+  },
+  "{state, select, running {Submitting Cafe Code message} completed {Submitted Cafe Code message} other {Could not submit Cafe Code message}}": {
+    "message": "{state, select, running {Submitting Cafe Code message} completed {Submitted Cafe Code message} other {Could not submit Cafe Code message}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:217"]
+  },
+  "{state, select, running {Unarchiving Cafe Code thread} completed {Unarchived Cafe Code thread} other {Could not unarchive Cafe Code thread}}": {
+    "message": "{state, select, running {Unarchiving Cafe Code thread} completed {Unarchived Cafe Code thread} other {Could not unarchive Cafe Code thread}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:202"]
+  },
+  "{state, select, running {Updating Cafe Code project} completed {Updated Cafe Code project} other {Could not update Cafe Code project}}": {
+    "message": "{state, select, running {Updating Cafe Code project} completed {Updated Cafe Code project} other {Could not update Cafe Code project}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:177"]
+  },
+  "{state, select, running {Updating Cafe Code provider settings} completed {Updated Cafe Code provider settings} other {Could not update Cafe Code provider settings}}": {
+    "message": "{state, select, running {Updating Cafe Code provider settings} completed {Updated Cafe Code provider settings} other {Could not update Cafe Code provider settings}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:227"]
+  },
+  "{state, select, running {Updating Cafe Code thread} completed {Updated Cafe Code thread} other {Could not update Cafe Code thread}}": {
+    "message": "{state, select, running {Updating Cafe Code thread} completed {Updated Cafe Code thread} other {Could not update Cafe Code thread}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:192"]
+  },
+  "{state, select, running {Viewing Cafe Code chat context} completed {Viewed Cafe Code chat context} other {Could not view Cafe Code chat context}}": {
+    "message": "{state, select, running {Viewing Cafe Code chat context} completed {Viewed Cafe Code chat context} other {Could not view Cafe Code chat context}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:122"]
+  },
+  "{state, select, running {Viewing Cafe Code projects} completed {Viewed Cafe Code projects} other {Could not view Cafe Code projects}}": {
+    "message": "{state, select, running {Viewing Cafe Code projects} completed {Viewed Cafe Code projects} other {Could not view Cafe Code projects}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:102"]
+  },
+  "{state, select, running {Viewing Cafe Code project} completed {Viewed Cafe Code project} other {Could not view Cafe Code project}}": {
+    "message": "{state, select, running {Viewing Cafe Code project} completed {Viewed Cafe Code project} other {Could not view Cafe Code project}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:107"]
+  },
+  "{state, select, running {Viewing Cafe Code provider models} completed {Viewed Cafe Code provider models} other {Could not view Cafe Code provider models}}": {
+    "message": "{state, select, running {Viewing Cafe Code provider models} completed {Viewed Cafe Code provider models} other {Could not view Cafe Code provider models}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:147"]
+  },
+  "{state, select, running {Viewing Cafe Code provider settings} completed {Viewed Cafe Code provider settings} other {Could not view Cafe Code provider settings}}": {
+    "message": "{state, select, running {Viewing Cafe Code provider settings} completed {Viewed Cafe Code provider settings} other {Could not view Cafe Code provider settings}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:152"]
+  },
+  "{state, select, running {Viewing Cafe Code providers} completed {Viewed Cafe Code providers} other {Could not view Cafe Code providers}}": {
+    "message": "{state, select, running {Viewing Cafe Code providers} completed {Viewed Cafe Code providers} other {Could not view Cafe Code providers}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:142"]
+  },
+  "{state, select, running {Viewing Cafe Code questions} completed {Viewed Cafe Code questions} other {Could not view Cafe Code questions}}": {
+    "message": "{state, select, running {Viewing Cafe Code questions} completed {Viewed Cafe Code questions} other {Could not view Cafe Code questions}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:162"]
+  },
+  "{state, select, running {Viewing Cafe Code question} completed {Viewed Cafe Code question} other {Could not view Cafe Code question}}": {
+    "message": "{state, select, running {Viewing Cafe Code question} completed {Viewed Cafe Code question} other {Could not view Cafe Code question}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:167"]
+  },
+  "{state, select, running {Viewing Cafe Code scheduled follow-ups} completed {Viewed Cafe Code scheduled follow-ups} other {Could not view Cafe Code scheduled follow-ups}}": {
+    "message": "{state, select, running {Viewing Cafe Code scheduled follow-ups} completed {Viewed Cafe Code scheduled follow-ups} other {Could not view Cafe Code scheduled follow-ups}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:257"]
+  },
+  "{state, select, running {Viewing Cafe Code threads} completed {Viewed Cafe Code threads} other {Could not view Cafe Code threads}}": {
+    "message": "{state, select, running {Viewing Cafe Code threads} completed {Viewed Cafe Code threads} other {Could not view Cafe Code threads}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:112"]
+  },
+  "{state, select, running {Viewing Cafe Code thread} completed {Viewed Cafe Code thread} other {Could not view Cafe Code thread}}": {
+    "message": "{state, select, running {Viewing Cafe Code thread} completed {Viewed Cafe Code thread} other {Could not view Cafe Code thread}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:117"]
+  },
+  "{state, select, running {Waiting for Cafe Code thread changes} completed {Waited for Cafe Code thread changes} other {Could not wait for Cafe Code thread changes}}": {
+    "message": "{state, select, running {Waiting for Cafe Code thread changes} completed {Waited for Cafe Code thread changes} other {Could not wait for Cafe Code thread changes}}",
+    "locations": ["apps/web/src/cafeMcpPresentation.ts:132"]
   },
   "{timestamp} • {duration}": {
     "message": "{timestamp} • {duration}",

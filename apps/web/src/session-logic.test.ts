@@ -27,6 +27,7 @@ import {
   hasToolActivityForTurn,
   isLatestTurnSettled,
   workLogDisplayLabel,
+  workLogDisplayToolTitle,
 } from "./session-logic";
 
 function makeActivity(overrides: {
@@ -3211,6 +3212,63 @@ describe("deriveWorkLogEntries", () => {
       detail: "current Codex five-hour and weekly usage limits",
       itemType: "web_search",
     });
+  });
+
+  it("presents retained Cafe MCP actions after lifecycle folding while preserving canonical details", () => {
+    const detail = 'cafe-code-0123456789abcdef.list_threads: {"state":"active"}';
+    const payload = {
+      itemId: "cafe-mcp-call",
+      itemType: "mcp_tool_call",
+      title: "MCP tool call",
+      detail,
+      data: {
+        item: {
+          type: "mcpToolCall",
+          id: "cafe-mcp-call",
+          server: "cafe-code-0123456789abcdef",
+          tool: "list_threads",
+        },
+      },
+    };
+    const started = makeActivity({
+      id: "cafe-mcp-progress",
+      kind: "tool.updated",
+      sequence: 1,
+      summary: "MCP tool call",
+      payload: { ...payload, status: "inProgress" },
+    });
+    const running = deriveWorkLogEntries([started], undefined)[0]!;
+    expect(workLogDisplayToolTitle(running)).toBe("Viewing Cafe Code threads");
+    const finished = makeActivity({
+      id: "cafe-mcp-complete",
+      kind: "tool.completed",
+      sequence: 2,
+      summary: "MCP tool call completed",
+      payload: { ...payload, status: "completed" },
+    });
+    const entries = deriveWorkLogEntries([started, finished], undefined);
+    expect(entries).toHaveLength(1);
+    expect(workLogDisplayToolTitle(entries[0]!)).toBe("Viewed Cafe Code threads");
+    expect(entries[0]).toMatchObject({
+      toolTitle: "MCP tool call",
+      detail,
+      cafeMcp: { tool: "list_threads", state: "completed" },
+    });
+    const failed = deriveWorkLogEntries(
+      [
+        {
+          ...finished,
+          payload: {
+            ...payload,
+            status: "completed",
+            data: { item: { ...payload.data.item, result: { isError: true } } },
+          },
+        },
+      ],
+      undefined,
+    )[0]!;
+    expect(workLogDisplayToolTitle(failed)).toBe("Could not view Cafe Code threads");
+    expect(failed.detail).toBe(detail);
   });
 
   it("recovers Codex MCP and dynamic-tool detail from retained activity payloads", () => {

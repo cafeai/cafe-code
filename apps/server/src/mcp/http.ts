@@ -1,6 +1,7 @@
 import { boundedWebRequest, respondToHttpBodyError } from "../httpBody.ts";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
 import { respondToAuthError } from "../auth/http.ts";
@@ -14,6 +15,7 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { WorkspacePaths } from "../workspace/Services/WorkspacePaths.ts";
 import { makeCafeMcpServer } from "./CafeMcpServer.ts";
 import { ScheduledFollowups } from "../scheduledFollowups/service.ts";
+import { makeMcpOperations } from "./operations.ts";
 
 // Cafe management only. Desktop Control must use a separate endpoint and
 // session credential, so this owner credential/toggle cannot grant desktop input.
@@ -50,6 +52,7 @@ export const cafeMcpRouteLayer = HttpRouter.add(
     const startup = yield* ServerRuntimeStartup;
     const workspacePaths = yield* WorkspacePaths;
     const scheduledFollowups = yield* ScheduledFollowups;
+    const operations = yield* makeMcpOperations;
     const webRequest = yield* boundedWebRequest(request);
 
     const webResponse = yield* Effect.tryPromise({
@@ -71,9 +74,21 @@ export const cafeMcpRouteLayer = HttpRouter.add(
             workspacePaths,
             scheduledFollowups,
           },
-          session.managementLaunchContext
-            ? { managementLaunchContext: session.managementLaunchContext }
-            : undefined,
+          {
+            ...(session.managementLaunchContext
+              ? { managementLaunchContext: session.managementLaunchContext }
+              : {}),
+            operations,
+            ...(session.expiresAt
+              ? {
+                  operationOwner: {
+                    sessionId: session.sessionId,
+                    expiresAt: DateTime.formatIso(session.expiresAt),
+                  },
+                }
+              : {}),
+            requestSignal: webRequest.signal,
+          },
         );
         try {
           await mcpServer.connect(transport);

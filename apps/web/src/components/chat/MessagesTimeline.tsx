@@ -3919,9 +3919,12 @@ function workToneClass(tone: "thinking" | "tool" | "info" | "error"): string {
 }
 
 function workEntryPreview(
-  workEntry: Pick<TimelineWorkEntry, "detail" | "command" | "changedFiles">,
+  workEntry: Pick<TimelineWorkEntry, "detail" | "command" | "changedFiles" | "cafeMcp">,
   workspaceRoot: string | undefined,
 ) {
+  // The random MCP server suffix and raw IDs remain in hover details; the
+  // compact row describes the action without repeating connection plumbing.
+  if (workEntry.cafeMcp) return null;
   if (workEntry.command) return workEntry.command;
   if (workEntry.detail) return workEntry.detail;
   if ((workEntry.changedFiles?.length ?? 0) === 0) return null;
@@ -4011,6 +4014,7 @@ function openFileWithPreferredEditor(input: {
 }
 
 function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
+  if (workEntry.cafeMcp) return workLogDisplayToolTitle(workEntry) ?? workEntry.label;
   // Compaction's canonical title carries its observed lifecycle phase. A
   // localized summary must not replace that title or imply a terminal outcome
   // for a hydrated start whose latest turn metadata is unavailable.
@@ -4083,6 +4087,8 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
       : rawPreview;
   const rawCommand = workEntryRawCommand(workEntry);
   const displayText = preview ? `${heading} - ${preview}` : heading;
+  const inspectionText =
+    workEntry.cafeMcp && workEntry.detail ? `${heading} - ${workEntry.detail}` : displayText;
   const hasChangedFiles = (workEntry.changedFiles?.length ?? 0) > 0;
   const previewIsChangedFiles = hasChangedFiles && !workEntry.command && !workEntry.detail;
   const primaryChangedFile = workEntry.changedFiles?.[0] ?? null;
@@ -4192,7 +4198,7 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
               </TooltipTrigger>
               <TooltipPopup className="max-w-[min(720px,calc(100vw-2rem))]">
                 <p className="whitespace-pre-wrap wrap-break-word text-xs leading-5">
-                  {displayText}
+                  {inspectionText}
                 </p>
               </TooltipPopup>
             </Tooltip>

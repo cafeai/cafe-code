@@ -1,3 +1,4 @@
+import { McpToolError } from "./results.ts";
 import {
   ApprovalRequestId,
   CommandId,
@@ -74,7 +75,8 @@ function boundedDetail<A>(detail: A): A {
   // JSON escaping can enlarge a valid provider questionnaire. Refuse the
   // complete detail rather than truncate actionable wording or option labels.
   if (Buffer.byteLength(encodeDetailJson(detail), "utf8") > 1_048_576)
-    throw new Error(
+    throw new McpToolError(
+      "invalid_request",
       "The complete question details exceed the MCP size limit. Use the Cafe interface.",
     );
   return detail;
@@ -88,7 +90,7 @@ async function execute<A, E>(effect: Effect.Effect<A, E>, failure: string): Prom
   } catch {
     // Database/provider failures can include credentials, paths or question
     // contents. Only our closed preflight failures are suitable tool errors.
-    throw new Error(failure);
+    throw new McpToolError("invalid_request", failure);
   }
 }
 
@@ -168,7 +170,7 @@ async function readThread(dependencies: CafeMcpDependencies, requestedId: string
     "Unable to read pending questions.",
   );
   if (Option.isNone(thread) || thread.value.deletedAt !== null)
-    throw new Error("This chat is unavailable.");
+    throw new McpToolError("invalid_request", "This chat is unavailable.");
   return thread.value;
 }
 
@@ -180,7 +182,10 @@ function findCallback(
     (entry) => entry.requestId === target.requestId && entry.createdAt === target.createdAt,
   );
   if (!request)
-    throw new Error("This question request is no longer pending. Read its current details first.");
+    throw new McpToolError(
+      "invalid_request",
+      "This question request is no longer pending. Read its current details first.",
+    );
   return request;
 }
 
@@ -199,7 +204,10 @@ async function findAsync(
   const parsed = Option.isSome(row) ? readAsyncActivity(row.value) : null;
   const question = parsed?.questions[target.questionIndex];
   if (!parsed || !question || parsed.handled.has(target.questionIndex))
-    throw new Error("This question is unavailable or has already been handled.");
+    throw new McpToolError(
+      "invalid_request",
+      "This question is unavailable or has already been handled.",
+    );
   return question;
 }
 
@@ -231,7 +239,7 @@ function requireValidCallback(
     answers,
     ...(unanswered !== undefined ? { unanswered } : {}),
   });
-  if (!checked.ok) throw new Error(checked.reason);
+  if (!checked.ok) throw new McpToolError("invalid_request", checked.reason);
   return checked;
 }
 
@@ -422,7 +430,14 @@ export function registerThreadQuestionTools(
           .describe(
             "Optional native question-ID map of explicit skipped or dismissed dispositions; only supported callbacks permit it, and every question must appear exactly once across both maps.",
           ),
-        answer: z.string().min(1).max(PROVIDER_SEND_TURN_MAX_INPUT_CHARS).optional(),
+        answer: z
+          .string()
+          .min(1)
+          .max(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)
+          .optional()
+          .describe(
+            "Inline async targets only. Native callback targets require the complete answers map instead.",
+          ),
       },
       outputSchema: receiptSchema,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -438,7 +453,10 @@ export function registerThreadQuestionTools(
       };
       if (target.kind === "callback") {
         if (answer !== undefined || answers === undefined)
-          throw new Error("Use the complete answers map for a native questionnaire.");
+          throw new McpToolError(
+            "invalid_request",
+            "Use the complete answers map for a native questionnaire.",
+          );
         const checked = requireValidCallback(
           findCallback(thread, target),
           target,
@@ -472,7 +490,10 @@ export function registerThreadQuestionTools(
         answer === undefined ||
         answer.trim().length === 0
       )
-        throw new Error("Use nonempty answer text for an inline question.");
+        throw new McpToolError(
+          "invalid_request",
+          "Use nonempty answer text for an inline question.",
+        );
       await findAsync(dependencies, threadId, target);
       const messageId = MessageId.make(crypto.randomUUID());
       const receipt = await dispatch(dependencies, {

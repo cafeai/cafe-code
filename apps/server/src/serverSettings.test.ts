@@ -16,6 +16,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import { ServerConfig } from "./config.ts";
+import { patchProviderEnvironment, patchProviderConfig } from "./mcp/providerSettings.ts";
 import {
   redactServerSettingsForClient,
   ServerSettingsLive,
@@ -788,6 +789,85 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         automaticGitFetchInterval: 10_000,
       });
     }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect(
+    "preserves and explicitly clears MCP-patched secrets through the real secret store",
+    () =>
+      Effect.gen(function* () {
+        const settings = yield* ServerSettingsService;
+        const config = yield* ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const instanceId = ProviderInstanceId.make("mcp_secret_fixture");
+        const initial = yield* settings.updateSettings({
+          providerInstances: {
+            [instanceId]: {
+              driver: ProviderDriverKind.make("opencode"),
+              environment: [
+                { name: "API_KEY", value: "mcp-private-key", sensitive: true },
+                { name: "KEEP", value: "plain", sensitive: false },
+              ],
+              config: {
+                serverUrl: "http://127.0.0.1:3000",
+                serverPassword: "mcp-private-password",
+              },
+            },
+          },
+        });
+        const current = initial.providerInstances[instanceId]!;
+        const redacted = redactServerSettingsForClient(initial).providerInstances[instanceId]!;
+        const preserved = yield* settings.updateSettings({
+          providerInstances: {
+            [instanceId]: {
+              ...current,
+              displayName: "Renamed",
+              environment: patchProviderEnvironment(current.environment, redacted.environment)!,
+              config: patchProviderConfig(
+                current.config,
+                { serverUrl: "http://127.0.0.1:3001" },
+                [],
+                true,
+                "opencode",
+              ),
+            },
+          },
+        });
+        assert.equal(
+          preserved.providerInstances[instanceId]?.environment?.[0]?.value,
+          "mcp-private-key",
+        );
+        assert.equal(
+          (preserved.providerInstances[instanceId]?.config as { serverPassword: string })
+            .serverPassword,
+          "mcp-private-password",
+        );
+        const raw = yield* fs.readFileString(config.settingsPath);
+        assert.notInclude(raw, "mcp-private-key");
+        assert.notInclude(raw, "mcp-private-password");
+        const held = preserved.providerInstances[instanceId]!;
+        const cleared = yield* settings.updateSettings({
+          providerInstances: {
+            [instanceId]: {
+              ...held,
+              environment: patchProviderEnvironment(held.environment, [
+                { name: "API_KEY", clear: true },
+              ])!,
+              config: patchProviderConfig(
+                held.config,
+                undefined,
+                ["serverPassword"],
+                false,
+                "opencode",
+              ),
+            },
+          },
+        });
+        assert.deepEqual(
+          cleared.providerInstances[instanceId]?.environment?.map((entry) => entry.name),
+          ["KEEP"],
+        );
+        assert.notProperty(cleared.providerInstances[instanceId]?.config, "serverPassword");
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
   it.effect("stores sensitive provider instance environment values outside settings.json", () =>

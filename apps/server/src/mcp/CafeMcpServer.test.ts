@@ -20,6 +20,11 @@ import { describe, expect, it, vi } from "@effect/vitest";
 import type { TestContext } from "vitest";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Layer from "effect/Layer";
+import { McpOperations, McpOperationsLive, operationInputHash } from "./operations.ts";
+import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
+import { McpToolError } from "./results.ts";
 
 import {
   CAFE_MCP_RESTART_DELAY_MS,
@@ -172,6 +177,20 @@ function makeDependencies(input?: {
         Effect.succeed(
           Option.fromUndefinedOr(threads.find((value) => value.id === requestedThreadId)),
         ),
+      getThreadMessageTail: ({ threadId: requestedThreadId, limit }) => {
+        const messages = threads.find((value) => value.id === requestedThreadId)?.messages ?? [];
+        return Effect.succeed({
+          messages: messages.slice(-limit).map((message) => ({ ...message, textOmitted: false })),
+          hasMore: messages.length > limit,
+        });
+      },
+      getThreadWorkStatusById: (requestedThreadId) =>
+        Effect.succeed(
+          Option.map(
+            Option.fromUndefinedOr(threads.find((value) => value.id === requestedThreadId)),
+            (value) => ({ thread: shell(value), pendingTurnStart: null }),
+          ),
+        ),
       getThreadShellById: (requestedThreadId) =>
         Effect.succeed(
           Option.map(
@@ -258,6 +277,7 @@ function makeDependencies(input?: {
     serverSettings: {
       getSettings: Effect.succeed(settings),
       updateSettings: () => Effect.succeed(settings),
+      updateSettingsWith: (prepare) => prepare(settings).pipe(Effect.as(settings)),
     },
     startup: {
       enqueueCommand: (effect) => effect,
@@ -474,6 +494,7 @@ function passiveDependencies(input: Parameters<typeof makeDependencies>[0]): Caf
     projectionSnapshotQuery: {
       ...dependencies.projectionSnapshotQuery,
       getThreadDetailById: () => Effect.die("Usage must not load a transcript."),
+      getThreadMessageTail: () => Effect.die("Usage must not load messages."),
     },
     providerRegistry: {
       ...dependencies.providerRegistry,
@@ -490,6 +511,573 @@ function passiveDependencies(input: Parameters<typeof makeDependencies>[0]): Caf
 }
 
 describe("Cafe Code MCP server", () => {
+  it("finds duplicate chat titles through bounded query-bound pages usable by text-only clients", async (context) => {
+    const threads = Array.from({ length: 5 }, (_, index) => ({
+      ...thread,
+      id: ThreadId.make(`duplicate-${index}`),
+      title: index < 4 ? "Review relay" : "Other work",
+    }));
+    await withClient(context, makeDependencies({ threads }), async (client) => {
+      const first = await client.callTool({
+        name: "list_threads",
+        arguments: { query: "RELAY", limit: 2 },
+      });
+      expect(first.isError).not.toBe(true);
+      const content = first.content as Array<{ type: string; text: string }>;
+      const page = JSON.parse(content.find((entry) => entry.type === "text")!.text);
+      expect(page).toEqual(first.structuredContent);
+      expect(page).toMatchObject({
+        totalMatches: 4,
+        hasMore: true,
+        threads: [{ id: "duplicate-0" }, { id: "duplicate-1" }],
+      });
+      const second = await client.callTool({
+        name: "list_threads",
+        arguments: { query: "RELAY", limit: 2, cursor: page.nextCursor },
+      });
+      expect(second.structuredContent).toMatchObject({
+        hasMore: false,
+        nextCursor: null,
+        threads: [{ id: "duplicate-2" }, { id: "duplicate-3" }],
+      });
+      const foreign = await client.callTool({
+        name: "list_threads",
+        arguments: { query: "Other", limit: 2, cursor: page.nextCursor },
+      });
+      expect(foreign.isError).toBe(true);
+      expect(JSON.stringify(foreign)).toContain("different query");
+    });
+  });
+
+  it("keeps provider discovery compact and fetches only the requested model/options page", async (context) => {
+    const models = Array.from({ length: 116 }, (_, index) => ({
+      ...provider.models[0]!,
+      slug: `model-${String(index).padStart(3, "0")}`,
+      name: `Model ${index}`,
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "effort",
+            type: "select" as const,
+            label: "Reasoning",
+            options: [{ id: "high", label: "High" }],
+          },
+        ],
+      },
+    }));
+    await withClient(
+      context,
+      makeDependencies({ providers: [{ ...provider, models }] }),
+      async (client) => {
+        const list = await client.callTool({ name: "list_providers", arguments: {} });
+        expect(list.structuredContent).toMatchObject({
+          providers: [{ instanceId, modelCount: 116, modelsIncluded: false }],
+        });
+        expect(JSON.stringify(list)).not.toContain("optionDescriptors");
+        const page = await client.callTool({
+          name: "list_provider_models",
+          arguments: { instanceId, query: "model-11", includeOptions: true, limit: 2 },
+        });
+        expect(page.structuredContent).toMatchObject({
+          totalMatches: 6,
+          hasMore: true,
+          models: [
+            { slug: "model-110", capabilities: { optionDescriptors: [{ id: "effort" }] } },
+            { slug: "model-111" },
+          ],
+        });
+      },
+    );
+  });
+
+  it("uses authenticated context and status without loading inventories, messages or native sessions", async (context) => {
+    const usage = usageThread();
+    const dependencies = passiveDependencies({
+      threads: [
+        {
+          ...usage,
+          projectId: null,
+          session: { ...usage.session!, status: "ready", lastError: null },
+        },
+      ],
+    });
+    await withClient(
+      context,
+      dependencies,
+      async (client) => {
+        const current = await client.callTool({ name: "get_cafe_context", arguments: {} });
+        expect(current.isError).not.toBe(true);
+        expect(current.structuredContent).toMatchObject({
+          thread: { id: threadId },
+          target: { selection: "authenticated-launch", launchMatchesSession: true },
+          provider: {
+            configuredInstanceId: selectedInstanceId,
+            sessionInstanceId: actualInstanceId,
+          },
+          project: null,
+          contractVersion: 2,
+        });
+        const status = await client.callTool({
+          name: "get_thread_status",
+          arguments: { threadId },
+        });
+        expect(status.isError).not.toBe(true);
+        expect(status.structuredContent).toMatchObject({
+          thread: { id: threadId },
+          wholeChatIdle: true,
+          waitingFor: "none",
+        });
+        const empty = await client.callTool({
+          name: "get_thread",
+          arguments: { threadId, messageLimit: 0 },
+        });
+        expect(empty.isError).not.toBe(true);
+        expect(empty.structuredContent).toMatchObject({ messages: [], omittedMessageTexts: 0 });
+      },
+      { managementLaunchContext: { threadId, providerInstanceId: actualInstanceId, launchNonce } },
+    );
+    await withClient(context, dependencies, async (client) => {
+      const manual = await client.callTool({ name: "get_cafe_context", arguments: {} });
+      expect(manual.isError).toBe(true);
+      expect(JSON.stringify(manual)).toContain("Pass threadId explicitly");
+    });
+  });
+
+  it("reports pending input and surviving agents independently of root completion", async (context) => {
+    const defaults = makeDependencies();
+    const dependencies = {
+      ...defaults,
+      projectionSnapshotQuery: {
+        ...defaults.projectionSnapshotQuery,
+        getThreadWorkStatusById: () =>
+          Effect.succeed(
+            Option.some({
+              pendingTurnStart: null,
+              thread: {
+                ...threadShell,
+                hasPendingUserInput: true,
+                liveWork: {
+                  runtimeId: "runtime-live" as NonNullable<
+                    OrchestrationThreadShell["liveWork"]
+                  >["runtimeId"],
+                  taskCount: 1,
+                  agentCount: 2,
+                },
+                latestTurn: {
+                  turnId: "root-complete" as NonNullable<
+                    OrchestrationThreadShell["latestTurn"]
+                  >["turnId"],
+                  state: "completed" as const,
+                  requestedAt: now,
+                  startedAt: now,
+                  completedAt: now,
+                  assistantMessageId: null,
+                },
+              },
+            }),
+          ),
+      },
+    };
+    await withClient(context, dependencies, async (client) => {
+      const result = await client.callTool({ name: "get_thread_status", arguments: { threadId } });
+      expect(result.structuredContent).toMatchObject({
+        rootComplete: true,
+        wholeChatIdle: false,
+        waitingFor: "user-input",
+        thread: { hasPendingUserInput: true, liveWork: { taskCount: 1, agentCount: 2 } },
+      });
+      const token = (result.structuredContent as { observationToken: string }).observationToken;
+      const attention = await client.callTool({
+        name: "wait_for_thread",
+        arguments: { threadId, observationToken: token, timeoutMs: 25_000 },
+      });
+      expect(attention.structuredContent).toMatchObject({
+        reason: "attention",
+        rootComplete: true,
+        wholeChatIdle: false,
+      });
+      const replaced = await client.callTool({
+        name: "wait_for_thread",
+        arguments: { threadId, observationToken: token, turnId: "old-root", timeoutMs: 25_000 },
+      });
+      expect(replaced.structuredContent).toMatchObject({ reason: "turn-changed" });
+    });
+  });
+
+  it("returns an honest zero-timeout observation and detects subsequent state changes", async (context) => {
+    let current = threadShell;
+    const defaults = makeDependencies();
+    const dependencies = {
+      ...defaults,
+      projectionSnapshotQuery: {
+        ...defaults.projectionSnapshotQuery,
+        getThreadWorkStatusById: () =>
+          Effect.sync(() => Option.some({ thread: current, pendingTurnStart: null })),
+      },
+    };
+    await withClient(context, dependencies, async (client) => {
+      const status = await client.callTool({ name: "get_thread_status", arguments: { threadId } });
+      const token = (status.structuredContent as { observationToken: string }).observationToken;
+      const timeout = await client.callTool({
+        name: "wait_for_thread",
+        arguments: { threadId, observationToken: token, timeoutMs: 0 },
+      });
+      expect(timeout.structuredContent).toMatchObject({ reason: "timeout" });
+      current = { ...current, hasPendingApprovals: true };
+      const attention = await client.callTool({
+        name: "wait_for_thread",
+        arguments: { threadId, observationToken: token, timeoutMs: 0 },
+      });
+      expect(attention.structuredContent).toMatchObject({
+        reason: "attention",
+        waitingFor: "approval",
+      });
+      current = { ...current, hasPendingApprovals: false, title: "Updated work" };
+      const changed = await client.callTool({
+        name: "wait_for_thread",
+        arguments: { threadId, observationToken: token, timeoutMs: 0 },
+      });
+      expect(changed.structuredContent).toMatchObject({
+        reason: "changed",
+        thread: { title: "Updated work" },
+      });
+    });
+  });
+
+  it("preserves omitted/redacted secrets and untouched environment entries through MCP patches", async (context) => {
+    let settings: ServerSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        [instanceId]: {
+          driver,
+          config: { binaryPath: "/test/codex", cwd: "/workspace" },
+          environment: [
+            { name: "API_KEY", value: "PRIVATE_KEY", sensitive: true, valueRedacted: true },
+            { name: "KEEP", value: "keep", sensitive: false },
+          ],
+        },
+      },
+    };
+    const defaults = makeDependencies();
+    const serverSettings: CafeMcpDependencies["serverSettings"] = {
+      getSettings: Effect.sync(() => settings),
+      updateSettings: (patch) =>
+        Effect.sync(() => {
+          settings = { ...settings, ...patch } as ServerSettings;
+          return settings;
+        }),
+      updateSettingsWith: (prepare) =>
+        Effect.suspend(() => prepare(settings)).pipe(
+          Effect.map((patch) => {
+            settings = { ...settings, ...patch } as ServerSettings;
+            return settings;
+          }),
+        ),
+    };
+    const dependencies = { ...defaults, serverSettings };
+    await withClient(context, dependencies, async (client) => {
+      const read = await client.callTool({
+        name: "get_provider_settings",
+        arguments: { instanceId },
+      });
+      expect(JSON.stringify(read)).not.toContain("PRIVATE_KEY");
+      expect((read.structuredContent as { configSchema: unknown }).configSchema).not.toBeNull();
+      const environment = (read.structuredContent as { settings: { environment: unknown[] } })
+        .settings.environment;
+      const write = await client.callTool({
+        name: "set_provider_settings",
+        arguments: { instanceId, environment, displayName: "Renamed" },
+      });
+      expect(write.isError).not.toBe(true);
+      expect(settings.providerInstances[instanceId]?.environment).toContainEqual({
+        name: "API_KEY",
+        value: "PRIVATE_KEY",
+        sensitive: true,
+        valueRedacted: true,
+      });
+      const patch = await client.callTool({
+        name: "set_provider_settings",
+        arguments: {
+          instanceId,
+          environment: [{ name: "OTHER", value: "new" }],
+          config: { cwd: "/other" },
+        },
+      });
+      expect(patch.isError).not.toBe(true);
+      expect(
+        settings.providerInstances[instanceId]?.environment?.map((entry) => entry.name),
+      ).toEqual(["API_KEY", "KEEP", "OTHER"]);
+      expect(settings.providerInstances[instanceId]?.config).toMatchObject({
+        binaryPath: "/test/codex",
+        cwd: "/other",
+      });
+      const clear = await client.callTool({
+        name: "set_provider_settings",
+        arguments: { instanceId, clearEnvironment: ["API_KEY"] },
+      });
+      expect(clear.isError).not.toBe(true);
+      expect(
+        settings.providerInstances[instanceId]?.environment?.map((entry) => entry.name),
+      ).toEqual(["KEEP", "OTHER"]);
+      settings = {
+        ...settings,
+        providerInstances: {
+          [instanceId]: {
+            driver: ProviderDriverKind.make("opencode"),
+            config: { serverPassword: "PRIVATE_OLD_DRIVER_PASSWORD", serverPasswordRedacted: true },
+          },
+        },
+      };
+      const changedDriver = await client.callTool({
+        name: "set_provider_settings",
+        arguments: { instanceId, driver: "codex" },
+      });
+      expect(changedDriver.isError).not.toBe(true);
+      expect(JSON.stringify(settings.providerInstances[instanceId])).not.toContain(
+        "PRIVATE_OLD_DRIVER_PASSWORD",
+      );
+    });
+  });
+
+  it("reconciles a lost message acknowledgement across server instances without another dispatch", async (context) => {
+    const runtime = ManagedRuntime.make(
+      McpOperationsLive.pipe(Layer.provide(SqlitePersistenceTest)),
+    );
+    context.onTestFinished(() => runtime.dispose());
+    const operations = await runtime.runPromise(Effect.service(McpOperations));
+    const owner = { sessionId: "test-owner", expiresAt: "2099-01-01T00:00:00.000Z" };
+    const requestId = "291f4c55-143d-49c6-859b-33291806d86b";
+    const dispatched: NonNullable<Parameters<typeof makeDependencies>[0]>["dispatched"] = [];
+    const dependencies = makeDependencies({ dispatched });
+    let original: unknown;
+    await withClient(
+      context,
+      dependencies,
+      async (client) => {
+        const result = await client.callTool({
+          name: "send_message",
+          arguments: { threadId, message: "PRIVATE_MESSAGE", requestId },
+        });
+        expect(result.isError).not.toBe(true);
+        original = result.structuredContent;
+      },
+      { operations, operationOwner: owner },
+    );
+    await withClient(
+      context,
+      dependencies,
+      async (client) => {
+        const receipt = await client.callTool({ name: "get_operation", arguments: { requestId } });
+        expect(receipt.structuredContent).toMatchObject({
+          found: true,
+          operation: { state: "recorded" },
+          result: original,
+        });
+        expect(JSON.stringify(receipt)).not.toContain("PRIVATE_MESSAGE");
+        const replay = await client.callTool({
+          name: "send_message",
+          arguments: { message: "PRIVATE_MESSAGE", requestId, threadId },
+        });
+        expect(replay.structuredContent).toEqual(original);
+        const conflict = await client.callTool({
+          name: "send_message",
+          arguments: { threadId, message: "Different intent", requestId },
+        });
+        expect(conflict.isError).toBe(true);
+        expect(dispatched).toHaveLength(1);
+      },
+      { operations, operationOwner: owner },
+    );
+    await withClient(
+      context,
+      dependencies,
+      async (client) => {
+        const foreign = await client.callTool({ name: "get_operation", arguments: { requestId } });
+        expect(foreign.structuredContent).toMatchObject({
+          found: false,
+          operation: null,
+          mayHaveApplied: true,
+        });
+      },
+      { operations, operationOwner: { ...owner, sessionId: "other-owner" } },
+    );
+    const unsettledId = "b30d5792-ccce-4025-a6a1-53c4c4fed452";
+    await withClient(
+      context,
+      dependencies,
+      async (client) => {
+        const accepted = await client.callTool({
+          name: "send_message",
+          arguments: {
+            threadId,
+            message: "Accepted with unavailable journal",
+            requestId: unsettledId,
+          },
+        });
+        expect(accepted.isError).not.toBe(true);
+        expect(accepted.structuredContent).toMatchObject({
+          phase: "recorded",
+          operation: { state: "unconfirmed" },
+        });
+        expect(JSON.stringify(accepted)).not.toContain("PRIVATE_JOURNAL_FAILURE");
+        expect(dispatched).toHaveLength(2);
+      },
+      {
+        operationOwner: owner,
+        operations: {
+          ...operations,
+          settle: () => Effect.fail(new McpToolError("unavailable", "PRIVATE_JOURNAL_FAILURE")),
+        },
+      },
+    );
+    await withClient(
+      context,
+      dependencies,
+      async (client) => {
+        expect(
+          (
+            await client.callTool({
+              name: "send_message",
+              arguments: {
+                threadId,
+                message: "Accepted with unavailable journal",
+                requestId: unsettledId,
+              },
+            })
+          ).isError,
+        ).toBe(true);
+        expect(dispatched).toHaveLength(2);
+      },
+      { operations, operationOwner: owner },
+    );
+  });
+
+  it("keeps interrupted admission and partial command failures consumed without repeating effects", async (context) => {
+    const runtime = ManagedRuntime.make(
+      McpOperationsLive.pipe(Layer.provide(SqlitePersistenceTest)),
+    );
+    context.onTestFinished(() => runtime.dispose());
+    const operations = await runtime.runPromise(Effect.service(McpOperations));
+    const owner = { sessionId: "uncertain-owner", expiresAt: "2099-01-01T00:00:00.000Z" };
+    const requestId = "65892814-be59-4812-a5cf-21906ba08239";
+    const input = { threadId, message: "unconfirmed input" };
+    await runtime.runPromise(
+      operations.reserve(
+        owner,
+        requestId,
+        "send_message",
+        operationInputHash(owner, "send_message", input),
+      ),
+    );
+    const dispatched: NonNullable<Parameters<typeof makeDependencies>[0]>["dispatched"] = [];
+    const defaults = makeDependencies({ dispatched });
+    const dependencies: CafeMcpDependencies = {
+      ...defaults,
+      orchestrationEngine: {
+        dispatch: (command) =>
+          command.type === "thread.runtime-mode.set"
+            ? Effect.die(new Error("PRIVATE_NATIVE_FAILURE"))
+            : defaults.orchestrationEngine.dispatch(command),
+      },
+    };
+    await withClient(
+      context,
+      dependencies,
+      async (client) => {
+        const uncertain = await client.callTool({
+          name: "send_message",
+          arguments: { ...input, requestId },
+        });
+        expect(uncertain.isError).toBe(true);
+        expect(dispatched).toHaveLength(0);
+        const pending = await client.callTool({ name: "get_operation", arguments: { requestId } });
+        expect(pending.structuredContent).toMatchObject({
+          found: true,
+          operation: { state: "unconfirmed" },
+          result: null,
+        });
+        const partialId = "916dddec-3b9a-43da-9971-54953d5f5cfb";
+        const change = {
+          threadId,
+          title: "Changed metadata",
+          runtimeMode: "approval-required",
+          requestId: partialId,
+        };
+        const partial = await client.callTool({ name: "update_thread", arguments: change });
+        expect(partial.isError).toBe(true);
+        expect(dispatched).toHaveLength(1);
+        const failed = await client.callTool({
+          name: "get_operation",
+          arguments: { requestId: partialId },
+        });
+        expect(failed.structuredContent).toMatchObject({
+          operation: { state: "failed" },
+          result: { error: { mayHaveApplied: true } },
+        });
+        expect(JSON.stringify(failed)).not.toContain("PRIVATE_NATIVE_FAILURE");
+        expect((await client.callTool({ name: "update_thread", arguments: change })).isError).toBe(
+          true,
+        );
+        expect(dispatched).toHaveLength(1);
+      },
+      { operations, operationOwner: owner },
+    );
+  });
+
+  it("tracks restart scheduling and later policy completion without rescheduling a repeated intent", async (context) => {
+    const runtime = ManagedRuntime.make(
+      McpOperationsLive.pipe(Layer.provide(SqlitePersistenceTest)),
+    );
+    context.onTestFinished(() => runtime.dispose());
+    const operations = await runtime.runPromise(Effect.service(McpOperations));
+    const owner = { sessionId: "restart-owner", expiresAt: "2099-01-01T00:00:00.000Z" };
+    const requestId = "322e6c67-878c-4351-979c-989ac481d89c";
+    const jobs: Effect.Effect<void>[] = [];
+    await withClient(
+      context,
+      makeDependencies(),
+      async (client) => {
+        const scheduled = await client.callTool({
+          name: "restart_provider",
+          arguments: { instanceId, requestId },
+        });
+        expect(scheduled.structuredContent).toMatchObject({
+          phase: "scheduled",
+          operation: { state: "scheduled" },
+        });
+        expect(jobs).toHaveLength(1);
+        await Effect.runPromise(jobs[0]!);
+        const completed = await client.callTool({
+          name: "get_operation",
+          arguments: { requestId },
+        });
+        expect(completed.structuredContent).toMatchObject({
+          operation: { state: "completed" },
+          result: {
+            phase: "completed",
+            completion: {
+              stoppedSessionCount: 0,
+              activeSessionCount: 0,
+              resumedThreadCount: 0,
+              failedResumeThreadCount: 0,
+            },
+          },
+        });
+        const replay = await client.callTool({
+          name: "restart_provider",
+          arguments: { instanceId, requestId },
+        });
+        expect(replay.isError).not.toBe(true);
+        expect(replay.structuredContent).toMatchObject({
+          phase: "completed",
+          operation: { state: "completed" },
+        });
+        expect(jobs).toHaveLength(1);
+      },
+      { operations, operationOwner: owner, scheduleRestart: (job) => jobs.push(job) },
+    );
+  });
+
   it("advertises focused tools with accurate safety annotations", async (context) => {
     const tools = await withClient(context, makeDependencies(), (client) => client.listTools());
 

@@ -1005,6 +1005,8 @@ const buildAppUnderTest = (options?: {
           getThreadActivityDiagnostic: () => Effect.die("unused"),
           getThreadTurnWorkLogPresence: () => Effect.die("unused"),
           hasThreadTurnSubagentActivity: () => Effect.die("unused"),
+          getThreadWorkStatusById: () => Effect.die("unused management status read"),
+          getThreadMessageTail: () => Effect.die("unused management message read"),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshotById: () => Effect.succeed(Option.none()),
           getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
@@ -6758,6 +6760,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       yield* buildAppUnderTest({
         layers: {
           projectionSnapshotQuery: {
+            getThreadWorkStatusById: () => Effect.die("unused management status read"),
+            getThreadMessageTail: () => Effect.die("unused management message read"),
             getThreadDetailById: (inputThreadId) =>
               Effect.succeed(inputThreadId === threadId ? Option.some(thread) : Option.none()),
             getThreadDetailSnapshotById: (inputThreadId) =>

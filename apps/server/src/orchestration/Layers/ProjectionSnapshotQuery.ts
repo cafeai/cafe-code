@@ -72,6 +72,8 @@ import { ProjectionState } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { makeProviderActivityDiagnosticStore } from "../../persistence/Layers/ProviderActivityDiagnostics.ts";
 import { ProjectionThreadMessage } from "../../persistence/Services/ProjectionThreadMessages.ts";
+import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
+import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { ProjectionThreadProposedPlan } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSessionSqlRow } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import {
@@ -667,6 +669,7 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const turns = yield* ProjectionTurnRepository;
   const diagnosticStore = makeProviderActivityDiagnosticStore(sql);
   /**
    * A native child can be re-admitted under a newer root turn. Its immutable
@@ -5816,6 +5819,89 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadTurnWorkLogPresence,
     hasThreadTurnSubagentActivity,
     getThreadDetailById,
+    getThreadWorkStatusById: (threadId) =>
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const thread = yield* getThreadShellById(threadId);
+            if (Option.isNone(thread)) return Option.none();
+            // Reuse canonical pending-start ownership in the same read transaction;
+            // do not combine an old root with a newer removed placeholder.
+            const pending = yield* turns.getPendingTurnStartByThreadId({ threadId });
+            return Option.some({
+              thread: thread.value,
+              pendingTurnStart: Option.isSome(pending)
+                ? { messageId: pending.value.messageId, requestedAt: pending.value.requestedAt }
+                : null,
+            });
+          }),
+        )
+        .pipe(
+          Effect.mapError((error) =>
+            isPersistenceError(error)
+              ? error
+              : toPersistenceSqlError("ProjectionSnapshotQuery.getThreadWorkStatusById:query")(
+                  error,
+                ),
+          ),
+        ),
+    getThreadMessageTail: ({ threadId, limit }) =>
+      Effect.gen(function* () {
+        const boundedLimit = yield* Schema.decodeUnknownEffect(
+          Schema.Number.check(
+            Schema.isInt(),
+            Schema.isGreaterThanOrEqualTo(0),
+            Schema.isLessThanOrEqualTo(100),
+          ),
+        )(limit).pipe(
+          Effect.mapError(
+            toPersistenceDecodeError("ProjectionSnapshotQuery.getThreadMessageTail:limit"),
+          ),
+        );
+        if (boundedLimit === 0) return { messages: [], hasMore: false };
+        const rows = yield* sql`
+        SELECT message_id AS id, role,
+          CASE WHEN length(CAST(text AS BLOB)) <= 65536 THEN text ELSE '' END AS text,
+          CASE WHEN length(CAST(text AS BLOB)) <= 65536 THEN 0 ELSE 1 END AS omitted,
+          turn_id AS "turnId", is_streaming AS streaming, created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM projection_thread_messages WHERE thread_id = ${threadId}
+        ORDER BY created_at DESC, message_id DESC LIMIT ${boundedLimit + 1}
+      `.pipe(
+          Effect.flatMap(
+            Schema.decodeUnknownEffect(
+              Schema.Array(
+                Schema.Struct({
+                  id: MessageId,
+                  role: Schema.Literals(["user", "assistant", "system"]),
+                  text: Schema.String,
+                  omitted: Schema.Number,
+                  turnId: Schema.NullOr(TurnId),
+                  streaming: Schema.Number,
+                  createdAt: IsoDateTime,
+                  updatedAt: IsoDateTime,
+                }),
+              ),
+            ),
+          ),
+          Effect.mapError(
+            toPersistenceSqlOrDecodeError(
+              "ProjectionSnapshotQuery.getThreadMessageTail:query",
+              "ProjectionSnapshotQuery.getThreadMessageTail:decode",
+            ),
+          ),
+        );
+        return {
+          messages: rows
+            .slice(0, boundedLimit)
+            .reverse()
+            .map(({ omitted, streaming, ...row }) => ({
+              ...row,
+              streaming: streaming === 1,
+              textOmitted: omitted === 1,
+            })),
+          hasMore: rows.length > boundedLimit,
+        };
+      }),
     getThreadQuestionContextById,
     getThreadDetailSnapshotById,
   } satisfies ProjectionSnapshotQueryShape;
@@ -5824,4 +5910,4 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 export const OrchestrationProjectionSnapshotQueryLive = Layer.effect(
   ProjectionSnapshotQuery,
   makeProjectionSnapshotQuery,
-);
+).pipe(Layer.provide(ProjectionTurnRepositoryLive));

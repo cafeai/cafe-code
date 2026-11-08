@@ -2612,6 +2612,8 @@ describe("OrchestrationEngine", () => {
           getThreadQuestionContextById: () => Effect.die("unused"),
           getThreadTurnWorkLogPresence: () => Effect.die("unused"),
           hasThreadTurnSubagentActivity: () => Effect.die("unused"),
+          getThreadWorkStatusById: () => Effect.die("unused management status read"),
+          getThreadMessageTail: () => Effect.die("unused management message read"),
           getThreadDetailById: () => Effect.succeed(Option.none()),
           getThreadDetailSnapshotById: () => Effect.succeed(Option.none()),
         }),

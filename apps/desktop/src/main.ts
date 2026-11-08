@@ -192,8 +192,7 @@ const desktopFoundationLayer = Layer.mergeAll(
   DesktopRemoteCertificates.layer,
   DesktopAssets.layer,
   DesktopObservability.layer,
-  DesktopPowerSaveBlocker.layer,
-  DesktopMacKeepAwake.layer,
+  DesktopMacKeepAwake.layer.pipe(Layer.provideMerge(DesktopPowerSaveBlocker.layer)),
 ).pipe(Layer.provideMerge(desktopEnvironmentLayer));
 
 const desktopLocalizedFoundationLayer = Layer.mergeAll(

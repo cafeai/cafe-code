@@ -10,6 +10,158 @@ Codex receives a private stdio server through the existing structured app-server
 
 Management tools have owner authority over Cafe projects, chats, providers and settings. Cafe adds no management approval prompt and does not modify provider approval policy. This is broader than scheduling's proposal/list/pause capability; enabling management never approves a recurring task.
 
+## Management contract v2
+
+The management server advertises version `2.0.0`. Existing action names and
+exact-ID targeting remain. Discovery defaults are now bounded and provider
+discovery is compact; clients which previously assumed complete inventories
+must follow pagination. All structured management results, including question
+details and receipts, have an identical JSON text fallback for clients which
+only deliver text to the model. Public failures contain a finite `error` object
+with `code`, `message`, `nextAction` and `mayHaveApplied`; native/SQL errors and
+submitted settings are not echoed.
+
+Start with `get_cafe_context({})` on a Cafe-issued connection. It returns the
+signed launch Cafe chat's metadata, project/workspace and separate configured
+and projected-session provider IDs without loading transcripts, enumerating
+providers or opening a native session. Manual/legacy connections pass an
+explicit `threadId`. Inherited subagents still identify the launch Cafe chat.
+The context is recorded projection/launch information, not native adoption or
+liveness proof, and never follows the currently selected UI window.
+
+Tool history presents recognized Cafe management invocations as actions such as
+“Viewed Cafe Code threads” or “Checked Cafe Code context and quota.” Running and
+failed calls retain their observed lifecycle wording. Native callback answers
+and asynchronous restarts say “Submitted”/“Requested”; a tool acknowledgement
+never becomes provider consumption or restart-completion proof. The compact row
+hides the random server suffix and argument IDs; hover details retain the exact
+invocation. This presentation also applies to retained history with invocation
+metadata, without rewriting events, native tool names or operation identities.
+Unknown/foreign tools keep their existing presentation. Name recognition is
+display formatting only and grants no server trust or management authority.
+
+Only discover IDs that are missing:
+
+- `list_projects` supports title `query`, exact `workspaceRoot`, `limit` and
+  `cursor`, plus its existing `includeDeleted` option.
+- `list_threads` supports title `query`, `projectId`, lifecycle `state`, provider
+  `status`, `limit` and `cursor`. Duplicate titles remain distinct candidates
+  with stable IDs; mutations never resolve a title or choose a fuzzy match.
+- `get_project` defaults to an active-chat page and accepts the same title and
+  lifecycle filters, including explicit `state: "all"`.
+- `list_providers` supports `query` and exact `instanceId` and omits model
+  catalogs by default. `modelCount`/`modelsIncluded` make that omission explicit.
+  `includeModels: true` returns at most 100 models per provider and sets
+  `modelsTruncated` when necessary.
+- `list_provider_models` reads one instance's model page. Search matches model
+  name or slug; `includeOptions: true` adds its capability/option descriptors.
+  It never refreshes an account or makes a model request.
+
+Discovery pages default to 20 entries, allow 1–100, and return `hasMore`,
+`nextCursor` and the current `totalMatches`. Copy the cursor unchanged and
+retain the same filters. Stable-ID keysets tolerate edits/deletions without
+offset shifts; these are live reads, not a frozen snapshot. A foreign/malformed
+cursor is refused. Complete JSON results have a 4 MiB ceiling; request smaller
+pages/options when a complete response cannot fit.
+
+### Settings patches and hidden values
+
+`get_provider_settings` returns redacted settings plus the built-in driver's
+finite JSON `configSchema` when conversion is supported (`null` otherwise).
+`set_provider_settings` prepares its patch from the latest settings under the
+same settings writer used by ordinary updates. Its `completed` phase means the
+settings were saved, not that a running provider adopted them.
+
+Environment entries patch exact names; unmentioned names remain. Missing,
+empty or redacted values preserve an existing sensitive value. A copied
+`valueRedacted: true` can only preserve an existing sensitive variable; it
+cannot install a secret or change its classification. Supply a nonempty
+explicit value to replace a secret. Use `{ "name": "API_KEY", "clear": true }`
+or `clearEnvironment: ["API_KEY"]` to remove one. Duplicate or contradictory
+updates are refused before saving. An empty environment array is an empty
+patch, not permission to clear all credentials.
+
+`config` is a shallow field patch. `clearConfigKeys` removes exact keys;
+`replaceConfig: true` explicitly replaces other config fields. OpenCode's saved
+server password remains protected by its existing redaction witness even on
+replacement: clear `serverPassword` explicitly to remove it. Ordinary settings
+writes, profile selection, native permissions and provider adoption policies
+retain their existing paths.
+
+### Status and bounded waiting
+
+`get_thread_status` reads a lightweight shell and returns pending approval/input
+flags, a safe failure flag, current live task/agent counts, root-turn state,
+`waitingFor`, `rootComplete`, `wholeChatIdle`, `observedAt` and an opaque
+`observationToken`. The same database read transaction includes the exact
+`pendingTurnStart` message ID/time; a recorded but not yet started input is not
+reported as an idle chat. Root completion can coexist with current live children.
+Unconfirmed child-retirement hints do not establish an idle whole chat. No raw
+provider failure, transcript, native probe or ownership renewal is returned.
+
+Pass the exact token to `wait_for_thread` with the same `threadId` and optionally
+the exact `turnId`. It returns `changed`, `attention`, `turn-changed` or `timeout`.
+The requested wait defaults to 20 seconds and is capped at 25 seconds; the
+elapsed budget uses the monotonic clock. At most eight waits are admitted across
+stateless management requests in a backend. Cancellation/failure releases that
+exact admission; excess calls fail rather than queue without bound. A timeout
+is an observation result and does not prove completion or authorize a retry.
+
+`get_thread` remains available for message content. `messageLimit: 0` reads only
+the shell and reports `hasMoreMessages: null` because messages were not queried.
+Positive limits select at most 100 recent rows directly without hydrating
+plans, checkpoints, attachments or tool activity. Individual text above 64 KiB
+or text exceeding the cumulative 1 MiB encoded-message budget is returned as
+empty with `textOmitted: true` and `omittedMessageTexts`; it is never presented
+as complete truncated wording. `hasMoreMessages` describes older rows beyond
+the inspected tail, not omitted text within it.
+
+### Action receipts and lost acknowledgements
+
+Management mutations accept an optional UUID `requestId`. Generate and retain
+one **before** an action when its acknowledgement may need reconciliation.
+Successful actions return `phase` plus an `operation` reference on the
+authenticated endpoint. The server reserves the exact bearer-session/request
+tuple durably **before** calling the action and binds it to the tool and a
+canonical digest of its arguments, including the exact target. Argument object
+key order does not create a new intent. Changed tools/arguments under the same
+ID are refused. A repeated known successful intent returns its stored receipt;
+unconfirmed/failed attempts remain reserved and are never executed again.
+If the action returns its own receipt but settling the management journal fails,
+the response retains that action result with `operation.state: "unconfirmed"`.
+Journal failure does not change a known action result into an execution failure
+or permit another execution.
+
+Use `get_operation({ "requestId": "the-retained-uuid" })` to reconcile:
+
+| State         | Evidence                                                                                      |
+| ------------- | --------------------------------------------------------------------------------------------- |
+| `unconfirmed` | Reserved attempt; execution/settlement may be in progress or interrupted.                     |
+| `recorded`    | Durable orchestration intent; no native consumption or finished-work proof.                   |
+| `scheduled`   | Restart acknowledged before its asynchronous teardown.                                        |
+| `completed`   | Settings saved, or the restart policy operation returned; resumed turns can still be running. |
+| `failed`      | The attempt failed; partial effects remain possible and the ID stays consumed.                |
+
+Question responses retain their stronger `resolution` distinction: recorded
+callback intent and an operation receipt do not confirm native consumption or
+create a primary-chat settlement notice. Native settlement still requires the
+original exact request/session ownership. Scheduling retains its separate
+proposal/revision/owner-approval protocol and does not gain these mutation IDs.
+
+Tracking is scoped to the **exact bearer session**, with an opaque `scopeId` and
+credential `expiresAt`. Rotation/reissuance changes the scope; a missing receipt
+in another scope never proves an earlier action did not run. A missing or
+uncertain receipt must not trigger automatic replay. Authentication/revocation
+remain authoritative independently of these read-only receipts.
+
+The SQLite ledger retains at most 10,000 unexpired receipts, each at most 64 KiB.
+Capacity refusal starts no new action and never evicts live deduplication
+evidence; expired credential namespaces can be pruned on admission. Stored data
+is limited to hashed scope/intent, tool, timestamps, public result identifiers
+and fixed errors. Prompts, answers, config/environment values and raw native
+failures are not copied into this ledger. Interrupted attempts stay unconfirmed
+rather than being reconstructed as successful or automatically resubmitted.
+
 ## Context and quota status
 
 Use `get_thread_usage` to check remaining context and provider quota without

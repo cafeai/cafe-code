@@ -26,6 +26,7 @@ import type {
   OrchestrationThreadTurnWorkLogPresenceInput,
   OrchestrationThreadTurnWorkLogPresenceResult,
   OrchestrationThreadShell,
+  OrchestrationMessage,
   ProjectId,
   ThreadId,
   TurnId,
@@ -209,6 +210,36 @@ export interface ProjectionCodexSteerIntentRecoveryBarriers {
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
 export interface ProjectionSnapshotQueryShape {
+  /** One read transaction binds current root/child attention and the exact
+   * durable pending start, without treating accepted input as native work. */
+  readonly getThreadWorkStatusById: (threadId: ThreadId) => Effect.Effect<
+    Option.Option<{
+      readonly thread: OrchestrationThreadShell;
+      readonly pendingTurnStart: {
+        readonly messageId: MessageId;
+        readonly requestedAt: string;
+      } | null;
+    }>,
+    ProjectionRepositoryError
+  >;
+  /** Management reads select only a bounded message tail, without hydrating
+   * plans, checkpoints, attachments or tool activity. Oversize text is omitted
+   * explicitly, never returned as an apparently complete truncated message. */
+  readonly getThreadMessageTail: (input: {
+    readonly threadId: ThreadId;
+    readonly limit: number;
+  }) => Effect.Effect<
+    {
+      readonly messages: ReadonlyArray<
+        Pick<
+          OrchestrationMessage,
+          "id" | "role" | "text" | "turnId" | "streaming" | "createdAt" | "updatedAt"
+        > & { readonly textOmitted: boolean }
+      >;
+      readonly hasMore: boolean;
+    },
+    ProjectionRepositoryError
+  >;
   /** Local desktop power intent, using current root/native-child ownership only.
    * No transcripts, provider probes, permission decisions, or renderer selection. */
   readonly hasActiveDesktopWork: () => Effect.Effect<boolean, ProjectionRepositoryError>;

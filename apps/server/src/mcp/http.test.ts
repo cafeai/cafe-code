@@ -8,6 +8,7 @@ import {
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
@@ -29,6 +30,8 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { WorkspacePaths } from "../workspace/Services/WorkspacePaths.ts";
 import type { CafeMcpDependencies } from "./CafeMcpServer.ts";
 import { cafeMcpRouteLayer } from "./http.ts";
+import { makeMcpOperations } from "./operations.ts";
+import type { IssuedSession } from "../auth/Services/SessionCredentialService.ts";
 
 const threadId = ThreadId.make("http-launch-chat");
 const otherThreadId = ThreadId.make("http-other-chat");
@@ -78,6 +81,8 @@ const dependencies = {
     getActiveProjectByWorkspaceRoot: () => Effect.die("Usage must not inspect a workspace."),
     getProjectShellById: () => Effect.die("Usage must not inspect a project."),
     getThreadDetailById: () => Effect.die("Usage must not load messages."),
+    getThreadMessageTail: () => Effect.die("Usage must not load messages."),
+    getThreadWorkStatusById: () => Effect.die("Usage must not read work status."),
     getThreadShellById: (id: ThreadId) =>
       Effect.succeed(
         id === threadId || id === otherThreadId ? Option.some(shell(id)) : Option.none(),
@@ -99,6 +104,7 @@ const dependencies = {
   serverSettings: {
     getSettings: Effect.succeed({ ...DEFAULT_SERVER_SETTINGS, mcpEnabled: true }),
     updateSettings: () => Effect.die("Usage must not update settings."),
+    updateSettingsWith: () => Effect.die("Usage must not update settings."),
   },
   startup: { enqueueCommand: () => Effect.die("Usage must not enqueue work.") },
   workspacePaths: { normalizeWorkspaceRoot: () => Effect.die("Usage must not resolve files.") },
@@ -116,6 +122,7 @@ async function harness(context: TestContext) {
   });
   const runtime = ManagedRuntime.make(
     Layer.mergeAll(
+      SqlitePersistenceTest,
       ServerAuthLive.pipe(
         Layer.provide(SqlitePersistenceTest),
         Layer.provide(ServerSecretStoreLive),
@@ -242,10 +249,61 @@ async function harness(context: TestContext) {
   const call = (client: Client, input: Parameters<Client["callTool"]>[0]) =>
     track(client.callTool(input));
   const text = (response: Response) => track(response.text());
-  return { issue, revoke, connect, raw, call, text, close };
+  const seedOperation = (session: IssuedSession, requestId: string) =>
+    track(
+      runtime.runPromise(
+        Effect.gen(function* () {
+          const operations = yield* makeMcpOperations;
+          const owner = {
+            sessionId: session.sessionId,
+            expiresAt: DateTime.formatIso(session.expiresAt),
+          };
+          yield* operations.reserve(owner, requestId, "send_message", "a".repeat(64));
+          yield* operations.settle(owner, requestId, "recorded", {
+            messageId: "owner-only-message",
+            sequence: 7,
+          });
+        }),
+        { signal: context.signal },
+      ),
+    );
+  return { issue, revoke, connect, raw, call, text, close, seedOperation };
 }
 
 describe("management usage HTTP ownership", () => {
+  it("binds durable receipt reads to the actual bearer rather than a competing cookie or supplied owner fields", async (context) => {
+    const h = await harness(context);
+    try {
+      const owner = await h.issue({ role: "owner", method: "bearer-session-token" });
+      const foreign = await h.issue({ role: "owner", method: "bearer-session-token" });
+      const requestId = "cf5f1652-de44-4c40-bd7f-6e40b1536ad3";
+      await h.seedOperation(owner, requestId);
+      const owning = await h.connect(owner.token);
+      const known = await h.call(owning, { name: "get_operation", arguments: { requestId } });
+      expect(known.structuredContent).toMatchObject({
+        found: true,
+        operation: { state: "recorded" },
+        result: { messageId: "owner-only-message" },
+      });
+      const other = await h.connect(foreign.token, owner.token);
+      const unavailable = await h.call(other, {
+        name: "get_operation",
+        arguments: { requestId, sessionId: owner.sessionId },
+      });
+      expect(unavailable.isError).not.toBe(true);
+      expect(unavailable.structuredContent).toMatchObject({
+        found: false,
+        operation: null,
+        result: null,
+        mayHaveApplied: true,
+      });
+      expect(JSON.stringify(unavailable)).not.toContain("owner-only-message");
+      expect(JSON.stringify(known)).not.toContain(owner.token);
+      expect(JSON.stringify(known)).not.toContain(owner.sessionId);
+    } finally {
+      await h.close();
+    }
+  });
   it("uses only signed launch context, requires explicit manual targets and rechecks revocation per request", async (context) => {
     const h = await harness(context);
     try {

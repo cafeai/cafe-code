@@ -41,6 +41,8 @@ function makeFakeBrowserWindow() {
   const setPermissionRequestHandler = vi.fn();
   const webContents = {
     copyImageAt: vi.fn(),
+    executeJavaScriptInIsolatedWorld: vi.fn(async () => null),
+    mainFrame: { frameToken: "main-document", detached: false, url: "http://127.0.0.1:5733/" },
     isDestroyed: vi.fn(() => false),
     isLoadingMainFrame: vi.fn(() => false),
     on: vi.fn(),
@@ -107,9 +109,10 @@ const desktopServerExposureLayer = Layer.succeed(DesktopServerExposure.DesktopSe
   getAdvertisedEndpoints: Effect.die("unexpected getAdvertisedEndpoints"),
 } satisfies DesktopServerExposure.DesktopServerExposureShape);
 
+const popupTemplate = vi.fn<ElectronMenu.ElectronMenuShape["popupTemplate"]>(() => Effect.void);
 const electronMenuLayer = Layer.succeed(ElectronMenu.ElectronMenu, {
   setApplicationMenu: () => Effect.void,
-  popupTemplate: () => Effect.void,
+  popupTemplate,
   showContextMenu: () => Effect.succeed(Option.none()),
 } satisfies ElectronMenu.ElectronMenuShape);
 
@@ -191,6 +194,51 @@ function makeTestLayer(input: {
 }
 
 describe("DesktopWindow", () => {
+  it.effect("routes the native Copy Image gesture through the original-image reader", () =>
+    Effect.gen(function* () {
+      const fixture = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const shown = Promise.withResolvers<ElectronMenu.ElectronMenuTemplateInput>();
+      const copied = Promise.withResolvers<void>();
+      popupTemplate.mockImplementationOnce((input) => Effect.sync(() => shown.resolve(input)));
+      const copyImageAt = fixture.window.webContents.copyImageAt as ReturnType<typeof vi.fn>;
+      copyImageAt.mockImplementationOnce(() => copied.resolve());
+      yield* Effect.gen(function* () {
+        const windows = yield* DesktopWindow.DesktopWindow;
+        yield* windows.handleBackendReady;
+        const contextMenu = fixture.onContents.mock.calls.find(
+          ([name]) => name === "context-menu",
+        )?.[1];
+        assert.isFunction(contextMenu);
+        const event = { preventDefault: vi.fn() };
+        contextMenu!(event, {
+          frame: fixture.window.webContents.mainFrame,
+          srcURL: "blob:http://127.0.0.1:5733/original-image",
+          x: 12,
+          y: 34,
+          mediaType: "image",
+          hasImageContents: true,
+          linkURL: "",
+          editFlags: {},
+        });
+        const { template } = yield* Effect.promise(() => shown.promise);
+        const copy = template.find((item) => item.label === "Copy Image");
+        assert.isDefined(copy?.click);
+        assert.equal(copy.enabled, true);
+        assert.equal(copyImageAt.mock.calls.length, 0, "opening a menu never copies pixels");
+        copy.click({} as Electron.MenuItem, fixture.window, {} as Electron.KeyboardEvent);
+        yield* Effect.promise(() => copied.promise);
+        assert.deepEqual(copyImageAt.mock.calls, [[12, 34]]);
+        assert.equal(
+          (fixture.window.webContents.executeJavaScriptInIsolatedWorld as ReturnType<typeof vi.fn>)
+            .mock.calls.length,
+          1,
+        );
+      }).pipe(Effect.provide(makeTestLayer({ window: fixture.window, createCount, mainWindow })));
+    }),
+  );
+
   it.effect("publishes native fullscreen changes only from its live window", () =>
     Effect.gen(function* () {
       const fixture = makeFakeBrowserWindow();

@@ -341,6 +341,7 @@ function makeMutableServerSettingsService(
       start: Effect.void,
       ready: Effect.void,
       getSettings: Ref.get(settingsRef),
+      updateSettingsWith: () => Effect.die("unused atomic settings update"),
       updateSettings: (patch) =>
         Effect.gen(function* () {
           const current = yield* Ref.get(settingsRef);

@@ -219,6 +219,13 @@ export interface ServerSettingsShape {
     patch: ServerSettingsPatch,
   ) => Effect.Effect<ServerSettings, ServerSettingsError>;
 
+  /** Prepare a patch from the latest materialized settings while holding the
+   * same writer as ordinary UI updates. Callers must not perform native work
+   * here; this prevents stale read/edit/write snapshots from losing changes. */
+  readonly updateSettingsWith: <E, R>(
+    prepare: (current: ServerSettings) => Effect.Effect<ServerSettingsPatch, E, R>,
+  ) => Effect.Effect<ServerSettings, ServerSettingsError | E, R>;
+
   /** Stream of settings change events. */
   readonly streamChanges: Stream.Stream<ServerSettings>;
 }
@@ -240,18 +247,27 @@ export class ServerSettingsService extends Context.Service<
             : {}),
         });
         const currentSettingsRef = yield* Ref.make<ServerSettings>(initialSettings);
+        const writer = yield* Semaphore.make(1);
+        const updateSettingsWith: ServerSettingsShape["updateSettingsWith"] = (prepare) =>
+          writer.withPermits(1)(
+            Ref.get(currentSettingsRef).pipe(
+              Effect.flatMap((currentSettings) =>
+                prepare(currentSettings).pipe(
+                  Effect.map((patch) => applyServerSettingsPatch(currentSettings, patch)),
+                ),
+              ),
+              Effect.map(stripRetiredProviderInstances),
+              Effect.flatMap(normalizeServerSettings),
+              Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
+            ),
+          );
 
         return {
           start: Effect.void,
           ready: Effect.void,
           getSettings: Ref.get(currentSettingsRef),
-          updateSettings: (patch) =>
-            Ref.get(currentSettingsRef).pipe(
-              Effect.map((currentSettings) => applyServerSettingsPatch(currentSettings, patch)),
-              Effect.map(stripRetiredProviderInstances),
-              Effect.flatMap(normalizeServerSettings),
-              Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
-            ),
+          updateSettings: (patch) => updateSettingsWith(() => Effect.succeed(patch)),
+          updateSettingsWith,
           streamChanges: Stream.empty,
         } satisfies ServerSettingsShape;
       }),
@@ -861,6 +877,51 @@ const makeServerSettings = Effect.gen(function* () {
     yield* Deferred.succeed(startedDeferred, undefined).pipe(Effect.orDie);
   });
 
+  const writePreparedSettings = <E, R>(
+    prepare: (current: ServerSettings) => Effect.Effect<ServerSettingsPatch, E, R>,
+    materialize: boolean,
+  ) =>
+    writeSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        const current = yield* getSettingsFromCache;
+        const materializedCurrent = materialize
+          ? yield* materializeProviderEnvironmentSecrets(current)
+          : current;
+        const patch = yield* prepare(resolveTextGenerationProvider(materializedCurrent));
+        // The shared patch helper intentionally seeds Production's default
+        // Axiom entry when a whole instance map is replaced. Debug must seed
+        // its own disabled defaults instead, including API clients which do
+        // not echo every built-in card in their replacement map.
+        const profilePatch =
+          dataProfile === "debug" && patch.providerInstances !== undefined
+            ? {
+                ...patch,
+                providerInstances: Schema.decodeUnknownSync(ServerSettings)(
+                  applyDebugProviderSettingsDefaults({
+                    providerInstances: patch.providerInstances,
+                  }),
+                ).providerInstances,
+              }
+            : patch;
+        const candidate = yield* validateClaudeOutputCaps(
+          stripRetiredProviderInstances(applyServerSettingsPatch(current, profilePatch)),
+          settingsPath,
+        );
+        const nextWithProviderSecrets = yield* persistOpenCodeServerPasswords(current, candidate);
+        const nextPersisted = yield* persistProviderEnvironmentSecrets(
+          current,
+          nextWithProviderSecrets,
+        );
+        const next = yield* normalizeServerSettings(nextPersisted);
+        yield* writeSettingsAtomically(next);
+        yield* Cache.set(settingsCache, cacheKey, next);
+        yield* emitChange(next);
+        const materialized = yield* materializeProviderEnvironmentSecrets(next);
+        return resolveTextGenerationProvider(materialized);
+      }),
+    );
+  const updateSettingsWith: ServerSettingsShape["updateSettingsWith"] = (prepare) =>
+    writePreparedSettings(prepare, true);
   return {
     start,
     ready: Deferred.await(startedDeferred),
@@ -868,42 +929,8 @@ const makeServerSettings = Effect.gen(function* () {
       Effect.flatMap(materializeProviderEnvironmentSecrets),
       Effect.map(resolveTextGenerationProvider),
     ),
-    updateSettings: (patch) =>
-      writeSemaphore.withPermits(1)(
-        Effect.gen(function* () {
-          const current = yield* getSettingsFromCache;
-          // The shared patch helper intentionally seeds Production's default
-          // Axiom entry when a whole instance map is replaced. Debug must seed
-          // its own disabled defaults instead, including API clients which do
-          // not echo every built-in card in their replacement map.
-          const profilePatch =
-            dataProfile === "debug" && patch.providerInstances !== undefined
-              ? {
-                  ...patch,
-                  providerInstances: Schema.decodeUnknownSync(ServerSettings)(
-                    applyDebugProviderSettingsDefaults({
-                      providerInstances: patch.providerInstances,
-                    }),
-                  ).providerInstances,
-                }
-              : patch;
-          const candidate = yield* validateClaudeOutputCaps(
-            stripRetiredProviderInstances(applyServerSettingsPatch(current, profilePatch)),
-            settingsPath,
-          );
-          const nextWithProviderSecrets = yield* persistOpenCodeServerPasswords(current, candidate);
-          const nextPersisted = yield* persistProviderEnvironmentSecrets(
-            current,
-            nextWithProviderSecrets,
-          );
-          const next = yield* normalizeServerSettings(nextPersisted);
-          yield* writeSettingsAtomically(next);
-          yield* Cache.set(settingsCache, cacheKey, next);
-          yield* emitChange(next);
-          const materialized = yield* materializeProviderEnvironmentSecrets(next);
-          return resolveTextGenerationProvider(materialized);
-        }),
-      ),
+    updateSettings: (patch) => writePreparedSettings(() => Effect.succeed(patch), false),
+    updateSettingsWith,
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub).pipe(
         Stream.mapEffect((settings) =>

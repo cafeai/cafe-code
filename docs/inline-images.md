@@ -40,6 +40,22 @@ Use forward slashes for native drive paths. Image reference definitions also wor
 
 Supported formats are PNG, JPEG, GIF and WebP, identified from their bytes. Limits are 8 MiB per image, 16,384 pixels per side, 40 million pixels, and eight unique image destinations per message. SVG, raw HTML, data URLs and `file://` imports are not supported by the local publication path. Existing ordinary HTTP image rendering is unchanged.
 
+In the desktop app, right-click **Copy Image** preserves a GIF's original encoded
+bytes, including all frames and timing, rather than copying its displayed frame.
+The native menu reads the clicked image only after selection, with the same 8 MiB
+limit and a 15-second deadline. Blob/data sources use a separate isolated Chromium
+world; HTTP images use the originating window's Chromium session. Navigation,
+renderer exit, document replacement and a newer context menu revoke a pending
+copy. There is at most one pending read per window, and failures leave the
+clipboard unchanged. Other image formats retain native image copying.
+
+GIFs are written using the native GIF clipboard format (`com.compuserve.gif` on
+macOS, `GIF` on Windows and `image/gif` on Linux). The receiving application still
+determines which formats it can paste and whether it preserves animation. The
+regression tests qualify the original bytes, bounded reads and menu ownership
+with synthetic clipboard/session APIs; they do not qualify every native paste
+destination. This path does not read the clipboard or create temporary files.
+
 ## Publication, ownership and delivery
 
 Migration 97 preserves image tables and ownership created by the former local migrations 93 and 96. Upstream migration 96 remains GeneratedVisualizations. When the exact local id-96 ChatImages entry caused that migration to be skipped, migration 97 installs its visualization schema within the migration transaction. It also installs the idempotent upstream recovery index if local migration 93 skipped it. Existing ledger entries remain unchanged; fixtures cover both local histories and upstream databases before and after migration 96.

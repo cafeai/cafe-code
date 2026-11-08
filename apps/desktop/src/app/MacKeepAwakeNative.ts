@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { lstat } from "node:fs/promises";
 import type { MacKeepAwakeState } from "@cafecode/contracts";
 import type { MacKeepAwakeControllerOptions, MacPowerLease } from "./MacKeepAwakeController.ts";
+import type { ClosedLidDisplayOwner } from "./DesktopPowerSaveBlocker.ts";
 
 const reasons = new Set<MacKeepAwakeState["reason"]>([
   "lease-busy",
@@ -18,7 +19,9 @@ const reasons = new Set<MacKeepAwakeState["reason"]>([
 
 export async function startMacPowerLease(
   candidates: readonly string[],
-  input: Parameters<MacKeepAwakeControllerOptions["start"]>[0],
+  input: Parameters<MacKeepAwakeControllerOptions["start"]>[0] & {
+    readonly display?: ClosedLidDisplayOwner;
+  },
 ): Promise<MacPowerLease | null> {
   let executable: string | undefined;
   for (const candidate of candidates) {
@@ -48,6 +51,8 @@ export async function startMacPowerLease(
   let closed = false;
   let ready = false;
   let resetRefused = false;
+  let lidSequence: number | null = null;
+  let displayEligible = false;
   let buffer = "";
   let closeTimer: ReturnType<typeof setTimeout> | undefined;
   let readyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -92,7 +97,22 @@ export async function startMacPowerLease(
         fail();
         return;
       }
-      child.stdin.write('{"command":"renew"}\n');
+      let displayMaySleep = false;
+      try {
+        displayMaySleep = displayEligible && (input.display?.maySleep() ?? false);
+      } catch {
+        fail();
+        return;
+      }
+      child.stdin.write(
+        input.display
+          ? `${JSON.stringify({
+              command: "renew",
+              lidSequence,
+              displayMaySleep,
+            })}\n`
+          : '{"command":"renew"}\n',
+      );
     },
     close: () => {
       retire();
@@ -113,6 +133,13 @@ export async function startMacPowerLease(
   });
   child.once("close", () => {
     closed = true;
+    if (!resetRefused) {
+      try {
+        input.display?.observe(null);
+      } catch {
+        /* Native close still owns completion. */
+      }
+    }
     clearTimeout(readyTimer);
     clearTimeout(closeTimer);
     rejectReady();
@@ -157,10 +184,45 @@ export async function startMacPowerLease(
       } else if (event.event === "active" && Object.keys(event).length === 1) {
         input.state({ phase: "active", reason: null });
       } else if (
+        event.event === "lid" &&
+        Object.keys(event).length === 4 &&
+        input.display &&
+        (event.closed === null || typeof event.closed === "boolean") &&
+        (event.internalOnly === null || typeof event.internalOnly === "boolean") &&
+        typeof event.sequence === "number" &&
+        Number.isSafeInteger(event.sequence) &&
+        event.sequence >= 0 &&
+        (lidSequence === null || event.sequence > lidSequence)
+      ) {
+        lidSequence = event.sequence;
+        displayEligible = event.closed === true && event.internalOnly === true;
+        if (input.current() && !closing) {
+          try {
+            // Unknown topology withdraws new permission without relighting an
+            // already sleeping panel. Known external displays restore the
+            // ordinary display blocker; opening does too.
+            if (event.closed === false || event.internalOnly === false)
+              input.display.observe(false);
+            else if (displayEligible) input.display.observe(true);
+          } catch {
+            fail();
+            return;
+          }
+        }
+      } else if (
         event.event === "paused" &&
         Object.keys(event).length === 2 &&
         reasons.has(event.reason as MacKeepAwakeState["reason"])
       ) {
+        displayEligible = false;
+        if (input.current() && !closing) {
+          try {
+            input.display?.observe(null);
+          } catch {
+            fail();
+            return;
+          }
+        }
         input.state({ phase: "paused", reason: event.reason as MacKeepAwakeState["reason"] });
       } else if (
         event.event === "stopped" &&
