@@ -4,7 +4,7 @@ Decision status: Accepted for the user-requested explicit restart action
 Implementation status: Implemented; rebuilt application adoption required
 Verification status: Native disposable-process and targeted desktop regression checks passed; complete hosted qualification remains required
 Created: 2026-11-08 17:05:31 JST (UTC+0900)
-Last updated: 2026-11-08 20:19:45 JST (UTC+0900)
+Last updated: 2026-11-08 20:44:11 JST (UTC+0900)
 Decision authority: The user reports that Restart daemon does not stop the old
 runtime and requests an immediate fix and rebuilt bundle.
 Partially supersedes: The manual macOS hard-stop limitation in
@@ -33,6 +33,11 @@ first with TERM, then with KILL after two seconds if necessary. Exit observation
 has a further three-second bound; unknown observations refuse replacement.
 There is no process enumeration, task-control port, PID-only signal fallback,
 root requirement, permission change or provider installation.
+
+The published source-launcher graph carries both the controller's build module
+and its C source, so an isolated staged launcher can resolve the same native
+helper without relying on files left in the development checkout. Packaged
+macOS resources separately include the compiled controller.
 
 The manager separately rechecks its exact pending recovery identifier,
 profile, held private marker/credential and socket directory before and after

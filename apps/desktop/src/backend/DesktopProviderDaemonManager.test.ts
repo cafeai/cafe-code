@@ -1469,7 +1469,12 @@ describe("DesktopProviderDaemonManager", () => {
             assert.equal(spawnCalls, 1);
             assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
             assert.equal(yield* fileSystem.exists(markerPath), phase === "readiness");
-            if (phase === "readiness") {
+            // This shared fixture exercises the POSIX manager on every host,
+            // but successful explicit restart additionally requires real
+            // uid/private-mode/no-follow evidence. Windows keeps every failure
+            // and preservation assertion above; its separate manager suite owns
+            // generation/FILETIME recovery rather than fabricated POSIX proof.
+            if (phase === "readiness" && process.platform !== "win32") {
               // Only the first failure's exact dialog identity may re-admit
               // control of the still-retained native handle. The later retry
               // above is observation, not a new shutdown authorization.
