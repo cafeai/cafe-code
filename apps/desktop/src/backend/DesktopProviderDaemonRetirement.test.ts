@@ -6,7 +6,6 @@ import * as fs from "node:fs/promises";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
 // Real test-owned Unix socket inodes distinguish stale listeners from files.
-// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as net from "node:net";
 // Native fixture roots are selected solely beneath the host temporary directory.
 import { tmpdir } from "node:os";

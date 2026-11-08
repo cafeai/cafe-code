@@ -1126,7 +1126,8 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
           const reservation = `${request.pid}:${request.startedAt}:${request.runtimeBuildId}`;
           if (retirementReservation === reservation)
             return yield* preserveInconclusiveOwner("compatibility");
-          if (pending.evidence === undefined) return yield* preserveInconclusiveOwner("namespace");
+          const evidence = pending.evidence;
+          if (evidence === undefined) return yield* preserveInconclusiveOwner("namespace");
           retirementReservation = reservation;
           pending.retirementAttempted = true;
           yield* logInfo("retiring incompatible provider daemon", { reason: mismatch });
@@ -1136,7 +1137,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
                 endpoint: rootEndpoint,
                 marker,
                 request,
-                evidence: pending.evidence,
+                evidence,
                 markerPath: environment.providerDaemonMarkerPath,
                 credentialPath,
                 socketPath: providerDaemonIpcSocketPath(environment),

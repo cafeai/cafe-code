@@ -2,9 +2,9 @@
 
 Decision status: Accepted for the user-requested explicit restart action
 Implementation status: Implemented; rebuilt application adoption required
-Verification status: Native disposable-process qualification passed; repository regression tests authored but deferred at the user's request
+Verification status: Native disposable-process and targeted desktop regression checks passed; complete hosted qualification remains required
 Created: 2026-11-08 17:05:31 JST (UTC+0900)
-Last updated: 2026-11-08 17:05:31 JST (UTC+0900)
+Last updated: 2026-11-08 20:19:45 JST (UTC+0900)
 Decision authority: The user reports that Restart daemon does not stop the old
 runtime and requests an immediate fix and rebuilt bundle.
 Partially supersedes: The manual macOS hard-stop limitation in
@@ -51,6 +51,9 @@ native sequence rather than closing its pipe midway. The helper has a minimal
 source-owned environment and fixed bounded protocol. Kernel tokens, paths,
 credential bytes and native errors never become dialog text or diagnostic
 payloads. Fixed control/identity/exit categories provide actionable guidance.
+The bridge measures its existing cleanup allowance with a monotonic elapsed
+clock, so a wall-clock correction cannot extend that allowance. The exact
+captured recovery evidence remains bound across asynchronous logging.
 
 Both the uncertain cooperative request and native force command remain
 consumed before asynchronous control. An unknown acknowledgement does not
@@ -68,6 +71,8 @@ KILL escalation, wrong-birth refusal and an exec replacement surviving control
 of the earlier audit-token generation. The helper compiled with warnings as
 errors. Existing desktop startup, manager and retirement test owners add
 regressions for consent, stale identifiers, cancellation, unknown-ACK
-non-replay and exact socket cleanup; those repository tests are deferred.
+non-replay and exact socket cleanup. Those regression files passed locally
+after the strict desktop compiler and repository lint checks; the complete
+hosted gate is a separate requirement.
 Compilation and disposable-process checks do not prove a real daemon restart,
 installed-artifact qualification or running application/provider adoption.

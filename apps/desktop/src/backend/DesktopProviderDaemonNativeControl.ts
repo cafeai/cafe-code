@@ -6,7 +6,9 @@ import { spawn } from "node:child_process";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { lstat } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { DesktopEnvironment } from "../app/DesktopEnvironment.ts";
@@ -36,10 +38,13 @@ export class DesktopProviderDaemonNativeControl extends Context.Service<
 
 /** Fixed phase only: no native body, executable path or kernel identity leaks. */
 export class ProviderDaemonNativeControlError extends Error {
-  constructor(readonly phase: "native-control" | "native-identity" | "native-exit") {
+  readonly phase: "native-control" | "native-identity" | "native-exit";
+
+  constructor(phase: "native-control" | "native-identity" | "native-exit") {
     super(
       "The selected provider daemon could not be safely stopped. Its recovery files were preserved.",
     );
+    this.phase = phase;
   }
 }
 
@@ -70,7 +75,7 @@ export async function captureMacProviderDaemonNativeControl(
     input.pid > 2_147_483_647 ||
     !Number.isSafeInteger(milliseconds) ||
     milliseconds <= 0 ||
-    new Date(milliseconds).toISOString() !== input.createdAt ||
+    DateTime.formatIso(DateTime.makeUnsafe(milliseconds)) !== input.createdAt ||
     executableBytes.length === 0 ||
     executableBytes.length > 4096 ||
     executableBytes.includes(0)
@@ -130,6 +135,8 @@ export async function captureMacProviderDaemonNativeControl(
   let closeTimer: ReturnType<typeof setTimeout> | undefined;
   let forceTimer: ReturnType<typeof setTimeout> | undefined;
   let readyTimer: ReturnType<typeof setTimeout> | undefined;
+  // This native pipe/child budget must follow elapsed time even if the wall
+  // clock changes during the modal or stop. Preserve the same eight seconds.
   let forceIssuedAtMs: number | undefined;
   let resolveReady!: () => void, rejectReady!: (error: ProviderDaemonNativeControlError) => void;
   const admitted = new Promise<void>((resolve, reject) => {
@@ -167,7 +174,7 @@ export async function captureMacProviderDaemonNativeControl(
             if (!closed) child.kill("SIGKILL");
           },
           forceCommandWritten
-            ? Math.max(0, 8_000 - (Date.now() - (forceIssuedAtMs ?? Date.now())))
+            ? Math.max(0, 8_000 - (performance.now() - (forceIssuedAtMs ?? performance.now())))
             : 2_000,
         );
       }
@@ -315,7 +322,7 @@ export async function captureMacProviderDaemonNativeControl(
           if (closed || closing || failed || !ready || forceSent)
             throw new ProviderDaemonNativeControlError("native-exit");
           forceSent = true;
-          forceIssuedAtMs = Date.now();
+          forceIssuedAtMs = performance.now();
           const onAbort = () => {
             void close();
           };
