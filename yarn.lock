@@ -1057,6 +1057,24 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@electron/get@npm:5.0.0":
+  version: 5.0.0
+  resolution: "@electron/get@npm:5.0.0"
+  dependencies:
+    debug: "npm:^4.1.1"
+    env-paths: "npm:^3.0.0"
+    graceful-fs: "npm:^4.2.11"
+    progress: "npm:^2.0.3"
+    semver: "npm:^7.6.3"
+    sumchecker: "npm:^3.0.1"
+    undici: "npm:^7.24.4"
+  dependenciesMeta:
+    undici:
+      optional: true
+  checksum: 10c0/6f40ac6a5cb6be6178b3218f2be771351da8d06bb1ab3e15b5e5b785c9480d71e177c645fc96b06c717672018bbcb81d125da0a59fb0b2aaae7076db73360fd0
+  languageName: node
+  linkType: hard
+
 "@electron/get@npm:^3.0.0":
   version: 3.1.0
   resolution: "@electron/get@npm:3.1.0"
@@ -1076,9 +1094,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@electron/get@npm:^5.0.0":
+"@electron/get@patch:@electron/get@npm%3A5.0.0#./.yarn/patches/electron-get-transient-download.patch::locator=%40cafecode%2Fmonorepo%40workspace%3A.":
   version: 5.0.0
-  resolution: "@electron/get@npm:5.0.0"
+  resolution: "@electron/get@patch:@electron/get@npm%3A5.0.0#./.yarn/patches/electron-get-transient-download.patch::version=5.0.0&hash=6709f0&locator=%40cafecode%2Fmonorepo%40workspace%3A."
   dependencies:
     debug: "npm:^4.1.1"
     env-paths: "npm:^3.0.0"
@@ -1090,7 +1108,7 @@ __metadata:
   dependenciesMeta:
     undici:
       optional: true
-  checksum: 10c0/6f40ac6a5cb6be6178b3218f2be771351da8d06bb1ab3e15b5e5b785c9480d71e177c645fc96b06c717672018bbcb81d125da0a59fb0b2aaae7076db73360fd0
+  checksum: 10c0/fb9b32af154ef021886d40faa9ed587595774c3385633c4016d967c89dd9ba79c5693ba1cd3b590ff4ab69fb409f0a30b494569e54cfc5b86664e6a1711cb1ee
   languageName: node
   linkType: hard
 

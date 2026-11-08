@@ -1,0 +1,54 @@
+diff --git a/dist/FetchDownloader.js b/dist/FetchDownloader.js
+--- a/dist/FetchDownloader.js
++++ b/dist/FetchDownloader.js
+@@ -1,9 +1,11 @@
+ import fs from 'graceful-fs';
+ import path from 'node:path';
+ import ProgressBar from 'progress';
+ import { pipeline } from 'node:stream/promises';
+ import { Readable } from 'node:stream';
++import { setTimeout as delay } from 'node:timers/promises';
+ const PROGRESS_BAR_DELAY_IN_SECONDS = 30;
++const TRANSIENT_HTTP_RETRY_DELAYS = [250, 500];
+ /**
+  * @category Downloader
+  */
+@@ -43,10 +45,34 @@
+             }, PROGRESS_BAR_DELAY_IN_SECONDS * 1000);
+         }
+         try {
+-            const response = await fetch(url, fetchOptions);
+-            if (!response.ok) {
+-                throw new HTTPError(response);
+-            }
++            // Retry only an idempotent archive GET rejected before streaming.
++            // Native fetch failures, successful-body failures and later checksum
++            // or extraction failures never enter this response-only policy.
++            const retryableMethod = fetchOptions.method === undefined ||
++                (typeof fetchOptions.method === 'string' && fetchOptions.method.toUpperCase() === 'GET');
++            let response;
++            for (let attempt = 0; ; attempt += 1) {
++                response = await fetch(url, fetchOptions);
++                if (response.ok) {
++                    break;
++                }
++                const delayMs = TRANSIENT_HTTP_RETRY_DELAYS[attempt];
++                if (!retryableMethod ||
++                    ![502, 503, 504].includes(response.status) ||
++                    delayMs === undefined) {
++                    throw new HTTPError(response);
++                }
++                // Retire this rejected response before admitting another GET.
++                // Cancellation failures remain fatal; do not overlap bodies or
++                // write rejected bytes into the archive/cache output.
++                if (response.body) {
++                    await response.body.cancel();
++                }
++                // The caller owns cancellation during both the fixed backoff
++                // and the next unchanged fetch. No Retry-After value can grow
++                // this budget or create an unbounded retry queue.
++                await delay(delayMs, undefined, { signal: fetchOptions.signal ?? undefined });
++            }
+             if (!response.body) {
+                 throw new Error('Response body is empty');
+             }

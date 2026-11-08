@@ -1,7 +1,7 @@
 # Dependency maintenance with Renovate
 
 Created: 2026-10-03 01:30:40 JST (UTC+0900)
-Last updated: 2026-11-04 11:22:32 JST (UTC+0900)
+Last updated: 2026-11-08 21:04:42 JST (UTC+0900)
 
 Cafe is configured to use the Mend-hosted [Renovate GitHub App](https://github.com/apps/renovate)
 to propose dependency updates once activated. The checked-in repository policy is
@@ -403,6 +403,27 @@ reconciling the dashboard against the new `dev` lockfile.
 
 Official references: [Dependency Dashboard](https://docs.renovatebot.com/key-concepts/dashboard/)
 and [Mend job processing](https://docs.mend.io/wsk/renovate-ee-job-processing-in-renovate).
+
+## Electron archive transport retry patch
+
+The checked-in [@electron/get patch](../.yarn/patches/electron-get-transient-download.patch)
+targets only the exact `5.0.0` FetchDownloader consumed by pinned Electron `43.8.4`.
+It permits at most three attempts for default or explicit GET requests receiving
+HTTP 502, 503 or 504 before any archive body is streamed. The two delays use the
+actual clock: 250 ms, then 500 ms. The rejected response body is cancelled and joined
+before each retry; the same caller AbortSignal owns the delay and the next fetch.
+The request URL/options, proxy behavior, version/architecture, cache and checksum
+validation stay unchanged, with no mirror substitution or whole-install retry.
+Non-GET requests, other HTTP statuses, network/TLS errors, successful-body or disk
+failures, checksum mismatches and extraction errors remain fatal. The builder's
+separate `@electron/get` 3 dependency is unchanged.
+
+Qualification must replay the actual nested downloader against test-owned HTTP
+responses with independent checksum/file bytes, cache-hit, exhausted-attempt,
+cancellation and fatal-response controls. Use the real backoff clock and preserve
+native request/stream cleanup and existing deadlines; a patch-text assertion is
+not transport or integrity proof. Installation, test and final build results are
+recorded separately; this note alone claims none of them.
 
 ## LegendList review-anchor compatibility patch
 
