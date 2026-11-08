@@ -4741,11 +4741,35 @@ describe("ClaudeAdapterLive", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
+      const events: ProviderRuntimeEvent[] = [];
+      const queuedBoundary = yield* Deferred.make<void>();
+      const consumedBoundary = yield* Deferred.make<void>();
+      const completedBoundary = yield* Deferred.make<void>();
+      let statusBoundaryIndex = 0;
+      yield* Stream.runForEach(adapter.streamEvents, (event) => {
+        events.push(event);
+        if (event.type === "session.state.changed" && event.payload.reason === "status:active")
+          return Deferred.succeed(
+            statusBoundaryIndex++ === 0 ? queuedBoundary : consumedBoundary,
+            undefined,
+          );
+        if (event.type === "turn.completed") return Deferred.succeed(completedBoundary, undefined);
+        return Effect.void;
+      }).pipe(Effect.forkChild);
+      const processingReceipts = () =>
+        events
+          .filter((event) => event.type === "task.progress")
+          .filter((event) =>
+            String(event.payload.taskId).startsWith("claude-turn-steer-processing:"),
+          );
       const session = yield* adapter.startSession({
         threadId: THREAD_ID,
         provider: ProviderDriverKind.make("claudeAgent"),
         runtimeMode: "full-access",
       });
+      const runtimeId = session.subagentRuntimeId;
+      assert.isString(runtimeId);
+      assert.notEqual(runtimeId, "");
 
       const turn = yield* adapter.sendTurn({
         threadId: session.threadId,
@@ -4755,6 +4779,8 @@ describe("ClaudeAdapterLive", () => {
       yield* adapter.steerTurn({
         threadId: session.threadId,
         expectedTurnId: turn.turnId,
+        messageId: MessageId.make("queued-claude-follow-up"),
+        intentSequence: 23,
         input: "incorporate this follow-up",
         attachments: [],
       });
@@ -4791,6 +4817,53 @@ describe("ClaudeAdapterLive", () => {
         session_id: "claude-session-follow-up",
         uuid: "lifecycle-follow-up-queued",
       } as unknown as SDKMessage);
+      // A different conversation and a child task cannot acknowledge an owned
+      // root prompt, even when they repeat its exact UUID. A native task also
+      // cannot forge the application-owned presentation receipt namespace.
+      for (const extra of [
+        { session_id: "foreign-conversation" },
+        { session_id: "claude-session-follow-up", parent_tool_use_id: "child-tool" },
+        { session_id: "claude-session-follow-up", task_id: "child-task" },
+      ])
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: followUpMessageUuid,
+          state: "started",
+          uuid: "foreign-lifecycle",
+          ...extra,
+        } as unknown as SDKMessage);
+      // Misplaced quota metadata is diagnostic-only, not a permanent
+      // reservation preventing a later clean native acknowledgement.
+      harness.query.emit({
+        type: "command_lifecycle",
+        command_uuid: followUpMessageUuid,
+        state: "started",
+        session_id: "claude-session-follow-up",
+        uuid: "mixed-quota-lifecycle",
+        usage_report: {},
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_progress",
+        session_id: "claude-session-follow-up",
+        uuid: "forged-native-progress",
+        task_id: `claude-turn-steer-processing:${"a".repeat(64)}`,
+        description: "forged processing",
+        usage: {
+          provider: "claudeAgent",
+          messageId: "queued-claude-follow-up",
+          intentSequence: 23,
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "status",
+        status: null,
+        session_id: "claude-session-follow-up",
+        uuid: "queued-receipt-boundary",
+      } as unknown as SDKMessage);
+      yield* Deferred.await(queuedBoundary);
+      assert.equal(processingReceipts().length, 0);
       harness.query.emit({
         type: "assistant",
         session_id: "claude-session-follow-up",
@@ -4835,6 +4908,38 @@ describe("ClaudeAdapterLive", () => {
         uuid: "lifecycle-follow-up-started",
       } as unknown as SDKMessage);
       harness.query.emit({
+        type: "system",
+        subtype: "status",
+        status: null,
+        session_id: "claude-session-follow-up",
+        uuid: "consumed-receipt-boundary",
+      } as unknown as SDKMessage);
+      // The exact native start retires the spinner before any assistant text,
+      // while retaining the same Cafe turn and every running background task.
+      yield* Deferred.await(consumedBoundary);
+      const processing = processingReceipts()[0];
+      assert.isDefined(processing);
+      if (!processing) throw new Error("Expected the exact native-consumption receipt.");
+      assert.match(
+        String(processing.payload.taskId),
+        /^claude-turn-steer-processing:[a-f0-9]{64}$/u,
+      );
+      assert.equal(processing.turnId, turn.turnId);
+      assert.equal(processing.payload.visibility, "ambient");
+      assert.equal(
+        processing.payload.description,
+        "Claude began processing the submitted follow-up.",
+      );
+      assert.equal(processing.subagentRuntimeId, runtimeId);
+      assert.deepEqual(processing.payload.usage, {
+        provider: "claudeAgent",
+        messageId: "queued-claude-follow-up",
+        intentSequence: 23,
+        providerInstanceId: "claudeAgent",
+        subagentRuntimeId: runtimeId,
+      });
+      assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+      harness.query.emit({
         type: "assistant",
         session_id: "claude-session-follow-up",
         uuid: "assistant-follow-up-segment",
@@ -4853,6 +4958,7 @@ describe("ClaudeAdapterLive", () => {
         uuid: "result-follow-up-segment",
         user_message_uuid: followUpMessageUuid,
       } as unknown as SDKMessage);
+      yield* Deferred.await(completedBoundary);
       yield* Effect.yieldNow;
       yield* Effect.yieldNow;
 
@@ -4863,6 +4969,7 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(snapshot.turns.length, 1);
       assert.equal(snapshot.turns[0]?.id, turn.turnId);
       assert.equal(snapshot.turns[0]?.items.length, 2);
+      assert.equal(processingReceipts().length, 1);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -5197,11 +5304,27 @@ describe("ClaudeAdapterLive", () => {
       const harness = makeHarness();
       return Effect.gen(function* () {
         const adapter = yield* ClaudeAdapter;
+        const events: ProviderRuntimeEvent[] = [];
+        const beforeInterruptBoundary = yield* Deferred.make<void>();
+        const cancelledBoundary = yield* Deferred.make<void>();
+        let statusBoundaryIndex = 0;
+        yield* Stream.runForEach(adapter.streamEvents, (event) => {
+          events.push(event);
+          return event.type === "session.state.changed" && event.payload.reason === "status:active"
+            ? Deferred.succeed(
+                statusBoundaryIndex++ === 0 ? beforeInterruptBoundary : cancelledBoundary,
+                undefined,
+              )
+            : Effect.void;
+        }).pipe(Effect.forkChild);
         const session = yield* adapter.startSession({
           threadId: THREAD_ID,
           provider: ProviderDriverKind.make("claudeAgent"),
           runtimeMode: "full-access",
         });
+        const runtimeId = session.subagentRuntimeId;
+        assert.isString(runtimeId);
+        assert.notEqual(runtimeId, "");
 
         const turn = yield* adapter.sendTurn({
           threadId: session.threadId,
@@ -5228,6 +5351,12 @@ describe("ClaudeAdapterLive", () => {
         }
 
         harness.query.emit({
+          type: "system",
+          subtype: "init",
+          session_id: "claude-session-lifecycle",
+          uuid: "command-lifecycle-primary-init",
+        } as unknown as SDKMessage);
+        harness.query.emit({
           type: "command_lifecycle",
           command_uuid: firstMessageUuid,
           state: "started",
@@ -5241,6 +5370,16 @@ describe("ClaudeAdapterLive", () => {
           uuid: "command-lifecycle-queued",
           session_id: "claude-session-lifecycle",
         } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "status",
+          status: null,
+          session_id: "claude-session-lifecycle",
+          uuid: "lifecycle-before-interrupt-boundary",
+        } as unknown as SDKMessage);
+        // This received FIFO event proves init/start/queued handling finished
+        // before the original interrupt; mock emit or scheduler yields do not.
+        yield* Deferred.await(beforeInterruptBoundary);
         yield* Effect.yieldNow;
         yield* Effect.yieldNow;
 
@@ -5251,6 +5390,67 @@ describe("ClaudeAdapterLive", () => {
 
         assert.equal(harness.query.interruptCalls.length, 1);
         assert.deepEqual(harness.query.cancelAsyncMessageCalls, [steerMessageUuid]);
+        assert.equal(harness.query.closeCalls, 0);
+
+        // Admit a fresh lease AFTER the original API cancellation assertions.
+        // Reusing the already-cancelled input would only test API cleanup and
+        // could not expose native cancellation followed by a late ACK.
+        yield* adapter.steerTurn({
+          threadId: session.threadId,
+          expectedTurnId: turn.turnId,
+          messageId: MessageId.make("native-cancelled-claude-follow-up"),
+          intentSequence: 41,
+          input: "cancel this native follow-up",
+          attachments: [],
+        });
+        const [cancelledMessage] = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 1),
+        );
+        if (!cancelledMessage?.uuid) throw new Error("Expected a fresh native follow-up UUID.");
+        assert.equal(promptMessageText(cancelledMessage), "cancel this native follow-up");
+        assert.notEqual(cancelledMessage.uuid, firstMessageUuid);
+        assert.notEqual(cancelledMessage.uuid, steerMessageUuid);
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: cancelledMessage.uuid,
+          state: "cancelled",
+          session_id: "claude-session-lifecycle",
+          uuid: "native-cancelled-follow-up",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: cancelledMessage.uuid,
+          state: "completed",
+          session_id: "claude-session-lifecycle",
+          uuid: "late-completed-cancelled-follow-up",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          ...makeSuccessfulClaudeResult("claude-session-lifecycle"),
+          user_message_uuid: cancelledMessage.uuid,
+          user_message_uuids: [cancelledMessage.uuid],
+        } as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "status",
+          status: null,
+          session_id: "claude-session-lifecycle",
+          uuid: "cancelled-follow-up-boundary",
+        } as unknown as SDKMessage);
+        yield* Deferred.await(cancelledBoundary);
+        assert.deepEqual(
+          events.filter(
+            (event) =>
+              event.type === "task.progress" &&
+              String(event.payload.taskId).startsWith("claude-turn-steer-processing:"),
+          ),
+          [],
+        );
+        const current = (yield* adapter.listSessions())[0];
+        assert.equal(current?.activeTurnId, turn.turnId);
+        assert.equal(current?.subagentRuntimeId, runtimeId);
+        assert.equal(harness.query.interruptCalls.length, 1);
+        assert.deepEqual(harness.query.cancelAsyncMessageCalls, [steerMessageUuid]);
+        assert.equal(harness.createInputs.length, 1);
         assert.equal(harness.query.closeCalls, 0);
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -5330,20 +5530,52 @@ describe("ClaudeAdapterLive", () => {
       const harness = makeHarness();
       return Effect.gen(function* () {
         const adapter = yield* ClaudeAdapter;
+        const events: ProviderRuntimeEvent[] = [];
+        const mergedBoundary = yield* Deferred.make<void>();
+        const replayBoundary = yield* Deferred.make<void>();
+        const completedBoundary = yield* Deferred.make<void>();
+        let boundaryIndex = 0;
+        yield* Stream.runForEach(adapter.streamEvents, (event) => {
+          events.push(event);
+          if (event.type === "session.state.changed" && event.payload.reason === "status:active")
+            return Deferred.succeed(
+              boundaryIndex++ === 0 ? mergedBoundary : replayBoundary,
+              undefined,
+            );
+          if (event.type === "turn.completed")
+            return Deferred.succeed(completedBoundary, undefined);
+          return Effect.void;
+        }).pipe(Effect.forkChild);
+        const processingReceipts = () =>
+          events
+            .filter((event) => event.type === "task.progress")
+            .filter((event) =>
+              String(event.payload.taskId).startsWith("claude-turn-steer-processing:"),
+            );
         const session = yield* adapter.startSession({
           threadId: THREAD_ID,
           provider: ProviderDriverKind.make("claudeAgent"),
           runtimeMode: "full-access",
         });
+        const runtimeId = session.subagentRuntimeId;
+        assert.isString(runtimeId);
+        assert.notEqual(runtimeId, "");
         const turn = yield* adapter.sendTurn({
           threadId: session.threadId,
           input: "original task",
           attachments: [],
         });
-        for (const input of ["folded into the current reply", "wait for the next reply"]) {
+        for (const [index, input] of [
+          "folded into the current reply",
+          "wait for the next reply",
+        ].entries()) {
           yield* adapter.steerTurn({
             threadId: session.threadId,
             expectedTurnId: turn.turnId,
+            messageId: MessageId.make(
+              index === 0 ? "merged-claude-follow-up" : "pending-claude-follow-up",
+            ),
+            intentSequence: index + 31,
             input,
             attachments: [],
           });
@@ -5353,6 +5585,12 @@ describe("ClaudeAdapterLive", () => {
         );
         const [first, folded, pending] = messages.map((message) => message.uuid);
         if (!first || !folded || !pending) throw new Error("Expected UUID-stamped prompts.");
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          session_id: "claude-merged-prompts",
+          uuid: "merged-prompts-init",
+        } as unknown as SDKMessage);
 
         // No command_lifecycle frames arrive. The result itself is authoritative
         // for the merged/folded inputs, but cannot retire the unconsumed steer.
@@ -5367,17 +5605,47 @@ describe("ClaudeAdapterLive", () => {
           user_message_uuids: [first, folded, folded, "provider-owned-unknown-uuid"],
         } as unknown as SDKMessage;
         harness.query.emit(result);
+        harness.query.emit({
+          type: "system",
+          subtype: "status",
+          status: null,
+          session_id: "claude-merged-prompts",
+          uuid: "merged-result-boundary",
+        } as unknown as SDKMessage);
+        yield* Deferred.await(mergedBoundary);
         yield* Effect.yieldNow;
         yield* Effect.yieldNow;
         assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
         assert.equal((yield* adapter.readThread(session.threadId)).turns.length, 0);
+        assert.equal(processingReceipts().length, 1);
+        assert.deepEqual(
+          processingReceipts().map((event) => event.payload.usage),
+          [
+            {
+              provider: "claudeAgent",
+              messageId: "merged-claude-follow-up",
+              intentSequence: 31,
+              providerInstanceId: "claudeAgent",
+              subagentRuntimeId: runtimeId,
+            },
+          ],
+        );
 
         // A delayed replay of already-retired correlation must not fall back
         // to consuming the next submitted prompt.
         harness.query.emit(result);
+        harness.query.emit({
+          type: "system",
+          subtype: "status",
+          status: null,
+          session_id: "claude-merged-prompts",
+          uuid: "replayed-result-boundary",
+        } as unknown as SDKMessage);
+        yield* Deferred.await(replayBoundary);
         yield* Effect.yieldNow;
         yield* Effect.yieldNow;
         assert.equal((yield* adapter.listSessions())[0]?.status, "running");
+        assert.equal(processingReceipts().length, 1);
 
         harness.query.emit({
           type: "result",
@@ -5388,6 +5656,7 @@ describe("ClaudeAdapterLive", () => {
           user_message_uuid: pending,
           user_message_uuids: [pending],
         } as unknown as SDKMessage);
+        yield* Deferred.await(completedBoundary);
         yield* Effect.yieldNow;
         yield* Effect.yieldNow;
         const completed = (yield* adapter.listSessions())[0];
@@ -5396,6 +5665,38 @@ describe("ClaudeAdapterLive", () => {
         const snapshot = yield* adapter.readThread(session.threadId);
         assert.equal(snapshot.turns.length, 1);
         assert.equal(snapshot.turns[0]?.id, turn.turnId);
+        assert.deepEqual(
+          processingReceipts().map((event) => ({
+            turnId: event.turnId,
+            usage: event.payload.usage,
+          })),
+          [
+            {
+              turnId: turn.turnId,
+              usage: {
+                provider: "claudeAgent",
+                messageId: "merged-claude-follow-up",
+                intentSequence: 31,
+                providerInstanceId: "claudeAgent",
+                subagentRuntimeId: runtimeId,
+              },
+            },
+            {
+              turnId: turn.turnId,
+              usage: {
+                provider: "claudeAgent",
+                messageId: "pending-claude-follow-up",
+                intentSequence: 32,
+                providerInstanceId: "claudeAgent",
+                subagentRuntimeId: runtimeId,
+              },
+            },
+          ],
+        );
+        assert.deepEqual(
+          processingReceipts().map((event) => event.subagentRuntimeId),
+          [runtimeId, runtimeId],
+        );
         assert.deepEqual(harness.query.interruptCalls, []);
       }).pipe(
         Effect.provideService(Random.Random, makeDeterministicRandomService()),

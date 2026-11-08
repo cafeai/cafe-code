@@ -56,7 +56,7 @@ function captureThreadActivityStatements(sql: SqlClient.SqlClient) {
   return { sql: observed, statements };
 }
 
-function capturePostTerminalAcceptedSteerStatements(sql: SqlClient.SqlClient) {
+function captureCodexSteerEvidenceStatements(sql: SqlClient.SqlClient) {
   const statements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
   const observed = new Proxy(sql, {
     apply(target, thisArg, argumentsList) {
@@ -66,7 +66,9 @@ function capturePostTerminalAcceptedSteerStatements(sql: SqlClient.SqlClient) {
         argumentsList,
       ) as Statement.Statement<unknown>;
       const compiled = statement.compile();
-      if (/WITH exact_accepted AS/u.test(compiled[0])) statements.push(compiled);
+      if (/WITH exact_accepted AS|AS "processingObserved"/u.test(compiled[0])) {
+        statements.push(compiled);
+      }
       return statement;
     },
   });
@@ -2780,7 +2782,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
   );
 
   it.effect(
-    "keeps live and terminal exact Codex steer evidence bounded across a delayed-ACK Stop race",
+    "keeps live, terminal and legacy Codex steer evidence bounded across a delayed-ACK Stop race",
     () =>
       Effect.gen(function* () {
         const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -3062,7 +3064,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         // synchronously inspect every irrelevant event before finding no match.
         // Keep the existing delayed-ACK/Stop facts unchanged: they remain an
         // exact candidate for the later recovery owner to refuse or requeue.
-        const capturedAcceptedSteer = capturePostTerminalAcceptedSteerStatements(sql);
+        const capturedAcceptedSteer = captureCodexSteerEvidenceStatements(sql);
         const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
         const capturedAcceptedSteerLayer = Layer.fresh(
           OrchestrationProjectionSnapshotQueryLive,
@@ -3132,6 +3134,81 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         assert.isFalse(
           candidatePlan.some((row) => /^SCAN processing_event(?:\s|$)/u.test(row.detail)),
           `accepted recovery must not scan the orchestration event journal:\n${candidatePlanText}`,
+        );
+
+        // A new turn also revalidates this precise historical acceptance via
+        // the legacy API, without possessing its immutable compact barrier.
+        // Exercise that actual statement against the same mature journal:
+        // formerly its optional filter ORs and unfenced processing join let
+        // the journal drive a repeated correlated search. Keep the complete
+        // historical result, rather than hiding the work behind a row limit.
+        const legacyEvidence = yield* Effect.gen(function* () {
+          const capturedSnapshotQuery = yield* ProjectionSnapshotQuery;
+          return yield* capturedSnapshotQuery.getCodexSteerAcceptanceEvidence({
+            threadId,
+            acceptedTurnId: turnId,
+            messageId,
+          });
+        }).pipe(Effect.provide(capturedAcceptedSteerLayer));
+        assert.deepStrictEqual(legacyEvidence, [
+          {
+            threadId,
+            acceptedTurnId: turnId,
+            intentSequence: intent.sequence,
+            clientCorrelationId,
+            messageId,
+            messageTurnId: turnId,
+            messageText: "private mature prompt",
+            messageAttachments: [],
+            acceptedAt,
+            turnState: "interrupted",
+            turnCompletedAt: interruptedAt,
+            processingObserved: false,
+            recoveryObserved: false,
+            // Preserve the legacy API's acceptance-time control boundary.
+            // The exact barrier path below separately authenticates Stop
+            // against the earlier intent, including this delayed-ACK race.
+            interruptRequested: false,
+            sessionStopRequested: false,
+          },
+        ]);
+        assert.lengthOf(capturedAcceptedSteer.statements, 2);
+        const [legacyQuery, legacyParameters] = capturedAcceptedSteer.statements[1]!;
+        const legacyPlan = yield* sql.unsafe<{ readonly detail: string }>(
+          `EXPLAIN QUERY PLAN ${legacyQuery}`,
+          legacyParameters,
+        );
+        const legacyPlanText = legacyPlan.map((row) => row.detail).join("\n");
+        assert.match(
+          legacyPlanText,
+          /SEARCH accepted USING INDEX .*\(thread_id=\? AND turn_id=\? AND kind=\?\)/u,
+          `legacy recovery must select its supplied thread/turn acceptance range:\n${legacyPlanText}`,
+        );
+        const legacyProcessingRange = legacyPlan.findIndex((row) =>
+          row.detail.includes(
+            "SEARCH processing USING INDEX idx_projection_thread_activities_thread_turn_kind_created_id",
+          ),
+        );
+        const legacyProcessingEventProbe = legacyPlan.findIndex((row) =>
+          row.detail.includes("SEARCH processing_event USING INDEX idx_orch_events_command_id"),
+        );
+        assert.isAtLeast(
+          legacyProcessingRange,
+          0,
+          `legacy recovery must first select its processing activity range:\n${legacyPlanText}`,
+        );
+        assert.isAbove(
+          legacyProcessingEventProbe,
+          legacyProcessingRange,
+          `legacy recovery must authenticate processing with an exact command probe:\n${legacyPlanText}`,
+        );
+        assert.isFalse(
+          legacyPlan.some((row) =>
+            /(?:SCAN|SEARCH) processing_event .*idx_orch_events_stream_sequence|^SCAN processing_event(?:\s|$)/u.test(
+              row.detail,
+            ),
+          ),
+          `legacy recovery must not search the mature event stream for processing:\n${legacyPlanText}`,
         );
 
         const terminalLookupStartedAt = performance.now();
@@ -5301,6 +5378,19 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
       const sql = yield* SqlClient.SqlClient;
       const threadId = ThreadId.make("thread-all-turn-subagent-retention");
+      const processingReceiptPayload = {
+        taskId: `claude-turn-steer-processing:${"a".repeat(64)}`,
+        visibility: "ambient",
+        nativeWorkRuntimeId: "16f7d05e-709c-4b84-9638-7f9a0484729b",
+        detail: "Claude began processing the submitted follow-up.",
+        usage: {
+          provider: "claudeAgent",
+          messageId: "hydrated-claude-message",
+          intentSequence: 31,
+          providerInstanceId: "claude-retention-account",
+          subagentRuntimeId: "16f7d05e-709c-4b84-9638-7f9a0484729b",
+        },
+      };
 
       yield* sql`
         INSERT INTO projection_projects(
@@ -5424,6 +5514,18 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             1001, '2026-10-04T00:02:02.000Z'
           )
       `;
+      // This consumption receipt has no subagent presentation or task control.
+      // Its ambient identity must retain the complete input/attempt/owner
+      // metadata through both the legacy lane and real sidecar hydration.
+      yield* sql`
+        INSERT INTO projection_thread_activities(
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        ) VALUES (
+          'claude-consumption-before-tail', ${threadId}, 'turn-current', 'info', 'task.progress',
+          'Reasoning update', ${encodeJsonString(processingReceiptPayload)},
+          1002, '2026-10-04T00:02:03.000Z'
+        )
+      `;
       yield* sql`
         WITH RECURSIVE tail(index_value) AS (
           SELECT 1 UNION ALL SELECT index_value + 1 FROM tail
@@ -5479,6 +5581,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             (activity) => activity.id === asEventId("fallback-utf16-rejected"),
           ),
         );
+        assert.deepStrictEqual(
+          partialDetail.value.activities.find(
+            (activity) => activity.id === asEventId("claude-consumption-before-tail"),
+          )?.payload,
+          processingReceiptPayload,
+        );
       }
 
       yield* hydrateSubagentLifecycleForThread(sql, threadId);
@@ -5489,6 +5597,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           hydratedDetail.value.activities.some(
             (activity) => activity.id === asEventId("older-turn-child-start"),
           ),
+        );
+        assert.deepStrictEqual(
+          hydratedDetail.value.activities.find(
+            (activity) => activity.id === asEventId("claude-consumption-before-tail"),
+          )?.payload,
+          processingReceiptPayload,
         );
       }
 
@@ -5518,6 +5632,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const terminalDetail = yield* snapshotQuery.getThreadDetailById(threadId);
       assert.equal(terminalDetail._tag, "Some");
       if (terminalDetail._tag === "Some") {
+        const processingReceipt = terminalDetail.value.activities.find(
+          (activity) => activity.id === asEventId("claude-consumption-before-tail"),
+        );
+        assert.equal(processingReceipt?.turnId, asTurnId("turn-current"));
+        assert.deepStrictEqual(processingReceipt?.payload, processingReceiptPayload);
         assert.deepStrictEqual(
           terminalDetail.value.activities
             .filter(

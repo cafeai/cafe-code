@@ -2866,6 +2866,7 @@
   "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset.": "이 제공자 런타임은 숫자 하위 에이전트 한도를 적용할 수 없습니다. 기존 대화의 재정의는 초기화할 수 있습니다.",
   "This provider runtime does not support the account subagent limit. Clear it in account settings or use a supported runtime before sending.": "이 제공자 런타임은 계정 하위 에이전트 한도를 지원하지 않습니다. 보내기 전에 계정 설정에서 지우거나 지원되는 런타임을 사용하세요.",
   "This provider runtime does not support the saved subagent limit. Reset it in More composer controls before sending.": "이 제공자 런타임은 저장된 하위 에이전트 한도를 지원하지 않습니다. 보내기 전에 입력창 제어 더 보기에서 초기화하세요.",
+  "This provider runtime is unavailable or its subagent-limit support could not be verified. Check the provider status and retry. Your saved limit has been kept.": "이 제공자 런타임을 사용할 수 없거나 하위 에이전트 한도 지원 여부를 확인할 수 없습니다. 제공자 상태를 확인한 후 다시 시도하세요. 저장된 한도는 유지되었습니다.",
   "This provider session": "이 제공자 세션",
   "This question's answer changed in another view. Review the follow-up queue before trying again.": "이 질문의 답변이 다른 화면에서 변경되었습니다. 다시 시도하기 전에 후속 요청 대기열을 검토하세요.",
   "This queued follow-up changed in another view. Reload and review it before trying again.": "이 대기 중인 후속 요청이 다른 화면에서 변경되었습니다. 다시 시도하기 전에 다시 불러와 검토하세요.",

@@ -6417,6 +6417,200 @@ describe("ChatView full app (composer)", () => {
     });
   });
 
+  it("settles only the consumed Claude follow-up while its primary query keeps working", async (testContext) => {
+    const owner = createChatViewCallerOwner(testContext, mountChatView, { label: "pending-steer" });
+    await owner.run(async () => {
+      const activeTurnId = TurnId.make("claude-consumed-follow-up-turn");
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const runtimeId = "c7cb1b13-6a31-4669-82e4-8306a09364bb";
+      const base = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("claude-consumed-follow-up-original"),
+        targetText: "Keep the primary query running",
+        sessionStatus: "running",
+        provider: "claudeAgent",
+        history: "essential",
+      });
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          latestTurn: {
+            turnId: activeTurnId,
+            state: "running",
+            requestedAt: isoAt(1_000),
+            startedAt: isoAt(1_001),
+            completedAt: null,
+            assistantMessageId: null,
+          },
+          session: {
+            ...thread.session!,
+            status: "running",
+            providerInstanceId: instanceId,
+            subagentRuntimeId: runtimeId,
+            activeTurnId,
+          },
+        })),
+      };
+      const intentByMessageId = new Map<string, number>();
+      const outgoingTexts: string[] = [];
+      let nextIntent = snapshot.snapshotSequence + 1;
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        configureFixture: (fixture) => {
+          configureResponseLimitFixture(fixture);
+          fixture.serverConfig = {
+            ...fixture.serverConfig,
+            providers: fixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
+            })),
+          };
+        },
+        resolveRpc: (body) => {
+          if (body._tag !== ORCHESTRATION_WS_METHODS.dispatchCommand) return undefined;
+          if (body.type !== "thread.turn.steer") return { sequence: nextIntent };
+          const message = body.message as { readonly messageId: MessageId; readonly text: string };
+          const sequence = nextIntent++;
+          intentByMessageId.set(message.messageId, sequence);
+          outgoingTexts.push(message.text);
+          return { sequence };
+        },
+      });
+
+      const prompts = ["First Claude follow-up", "Second Claude follow-up"];
+      for (const [index, prompt] of prompts.entries()) {
+        owner.assertActive();
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+        await owner.own("controls", () =>
+          vi.waitFor(() => {
+            expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+              prompt,
+            );
+            expect(
+              document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent,
+            ).toBe(prompt);
+            expect(
+              document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]')
+                ?.disabled,
+            ).toBe(false);
+          }),
+        );
+        await owner.own("send", () =>
+          page.getByRole("button", { name: "Queue message", exact: true }).click(),
+        );
+        await owner.own("controls", () =>
+          vi.waitFor(() => expect(queuedSendButtons()).toHaveLength(1)),
+        );
+        await owner.own("steer", () =>
+          page.getByRole("button", { name: "Send", exact: true }).click(),
+        );
+        await owner.own("request", () =>
+          vi.waitFor(() => {
+            expect(intentByMessageId.size).toBe(index + 1);
+            expect(outgoingTexts).toEqual(prompts.slice(0, index + 1));
+          }),
+        );
+        await owner.own("ack", () => vi.waitFor(() => expect(queuedSendButtons()).toHaveLength(0)));
+      }
+      const receipts = [...intentByMessageId];
+      expect(receipts).toHaveLength(2);
+      const [firstMessageId, firstIntent] = receipts[0]!;
+      const [secondMessageId, secondIntent] = receipts[1]!;
+      const steeringRows = () => [
+        ...document.querySelectorAll<HTMLElement>('[data-cafe-followup-steering="true"]'),
+      ];
+      await owner.own("canonical", () => vi.waitFor(() => expect(steeringRows()).toHaveLength(2)));
+
+      const emitProcessing = (
+        id: string,
+        changes: Record<string, unknown> = {},
+        taskId = `claude-turn-steer-processing:${"a".repeat(64)}`,
+      ) => {
+        owner.assertActive();
+        const current = chatViewFixture.fixture.snapshot;
+        const currentThread = current.threads[0]!;
+        const snapshotSequence = Math.max(current.snapshotSequence, nextIntent) + 1;
+        const nextThread = {
+          ...currentThread,
+          activities: [
+            ...currentThread.activities,
+            {
+              id: EventId.make(id),
+              tone: "info" as const,
+              kind: "task.progress",
+              summary: "Reasoning update",
+              turnId: activeTurnId,
+              sequence: snapshotSequence,
+              createdAt: new Date().toISOString(),
+              payload: {
+                taskId,
+                visibility: "ambient",
+                nativeWorkRuntimeId: runtimeId,
+                detail: "Claude began processing the submitted follow-up.",
+                usage: {
+                  provider: "claudeAgent",
+                  messageId: firstMessageId,
+                  intentSequence: firstIntent,
+                  providerInstanceId: instanceId,
+                  subagentRuntimeId: runtimeId,
+                  ...changes,
+                },
+              },
+            },
+          ],
+        };
+        chatViewFixture.fixture.snapshot = { ...current, snapshotSequence, threads: [nextThread] };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence, thread: nextThread },
+        });
+      };
+      const rejected: ReadonlyArray<{
+        readonly id: string;
+        readonly changes: Record<string, unknown>;
+        readonly taskId?: string;
+      }> = [
+        { id: "claude-generic-progress", changes: {}, taskId: "ordinary-background-task" },
+        { id: "claude-stale-attempt", changes: { intentSequence: firstIntent - 1 } },
+        { id: "claude-foreign-runtime", changes: { subagentRuntimeId: "foreign-runtime" } },
+        { id: "claude-unrelated-message", changes: { messageId: "unrelated-message" } },
+      ];
+      for (const observation of rejected) {
+        emitProcessing(observation.id, observation.changes, observation.taskId);
+        await owner.own("layout", () => waitForLayout());
+        expect(steeringRows()).toHaveLength(2);
+      }
+
+      // The exact native lifecycle receipt, not assistant text or root
+      // completion, retires this row while background work remains active.
+      emitProcessing("claude-first-consumed");
+      await owner.own("processing", () =>
+        vi.waitFor(() => {
+          expect(steeringRows()).toHaveLength(1);
+          expect(steeringRows()[0]?.textContent).toContain("Second Claude follow-up");
+        }),
+      );
+      expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.session?.status).toBe("running");
+      expect(
+        selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn?.completedAt,
+      ).toBeNull();
+      emitProcessing(
+        "claude-second-consumed",
+        { messageId: secondMessageId, intentSequence: secondIntent },
+        `claude-turn-steer-processing:${"b".repeat(64)}`,
+      );
+      await owner.own("processing", () => vi.waitFor(() => expect(steeringRows()).toHaveLength(0)));
+      expect(wsRequests.filter((request) => request.type === "thread.turn.steer")).toHaveLength(2);
+      expect(
+        wsRequests.some(
+          (request) =>
+            request.type === "thread.turn.start" || request.type === "thread.turn.interrupt",
+        ),
+      ).toBe(false);
+    });
+  });
+
   it("retains a direct steer after the exact-command reconnect window exhausts without replay", async (testContext) => {
     let restoreDispatch: (() => void) | undefined;
     const owner = createChatViewCallerOwner(testContext, mountChatView, {

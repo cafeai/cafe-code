@@ -428,6 +428,17 @@ export const ProviderSteerTurnInput = Schema.Struct({
   // provider-owned state. It is optional for adapters whose upstream protocol
   // does not expose an equivalent correlation field.
   messageId: Schema.optional(MessageId),
+  // The durable Cafe event sequence identifies this particular delivery
+  // attempt when a saved MessageId is reused by an explicit retry. It is
+  // correlation metadata only: adapters must not forward it as native policy,
+  // infer provider consumption from its presence, or use it to authorize IO.
+  intentSequence: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   input: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
   ),

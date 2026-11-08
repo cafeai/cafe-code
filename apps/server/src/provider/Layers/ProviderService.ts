@@ -3492,18 +3492,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const listSessions: ProviderServiceShape["listSessions"] = Effect.fn("listSessions")(
     function* () {
       const { sessions: activeSessions, adapters } = yield* readAdapterSessions;
-      const persistedBindings = yield* directory.listThreadIds().pipe(
-        Effect.flatMap((threadIds) =>
-          Effect.forEach(
-            threadIds,
-            (threadId) =>
-              directory
-                .getBinding(threadId)
-                .pipe(Effect.orElseSucceed(() => Option.none<ProviderRuntimeBinding>())),
-            { concurrency: "unbounded" },
-          ),
-        ),
-        Effect.orElseSucceed(() => [] as Array<Option.Option<ProviderRuntimeBinding>>),
+      // Persisted history cannot add an active native session to this inventory. Read
+      // only the bindings used below, once per active thread, so repeated health
+      // requests do not enumerate or load every saved thread. An empty active
+      // inventory therefore requires no binding reads at all.
+      const persistedBindings = yield* Effect.forEach(
+        new Set(activeSessions.map((session) => session.threadId)),
+        (threadId) =>
+          directory
+            .getBinding(threadId)
+            .pipe(Effect.orElseSucceed(() => Option.none<ProviderRuntimeBinding>())),
+        { concurrency: "unbounded" },
       );
       const bindingsByThreadId = new Map<ThreadId, ProviderRuntimeBinding>();
       for (const bindingOption of persistedBindings) {

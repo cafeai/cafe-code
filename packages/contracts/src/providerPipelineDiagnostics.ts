@@ -70,6 +70,22 @@ export const ProviderPipelineWebSocketDiagnostics = Schema.Struct({
 });
 
 /**
+ * Process-local SQLite worker ownership and progress only. These aggregates
+ * deliberately contain no SQL, parameters, database paths, request identities,
+ * or native error text. The age is measured when this snapshot is read, so a
+ * native statement that has not completed remains visible without a timer for
+ * every connection or operation.
+ */
+export const ProviderPipelineSqliteDiagnostics = Schema.Struct({
+  activeConnectionCount: NonNegativeInt,
+  activeOperationCount: NonNegativeInt,
+  completedOperationCount: NonNegativeInt,
+  failedOperationCount: NonNegativeInt,
+  workerFailureCount: NonNegativeInt,
+  longestActiveOperationMs: NonNegativeInt,
+});
+
+/**
  * Payload-free, bounded-cardinality metrics for the provider-to-WebSocket path.
  * These contracts intentionally contain no labels, prompts, paths, event bodies,
  * bearer material, or provider error strings.
@@ -81,5 +97,7 @@ export const ProviderPipelineDiagnostics = Schema.Struct({
   backendBridge: ProviderPipelineBackendBridgeDiagnostics,
   subscriptions: ProviderPipelineSubscriptionDiagnostics,
   webSocket: ProviderPipelineWebSocketDiagnostics,
+  // Older backend/daemon processes do not publish worker diagnostics.
+  sqlite: Schema.optional(ProviderPipelineSqliteDiagnostics),
 });
 export type ProviderPipelineDiagnostics = typeof ProviderPipelineDiagnostics.Type;

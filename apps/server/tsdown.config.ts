@@ -19,7 +19,16 @@ const applicationVersion = resolveApplicationBuildVersion(
 
 export default defineConfig([
   {
-    entry: { bin: "src/runtimeEntry.ts", backend: "src/bin.ts", launcher: "src/launcher.ts" },
+    // SQLite runs in an owned thread so native reads and busy waits cannot
+    // block HTTP heartbeats. Keep that entry in this primary build: its bytes
+    // must participate in the same source and application-version receipts.
+    entry: {
+      bin: "src/runtimeEntry.ts",
+      backend: "src/bin.ts",
+      launcher: "src/launcher.ts",
+      "sqlite-worker": "src/persistence/sqliteWorkerEntry.ts",
+      "sqlite-worker-native": "src/persistence/sqliteWorkerNative.ts",
+    },
     outDir: "dist",
     sourcemap: false,
     clean: true,

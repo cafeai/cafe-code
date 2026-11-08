@@ -16,6 +16,105 @@ type MutableMetrics<T> = { -readonly [K in keyof T]-?: NonNullable<T[K]> };
 const eventLoopLagSamples: number[] = [];
 let eventLoopMonitorStarted = false;
 
+interface SqliteOperationOwner {
+  readonly startedAt: number;
+}
+
+interface SqliteConnectionOwner {
+  closed: boolean;
+  failed: boolean;
+  operation: SqliteOperationOwner | undefined;
+}
+
+// Retain only actual live connection owners, never a history of connections or
+// statements. Each worker admits one native operation at a time; close removes
+// its exact owner synchronously. No labels or database-derived values enter
+// this registry, and no per-operation timer or additional native probe exists.
+const sqliteConnectionOwners = new Set<SqliteConnectionOwner>();
+const sqliteTotals = {
+  completedOperationCount: 0,
+  failedOperationCount: 0,
+  workerFailureCount: 0,
+};
+
+export interface SqliteWorkerDiagnosticsOwner {
+  /** Call only after admission to the worker, not while waiting for a permit. */
+  readonly beginOperation: () => (outcome: "success" | "failure") => void;
+  /** Records one permanent failure of this exact worker; never a SQL failure. */
+  readonly recordWorkerFailure: () => void;
+  /** Retire only after the worker's actual native exit has been joined. */
+  readonly close: () => void;
+}
+
+function incrementSafeCounter(value: number): number {
+  return Math.min(Number.MAX_SAFE_INTEGER, value + 1);
+}
+
+/**
+ * Register an actual owned SQLite worker. The returned closures carry private
+ * object identities, so duplicate or late completion cannot clear a newer
+ * operation and a retired worker cannot publish into its replacement's state.
+ * This is observability only: it neither authorizes execution nor retries,
+ * cancels, reopens, or terminates a database operation.
+ */
+export function registerSqliteWorkerDiagnostics(): SqliteWorkerDiagnosticsOwner {
+  const owner: SqliteConnectionOwner = { closed: false, failed: false, operation: undefined };
+  sqliteConnectionOwners.add(owner);
+
+  return {
+    beginOperation: () => {
+      // The native connection owns its admission semaphore. A duplicate begin
+      // must not replace that operation's age or introduce diagnostic work.
+      if (owner.closed || owner.failed || owner.operation !== undefined) return () => {};
+      const operation: SqliteOperationOwner = { startedAt: performance.now() };
+      owner.operation = operation;
+      let completed = false;
+      return (outcome) => {
+        if (completed) return;
+        completed = true;
+        if (owner.closed || owner.operation !== operation) return;
+        owner.operation = undefined;
+        const counter = outcome === "success" ? "completedOperationCount" : "failedOperationCount";
+        sqliteTotals[counter] = incrementSafeCounter(sqliteTotals[counter]);
+      };
+    },
+    recordWorkerFailure: () => {
+      if (owner.closed || owner.failed) return;
+      owner.failed = true;
+      sqliteTotals.workerFailureCount = incrementSafeCounter(sqliteTotals.workerFailureCount);
+    },
+    close: () => {
+      if (owner.closed) return;
+      owner.closed = true;
+      owner.operation = undefined;
+      sqliteConnectionOwners.delete(owner);
+    },
+  };
+}
+
+function snapshotSqliteWorkerDiagnostics(): NonNullable<ProviderPipelineDiagnostics["sqlite"]> {
+  const now = performance.now();
+  let activeOperationCount = 0;
+  let longestActiveOperationMs = 0;
+  for (const owner of sqliteConnectionOwners) {
+    if (owner.operation === undefined) continue;
+    activeOperationCount += 1;
+    longestActiveOperationMs = Math.max(
+      longestActiveOperationMs,
+      Math.min(
+        Number.MAX_SAFE_INTEGER,
+        Math.floor(finiteNonNegative(now - owner.operation.startedAt)),
+      ),
+    );
+  }
+  return {
+    activeConnectionCount: sqliteConnectionOwners.size,
+    activeOperationCount,
+    ...sqliteTotals,
+    longestActiveOperationMs,
+  };
+}
+
 const compaction: MutableMetrics<ProviderPipelineDiagnostics["compaction"]> = {
   compactedEventCount: 0,
   historicalRepairCount: 0,
@@ -205,11 +304,22 @@ export function snapshotProviderPipelineDiagnostics(): ProviderPipelineDiagnosti
     backendBridge: { ...backendBridge },
     subscriptions: { ...subscriptions },
     webSocket: { ...webSocket },
+    sqlite: snapshotSqliteWorkerDiagnostics(),
   };
 }
 
 /** Test-only reset. Production code must preserve process-lifetime counters. */
 export function resetProviderPipelineDiagnosticsForTest(): void {
+  // Retire exact test owners before resetting process counters. Closures held
+  // by an earlier fixture must not increment a subsequent fixture's totals.
+  for (const owner of sqliteConnectionOwners) {
+    owner.closed = true;
+    owner.operation = undefined;
+  }
+  sqliteConnectionOwners.clear();
+  sqliteTotals.completedOperationCount = 0;
+  sqliteTotals.failedOperationCount = 0;
+  sqliteTotals.workerFailureCount = 0;
   eventLoopLagSamples.length = 0;
   setNumericFields(compaction, {
     compactedEventCount: 0,

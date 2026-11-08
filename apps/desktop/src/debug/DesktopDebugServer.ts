@@ -1212,6 +1212,9 @@ function summarizeProviderDaemonHealthForCompactDebug(
   const backendBridge = readRecord(pipelineDiagnostics?.backendBridge);
   const subscriptions = readRecord(pipelineDiagnostics?.subscriptions);
   const webSocket = readRecord(pipelineDiagnostics?.webSocket);
+  // These are received observations: accessors, inherited fields and proxies
+  // cannot supply data or execute while compact diagnostics are serialized.
+  const sqlite = readRpcDebugRecord(ownRpcDebugField(pipelineDiagnostics, "sqlite"));
 
   return {
     ok: readBoolean(health.ok),
@@ -1285,6 +1288,44 @@ function summarizeProviderDaemonHealthForCompactDebug(
       pipelineDiagnostics === null
         ? null
         : {
+            // Worker observations are content-free counters from this exact
+            // cached daemon snapshot. They do not refresh rich-health age or
+            // expose database paths, SQL, parameters or native error text.
+            sqlite:
+              sqlite === null
+                ? null
+                : {
+                    activeConnectionCount: readBoundedInteger(
+                      ownRpcDebugField(sqlite, "activeConnectionCount"),
+                      0,
+                      Number.MAX_SAFE_INTEGER,
+                    ),
+                    activeOperationCount: readBoundedInteger(
+                      ownRpcDebugField(sqlite, "activeOperationCount"),
+                      0,
+                      Number.MAX_SAFE_INTEGER,
+                    ),
+                    completedOperationCount: readBoundedInteger(
+                      ownRpcDebugField(sqlite, "completedOperationCount"),
+                      0,
+                      Number.MAX_SAFE_INTEGER,
+                    ),
+                    failedOperationCount: readBoundedInteger(
+                      ownRpcDebugField(sqlite, "failedOperationCount"),
+                      0,
+                      Number.MAX_SAFE_INTEGER,
+                    ),
+                    workerFailureCount: readBoundedInteger(
+                      ownRpcDebugField(sqlite, "workerFailureCount"),
+                      0,
+                      Number.MAX_SAFE_INTEGER,
+                    ),
+                    longestActiveOperationMs: readBoundedInteger(
+                      ownRpcDebugField(sqlite, "longestActiveOperationMs"),
+                      0,
+                      Number.MAX_SAFE_INTEGER,
+                    ),
+                  },
             eventLoop: {
               retainedSampleCount: readNumber(pipelineEventLoop?.retainedSampleCount),
               currentLagMs: readNumber(pipelineEventLoop?.currentLagMs),

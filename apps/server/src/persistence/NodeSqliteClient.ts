@@ -5,7 +5,6 @@
  * @module SqliteClient
  */
 import { DatabaseSync, type StatementSync } from "node:sqlite";
-import { createHash } from "node:crypto";
 
 import * as Cache from "effect/Cache";
 import * as Config from "effect/Config";
@@ -21,140 +20,22 @@ import * as Stream from "effect/Stream";
 import * as Reactivity from "effect/unstable/reactivity/Reactivity";
 import * as Client from "effect/unstable/sql/SqlClient";
 import type { Connection } from "effect/unstable/sql/SqlConnection";
-import { LockTimeoutError, SqlError, classifySqliteError } from "effect/unstable/sql/SqlError";
+import { SqlError } from "effect/unstable/sql/SqlError";
 import * as Statement from "effect/unstable/sql/Statement";
+
+import { makeSqliteWorkerConnection } from "./SqliteWorkerConnection.ts";
+import {
+  classifyNodeSqliteError,
+  makeSqliteStatementDiagnosticReporter,
+  writeSqliteStatementDiagnostic,
+} from "./sqliteError.ts";
+
+// Preserve the existing diagnostic boundary API; both native execution paths
+// share its content-free reporter and identical SQLite error classification.
+export { makeSqliteStatementDiagnosticReporter } from "./sqliteError.ts";
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name";
 const SQLITE_STATEMENT_DIAGNOSTICS_ENV = "CAFE_CODE_SQL_STATEMENT_DIAGNOSTICS";
-const SQLITE_SLOW_STATEMENT_MS = 25;
-
-type SqliteStatementDiagnosticRecord =
-  | {
-      readonly phase: "start";
-      readonly queryId: number;
-      readonly fingerprint: string;
-      readonly operation: string;
-      readonly parameterCount: number;
-    }
-  | {
-      readonly phase: "slow-complete";
-      readonly queryId: number;
-      readonly fingerprint: string;
-      readonly operation: string;
-      readonly parameterCount: number;
-      readonly durationMs: number;
-      readonly outcome: "success" | "failure";
-    };
-
-interface SqliteStatementDiagnosticReporterOptions {
-  readonly enabled: boolean;
-  readonly write: (record: SqliteStatementDiagnosticRecord) => void;
-  readonly now?: () => number;
-  readonly slowStatementMs?: number;
-}
-
-const SQL_OPERATION_ALLOWLIST = new Set([
-  "alter",
-  "create",
-  "delete",
-  "drop",
-  "insert",
-  "pragma",
-  "replace",
-  "select",
-  "update",
-  "vacuum",
-  "with",
-]);
-
-/**
- * Build a stable, content-free identity for one prepared SQL statement.
- *
- * Debugging a synchronous `StatementSync.all()` or `.run()` stall requires
- * recording the statement *before* Node enters SQLite. Logging SQL text is
- * unacceptable: a future call site could accidentally interpolate a prompt,
- * path, or secret into an unprepared statement. The domain-separated digest
- * lets maintainers correlate starts with completed trace spans without
- * retaining that text.
- */
-function sqliteStatementFingerprint(sql: string): string {
-  return createHash("sha256")
-    .update("cafe-code/sqlite-statement/v1\0", "utf8")
-    .update(sql, "utf8")
-    .digest("hex")
-    .slice(0, 16);
-}
-
-function sqliteStatementOperation(sql: string): string {
-  const firstToken = /^[\s;]*([A-Za-z]+)/u.exec(sql)?.[1]?.toLowerCase();
-  return firstToken !== undefined && SQL_OPERATION_ALLOWLIST.has(firstToken) ? firstToken : "other";
-}
-
-/**
- * This deliberately tiny reporter is exported only for security regression
- * coverage. Its records contain an allowlisted operation class, a digest, and
- * counts/timing; SQL text, parameter values, errors, and database paths never
- * cross the diagnostic boundary.
- */
-export function makeSqliteStatementDiagnosticReporter(
-  options: SqliteStatementDiagnosticReporterOptions,
-): (sql: string, parameterCount: number, execute: () => unknown) => unknown {
-  if (!options.enabled) {
-    return (_sql, _parameterCount, execute) => execute();
-  }
-
-  const now = options.now ?? performance.now.bind(performance);
-  const slowStatementMs = Math.max(0, options.slowStatementMs ?? SQLITE_SLOW_STATEMENT_MS);
-  let nextQueryId = 0;
-
-  return (sql, parameterCount, execute) => {
-    const queryId = (nextQueryId += 1);
-    const fingerprint = sqliteStatementFingerprint(sql);
-    const operation = sqliteStatementOperation(sql);
-    const startedAt = now();
-    options.write({
-      phase: "start",
-      queryId,
-      fingerprint,
-      operation,
-      parameterCount,
-    });
-
-    let outcome: "success" | "failure" = "success";
-    try {
-      return execute();
-    } catch (cause) {
-      outcome = "failure";
-      throw cause;
-    } finally {
-      const durationMs = now() - startedAt;
-      if (durationMs >= slowStatementMs) {
-        options.write({
-          phase: "slow-complete",
-          queryId,
-          fingerprint,
-          operation,
-          parameterCount,
-          durationMs: Math.round(durationMs * 10) / 10,
-          outcome,
-        });
-      }
-    }
-  };
-}
-
-function writeSqliteStatementDiagnostic(record: SqliteStatementDiagnosticRecord): void {
-  try {
-    // stderr is already captured by the desktop backend manager. Keep this a
-    // synchronous call immediately before StatementSync.all() or .run(); an
-    // Effect log span cannot finish while the main thread is blocked inside
-    // native SQLite.
-    process.stderr.write(`[Cafe Code SQLite] ${JSON.stringify(record)}\n`);
-  } catch {
-    // Diagnostics must never make a database operation fail or expose the
-    // original write error, which can contain unrestricted local paths.
-  }
-}
 
 export const TypeId: TypeId = "~local/sqlite-node/SqliteClient";
 
@@ -216,250 +97,246 @@ function normalizeBusyTimeoutMs(value: number | undefined): number {
   return Math.min(60_000, Math.trunc(value));
 }
 
-interface SqliteClassificationContext {
-  readonly message: string;
-  readonly operation: string;
-}
-
-function readNumericErrorProperty(cause: unknown, property: string): number | undefined {
-  if ((typeof cause !== "object" || cause === null) && typeof cause !== "function") {
-    return undefined;
-  }
-  try {
-    const value = Reflect.get(cause, property);
-    return typeof value === "number" ? value : undefined;
-  } catch {
-    // Error-like inputs can be hostile proxies. Classification diagnostics
-    // must never let a throwing property trap replace the original SQL error.
-    return undefined;
-  }
-}
-
-function readSqliteErrorCode(cause: unknown): string | number | undefined {
-  if ((typeof cause !== "object" || cause === null) && typeof cause !== "function") {
-    return undefined;
-  }
-  try {
-    const value = Reflect.get(cause, "code");
-    return typeof value === "string" || typeof value === "number" ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 /**
- * Adapt Node's native SQLite error shape to Effect's classifier.
- *
- * `node:sqlite` currently reports SQLite's numeric result code as `errcode`,
- * while Effect's SQLite classifier reads `errno`. Classify a small, local
- * facade so extended SQLITE_BUSY/SQLITE_LOCKED codes retain Effect's normal
- * low-byte handling, then rebuild the retryable reason with the untouched
- * native Error as its cause. We intentionally do not mutate the native error
- * or retain the facade: diagnostics and callers must see the exact exception
- * thrown by `node:sqlite`.
+ * Explicitly adopted DatabaseSync handles cannot cross a worker boundary.
+ * This path remains for owned in-memory clones and native handle fixtures;
+ * production filename-based layers below always use the asynchronous worker.
  */
-function classifyNodeSqliteError(
-  cause: unknown,
-  context: SqliteClassificationContext,
-): ReturnType<typeof classifySqliteError> {
-  if (readNumericErrorProperty(cause, "errno") !== undefined) {
-    return classifySqliteError(cause, context);
-  }
-
-  const errcode = readNumericErrorProperty(cause, "errcode");
-  if (errcode === undefined) {
-    return classifySqliteError(cause, context);
-  }
-
-  const code = readSqliteErrorCode(cause);
-  const classified = classifySqliteError(
-    {
-      ...(code !== undefined ? { code } : {}),
-      errno: errcode,
-    },
-    context,
-  );
-  if (classified._tag !== "LockTimeoutError") {
-    // Keep this compatibility shim deliberately narrow. Other numeric result
-    // codes continue through Effect's standard classifier until its upstream
-    // implementation gains native `errcode` support.
-    return classifySqliteError(cause, context);
-  }
-
-  return new LockTimeoutError({
-    cause,
-    message: context.message,
-    operation: context.operation,
-  });
-}
-
-const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
+const makeNativeConnection = Effect.fn("makeNativeConnection")(function* (
   options: SqliteClientConfig,
   openDatabase: () => DatabaseSync,
-): Effect.fn.Return<Client.SqlClient, never, Scope.Scope | Reactivity.Reactivity> {
-  yield* checkNodeSqliteCompat();
+): Effect.fn.Return<Connection, never, Scope.Scope> {
+  const scope = yield* Effect.scope;
+  const db = openDatabase();
+  const runWithStatementDiagnostics = makeSqliteStatementDiagnosticReporter({
+    enabled: process.env[SQLITE_STATEMENT_DIAGNOSTICS_ENV] === "1",
+    write: writeSqliteStatementDiagnostic,
+  });
+  yield* Scope.addFinalizer(
+    scope,
+    Effect.sync(() => db.close()),
+  );
+  const busyTimeoutMs = normalizeBusyTimeoutMs(options.busyTimeoutMs);
+  if (busyTimeoutMs > 0) {
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
+  }
 
-  const compiler = Statement.makeCompilerSqlite(options.transformQueryNames);
-  const transformRows = options.transformResultNames
-    ? Statement.defaultTransforms(options.transformResultNames).array
-    : undefined;
-
-  const makeConnection = Effect.gen(function* () {
-    const scope = yield* Effect.scope;
-    const db = openDatabase();
-    const runWithStatementDiagnostics = makeSqliteStatementDiagnosticReporter({
-      enabled: process.env[SQLITE_STATEMENT_DIAGNOSTICS_ENV] === "1",
-      write: writeSqliteStatementDiagnostic,
-    });
-    yield* Scope.addFinalizer(
-      scope,
-      Effect.sync(() => db.close()),
-    );
-    const busyTimeoutMs = normalizeBusyTimeoutMs(options.busyTimeoutMs);
-    if (busyTimeoutMs > 0) {
-      db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
+  const statementReaderCache = new WeakMap<StatementSync, boolean>();
+  const hasRows = (statement: StatementSync): boolean => {
+    const cached = statementReaderCache.get(statement);
+    if (cached !== undefined) {
+      return cached;
     }
+    const value = statement.columns().length > 0;
+    statementReaderCache.set(statement, value);
+    return value;
+  };
 
-    const statementReaderCache = new WeakMap<StatementSync, boolean>();
-    const hasRows = (statement: StatementSync): boolean => {
-      const cached = statementReaderCache.get(statement);
-      if (cached !== undefined) {
-        return cached;
-      }
-      const value = statement.columns().length > 0;
-      statementReaderCache.set(statement, value);
-      return value;
-    };
-
-    const prepareCache = yield* Cache.make({
-      capacity: options.prepareCacheSize ?? 200,
-      timeToLive: options.prepareCacheTTL ?? Duration.minutes(10),
-      lookup: (sql: string) =>
-        Effect.try({
-          try: () => db.prepare(sql),
-          catch: (cause) =>
-            new SqlError({
-              reason: classifyNodeSqliteError(cause, {
-                message: "Failed to prepare statement",
-                operation: "prepare",
-              }),
+  const prepareCache = yield* Cache.make({
+    capacity: options.prepareCacheSize ?? 200,
+    timeToLive: options.prepareCacheTTL ?? Duration.minutes(10),
+    lookup: (sql: string) =>
+      Effect.try({
+        try: () => db.prepare(sql),
+        catch: (cause) =>
+          new SqlError({
+            reason: classifyNodeSqliteError(cause, {
+              message: "Failed to prepare statement",
+              operation: "prepare",
             }),
-        }),
+          }),
+      }),
+  });
+
+  const runStatement = (
+    sql: string,
+    statement: StatementSync,
+    params: ReadonlyArray<unknown>,
+    raw: boolean,
+  ) =>
+    Effect.withFiber<ReadonlyArray<any>, SqlError>((fiber) => {
+      statement.setReadBigInts(Boolean(Context.get(fiber.context, Client.SafeIntegers)));
+      try {
+        if (hasRows(statement)) {
+          return Effect.succeed(
+            runWithStatementDiagnostics(sql, params.length, () =>
+              statement.all(...(params as any)),
+            ) as ReadonlyArray<any>,
+          );
+        }
+        // Non-returning statements include schema/index migrations and can
+        // block in SQLite just as reads can. Publish the same redacted start
+        // record before the native call, preserving its raw result and error.
+        const result = runWithStatementDiagnostics(sql, params.length, () =>
+          statement.run(...(params as any)),
+        );
+        return Effect.succeed(raw ? (result as unknown as ReadonlyArray<any>) : []);
+      } catch (cause) {
+        return Effect.fail(
+          new SqlError({
+            reason: classifyNodeSqliteError(cause, {
+              message: "Failed to execute statement",
+              operation: "execute",
+            }),
+          }),
+        );
+      }
     });
 
-    const runStatement = (
-      sql: string,
-      statement: StatementSync,
-      params: ReadonlyArray<unknown>,
-      raw: boolean,
-    ) =>
-      Effect.withFiber<ReadonlyArray<any>, SqlError>((fiber) => {
-        statement.setReadBigInts(Boolean(Context.get(fiber.context, Client.SafeIntegers)));
-        try {
-          if (hasRows(statement)) {
-            return Effect.succeed(
-              runWithStatementDiagnostics(sql, params.length, () =>
+  const run = (sql: string, params: ReadonlyArray<unknown>, raw = false) =>
+    Effect.flatMap(Cache.get(prepareCache, sql), (s) => runStatement(sql, s, params, raw));
+
+  const runValues = (sql: string, params: ReadonlyArray<unknown>) =>
+    Effect.acquireUseRelease(
+      Cache.get(prepareCache, sql),
+      (statement) =>
+        Effect.try({
+          try: () => {
+            if (hasRows(statement)) {
+              statement.setReturnArrays(true);
+              // Safe to cast to array after we've setReturnArrays(true)
+              return runWithStatementDiagnostics(sql, params.length, () =>
                 statement.all(...(params as any)),
-              ) as ReadonlyArray<any>,
+              ) as ReadonlyArray<ReadonlyArray<unknown>>;
+            }
+            // `.values` still executes writes through the native run path;
+            // retain its empty-array contract while diagnosing that work.
+            runWithStatementDiagnostics(sql, params.length, () =>
+              statement.run(...(params as any)),
             );
-          }
-          // Non-returning statements include schema/index migrations and can
-          // block in SQLite just as reads can. Publish the same redacted start
-          // record before the native call, preserving its raw result and error.
-          const result = runWithStatementDiagnostics(sql, params.length, () =>
-            statement.run(...(params as any)),
-          );
-          return Effect.succeed(raw ? (result as unknown as ReadonlyArray<any>) : []);
-        } catch (cause) {
-          return Effect.fail(
+            return [];
+          },
+          catch: (cause) =>
             new SqlError({
               reason: classifyNodeSqliteError(cause, {
                 message: "Failed to execute statement",
                 operation: "execute",
               }),
             }),
-          );
-        }
-      });
+        }),
+      (statement) =>
+        Effect.sync(() => {
+          if (hasRows(statement)) {
+            statement.setReturnArrays(false);
+          }
+        }),
+    );
 
-    const run = (sql: string, params: ReadonlyArray<unknown>, raw = false) =>
-      Effect.flatMap(Cache.get(prepareCache, sql), (s) => runStatement(sql, s, params, raw));
-
-    const runValues = (sql: string, params: ReadonlyArray<unknown>) =>
-      Effect.acquireUseRelease(
-        Cache.get(prepareCache, sql),
-        (statement) =>
-          Effect.try({
-            try: () => {
-              if (hasRows(statement)) {
-                statement.setReturnArrays(true);
-                // Safe to cast to array after we've setReturnArrays(true)
-                return runWithStatementDiagnostics(sql, params.length, () =>
-                  statement.all(...(params as any)),
-                ) as ReadonlyArray<ReadonlyArray<unknown>>;
-              }
-              // `.values` still executes writes through the native run path;
-              // retain its empty-array contract while diagnosing that work.
-              runWithStatementDiagnostics(sql, params.length, () =>
-                statement.run(...(params as any)),
-              );
-              return [];
-            },
-            catch: (cause) =>
-              new SqlError({
-                reason: classifyNodeSqliteError(cause, {
-                  message: "Failed to execute statement",
-                  operation: "execute",
-                }),
-              }),
-          }),
-        (statement) =>
-          Effect.sync(() => {
-            if (hasRows(statement)) {
-              statement.setReturnArrays(false);
-            }
-          }),
-      );
-
-    return identity<Connection>({
-      execute(sql, params, rowTransform) {
-        return rowTransform ? Effect.map(run(sql, params), rowTransform) : run(sql, params);
-      },
-      executeRaw(sql, params) {
-        return run(sql, params, true);
-      },
-      executeValues(sql, params) {
-        return runValues(sql, params);
-      },
-      executeUnprepared(sql, params, rowTransform) {
-        const effect = runStatement(sql, db.prepare(sql), params ?? [], false);
-        return rowTransform ? Effect.map(effect, rowTransform) : effect;
-      },
-      executeStream(sql, params, rowTransform) {
-        // `node:sqlite` iterators can throw while the Stream is pulling rows,
-        // outside the Effect error channel. Materialize through the same
-        // classified execution path as normal statements so SQLite failures
-        // remain typed `SqlError`s and the connection permit stays scoped to
-        // the stream. Cafe's current persistence queries are bounded; if a
-        // future call site needs cursor-scale streaming, add a pull adapter
-        // that translates iterator failures before changing this contract.
-        const rows = rowTransform ? Effect.map(run(sql, params), rowTransform) : run(sql, params);
-        return Stream.fromIterableEffect(rows);
-      },
-    });
+  return identity<Connection>({
+    execute(sql, params, rowTransform) {
+      return rowTransform ? Effect.map(run(sql, params), rowTransform) : run(sql, params);
+    },
+    executeRaw(sql, params) {
+      return run(sql, params, true);
+    },
+    executeValues(sql, params) {
+      return runValues(sql, params);
+    },
+    executeUnprepared(sql, params, rowTransform) {
+      const effect = runStatement(sql, db.prepare(sql), params ?? [], false);
+      return rowTransform ? Effect.map(effect, rowTransform) : effect;
+    },
+    executeStream(sql, params, rowTransform) {
+      // `node:sqlite` iterators can throw while the Stream is pulling rows,
+      // outside the Effect error channel. Materialize through the same
+      // classified execution path as normal statements so SQLite failures
+      // remain typed `SqlError`s. The normal client wrapper below releases its
+      // statement permit after materialization, before yielding rows. If a
+      // future call site needs cursor-scale streaming, add a pull adapter
+      // that translates iterator failures before changing this contract.
+      const rows = rowTransform ? Effect.map(run(sql, params), rowTransform) : run(sql, params);
+      return Stream.fromIterableEffect(rows);
+    },
   });
+});
+
+/**
+ * The SQL compiler, transforms and transaction service remain on the caller's
+ * Effect runtime. Normal operations hold a permit through their asynchronous
+ * native reply; an outer transaction or reserved connection holds it for its
+ * whole scope. Materialized streams release normal statement ownership before
+ * downstream consumers run, so a consumer can safely query this same client.
+ */
+const makeClient = Effect.fn("makeClient")(function* (
+  options: SqliteClientConfig,
+  makeConnection: Effect.Effect<Connection, never, Scope.Scope>,
+): Effect.fn.Return<Client.SqlClient, never, Scope.Scope | Reactivity.Reactivity> {
+  yield* checkNodeSqliteCompat();
+  const compiler = Statement.makeCompilerSqlite(options.transformQueryNames);
+  const transformRows = options.transformResultNames
+    ? Statement.defaultTransforms(options.transformResultNames).array
+    : undefined;
 
   const semaphore = yield* Semaphore.make(1);
   const connection = yield* makeConnection;
+  let retiring = false;
+  const unavailable = () =>
+    new SqlError({
+      reason: classifyNodeSqliteError(new Error("SQLite connection is closing."), {
+        message: "SQLite connection is closing.",
+        operation: "acquire",
+      }),
+    });
 
-  const acquirer = semaphore.withPermits(1)(Effect.succeed(connection));
+  // This finalizer is installed after the connection's own finalizer, so scope
+  // teardown fences new borrowers and drains the entire outer transaction
+  // before the worker closes its database. Draining just the currently posted
+  // statement would allow native close to race that transaction's rollback.
+  const clientScope = yield* Effect.scope;
+  yield* Scope.addFinalizer(
+    clientScope,
+    Effect.gen(function* () {
+      retiring = true;
+      yield* semaphore.withPermits(1)(Effect.void);
+    }),
+  );
+
+  // Take a thunk, rather than an already constructed Effect: explicitly adopted
+  // native handles can prepare unprepared statements when the method is called.
+  // Even that preparation must happen only after admission and its second
+  // retirement check. Cancellation of queued work never acquires a permit;
+  // admitted worker calls retain their own exact native-reply join.
+  const withPermit = <A>(work: () => Effect.Effect<A, SqlError>): Effect.Effect<A, SqlError> =>
+    Effect.suspend(() =>
+      retiring
+        ? Effect.fail(unavailable())
+        : semaphore.withPermits(1)(
+            Effect.suspend(() => (retiring ? Effect.fail(unavailable()) : work())),
+          ),
+    );
+
+  const ordinaryConnection: Connection = {
+    execute: (sql, params, rowTransform) =>
+      withPermit(() => connection.execute(sql, params, rowTransform)),
+    executeRaw: (sql, params) => withPermit(() => connection.executeRaw(sql, params)),
+    executeValues: (sql, params) => withPermit(() => connection.executeValues(sql, params)),
+    executeUnprepared: (sql, params, rowTransform) =>
+      withPermit(() => connection.executeUnprepared(sql, params, rowTransform)),
+    // Effect keeps a stream's acquisition scope throughout consumption. The
+    // native driver materializes rows, so release the ordinary permit before
+    // emitting them: a row consumer may itself issue a query or transaction.
+    executeStream: (sql, params, rowTransform) =>
+      Stream.fromIterableEffect(withPermit(() => connection.execute(sql, params, rowTransform))),
+  };
+  const acquirer = Effect.suspend(() =>
+    retiring ? Effect.fail(unavailable()) : Effect.succeed(ordinaryConnection),
+  );
   const transactionAcquirer = Effect.uninterruptibleMask((restore) => {
     const fiber = Fiber.getCurrent()!;
     const scope = Context.getUnsafe(fiber.context, Scope.Scope);
-    return Effect.as(
-      Effect.tap(restore(semaphore.take(1)), () => Scope.addFinalizer(scope, semaphore.release(1))),
-      connection,
-    );
+    return Effect.gen(function* () {
+      if (retiring) return yield* Effect.fail(unavailable());
+      yield* restore(semaphore.take(1));
+      // Retirement may start while this exact borrower waits. Release its own
+      // permit synchronously before refusing it; never enter a closing native
+      // connection or strand a later shutdown waiter behind a lost permit.
+      if (retiring) {
+        yield* semaphore.release(1);
+        return yield* Effect.fail(unavailable());
+      }
+      yield* Scope.addFinalizer(scope, semaphore.release(1));
+      return connection;
+    });
   });
 
   return yield* Client.make({
@@ -477,31 +354,32 @@ const makeWithDatabase = Effect.fn("makeWithDatabase")(function* (
 const make = (
   options: SqliteClientConfig,
 ): Effect.Effect<Client.SqlClient, never, Scope.Scope | Reactivity.Reactivity> =>
-  makeWithDatabase(
+  makeClient(
     options,
-    () =>
-      new DatabaseSync(options.filename, {
-        readOnly: options.readonly ?? false,
-        allowExtension: options.allowExtension ?? false,
-      }),
+    makeSqliteWorkerConnection({
+      filename: options.filename,
+      readonly: options.readonly,
+      allowExtension: options.allowExtension,
+      busyTimeoutMs: options.busyTimeoutMs,
+      prepareCacheSize: options.prepareCacheSize,
+      prepareCacheTTLMillis: Duration.toMillis(
+        Duration.fromInputUnsafe(options.prepareCacheTTL ?? Duration.minutes(10)),
+      ),
+    }),
   );
 
 const makeMemory = (
   config: SqliteMemoryClientConfig = {},
-): Effect.Effect<Client.SqlClient, never, Scope.Scope | Reactivity.Reactivity> =>
-  makeWithDatabase(
-    {
-      ...config,
-      filename: ":memory:",
-      readonly: false,
-    },
-    () => {
-      const database = new DatabaseSync(":memory:", {
-        allowExtension: config.allowExtension ?? false,
-      });
-      return database;
-    },
+): Effect.Effect<Client.SqlClient, never, Scope.Scope | Reactivity.Reactivity> => {
+  const options = { ...config, filename: ":memory:", readonly: false };
+  return makeClient(
+    options,
+    makeNativeConnection(
+      options,
+      () => new DatabaseSync(":memory:", { allowExtension: config.allowExtension ?? false }),
+    ),
   );
+};
 
 export const layerConfig = (
   config: Config.Wrap<SqliteClientConfig>,
@@ -517,15 +395,13 @@ export const layerConfig = (
       ),
   ).pipe(Layer.provide(Reactivity.layer));
 
+/** Filename-based runtime clients always isolate native SQLite execution. */
 export const layer = (config: SqliteClientConfig): Layer.Layer<Client.SqlClient> =>
-  layerWithDatabase(
-    config,
-    () =>
-      new DatabaseSync(config.filename, {
-        readOnly: config.readonly ?? false,
-        allowExtension: config.allowExtension ?? false,
-      }),
-  );
+  Layer.effectContext(
+    Effect.map(make(config), (client) =>
+      Context.make(SqliteClient, client).pipe(Context.add(Client.SqlClient, client)),
+    ),
+  ).pipe(Layer.provide(Reactivity.layer));
 
 /** The layer owns and closes each database returned by the factory. */
 export const layerWithDatabase = (
@@ -533,7 +409,7 @@ export const layerWithDatabase = (
   openDatabase: () => DatabaseSync,
 ): Layer.Layer<Client.SqlClient> =>
   Layer.effectContext(
-    Effect.map(makeWithDatabase(config, openDatabase), (client) =>
+    Effect.map(makeClient(config, makeNativeConnection(config, openDatabase)), (client) =>
       Context.make(SqliteClient, client).pipe(Context.add(Client.SqlClient, client)),
     ),
   ).pipe(Layer.provide(Reactivity.layer));

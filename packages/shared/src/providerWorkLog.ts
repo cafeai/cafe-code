@@ -94,6 +94,11 @@ export const CODEX_STEER_PROGRESS_TASK_PREFIXES = [
   "codex-turn-steer-processing:",
 ] as const;
 
+// Claude's receipt is internal input-consumption metadata, not another model
+// reasoning update or an independently running provider task. Its producer
+// reserves this namespace; presentation classification grants no authority.
+export const CLAUDE_STEER_PROCESSING_TASK_PREFIX = "claude-turn-steer-processing:";
+
 export const CODEX_STEER_PROGRESS_MESSAGES = [
   "Codex app-server accepted turn/steer.",
   "Codex app-server began processing turn/steer.",
@@ -181,7 +186,8 @@ export function isRoutineProviderWorkLogActivity(activity: {
   const taskId = payload?.taskId;
   return (
     (typeof taskId === "string" &&
-      CODEX_STEER_PROGRESS_TASK_PREFIXES.some((prefix) => taskId.startsWith(prefix))) ||
+      (CODEX_STEER_PROGRESS_TASK_PREFIXES.some((prefix) => taskId.startsWith(prefix)) ||
+        taskId.startsWith(CLAUDE_STEER_PROCESSING_TASK_PREFIX))) ||
     CODEX_STEER_PROGRESS_MESSAGES.some(
       (message) => payload?.detail === message || payload?.description === message,
     )

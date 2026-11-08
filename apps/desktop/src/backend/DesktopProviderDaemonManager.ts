@@ -21,6 +21,7 @@ import {
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
 import { CAFE_CODE_SHELL_ENV_HYDRATED } from "@cafecode/shared/shell";
+import { sourceDebugBuildFingerprint } from "@cafecode/shared/sourceDebugBuild";
 import {
   BACKEND_STARTUP_PROGRESS_FD,
   makeProviderDaemonStartupProgressTracker,
@@ -369,6 +370,28 @@ const computeProviderDaemonRuntimeBuildId = (
 ): Effect.Effect<string, ProviderDaemonSpawnError> =>
   Effect.tryPromise({
     try: async () => {
+      if (!environment.isPackaged) {
+        // The built source entry is a deliberately thin runtime-loader wrapper.
+        // Its bytes can remain identical while backend code, native worker code
+        // or the reduced dependency pointer changes. Never adopt that old owner
+        // merely because its wrapper survived a rebuild. The existing bounded
+        // verifier rehashes the primary emitted code/pointer closure and rereads
+        // its receipt before returning this fingerprint; missing or stale source
+        // receipts fail before marker/credential/lease or native spawn admission.
+        const fingerprint = sourceDebugBuildFingerprint(environment.backendEntryPath, "server");
+        return crypto
+          .createHash("sha256")
+          .update("cafecode-provider-source-runtime-v2\0")
+          .update(environment.appVersion)
+          .update("\0")
+          .update(environment.backendEntryPath)
+          .update("\0")
+          .update(fingerprint)
+          .digest("hex");
+      }
+      // Packaged applications retain their existing compatibility identity.
+      // Their ASAR virtual files require separate native qualification; a source
+      // receipt must never be presented as proof of the packaged dependency tree.
       const backendBundle = await fs.readFile(environment.backendEntryPath);
       return crypto
         .createHash("sha256")

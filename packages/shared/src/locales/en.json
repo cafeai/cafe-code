@@ -2866,6 +2866,7 @@
   "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset.": "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset.",
   "This provider runtime does not support the account subagent limit. Clear it in account settings or use a supported runtime before sending.": "This provider runtime does not support the account subagent limit. Clear it in account settings or use a supported runtime before sending.",
   "This provider runtime does not support the saved subagent limit. Reset it in More composer controls before sending.": "This provider runtime does not support the saved subagent limit. Reset it in More composer controls before sending.",
+  "This provider runtime is unavailable or its subagent-limit support could not be verified. Check the provider status and retry. Your saved limit has been kept.": "This provider runtime is unavailable or its subagent-limit support could not be verified. Check the provider status and retry. Your saved limit has been kept.",
   "This provider session": "This provider session",
   "This question's answer changed in another view. Review the follow-up queue before trying again.": "This question's answer changed in another view. Review the follow-up queue before trying again.",
   "This queued follow-up changed in another view. Reload and review it before trying again.": "This queued follow-up changed in another view. Reload and review it before trying again.",

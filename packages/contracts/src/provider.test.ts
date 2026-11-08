@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import {
   ProviderEvent,
   ProviderSendTurnInput,
+  ProviderSteerTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
   ProviderTurnStartResult,
@@ -14,6 +15,18 @@ const decodeProviderSessionStartInput = Schema.decodeUnknownSync(ProviderSession
 const decodeProviderSendTurnInput = Schema.decodeUnknownSync(ProviderSendTurnInput);
 const decodeProviderSession = Schema.decodeUnknownSync(ProviderSession);
 const decodeProviderEvent = Schema.decodeUnknownSync(ProviderEvent);
+
+describe("ProviderSteerTurnInput", () => {
+  it("retains the exact safe delivery attempt and legacy omission", () => {
+    const decode = Schema.decodeUnknownSync(ProviderSteerTurnInput);
+    const input = { threadId: "thread-1", expectedTurnId: "turn-1", messageId: "message-1" };
+    expect(decode(input)).toEqual(input);
+    for (const intentSequence of [0, Number.MAX_SAFE_INTEGER])
+      expect(decode({ ...input, intentSequence }).intentSequence).toBe(intentSequence);
+    for (const intentSequence of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, "1", null])
+      expect(() => decode({ ...input, intentSequence })).toThrow();
+  });
+});
 
 describe("ProviderTurnStartResult", () => {
   it("keeps legacy envelopes and admits only content-free known delivery kinds", () => {

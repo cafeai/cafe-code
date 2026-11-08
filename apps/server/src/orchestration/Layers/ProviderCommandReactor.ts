@@ -3750,6 +3750,7 @@ const make = Effect.gen(function* () {
           threadId: event.payload.threadId,
           expectedTurnId: activeTurnId,
           messageId: event.payload.messageId,
+          intentSequence: event.sequence,
           ...(event.payload.deliveryPriority !== undefined
             ? {
                 deliveryPriority: event.payload.deliveryPriority,
@@ -3920,6 +3921,7 @@ const make = Effect.gen(function* () {
             : {}),
           expectedTurnId: activeTurnId,
           messageId: event.payload.messageId,
+          intentSequence: event.sequence,
           ...(event.payload.deliveryPriority !== undefined
             ? { deliveryPriority: event.payload.deliveryPriority }
             : {}),
@@ -5262,6 +5264,7 @@ const make = Effect.gen(function* () {
         : {}),
       expectedTurnId,
       messageId: event.payload.messageId,
+      intentSequence: event.sequence,
       ...(normalizedInput ? { input: normalizedInput } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
     }).pipe(

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   addProviderBackendBridgeDiagnostics,
@@ -9,6 +9,7 @@ import {
   recordProviderPipelineEventLoopLagForTest,
   recordProviderQuarantinedRow,
   recordProviderWebSocketFrame,
+  registerSqliteWorkerDiagnostics,
   releaseProviderWebSocketFrame,
   resetProviderPipelineDiagnosticsForTest,
   setProviderBackendBridgeDiagnostics,
@@ -46,6 +47,61 @@ describe("provider pipeline diagnostics", () => {
       lastAuthenticationFailureStatus: 0,
       authenticationRetryDelayMs: 0,
     });
+  });
+
+  it("tracks only live SQLite owners and ignores duplicate or retired completions", () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+    const first = registerSqliteWorkerDiagnostics();
+    const second = registerSqliteWorkerDiagnostics();
+    try {
+      const finishFirst = first.beginOperation();
+      clock.mockReturnValue(150);
+      const finishSecond = second.beginOperation();
+      clock.mockReturnValue(200);
+      expect(snapshotProviderPipelineDiagnostics().sqlite).toEqual({
+        activeConnectionCount: 2,
+        activeOperationCount: 2,
+        completedOperationCount: 0,
+        failedOperationCount: 0,
+        workerFailureCount: 0,
+        longestActiveOperationMs: 100,
+      });
+
+      finishFirst("success");
+      clock.mockReturnValue(230);
+      const finishNewFirst = first.beginOperation();
+      // A duplicate completion belongs to the former operation. It cannot
+      // erase the newer active operation or increment successful work twice.
+      finishFirst("success");
+      finishSecond("failure");
+      expect(snapshotProviderPipelineDiagnostics().sqlite).toMatchObject({
+        activeConnectionCount: 2,
+        activeOperationCount: 1,
+        completedOperationCount: 1,
+        failedOperationCount: 1,
+        longestActiveOperationMs: 0,
+      });
+
+      first.recordWorkerFailure();
+      first.recordWorkerFailure();
+      first.close();
+      first.close();
+      finishNewFirst("success");
+      first.beginOperation()("failure");
+      second.close();
+      expect(snapshotProviderPipelineDiagnostics().sqlite).toEqual({
+        activeConnectionCount: 0,
+        activeOperationCount: 0,
+        completedOperationCount: 1,
+        failedOperationCount: 1,
+        workerFailureCount: 1,
+        longestActiveOperationMs: 0,
+      });
+    } finally {
+      first.close();
+      second.close();
+      clock.mockRestore();
+    }
   });
 
   it("accounts for queue admission and release with bounded numeric fields", () => {
@@ -118,6 +174,7 @@ describe("provider pipeline diagnostics", () => {
       "backendBridge",
       "subscriptions",
       "webSocket",
+      "sqlite",
     ]);
   });
 
