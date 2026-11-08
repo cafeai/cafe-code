@@ -1810,6 +1810,8 @@ export function registerChatViewBrowserHooks(): void {
       threadLastVisitedAtById: {},
       sessionRailDocked: false,
       chatRightPanelWidth: null,
+      standaloneChatsExpanded: true,
+      projectsSectionExpanded: true,
     });
     useTaskAtriumStore.getState().setOpen(false);
   });

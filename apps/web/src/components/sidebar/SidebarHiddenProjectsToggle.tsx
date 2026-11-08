@@ -1,24 +1,15 @@
-import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import { uiText } from "@cafecode/shared/i18n";
 import { ChevronRightIcon, EyeOffIcon } from "lucide-react";
-import { useMemo } from "react";
-import { useShallow } from "zustand/react/shallow";
+import { type ReactNode, useId } from "react";
 
-import { useUiLocale, useUiPresentation } from "~/i18n";
+import { useUiLocale } from "~/i18n";
 import type { SidebarThreadSummary } from "../../types";
-import { useUiStateStore } from "../../uiStateStore";
-import {
-  readScheduledFollowUpAtFrom,
-  useScheduledFollowupPresenceByEnvironment,
-} from "../chat/scheduledFollowupPresence";
-import { resolveThreadStatusPill, summarizeHiddenThreadStatuses } from "../Sidebar.logic";
 import { ThreadStatusDot } from "../ThreadStatusIndicators";
-import { SidebarMenuButton, SidebarMenuItem } from "../ui/sidebar";
-
-const PRESENTATION_SOURCES = { summarizeHiddenThreadStatuses };
+import { SidebarMenuButton, SidebarMenuItem, SidebarMenuSub } from "../ui/sidebar";
+import { useHiddenThreadStatusSummary } from "./useHiddenThreadStatusSummary";
 
 /**
- * Header row of the sidebar's Hidden projects group.
+ * Disclosure and nested list for the sidebar's Hidden projects group.
  *
  * While collapsed it names the most urgent state among the hidden projects'
  * chats (the same summary as a chat list's "N more" row), so hiding a project
@@ -29,56 +20,18 @@ export function SidebarHiddenProjectsToggle({
   open,
   threads,
   onToggle,
+  children,
 }: {
   hiddenCount: number;
   open: boolean;
   /** Unarchived chats of the hidden projects, used only for the summary. */
   threads: readonly SidebarThreadSummary[];
   onToggle: () => void;
+  children?: ReactNode;
 }) {
   const uiLocale = useUiLocale();
-  const presentation = useUiPresentation(PRESENTATION_SOURCES);
-  const lastVisitedAts = useUiStateStore(
-    useShallow((state) =>
-      open
-        ? []
-        : threads.map(
-            (thread) =>
-              state.threadLastVisitedAtById[
-                scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))
-              ] ?? null,
-          ),
-    ),
-  );
-  const environmentIds = useMemo(
-    () => [...new Set(threads.map((thread) => thread.environmentId))],
-    [threads],
-  );
-  const scheduledPresence = useScheduledFollowupPresenceByEnvironment(environmentIds);
-  const summary = useMemo(
-    () =>
-      open
-        ? null
-        : presentation.summarizeHiddenThreadStatuses(
-            threads.map((thread, index) => {
-              const lastVisitedAt = lastVisitedAts[index];
-              return resolveThreadStatusPill({
-                thread: {
-                  ...thread,
-                  ...(lastVisitedAt !== null && lastVisitedAt !== undefined
-                    ? { lastVisitedAt }
-                    : {}),
-                  scheduledFollowUpAt: readScheduledFollowUpAtFrom(
-                    scheduledPresence,
-                    thread.environmentId,
-                    thread.id,
-                  ),
-                },
-              });
-            }),
-          ),
-    [lastVisitedAts, open, presentation, scheduledPresence, threads],
-  );
+  const contentId = useId();
+  const summary = useHiddenThreadStatusSummary(threads, !open);
 
   return (
     <SidebarMenuItem className="rounded-md">
@@ -86,6 +39,7 @@ export function SidebarHiddenProjectsToggle({
         size="sm"
         data-testid="sidebar-hidden-projects-toggle"
         aria-expanded={open}
+        aria-controls={open ? contentId : undefined}
         aria-label={uiText(
           "{count, plural, one {# hidden project} other {# hidden projects}}{hasSummary, select, yes {, {summary}} other {}}",
           {
@@ -121,6 +75,15 @@ export function SidebarHiddenProjectsToggle({
           </span>
         ) : null}
       </SidebarMenuButton>
+      {open ? (
+        <SidebarMenuSub
+          id={contentId}
+          data-testid="sidebar-hidden-projects-list"
+          className="mr-0 pr-0"
+        >
+          {children}
+        </SidebarMenuSub>
+      ) : null}
     </SidebarMenuItem>
   );
 }

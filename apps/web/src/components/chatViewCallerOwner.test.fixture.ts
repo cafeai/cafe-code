@@ -25,6 +25,7 @@ const labels = [
   "composer-preparation-stop",
   "composer-unanswered",
   "navigation-atrium",
+  "navigation-hidden-projects",
   "navigation-project-search",
   "continuation-preparation",
   "live-account-preparation",

@@ -216,6 +216,8 @@ import { SidebarProviderUpdatePill } from "./sidebar/SidebarProviderUpdatePill";
 import { SidebarNewChatButton } from "./sidebar/SidebarNewChatButton";
 import { SidebarThreadOverflowToggle } from "./sidebar/SidebarThreadOverflowToggle";
 import { SidebarHiddenProjectsToggle } from "./sidebar/SidebarHiddenProjectsToggle";
+import { SidebarSectionToggle } from "./sidebar/SidebarSectionToggle";
+import { useHiddenThreadStatusSummary } from "./sidebar/useHiddenThreadStatusSummary";
 import {
   nextHiddenSidebarProjectKeys,
   partitionHiddenSidebarProjects,
@@ -963,6 +965,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
 });
 
 const EMPTY_STANDALONE_ENTRIES: readonly StandaloneCatalogEntry[] = [];
+const EMPTY_SIDEBAR_THREADS: readonly SidebarThreadSummary[] = [];
 
 /**
  * Projectless saved chats share Projects' canonical row and mutation controls.
@@ -1045,41 +1048,14 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
           : entries.slice(previewCount),
     [entries, expanded, previewCount, sectionExpanded],
   );
-  // Visible rows resolve their own status. Subscribe only to the summarized
-  // rows' visit cursors.
-  const hiddenLastVisitedAts = useUiStateStore(
-    useShallow((state) =>
-      summarizedEntries.map((entry) => state.threadLastVisitedAtById[entry.key] ?? null),
-    ),
+  const summarizedThreads = useMemo(
+    () => summarizedEntries.map((entry) => entry.thread),
+    [summarizedEntries],
   );
-  const standaloneEnvironmentIds = useMemo(
-    () => [...new Set(entries.map((entry) => entry.thread.environmentId))],
-    [entries],
-  );
-  const scheduledPresence = useScheduledFollowupPresenceByEnvironment(standaloneEnvironmentIds);
-  const hiddenSummary = useMemo(
-    () =>
-      summarizedEntries.length === 0
-        ? null
-        : uiPresentation.summarizeHiddenThreadStatuses(
-            summarizedEntries.map((entry, index) => {
-              const lastVisitedAt = hiddenLastVisitedAts[index];
-              return resolveThreadStatusPill({
-                thread: {
-                  ...entry.thread,
-                  ...(lastVisitedAt !== null && lastVisitedAt !== undefined
-                    ? { lastVisitedAt }
-                    : {}),
-                  scheduledFollowUpAt: readScheduledFollowUpAtFrom(
-                    scheduledPresence,
-                    entry.thread.environmentId,
-                    entry.thread.id,
-                  ),
-                },
-              });
-            }),
-          ),
-    [hiddenLastVisitedAts, scheduledPresence, summarizedEntries, uiPresentation],
+  // Visible rows resolve their own status; only the summarized rows are read.
+  const hiddenSummary = useHiddenThreadStatusSummary(
+    summarizedThreads,
+    summarizedThreads.length > 0,
   );
   const cancelRename = useCallback(() => {
     setRenamingThreadKey(null);
@@ -1321,48 +1297,30 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
   return (
     <SidebarGroup
       aria-label={uiText("Standalone chats", undefined, undefined, uiLocale)}
-      className="px-2 pt-2 pb-1"
+      className="px-2 pt-2 pb-0"
     >
-      <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
+      {/* Same pl-2/pr-1.5 and 20px icon buttons as the Projects heading, so
+          both labels share one left edge and the trailing icons line up. */}
+      <div className="flex items-center justify-between pl-2 pr-1.5">
         {onSectionExpandedChange ? (
-          // Same leading chevron as a project folder, offset so it lines up
-          // with the project chevrons below.
-          <button
-            type="button"
-            data-testid="sidebar-chats-section-toggle"
-            aria-expanded={sectionExpanded}
-            className="-mx-1 inline-flex min-w-0 cursor-pointer items-center gap-1.5 rounded-sm px-1 text-subtle-foreground transition-colors duration-(--duration-fast) hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
-            onClick={() => onSectionExpandedChange(!sectionExpanded)}
-          >
-            <ChevronRightIcon
-              aria-hidden="true"
-              className={`-ml-0.5 size-3.5 shrink-0 transition-transform duration-(--duration-fast) motion-reduce:transition-none ${
-                sectionExpanded ? "rotate-90" : ""
-              }`}
-            />
-            <span className="label-overline">
-              {uiText("Chats", undefined, undefined, uiLocale)}
-            </span>
-            {!sectionExpanded && hiddenSummary ? (
-              <span
-                data-testid="sidebar-chats-section-status"
-                data-status={hiddenSummary.status.label}
-                title={hiddenSummary.text}
-                className={`inline-flex shrink-0 items-center ${hiddenSummary.status.colorClass}`}
-              >
-                <ThreadStatusDot status={hiddenSummary.status} />
-                <span className="sr-only">{hiddenSummary.text}</span>
-              </span>
-            ) : null}
-          </button>
+          <SidebarSectionToggle
+            label={uiText("Chats", undefined, undefined, uiLocale)}
+            expanded={sectionExpanded}
+            onExpandedChange={onSectionExpandedChange}
+            summary={hiddenSummary}
+            testId="sidebar-chats-section-toggle"
+            statusTestId="sidebar-chats-section-status"
+          />
         ) : (
           <span className="label-overline">{uiText("Chats", undefined, undefined, uiLocale)}</span>
         )}
-        <SidebarNewChatButton disabled={newChatDisabled} onClick={onNewChat} />
+        <SidebarNewChatButton variant="section" disabled={newChatDisabled} onClick={onNewChat} />
       </div>
+      {/* The list owns the gap below the heading, so a collapsed, empty
+          section adds no stray space above Projects. */}
       <SidebarMenuSub
         ref={attachListAutoAnimate}
-        className="mx-1 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1.5 py-0"
+        className="mx-1 mt-1 mb-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1.5 py-0 empty:mt-0"
       >
         {visibleEntries.map((entry) => (
           <SidebarThreadRow
@@ -1406,7 +1364,7 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
         ) : null}
       </SidebarMenuSub>
       {sectionExpanded && entries.length === 0 ? (
-        <p className="px-3 py-1 text-xs text-subtle-foreground">
+        <p className="mt-1 px-3 py-1 text-xs text-subtle-foreground">
           {uiText("No chats yet", undefined, undefined, uiLocale)}
         </p>
       ) : null}
@@ -4039,10 +3997,15 @@ interface SidebarProjectsContentProps {
   hiddenProjects: readonly SidebarProjectSnapshot[];
   hiddenProjectsOpen: boolean;
   onHiddenProjectsOpenChange: (open: boolean) => void;
-  /** A hidden project shown while its chat is open, like a collapsed project's active chat. */
-  revealedHiddenProjectKey: string | null;
   hiddenProjectThreads: readonly SidebarThreadSummary[];
   setProjectHidden: (project: SidebarProjectSnapshot, hidden: boolean) => void;
+  /** Whether the Projects section is open; presentation only, like Chats. */
+  projectsSectionExpanded: boolean;
+  onProjectsSectionExpandedChange: (expanded: boolean) => void;
+  /** The open chat's project (shown or hidden), the only row while collapsed. */
+  collapsedProjectsSectionProjects: readonly SidebarProjectSnapshot[];
+  /** Chats of the projects a collapsed section omits, used only for its summary. */
+  collapsedProjectsSectionThreads: readonly SidebarThreadSummary[];
   standaloneContent: React.ReactNode;
   deskContent: React.ReactNode;
   primaryEnvironmentBootstrapped: boolean;
@@ -4118,9 +4081,12 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     hiddenProjects,
     hiddenProjectsOpen,
     onHiddenProjectsOpenChange,
-    revealedHiddenProjectKey,
     hiddenProjectThreads,
     setProjectHidden,
+    projectsSectionExpanded,
+    onProjectsSectionExpandedChange,
+    collapsedProjectsSectionProjects,
+    collapsedProjectsSectionThreads,
     standaloneContent,
     deskContent,
     primaryEnvironmentBootstrapped,
@@ -4222,9 +4188,10 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     suppressProjectClickForContextMenuRef,
     onSetProjectHidden: setProjectHidden,
   });
-  const renderedHiddenProjects = hiddenProjectsOpen
-    ? hiddenProjects
-    : hiddenProjects.filter((project) => project.projectKey === revealedHiddenProjectKey);
+  const collapsedProjectsSectionSummary = useHiddenThreadStatusSummary(
+    collapsedProjectsSectionThreads,
+    !projectsSectionExpanded,
+  );
 
   return (
     <SidebarContent className="min-h-full gap-0">
@@ -4302,9 +4269,14 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
           {standaloneContent}
           <SidebarGroup className="px-2 py-2">
             <div className="mb-1 flex items-center justify-between pl-2 pr-1.5">
-              <span className="label-overline">
-                {uiText("Projects", undefined, undefined, uiLocale)}
-              </span>
+              <SidebarSectionToggle
+                label={uiText("Projects", undefined, undefined, uiLocale)}
+                expanded={projectsSectionExpanded}
+                onExpandedChange={onProjectsSectionExpandedChange}
+                summary={collapsedProjectsSectionSummary}
+                testId="sidebar-projects-section-toggle"
+                statusTestId="sidebar-projects-section-status"
+              />
               <div className="flex items-center gap-1">
                 <ProjectSortMenu
                   projectSortOrder={projectSortOrder}
@@ -4350,7 +4322,25 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               </div>
             </div>
 
-            {isManualProjectSorting ? (
+            {!projectsSectionExpanded ? (
+              // Collapsed: only the open chat's project, without drag sorting,
+              // the Hidden group or the empty-state text.
+              collapsedProjectsSectionProjects.length > 0 ? (
+                <SidebarMenu data-testid="sidebar-projects-section-active">
+                  {collapsedProjectsSectionProjects.map((project) => (
+                    <SidebarProjectListRow
+                      key={project.projectKey}
+                      {...projectRowProps(project)}
+                      isHidden={hiddenProjects.some(
+                        (hidden) => hidden.projectKey === project.projectKey,
+                      )}
+                      isManualProjectSorting={false}
+                      dragHandleProps={null}
+                    />
+                  ))}
+                </SidebarMenu>
+              ) : null
+            ) : isManualProjectSorting ? (
               <DndContext
                 sensors={projectDnDSensors}
                 collisionDetection={projectCollisionDetection}
@@ -4393,7 +4383,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
               </SidebarMenu>
             )}
 
-            {hiddenProjects.length > 0 ? (
+            {projectsSectionExpanded && hiddenProjects.length > 0 ? (
               // Hidden rows sit outside manual drag sorting; their saved order
               // is kept and applies again once they are shown.
               <SidebarMenu className="mt-1" data-testid="sidebar-hidden-projects">
@@ -4402,20 +4392,23 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                   open={hiddenProjectsOpen}
                   threads={hiddenProjectThreads}
                   onToggle={toggleHiddenProjects}
-                />
-                {renderedHiddenProjects.map((project) => (
-                  <SidebarProjectListRow
-                    key={project.projectKey}
-                    {...projectRowProps(project)}
-                    isHidden
-                    isManualProjectSorting={false}
-                    dragHandleProps={null}
-                  />
-                ))}
+                >
+                  {hiddenProjectsOpen
+                    ? hiddenProjects.map((project) => (
+                        <SidebarProjectListRow
+                          key={project.projectKey}
+                          {...projectRowProps(project)}
+                          isHidden
+                          isManualProjectSorting={false}
+                          dragHandleProps={null}
+                        />
+                      ))
+                    : null}
+                </SidebarHiddenProjectsToggle>
               </SidebarMenu>
             ) : null}
 
-            {primaryEnvironmentBootstrapped && projectsLength === 0 && (
+            {projectsSectionExpanded && primaryEnvironmentBootstrapped && projectsLength === 0 && (
               <p className="px-3 py-1 text-xs text-subtle-foreground">
                 {uiText("No projects yet", undefined, undefined, uiLocale)}
               </p>
@@ -4508,6 +4501,8 @@ export default function Sidebar() {
   const sidebarMode = resolveEffectiveSidebarMode(deskEnabled, desk.sidebarMode);
   const standaloneChatsExpanded = useUiStateStore((store) => store.standaloneChatsExpanded);
   const setStandaloneChatsExpanded = useUiStateStore((store) => store.setStandaloneChatsExpanded);
+  const projectsSectionExpanded = useUiStateStore((store) => store.projectsSectionExpanded);
+  const setProjectsSectionExpanded = useUiStateStore((store) => store.setProjectsSectionExpanded);
   const desktopDebugEnabled = useDesktopDebugEnabled();
   const { updateSettings } = useUpdateSettings();
   const { handleNewThread, handleNewStandaloneChat } = useNewThreadHandler();
@@ -4881,14 +4876,33 @@ export default function Sidebar() {
     () => partitionHiddenSidebarProjects(sortedProjects, hiddenProjectKeySet),
     [hiddenProjectKeySet, sortedProjects],
   );
-  // Peeking is session-only; the active chat's hidden project stays visible
-  // without opening the whole group (see revealedHiddenProjectKey).
-  const [hiddenProjectsOpen, setHiddenProjectsOpen] = useState(false);
-  const revealedHiddenProjectKey =
+  // Open the dropdown on navigation to a hidden chat, rather than placing its
+  // project beneath a collapsed heading. An explicit collapse lasts until the
+  // next hidden-chat navigation; streaming updates do not reopen it.
+  const activeHiddenProjectKey =
     activeRouteProjectKey !== null &&
     hiddenProjects.some((project) => project.projectKey === activeRouteProjectKey)
       ? activeRouteProjectKey
       : null;
+  const [hiddenProjectsView, setHiddenProjectsView] = useState({
+    activeProjectKey: activeHiddenProjectKey,
+    threadKey: routeThreadKey,
+    open: activeHiddenProjectKey !== null,
+  });
+  if (
+    hiddenProjectsView.activeProjectKey !== activeHiddenProjectKey ||
+    hiddenProjectsView.threadKey !== routeThreadKey
+  ) {
+    setHiddenProjectsView({
+      activeProjectKey: activeHiddenProjectKey,
+      threadKey: routeThreadKey,
+      open: activeHiddenProjectKey !== null || hiddenProjectsView.open,
+    });
+  }
+  const hiddenProjectsOpen = hiddenProjectsView.open;
+  const setHiddenProjectsOpen = useCallback((open: boolean) => {
+    setHiddenProjectsView((current) => ({ ...current, open }));
+  }, []);
   const hiddenProjectThreads = useMemo(
     () =>
       hiddenProjects.flatMap((project) =>
@@ -4897,6 +4911,38 @@ export default function Sidebar() {
         ),
       ),
     [hiddenProjects, threadsByProjectKey],
+  );
+  // A collapsed Projects section shows only the open chat's project, shown or
+  // hidden, like the collapsed Chats section keeps its open chat.
+  const collapsedProjectsSectionProjects = useMemo(
+    () =>
+      projectsSectionExpanded || activeRouteProjectKey === null
+        ? []
+        : [...shownProjects, ...hiddenProjects].filter(
+            (project) => project.projectKey === activeRouteProjectKey,
+          ),
+    [activeRouteProjectKey, hiddenProjects, projectsSectionExpanded, shownProjects],
+  );
+  // Unarchived chats of every project the collapsed section is not showing,
+  // summarized on its heading. Empty (no subscriptions) while open.
+  const collapsedProjectsSectionThreads = useMemo(
+    () =>
+      projectsSectionExpanded
+        ? EMPTY_SIDEBAR_THREADS
+        : [...shownProjects, ...hiddenProjects]
+            .filter((project) => project.projectKey !== activeRouteProjectKey)
+            .flatMap((project) =>
+              (threadsByProjectKey.get(project.projectKey) ?? []).filter(
+                (thread) => thread.archivedAt === null,
+              ),
+            ),
+    [
+      activeRouteProjectKey,
+      hiddenProjects,
+      projectsSectionExpanded,
+      shownProjects,
+      threadsByProjectKey,
+    ],
   );
   const setProjectHidden = useCallback(
     (project: SidebarProjectSnapshot, hidden: boolean) => {
@@ -4941,12 +4987,10 @@ export default function Sidebar() {
           ? standaloneCatalog
           : standaloneCatalog.slice(0, sidebarThreadPreviewCount)
       ).map((entry) => entry.key),
-      ...[
-        ...shownProjects,
-        ...(hiddenProjectsOpen
-          ? hiddenProjects
-          : hiddenProjects.filter((project) => project.projectKey === revealedHiddenProjectKey)),
-      ].flatMap((project) => {
+      ...(!projectsSectionExpanded
+        ? collapsedProjectsSectionProjects
+        : [...shownProjects, ...(hiddenProjectsOpen ? hiddenProjects : [])]
+      ).flatMap((project) => {
         const projectThreads = sortThreads(
           (threadsByProjectKey.get(project.projectKey) ?? []).filter(
             (thread) => thread.archivedAt === null,
@@ -4988,11 +5032,12 @@ export default function Sidebar() {
       shownProjects,
       hiddenProjects,
       hiddenProjectsOpen,
-      revealedHiddenProjectKey,
       threadsByProjectKey,
       standaloneCatalog,
       standaloneCatalogExpanded,
       standaloneChatsExpanded,
+      projectsSectionExpanded,
+      collapsedProjectsSectionProjects,
     ],
   );
   const threadJumpCommandByKey = useMemo(() => {
@@ -5364,9 +5409,12 @@ export default function Sidebar() {
               hiddenProjects={hiddenProjects}
               hiddenProjectsOpen={hiddenProjectsOpen}
               onHiddenProjectsOpenChange={setHiddenProjectsOpen}
-              revealedHiddenProjectKey={revealedHiddenProjectKey}
               hiddenProjectThreads={hiddenProjectThreads}
               setProjectHidden={setProjectHidden}
+              projectsSectionExpanded={projectsSectionExpanded}
+              onProjectsSectionExpandedChange={setProjectsSectionExpanded}
+              collapsedProjectsSectionProjects={collapsedProjectsSectionProjects}
+              collapsedProjectsSectionThreads={collapsedProjectsSectionThreads}
               standaloneContent={
                 <SidebarStandaloneChats
                   onNewChat={createStandaloneChat}

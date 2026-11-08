@@ -14,10 +14,11 @@ anything, right-click a project and choose **Hide project**. Hidden projects mov
 into a collapsed **Hidden** group at the bottom of Projects, which shows the most
 urgent state of their chats. Open the group and choose **Show project** to bring
 one back. Hiding never changes, stops or deletes a project or its chats: they
-keep running, stay in search, and a hidden project appears while one of its chats
-is open. A grouped project returns on its own if a new folder (such as a new
-worktree) joins it. The Hidden list is saved with your Cafe settings, so it
-follows you between the desktop app and the browser.
+keep running and stay in search. Opening a hidden project's chat automatically
+expands **Hidden**, with its projects nested inside the dropdown. You can collapse
+it again without leaving the chat. A grouped project returns on its own if a new
+folder (such as a new worktree) joins it. The Hidden list is saved with your Cafe
+settings, so it follows you between the desktop app and the browser.
 
 While reviewing earlier messages, hover or focus **Scroll to bottom** to reveal
 its compact options popout. Choose **Hide until bottom** to dismiss the button

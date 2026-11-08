@@ -19,6 +19,7 @@ import {
   setThreadPlanSidebarOpen,
   setComposerTabCollapsed,
   setStandaloneChatsExpanded,
+  setProjectsSectionExpanded,
   syncProjects,
   syncThreads,
   type UiState,
@@ -29,6 +30,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectExpandedById: {},
     projectOrder: [],
     standaloneChatsExpanded: true,
+    projectsSectionExpanded: true,
     threadLastVisitedAtById: {},
     threadPlanSidebarOpenById: {},
     composerTabCollapsed: false,
@@ -719,6 +721,22 @@ describe("uiStateStore persistence round-trip", () => {
     expect(persisted.standaloneChatsExpanded).toBe(false);
     expect(hydratePersistedUiState(persisted).standaloneChatsExpanded).toBe(false);
     expect(hydratePersistedUiState({}).standaloneChatsExpanded).toBe(true);
+  });
+
+  it("persists the Projects section collapse independently and defaults it open", () => {
+    const state = setProjectsSectionExpanded(makeUiState(), false);
+    expect(setProjectsSectionExpanded(state, false)).toBe(state);
+    expect(state.standaloneChatsExpanded).toBe(true);
+
+    persistState(state);
+
+    const persisted = JSON.parse(
+      localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
+    ) as PersistedUiState;
+    expect(persisted.projectsSectionExpanded).toBe(false);
+    expect(hydratePersistedUiState(persisted).projectsSectionExpanded).toBe(false);
+    expect(hydratePersistedUiState(persisted).standaloneChatsExpanded).toBe(true);
+    expect(hydratePersistedUiState({}).projectsSectionExpanded).toBe(true);
   });
 
   it("persists the global session-rail placement", () => {

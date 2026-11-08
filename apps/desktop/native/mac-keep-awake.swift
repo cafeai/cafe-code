@@ -1,15 +1,18 @@
 import Foundation
+import CoreGraphics
 import IOKit
 import IOKit.pwr_mgt
 import IOKit.ps
 import Darwin
+import OSLog
 
 // One exact desktop client's renewable lease. The independent worker retains
 // the same native flock description and restores the raw switch on pipe loss.
 // No PID catalogue, persistent pmset preference, sudoers rule, provider access,
-// display assertion, login item or privileged installation is involved.
+// persistent display override, login item or privileged installation is involved.
 private let heartbeatSeconds: Double = 4
 private let assertionSeconds: Double = 8
+private let displayLog = Logger(subsystem: "com.cafeai.cafecode", category: "mac-power")
 private func leaseNow() -> Double {
     var scale = mach_timebase_info_data_t()
     guard mach_timebase_info(&scale) == KERN_SUCCESS, scale.numer > 0, scale.denom > 0 else { Darwin.exit(3) }
@@ -32,6 +35,7 @@ private func encode(_ value: [String: Any]) -> Data {
 }
 private func emit(_ value: [String: Any]) { _ = writeBytes(1, encode(value)) }
 private struct Refusal: Error { let reason: String; init(_ reason: String) { self.reason = reason } }
+private struct DisplayRefusal: Error {}
 
 #if KEEP_AWAKE_TEST
 private let mockRoot: String? = {
@@ -69,10 +73,11 @@ private final class Lines {
     let source: DispatchSourceRead
     var bytes = Data()
     var retired = false
+    private var readAvailable: (() -> Void)?
     init(_ fd: Int32, line: @escaping ([String: Any]) -> Void, end: @escaping () -> Void) {
         _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
         source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
-        source.setEventHandler { [weak self] in
+        readAvailable = { [weak self] in
             guard let self, !self.retired else { return }
             var buffer = [UInt8](repeating: 0, count: 1024)
             while !self.retired {
@@ -90,9 +95,14 @@ private final class Lines {
                 guard self.bytes.count <= 256 else { self.stop(); end(); return }
             }
         }
+        source.setEventHandler { [weak self] in self?.drain() }
         source.resume()
     }
-    func stop() { if !retired { retired = true; source.cancel() } }
+    // After an exact child exit, its final ownership messages may still be in
+    // the pipe ahead of the queued Dispatch read event. Join and drain before
+    // cancelling that reader or deciding which display cleanup we own.
+    func drain() { readAvailable?() }
+    func stop() { if !retired { retired = true; source.cancel(); readAvailable = nil } }
 }
 
 private final class Power {
@@ -151,10 +161,11 @@ private final class Power {
         // https://github.com/x74353/Amphetamine-Enhancer/blob/master/Xcode%20Project/CDMManager/CDMManager/AppDelegate.m
         guard IOConnectCallScalarMethod(connection, UInt32(kPMSetClamshellSleepState), &value, 1, nil, &outputCount) == KERN_SUCCESS else { throw Refusal("native-refused") }
     }
-    func renew() throws {
+    func renew(current: () -> Bool) throws {
+        guard current() else { throw Refusal("native-refused") }
         if let reason = refusal() { throw Refusal(reason) }
         #if KEEP_AWAKE_TEST
-        if mockState >= 0 { if !touched { touched = true; try setLid(true) }; return }
+        if mockState >= 0 { touched = true; try setLid(true); return }
         #endif
         if assertionHeld {
             guard let properties = IOPMAssertionCopyProperties(assertion)?.takeRetainedValue() as? [String: Any],
@@ -167,7 +178,11 @@ private final class Power {
             guard IOPMAssertionCreateWithProperties(properties as CFDictionary, &assertion) == kIOReturnSuccess else { throw Refusal("native-refused") }
             assertionHeld = true
         }
-        if !touched { touched = true; try setLid(true) }
+        // powerd also owns this shared bit and may rewrite it when display or
+        // power policy changes. A successful initial ACK is not a lease. Only
+        // admitted fresh work input may reapply it; the watchdog never does.
+        guard current() else { throw Refusal("native-refused") }
+        touched = true; try setLid(true)
     }
     func stop(recover: Bool = false) -> Bool {
         if assertionHeld { IOPMAssertionRelease(assertion); assertionHeld = false }
@@ -177,6 +192,197 @@ private final class Power {
         // This acknowledges our native reset. It does not claim physical sleep
         // or exclusive ownership of another app's shared clamshell policy.
         return true
+    }
+}
+
+/** Display sleep and system sleep are different native operations. In
+ * particular, suppressing clamshell system sleep need not darken the internal
+ * panel when no external monitor is connected. Use the same transient request
+ * as Apple's `pmset displaysleepnow`, not brightness or display configuration.
+ * Those would need persistent restoration and can strand a dark display.
+ * https://github.com/apple-oss-distributions/PowerManagement/blob/main/pmset/pmset.m
+ */
+private final class LidDisplay {
+    let power: Power
+    var requestedSleep = false
+    var inventoryRefused = false
+    var framework: UnsafeMutableRawPointer?
+    init(_ power: Power) { self.power = power }
+    deinit { if let framework { dlclose(framework) } }
+
+    func refused(_ phase: String) {
+        // Fixed, content-free phases only. Display control is optional; a
+        // refusal must not release healthy work's separate system-sleep lease.
+        switch phase {
+        case "inventory": displayLog.warning("Display inventory unavailable; keeping the work lease")
+        case "sleep": displayLog.warning("Display idle request refused; keeping the work lease")
+        default: displayLog.warning("Display wake request refused; normal input wake remains available")
+        }
+        #if KEEP_AWAKE_TEST
+        if mockRoot != nil { emit(["event": "test-display-refused", "phase": phase]) }
+        #endif
+    }
+
+    #if KEEP_AWAKE_TEST
+    func mockValue(_ name: String) -> String? {
+        guard let mockRoot, let fd = try? privateFile(mockRoot + "/" + name) else { return nil }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_size >= 0, info.st_size <= 16 else { return nil }
+        var bytes = [UInt8](repeating: 0, count: 17)
+        let count = pread(fd, &bytes, bytes.count, 0)
+        guard count >= 0, count <= 16 else { return nil }
+        return String(bytes: bytes.prefix(count), encoding: .utf8)
+    }
+    func mockAction(_ action: String) throws {
+        guard let mockRoot else { throw Refusal("native-refused") }
+        let fd = try privateFile(mockRoot + "/display-state")
+        defer { close(fd) }
+        var byte: UInt8 = action == "sleep" ? 48 : 49
+        guard pwrite(fd, &byte, 1, 0) == 1 else { throw Refusal("native-refused") }
+        emit(["event": "test-display", "action": action])
+    }
+    #endif
+
+    func lidClosed() -> Bool? {
+        #if KEEP_AWAKE_TEST
+        if mockRoot != nil {
+            switch mockValue("lid-state") { case "closed": return true; case "open": return false; default: return nil }
+        }
+        #endif
+        guard power.service != 0,
+              let value = IORegistryEntryCreateCFProperty(power.service, "AppleClamshellState" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue(),
+              CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
+        return value as? Bool
+    }
+
+    func internalDisplayOnly() -> Bool {
+        #if KEEP_AWAKE_TEST
+        if mockRoot != nil {
+            if mockValue("external-displays") == "refused" {
+                if !inventoryRefused { inventoryRefused = true; refused("inventory") }
+                return false
+            }
+            inventoryRefused = false
+            return mockValue("external-displays") == "no"
+        }
+        #endif
+        var ids = [CGDirectDisplayID](repeating: 0, count: 32)
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(UInt32(ids.count), &ids, &count) == .success,
+              count <= ids.count else {
+            if !inventoryRefused { inventoryRefused = true; refused("inventory") }
+            return false
+        }
+        inventoryRefused = false
+        // RequestDisplaysIdle affects all displays. Admit only an observed
+        // built-in-only topology; this snapshot cannot make hotplug atomic.
+        // macOS retains its ordinary clamshell handling with other monitors.
+        return count > 0 && ids.prefix(Int(count)).allSatisfy { CGDisplayIsBuiltin($0) != 0 }
+    }
+
+    func modernDisplayIdle() throws -> Bool {
+        #if KEEP_AWAKE_TEST
+        if mockRoot != nil {
+            if mockValue("display-refused") == "yes" || mockValue("display-primary-refused") == "yes" { return false }
+            try mockAction("sleep"); return true
+        }
+        #endif
+        // Newer macOS, including Apple Silicon, uses the display manager.
+        // Resolve its one-shot SPI from a fixed OS framework; no PATH command
+        // or detached display-control child can outlive this exact worker.
+        if framework == nil {
+            framework = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY | RTLD_LOCAL)
+        }
+        if let framework, let symbol = dlsym(framework, "SLSDisplayManagerRequestDisplaysIdle") {
+            typealias RequestIdle = @convention(c) () -> Int32
+            let request = unsafeBitCast(symbol, to: RequestIdle.self)
+            return request() == CGError.success.rawValue
+        }
+        return false
+    }
+
+    func sleepDisplay() throws {
+        if try modernDisplayIdle() { return }
+        #if KEEP_AWAKE_TEST
+        if mockRoot != nil {
+            if mockValue("display-refused") == "yes" { throw DisplayRefusal() }
+            try mockAction("sleep"); return
+        }
+        #endif
+        // Apple's pmset retains this legacy Intel path. It requests immediate
+        // display idle, including over an ordinary idle-display assertion.
+        // Also try it after a refused SkyLight request, not just a missing SPI.
+        let display = IORegistryEntryFromPath(kIOMainPortDefault, "IOService:/IOResources/IODisplayWrangler")
+        guard display != 0 else { throw DisplayRefusal() }
+        defer { IOObjectRelease(display) }
+        guard IORegistryEntrySetCFProperty(display, "IORequestIdle" as CFString, kCFBooleanTrue) == KERN_SUCCESS else { throw DisplayRefusal() }
+    }
+
+    func wakeDisplay() throws {
+        #if KEEP_AWAKE_TEST
+        if mockRoot != nil {
+            if mockValue("display-wake-refused") == "yes" { throw DisplayRefusal() }
+            try mockAction("wake")
+            if mockValue("display-wake-release-refused") == "yes" { throw Refusal("native-refused") }
+            return
+        }
+        #endif
+        // One pulse for our own observed closed -> open transition. Releasing
+        // its ID immediately keeps no display-sleep assertion alive. This
+        // powers on the screen; it does not unlock the user's session.
+        var activity: IOPMAssertionID = 0
+        guard IOPMAssertionDeclareUserActivity("Cafe Code lid opened" as CFString, kIOPMUserActiveLocal, &activity) == KERN_SUCCESS else { throw DisplayRefusal() }
+        // A failed release differs from an unavailable wake request: retiring
+        // this process must release any possibly-held user-activity assertion.
+        guard IOPMAssertionRelease(activity) == KERN_SUCCESS else { throw Refusal("native-refused") }
+    }
+
+    func publishSleepOwnership(_ pending: Bool) throws {
+        // Extend the existing alive envelope so an older supervisor can still
+        // host a new worker. A live supervisor receives this reservation before
+        // any display mutation, and drains it after a native child exit.
+        guard writeBytes(1, encode(["event": "alive", "displaySleepPending": pending])) else { throw Refusal("native-refused") }
+    }
+
+    func update(current: () -> Bool) throws {
+        guard current(), let closed = lidClosed() else { return }
+        if !closed {
+            inventoryRefused = false
+            guard requestedSleep, current(), lidClosed() == false else { return }
+            // Consume before native IPC so failure/retirement cannot replay a
+            // wake, or continually reset idle time with an already-open lid.
+            requestedSleep = false
+            do { try wakeDisplay() } catch is DisplayRefusal { refused("wake"); return }
+            try publishSleepOwnership(false)
+        } else if !requestedSleep, internalDisplayOnly() {
+            // Recheck both native time and the actual lid after display lookup.
+            guard current(), lidClosed() == true else { return }
+            requestedSleep = true
+            try publishSleepOwnership(true)
+            do { try sleepDisplay() } catch is DisplayRefusal { refused("sleep") }
+            // Display transitions can change powerd's shared clamshell policy.
+            // Reapply only after rechecking exact fresh work, never from a
+            // stopped/expired worker or an unowned display callback.
+            if current() { try power.renew(current: current) }
+            // A quick open during synchronous native IPC must not leave a
+            // delayed sleep request behind the user's physical open event.
+            if current(), lidClosed() == false {
+                requestedSleep = false
+                do { try wakeDisplay() } catch is DisplayRefusal { refused("wake"); return }
+                try publishSleepOwnership(false)
+            }
+        }
+    }
+
+    func stop() {
+        // Ending work while closed must never light the closed panel. A
+        // transient sleep request leaves normal input/lid wake available even
+        // if both processes disappear; there is no display-disable to undo.
+        if requestedSleep, lidClosed() == false {
+            requestedSleep = false
+            do { try wakeDisplay(); try publishSleepOwnership(false) } catch { refused("wake") }
+        }
     }
 }
 
@@ -227,17 +433,22 @@ private func spawnWorker(_ lock: Int32) throws -> Child {
 
 private final class Worker {
     let power: Power
+    let display: LidDisplay
     var heartbeat = leaseNow()
     var retired = false
     var active = false
     var lines: Lines?
     var timer: DispatchSourceTimer?
     var signalSources: [DispatchSourceSignal] = []
+    #if KEEP_AWAKE_TEST
+    var displayTicks = 0
+    #endif
     init() throws {
         var held = stat()
         guard fstat(3, &held) == 0, held.st_mode & S_IFMT == S_IFREG,
               held.st_uid == getuid(), held.st_nlink == 1 else { throw Refusal("native-refused") }
         power = try Power()
+        display = LidDisplay(power)
     }
     func run() {
         lines = Lines(0, line: { [self] value in
@@ -245,7 +456,11 @@ private final class Worker {
                   leaseNow() - heartbeat < heartbeatSeconds else { stop(); return }
             heartbeat = leaseNow()
             do {
-                try power.renew()
+                try power.renew(current: { [self] in !self.retired && leaseNow() - self.heartbeat < heartbeatSeconds })
+                #if KEEP_AWAKE_TEST
+                if mockRoot != nil { emit(["event": "test-power-renewed"]) }
+                #endif
+                try display.update(current: { [self] in !self.retired && leaseNow() - self.heartbeat < heartbeatSeconds })
                 if !active { active = true; emit(["event": "active"]) }
                 emit(["event": "alive"])
             }
@@ -256,12 +471,23 @@ private final class Worker {
         timer?.setEventHandler { [self] in
             if leaseNow() - heartbeat >= heartbeatSeconds { stop(); return }
             if active, let reason = power.refusal() { emit(["event": "paused", "reason": reason]); stop() }
+            if active {
+                do { try display.update(current: { [self] in !self.retired && leaseNow() - self.heartbeat < heartbeatSeconds }) }
+                catch { emit(["event": "paused", "reason": "native-refused"]); stop() }
+                #if KEEP_AWAKE_TEST
+                if mockRoot != nil {
+                    displayTicks += 1
+                    if displayTicks % 4 == 0 { emit(["event": "test-display-tick", "tick": displayTicks]) }
+                }
+                #endif
+            }
         }
         timer?.resume(); signalSources = signals { [self] in stop() }
         emit(["event": "ready"])
     }
     func stop() {
         guard !retired else { return }; retired = true; lines?.stop(); timer?.cancel()
+        display.stop()
         let attempted = power.touched; let accepted = power.stop()
         emit(["event": "worker-stopped", "attempted": attempted, "resetAccepted": accepted])
         Darwin.exit(accepted ? 0 : 2)
@@ -285,6 +511,7 @@ private final class Supervisor {
     var failed = false
     var childInputClosed = false
     var workerHeartbeat = leaseNow()
+    var displaySleepPending = false
     init() throws {
         var root = "/private/tmp/cafe-code-keep-awake-\(getuid())"
         #if KEEP_AWAKE_TEST
@@ -317,7 +544,18 @@ private final class Supervisor {
         timer?.setEventHandler { [self] in
             if let child {
                 var status: Int32 = 0
-                let result = waitpid(child.pid, &status, WNOHANG)
+                var waitFlags = WNOHANG
+                #if KEEP_AWAKE_TEST
+                waitFlags |= WUNTRACED
+                #endif
+                let result = waitpid(child.pid, &status, waitFlags)
+                #if KEEP_AWAKE_TEST
+                // Observe the exact child's native stopped state, rather than
+                // treating successful signal delivery as completed suspension.
+                if result == child.pid, status & 0x7f == 0x7f {
+                    emit(["event": "test-worker-frozen"]); return
+                }
+                #endif
                 if result == child.pid { joined(child, status); return }
                 if result < 0 && errno != EINTR { Darwin.exit(3) }
                 if !retired && leaseNow() - workerHeartbeat >= heartbeatSeconds {
@@ -348,12 +586,17 @@ private final class Supervisor {
             childInputClosed = false; workerHeartbeat = leaseNow()
             childLines = Lines(admitted.output, line: { [self] value in
                 guard child?.pid == admitted.pid, let event = value["event"] as? String else { return }
+                #if KEEP_AWAKE_TEST
+                if ["test-display", "test-display-tick", "test-display-refused", "test-power-renewed"].contains(event) { emit(value); return }
+                #endif
                 workerHeartbeat = leaseNow()
                 if event == "ready" && !retired && !armed {
                     armed = true
                     _ = writeBytes(admitted.input, encode(["command": "renew"]))
                 } else if event == "active" { emit(["event": "active"]) }
-                else if event == "alive" { }
+                else if event == "alive" {
+                    if let pending = value["displaySleepPending"] as? Bool { displaySleepPending = pending }
+                }
                 else if event == "worker-stopped" {
                     if value["attempted"] as? Bool == false { armed = false }
                     if value["resetAccepted"] as? Bool == false { failed = true }
@@ -378,11 +621,27 @@ private final class Supervisor {
     }
     func joined(_ admitted: Child, _ status: Int32) {
         guard child?.pid == admitted.pid else { return }
+        childLines?.drain()
         childLines?.stop(); childLines = nil
         closeChildInput(admitted); close(admitted.output); child = nil; stopAt = nil
         // Confirmed native exit precedes our reset. A late worker cannot apply
         // true after cleanup, and flock remains held through this handoff.
-        let accepted = power.stop(recover: armed); armed = false
+        if displaySleepPending {
+            let recovery = LidDisplay(power)
+            // Undo only this child's reserved display request, only after its
+            // exact exit and only with the real lid open. Never illuminate a
+            // still-closed panel during crash/timeout or low-battery cleanup.
+            if recovery.lidClosed() == false {
+                do { try recovery.wakeDisplay() }
+                catch is DisplayRefusal { recovery.refused("wake") }
+                catch { failed = true; recovery.refused("wake") }
+            }
+            displaySleepPending = false
+        }
+        let lidReset = power.stop(recover: armed); armed = false
+        // A transient wake pulse changes no persistent display configuration.
+        // Its refusal is not a refused raw-switch reset or a retained lease.
+        let accepted = lidReset
         if !accepted { failed = true; emit(["event": "paused", "reason": "cleanup-failed"]) }
         if retired || failed || pauseReason == nil || status != 0 { finish(accepted); return }
     }

@@ -119,10 +119,10 @@ function launch(t, args = [], heartbeat = false) {
       notices.emit("change");
     }
   });
-  const event = async (name) => {
+  const event = async (name, occurrence = 1) => {
     const expected = Array.isArray(name) ? name : [name];
     for (;;) {
-      const found = events.find((value) => expected.includes(value.event));
+      const found = events.filter((value) => expected.includes(value.event))[occurrence - 1];
       if (found) return found;
       if (closed) throw new Error(`Native owner closed before ${name}`);
       await once(notices, "change", {
@@ -150,6 +150,270 @@ const state = (path) => readFile(join(path, "power-state"), "utf8");
 
 try {
   if (!live) {
+    await test(
+      "closed lid darkens only the internal display and reopening wakes it once without releasing work",
+      { timeout: 18000 },
+      async (t) => {
+        const path = await mockDirectory(t);
+        await writeFile(join(path, "lid-state"), "open", { mode: 0o600 });
+        await writeFile(join(path, "external-displays"), "no", { mode: 0o600 });
+        const instance = launch(t, ["--mock-root", path], true);
+        await instance.event("active");
+        assert.equal(instance.events.filter((value) => value.event === "test-display").length, 0);
+        await writeFile(join(path, "lid-state"), "closed");
+        assert.equal((await instance.event("test-display")).action, "sleep");
+        assert.equal(await readFile(join(path, "display-state"), "utf8"), "0");
+        assert.equal(await state(path), "1");
+        await instance.event(
+          "test-display-tick",
+          instance.events.filter((value) => value.event === "test-display-tick").length + 1,
+        );
+        assert.equal(instance.events.filter((value) => value.event === "test-display").length, 1);
+        await writeFile(join(path, "lid-state"), "open");
+        assert.equal((await instance.event("test-display", 2)).action, "wake");
+        assert.equal(await readFile(join(path, "display-state"), "utf8"), "1");
+        assert.equal(await state(path), "1");
+        await instance.event(
+          "test-display-tick",
+          instance.events.filter((value) => value.event === "test-display-tick").length + 1,
+        );
+        assert.equal(instance.events.filter((value) => value.event === "test-display").length, 2);
+        // A later genuine close/open gets one new pair; ordinary native ticks
+        // and parent heartbeats must not manufacture additional user activity.
+        await writeFile(join(path, "lid-state"), "closed");
+        assert.equal((await instance.event("test-display", 3)).action, "sleep");
+        await writeFile(join(path, "lid-state"), "open");
+        assert.equal((await instance.event("test-display", 4)).action, "wake");
+        instance.retire();
+        await instance.done;
+        assert.deepEqual(
+          instance.events
+            .filter((value) => value.event === "test-display")
+            .map((value) => value.action),
+          ["sleep", "wake", "sleep", "wake"],
+        );
+        assert.equal(await state(path), "0");
+      },
+    );
+    for (const topology of ["yes", "unknown"]) {
+      await test(
+        `closed lid does not globally blank external or unqualified displays: ${topology}`,
+        { timeout: 18000 },
+        async (t) => {
+          const path = await mockDirectory(t);
+          await writeFile(join(path, "lid-state"), "closed", { mode: 0o600 });
+          await writeFile(join(path, "external-displays"), topology, { mode: 0o600 });
+          const instance = launch(t, ["--mock-root", path], true);
+          await instance.event("active");
+          instance.retire();
+          await instance.done;
+          assert.equal(instance.events.filter((value) => value.event === "test-display").length, 0);
+          assert.equal(await state(path), "0");
+        },
+      );
+    }
+    await test(
+      "a closed-lid startup blanks once and cleanup never wakes a still-closed panel",
+      { timeout: 18000 },
+      async (t) => {
+        const path = await mockDirectory(t);
+        await writeFile(join(path, "lid-state"), "closed", { mode: 0o600 });
+        await writeFile(join(path, "external-displays"), "no", { mode: 0o600 });
+        const instance = launch(t, ["--mock-root", path], true);
+        await instance.event("active");
+        assert.equal((await instance.event("test-display")).action, "sleep");
+        instance.retire();
+        await instance.done;
+        assert.deepEqual(
+          instance.events
+            .filter((value) => value.event === "test-display")
+            .map((value) => value.action),
+          ["sleep"],
+        );
+        assert.equal(await state(path), "0");
+      },
+    );
+    await test(
+      "a refused modern display request falls back without dropping work",
+      { timeout: 18000 },
+      async (t) => {
+        const path = await mockDirectory(t);
+        await writeFile(join(path, "lid-state"), "closed", { mode: 0o600 });
+        await writeFile(join(path, "external-displays"), "no", { mode: 0o600 });
+        await writeFile(join(path, "display-primary-refused"), "yes", { mode: 0o600 });
+        const instance = launch(t, ["--mock-root", path], true);
+        await instance.event("active");
+        assert.equal((await instance.event("test-display")).action, "sleep");
+        assert.equal(await state(path), "1");
+        instance.retire();
+        assert.equal((await instance.event("stopped")).resetAccepted, true);
+        assert.equal((await instance.done).code, 0);
+        assert.equal(await state(path), "0");
+      },
+    );
+    await test(
+      "refused display control retains work protection until its actual input expires",
+      { timeout: 18000 },
+      async (t) => {
+        const path = await mockDirectory(t);
+        await writeFile(join(path, "lid-state"), "closed", { mode: 0o600 });
+        await writeFile(join(path, "external-displays"), "no", { mode: 0o600 });
+        await writeFile(join(path, "display-refused"), "yes", { mode: 0o600 });
+        const instance = launch(t, ["--mock-root", path], true);
+        assert.equal((await instance.event("test-display-refused")).phase, "sleep");
+        await instance.event("active");
+        await instance.event("test-display-tick", 2);
+        assert.equal(await state(path), "1");
+        assert.equal(
+          instance.events.some((value) => value.event === "test-display"),
+          false,
+        );
+        assert.equal(
+          instance.events.filter((value) => value.event === "test-display-refused").length,
+          1,
+        );
+        instance.stopPings();
+        assert.equal((await instance.event("stopped")).resetAccepted, true);
+        await instance.done;
+        assert.equal(await state(path), "0");
+      },
+    );
+    await test(
+      "unavailable display inventory excludes display writes and recovers without retiring work",
+      { timeout: 18000 },
+      async (t) => {
+        const path = await mockDirectory(t);
+        await writeFile(join(path, "lid-state"), "closed", { mode: 0o600 });
+        await writeFile(join(path, "external-displays"), "refused", { mode: 0o600 });
+        const instance = launch(t, ["--mock-root", path], true);
+        assert.equal((await instance.event("test-display-refused")).phase, "inventory");
+        await instance.event("active");
+        await instance.event("test-display-tick");
+        assert.equal(await state(path), "1");
+        assert.equal(
+          instance.events.some((value) => value.event === "test-display"),
+          false,
+        );
+        assert.equal(
+          instance.events.filter((value) => value.event === "test-display-refused").length,
+          1,
+        );
+        await writeFile(join(path, "external-displays"), "no");
+        assert.equal((await instance.event("test-display")).action, "sleep");
+        instance.retire();
+        assert.equal((await instance.event("stopped")).resetAccepted, true);
+        assert.equal((await instance.done).code, 0);
+        assert.equal(await state(path), "0");
+      },
+    );
+    await test(
+      "only fresh native renewals restore a rewritten shared lid bit",
+      { timeout: 18000 },
+      async (t) => {
+        const path = await mockDirectory(t);
+        const instance = launch(t, ["--mock-root", path]);
+        instance.send("renew");
+        await instance.event("active");
+        assert.equal(await state(path), "1");
+        await writeFile(join(path, "power-state"), "0");
+        await instance.event("test-display-tick");
+        // Policy polling alone must not rearm the global bit.
+        assert.equal(await state(path), "0");
+        instance.send("renew");
+        await instance.event("test-power-renewed", 2);
+        assert.equal(await state(path), "1");
+        instance.retire();
+        assert.equal((await instance.event("stopped")).resetAccepted, true);
+        await instance.done;
+        assert.equal(await state(path), "0");
+      },
+    );
+    await test(
+      "a refused transient wake does not replay or retain the raw power lease after cleanup",
+      { timeout: 18000 },
+      async (t) => {
+        const path = await mockDirectory(t);
+        await writeFile(join(path, "lid-state"), "closed", { mode: 0o600 });
+        await writeFile(join(path, "external-displays"), "no", { mode: 0o600 });
+        await writeFile(join(path, "display-wake-refused"), "yes", { mode: 0o600 });
+        const instance = launch(t, ["--mock-root", path], true);
+        await instance.event("active");
+        await instance.event("test-display");
+        await writeFile(join(path, "lid-state"), "open");
+        assert.equal((await instance.event("test-display-refused")).phase, "wake");
+        await instance.event(
+          "test-display-tick",
+          instance.events.filter((value) => value.event === "test-display-tick").length + 1,
+        );
+        assert.equal(
+          instance.events.filter((value) => value.event === "test-display-refused").length,
+          1,
+        );
+        assert.equal(await state(path), "1");
+        instance.retire();
+        assert.equal((await instance.event("stopped")).resetAccepted, true);
+        assert.equal((await instance.done).code, 0);
+        assert.equal(await state(path), "0");
+        const next = launch(t, ["--mock-root", path], true);
+        await next.event("active");
+        next.retire();
+        await next.done;
+        assert.equal(await state(path), "0");
+      },
+    );
+    await test(
+      "a failed wake-assertion release retires the helpers instead of retaining display activity",
+      { timeout: 18000 },
+      async (t) => {
+        const path = await mockDirectory(t);
+        await writeFile(join(path, "lid-state"), "closed", { mode: 0o600 });
+        await writeFile(join(path, "external-displays"), "no", { mode: 0o600 });
+        const instance = launch(t, ["--mock-root", path], true);
+        await instance.event("active");
+        await instance.event("test-display");
+        await writeFile(join(path, "display-wake-release-refused"), "yes", { mode: 0o600 });
+        await writeFile(join(path, "lid-state"), "open");
+        assert.equal((await instance.event("stopped")).resetAccepted, true);
+        assert.notEqual((await instance.done).code, 0);
+        assert.equal(await state(path), "0");
+        const next = launch(t, ["--mock-root", path], true);
+        await next.event("active");
+        next.retire();
+        await next.done;
+        assert.equal(await state(path), "0");
+      },
+    );
+    for (const fault of ["crash", "freeze"]) {
+      for (const lid of ["open", "closed"]) {
+        await test(
+          `supervisor recovers a ${fault} worker's owned display request with the lid ${lid}`,
+          { timeout: 18000 },
+          async (t) => {
+            const path = await mockDirectory(t);
+            await writeFile(join(path, "lid-state"), "closed", { mode: 0o600 });
+            await writeFile(join(path, "external-displays"), "no", { mode: 0o600 });
+            const instance = launch(t, ["--mock-root", path], true);
+            await instance.event("active");
+            assert.equal((await instance.event("test-display")).action, "sleep");
+            // Hold the exact worker before changing the physical-lid fixture,
+            // so only its joined supervisor can perform the recovery wake.
+            instance.send("freeze-worker");
+            await instance.event("test-worker-frozen");
+            await writeFile(join(path, "lid-state"), lid);
+            if (fault === "crash") instance.send("crash-worker");
+            assert.equal((await instance.event("stopped")).resetAccepted, true);
+            await instance.done;
+            assert.deepEqual(
+              instance.events
+                .filter((value) => value.event === "test-display")
+                .map((value) => value.action),
+              lid === "open" ? ["sleep", "wake"] : ["sleep"],
+            );
+            assert.equal(await state(path), "0");
+          },
+        );
+      }
+    }
     for (const action of [
       "stop",
       "parent-heartbeat-loss",
