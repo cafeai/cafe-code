@@ -18,9 +18,12 @@ import {
 } from "@cafecode/contracts";
 import type { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
 import {
+  captureProviderDaemonStartupRetirementEvidence,
   observeProviderDaemonProcess,
   providerDaemonRetirementRequest,
+  reconcileProviderDaemonStartupRetirement,
   retireProviderDaemonForStartup,
+  type ProviderDaemonStartupRetirementEvidence,
 } from "./DesktopProviderDaemonRetirement.ts";
 
 const token = "synthetic-bootstrap-root-token-0000000000000000000000";
@@ -284,7 +287,17 @@ async function nativeFixture(context: TestContext, encrypted = false) {
     controller,
     own,
     cleanup,
-    run: (changes: Partial<typeof input> = {}) =>
+    capture: () => own(() => captureProviderDaemonStartupRetirementEvidence(input)),
+    reconcile: (evidence: ProviderDaemonStartupRetirementEvidence) =>
+      own(async () => {
+        const guard = await reconcileProviderDaemonStartupRetirement(evidence, controller.signal, {
+          observeProcess,
+        });
+        guards.add(guard);
+        assertActive();
+        return guard;
+      }),
+    run: (changes: Partial<Parameters<typeof retireProviderDaemonForStartup>[0]> = {}) =>
       own(async () => {
         const guard = await retireProviderDaemonForStartup({ ...input, ...changes }, dependencies);
         // A timeout can retire the fixture after native guard acquisition but
@@ -394,6 +407,78 @@ describe.skipIf(process.platform === "win32")("private POSIX startup retirement"
         });
         await expect(f.run()).rejects.toThrow("could not be safely stopped");
         expect(f.dependencies.requestJson).toHaveBeenCalledTimes(1);
+        expect(f.dependencies.observeProcess).not.toHaveBeenCalled();
+        expect(await f.own(() => fs.readFile(f.markerPath, "utf8"))).toBe(f.markerSource);
+        expect(await f.own(() => fs.readFile(f.credentialPath))).toEqual(f.credentialBytes);
+      });
+    },
+  );
+
+  it("reconciles an unknown acknowledgement only through exact native absence without another POST", async (context) => {
+    await withNativeFixture(context, async (f) => {
+      // Capture is the authority held across the native confirmation dialog.
+      // A later failed HTTP acknowledgement must not recapture newer files or
+      // authorize replay of the already admitted destructive request.
+      const evidence = await f.capture();
+      f.dependencies.requestJson.mockRejectedValueOnce(new Error("Synthetic lost acknowledgement"));
+      await expect(f.run({ evidence })).rejects.toThrow("could not be safely stopped");
+      expect(f.dependencies.requestJson).toHaveBeenCalledTimes(1);
+      expect(f.dependencies.observeProcess).not.toHaveBeenCalled();
+
+      const retired = await f.reconcile(evidence);
+      await f.own(() => retired.verifyBeforeSpawn());
+      expect(f.dependencies.requestJson).toHaveBeenCalledTimes(1);
+      expect(f.dependencies.observeProcess).toHaveBeenCalledWith(marker.pid);
+      expect(await f.own(() => fs.readFile(f.markerPath, "utf8"))).toBe(f.markerSource);
+      expect(await f.own(() => fs.readFile(f.credentialPath))).toEqual(f.credentialBytes);
+    });
+  });
+
+  it.for(["present", "unknown", "replacement-socket"] as const)(
+    "refuses %s during read-only reconciliation without replaying control",
+    async (observation, context) => {
+      await withNativeFixture(context, async (f) => {
+        const evidence = await f.capture();
+        f.dependencies.requestJson.mockRejectedValueOnce(
+          new Error("Synthetic lost acknowledgement"),
+        );
+        await expect(f.run({ evidence })).rejects.toThrow("could not be safely stopped");
+        if (observation === "replacement-socket") {
+          await f.own(() =>
+            fs.writeFile(f.socketPath, "replacement owner", { flag: "wx", mode: 0o600 }),
+          );
+        } else {
+          f.dependencies.observeProcess.mockReturnValue(observation);
+        }
+        await expect(f.reconcile(evidence)).rejects.toThrow("could not be safely stopped");
+        expect(f.dependencies.requestJson).toHaveBeenCalledTimes(1);
+        expect(await f.own(() => fs.readFile(f.markerPath, "utf8"))).toBe(f.markerSource);
+        expect(await f.own(() => fs.readFile(f.credentialPath))).toEqual(f.credentialBytes);
+        if (observation === "replacement-socket")
+          expect(await f.own(() => fs.readFile(f.socketPath, "utf8"))).toBe("replacement owner");
+      });
+    },
+  );
+
+  it.for(["marker", "credential", "socket-directory"] as const)(
+    "refuses a replaced %s captured before confirmation without any control request",
+    async (changed, context) => {
+      await withNativeFixture(context, async (f) => {
+        const evidence = await f.capture();
+        if (changed === "socket-directory") {
+          await f.own(() => fs.rename(f.ipcDirectory, path.join(f.directory, "old-ipc")));
+          await f.own(() => fs.mkdir(f.ipcDirectory, { mode: 0o700 }));
+        } else {
+          // Identical bytes under a new inode are still a different owner.
+          const replacement = path.join(f.directory, "replacement");
+          const target = changed === "marker" ? f.markerPath : f.credentialPath;
+          const bytes = changed === "marker" ? f.markerSource : f.credentialBytes;
+          await f.own(() => fs.writeFile(replacement, bytes, { flag: "wx", mode: 0o600 }));
+          await f.own(() => fs.rename(replacement, target));
+        }
+        await expect(f.run({ evidence })).rejects.toThrow("could not be safely stopped");
+        await expect(f.reconcile(evidence)).rejects.toThrow("could not be safely stopped");
+        expect(f.dependencies.requestJson).not.toHaveBeenCalled();
         expect(f.dependencies.observeProcess).not.toHaveBeenCalled();
         expect(await f.own(() => fs.readFile(f.markerPath, "utf8"))).toBe(f.markerSource);
         expect(await f.own(() => fs.readFile(f.credentialPath))).toEqual(f.credentialBytes);

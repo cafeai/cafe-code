@@ -19,7 +19,9 @@ import type {
   DesktopProviderDaemonManagerShape,
   DesktopProviderDaemonSnapshot,
 } from "../backend/DesktopProviderDaemonManager.ts";
+import * as DesktopProviderDaemonManager from "../backend/DesktopProviderDaemonManager.ts";
 import {
+  ensureProviderDaemonWithStartupRecovery,
   fatalStartupCause,
   resolveDesktopBackendPort,
   resolveDesktopBackendHttpsPort,
@@ -169,6 +171,102 @@ function portProbeFixture(available: (port: number, host: string) => boolean) {
     findAvailablePort: () => Effect.die("desktop port policy owns its bounded scan"),
   };
   return { probes, service };
+}
+
+/**
+ * Exercise the real startup decision loop without acquiring any native daemon
+ * authority. Unrelated Electron APIs are tripwires; the two control paths are
+ * separately observable so Retry or Cancel cannot accidentally become Stop.
+ */
+function startupRecoveryFixture(input: {
+  readonly ensureRunning: Effect.Effect<ProviderDaemonClientConfig>;
+  readonly restartForStartup?: Effect.Effect<ProviderDaemonClientConfig>;
+  readonly showMessageBox: ElectronDialog.ElectronDialogShape["showMessageBox"];
+}) {
+  return Effect.gen(function* () {
+    const quitting = yield* Ref.make(false);
+    const backendReady = yield* Ref.make(false);
+    const shutdown = yield* DesktopLifecycle.DesktopShutdown;
+    const actions: string[] = [];
+    const dialogs: Array<Parameters<ElectronDialog.ElectronDialogShape["showMessageBox"]>[0]> = [];
+    const unexpected = () => Effect.die("startup recovery invoked an unrelated Electron API");
+    const restartForStartup = input.restartForStartup;
+    const manager: DesktopProviderDaemonManagerShape = {
+      ensureRunning: Effect.suspend(() => {
+        actions.push("ensure");
+        return input.ensureRunning;
+      }),
+      ...(restartForStartup === undefined
+        ? {}
+        : {
+            restartForStartup: (expectedRecoveryId) =>
+              Effect.suspend(() => {
+                assert.equal(expectedRecoveryId, "synthetic-startup-owner");
+                actions.push("restart");
+                return restartForStartup;
+              }),
+          }),
+      recover: () =>
+        Effect.sync(() => {
+          actions.push("recover");
+          return endpoint;
+        }),
+      currentConfig: Effect.succeed(Option.none()),
+      probeLiveness: Effect.succeed(Option.none()),
+      refreshHealth: Effect.succeed(Option.none()),
+      snapshot: Effect.sync(daemonSnapshot),
+      stop: Effect.sync(() => {
+        actions.push("stop");
+      }),
+    };
+    const app: ElectronApp.ElectronAppShape = {
+      metadata: unexpected(),
+      name: unexpected(),
+      whenReady: unexpected(),
+      // The shutdown waiter can wake here. The decision loop must still
+      // deliver the ordinary Quit before its own cancellation completes.
+      quit: Effect.yieldNow.pipe(
+        Effect.andThen(Effect.sync(() => actions.push("quit"))),
+        Effect.asVoid,
+      ),
+      exit: unexpected,
+      requestSingleInstanceLock: unexpected(),
+      relaunch: unexpected,
+      setPath: unexpected,
+      setName: unexpected,
+      setAboutPanelOptions: unexpected,
+      setAppUserModelId: unexpected,
+      setDesktopName: unexpected,
+      setDockIcon: unexpected,
+      appendCommandLineSwitch: unexpected,
+      on: unexpected,
+    };
+    const run = ensureProviderDaemonWithStartupRecovery.pipe(
+      Effect.provideService(DesktopProviderDaemonManager.DesktopProviderDaemonManager, manager),
+      Effect.provideService(DesktopState.DesktopState, { quitting, backendReady }),
+      Effect.provideService(ElectronApp.ElectronApp, app),
+      Effect.provideService(DesktopLifecycle.DesktopShutdown, shutdown),
+      Effect.provideService(ElectronDialog.ElectronDialog, {
+        pickFolder: unexpected,
+        confirm: unexpected,
+        showMessageBox: (options) =>
+          Effect.suspend(() => {
+            actions.push("dialog");
+            dialogs.push(options);
+            return input.showMessageBox(options);
+          }),
+        showErrorBox: unexpected,
+      }),
+      Effect.provideService(DesktopStartupWindow.DesktopStartupWindow, {
+        begin: unexpected(),
+        update: unexpected,
+        close: Effect.sync(() => {
+          actions.push("close-startup");
+        }),
+      }),
+    );
+    return { run, actions, dialogs, quitting, shutdown };
+  });
 }
 
 describe("DesktopApp source-build startup admission", () => {
@@ -436,6 +534,165 @@ describe("DesktopApp backend listener selection", () => {
       ]);
     }),
   );
+});
+
+describe("DesktopApp provider daemon startup recovery", () => {
+  const recoveryRequired = () =>
+    Effect.die(
+      new DesktopProviderDaemonManager.ProviderDaemonStartupRecoveryRequiredError({
+        phase: "compatibility",
+        recoveryId: "synthetic-startup-owner",
+      }),
+    );
+
+  for (const choice of [
+    { name: "Cancel", response: 0, supportsRestart: true },
+    { name: "an unknown native response", response: 99, supportsRestart: true },
+    { name: "an unoffered Restart response", response: 2, supportsRestart: false },
+  ]) {
+    it.effect(
+      `keeps ${choice.name} non-destructive and completes Quit after requesting shutdown`,
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const fixture = yield* startupRecoveryFixture({
+              ensureRunning: recoveryRequired(),
+              ...(choice.supportsRestart ? { restartForStartup: Effect.succeed(endpoint) } : {}),
+              showMessageBox: () =>
+                Effect.succeed({ response: choice.response, checkboxChecked: false }),
+            });
+            const result = yield* runDesktopStartupUntilShutdown({
+              startup: fixture.run,
+              awaitShutdown: fixture.shutdown.awaitRequest.pipe(
+                Effect.tap(() => Effect.sync(() => fixture.actions.push("shutdown-observed"))),
+              ),
+            });
+            assert.equal(result, "shutdown");
+            assert.equal(yield* Ref.get(fixture.quitting), true);
+            assert.deepStrictEqual(fixture.actions, [
+              "ensure",
+              "close-startup",
+              "dialog",
+              "shutdown-observed",
+              "quit",
+            ]);
+            assert.equal(fixture.dialogs[0]?.defaultId, 0);
+            assert.equal(fixture.dialogs[0]?.cancelId, 0);
+            assert.deepStrictEqual(
+              fixture.dialogs[0]?.buttons,
+              choice.supportsRestart
+                ? ["Cancel", "Retry connection", "Restart daemon"]
+                : ["Cancel", "Retry connection"],
+            );
+          }),
+        ).pipe(Effect.provide(DesktopLifecycle.layerShutdown)),
+    );
+  }
+
+  it.effect("retries only connection and returns the lease from the successful ensure", () =>
+    Effect.gen(function* () {
+      let attempts = 0;
+      const fixture = yield* startupRecoveryFixture({
+        ensureRunning: Effect.suspend(() => {
+          attempts += 1;
+          return attempts === 1 ? recoveryRequired() : Effect.succeed(endpoint);
+        }),
+        restartForStartup: Effect.succeed(endpoint),
+        showMessageBox: () => Effect.succeed({ response: 1, checkboxChecked: false }),
+      });
+      assert.strictEqual(yield* fixture.run, endpoint);
+      assert.deepStrictEqual(fixture.actions, ["ensure", "close-startup", "dialog", "ensure"]);
+      assert.equal(yield* Ref.get(fixture.quitting), false);
+    }).pipe(Effect.provide(DesktopLifecycle.layerShutdown)),
+  );
+
+  for (const quitDuringDialog of [false, true]) {
+    it.effect(
+      quitDuringDialog
+        ? "refuses a late Restart confirmation after native Quit retires startup"
+        : "waits for explicit Restart confirmation before returning the replacement lease",
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const entered = yield* Deferred.make<void>();
+            const response = yield* Deferred.make<{
+              readonly response: number;
+              readonly checkboxChecked: boolean;
+            }>();
+            // Register retirement before admitting the dialog fiber. A failed
+            // assertion cannot leave an owned pending confirmation behind.
+            yield* Effect.addFinalizer(() =>
+              Deferred.succeed(response, { response: 0, checkboxChecked: false }),
+            );
+            const replacement: ProviderDaemonClientConfig = {
+              ...endpoint,
+              token: "replacement-provider-token-000000000000000000000000",
+              leaseId: "replacement-provider-lease-00000000000000000000",
+            };
+            const fixture = yield* startupRecoveryFixture({
+              ensureRunning: recoveryRequired(),
+              restartForStartup: Effect.succeed(replacement),
+              showMessageBox: () =>
+                Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(response))),
+            });
+            const attempt = yield* fixture.run.pipe(Effect.exit, Effect.forkScoped);
+            yield* Deferred.await(entered);
+            assert.deepStrictEqual(fixture.actions, ["ensure", "close-startup", "dialog"]);
+            if (quitDuringDialog) yield* Ref.set(fixture.quitting, true);
+            yield* Deferred.succeed(response, { response: 2, checkboxChecked: false });
+            const result = yield* Fiber.join(attempt);
+            if (quitDuringDialog) {
+              assert.equal(result._tag, "Failure");
+              if (result._tag === "Failure")
+                assert.equal(Cause.hasInterruptsOnly(result.cause), true);
+              assert.deepStrictEqual(fixture.actions, ["ensure", "close-startup", "dialog"]);
+            } else {
+              assert.equal(result._tag, "Success");
+              if (result._tag === "Success") assert.strictEqual(result.value, replacement);
+              assert.deepStrictEqual(fixture.actions, [
+                "ensure",
+                "close-startup",
+                "dialog",
+                "restart",
+              ]);
+              assert.equal(yield* Ref.get(fixture.quitting), false);
+            }
+          }),
+        ).pipe(Effect.provide(DesktopLifecycle.layerShutdown)),
+    );
+  }
+
+  for (const failure of [
+    {
+      name: "an unrelated exception with matching refusal prose",
+      cause: () =>
+        Cause.die(
+          new Error("Existing provider daemon runtime build does not match this Cafe Code build."),
+        ),
+    },
+    {
+      name: "an untrusted tagged recovery lookalike",
+      cause: () =>
+        Cause.die({ _tag: "ProviderDaemonStartupRecoveryRequiredError", phase: "compatibility" }),
+    },
+    { name: "interruption", cause: () => Cause.interrupt(123) },
+  ]) {
+    it.effect(`passes ${failure.name} through without offering daemon controls`, () =>
+      Effect.gen(function* () {
+        const original = failure.cause();
+        const fixture = yield* startupRecoveryFixture({
+          ensureRunning: Effect.failCause(original),
+          restartForStartup: Effect.succeed(endpoint),
+          showMessageBox: () => Effect.die("unrelated failure must not offer startup recovery"),
+        });
+        const result = yield* fixture.run.pipe(Effect.exit);
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") assert.deepStrictEqual(result.cause, original);
+        assert.deepStrictEqual(fixture.actions, ["ensure"]);
+        assert.equal(yield* Ref.get(fixture.quitting), false);
+      }).pipe(Effect.provide(DesktopLifecycle.layerShutdown)),
+    );
+  }
 });
 
 describe("DesktopApp provider daemon bootstrap credentials", () => {

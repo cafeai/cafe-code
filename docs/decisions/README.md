@@ -29,6 +29,9 @@ in this directory.
 - [Provider daemon startup retirement](provider-daemon-startup-retirement.md):
   root-only cooperative self-retirement of supported incompatible POSIX owners,
   with exact acknowledgement, confirmed exit and preserved legacy-owner limits.
+- [Provider daemon startup recovery dialog](provider-daemon-startup-recovery-dialog.md):
+  explicit Cancel/reconnect/restart choices, exact-owner consent fences and
+  read-only post-exit reconciliation without replaying an uncertain stop.
 
 Related provider lifecycle decisions:
 

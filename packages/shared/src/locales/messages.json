@@ -1659,6 +1659,10 @@
     "message": "Cafe Code could not load dictation status.",
     "locations": ["apps/web/src/components/settings/DictationSettings.tsx:211"]
   },
+  "Cafe Code could not reconnect to its provider daemon.": {
+    "message": "Cafe Code could not reconnect to its provider daemon.",
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:307"]
+  },
   "Cafe Code could not update its private credential store.": {
     "message": "Cafe Code could not update its private credential store.",
     "locations": ["apps/web/src/components/settings/DictationSettings.tsx:98"]
@@ -1677,7 +1681,7 @@
   },
   "Cafe Code failed to start": {
     "message": "Cafe Code failed to start",
-    "locations": ["apps/desktop/src/app/DesktopApp.ts:237", "apps/desktop/src/main.ts:139"]
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:238", "apps/desktop/src/main.ts:139"]
   },
   "Cafe Code is not connected.": {
     "message": "Cafe Code is not connected.",
@@ -1841,6 +1845,8 @@
   "Cancel": {
     "message": "Cancel",
     "locations": [
+      "apps/desktop/src/app/DesktopApp.ts:316",
+      "apps/desktop/src/app/DesktopApp.ts:317",
       "apps/desktop/src/settings/DesktopRemoteCertificates.ts:170",
       "apps/desktop/src/updates/DesktopUpdates.ts:448",
       "apps/web/src/components/ProjectScriptsControl.tsx:508",
@@ -9566,6 +9572,10 @@
     "message": "Provider process stopped",
     "locations": ["apps/web/src/providerDiagnostic.ts:385"]
   },
+  "Provider runtime could not start": {
+    "message": "Provider runtime could not start",
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:304"]
+  },
   "Provider runtime ingestion": {
     "message": "Provider runtime ingestion",
     "locations": ["apps/web/src/components/settings/diagnosticsRuntimeViewModel.ts:26"]
@@ -10516,6 +10526,10 @@
       "apps/web/src/components/settings/ConnectionsSettings.tsx:2394"
     ]
   },
+  "Restart daemon": {
+    "message": "Restart daemon",
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:316"]
+  },
   "Restart provider": {
     "message": "Restart provider",
     "locations": ["apps/web/src/components/settings/ProviderInstanceCard.tsx:1566"]
@@ -10587,6 +10601,21 @@
       "apps/web/src/components/settings/DictationSettings.tsx:524",
       "apps/web/src/components/visualizations/VisualizationCard.tsx:965"
     ]
+  },
+  "Retry connection": {
+    "message": "Retry connection",
+    "locations": [
+      "apps/desktop/src/app/DesktopApp.ts:316",
+      "apps/desktop/src/app/DesktopApp.ts:317"
+    ]
+  },
+  "Retry connection leaves running work alone. A verified startup restart is not available for this daemon. Stop it from its owning Cafe Code instance, then retry the connection.": {
+    "message": "Retry connection leaves running work alone. A verified startup restart is not available for this daemon. Stop it from its owning Cafe Code instance, then retry the connection.",
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:312"]
+  },
+  "Retry connection leaves running work alone. Restart daemon stops its provider sessions and running work, then starts a new runtime. Cafe Code will verify the exact daemon before stopping it; if its identity or exit cannot be confirmed, it will preserve the process and recovery files.": {
+    "message": "Retry connection leaves running work alone. Restart daemon stops its provider sessions and running work, then starts a new runtime. Cafe Code will verify the exact daemon before stopping it; if its identity or exit cannot be confirmed, it will preserve the process and recovery files.",
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:309"]
   },
   "Retry delivery": {
     "message": "Retry delivery",
@@ -12064,7 +12093,7 @@
   },
   "Stage: {stage}": {
     "message": "Stage: {stage}",
-    "locations": ["apps/desktop/src/app/DesktopApp.ts:238"]
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:239"]
   },
   "Stale flags": {
     "message": "Stale flags",
@@ -12854,6 +12883,10 @@
   "The project was not opened.": {
     "message": "The project was not opened.",
     "locations": ["apps/web/src/components/chat/OpenInPicker.tsx:33"]
+  },
+  "The provider daemon could not be restarted.": {
+    "message": "The provider daemon could not be restarted.",
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:306"]
   },
   "The provider declined this request under its usage policy. Try rephrasing it.": {
     "message": "The provider declined this request under its usage policy. Try rephrasing it.",

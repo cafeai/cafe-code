@@ -11,6 +11,9 @@ blocks bootstrap, followed by explicit authorization to push dev without local t
 Source identity extension authority: the user's Debug startup failure reports and
 request to fix, run targeted checks, publish and rebuild before restarting.
 Supplements: [ownership-safe startup](provider-daemon-migration-startup.md).
+Manual recovery extension: [explicit startup recovery dialog](provider-daemon-startup-recovery-dialog.md)
+adds a separate user-confirmed post-exit reconciliation path. The automatic
+one-request/acknowledgement rules in this decision remain unchanged.
 Partially supersedes only the POSIX startup replacement limitation in
 [update retirement](provider-daemon-update-retirement.md); installation consent,
 adopted Stop restrictions and all native installer gates remain unchanged.

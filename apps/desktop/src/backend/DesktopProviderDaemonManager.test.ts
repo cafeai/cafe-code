@@ -6,6 +6,7 @@ import * as fs from "node:fs/promises";
 import {
   PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LEASES_PATH,
+  PROVIDER_DAEMON_RETIRE_PATH,
   ProviderDaemonBootstrap,
   ProviderDaemonHealth,
   ProviderDaemonLeaseResponse,
@@ -70,6 +71,20 @@ const encodeProviderDaemonLeaseResponseJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonLeaseResponse),
 );
 
+// The confirmation dialog transports this exact surfaced owner capability.
+// Never derive it from a snapshot PID, error text or a later failed attempt.
+function startupRecoveryId(result: Exit.Exit<unknown, unknown>): string {
+  if (Exit.isFailure(result)) {
+    const failure = Cause.squash(result.cause);
+    if (
+      failure instanceof DesktopProviderDaemonManager.ProviderDaemonStartupRecoveryRequiredError &&
+      typeof failure.recoveryId === "string"
+    )
+      return failure.recoveryId;
+  }
+  throw new Error("Expected an exact surfaced startup recovery identity");
+}
+
 class FakeProviderDaemonError extends Data.TaggedError("FakeProviderDaemonError")<{
   readonly cause: unknown;
 }> {}
@@ -131,6 +146,7 @@ const startFakeProviderDaemon = (
   failRequest?: (pathname: string) => boolean,
   proof: "matching" | "missing" | "foreign" = "matching",
   healthPatch: Partial<ProviderDaemonHealth> = {},
+  ipcSocketPath?: string,
 ): Effect.Effect<FakeProviderDaemon, FakeProviderDaemonError> =>
   Effect.tryPromise({
     try: () =>
@@ -150,6 +166,12 @@ const startFakeProviderDaemon = (
           if (failRequest?.(request.url ?? "")) {
             response.writeHead(503, { "content-type": "application/json" });
             response.end('{"error":"temporarily-unavailable"}\n');
+            return;
+          }
+          if (request.url === PROVIDER_DAEMON_RETIRE_PATH) {
+            // This synthetic old owner deliberately loses its control reply.
+            // The manager must retain the uncertain attempt, never replay it.
+            response.destroy();
             return;
           }
           response.writeHead(200, {
@@ -193,9 +215,9 @@ const startFakeProviderDaemon = (
           );
         });
         server.once("error", reject);
-        server.listen(0, "127.0.0.1", () => {
+        const listening = () => {
           const address = server.address();
-          if (typeof address !== "object" || address === null) {
+          if ((typeof address !== "object" || address === null) && address !== ipcSocketPath) {
             reject(
               new FakeProviderDaemonError({
                 cause: "fake provider daemon did not bind to TCP",
@@ -204,7 +226,7 @@ const startFakeProviderDaemon = (
             return;
           }
           resolve({
-            port: address.port,
+            port: typeof address === "object" && address !== null ? address.port : 0,
             close: Effect.promise(
               () =>
                 new Promise<void>((closeResolve) => {
@@ -212,7 +234,9 @@ const startFakeProviderDaemon = (
                 }),
             ),
           });
-        });
+        };
+        if (ipcSocketPath === undefined) server.listen(0, "127.0.0.1", listening);
+        else server.listen(ipcSocketPath, listening);
       }),
     catch: (cause) => new FakeProviderDaemonError({ cause }),
   });
@@ -706,7 +730,9 @@ describe("DesktopProviderDaemonManager", () => {
           yield* Effect.gen(function* () {
             const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
             yield* manager.configureCafeMcpPort!(3773);
-            assert.isTrue(Exit.isFailure(yield* manager.ensureRunning.pipe(Effect.exit)));
+            const refused = yield* manager.ensureRunning.pipe(Effect.exit);
+            const recoveryId = startupRecoveryId(refused);
+            assert.isTrue(Exit.isFailure(refused));
             const snapshot = yield* manager.snapshot;
             const message = Option.getOrThrow(snapshot.lastError);
             assert.include(message, scenario.label);
@@ -715,6 +741,13 @@ describe("DesktopProviderDaemonManager", () => {
             assert.notInclude(message, TEST_TOKEN);
             assert.notInclude(message, baseDir);
             assert.notInclude(message, oldVersion);
+            // Explicit confirmation cannot manufacture a retained native
+            // handle or cooperative protocol for these legacy/foreign owners.
+            // In particular, the dialog's restart action must not convert the
+            // observed PID into signal-based shutdown authority.
+            assert.isTrue(
+              Exit.isFailure(yield* manager.restartForStartup!(recoveryId).pipe(Effect.exit)),
+            );
             assert.equal(requests, 1);
             assert.equal(leases, 0);
             assert.equal(spawns, 0);
@@ -736,6 +769,130 @@ describe("DesktopProviderDaemonManager", () => {
         }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
     );
   }
+
+  if (process.platform !== "win32")
+    it.live(
+      "never replays an unknown automatic retirement after explicit restart confirmation",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+            directory: "/tmp",
+            prefix: "cafe-unknown-ack-",
+          });
+          const markerPath = `${baseDir}/provider-daemon.json`;
+          const credentialPath = `${baseDir}/provider-daemon-token.bin`;
+          const socketDirectory = `${baseDir}/provider-daemon-ipc`;
+          const socketPath = `${socketDirectory}/provider-daemon.sock`;
+          const backendEntryPath = `${baseDir}/backend.mjs`;
+          yield* writeSyntheticBackend(
+            fileSystem,
+            backendEntryPath,
+            "// inert replacement owner\n",
+          );
+          yield* fileSystem.makeDirectory(socketDirectory);
+          yield* fileSystem.chmod(socketDirectory, 0o700);
+          yield* fileSystem.writeFileString(credentialPath, TEST_TOKEN);
+          yield* fileSystem.chmod(credentialPath, 0o600);
+          let retireRequests = 0;
+          let leaseRequests = 0;
+          let spawns = 0;
+          const oldBuild = "a".repeat(64);
+          const fake = yield* startFakeProviderDaemon(
+            baseDir,
+            oldBuild,
+            (pathname) => {
+              if (pathname === PROVIDER_DAEMON_RETIRE_PATH) retireRequests += 1;
+              if (pathname === PROVIDER_DAEMON_LEASES_PATH) leaseRequests += 1;
+              return false;
+            },
+            "matching",
+            { transport: "ipc", retirementProtocol: 1 },
+            socketPath,
+          );
+          yield* Effect.addFinalizer(() => fake.close);
+          const marker = encodeProviderDaemonMarkerJson({
+            version: 2,
+            mode: "provider-daemon",
+            dataProfile: "production",
+            dataProfileId: dataProfileIdentity("production", baseDir),
+            pid: process.pid,
+            ppid: process.ppid,
+            protocolVersion: 1,
+            transport: "ipc",
+            socketPath,
+            httpBaseUrl: "http://provider-daemon.local",
+            credentialPath,
+            credentialEncrypted: false,
+            createdAt: "1970-01-01T00:00:00.000Z",
+            updatedAt: "1970-01-01T00:00:00.000Z",
+            appVersion: "0.0.0-test",
+            runtimeBuildId: oldBuild,
+          });
+          yield* fileSystem.writeFileString(markerPath, marker);
+          yield* fileSystem.chmod(markerPath, 0o600);
+          const signals = vi.spyOn(process, "kill").mockReturnValue(true);
+          const guardedSpawner: TestProcessSpawner = {
+            ...spawner,
+            spawn: () =>
+              Effect.sync(() => {
+                spawns += 1;
+              }).pipe(Effect.andThen(Effect.die("Synthetic replacement admission reached"))),
+          };
+          yield* Effect.gen(function* () {
+            const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
+            // Native IPC really drops the single retirement response. The old
+            // process remains present; no acknowledgement is manufactured.
+            const failed = yield* manager.ensureRunning.pipe(Effect.exit);
+            const recoveryId = startupRecoveryId(failed);
+            assert.isTrue(Exit.isFailure(failed));
+            assert.equal(retireRequests, 1);
+            assert.isTrue(
+              Exit.isFailure(yield* manager.restartForStartup!(recoveryId).pipe(Effect.exit)),
+            );
+            assert.isTrue(
+              Exit.isFailure(yield* manager.restartForStartup!(recoveryId).pipe(Effect.exit)),
+            );
+            assert.isTrue(Exit.isFailure(yield* manager.ensureRunning.pipe(Effect.exit)));
+            assert.equal(retireRequests, 1);
+            assert.equal(leaseRequests, 0);
+            assert.equal(spawns, 0);
+            assert.isTrue(signals.mock.calls.every(([, signal]) => signal === 0));
+            assert.equal(yield* fileSystem.readFileString(markerPath), marker);
+            assert.equal(yield* fileSystem.readFileString(credentialPath), TEST_TOKEN);
+            assert.isTrue(yield* fileSystem.exists(socketPath));
+
+            // A failed read-only confirmation is not a permanent UI lock. Once
+            // this exact test-owned peer has actually closed, another explicit
+            // confirmation may reconcile its absence without replaying its POST.
+            yield* fake.close;
+            signals.mockImplementation((pid, signal) => {
+              assert.equal(pid, process.pid);
+              assert.equal(signal, 0);
+              throw Object.assign(new Error("Synthetic exact process absence"), { code: "ESRCH" });
+            });
+            assert.isTrue(
+              Exit.isFailure(yield* manager.restartForStartup!(recoveryId).pipe(Effect.exit)),
+            );
+            // The fixture intercepts only the fresh child admission. It proves
+            // progress beyond reconciliation, without launching another process.
+            assert.equal(spawns, 1);
+            assert.equal(retireRequests, 1);
+            assert.equal(leaseRequests, 0);
+            assert.isTrue(signals.mock.calls.every(([, signal]) => signal === 0));
+            assert.equal(yield* fileSystem.readFileString(markerPath), marker);
+            assert.equal(yield* fileSystem.readFileString(credentialPath), TEST_TOKEN);
+          }).pipe(
+            Effect.provide(
+              makeManagerLayer(baseDir, markerPath, backendEntryPath, undefined, {
+                fileSystem,
+                spawner: guardedSpawner,
+              }),
+            ),
+          );
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
 
   // This is an actual POSIX socket/manager boundary. Windows exercises its
   // distinct guarded native-owner adapter in WindowsDesktopProviderDaemonManager.test.ts.
@@ -1056,12 +1213,17 @@ describe("DesktopProviderDaemonManager", () => {
           // fail. No real profile, injected process or private token is observed.
           if (phase === "publication") yield* fileSystem.makeDirectory(credentialPath);
           let spawnCalls = 0;
+          let manualRestart = false;
+          let running = true;
           const signals: string[] = [];
           const guardedSpawner: TestProcessSpawner = {
             ...spawner,
             spawn: (command) =>
               Effect.sync(() => {
                 spawnCalls += 1;
+                // Recovery may reach replacement admission, but this fixture
+                // never starts a second native child or provider runtime.
+                if (spawnCalls > 1) throw new Error("Synthetic replacement admission reached");
                 assert.equal(command._tag, "StandardCommand");
                 if (command._tag === "StandardCommand") {
                   assert.equal(command.options.stdout, "ignore");
@@ -1074,10 +1236,14 @@ describe("DesktopProviderDaemonManager", () => {
                   stderr: Stream.empty,
                   all: Stream.empty,
                   exitCode: Effect.never,
-                  isRunning: Effect.succeed(true),
+                  isRunning: Effect.sync(() => running),
                   kill: (options) => {
                     signals.push(options?.killSignal ?? "SIGTERM");
-                    return Effect.never;
+                    return manualRestart
+                      ? Effect.sync(() => {
+                          running = false;
+                        })
+                      : Effect.never;
                   },
                   stdin: Sink.drain,
                   getInputFd: () => Sink.drain,
@@ -1112,13 +1278,29 @@ describe("DesktopProviderDaemonManager", () => {
             assert.equal(Option.getOrNull(snapshot.pid), 1_234_567);
             assert.equal(
               Option.getOrNull(snapshot.lastError),
-              new DesktopProviderDaemonManager.ProviderDaemonTerminationUnconfirmedError().message,
+              "Provider daemon exit could not be confirmed; its process and recovery files were preserved. Retry connection.",
             );
             const retry = yield* manager.ensureRunning.pipe(Effect.exit);
             assert.equal(retry._tag, "Failure");
             assert.equal(spawnCalls, 1);
             assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
             assert.equal(yield* fileSystem.exists(markerPath), phase === "readiness");
+            if (phase === "readiness") {
+              // Only the first failure's exact dialog identity may re-admit
+              // control of the still-retained native handle. The later retry
+              // above is observation, not a new shutdown authorization.
+              const recoveryId = startupRecoveryId(result);
+              const pidSignals = vi.spyOn(process, "kill").mockReturnValue(true);
+              manualRestart = true;
+              const restarted = yield* manager.restartForStartup!(recoveryId).pipe(Effect.exit);
+              assert.isTrue(Exit.isFailure(restarted));
+              // The deliberate failure is at replacement admission after the
+              // exact original handle has confirmed closure, not retirement.
+              assert.equal(spawnCalls, 2);
+              assert.deepEqual(signals, ["SIGTERM", "SIGKILL", "SIGTERM"]);
+              assert.equal(pidSignals.mock.calls.length, 0);
+              assert.isFalse(running);
+            }
           }).pipe(
             Effect.provide(
               makeManagerLayer(baseDir, markerPath, backendEntryPath, undefined, {

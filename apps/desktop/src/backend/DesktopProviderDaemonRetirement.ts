@@ -53,11 +53,19 @@ const decodeResponse = Schema.decodeUnknownSync(
 interface FileEvidence {
   readonly dev: bigint;
   readonly ino: bigint;
+  readonly uid: bigint;
+  readonly gid: bigint;
+  readonly mode: bigint;
+  readonly size: bigint;
+  readonly mtimeNs: bigint;
+  readonly ctimeNs: bigint;
   readonly digest: string;
 }
 
 async function readPrivateFile(filePath: string, maximum: number, held?: fs.FileHandle) {
-  const handle = held ?? (await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW));
+  const handle =
+    held ??
+    (await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK));
   try {
     const before = await handle.stat({ bigint: true });
     if (
@@ -65,6 +73,7 @@ async function readPrivateFile(filePath: string, maximum: number, held?: fs.File
       before.nlink !== 1n ||
       before.uid !== BigInt(process.getuid!()) ||
       (before.mode & 0o077n) !== 0n ||
+      before.size < 0n ||
       before.size > BigInt(maximum)
     )
       throw new ProviderDaemonRetirementError();
@@ -82,12 +91,10 @@ async function readPrivateFile(filePath: string, maximum: number, held?: fs.File
     if (
       length > maximum ||
       BigInt(length) !== before.size ||
-      after.size !== before.size ||
-      after.mtimeNs !== before.mtimeNs ||
-      after.ctimeNs !== before.ctimeNs ||
-      named.dev !== before.dev ||
-      named.ino !== before.ino ||
-      named.nlink !== 1n ||
+      (["dev", "ino", "uid", "gid", "mode", "nlink", "size", "mtimeNs", "ctimeNs"] as const).some(
+        (field) => after[field] !== before[field] || named[field] !== before[field],
+      ) ||
+      !named.isFile() ||
       named.isSymbolicLink()
     )
       throw new ProviderDaemonRetirementError();
@@ -97,6 +104,12 @@ async function readPrivateFile(filePath: string, maximum: number, held?: fs.File
       evidence: {
         dev: before.dev,
         ino: before.ino,
+        uid: before.uid,
+        gid: before.gid,
+        mode: before.mode,
+        size: before.size,
+        mtimeNs: before.mtimeNs,
+        ctimeNs: before.ctimeNs,
         digest: crypto.createHash("sha256").update(bytes).digest("hex"),
       } satisfies FileEvidence,
     };
@@ -106,7 +119,163 @@ async function readPrivateFile(filePath: string, maximum: number, held?: fs.File
 }
 
 function sameEvidence(left: FileEvidence, right: FileEvidence) {
-  return left.dev === right.dev && left.ino === right.ino && left.digest === right.digest;
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.uid === right.uid &&
+    left.gid === right.gid &&
+    left.mode === right.mode &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs &&
+    left.digest === right.digest
+  );
+}
+
+interface StartupRetirementInput {
+  readonly endpoint: ProviderDaemonClientConfig;
+  readonly marker: ProviderDaemonMarker;
+  readonly markerPath: string;
+  readonly credentialPath: string;
+  readonly socketPath: string;
+  readonly decryptCredential: (bytes: Uint8Array) => Promise<string>;
+}
+
+/** Opaque, live controller evidence. No credential or filesystem identity is public. */
+export interface ProviderDaemonStartupRetirementEvidence {
+  readonly _tag: "ProviderDaemonStartupRetirementEvidence";
+}
+
+interface StartupRetirementRecord {
+  readonly input: StartupRetirementInput;
+  readonly marker: FileEvidence;
+  readonly credential: FileEvidence;
+  readonly parent: {
+    readonly dev: bigint;
+    readonly ino: bigint;
+    readonly uid: bigint;
+    readonly gid: bigint;
+    readonly mode: bigint;
+  };
+}
+
+// A structural lookalike cannot mint a captured owner. These records are live
+// manager capabilities only; none is persisted, logged or hydrated from JSON.
+const startupRetirementEvidence = new WeakMap<
+  ProviderDaemonStartupRetirementEvidence,
+  StartupRetirementRecord
+>();
+
+async function privateSocketParent(socketPath: string) {
+  const parent = await fs.lstat(path.dirname(socketPath), { bigint: true });
+  if (
+    !parent.isDirectory() ||
+    parent.isSymbolicLink() ||
+    parent.uid !== BigInt(process.getuid!()) ||
+    (parent.mode & 0o077n) !== 0n
+  )
+    throw new ProviderDaemonRetirementError();
+  return parent;
+}
+
+/** Capture BEFORE the first retirement POST and before asking the human.
+ * Only exact existing private bytes and namespace can survive that await. */
+export async function captureProviderDaemonStartupRetirementEvidence(
+  input: StartupRetirementInput & { readonly signal: AbortSignal },
+): Promise<ProviderDaemonStartupRetirementEvidence> {
+  try {
+    input.signal.throwIfAborted();
+    if (
+      input.marker.transport !== "ipc" ||
+      input.endpoint.transport !== "ipc" ||
+      input.marker.socketPath !== input.socketPath ||
+      input.endpoint.socketPath !== input.socketPath ||
+      (input.marker.credentialPath ?? input.credentialPath) !== input.credentialPath
+    )
+      throw new ProviderDaemonRetirementError();
+    const marker = await readPrivateFile(input.markerPath, 65_536);
+    const credential = await readPrivateFile(input.credentialPath, 8_192);
+    if (encodeMarker(decodeMarker(marker.bytes.toString("utf8"))) !== encodeMarker(input.marker))
+      throw new ProviderDaemonRetirementError();
+    const token =
+      input.marker.credentialEncrypted === false
+        ? credential.bytes.toString("utf8")
+        : await input.decryptCredential(credential.bytes);
+    const actual = Buffer.from(token, "utf8"),
+      expected = Buffer.from(input.endpoint.token, "utf8");
+    if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected))
+      throw new ProviderDaemonRetirementError();
+    const parent = await privateSocketParent(input.socketPath);
+    // Keyring decryption may await. Do not publish a capability if either
+    // recovery file or the private socket namespace changed during that await.
+    const markerAfter = await readPrivateFile(input.markerPath, 65_536);
+    const credentialAfter = await readPrivateFile(input.credentialPath, 8_192);
+    const parentAfter = await privateSocketParent(input.socketPath);
+    if (
+      !sameEvidence(marker.evidence, markerAfter.evidence) ||
+      !sameEvidence(credential.evidence, credentialAfter.evidence) ||
+      parentAfter.dev !== parent.dev ||
+      parentAfter.ino !== parent.ino ||
+      parentAfter.uid !== parent.uid ||
+      parentAfter.gid !== parent.gid ||
+      parentAfter.mode !== parent.mode
+    )
+      throw new ProviderDaemonRetirementError();
+    input.signal.throwIfAborted();
+    const evidence: ProviderDaemonStartupRetirementEvidence = Object.freeze({
+      _tag: "ProviderDaemonStartupRetirementEvidence",
+    });
+    startupRetirementEvidence.set(evidence, {
+      input: {
+        endpoint: { ...input.endpoint },
+        marker: { ...input.marker },
+        markerPath: input.markerPath,
+        credentialPath: input.credentialPath,
+        socketPath: input.socketPath,
+        decryptCredential: input.decryptCredential,
+      },
+      marker: marker.evidence,
+      credential: credential.evidence,
+      parent: {
+        dev: parent.dev,
+        ino: parent.ino,
+        uid: parent.uid,
+        gid: parent.gid,
+        mode: parent.mode,
+      },
+    });
+    return evidence;
+  } catch {
+    throw new ProviderDaemonRetirementError();
+  }
+}
+
+/** Read-only revalidation; this grants no HTTP, signalling or spawn authority. */
+export async function verifyProviderDaemonStartupRetirementEvidence(
+  evidence: ProviderDaemonStartupRetirementEvidence,
+  signal: AbortSignal,
+): Promise<void> {
+  try {
+    const record = startupRetirementEvidence.get(evidence);
+    if (record === undefined) throw new ProviderDaemonRetirementError();
+    signal.throwIfAborted();
+    const marker = await readPrivateFile(record.input.markerPath, 65_536);
+    const credential = await readPrivateFile(record.input.credentialPath, 8_192);
+    const parent = await privateSocketParent(record.input.socketPath);
+    if (
+      !sameEvidence(record.marker, marker.evidence) ||
+      !sameEvidence(record.credential, credential.evidence) ||
+      parent.dev !== record.parent.dev ||
+      parent.ino !== record.parent.ino ||
+      parent.uid !== record.parent.uid ||
+      parent.gid !== record.parent.gid ||
+      parent.mode !== record.parent.mode
+    )
+      throw new ProviderDaemonRetirementError();
+    signal.throwIfAborted();
+  } catch {
+    throw new ProviderDaemonRetirementError();
+  }
 }
 
 /** Runtime incompatibility is allowed only for retirement, never for adoption. */
@@ -154,22 +323,17 @@ export function providerDaemonRetirementRequest(
  * control to arbitrary standalone callers or ordinary backend leases. It asks
  * the authenticated old owner to stop itself, never signals its observed PID.
  */
-export async function retireProviderDaemonForStartup(
-  input: {
-    readonly endpoint: ProviderDaemonClientConfig;
-    readonly marker: ProviderDaemonMarker;
-    readonly request: ProviderDaemonRetirementRequest;
-    readonly markerPath: string;
-    readonly credentialPath: string;
-    readonly socketPath: string;
+async function holdStartupRetirementNamespace(
+  input: StartupRetirementInput & {
+    readonly request?: ProviderDaemonRetirementRequest;
+    readonly evidence?: ProviderDaemonStartupRetirementEvidence;
     readonly signal: AbortSignal;
-    /** Decrypt only the exact held private credential bytes, never a path reread. */
-    readonly decryptCredential: (bytes: Uint8Array) => Promise<string>;
   },
   dependencies: {
     readonly requestJson?: typeof requestProviderDaemonJson;
     readonly observeProcess?: typeof observeProviderDaemonProcess;
-  } = {},
+  },
+  reconcileOnly: boolean,
 ): Promise<{
   readonly verifyBeforeSpawn: () => Promise<void>;
   readonly close: () => Promise<void>;
@@ -191,61 +355,90 @@ export async function retireProviderDaemonForStartup(
   input.signal.addEventListener("abort", onAbort, { once: true });
   try {
     input.signal.throwIfAborted();
-    markerHandle = await fs.open(input.markerPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const evidence =
+      input.evidence ?? (await captureProviderDaemonStartupRetirementEvidence(input));
+    const captured = startupRetirementEvidence.get(evidence);
+    if (
+      captured === undefined ||
+      encodeMarker(captured.input.marker) !== encodeMarker(input.marker) ||
+      captured.input.markerPath !== input.markerPath ||
+      captured.input.credentialPath !== input.credentialPath ||
+      captured.input.socketPath !== input.socketPath ||
+      captured.input.endpoint.transport !== input.endpoint.transport ||
+      captured.input.endpoint.httpBaseUrl !== input.endpoint.httpBaseUrl ||
+      captured.input.endpoint.socketPath !== input.endpoint.socketPath ||
+      captured.input.endpoint.token !== input.endpoint.token
+    )
+      throw new ProviderDaemonRetirementError();
+    markerHandle = await fs.open(
+      input.markerPath,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
     input.signal.throwIfAborted();
     credentialHandle = await fs.open(
       input.credentialPath,
-      constants.O_RDONLY | constants.O_NOFOLLOW,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
     input.signal.throwIfAborted();
     const markerFile = await readPrivateFile(input.markerPath, 65_536, markerHandle);
     const credentialFile = await readPrivateFile(input.credentialPath, 8_192, credentialHandle);
     if (
+      !sameEvidence(captured.marker, markerFile.evidence) ||
+      !sameEvidence(captured.credential, credentialFile.evidence)
+    )
+      throw new ProviderDaemonRetirementError();
+    if (
       encodeMarker(decodeMarker(markerFile.bytes.toString("utf8"))) !== encodeMarker(input.marker)
     )
       throw new ProviderDaemonRetirementError();
-    const heldToken =
-      input.marker.credentialEncrypted === false
-        ? credentialFile.bytes.toString("utf8")
-        : await input.decryptCredential(credentialFile.bytes);
-    const actualToken = Buffer.from(heldToken, "utf8");
-    const expectedToken = Buffer.from(input.endpoint.token, "utf8");
-    if (
-      actualToken.length !== expectedToken.length ||
-      !crypto.timingSafeEqual(actualToken, expectedToken)
-    )
-      throw new ProviderDaemonRetirementError();
-    const parent = await fs.lstat(path.dirname(input.socketPath), { bigint: true });
+    // Capture already decrypted and constant-time authenticated these exact
+    // held bytes against this exact endpoint. Equality above retains that
+    // authority without opening another keyring operation across an await.
+    const parent = await privateSocketParent(input.socketPath);
     if (
       !parent.isDirectory() ||
       parent.isSymbolicLink() ||
       parent.uid !== BigInt(process.getuid!()) ||
-      (parent.mode & 0o077n) !== 0n
+      (parent.mode & 0o077n) !== 0n ||
+      parent.dev !== captured.parent.dev ||
+      parent.ino !== captured.parent.ino ||
+      parent.gid !== captured.parent.gid ||
+      parent.mode !== captured.parent.mode
     )
       throw new ProviderDaemonRetirementError();
     const signal = AbortSignal.any([input.signal, AbortSignal.timeout(18_000)]);
     signal.throwIfAborted();
     // Exactly one request. A timeout, malformed response or unknown ACK never
     // authorizes replay, evidence deletion or a competing replacement.
-    const response = await (dependencies.requestJson ?? requestProviderDaemonJson)(
-      input.endpoint,
-      PROVIDER_DAEMON_RETIRE_PATH,
-      {
-        method: "POST",
-        body: encodeRequest(input.request),
-        timeoutMs: 5_000,
-        maxResponseBytes: 2_048,
-        signal,
-      },
-    );
-    if (response.statusCode !== 200) throw new ProviderDaemonRetirementError();
-    const receipt = decodeResponse(response.body);
-    for (const key of Object.keys(input.request) as (keyof ProviderDaemonRetirementRequest)[]) {
-      if (receipt[key] !== input.request[key]) throw new ProviderDaemonRetirementError();
+    if (!reconcileOnly) {
+      const request = input.request;
+      if (request === undefined) throw new ProviderDaemonRetirementError();
+      const response = await (dependencies.requestJson ?? requestProviderDaemonJson)(
+        input.endpoint,
+        PROVIDER_DAEMON_RETIRE_PATH,
+        {
+          method: "POST",
+          body: encodeRequest(request),
+          timeoutMs: 5_000,
+          maxResponseBytes: 2_048,
+          signal,
+        },
+      );
+      if (response.statusCode !== 200) throw new ProviderDaemonRetirementError();
+      const receipt = decodeResponse(response.body);
+      for (const key of Object.keys(request) as (keyof ProviderDaemonRetirementRequest)[]) {
+        if (receipt[key] !== request[key]) throw new ProviderDaemonRetirementError();
+      }
     }
     const observe = dependencies.observeProcess ?? observeProviderDaemonProcess;
-    while (observe(input.marker.pid) !== "exited") {
-      await setTimeout(100, undefined, { signal });
+    if (reconcileOnly) {
+      // Human confirmation does not turn an uncertain ACK into permission to
+      // replay its POST. Reconciliation is a single conclusive absence check.
+      if (observe(input.marker.pid) !== "exited") throw new ProviderDaemonRetirementError();
+    } else {
+      while (observe(input.marker.pid) !== "exited") {
+        await setTimeout(100, undefined, { signal });
+      }
     }
     const checkNamespace = async () => {
       input.signal.throwIfAborted();
@@ -265,6 +458,8 @@ export async function retireProviderDaemonForStartup(
         parentNow.dev !== parent.dev ||
         parentNow.ino !== parent.ino ||
         parentNow.uid !== BigInt(process.getuid!()) ||
+        parentNow.gid !== parent.gid ||
+        parentNow.mode !== parent.mode ||
         (parentNow.mode & 0o077n) !== 0n
       )
         throw new ProviderDaemonRetirementError();
@@ -300,4 +495,33 @@ export async function retireProviderDaemonForStartup(
   } finally {
     if (!transferred) await close();
   }
+}
+
+/** Exactly one authenticated request; callers retain the opaque pre-POST
+ * evidence if its acknowledgement becomes unknown. */
+export function retireProviderDaemonForStartup(
+  input: StartupRetirementInput & {
+    readonly request: ProviderDaemonRetirementRequest;
+    readonly evidence?: ProviderDaemonStartupRetirementEvidence;
+    readonly signal: AbortSignal;
+  },
+  dependencies: {
+    readonly requestJson?: typeof requestProviderDaemonJson;
+    readonly observeProcess?: typeof observeProviderDaemonProcess;
+  } = {},
+) {
+  return holdStartupRetirementNamespace(input, dependencies, false);
+}
+
+/** Explicit startup recovery only: no request, PID signal, stale cleanup or
+ * timer retry. Exact pre-POST files, ESRCH and the old socket's absence are all
+ * required; the returned guard rechecks them immediately before fresh spawn. */
+export function reconcileProviderDaemonStartupRetirement(
+  evidence: ProviderDaemonStartupRetirementEvidence,
+  signal: AbortSignal,
+  dependencies: { readonly observeProcess?: typeof observeProviderDaemonProcess } = {},
+) {
+  const record = startupRetirementEvidence.get(evidence);
+  if (record === undefined) return Promise.reject(new ProviderDaemonRetirementError());
+  return holdStartupRetirementNamespace({ ...record.input, evidence, signal }, dependencies, true);
 }

@@ -8,6 +8,7 @@ import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Random from "effect/Random";
@@ -254,6 +255,98 @@ export const fatalStartupCause = <E>(stage: string, cause: Cause.Cause<E>) =>
     : handleFatalStartupError(stage, Cause.pretty(cause)).pipe(
         Effect.andThen(Effect.failCause(cause)),
       );
+
+/** A startup refusal is not a reason to make the user quit and hunt for a
+ * detached process. Keep the startup attempt alive while the native dialog
+ * obtains an explicit decision. Only the manager's typed recovery refusal
+ * opens this surface; arbitrary exception text never selects a control path.
+ *
+ * Restart is intentionally delegated back to the manager after the dialog
+ * await. It must re-admit the exact profile/marker/credential/native owner;
+ * the user's confirmation is intent, not proof that an observed PID is safe
+ * to signal. Retry only reconnects and never silently becomes Restart. */
+export const ensureProviderDaemonWithStartupRecovery = Effect.gen(function* () {
+  const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
+  const dialog = yield* ElectronDialog.ElectronDialog;
+  const state = yield* DesktopState.DesktopState;
+  const app = yield* ElectronApp.ElectronApp;
+  const shutdown = yield* DesktopLifecycle.DesktopShutdown;
+  let operation = manager.ensureRunning;
+  let recoveryDialogOpened = false;
+  let restartFailed = false;
+  let recoveryId: string | undefined;
+
+  while (true) {
+    if (yield* Ref.get(state.quitting)) return yield* Effect.interrupt;
+    const result = yield* Effect.exit(operation);
+    if (Exit.isSuccess(result)) return result.value;
+    if (Cause.hasInterrupts(result.cause)) return yield* Effect.failCause(result.cause);
+    const reason = result.cause.reasons.length === 1 ? result.cause.reasons[0] : undefined;
+    const recoveryError =
+      reason !== undefined &&
+      Cause.isDieReason(reason) &&
+      reason.defect instanceof
+        DesktopProviderDaemonManager.ProviderDaemonStartupRecoveryRequiredError
+        ? reason.defect
+        : undefined;
+    if (!recoveryDialogOpened && recoveryError === undefined)
+      return yield* Effect.failCause(result.cause);
+    if (recoveryError !== undefined) recoveryId = recoveryError.recoveryId;
+
+    if (!recoveryDialogOpened) {
+      const startupWindow = yield* Effect.serviceOption(DesktopStartupWindow.DesktopStartupWindow);
+      if (Option.isSome(startupWindow)) yield* startupWindow.value.close;
+      recoveryDialogOpened = true;
+    }
+    const canRestart = manager.restartForStartup !== undefined && recoveryId !== undefined;
+    const response = yield* dialog.showMessageBox({
+      type: "warning",
+      title: uiText("Provider runtime could not start"),
+      message: restartFailed
+        ? uiText("The provider daemon could not be restarted.")
+        : uiText("Cafe Code could not reconnect to its provider daemon."),
+      detail: canRestart
+        ? uiText(
+            "Retry connection leaves running work alone. Restart daemon stops its provider sessions and running work, then starts a new runtime. Cafe Code will verify the exact daemon before stopping it; if its identity or exit cannot be confirmed, it will preserve the process and recovery files.",
+          )
+        : uiText(
+            "Retry connection leaves running work alone. A verified startup restart is not available for this daemon. Stop it from its owning Cafe Code instance, then retry the connection.",
+          ),
+      buttons: canRestart
+        ? [uiText("Cancel"), uiText("Retry connection"), uiText("Restart daemon")]
+        : [uiText("Cancel"), uiText("Retry connection")],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    // Native quit can retire startup while a modal dialog is open. A late
+    // response must not restart provider work behind the closing application.
+    if (yield* Ref.get(state.quitting)) return yield* Effect.interrupt;
+    if (response.response === 1) {
+      operation = manager.ensureRunning;
+      restartFailed = false;
+      continue;
+    }
+    if (
+      response.response === 2 &&
+      manager.restartForStartup !== undefined &&
+      recoveryId !== undefined
+    ) {
+      operation = manager.restartForStartup(recoveryId);
+      restartFailed = true;
+      continue;
+    }
+    // Deliver Quit before the shutdown race can interrupt its own handoff.
+    // Cancellation is not a fatal bootstrap error and must not open a second
+    // error dialog, stop another runtime or erase recovery evidence.
+    yield* Effect.gen(function* () {
+      yield* Ref.set(state.quitting, true);
+      yield* shutdown.request;
+      yield* app.quit;
+    }).pipe(Effect.uninterruptible);
+    return yield* Effect.interrupt;
+  }
+});
 
 /**
  * A user quit must cancel pending readiness, rather than waiting for startup
@@ -535,7 +628,9 @@ const bootstrap = Effect.gen(function* () {
   if (providerDaemonManager.configureCafeMcpPort) {
     yield* providerDaemonManager.configureCafeMcpPort(backendConfig.port);
   }
-  const providerDaemonReadyFiber = yield* Effect.forkScoped(providerDaemonManager.ensureRunning);
+  const providerDaemonReadyFiber = yield* Effect.forkScoped(
+    ensureProviderDaemonWithStartupRecovery,
+  );
   if (serverExposureState.endpointUrl) {
     yield* logBootstrapInfo("bootstrap enabled network access", {
       endpointUrl: serverExposureState.endpointUrl,
