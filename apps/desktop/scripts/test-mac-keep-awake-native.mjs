@@ -234,13 +234,14 @@ try {
       },
     );
     await test(
-      "a refused modern display request falls back without dropping work",
+      "a refused modern display request falls back and restores the shared lid bit without dropping work",
       { timeout: 18000 },
       async (t) => {
         const path = await mockDirectory(t);
         await writeFile(join(path, "lid-state"), "closed", { mode: 0o600 });
         await writeFile(join(path, "external-displays"), "no", { mode: 0o600 });
         await writeFile(join(path, "display-primary-refused"), "yes", { mode: 0o600 });
+        await writeFile(join(path, "display-resets-lid"), "yes", { mode: 0o600 });
         const instance = launch(t, ["--mock-root", path], true);
         await instance.event("active");
         assert.equal((await instance.event("test-display")).action, "sleep");

@@ -240,6 +240,9 @@ private final class LidDisplay {
         defer { close(fd) }
         var byte: UInt8 = action == "sleep" ? 48 : 49
         guard pwrite(fd, &byte, 1, 0) == 1 else { throw Refusal("native-refused") }
+        if action == "sleep", mockValue("display-resets-lid") == "yes" {
+            try power.setLid(false)
+        }
         emit(["event": "test-display", "action": action])
     }
     #endif
