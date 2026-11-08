@@ -1,6 +1,6 @@
 # Browser test input isolation
 
-Last updated: 2026-10-28 17:40:13 JST (UTC+0900)
+Last updated: 2026-11-08 21:51:31 JST (UTC+0900)
 
 Current suite design is governed by [Test suite policy](test-suite-policy.md).
 The October 16 overhaul retires the exact fluid inventory, sample commit-chart
@@ -106,6 +106,23 @@ initial-load witness, stale scroll, unknown measurement and invalid range even
 when other geometry looks ready. Do not add sleeps, retry input, force dimensions,
 relax tolerances or change production scrolling. These observations demonstrate
 an incomplete precondition, not the precise cause of an archived 48px assertion.
+
+The scroll-control dismissal case uses the same exact initial-load boundary
+and mounted rows' logical ownership and measured sizes before its original end
+preparation. Keep the original physical-tail assertion after that preparation:
+LegendList may retain a requested end target beyond the browser's clamped
+maximum, so public/native offset equality is not a valid following-tail gate.
+A visible last row and a zero tail distance alone can precede bootstrap
+completion. Keep every original wheel gesture, hide/review/growth/shrink check
+and deadline; this precondition never replays input or repairs an offset.
+
+That case registers public test-signal retirement before render. Shared
+afterEach joins the same owner, including late render/rerender and native
+actions, before exact unmount and host removal. Retired continuations cannot
+dispatch the second CDP operation or enter another action. The retained CI
+assertion reported a zero review distance without load or wheel-delivery
+receipts; it does not prove the historical cause, and a local baseline pass
+does not erase that failure.
 
 ## Ordinary-motion fluid lifecycle ownership
 

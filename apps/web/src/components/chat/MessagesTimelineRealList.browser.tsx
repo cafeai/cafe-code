@@ -19,7 +19,7 @@ import {
 import type { LegendListRef } from "@legendapp/list/react";
 import * as Schema from "effect/Schema";
 import { createRef, useCallback, useState, type ComponentProps } from "react";
-import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi, type TestContext } from "vitest";
 import { render } from "vitest-browser-react";
 import { cdp, page } from "vitest/browser";
 
@@ -41,6 +41,85 @@ const decodeGeneratedVisualizationReference = Schema.decodeUnknownSync(
   GeneratedVisualizationReference,
 );
 const ignore = () => undefined;
+
+let activeScrollControlOwner: { cleanup: () => Promise<void> } | undefined;
+
+afterEach(async () => {
+  // The shared hook precedes onTestFinished. Join the same exact fixture before
+  // the next case can reuse its page; a timed-out body's finally is not enough.
+  await activeScrollControlOwner?.cleanup();
+});
+
+function createScrollControlOwner(context: TestContext) {
+  if (activeScrollControlOwner) throw new Error("A scroll-control fixture is already owned.");
+  const signal = context.signal;
+  const pending = new Set<Promise<unknown>>();
+  let retired = false;
+  let host: HTMLElement | undefined;
+  let rendering: ReturnType<typeof render> | undefined;
+  let completion: Promise<void> | undefined;
+  const assertActive = () => {
+    if (retired || signal.aborted) throw new Error("The exact scroll-control fixture was retired.");
+  };
+  const own = async <T,>(start: () => PromiseLike<T>): Promise<T> => {
+    assertActive();
+    const original = Promise.resolve(start());
+    pending.add(original);
+    try {
+      const value = await original;
+      assertActive();
+      return value;
+    } finally {
+      pending.delete(original);
+    }
+  };
+  const cleanup = () => {
+    if (completion) return completion;
+    retired = true;
+    signal.removeEventListener("abort", onAbort);
+    completion = Promise.resolve().then(async () => {
+      // Retirement fences admission synchronously. Keep each original native
+      // operation and even a late render's target alive until they have joined.
+      while (pending.size) await Promise.allSettled([...pending]);
+      const view = await rendering?.catch(() => undefined);
+      await view?.unmount();
+      host?.remove();
+      if (activeScrollControlOwner?.cleanup === cleanup) activeScrollControlOwner = undefined;
+    });
+    return completion;
+  };
+  const onAbort = () => {
+    void cleanup().catch(() => undefined);
+  };
+  activeScrollControlOwner = { cleanup };
+  context.onTestFinished(cleanup);
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) onAbort();
+  return {
+    assertActive,
+    isActive: () => !retired && !signal.aborted,
+    own,
+    cleanup,
+    waitFor(check: () => void) {
+      return own(() =>
+        vi.waitFor(() => {
+          assertActive();
+          check();
+        }),
+      );
+    },
+    setHost(value: HTMLElement) {
+      host = value;
+      assertActive();
+    },
+    setRendering(value: ReturnType<typeof render>) {
+      // Retain an admitted render before checking retirement, so its eventual
+      // screen cannot escape this owner's exact unmount after a hard timeout.
+      rendering = value;
+      assertActive();
+    },
+  };
+}
 
 function messages(scope: string, count = 40): TimelineEntries {
   return Array.from({ length: count }, (_, index) => ({
@@ -295,7 +374,12 @@ function isProposalReviewBaselineReady(
 }
 
 /** Native wheel input only: never change a reused worker's device/media policy. */
-async function reviewWithNativeWheel(scroller: HTMLElement, deltaY = -500) {
+async function reviewWithNativeWheel(
+  scroller: HTMLElement,
+  deltaY = -500,
+  assertActive: () => void = ignore,
+) {
+  assertActive();
   const bounds = scroller.getBoundingClientRect();
   let x = bounds.left + bounds.width / 2;
   let y = bounds.top + Math.min(bounds.height / 2, 100);
@@ -307,7 +391,9 @@ async function reviewWithNativeWheel(scroller: HTMLElement, deltaY = -500) {
     y = rect.top + (y + element.clientTop) * (rect.height / element.offsetHeight);
     frame = frame.ownerDocument.defaultView?.frameElement ?? null;
   }
+  assertActive();
   await cdp().send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+  assertActive();
   await cdp().send("Input.dispatchMouseEvent", {
     type: "mouseWheel",
     x,
@@ -315,6 +401,7 @@ async function reviewWithNativeWheel(scroller: HTMLElement, deltaY = -500) {
     deltaX: 0,
     deltaY,
   });
+  assertActive();
 }
 
 function readMessage(host: HTMLElement, id: string): HTMLElement {
@@ -353,39 +440,103 @@ async function expectTail(
 }
 
 describe("MessagesTimeline with real LegendList", () => {
-  it("hides the scroll control without moving review and restores it only after native bottom then review", async () => {
+  it("hides the scroll control without moving review and restores it only after native bottom then review", async (context) => {
+    const owner = createScrollControlOwner(context);
     const scope = "scroll-control-review";
+    owner.assertActive();
     const host = createHost();
+    owner.setHost(host);
     const listRef = createRef<LegendListRef>();
-    const view = await render(
-      <TimelineFixture entries={messages(scope)} listRef={listRef} scope={scope} scrollControl />,
-      { container: host },
-    );
+    let loadedScroller: HTMLElement | undefined;
+    const observeInitialLoad: NonNullable<TimelineProps["onDebugScrollEvent"]> = (event) => {
+      if (
+        owner.isActive() &&
+        event.source === "MessagesTimeline" &&
+        event.activeThreadId === ThreadId.make(scope) &&
+        event.reason === "initial-list-load"
+      )
+        loadedScroller = listRef.current?.getScrollableNode() ?? undefined;
+    };
     try {
-      await expectTail(host, listRef, `${scope}-message-39`);
-      await listRef.current!.scrollToEnd({ animated: false });
+      const view = await owner.own(() => {
+        const rendering = render(
+          <TimelineFixture
+            entries={messages(scope)}
+            listRef={listRef}
+            scope={scope}
+            scrollControl
+            onDebugScrollEvent={observeInitialLoad}
+          />,
+          { container: host },
+        );
+        owner.setRendering(rendering);
+        return rendering;
+      });
+      await owner.own(() => expectTail(host, listRef, `${scope}-message-39`));
+      // Physical tail pixels can precede LegendList's supported bootstrap
+      // completion, during which it still owns its initial target. Admit the
+      // original review gesture only after this exact list's public load and
+      // actual mounted-size/identity receipts, never after a guessed frame count.
+      await owner.waitFor(() => {
+        const observation = readProposalListObservation(
+          host,
+          listRef,
+          loadedScroller !== undefined,
+        );
+        expect(loadedScroller).toBe(readScroller(listRef));
+        expect(observation.initialLoadObserved).toBe(true);
+        // LegendList can retain an end target above the browser's clamped
+        // maximum. The original physical-tail assertion below owns that
+        // boundary; equality with the requested public target is not readiness.
+        expect(observation.startBuffered).toBeGreaterThanOrEqual(0);
+        expect(observation.start).toBeGreaterThanOrEqual(observation.startBuffered);
+        expect(observation.end).toBeGreaterThanOrEqual(observation.start);
+        expect(observation.endBuffered).toBeGreaterThanOrEqual(observation.end);
+        expect(observation.endBuffered).toBeLessThan(observation.dataLength);
+        for (let index = observation.startBuffered; index <= observation.endBuffered; index += 1) {
+          const row = observation.mounted.find((mounted) => mounted.index === index);
+          expect(row).toBeDefined();
+          expect(row!.rowIdentityMatches).toBe(true);
+          expect(row!.measuredSize).toBeGreaterThan(0);
+          expect(row!.knownSize).toBe(row!.measuredSize);
+        }
+      });
+      await owner.own(() => listRef.current!.scrollToEnd({ animated: false }));
       const scroller = readScroller(listRef);
-      await vi.waitFor(() => expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8));
-      await reviewWithNativeWheel(scroller);
-      await vi.waitFor(() => expect(tailDistance(scroller)).toBeGreaterThan(100));
+      const assertScrollerActive = () => {
+        owner.assertActive();
+        if (!scroller.isConnected || listRef.current?.getScrollableNode() !== scroller)
+          throw new Error("The exact scroll-control input target was retired.");
+      };
+      await owner.waitFor(() => expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8));
+      await owner.own(() => reviewWithNativeWheel(scroller, -500, assertScrollerActive));
+      await owner.waitFor(() => expect(tailDistance(scroller)).toBeGreaterThan(100));
       const jump = page.getByRole("button", { name: "Scroll to bottom", exact: true });
-      await expect.element(jump).toBeVisible();
-      await jump.hover();
+      await owner.own(() => expect.element(jump).toBeVisible());
+      await owner.own(() => jump.hover());
       const hide = page.getByRole("button", { name: "Hide until bottom", exact: true });
-      await expect.element(hide).toBeVisible();
+      await owner.own(() => expect.element(hide).toBeVisible());
       const reviewOffset = scroller.scrollTop;
-      await hide.click();
-      await vi.waitFor(() =>
+      await owner.own(() => hide.click());
+      await owner.waitFor(() =>
         expect(host.querySelector("[data-scroll-control-dismissed=true]")).not.toBeNull(),
       );
-      await expect.element(jump).not.toBeInTheDocument();
+      await owner.own(() => expect.element(jump).not.toBeInTheDocument());
       expect(scroller.scrollTop).toBe(reviewOffset);
       expect(host.querySelector("[data-real-list-following=false]")).not.toBeNull();
       const grown = growLastMessage(messages(scope, 41));
-      await view.rerender(
-        <TimelineFixture entries={grown} listRef={listRef} scope={scope} scrollControl />,
+      await owner.own(() =>
+        view.rerender(
+          <TimelineFixture
+            entries={grown}
+            listRef={listRef}
+            scope={scope}
+            scrollControl
+            onDebugScrollEvent={observeInitialLoad}
+          />,
+        ),
       );
-      await vi.waitFor(() => expect(listRef.current!.getState().data.length).toBe(41));
+      await owner.waitFor(() => expect(listRef.current!.getState().data.length).toBe(41));
       expect(host.querySelector("[data-scroll-control-dismissed=true]")).not.toBeNull();
       expect(scroller.scrollTop).toBe(reviewOffset);
       expect(host.querySelector("[data-real-list-following=false]")).not.toBeNull();
@@ -395,55 +546,62 @@ describe("MessagesTimeline with real LegendList", () => {
       // estimated-content jump is not proof that newly visible rows have
       // finished measuring, just as in the longer artifact review fixture.
       for (let gesture = 0; gesture < 4; gesture += 1) {
-        await reviewWithNativeWheel(scroller, 300);
-        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        await owner.own(() => reviewWithNativeWheel(scroller, 300, assertScrollerActive));
+        await owner.own(
+          () => new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve())),
+        );
       }
-      await vi.waitFor(() => {
+      await owner.waitFor(() => {
         expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8);
         expect(host.querySelector("[data-scroll-control-dismissed=false]")).not.toBeNull();
       });
-      await reviewWithNativeWheel(scroller);
-      await vi.waitFor(() => expect(tailDistance(scroller)).toBeGreaterThan(100));
-      await expect.element(jump).toBeVisible();
-      await jump.hover();
-      await expect.element(hide).toBeVisible();
-      await hide.click();
-      await vi.waitFor(() =>
+      await owner.own(() => reviewWithNativeWheel(scroller, -500, assertScrollerActive));
+      await owner.waitFor(() => expect(tailDistance(scroller)).toBeGreaterThan(100));
+      await owner.own(() => expect.element(jump).toBeVisible());
+      await owner.own(() => jump.hover());
+      await owner.own(() => expect.element(hide).toBeVisible());
+      await owner.own(() => hide.click());
+      await owner.waitFor(() =>
         expect(host.querySelector("[data-scroll-control-dismissed=true]")).not.toBeNull(),
       );
       // A real content shrink can reach bottom without another wheel event.
       // Observe the native clamp; do not manufacture a bottom flag or scroll.
-      await view.rerender(
-        <TimelineFixture
-          entries={messages(scope, 3)}
-          listRef={listRef}
-          scope={scope}
-          scrollControl
-          hydrating
-        />,
+      await owner.own(() =>
+        view.rerender(
+          <TimelineFixture
+            entries={messages(scope, 3)}
+            listRef={listRef}
+            scope={scope}
+            scrollControl
+            hydrating
+            onDebugScrollEvent={observeInitialLoad}
+          />,
+        ),
       );
-      await vi.waitFor(() => {
+      await owner.waitFor(() => {
         expect(listRef.current!.getState().data.length).toBe(3);
         expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8);
       });
       // An intermediate short/empty hydration projection is not a completed
       // view. It cannot consume the exact chat's dismissal while loading.
       expect(host.querySelector("[data-scroll-control-dismissed=true]")).not.toBeNull();
-      await view.rerender(
-        <TimelineFixture
-          entries={messages(scope, 3)}
-          listRef={listRef}
-          scope={scope}
-          scrollControl
-        />,
+      await owner.own(() =>
+        view.rerender(
+          <TimelineFixture
+            entries={messages(scope, 3)}
+            listRef={listRef}
+            scope={scope}
+            scrollControl
+            onDebugScrollEvent={observeInitialLoad}
+          />,
+        ),
       );
-      await vi.waitFor(() => {
+      await owner.waitFor(() => {
         expect(Math.abs(tailDistance(scroller))).toBeLessThanOrEqual(8);
         expect(host.querySelector("[data-scroll-control-dismissed=false]")).not.toBeNull();
       });
     } finally {
-      await view.unmount();
-      host.remove();
+      await owner.cleanup();
     }
   });
 
