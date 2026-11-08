@@ -14,6 +14,7 @@ import { installMobileDebugLogging } from "./lib/mobileDebugLog";
 import { initializeApplicationLanguage } from "./uiLocaleStartup";
 import { installWebPushLocaleSynchronization } from "./lib/webPushNotifications";
 import { initializeWebAppBranding } from "./webAppBranding";
+import { hasRelayEntry } from "./environments/relay/intent";
 
 // Mobile DOM debugging — no-op unless enabled; see lib/mobileDebugLog.ts.
 installMobileDebugLogging();
@@ -38,9 +39,9 @@ if (
 
 const recordingOverlay =
   isElectron && new URLSearchParams(window.location.search).get("cafeDictationOverlay") === "1";
-if (!recordingOverlay) initializeWebAppBranding(document);
+if (!recordingOverlay && !hasRelayEntry) initializeWebAppBranding(document);
 const languageReady = initializeApplicationLanguage(document, recordingOverlay);
-if (!isElectron) {
+if (!isElectron && !hasRelayEntry) {
   void languageReady.then(() => {
     const unsubscribe = installWebPushLocaleSynchronization();
     window.addEventListener("pagehide", unsubscribe, { once: true });
@@ -58,27 +59,40 @@ if (recordingOverlay) {
       mountGlobalDictation(document.getElementById("root") as HTMLElement),
     );
 } else {
-  // Import the application graph only for an ordinary app window. Route
-  // modules initialize desktop services at module load time, before React
-  // mounts; loading them in the restricted dictation renderer previously
-  // called an unavailable theme bridge method and prevented its ready IPC.
-  void languageReady
-    .then(() => import("./router"))
-    .then(({ getRouter }) => {
-      // Hash history avoids path resolution issues in the Electron shell.
-      const history = isElectron ? createHashHistory() : createBrowserHistory();
-      const router = getRouter(history);
+  const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
+  const mountApplication = () => {
+    if (hasRelayEntry) {
+      initializeWebAppBranding(document);
+      const unsubscribe = installWebPushLocaleSynchronization();
+      window.addEventListener("pagehide", unsubscribe, { once: true });
+    }
+    // Import the application graph only for an ordinary app window. Route
+    // modules initialize desktop services at module load time, before React
+    // mounts; loading them in the restricted dictation renderer previously
+    // called an unavailable theme bridge method and prevented its ready IPC.
+    void languageReady
+      .then(() => import("./router"))
+      .then(({ getRouter }) => {
+        // Hash history avoids path resolution issues in the Electron shell.
+        const history = isElectron ? createHashHistory() : createBrowserHistory();
+        const router = getRouter(history);
 
-      if (isElectron) {
-        syncDocumentWindowControlsOverlayClass();
-        syncDocumentMacTrafficLightsClass();
-      }
+        if (isElectron) {
+          syncDocumentWindowControlsOverlayClass();
+          syncDocumentMacTrafficLightsClass();
+        }
 
-      document.title = APP_DISPLAY_NAME;
-      ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-        <React.StrictMode>
-          <RouterProvider router={router} />
-        </React.StrictMode>,
-      );
-    });
+        document.title = APP_DISPLAY_NAME;
+        root.render(
+          <React.StrictMode>
+            <RouterProvider router={router} />
+          </React.StrictMode>,
+        );
+      });
+  };
+  if (hasRelayEntry)
+    void languageReady
+      .then(() => import("./environments/relay/entry"))
+      .then(({ RelayEntry }) => root.render(<RelayEntry ready={mountApplication} />));
+  else mountApplication();
 }

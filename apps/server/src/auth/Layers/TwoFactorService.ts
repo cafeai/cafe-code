@@ -149,6 +149,7 @@ export const makeTwoFactorService = Effect.gen(function* () {
         return yield* new AuthError({
           message: "Enter an authenticator code or recovery code.",
           status: 401,
+          reason: "two-factor-required",
         });
       const candidate = code.trim();
       if (state.blockedUntil > now)

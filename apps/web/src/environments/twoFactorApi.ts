@@ -1,3 +1,4 @@
+import { fetchAppResource } from "./relay/active";
 import type {
   AuthTwoFactorEnabled,
   AuthTwoFactorEnrollment,
@@ -33,7 +34,7 @@ export function createTwoFactorApi(environmentId: EnvironmentId | null) {
           ...(body === undefined ? {} : { body }),
         });
       }
-      const response = await fetch(resolvePrimaryEnvironmentHttpUrl(path), {
+      const response = await fetchAppResource(resolvePrimaryEnvironmentHttpUrl(path), {
         method,
         credentials: "include",
         redirect: "error",

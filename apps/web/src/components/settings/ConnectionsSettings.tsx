@@ -1,4 +1,5 @@
 import { useUiLocale, useUiPresentation } from "~/i18n";
+import { RelayConnectionsSettings } from "./RelayConnectionsSettings";
 import { uiFormatDateTime, uiText, type UiLocale } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
 import {
@@ -2224,6 +2225,7 @@ export function ConnectionsSettings() {
   return (
     <SettingsPageContainer title={uiText("Connections", undefined, undefined, uiLocale)}>
       <SavedEnvironmentsSettings />
+      {isPrimary && canManageLocalBackend ? <RelayConnectionsSettings /> : null}
       {canManageLocalBackend ? (
         <>
           <SettingsSection

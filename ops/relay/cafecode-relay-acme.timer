@@ -1,0 +1,8 @@
+[Unit]
+Description=Check Cafe relay pilot certificate renewal twice daily
+[Timer]
+OnCalendar=*-*-* 00,12:23:00
+RandomizedDelaySec=3600
+Persistent=true
+[Install]
+WantedBy=timers.target

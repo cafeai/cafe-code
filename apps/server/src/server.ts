@@ -18,7 +18,17 @@ import * as NodeHttp from "node:http";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
+import { FetchHttpClient, HttpRouter, HttpServer, HttpServerResponse } from "effect/unstable/http";
+import { RelayRuntime, RelayRuntimeLive } from "./relay/runtime.ts";
+import { relayRoutesLayer } from "./relay/http.ts";
+// The public HttpRouter API deliberately erases registered route errors to
+// unknown. This one adapter discards them into a fixed response before the
+// relay obtains an infallible handler; no opaque cause is logged or exposed.
+// @effect-diagnostics-next-line anyUnknownInErrorContext:off
+const relayHandler = (router: HttpRouter.HttpRouter) =>
+  router
+    .asHttpEffect()
+    .pipe(Effect.catch(() => Effect.succeed(HttpServerResponse.empty({ status: 500 }))));
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "./config.ts";
@@ -364,6 +374,7 @@ const RuntimeServicesLive = ServerRuntimeStartupLive.pipe(
 );
 
 export const makeRoutesLayer = Layer.mergeAll(
+  relayRoutesLayer,
   authTwoFactorRouteLayer,
   authAdminPasswordClearRouteLayer,
   authAdminPasswordSetRouteLayer,
@@ -446,17 +457,23 @@ export const makeServerLayer = Layer.unwrap(
       ),
     );
     const httpsSiblingLayer = Layer.effectDiscard(startHttpsSiblingServer);
+    const relayListening = Layer.effectDiscard(
+      Effect.gen(function* () {
+        const router = yield* HttpRouter.HttpRouter;
+        const relay = yield* RelayRuntime;
+        yield* relay.start(relayHandler(router));
+      }),
+    ).pipe(Layer.provideMerge(makeRoutesLayer));
     const serverApplicationLayer = Layer.mergeAll(
       Layer.effectDiscard(startDesktopPowerState),
-      HttpRouter.serve(makeRoutesLayer, {
-        disableLogger: !config.logWebSocketEvents,
-      }),
+      HttpRouter.serve(relayListening, { disableLogger: !config.logWebSocketEvents }),
       httpListeningLayer,
       httpsSiblingLayer,
       runtimeStateLayer,
     );
 
     return serverApplicationLayer.pipe(
+      Layer.provideMerge(RelayRuntimeLive),
       Layer.provideMerge(RuntimeServicesLive),
       Layer.provideMerge(BrandingImageStoreLive),
       Layer.provideMerge(ThreadDetailSubscriptionRegistryLive),

@@ -1,0 +1,39 @@
+{
+  "name": "@cafecode/relay",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./crypto": "./src/crypto.ts",
+    "./protocol": "./src/protocol.ts",
+    "./client": "./src/client.ts",
+    "./host": "./src/host.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config ../../vitest.config.ts"
+  },
+  "dependencies": {
+    "@libp2p/crypto": "5.2.0",
+    "@libp2p/interface": "3.4.0",
+    "@libp2p/noise": "17.0.7",
+    "@libp2p/peer-id": "6.0.18",
+    "@libp2p/utils": "7.4.5",
+    "canonicalize": "2.1.0",
+    "effect": "catalog:",
+    "uint8arraylist": "3.0.2",
+    "uint8arrays": "6.1.1",
+    "ws": "8.21.0"
+  },
+  "devDependencies": {
+    "@effect/language-service": "catalog:",
+    "@types/node": "catalog:",
+    "@types/ws": "^8.18.1",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vitest": "catalog:"
+  }
+}

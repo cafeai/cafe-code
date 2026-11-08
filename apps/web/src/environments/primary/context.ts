@@ -1,3 +1,4 @@
+import { fetchAppResource } from "../relay/active";
 import { uiText } from "@cafecode/shared/i18n";
 import {
   attachEnvironmentDescriptor,
@@ -49,7 +50,7 @@ function createPrimaryKnownEnvironment(input: {
 async function fetchPrimaryEnvironmentDescriptor(): Promise<ExecutionEnvironmentDescriptor> {
   return retryTransientBootstrap(async () => {
     for (const pathname of ENVIRONMENT_ENDPOINT_PATHS) {
-      const response = await fetch(resolvePrimaryEnvironmentHttpUrl(pathname));
+      const response = await fetchAppResource(resolvePrimaryEnvironmentHttpUrl(pathname));
       if (response.ok) {
         const descriptor = (await response.json()) as ExecutionEnvironmentDescriptor;
         writePrimaryEnvironmentDescriptor(descriptor);

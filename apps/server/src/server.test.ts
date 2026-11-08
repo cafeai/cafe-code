@@ -1,3 +1,29 @@
+import { startRelayServer } from "@cafecode/relay-server/server";
+import {
+  createIdentity as createRelayIdentity,
+  deriveIdentityId as deriveRelayIdentityId,
+  sha256 as relaySha256,
+  privateIdentityBytes as privateRelayIdentityBytes,
+} from "@cafecode/relay/crypto";
+import { signNetwork as signRelayNetwork } from "@cafecode/relay/descriptor";
+import {
+  opaque as relayOpaque,
+  unopaque as relayUnopaque,
+  randomOpaque as randomRelayOpaque,
+} from "@cafecode/relay/bytes";
+import { canonicalBytes as relayCanonicalBytes } from "@cafecode/relay/protocol";
+import { Lifetime as RelayLifetime, epochNow as relayEpochNow } from "@cafecode/relay/lifetime";
+import { connectNative as connectRelayNative } from "@cafecode/relay/nativeWire";
+import { connectViewer as connectRelayViewer } from "@cafecode/relay/client";
+import { parseInvitationUrl as parseRelayInvitation } from "@cafecode/relay/invitation";
+import { fetchRelayed as fetchRelayHttp } from "@cafecode/relay/http";
+import { relayEffectSocket } from "./relay/request.ts";
+import {
+  RelayRuntime,
+  RelayRuntimeLive,
+  RelayRuntimeIO,
+  type RelayRuntimeIOShape,
+} from "./relay/runtime.ts";
 import { readProviderMcpCredentialIssuer } from "./auth/ProviderMcpCredentialBroker.ts";
 import { installGlideSessionRuntime } from "./glide/sessionRuntime.ts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
@@ -77,11 +103,13 @@ import {
   HttpClientRequest,
   HttpRouter,
   HttpServer,
+  HttpServerResponse,
 } from "effect/unstable/http";
 import { OtlpSerialization, OtlpTracer } from "effect/unstable/observability";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
-import { vi } from "vitest";
+import { vi, expect, type TestContext } from "vitest";
+import serverPackage from "../package.json" with { type: "json" };
 import { deriveLiveWorkObservations } from "@cafecode/shared/liveWork";
 
 const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
@@ -479,6 +507,8 @@ const makeBrowserOtlpPayload = (spanName: string) =>
 
 const buildAppUnderTest = (options?: {
   config?: Partial<ServerConfigShape>;
+  relayConfig?: Uint8Array;
+  relayIO?: RelayRuntimeIOShape;
   layers?: {
     sqlClient?: SqlClient.SqlClient;
     keybindings?: Partial<KeybindingsShape>;
@@ -511,7 +541,9 @@ const buildAppUnderTest = (options?: {
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const tempBaseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-router-test-" });
-    const baseDir = options?.config?.baseDir ?? tempBaseDir;
+    const baseDir =
+      options?.config?.baseDir ??
+      (options?.relayConfig ? yield* fileSystem.realPath(tempBaseDir) : tempBaseDir);
     const devUrl = options?.config?.devUrl;
     const derivedPaths = yield* deriveServerPaths(baseDir, devUrl);
     const config: ServerConfigShape = {
@@ -542,6 +574,24 @@ const buildAppUnderTest = (options?: {
       logWebSocketEvents: false,
       ...options?.config,
     };
+    if (options?.relayConfig) {
+      const path = yield* Path.Path;
+      yield* fileSystem.makeDirectory(path.join(config.stateDir, "relay"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      const bytes = options.relayConfig;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const file = yield* fileSystem.open(path.join(config.stateDir, "relay", "config.json"), {
+            flag: "wx",
+            mode: 0o600,
+          });
+          yield* file.writeAll(bytes);
+          yield* file.sync;
+        }),
+      );
+    }
     const layerConfig = Layer.succeed(ServerConfig, config);
     const defaultVcsDriver: VcsDriver.VcsDriverShape = {
       capabilities: {
@@ -671,361 +721,383 @@ const buildAppUnderTest = (options?: {
         })
       : VcsStatusBroadcaster.layer.pipe(Layer.provide(gitWorkflowLayer));
 
-    const servedRoutesLayer = HttpRouter.serve(makeRoutesLayer, {
+    const relayListening = options?.relayConfig
+      ? Layer.effectDiscard(
+          Effect.gen(function* () {
+            const router = yield* HttpRouter.HttpRouter,
+              relay = yield* RelayRuntime;
+            // Same public opaque router boundary as the production HTTP adapter.
+            // @effect-diagnostics-next-line anyUnknownInErrorContext:off
+            const handler = router
+              .asHttpEffect()
+              .pipe(Effect.catch(() => Effect.succeed(HttpServerResponse.empty({ status: 500 }))));
+            yield* relay.start(handler);
+          }),
+        ).pipe(Layer.provideMerge(makeRoutesLayer))
+      : makeRoutesLayer;
+    const relayLayer = RelayRuntimeLive;
+    const servedRoutesLayer = HttpRouter.serve(relayListening, {
       disableListenLog: true,
       disableLogger: true,
-    }).pipe(
-      Layer.provide(
-        Layer.mock(Keybindings)({
-          loadConfigState: Effect.succeed({
-            keybindings: [],
-            issues: [],
+    })
+      .pipe(
+        Layer.provide(
+          Layer.mock(Keybindings)({
+            loadConfigState: Effect.succeed({
+              keybindings: [],
+              issues: [],
+            }),
+            streamChanges: Stream.empty,
+            ...options?.layers?.keybindings,
           }),
-          streamChanges: Stream.empty,
-          ...options?.layers?.keybindings,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(ProviderRegistry)({
-          getProviders: Effect.succeed([]),
-          readInstanceAccountQuota: () => Effect.succeed(null),
-          refresh: () => Effect.succeed([]),
-          refreshInstance: () => Effect.succeed([]),
-          refreshInstanceAccountUsage: () => Effect.succeed([]),
-          getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
-            Effect.succeed(
-              makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
-            ),
-          setProviderMaintenanceActionState: () => Effect.succeed([]),
-          streamChanges: Stream.empty,
-          ...options?.layers?.providerRegistry,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(ProviderService)({
-          startSession: () => Effect.die("unexpected startSession"),
-          sendTurn: () => Effect.die("unexpected sendTurn"),
-          steerTurn: () => Effect.die("unexpected steerTurn"),
-          interruptTurn: () => Effect.die("unexpected interruptTurn"),
-          respondToRequest: () => Effect.die("unexpected respondToRequest"),
-          respondToUserInput: () => Effect.die("unexpected respondToUserInput"),
-          stopSession: () => Effect.die("unexpected stopSession"),
-          quiesceThreadForHardDelete: () => Effect.die("unexpected quiesceThreadForHardDelete"),
-          restartProviderRuntime: (input) =>
-            Effect.succeed({
-              instanceId: input.instanceId,
-              provider: ProviderDriverKind.make(String(input.instanceId)),
-              stoppedSessionCount: 0,
-            }),
-          listSessions: () => Effect.succeed([]),
-          getCapabilities: () => Effect.die("unexpected getCapabilities"),
-          getInstanceInfo: (instanceId) =>
-            Effect.succeed({
-              instanceId,
-              driverKind: ProviderDriverKind.make(String(instanceId)),
-              displayName: undefined,
-              enabled: true,
-              continuationIdentity: {
+        ),
+        Layer.provide(
+          Layer.mock(ProviderRegistry)({
+            getProviders: Effect.succeed([]),
+            readInstanceAccountQuota: () => Effect.succeed(null),
+            refresh: () => Effect.succeed([]),
+            refreshInstance: () => Effect.succeed([]),
+            refreshInstanceAccountUsage: () => Effect.succeed([]),
+            getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
+              Effect.succeed(
+                makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
+              ),
+            setProviderMaintenanceActionState: () => Effect.succeed([]),
+            streamChanges: Stream.empty,
+            ...options?.layers?.providerRegistry,
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ProviderService)({
+            startSession: () => Effect.die("unexpected startSession"),
+            sendTurn: () => Effect.die("unexpected sendTurn"),
+            steerTurn: () => Effect.die("unexpected steerTurn"),
+            interruptTurn: () => Effect.die("unexpected interruptTurn"),
+            respondToRequest: () => Effect.die("unexpected respondToRequest"),
+            respondToUserInput: () => Effect.die("unexpected respondToUserInput"),
+            stopSession: () => Effect.die("unexpected stopSession"),
+            quiesceThreadForHardDelete: () => Effect.die("unexpected quiesceThreadForHardDelete"),
+            restartProviderRuntime: (input) =>
+              Effect.succeed({
+                instanceId: input.instanceId,
+                provider: ProviderDriverKind.make(String(input.instanceId)),
+                stoppedSessionCount: 0,
+              }),
+            listSessions: () => Effect.succeed([]),
+            getCapabilities: () => Effect.die("unexpected getCapabilities"),
+            getInstanceInfo: (instanceId) =>
+              Effect.succeed({
+                instanceId,
                 driverKind: ProviderDriverKind.make(String(instanceId)),
-                continuationKey: `test:${String(instanceId)}`,
-              },
-            }),
-          rollbackConversation: () => Effect.die("unexpected rollbackConversation"),
-          readSubagentDetail: () => Effect.die("unexpected readSubagentDetail"),
-          streamEvents: Stream.empty,
-          ...options?.layers?.providerService,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(ServerSettingsService)({
-          start: Effect.void,
-          ready: Effect.void,
-          getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
-          updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
-          streamChanges: Stream.empty,
-          ...options?.layers?.serverSettings,
-        }),
-      ),
-      Layer.provide(
-        Layer.mergeAll(
-          Layer.mock(ServerClientSettingsService)({
+                displayName: undefined,
+                enabled: true,
+                continuationIdentity: {
+                  driverKind: ProviderDriverKind.make(String(instanceId)),
+                  continuationKey: `test:${String(instanceId)}`,
+                },
+              }),
+            rollbackConversation: () => Effect.die("unexpected rollbackConversation"),
+            readSubagentDetail: () => Effect.die("unexpected readSubagentDetail"),
+            streamEvents: Stream.empty,
+            ...options?.layers?.providerService,
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ServerSettingsService)({
             start: Effect.void,
             ready: Effect.void,
-            getSettings: Effect.succeed(DEFAULT_CLIENT_SETTINGS),
-            updateSettings: () => Effect.succeed(DEFAULT_CLIENT_SETTINGS),
+            getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+            updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
             streamChanges: Stream.empty,
-            ...options?.layers?.clientSettings,
-          }),
-          Layer.mock(ScheduledFollowups)({
-            list: () => Effect.succeed({ schedules: [], backendOnline: true as const }),
-            notification: () => Effect.succeed({ notify: true }),
-            ...options?.layers?.scheduledFollowups,
-          }),
-          Layer.mock(UsageStatsService)({
-            recordAccounting: () => Effect.void,
-            get: Effect.succeed({
-              totals: {
-                generatingMs: 0,
-                outputTokens: 0,
-                userMessages: 0,
-                inputTokens: 0,
-                cachedInputTokens: 0,
-                cacheWriteInputTokens: 0,
-                reasoningOutputTokens: 0,
-              },
-              today: {
-                day: "1970-01-01",
-                generatingMs: 0,
-                outputTokens: 0,
-                userMessages: 0,
-                inputTokens: 0,
-                cachedInputTokens: 0,
-                cacheWriteInputTokens: 0,
-                reasoningOutputTokens: 0,
-              },
-              activeSessionCount: 0,
-              collectionEnabled: true,
-              asOfMs: 0,
-              days: [],
-              tokenBreakdown: [],
-            }),
-            snapshot: Effect.succeed({
-              totals: {
-                generatingMs: 0,
-                outputTokens: 0,
-                userMessages: 0,
-                inputTokens: 0,
-                cachedInputTokens: 0,
-                cacheWriteInputTokens: 0,
-                reasoningOutputTokens: 0,
-              },
-              today: {
-                day: "1970-01-01",
-                generatingMs: 0,
-                outputTokens: 0,
-                userMessages: 0,
-                inputTokens: 0,
-                cachedInputTokens: 0,
-                cacheWriteInputTokens: 0,
-                reasoningOutputTokens: 0,
-              },
-              activeSessionCount: 0,
-              collectionEnabled: true,
-              asOfMs: 0,
-            }),
-            flush: Effect.void,
-            ...options?.layers?.usageStats,
+            ...options?.layers?.serverSettings,
           }),
         ),
-      ),
-      Layer.provide(
-        Layer.mock(ExternalLauncher.ExternalLauncher)({
-          ...options?.layers?.externalLauncher,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(ProcessDiagnostics.ProcessDiagnostics)({
-          read: Effect.succeed({
-            serverPid: process.pid,
-            readAt: TEST_EPOCH,
-            processCount: 0,
-            totalRssBytes: 0,
-            totalCpuPercent: 0,
-            processes: [],
-            error: Option.none(),
-          }),
-          signal: (input) =>
-            Effect.succeed({
-              pid: input.pid,
-              signal: input.signal,
-              signaled: true,
-              message: Option.none(),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(ServerClientSettingsService)({
+              start: Effect.void,
+              ready: Effect.void,
+              getSettings: Effect.succeed(DEFAULT_CLIENT_SETTINGS),
+              updateSettings: () => Effect.succeed(DEFAULT_CLIENT_SETTINGS),
+              streamChanges: Stream.empty,
+              ...options?.layers?.clientSettings,
             }),
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(ProcessResourceMonitor.ProcessResourceMonitor)({
-          readHistory: (input) =>
-            Effect.succeed({
-              readAt: TEST_EPOCH,
-              windowMs: input.windowMs,
-              bucketMs: input.bucketMs,
-              sampleIntervalMs: 5_000,
-              retainedSampleCount: 0,
-              totalCpuSecondsApprox: 0,
-              buckets: [],
-              topProcesses: [],
-              error: Option.none(),
+            Layer.mock(ScheduledFollowups)({
+              list: () => Effect.succeed({ schedules: [], backendOnline: true as const }),
+              notification: () => Effect.succeed({ notify: true }),
+              ...options?.layers?.scheduledFollowups,
             }),
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(RuntimeLayerDiagnostics.RuntimeLayerDiagnostics)({
-          read: (input) => Effect.succeed(makeEmptyRuntimeLayerDiagnosticsResult(input)),
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(TraceDiagnostics.TraceDiagnostics)({
-          read: () =>
-            Effect.succeed({
-              traceFilePath: "",
-              scannedFilePaths: [],
-              readAt: TEST_EPOCH,
-              recordCount: 0,
-              parseErrorCount: 0,
-              firstSpanAt: Option.none(),
-              lastSpanAt: Option.none(),
-              failureCount: 0,
-              interruptionCount: 0,
-              slowSpanThresholdMs: 1_000,
-              slowSpanCount: 0,
-              logLevelCounts: {},
-              topSpansByCount: [],
-              slowestSpans: [],
-              commonFailures: [],
-              latestFailures: [],
-              latestWarningAndErrorLogs: [],
-              partialFailure: Option.none(),
-              error: Option.none(),
-            }),
-        }),
-      ),
-      Layer.provide(gitManagerLayer),
-      Layer.provide(gitVcsDriverLayer),
-      Layer.provide(gitWorkflowLayer),
-      Layer.provide(vcsProvisioningLayer),
-      Layer.provide(
-        Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
-          ...options?.layers?.sourceControlRepositoryService,
-        }),
-      ),
-      Layer.provideMerge(vcsStatusBroadcasterLayer),
-      Layer.provide(
-        Layer.mock(ProjectSetupScriptRunner)({
-          runForThread: () => Effect.succeed({ status: "no-script" as const }),
-          ...options?.layers?.projectSetupScriptRunner,
-        }),
-      ),
-      Layer.provide(
-        Layer.mergeAll(
-          Layer.mock(OrchestrationEngineService)({
-            readEvents: () => Stream.empty,
-            dispatch: () => Effect.succeed({ sequence: 0 }),
-            retireThreadForHardDelete: () => Effect.void,
-            purgeHardDeletedThread: () => Effect.succeed({ deleted: true as const }),
-            streamDomainEvents: Stream.empty,
-            ...options?.layers?.orchestrationEngine,
-          }),
-          Layer.mock(ProviderRuntimeIngestionService)({
-            start: () => Effect.void,
-            drain: Effect.void,
-            retireThreadForHardDelete: () => Effect.void,
-            completeThreadHardDelete: () => Effect.void,
-            ...options?.layers?.providerRuntimeIngestion,
-          }),
-          Layer.mock(ProviderJournalMessageRepair)({
-            repairAssistantMessage: (input) =>
-              Effect.succeed({
-                status: "source-not-found",
-                threadId: input.threadId,
-                messageId: input.messageId,
-                reason: "test-default",
-              }),
-            repairThreadAssistantMessages: (input) =>
-              Effect.succeed({
-                threadId: input.threadId,
-                sourcePolicy: input.sourcePolicy ?? "local-then-upstream",
-                counts: {
-                  totalMessages: 0,
-                  eligibleMessages: 0,
-                  localAttempts: 0,
-                  upstreamAttempts: 0,
-                  repaired: 0,
-                  unchanged: 0,
-                  notEligible: 0,
-                  sourceNotFound: 0,
-                  ambiguousSource: 0,
-                  diverged: 0,
-                  upstreamUnavailable: 0,
-                  failed: 0,
+            Layer.mock(UsageStatsService)({
+              recordAccounting: () => Effect.void,
+              get: Effect.succeed({
+                totals: {
+                  generatingMs: 0,
+                  outputTokens: 0,
+                  userMessages: 0,
+                  inputTokens: 0,
+                  cachedInputTokens: 0,
+                  cacheWriteInputTokens: 0,
+                  reasoningOutputTokens: 0,
                 },
-                results: [],
+                today: {
+                  day: "1970-01-01",
+                  generatingMs: 0,
+                  outputTokens: 0,
+                  userMessages: 0,
+                  inputTokens: 0,
+                  cachedInputTokens: 0,
+                  cacheWriteInputTokens: 0,
+                  reasoningOutputTokens: 0,
+                },
+                activeSessionCount: 0,
+                collectionEnabled: true,
+                asOfMs: 0,
+                days: [],
+                tokenBreakdown: [],
               }),
-            ...options?.layers?.providerJournalMessageRepair,
+              snapshot: Effect.succeed({
+                totals: {
+                  generatingMs: 0,
+                  outputTokens: 0,
+                  userMessages: 0,
+                  inputTokens: 0,
+                  cachedInputTokens: 0,
+                  cacheWriteInputTokens: 0,
+                  reasoningOutputTokens: 0,
+                },
+                today: {
+                  day: "1970-01-01",
+                  generatingMs: 0,
+                  outputTokens: 0,
+                  userMessages: 0,
+                  inputTokens: 0,
+                  cachedInputTokens: 0,
+                  cacheWriteInputTokens: 0,
+                  reasoningOutputTokens: 0,
+                },
+                activeSessionCount: 0,
+                collectionEnabled: true,
+                asOfMs: 0,
+              }),
+              flush: Effect.void,
+              ...options?.layers?.usageStats,
+            }),
+          ),
+        ),
+        Layer.provide(
+          Layer.mock(ExternalLauncher.ExternalLauncher)({
+            ...options?.layers?.externalLauncher,
           }),
         ),
-      ),
-      Layer.provide(
-        Layer.mock(ProjectionSnapshotQuery)({
-          getCommandReadModel: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
-          getSnapshot: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
-          getShellSnapshot: () =>
-            Effect.succeed({
-              snapshotSequence: 0,
-              projects: [],
-              threads: [],
-              updatedAt: "1970-01-01T00:00:00.000Z",
+        Layer.provide(
+          Layer.mock(ProcessDiagnostics.ProcessDiagnostics)({
+            read: Effect.succeed({
+              serverPid: process.pid,
+              readAt: TEST_EPOCH,
+              processCount: 0,
+              totalRssBytes: 0,
+              totalCpuPercent: 0,
+              processes: [],
+              error: Option.none(),
             }),
-          getArchivedShellSnapshot: () =>
-            Effect.succeed({
-              snapshotSequence: 0,
-              projects: [],
-              threads: [],
-              updatedAt: "1970-01-01T00:00:00.000Z",
+            signal: (input) =>
+              Effect.succeed({
+                pid: input.pid,
+                signal: input.signal,
+                signaled: true,
+                message: Option.none(),
+              }),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ProcessResourceMonitor.ProcessResourceMonitor)({
+            readHistory: (input) =>
+              Effect.succeed({
+                readAt: TEST_EPOCH,
+                windowMs: input.windowMs,
+                bucketMs: input.bucketMs,
+                sampleIntervalMs: 5_000,
+                retainedSampleCount: 0,
+                totalCpuSecondsApprox: 0,
+                buckets: [],
+                topProcesses: [],
+                error: Option.none(),
+              }),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(RuntimeLayerDiagnostics.RuntimeLayerDiagnostics)({
+            read: (input) => Effect.succeed(makeEmptyRuntimeLayerDiagnosticsResult(input)),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(TraceDiagnostics.TraceDiagnostics)({
+            read: () =>
+              Effect.succeed({
+                traceFilePath: "",
+                scannedFilePaths: [],
+                readAt: TEST_EPOCH,
+                recordCount: 0,
+                parseErrorCount: 0,
+                firstSpanAt: Option.none(),
+                lastSpanAt: Option.none(),
+                failureCount: 0,
+                interruptionCount: 0,
+                slowSpanThresholdMs: 1_000,
+                slowSpanCount: 0,
+                logLevelCounts: {},
+                topSpansByCount: [],
+                slowestSpans: [],
+                commonFailures: [],
+                latestFailures: [],
+                latestWarningAndErrorLogs: [],
+                partialFailure: Option.none(),
+                error: Option.none(),
+              }),
+          }),
+        ),
+        Layer.provide(gitManagerLayer),
+        Layer.provide(gitVcsDriverLayer),
+        Layer.provide(gitWorkflowLayer),
+        Layer.provide(vcsProvisioningLayer),
+        Layer.provide(
+          Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
+            ...options?.layers?.sourceControlRepositoryService,
+          }),
+        ),
+        Layer.provideMerge(vcsStatusBroadcasterLayer),
+        Layer.provide(
+          Layer.mock(ProjectSetupScriptRunner)({
+            runForThread: () => Effect.succeed({ status: "no-script" as const }),
+            ...options?.layers?.projectSetupScriptRunner,
+          }),
+        ),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(OrchestrationEngineService)({
+              readEvents: () => Stream.empty,
+              dispatch: () => Effect.succeed({ sequence: 0 }),
+              retireThreadForHardDelete: () => Effect.void,
+              purgeHardDeletedThread: () => Effect.succeed({ deleted: true as const }),
+              streamDomainEvents: Stream.empty,
+              ...options?.layers?.orchestrationEngine,
             }),
-          getDeletedShellSnapshot: () =>
-            Effect.succeed({
-              snapshotSequence: 0,
-              projects: [],
-              threads: [],
-              updatedAt: "1970-01-01T00:00:00.000Z",
+            Layer.mock(ProviderRuntimeIngestionService)({
+              start: () => Effect.void,
+              drain: Effect.void,
+              retireThreadForHardDelete: () => Effect.void,
+              completeThreadHardDelete: () => Effect.void,
+              ...options?.layers?.providerRuntimeIngestion,
             }),
-          getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
-          getThreadForkSourceVersion: () => Effect.succeed(0),
-          hasPendingContextBootstrap: () => Effect.succeed(false),
-          getThreadForkMessageCount: () => Effect.succeed(0),
-          getProjectShellById: (projectId) => {
-            const project = makeDefaultOrchestrationReadModel().projects.find(
-              (project) => project.id === projectId,
-            );
-            return Effect.succeed(
-              project
-                ? Option.some({
-                    ...project,
-                    additionalWorkspaceRoots: [],
-                    repositoryIdentity: null,
-                  })
-                : Option.none(),
-            );
-          },
-          getThreadShellById: () => Effect.succeed(Option.none()),
-          getPostTerminalStaleSteerCandidates: () => Effect.succeed([]),
-          getPostTerminalStaleSteerCandidateThreadIds: () => Effect.succeed([]),
-          getThreadTurnActivityPage: () => Effect.die("unused"),
-          getThreadActivityDiagnostic: () => Effect.die("unused"),
-          getThreadTurnWorkLogPresence: () => Effect.die("unused"),
-          hasThreadTurnSubagentActivity: () => Effect.die("unused"),
-          getThreadDetailById: () => Effect.succeed(Option.none()),
-          getThreadDetailSnapshotById: () => Effect.succeed(Option.none()),
-          getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
-          getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
-          getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
-          getThreadCheckpointContext: () => Effect.succeed(Option.none()),
-          ...options?.layers?.projectionSnapshotQuery,
-        }),
-      ),
-      Layer.provide(
-        Layer.mock(CheckpointStore)({
-          isGitRepository: () => Effect.succeed(false),
-          captureCheckpoint: () => Effect.void,
-          hasCheckpointRef: () => Effect.succeed(false),
-          restoreCheckpoint: () => Effect.succeed(false),
-          diffCheckpoints: () => Effect.succeed(""),
-          deleteCheckpointRefs: () => Effect.void,
-          ...options?.layers?.checkpointStore,
-        }),
-      ),
-    );
+            Layer.mock(ProviderJournalMessageRepair)({
+              repairAssistantMessage: (input) =>
+                Effect.succeed({
+                  status: "source-not-found",
+                  threadId: input.threadId,
+                  messageId: input.messageId,
+                  reason: "test-default",
+                }),
+              repairThreadAssistantMessages: (input) =>
+                Effect.succeed({
+                  threadId: input.threadId,
+                  sourcePolicy: input.sourcePolicy ?? "local-then-upstream",
+                  counts: {
+                    totalMessages: 0,
+                    eligibleMessages: 0,
+                    localAttempts: 0,
+                    upstreamAttempts: 0,
+                    repaired: 0,
+                    unchanged: 0,
+                    notEligible: 0,
+                    sourceNotFound: 0,
+                    ambiguousSource: 0,
+                    diverged: 0,
+                    upstreamUnavailable: 0,
+                    failed: 0,
+                  },
+                  results: [],
+                }),
+              ...options?.layers?.providerJournalMessageRepair,
+            }),
+          ),
+        ),
+        Layer.provide(
+          Layer.mock(ProjectionSnapshotQuery)({
+            getCommandReadModel: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
+            getSnapshot: () => Effect.succeed(makeDefaultOrchestrationReadModel()),
+            getShellSnapshot: () =>
+              Effect.succeed({
+                snapshotSequence: 0,
+                projects: [],
+                threads: [],
+                updatedAt: "1970-01-01T00:00:00.000Z",
+              }),
+            getArchivedShellSnapshot: () =>
+              Effect.succeed({
+                snapshotSequence: 0,
+                projects: [],
+                threads: [],
+                updatedAt: "1970-01-01T00:00:00.000Z",
+              }),
+            getDeletedShellSnapshot: () =>
+              Effect.succeed({
+                snapshotSequence: 0,
+                projects: [],
+                threads: [],
+                updatedAt: "1970-01-01T00:00:00.000Z",
+              }),
+            getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
+            getThreadForkSourceVersion: () => Effect.succeed(0),
+            hasPendingContextBootstrap: () => Effect.succeed(false),
+            getThreadForkMessageCount: () => Effect.succeed(0),
+            getProjectShellById: (projectId) => {
+              const project = makeDefaultOrchestrationReadModel().projects.find(
+                (project) => project.id === projectId,
+              );
+              return Effect.succeed(
+                project
+                  ? Option.some({
+                      ...project,
+                      additionalWorkspaceRoots: [],
+                      repositoryIdentity: null,
+                    })
+                  : Option.none(),
+              );
+            },
+            getThreadShellById: () => Effect.succeed(Option.none()),
+            getPostTerminalStaleSteerCandidates: () => Effect.succeed([]),
+            getPostTerminalStaleSteerCandidateThreadIds: () => Effect.succeed([]),
+            getThreadTurnActivityPage: () => Effect.die("unused"),
+            getThreadActivityDiagnostic: () => Effect.die("unused"),
+            getThreadTurnWorkLogPresence: () => Effect.die("unused"),
+            hasThreadTurnSubagentActivity: () => Effect.die("unused"),
+            getThreadDetailById: () => Effect.succeed(Option.none()),
+            getThreadDetailSnapshotById: () => Effect.succeed(Option.none()),
+            getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
+            getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
+            getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+            getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+            ...options?.layers?.projectionSnapshotQuery,
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(CheckpointStore)({
+            isGitRepository: () => Effect.succeed(false),
+            captureCheckpoint: () => Effect.void,
+            hasCheckpointRef: () => Effect.succeed(false),
+            restoreCheckpoint: () => Effect.succeed(false),
+            diffCheckpoints: () => Effect.succeed(""),
+            deleteCheckpointRefs: () => Effect.void,
+            ...options?.layers?.checkpointStore,
+          }),
+        ),
+      )
+      .pipe(
+        Layer.provideMerge(relayLayer),
+        Layer.provide(
+          options?.relayIO ? Layer.succeed(RelayRuntimeIO, options.relayIO) : Layer.empty,
+        ),
+      );
 
     const appLayer = servedRoutesLayer.pipe(
       Layer.provide(
@@ -1545,6 +1617,313 @@ const getWsServerUrl = (
       yield* getAuthenticatedSessionCookieHeader(options?.credential),
     );
   });
+
+const qualifyRelayRouter = (test: TestContext, compiled = false) => {
+  let phase = "setup";
+  test.onTestFailed(() => {
+    process.stdout.write("relay-router-phase: " + phase + "\n");
+  });
+  const lifetime = new RelayLifetime();
+  let relay: Awaited<ReturnType<typeof startRelayServer>> | undefined;
+  let connection: Awaited<ReturnType<typeof connectRelayViewer>> | undefined;
+  const retire = () => {
+    lifetime.retire();
+    void connection?.close();
+    void relay?.close();
+  };
+  test.signal.addEventListener("abort", retire, { once: true });
+  test.onTestFinished(async () => {
+    retire();
+    await connection?.close();
+    await relay?.close();
+    await lifetime.close();
+  });
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const tlsRoot = new URL("../../desktop/src/settings/__fixtures__/remote-tls/", import.meta.url);
+    const tls = {
+      key: yield* fs.readFileString(
+        compiled
+          ? process.env.CAFE_RELAY_TLS_KEY!
+          : fileURLToPath(new URL("test-only-key.pem", tlsRoot)),
+      ),
+      cert: yield* fs.readFileString(
+        compiled
+          ? process.env.CAFE_RELAY_TLS_CERT!
+          : fileURLToPath(new URL("test-only-cert.pem", tlsRoot)),
+      ),
+    };
+    const hostname = compiled ? "vps-692e150f.vps.ovh.net" : "127.0.0.1";
+    const browser = compiled
+      ? yield* Effect.promise(async () => {
+          const { compiledRelayViewer } = await import("./relay/browserFixture.e2e.ts");
+          return compiledRelayViewer(test, hostname, tls);
+        })
+      : undefined;
+    const viewerOrigin = browser?.origin ?? "https://trusted-viewer.example";
+    const descriptor = compiled
+      ? { ...testEnvironmentDescriptor, serverVersion: serverPackage.version }
+      : testEnvironmentDescriptor;
+    let clientSettings = DEFAULT_CLIENT_SETTINGS;
+    const dial: RelayRuntimeIOShape["dial"] = (member, resources) =>
+      connectRelayNative(
+        member.url,
+        resources,
+        compiled
+          ? {
+              lookup: (host, options, callback) => {
+                if (host !== hostname) {
+                  callback(new Error("fixture-host-refused"), "", 4);
+                  return;
+                }
+                if (options.all) callback(null, [{ address: "127.0.0.1", family: 4 }]);
+                else callback(null, "127.0.0.1", 4);
+              },
+            }
+          : { ca: tls.cert },
+      );
+    const [root, node, admission, device, deviceAdmission] = yield* Effect.promise(() =>
+      Promise.all(Array.from({ length: 5 }, () => createRelayIdentity())),
+    );
+    const nodeId = deriveRelayIdentityId("node", node!.publicKey),
+      locator = randomRelayOpaque(),
+      capacity = randomRelayOpaque();
+    let network = yield* Effect.promise(() =>
+      signRelayNetwork({
+        root: root!,
+        revision: 1,
+        expiresAt: relayEpochNow() + 3_600_000,
+        nodes: [{ id: nodeId, publicKey: node!.publicKey, url: `wss://${hostname}:1/v1/relay` }],
+      }),
+    );
+    relay = yield* Effect.promise(() =>
+      startRelayServer({
+        network,
+        nodeId,
+        host: "127.0.0.1",
+        port: 0,
+        tls,
+        grants: [
+          {
+            locator,
+            admissionPublicKey: admission!.publicKey,
+            tokenDigest: relayOpaque(relaySha256(relayUnopaque(capacity, 32))),
+          },
+        ],
+      }),
+    );
+    if (!lifetime.active) {
+      yield* Effect.promise(() => relay!.close());
+      return;
+    }
+    network = yield* Effect.promise(() =>
+      signRelayNetwork({
+        root: root!,
+        revision: 2,
+        expiresAt: relayEpochNow() + 3_600_000,
+        nodes: [
+          {
+            id: nodeId,
+            publicKey: node!.publicKey,
+            url: `wss://${hostname}:${relay!.port}/v1/relay`,
+          },
+        ],
+      }),
+    );
+    yield* Effect.promise(() => relay!.updateNetwork(relayCanonicalBytes(network)));
+    yield* buildAppUnderTest({
+      layers: {
+        serverEnvironment: { getDescriptor: Effect.succeed(descriptor) },
+        ...(compiled
+          ? {
+              clientSettings: {
+                getSettings: Effect.sync(() => clientSettings),
+                updateSettings: (patch) =>
+                  Effect.sync(() => (clientSettings = { ...clientSettings, ...patch })),
+              },
+              projectionSnapshotQuery: {
+                getShellSnapshot: () =>
+                  Effect.succeed({
+                    ...makeDefaultOrchestrationReadModel(),
+                    threads: [makeDefaultOrchestrationThreadShell()],
+                  }),
+              },
+            }
+          : {}),
+      },
+      relayConfig: relayCanonicalBytes({
+        version: 1,
+        networks: [
+          {
+            descriptor: network,
+            viewerOrigin,
+            locator,
+            credentials: [
+              {
+                nodeId,
+                token: capacity,
+                admissionPrivateKey: relayOpaque(privateRelayIdentityBytes(admission!)),
+              },
+            ],
+          },
+        ],
+      }),
+      relayIO: {
+        dial,
+        measureLatency: async () => 1,
+      },
+    });
+    if (browser) yield* Effect.addFinalizer(() => Effect.promise(() => browser.close()));
+    yield* Effect.promise(() => vi.waitFor(() => assert.equal(relay!.stats().registrations, 1)));
+    const owner = yield* getAuthenticatedBearerSessionToken();
+    const issued = yield* HttpClient.post("/api/relay/invitations", {
+      headers: { authorization: "Bearer " + owner },
+      body: HttpBody.jsonUnsafe({ networkId: network.networkId, role: "owner" }),
+    });
+    assert.equal(issued.status, 200);
+    const body = yield* issued.json;
+    const decoded = yield* Schema.decodeUnknownEffect(Schema.Struct({ url: Schema.String }))(body);
+    const invitation = parseRelayInvitation(decoded.url, new Set([viewerOrigin]), relayEpochNow());
+    connection = yield* Effect.promise(() =>
+      connectRelayViewer({
+        lifetime,
+        target: {
+          network,
+          hostPublicKey: invitation.hostPublicKey,
+          environmentId: invitation.environmentId,
+          locator,
+          preferredNodeId: nodeId,
+          deviceIdentity: device!,
+          tickets: [
+            {
+              nodeId,
+              registrationId: invitation.registrationId,
+              token: invitation.inviteTicket,
+              expiresAt: invitation.expiresAt,
+              admissionIdentity: deviceAdmission!,
+            },
+          ],
+          paired: false,
+        },
+        dial,
+        // Discovery replication/native HTTP have their own tests. This seam keeps
+        // this qualification on the real application auth/router/socket adapter.
+        fetcher: async () =>
+          new Response(
+            relayCanonicalBytes(relay!.broker.directory.lookup(locator, relayEpochNow())).slice(),
+          ),
+      }),
+    );
+    if (!lifetime.active) {
+      yield* Effect.promise(() => connection!.close());
+      return;
+    }
+    const session = connection.session;
+    const auth = yield* Effect.promise(() =>
+      session.authenticate({
+        environmentId: invitation.environmentId,
+        operation: "pair",
+        credential: invitation.pairingSecret,
+      }),
+    );
+    assert.equal(auth.role, "owner");
+    yield* Effect.promise(async () => {
+      const headers = { authorization: "Bearer " + auth.bearerToken };
+      phase = "descriptor";
+      const descriptor = await fetchRelayHttp(session, "/.well-known/cafe-code/environment", {
+        headers,
+      });
+      assert.equal(descriptor.status, 200);
+      assert.deepEqual(
+        await descriptor.json(),
+        compiled
+          ? { ...testEnvironmentDescriptor, serverVersion: serverPackage.version }
+          : testEnvironmentDescriptor,
+      );
+      const bytes = new Uint8Array(65_543).map((_, index) => index % 251);
+      phase = "file-upload";
+      const upload = await fetchRelayHttp(session, "/api/attachments", {
+        method: "POST",
+        headers: {
+          ...headers,
+          "content-type": "application/octet-stream",
+          "x-cafe-thread-id": "relay-draft-thread",
+          "x-cafe-attachment-name": "relay-file.bin",
+        },
+        body: new Blob([bytes]),
+      });
+      assert.equal(upload.status, 201);
+      const file = (await upload.json()) as { id: string };
+      phase = "file-download";
+      const downloaded = await fetchRelayHttp(session, "/api/attachments/" + file.id, {
+        headers,
+      });
+      assert.equal(downloaded.status, 200);
+      assert.deepEqual(new Uint8Array(await downloaded.arrayBuffer()), bytes);
+      phase = "image-upload";
+      const image = await fetchRelayHttp(session, "/api/branding/sidebar-image", {
+        method: "POST",
+        headers: { ...headers, "content-type": "image/png" },
+        body: new Blob([tinyPngBytes]),
+      });
+      assert.equal(image.status, 200);
+      const asset = (await image.json()) as { sidebarBrandImage: { url: string } };
+      phase = "image-download";
+      const rendered = await fetchRelayHttp(session, asset.sidebarBrandImage.url, { headers });
+      assert.equal(rendered.status, 200);
+      assert.deepEqual(new Uint8Array(await rendered.arrayBuffer()), tinyPngBytes);
+      phase = "native-route-denial";
+      await expect(
+        fetchRelayHttp(session, "/api/auth/bootstrap/bearer", { method: "POST", body: "{}" }),
+      ).rejects.toMatchObject({ code: "INCOMPLETE" });
+    });
+    phase = "rpc";
+    const rpc = yield* Effect.promise(() =>
+      session.open("rpc", { method: "GET", path: "/ws", headers: [] }),
+    );
+    const protocol = RpcClient.layerProtocolSocket({ retryTransientErrors: false }).pipe(
+      Layer.provide(RpcSerialization.layerNdjson),
+      Layer.provide(Layer.effect(Socket.Socket, relayEffectSocket(rpc))),
+    );
+    const result = yield* makeWsRpcClient.pipe(
+      Effect.flatMap((client) => client[WS_METHODS.serverGetConfig]({})),
+      Effect.provide(protocol),
+    );
+    assert.isDefined(result);
+    assert.isTrue(session.active);
+    if (browser) {
+      phase = "compiled-application";
+      yield* Effect.promise(() => connection!.close());
+      const issued = yield* HttpClient.post("/api/relay/invitations", {
+        headers: { authorization: "Bearer " + owner },
+        body: HttpBody.jsonUnsafe({ networkId: network.networkId, role: "owner" }),
+      });
+      assert.equal(issued.status, 200);
+      const invitation = yield* Schema.decodeUnknownEffect(Schema.Struct({ url: Schema.String }))(
+        yield* issued.json,
+      );
+      yield* Effect.promise(() => browser.qualify(invitation.url)).pipe(
+        Effect.ensuring(
+          Effect.promise(() => {
+            phase = "browser-close";
+            return browser.close();
+          }),
+        ),
+      );
+      phase = "backend-close";
+    }
+  }).pipe(Effect.provide(makeHttpServerTestLayer().pipe(Layer.provideMerge(NodeServices.layer))));
+};
+
+it.live(
+  "serves the Cafe router and typed RPC through a pinned encrypted relay with durable auth",
+  (test) => qualifyRelayRouter(test),
+);
+it.live.runIf(process.env.CAFE_RELAY_APP_E2E === "1")(
+  "opens the compiled Cafe application through real pairing and encrypted HTTP/RPC",
+  (test) => qualifyRelayRouter(test, true),
+  60_000,
+);
 
 it.layer(NodeServices.layer)("server router seam", (it) => {
   for (const driver of ["axiom", "codex"]) {

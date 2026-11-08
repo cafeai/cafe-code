@@ -1,0 +1,50 @@
+[Unit]
+Description=Cafe Code private encrypted relay pilot
+After=network-online.target wg-quick@wg0.service
+Wants=network-online.target
+Requires=wg-quick@wg0.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=cafecode-relay-test
+Group=cafecode-relay-test
+WorkingDirectory=/var/lib/cafecode-relay-test
+StateDirectory=cafecode-relay-test
+StateDirectoryMode=0700
+ExecStart=/opt/cafecode-relay-node/node --max-old-space-size=256 /opt/cafecode-relay-test/current/main.mjs --config /etc/cafecode-relay-test/node.json
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+Nice=10
+CPUQuota=100%
+MemoryHigh=384M
+MemoryMax=512M
+MemorySwapMax=0
+TasksMax=64
+LimitNOFILE=1024
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+ReadWritePaths=/var/lib/cafecode-relay-test
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=30
+
+[Install]
+WantedBy=multi-user.target

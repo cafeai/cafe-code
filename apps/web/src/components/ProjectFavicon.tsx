@@ -2,6 +2,7 @@ import type { EnvironmentId } from "@cafecode/contracts";
 import { FolderIcon } from "lucide-react";
 import { useState } from "react";
 import { resolveEnvironmentHttpUrl } from "../environments/runtime";
+import { useRelayImageSource } from "../environments/relay/media";
 
 const loadedProjectFaviconSrcs = new Set<string>();
 
@@ -10,7 +11,7 @@ export function ProjectFavicon(input: {
   cwd: string;
   className?: string;
 }) {
-  const src = (() => {
+  const rawSrc = (() => {
     try {
       return resolveEnvironmentHttpUrl({
         environmentId: input.environmentId,
@@ -21,6 +22,7 @@ export function ProjectFavicon(input: {
       return null;
     }
   })();
+  const src = useRelayImageSource(rawSrc);
   const [status, setStatus] = useState<"loading" | "loaded" | "error">(() =>
     src && loadedProjectFaviconSrcs.has(src) ? "loaded" : "loading",
   );
