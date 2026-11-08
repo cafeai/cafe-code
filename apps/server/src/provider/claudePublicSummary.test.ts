@@ -34,8 +34,20 @@ describe("bounded disclosed Claude summaries", () => {
     expect(state.truncated).toBe(true);
     expect(mergeClaudePublicSummarySnapshot(state, "a".repeat(5_000) + "b")).toBe(true);
     expect(state.receivedLength).toBe(5_001);
+    expect(state.text).toBe("a".repeat(4_095) + "b");
+    // Retention may roll, but every original code unit still binds repairs.
+    expect(mergeClaudePublicSummarySnapshot(state, "z" + "a".repeat(4_999) + "bc")).toBe(false);
     expect(mergeClaudePublicSummarySnapshot(state, "a".repeat(65_537))).toBe(false);
     expect(state.text).toHaveLength(4_096);
+  });
+  it("keeps receiving text after the preview fills, including a delta larger than the window", () => {
+    const state = makeClaudePublicSummaryText();
+    appendClaudePublicSummary(state, "Old prefix " + "a".repeat(4_096));
+    appendClaudePublicSummary(state, " latest progress");
+    expect(state.text).toBe("a".repeat(4_080) + " latest progress");
+    appendClaudePublicSummary(state, "b".repeat(5_000) + " newest");
+    expect(state.text).toBe("b".repeat(4_089) + " newest");
+    expect(state.truncated).toBe(true);
   });
   it("preserves ordinary command text, redacts known tokens and makes controls visible", () => {
     expect(claudeCommandInspectionText("corepack yarn test --run", 4_096)).toBe(

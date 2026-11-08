@@ -21,6 +21,9 @@ import {
   type SubagentConcurrencyPresentation,
 } from "../../subagentConcurrency";
 
+/** Section label in the docked rail, matching its "Scheduled" heading. */
+const PANEL_SECTION_LABEL_CLASS_NAME = "text-xs font-medium text-muted-foreground";
+
 function formatPercentage(value: number | null): string | null {
   if (value === null || !Number.isFinite(value)) {
     return null;
@@ -91,7 +94,8 @@ export function ContextWindowDetails(props: {
           {props.headerAction}
         </div>
       ) : hasUsage || !hasSessionQuota ? (
-        <div className="label-overline">
+        // The docked rail labels each part the way its Scheduled section does.
+        <div className={PANEL_SECTION_LABEL_CLASS_NAME}>
           {uiText("Context window", undefined, undefined, uiLocale)}
         </div>
       ) : null}

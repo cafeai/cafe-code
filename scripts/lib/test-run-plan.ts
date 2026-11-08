@@ -101,10 +101,13 @@ export function browserTestPlan(
             "Mermaid security",
             selection?.mermaidSecurityFiles ?? browserPolicy.mermaidSecurityFiles,
           ),
-          browser(
-            "Mermaid families",
-            selection?.mermaidFamilyFiles ?? browserPolicy.mermaidFamilyFiles,
-          ),
+          browser("Mermaid families", [
+            ...(selection?.mermaidFamilyFiles ?? browserPolicy.mermaidFamilyFiles),
+            // Each file starts full native engines in fresh opaque documents.
+            // Bound overlapping startup in macOS CI and complete local runs;
+            // preserve every probe's absolute allowance and the worker cap.
+            ...(completeLocal || platform === "darwin" ? ["--fileParallelism=false"] : []),
+          ]),
           browser(
             "Diagram and table PNG",
             selection?.imageExportFiles ?? browserPolicy.imageExportFiles,

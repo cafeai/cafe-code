@@ -27,6 +27,7 @@
   },
   "files": [
     "dist",
+    "!dist/.source-runtime-dependencies.json",
     "README.md"
   ],
   "type": "module",
@@ -34,7 +35,7 @@
     "access": "public"
   },
   "scripts": {
-    "dev": "node --watch src/bin.ts",
+    "dev": "node scripts/dev.mjs",
     "build": "node scripts/cli.ts build",
     "build:bundle": "tsdown",
     "prepack": "node scripts/cli.ts assert-publish-prepared",
@@ -48,17 +49,17 @@
     "test:e2e:axiom": "vitest run --config vitest.e2e.config.ts integration/AxiomAcpCliProbe.e2e.test.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.295",
+    "@anthropic-ai/claude-agent-sdk": "0.3.318",
     "@anthropic-ai/sdk": "^0.98.0",
     "@effect/platform-node": "catalog:",
     "@effect/platform-node-shared": "catalog:",
     "@modelcontextprotocol/sdk": "^1.32.1",
+    "@napi-rs/canvas": "1.0.8",
     "@opencode-ai/sdk": "^1.17.18",
     "@pierre/diffs": "catalog:",
-    "@types/web-push": "^3.6.4",
     "acorn": "8.18.0",
     "effect": "catalog:",
-    "electron": "42.11.15",
+    "electron": "43.8.4",
     "electron-updater": "^6.6.2",
     "jsonc-parser": "3.3.1",
     "mdast-util-from-markdown": "^2.0.0",
@@ -66,7 +67,7 @@
     "node-pty": "^1.1.0",
     "pdfjs-dist": "6.3.289",
     "saxes": "6.0.0",
-    "toml": "5.0.0",
+    "toml": "5.0.1",
     "web-push": "^3.6.7",
     "yauzl": "3.4.0",
     "zod": "^4.0.0"
@@ -78,6 +79,7 @@
     "@effect/language-service": "catalog:",
     "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
+    "@types/web-push": "^3.6.4",
     "@types/yauzl": "3.4.0",
     "effect-acp": "workspace:*",
     "effect-codex-app-server": "workspace:*",
@@ -87,6 +89,6 @@
     "vitest": "catalog:"
   },
   "engines": {
-    "node": "^24.21.0"
+    "node": "^24.22.1"
   }
 }

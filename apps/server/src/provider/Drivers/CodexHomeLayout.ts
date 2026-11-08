@@ -5,6 +5,7 @@ import {
   copyFile,
   link as createHardLink,
   lstat,
+  readFile,
   rename,
   rm,
   stat as statFile,
@@ -21,6 +22,7 @@ import * as Schema from "effect/Schema";
 import * as PlatformError from "effect/PlatformError";
 
 import { expandHomePath } from "../../pathExpansion.ts";
+import { isNewerRenewalOfSameCodexLogin } from "../codexAuthJson.ts";
 
 export interface CodexHomeLayout {
   readonly mode: "direct" | "authOverlay";
@@ -374,6 +376,54 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
   }
 });
 
+/**
+ * Atomically replace a private auth file: write an exclusive 0600 temp file in
+ * the same directory, then rename it over the target so a reader never
+ * observes a partially written token.
+ */
+const replacePrivateAuthFile = (path: Path.Path, targetPath: string, contents: string) => {
+  const tempPath = path.join(
+    path.dirname(targetPath),
+    `.auth.json.${process.pid}.${randomUUID()}.tmp`,
+  );
+  return runNodeFs(async () => {
+    try {
+      await writeFile(tempPath, contents, { mode: 0o600, flag: "wx" });
+      await chmodFile(tempPath, 0o600);
+      await rename(tempPath, targetPath);
+      await chmodFile(targetPath, 0o600);
+    } catch (error) {
+      await rm(tempPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  });
+};
+
+/**
+ * Copy a renewed shadow login back to the shared auth file. The shared file is
+ * re-read immediately before publication: if anything else (for example a
+ * fresh `codex login` in a terminal) changed it after it was compared, the
+ * write-back is abandoned and the next materialization re-evaluates. This
+ * narrows, but cannot fully close, the window against a concurrent writer that
+ * does not share a lock with Cafe; the same-subject/newer-renewal rule keeps
+ * the worst case to replacing one renewal of a login with a newer one.
+ */
+const publishShadowRenewalToShared = Effect.fn("CodexHomeLayout.publishShadowRenewalToShared")(
+  function* (
+    path: Path.Path,
+    sharedAuthPath: string,
+    comparedSharedContents: string,
+    renewedContents: string,
+  ) {
+    const unchanged = yield* runNodeFs(async () => {
+      const current = await readFile(sharedAuthPath, "utf8");
+      return current === comparedSharedContents;
+    });
+    if (!unchanged) return;
+    yield* replacePrivateAuthFile(path, sharedAuthPath, renewedContents);
+  },
+);
+
 const ensureShadowAuthIsPrivate = Effect.fn("CodexHomeLayout.ensureShadowAuthIsPrivate")(function* (
   fileSystem: FileSystem.FileSystem,
   authSourcePath: string,
@@ -419,26 +469,22 @@ const ensureShadowAuthIsPrivate = Effect.fn("CodexHomeLayout.ensureShadowAuthIsP
       yield* normalizeShadowHomeError(fileSystem.chmod(authPath, 0o600));
       return;
     }
+    // Codex persists a token renewal to its own CODEX_HOME, which is this
+    // shadow. OpenAI refresh tokens are single-use, so overwriting a strictly
+    // newer renewal of the same login with the shared copy would reinstate an
+    // already-consumed refresh token and sign the account out on the next
+    // renewal. Publish that renewal back to the shared source instead.
+    if (
+      existingContents !== undefined &&
+      isNewerRenewalOfSameCodexLogin(existingContents, authContents)
+    ) {
+      yield* publishShadowRenewalToShared(path, sharedAuthPath, authContents, existingContents);
+      yield* normalizeShadowHomeError(fileSystem.chmod(authPath, 0o600));
+      return;
+    }
   }
 
-  const tempPath = path.join(
-    path.dirname(authPath),
-    `.auth.json.${process.pid}.${randomUUID()}.tmp`,
-  );
-  yield* runNodeFs(async () => {
-    try {
-      // Auth is private material. Write a 0600 temp file first, then atomically
-      // replace the shadow auth so app-server never observes a partially
-      // written token after the user logs in again through the upstream CLI.
-      await writeFile(tempPath, authContents, { mode: 0o600, flag: "wx" });
-      await chmodFile(tempPath, 0o600);
-      await rename(tempPath, authPath);
-      await chmodFile(authPath, 0o600);
-    } catch (error) {
-      await rm(tempPath, { force: true }).catch(() => undefined);
-      throw error;
-    }
-  });
+  yield* replacePrivateAuthFile(path, authPath, authContents);
 });
 
 export const materializeCodexShadowHome = Effect.fn("materializeCodexShadowHome")(function* (

@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { EventId, type TurnId } from "@cafecode/contracts";
+import {
+  EventId,
+  type MessageId,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  type OrchestrationThreadActivity,
+  type TurnId,
+} from "@cafecode/contracts";
+import {
+  deriveTimelineEntries,
+  deriveWorkLogEntries,
+  type TimelineEntry,
+  type WorkLogEntry,
+} from "../../session-logic";
 import {
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
@@ -12,6 +24,188 @@ import {
   normalizeCompactToolLabel,
   resolveAssistantMessageCopyState,
 } from "./MessagesTimeline.logic";
+
+describe("MCP question resolution notices", () => {
+  it("keeps exact MCP questions and responses visible without promoting intents or unrelated payloads", () => {
+    const turnId = "question-turn" as TurnId;
+    const resolved = (
+      id: string,
+      action: "answered" | "skipped" | "cleared",
+      sequence: number,
+      items: unknown[],
+    ): OrchestrationThreadActivity => ({
+      id: EventId.make(id),
+      turnId,
+      createdAt: `2026-01-01T00:00:${String(sequence).padStart(2, "0")}Z`,
+      sequence,
+      kind: "mcp.question.resolved",
+      tone: "info",
+      summary: "Private unrelated activity wording",
+      payload: {
+        version: 2,
+        source: "mcp",
+        action,
+        questionCount: items.length,
+        items,
+        rawProviderFields: "Private unrelated provider payload",
+      },
+    });
+    const answeredItems = [
+      {
+        question: {
+          id: "details",
+          header: "Details",
+          question: "Which exact text?\nKeep <b>literal markup</b>.",
+        },
+        answer: "  Exact answer\n第二行  ",
+      },
+      {
+        question: { id: "choices", header: "Choices", question: "Which two values?" },
+        answer: ["First", "Second"],
+      },
+    ];
+    const answered = resolved("mcp-answered", "answered", 1, answeredItems);
+    // Inline questions have no native header and use the ordinary provider
+    // input limit, not the smaller native callback response byte budget.
+    const asyncItems = [
+      {
+        question: { id: "inline:0", header: "", question: "Which inline answer?" },
+        answer: "文".repeat(23_000),
+      },
+    ];
+    const skippedItems = [
+      {
+        question: { id: "later", header: "Later", question: "Which question was skipped?" },
+        disposition: "skipped",
+      },
+    ];
+    const clearedItems = [
+      {
+        question: { id: "dismiss", header: "Dismiss", question: "Which question was cleared?" },
+        disposition: "dismissed",
+      },
+    ];
+    const invalid = (id: string, payload: unknown): OrchestrationThreadActivity => ({
+      ...answered,
+      id: EventId.make(id),
+      sequence: 5,
+      // Positive legacy evidence follows the four distinct current receipts.
+      // Timeline presentation uses the activity timestamp, not just sequence.
+      createdAt: "2026-01-01T00:00:05Z",
+      payload,
+    });
+    let accessorCalls = 0;
+    const accessorItem = { question: answeredItems[0]!.question };
+    Object.defineProperty(accessorItem, "answer", {
+      get: () => {
+        accessorCalls += 1;
+        return "Do not run";
+      },
+    });
+    const activities = [
+      answered,
+      { ...answered },
+      resolved("mcp-skipped", "skipped", 2, skippedItems),
+      resolved("mcp-cleared", "cleared", 3, clearedItems),
+      resolved("mcp-inline", "answered", 4, asyncItems),
+      invalid("mcp-legacy", { version: 1, source: "mcp", action: "answered", questionCount: 1 }),
+      invalid("mcp-unknown-action", {
+        version: 2,
+        source: "mcp",
+        action: "approved",
+        questionCount: 2,
+        items: answeredItems,
+      }),
+      invalid("mcp-future-version", {
+        version: 3,
+        source: "mcp",
+        action: "answered",
+        questionCount: 2,
+        items: answeredItems,
+      }),
+      invalid("mcp-wrong-source", {
+        version: 2,
+        source: "native",
+        action: "answered",
+        questionCount: 2,
+        items: answeredItems,
+      }),
+      invalid("mcp-wrong-count", {
+        version: 2,
+        source: "mcp",
+        action: "answered",
+        questionCount: 1,
+        items: answeredItems,
+      }),
+      invalid("mcp-duplicate-question", {
+        version: 2,
+        source: "mcp",
+        action: "answered",
+        questionCount: 2,
+        items: [answeredItems[0], answeredItems[0]],
+      }),
+      invalid("mcp-conflicting-response", {
+        version: 2,
+        source: "mcp",
+        action: "answered",
+        questionCount: 1,
+        items: [{ ...answeredItems[0], disposition: "skipped" }],
+      }),
+      invalid("mcp-accessor", {
+        version: 2,
+        source: "mcp",
+        action: "answered",
+        questionCount: 1,
+        items: [accessorItem],
+      }),
+      invalid("mcp-answer-character-limit", {
+        version: 2,
+        source: "mcp",
+        action: "answered",
+        questionCount: 1,
+        items: [
+          { ...answeredItems[0], answer: "a".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS + 1) },
+        ],
+      }),
+      invalid("mcp-receipt-byte-limit", {
+        version: 2,
+        source: "mcp",
+        action: "answered",
+        questionCount: 6,
+        items: Array.from({ length: 6 }, (_, index) => ({
+          question: { id: `long-${index}`, header: "Long", question: "文".repeat(60_000) },
+          answer: "Yes",
+        })),
+      }),
+      { ...answered, id: EventId.make("native-impostor"), kind: "user-input.resolved" },
+      {
+        ...answered,
+        id: EventId.make("mcp-dispatch-only"),
+        kind: "mcp.question.response-requested",
+      },
+    ];
+    const work = deriveWorkLogEntries(activities, turnId);
+    expect(work.some((entry) => entry.id === answered.id)).toBe(false);
+    const entries = deriveTimelineEntries([], [], work, [], activities);
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: entries,
+      completionDividerAfterEntryId: null,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      revertTurnCountByUserMessageId: new Map(),
+    });
+    const notices = rows.filter((row) => row.kind === "question-resolution");
+    expect(notices.map((row) => [row.action, row.questionCount, row.items])).toEqual([
+      ["answered", 2, answeredItems],
+      ["skipped", 1, skippedItems],
+      ["cleared", 1, clearedItems],
+      ["answered", 1, asyncItems],
+      ["answered", 1, null],
+    ]);
+    expect(accessorCalls).toBe(0);
+    expect(JSON.stringify(notices)).not.toContain("Private unrelated");
+  });
+});
 
 describe("mergeHistoricalSubagentEntries", () => {
   it("preserves current native confirmation against separately paged older-runtime completion", () => {
@@ -705,6 +899,149 @@ describe("deriveMessagesTimelineRows", () => {
         row.kind === "message" && row.message.role === "user",
     );
     expect(userRow?.revertTurnCount).toBe(1);
+  });
+
+  it("keeps primary summary updates stable and excludes only their exact Claude history operation", () => {
+    const turnId = "turn-summary" as TurnId;
+    const summary: Extract<TimelineEntry, { kind: "provider-summary" }> = {
+      id: 'provider-summary:["turn-summary","block-0"]',
+      kind: "provider-summary",
+      operationKey: '["turn-summary","block-0"]',
+      turnId,
+      createdAt: "2026-01-01T00:00:01Z",
+      summary: {
+        provider: "claudeAgent",
+        text: "Received public text",
+        status: "completed",
+        truncated: false,
+      },
+    };
+    const duplicate: WorkLogEntry = {
+      id: "summary-activity",
+      turnId,
+      toolCallId: "block-0",
+      createdAt: summary.createdAt,
+      label: "Claude summary",
+      tone: "info",
+      publicSummary: summary.summary,
+    };
+    const input = {
+      timelineEntries: [summary],
+      completionDividerAfterEntryId: null,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      revertTurnCountByUserMessageId: new Map(),
+      historicalWorkLogSummariesByTurnId: new Map([
+        [
+          turnId,
+          {
+            turnId,
+            snapshotEntryCount: 3,
+            previewEntries: [
+              duplicate,
+              {
+                ...duplicate,
+                id: "opencode-same-id",
+                publicSummary: { ...summary.summary, provider: "opencode" as const },
+              },
+              { ...duplicate, id: "unpromoted-legacy-block", toolCallId: "block-older" },
+            ],
+          },
+        ],
+      ]),
+    };
+    const rows = deriveMessagesTimelineRows(input);
+    expect(rows.map((row) => row.kind)).toEqual(["historical-work", "provider-summary"]);
+    expect(rows[0]).toMatchObject({
+      summary: {
+        snapshotEntryCount: 2,
+        previewEntries: [{ id: "opencode-same-id" }, { id: "unpromoted-legacy-block" }],
+      },
+    });
+    const initial = computeStableMessagesTimelineRows(rows, { byId: new Map(), result: [] });
+    const repeated = computeStableMessagesTimelineRows(
+      deriveMessagesTimelineRows({
+        ...input,
+        timelineEntries: [{ ...summary, summary: { ...summary.summary } }],
+      }),
+      initial,
+    );
+    expect(repeated.result).toBe(initial.result);
+    const updated = computeStableMessagesTimelineRows(
+      deriveMessagesTimelineRows({
+        ...input,
+        timelineEntries: [
+          { ...summary, summary: { ...summary.summary, text: "Received corrected public text" } },
+        ],
+      }),
+      repeated,
+    );
+    expect(updated.result[0]).toBe(initial.result[0]);
+    expect(updated.result[1]).not.toBe(initial.result[1]);
+    expect(updated.result[1]).toMatchObject({
+      id: 'provider-summary:["turn-summary","block-0"]',
+      createdAt: "2026-01-01T00:00:01Z",
+      summary: { text: "Received corrected public text" },
+    });
+  });
+
+  it("keeps a failed turn's log immediately after its exact input when a later message arrives", () => {
+    const turnId = "failed-turn" as TurnId;
+    const messages = [
+      {
+        id: "failed-input" as MessageId,
+        role: "user" as const,
+        text: "Same prompt",
+        turnId: null,
+        originatingTurn: { turnId, state: "error" as const },
+        createdAt: "2026-01-01T00:00:00Z",
+        streaming: false,
+      },
+      {
+        id: "later-input" as MessageId,
+        role: "user" as const,
+        text: "Same prompt",
+        turnId: null,
+        createdAt: "2026-01-01T00:00:10Z",
+        streaming: false,
+      },
+    ];
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: messages.map((message) => ({
+        kind: "message" as const,
+        id: message.id,
+        createdAt: message.createdAt,
+        message,
+      })),
+      historicalWorkLogSummariesByTurnId: new Map([
+        [
+          turnId,
+          {
+            turnId,
+            snapshotEntryCount: 1,
+            previewEntries: [
+              {
+                id: "failure",
+                turnId,
+                createdAt: "2026-01-01T00:00:11Z",
+                label: "Provider error",
+                tone: "error" as const,
+              },
+            ],
+          },
+        ],
+      ]),
+      completionDividerAfterEntryId: null,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      revertTurnCountByUserMessageId: new Map(),
+    });
+    expect(rows.map((row) => row.id)).toEqual([
+      "failed-input",
+      "historical-work:failed-turn",
+      "later-input",
+    ]);
+    expect(messages[0]?.turnId).toBeNull();
   });
 
   it("inserts collapsed historical work logs between a turn's user and assistant messages", () => {

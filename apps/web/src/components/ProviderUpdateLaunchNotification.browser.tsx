@@ -3,6 +3,7 @@ import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@ca
 import { getUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+import { ownNotificationFixture } from "./notificationFixture.test.fixture";
 
 type FixtureToastPayload = {
   readonly type?: string;
@@ -29,6 +30,7 @@ const fixture = vi.hoisted(() => ({
   dismissed: new Set<string>(),
   dismiss: vi.fn(),
   navigate: vi.fn(),
+  reveal: vi.fn(),
   toastListeners: new Set<() => void>(),
   toastSnapshot: [] as readonly (readonly [string, FixtureToastPayload])[],
   toasts: new Map<string, FixtureToastPayload>(),
@@ -69,6 +71,7 @@ vi.mock("../providerUpdateDismissal", () => ({
   }),
 }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => fixture.navigate }));
+vi.mock("./settings/settingsSearchLanding", () => ({ revealSettingsSearchTarget: fixture.reveal }));
 vi.mock("./ui/toast", () => ({
   stackedThreadToast: (input: unknown) => input,
   toastManager: { add: fixture.add, update: fixture.update, close: fixture.close },
@@ -82,6 +85,7 @@ import {
 } from "./ProviderUpdateLaunchNotification.logic";
 
 const originalLocale = getUiLocale();
+let controlledUpdateOwner: ReturnType<typeof ownNotificationFixture> | undefined;
 
 function publishToastRevision() {
   // Real manager/provider stores publish immutable snapshots. Returning only a
@@ -142,6 +146,7 @@ function providerFixture(version: string, canUpdate = true): ProviderUpdateCandi
 }
 
 beforeEach(() => {
+  if (controlledUpdateOwner) throw new Error("Previous provider update fixture is still retiring.");
   setUiLocale("en");
   fixture.selected = "remote";
   fixture.providers = [];
@@ -156,9 +161,12 @@ beforeEach(() => {
     fixture.close,
     fixture.dismiss,
     fixture.navigate,
+    fixture.reveal,
   ]) {
     mock.mockReset();
   }
+  fixture.navigate.mockResolvedValue(undefined);
+  fixture.reveal.mockResolvedValue(true);
   fixture.add.mockImplementation((payload: FixtureToastPayload) => {
     const id = `toast-${fixture.add.mock.calls.length}`;
     fixture.toasts.set(id, payload);
@@ -175,7 +183,9 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await controlledUpdateOwner?.cleanup();
+  controlledUpdateOwner = undefined;
   setUiLocale(originalLocale);
   expect(fixture.toastListeners.size).toBe(0);
   expect(fixture.listeners.size).toBe(0);
@@ -492,4 +502,113 @@ it("retains received progress-failure text while updating its Cafe title and set
   } finally {
     await screen.unmount();
   }
+});
+
+it("routes a native failed-update Settings action to only the selected exact instance without passing output", async (context) => {
+  const owner = ownNotificationFixture(context);
+  controlledUpdateOwner = owner;
+  const selected = {
+    ...providerFixture("diagnostic-native-target-fixture-2.0.0"),
+    instanceId: ProviderInstanceId.make("codex-personal"),
+  };
+  const other = {
+    ...providerFixture("diagnostic-native-other-fixture-2.0.0"),
+    versionAdvisory: {
+      ...providerFixture("diagnostic-native-other-fixture-2.0.0").versionAdvisory,
+      status: "current" as const,
+    },
+  };
+  const failure = {
+    status: "failed",
+    startedAt: "2026-10-30T01:00:00.000Z",
+    finishedAt: "2026-10-30T01:01:00.000Z",
+    message: "Update command exited with code 1.",
+    output: "selected-private-output",
+  } as const;
+  fixture.providers = [selected, other];
+  fixture.remoteUpdate.mockResolvedValue({
+    providers: [
+      { ...other, updateState: { ...failure, output: "foreign-private-output" } },
+      { ...selected, updateState: failure },
+    ],
+  });
+  const view = await owner.mount(<ToastSurface />);
+  await owner.run(() =>
+    expect.element(view.getByTestId("toast-action")).toHaveTextContent("Update"),
+  );
+  await owner.run(() => view.getByTestId("toast-action").click());
+  await owner.run(() =>
+    expect
+      .element(view.getByTestId("provider-toast-title"))
+      .toHaveTextContent("Codex update failed"),
+  );
+  await owner.run(() =>
+    expect.element(view.getByTestId("toast-action")).toHaveTextContent("Settings"),
+  );
+  expect(view.container.textContent).not.toContain("selected-private-output");
+  expect(view.container.textContent).not.toContain("foreign-private-output");
+  await owner.run(() => view.getByTestId("toast-action").click());
+  await owner.run(() =>
+    vi.waitFor(() =>
+      expect(fixture.reveal).toHaveBeenCalledExactlyOnceWith({
+        id: "provider:codex-personal",
+        kind: "setting",
+        root: document.body,
+        isCurrent: expect.any(Function),
+      }),
+    ),
+  );
+  expect(fixture.navigate).toHaveBeenCalledExactlyOnceWith({ to: "/settings/providers" });
+  expect(fixture.remoteUpdate).toHaveBeenCalledExactlyOnceWith({
+    provider: "codex",
+    instanceId: "codex-personal",
+  });
+  expect(fixture.localUpdate).not.toHaveBeenCalled();
+  const target = fixture.reveal.mock.calls[0]![0] as { isCurrent: () => boolean };
+  expect(target.isCurrent()).toBe(true);
+  fixture.selected = "local";
+  expect(target.isCurrent()).toBe(false);
+});
+
+it("does not reveal an old server's similarly named provider after native Settings navigation settles late", async (context) => {
+  const owner = ownNotificationFixture(context);
+  controlledUpdateOwner = owner;
+  const selected = providerFixture("diagnostic-native-navigation-fixture-2.0.0");
+  fixture.providers = [selected];
+  fixture.remoteUpdate.mockResolvedValue({
+    providers: [
+      {
+        ...selected,
+        updateState: {
+          status: "failed",
+          startedAt: "2026-10-30T01:00:00.000Z",
+          finishedAt: "2026-10-30T01:01:00.000Z",
+          message: "Update command exited with code 1.",
+          output: "private-output-never-passed-to-navigation",
+        },
+      },
+    ],
+  });
+  let releaseNavigation!: () => void;
+  const navigation = new Promise<void>((resolve) => {
+    releaseNavigation = resolve;
+  });
+  owner.onRetire(() => releaseNavigation());
+  fixture.navigate.mockImplementation(() => navigation);
+  const view = await owner.mount(<ToastSurface />);
+  await owner.run(() =>
+    expect.element(view.getByTestId("toast-action")).toHaveTextContent("Update"),
+  );
+  await owner.run(() => view.getByTestId("toast-action").click());
+  await owner.run(() =>
+    expect.element(view.getByTestId("toast-action")).toHaveTextContent("Settings"),
+  );
+  await owner.run(() => view.getByTestId("toast-action").click());
+  expect(fixture.navigate).toHaveBeenCalledExactlyOnceWith({ to: "/settings/providers" });
+  fixture.selected = "local";
+  for (const listener of fixture.listeners) listener();
+  releaseNavigation();
+  await owner.run(() => navigation);
+  expect(fixture.reveal).not.toHaveBeenCalled();
+  expect(fixture.localUpdate).not.toHaveBeenCalled();
 });

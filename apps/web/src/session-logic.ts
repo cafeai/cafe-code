@@ -2,7 +2,11 @@ import * as Option from "effect/Option";
 import * as Arr from "effect/Array";
 import * as Schema from "effect/Schema";
 import type { VisualizationTimelineEntry } from "@cafecode/contracts/visualizationApi";
-import { uiFormatNumber, uiText } from "@cafecode/shared/i18n";
+import { getUiLocale, uiFormatNumber, uiText } from "@cafecode/shared/i18n";
+import {
+  providerStartupFailureDetail,
+  readProviderStartupFailureCategoryFromPayload,
+} from "@cafecode/shared/providerStartupFailure";
 import {
   ApprovalRequestId,
   EventId,
@@ -18,12 +22,14 @@ import {
   ProviderDriverKind,
   ProviderInteraction,
   ProviderNetworkApproval,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type ToolLifecycleItemType,
   type UserInputQuestion,
   type ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
 import { summarizeToolArguments } from "@cafecode/shared/toolActivity";
+import { deriveCurrentNativeAgentStarts } from "@cafecode/shared/liveWork";
 import { codexRecoveryWorkLogLabel, nativeRetryWorkLogLabel } from "./codexRecovery";
 import {
   deriveProviderDiagnosticWorkLogRecord,
@@ -39,10 +45,10 @@ import { visualizationEntryIdentity } from "./components/visualizations/visualiz
 import { readTurnConfiguration, presentTurnConfiguration } from "./turnConfiguration";
 import {
   readClaudeCommandInspection,
-  readClaudePublicSummary,
+  readProviderPublicSummary,
   mergeClaudeCommandInspections,
   type ClaudeCommandInspection,
-  type ClaudePublicSummary,
+  type ProviderPublicSummary,
 } from "./components/chat/providerOperationVisibility";
 
 import {
@@ -109,7 +115,7 @@ export interface WorkLogEntry {
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
   /** Explicit bounded public presentation, never arbitrary native payloads. */
-  publicSummary?: ClaudePublicSummary;
+  publicSummary?: ProviderPublicSummary;
   commandInspection?: ClaudeCommandInspection;
   /** Public occurrence metadata only; private JSON is read after expansion. */
   providerDiagnostic?: ProviderDiagnosticWorkLogRecord;
@@ -136,6 +142,13 @@ export interface WorkLogEntry {
     runtimeId?: string;
     taskControl?: import("@cafecode/contracts").ProviderTaskControlCapability;
   };
+}
+
+/** Exact presentation identity only; it never grants native session authority. */
+export function primaryClaudeSummaryKey(entry: WorkLogEntry): string | undefined {
+  return entry.publicSummary?.provider === "claudeAgent" && entry.turnId && entry.toolCallId
+    ? JSON.stringify([entry.turnId, entry.toolCallId])
+    : undefined;
 }
 
 /** Render Cafe-owned copy without translating opaque provider/user labels or
@@ -180,6 +193,8 @@ export interface HistoricalWorkLogSummary {
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
   activityKind: OrchestrationThreadActivity["kind"];
+  operationStatus?: ClaudeCommandInspection["status"];
+  operationCompletedAt?: string;
   collapseKey?: string;
   toolCallId?: string;
   /** Content-free duplicate-occurrence witness; stripped before rendering. */
@@ -201,6 +216,8 @@ export interface PendingUserInput {
   createdAt: string;
   questions: ReadonlyArray<UserInputQuestion>;
   isBlocking: boolean;
+  /** Presentation hint only; the live native callback rechecks authority. */
+  supportsUnanswered?: boolean;
   interaction?: ProviderInteraction;
 }
 
@@ -224,7 +241,36 @@ export interface LatestProposedPlanState {
   implementationThreadId: ThreadId | null;
 }
 
+export type McpQuestionResolutionItem = {
+  readonly question: {
+    readonly id: string;
+    readonly header: string;
+    readonly question: string;
+  };
+} & (
+  | { readonly answer: string | readonly string[] }
+  | { readonly disposition: "skipped" | "dismissed" }
+);
+
 export type TimelineEntry =
+  | {
+      id: string;
+      kind: "question-resolution";
+      createdAt: string;
+      turnId: TurnId | null;
+      action: "answered" | "skipped" | "cleared";
+      questionCount: number;
+      /** Null preserves honest count-only receipts written before v2. */
+      items: readonly McpQuestionResolutionItem[] | null;
+    }
+  | {
+      id: string;
+      kind: "provider-summary";
+      createdAt: string;
+      turnId: TurnId;
+      operationKey: string;
+      summary: ProviderPublicSummary;
+    }
   | {
       id: string;
       kind: "visualization";
@@ -349,18 +395,22 @@ function requestKindFromRequestType(requestType: unknown): PendingApproval["requ
   }
 }
 
-function isStalePendingRequestFailureDetail(detail: string | undefined): boolean {
+function isStalePendingRequestFailureDetail(
+  detail: string | undefined,
+  lane: "approval" | "question",
+): boolean {
   const normalized = detail?.toLowerCase();
   if (!normalized) {
     return false;
   }
-  return (
-    normalized.includes("stale pending approval request") ||
-    normalized.includes("stale pending user-input request") ||
-    normalized.includes("unknown pending approval request") ||
-    normalized.includes("unknown pending permission request") ||
-    normalized.includes("unknown pending user-input request")
-  );
+  // A stale response belongs to its exact interaction channel. An unrelated
+  // error's prose must not hide a still-pending permission or question card.
+  return lane === "approval"
+    ? normalized.includes("stale pending approval request") ||
+        normalized.includes("unknown pending approval request") ||
+        normalized.includes("unknown pending permission request")
+    : normalized.includes("stale pending user-input request") ||
+        normalized.includes("unknown pending user-input request");
 }
 
 export function derivePendingApprovals(
@@ -413,7 +463,7 @@ export function derivePendingApprovals(
     if (
       activity.kind === "provider.approval.respond.failed" &&
       requestId &&
-      isStalePendingRequestFailureDetail(detail)
+      isStalePendingRequestFailureDetail(detail, "approval")
     ) {
       openByRequestId.delete(requestId);
       continue;
@@ -508,6 +558,7 @@ export function derivePendingUserInputs(
         // Events written before Codex 0.147 did not carry the field and must
         // remain blocking. Only an explicit false enables auto-resolution.
         isBlocking: payload?.isBlocking !== false,
+        ...(payload?.supportsUnanswered === true ? { supportsUnanswered: true } : {}),
       });
       continue;
     }
@@ -520,7 +571,7 @@ export function derivePendingUserInputs(
     if (
       activity.kind === "provider.user-input.respond.failed" &&
       requestId &&
-      isStalePendingRequestFailureDetail(detail)
+      isStalePendingRequestFailureDetail(detail, "question")
     ) {
       openByRequestId.delete(requestId);
     }
@@ -653,13 +704,128 @@ export function hasActionableProposedPlan(
   return proposedPlan !== null && proposedPlan.implementedAt === null;
 }
 
+interface UnstartedTurnFailureContext {
+  /** Canonical retained messages only; optimistic rows cannot attest admission. */
+  readonly messages: ReadonlyArray<Pick<ChatMessage, "id" | "role" | "turnId" | "createdAt">>;
+  readonly latestTurn: Pick<
+    OrchestrationLatestTurn,
+    "turnId" | "requestedAt" | "startedAt" | "completedAt"
+  > | null;
+}
+
+function currentUnstartedMessageTimes(
+  context: UnstartedTurnFailureContext | undefined,
+  latestTurnId: TurnId | undefined,
+): ReadonlyMap<string, number> {
+  const result = new Map<string, number>();
+  if (!context || (context.latestTurn?.turnId ?? undefined) !== latestTurnId) return result;
+  const boundary = context.latestTurn
+    ? Date.parse(
+        context.latestTurn.completedAt ??
+          context.latestTurn.startedAt ??
+          context.latestTurn.requestedAt,
+      )
+    : null;
+  if (boundary !== null && !Number.isFinite(boundary)) return result;
+  // A later successful turn closes this suffix. Do not carry old failed
+  // messages into every subsequent turn's current work log merely because
+  // those messages never acquired a provider TurnId of their own.
+  for (let index = context.messages.length - 1; index >= 0; index -= 1) {
+    const message = context.messages[index]!;
+    if (message.turnId !== null && message.turnId !== undefined) break;
+    if (message.role !== "user") continue;
+    const createdAt = Date.parse(message.createdAt);
+    if (!Number.isFinite(createdAt) || (boundary !== null && createdAt <= boundary)) continue;
+    result.set(message.id, createdAt);
+  }
+  return result;
+}
+
+function isCurrentUnstartedTurnFailure(
+  activity: OrchestrationThreadActivity,
+  messageTimes: ReadonlyMap<string, number>,
+  uniqueLegacyMessageTimes: ReadonlySet<number>,
+): boolean {
+  if (
+    activity.kind !== "provider.turn.start.failed" ||
+    activity.turnId !== null ||
+    activity.tone !== "error"
+  )
+    return false;
+  const payload = asRecord(activity.payload);
+  const failedAt = Date.parse(activity.createdAt);
+  if (!Number.isFinite(failedAt)) return false;
+  if (
+    payload &&
+    Object.keys(payload).length === 1 &&
+    Object.hasOwn(payload, "detail") &&
+    typeof payload.detail === "string"
+  ) {
+    // Older failed-start rows retained only detail and the original intent's
+    // timestamp. A unique same-time canonical pending message admits a generic
+    // notice only; temporal coincidence is never a delivery/retry receipt.
+    // Partial or future correlation objects cannot fall back to this path.
+    return (
+      uniqueLegacyMessageTimes.has(failedAt) &&
+      (activity.sequence === undefined ||
+        (Number.isSafeInteger(activity.sequence) && activity.sequence > 0))
+    );
+  }
+  if (
+    typeof payload?.messageId !== "string" ||
+    typeof payload.intentSequence !== "number" ||
+    !Number.isSafeInteger(payload.intentSequence) ||
+    payload.intentSequence <= 0
+  )
+    return false;
+  const messageTime = messageTimes.get(payload.messageId);
+  // These received identities select presentation only. They grant no retry,
+  // delivery, liveness or native-owner authority. A timestamp cannot bind a
+  // stale failure to a later same-ID message, nor can malformed sequence data.
+  return (
+    messageTime !== undefined &&
+    Number.isFinite(failedAt) &&
+    failedAt >= messageTime &&
+    (activity.sequence === undefined ||
+      (Number.isSafeInteger(activity.sequence) && activity.sequence > payload.intentSequence))
+  );
+}
+
 export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
   latestTurnId: TurnId | undefined,
-  options: DeriveSubagentActivityOptions & { includeUnscopedCompaction?: boolean } = {},
+  options: DeriveSubagentActivityOptions & {
+    includeUnscopedCompaction?: boolean;
+    /** Main-chat-only visibility for a durably accepted message with no turn. */
+    unstartedTurnFailures?: UnstartedTurnFailureContext;
+  } = {},
 ): WorkLogEntry[] {
-  const ordered = [...activities].toSorted(compareActivitiesByOrder).filter(
-    (activity) =>
+  const unstartedMessageTimes = currentUnstartedMessageTimes(
+    options.unstartedTurnFailures,
+    latestTurnId,
+  );
+  const uniqueLegacyMessageTimes = new Set<number>();
+  const ambiguousLegacyMessageTimes = new Set<number>();
+  for (const createdAt of unstartedMessageTimes.values()) {
+    if (ambiguousLegacyMessageTimes.has(createdAt)) continue;
+    if (uniqueLegacyMessageTimes.has(createdAt)) {
+      uniqueLegacyMessageTimes.delete(createdAt);
+      ambiguousLegacyMessageTimes.add(createdAt);
+    } else uniqueLegacyMessageTimes.add(createdAt);
+  }
+  const admittedUnstartedFailures = new Set<string>();
+  const ordered = [...activities].toSorted(compareActivitiesByOrder).filter((activity) => {
+    if (
+      options.unstartedTurnFailures &&
+      activity.turnId === null &&
+      activity.kind === "provider.turn.start.failed"
+    ) {
+      if (!isCurrentUnstartedTurnFailure(activity, unstartedMessageTimes, uniqueLegacyMessageTimes))
+        return false;
+      admittedUnstartedFailures.add(activity.id);
+      return true;
+    }
+    return (
       !latestTurnId ||
       activity.turnId === latestTurnId ||
       // Manual requests/failures and some provider compaction notifications
@@ -669,8 +835,9 @@ export function deriveWorkLogEntries(
         activity.turnId === null &&
         (isContextCompactionActivity(activity) ||
           activity.kind === "provider.compaction.requested" ||
-          activity.kind === "provider.compaction.failed")),
-  );
+          activity.kind === "provider.compaction.failed"))
+    );
+  });
   const latestTaskVisibility = new Map<string, "visible" | "ambient">();
   const configuredCodexTurns = new Set<TurnId>();
   const configurationByActivityId = new Map<string, ProviderTurnConfiguration>();
@@ -724,7 +891,7 @@ export function deriveWorkLogEntries(
       (activity) =>
         activity.kind !== "reasoning.summary" ||
         (asTrimmedString(asRecord(activity.payload)?.itemId) !== null &&
-          readClaudePublicSummary(activity.payload) !== undefined),
+          readProviderPublicSummary(activity.payload) !== undefined),
     )
     .filter(
       (activity) => activity.kind !== "task.started" || isUserVisibleTaskStartedActivity(activity),
@@ -733,6 +900,10 @@ export function deriveWorkLogEntries(
     // These structured prompts have their own nonblocking composer surface.
     // They must not create a duplicate generic work-log row or waiting state.
     .filter((activity) => activity.kind !== "provider.async-questions")
+    // MCP handling is a primary conversation notice, including on replay. A
+    // malformed/future notice must not fall back to exposing arbitrary detail
+    // or answers through the generic Work Log renderer.
+    .filter((activity) => activity.kind !== "mcp.question.resolved")
     .filter((activity) => activity.summary !== "Checkpoint captured")
     .filter((activity) => !isPlanBoundaryToolActivity(activity))
     .filter((activity) => !isRetryableSteerDeliveryActivity(activity))
@@ -751,18 +922,41 @@ export function deriveWorkLogEntries(
       const payload = asRecord(activity.payload);
       return payload?.taskId !== `codex-turn-start:${activity.turnId}`;
     })
-    .map((activity) =>
-      toDerivedWorkLogEntry(
+    .map((activity) => {
+      if (admittedUnstartedFailures.has(activity.id)) {
+        // A preparation failure has no native turn, but it still belongs next
+        // to its accepted user message. Keep opaque failure prose out of the
+        // ordinary entry/debug/preview. Only the closed server-authored category
+        // selects fixed Cafe copy; no received detail becomes display text or a
+        // diagnostic subject. This marker grants no retry or native authority.
+        const startupFailureCategory = readProviderStartupFailureCategoryFromPayload(
+          activity.payload,
+        );
+        return {
+          id: activity.id,
+          turnId: activity.turnId,
+          createdAt: activity.createdAt,
+          label: uiText("Provider turn start failed"),
+          ...(startupFailureCategory !== undefined
+            ? { detail: providerStartupFailureDetail(startupFailureCategory, getUiLocale()) }
+            : {}),
+          tone: "error" as const,
+          activityKind: activity.kind,
+        };
+      }
+      return toDerivedWorkLogEntry(
         activity,
         configurationByActivityId.get(activity.id),
         activity.turnId ? configurationByTurnId.get(activity.turnId) : undefined,
-      ),
-    );
+      );
+    });
   const collapsed = collapseDerivedWorkLogEntries(
     foldProviderDiagnosticEntries(foldClaudeOperationSnapshots(entries)),
   ).map(
     ({
       activityKind: _activityKind,
+      operationStatus: _operationStatus,
+      operationCompletedAt: _operationCompletedAt,
       collapseKey: _collapseKey,
       diagnosticEchoKey: _diagnosticEchoKey,
       ...entry
@@ -844,8 +1038,35 @@ export function deriveActiveSubagentWorkEntries(
   }
   if (runningTurnId) terminalTurnIds.delete(runningTurnId);
 
+  const nativeOwners = new Map(
+    deriveCurrentNativeAgentStarts(activities).map(({ activity, observation }) => [
+      JSON.stringify([observation.runtimeId, observation.workId]),
+      activity.turnId,
+    ]),
+  );
+  const sourceHints = isSubagentRuntimeCurrent(
+    options.liveWork?.runtimeId,
+    options.runtimeSession ?? null,
+  )
+    ? options.liveWork
+    : undefined;
+  const unconfirmedAgentIds = new Set(sourceHints?.unconfirmedAgentIds);
+
   return deriveSubagentWorkEntries(activities, undefined, { ...options, terminalTurnIds }).filter(
-    (entry) => entry.subagent?.status === "active" || entry.subagent?.status === "waiting",
+    (entry) => {
+      const child = entry.subagent;
+      if (!child || (child.status !== "active" && child.status !== "waiting")) return false;
+      if (
+        child.runtimeId === sourceHints?.runtimeId &&
+        (sourceHints?.unconfirmedAgentIdsTruncated === true || unconfirmedAgentIds.has(child.id))
+      )
+        return false;
+      // Keep full historical rows and their exact history/control capabilities.
+      // Only the live roster uses the explicit current native owner, matching
+      // the shell counter and footer. A delayed old-turn edge cannot replace it.
+      const key = JSON.stringify([child.runtimeId, child.id]);
+      return !nativeOwners.has(key) || nativeOwners.get(key) === entry.turnId;
+    },
   );
 }
 
@@ -930,6 +1151,53 @@ export function reconcileSubagentWorkEntryRuntime<T extends WorkLogEntry>(
   };
 }
 
+/** Canonical routing is unchanged; the input owner is a timeline anchor only. */
+export function messageTimelineTurnId(message: ChatMessage): TurnId | null | undefined {
+  return message.turnId ?? message.originatingTurn?.turnId;
+}
+
+export function deriveFailedUserMessageIds(input: {
+  messages: ReadonlyArray<ChatMessage>;
+  activities: ReadonlyArray<OrchestrationThreadActivity>;
+}): ReadonlySet<ChatMessage["id"]> {
+  const failed = new Set<ChatMessage["id"]>();
+  const messages = new Map(
+    input.messages
+      .filter((message) => message.role === "user")
+      .map((message) => [message.id, message]),
+  );
+  for (const message of messages.values()) {
+    if (message.sendFailed || message.originatingTurn?.state === "error") failed.add(message.id);
+  }
+  for (const activity of input.activities) {
+    if (activity.kind !== "provider.turn.start.failed" || activity.tone !== "error") continue;
+    const payload = asRecord(activity.payload);
+    if (
+      typeof payload?.messageId !== "string" ||
+      !Number.isSafeInteger(payload.intentSequence) ||
+      Number(payload.intentSequence) <= 0
+    )
+      continue;
+    const message = messages.get(payload.messageId as ChatMessage["id"]);
+    if (
+      !message ||
+      message.originatingTurn ||
+      (activity.turnId !== null && activity.turnId !== message.turnId)
+    )
+      continue;
+    const generation = Date.parse(message.completedAt ?? message.createdAt);
+    const failedAt = Date.parse(activity.createdAt);
+    if (
+      Number.isFinite(generation) &&
+      Number.isFinite(failedAt) &&
+      failedAt >= generation &&
+      (activity.sequence === undefined || activity.sequence > Number(payload.intentSequence))
+    )
+      failed.add(message.id);
+  }
+  return failed;
+}
+
 export function deriveHistoricalWorkLogSummaries(input: {
   messages: ReadonlyArray<ChatMessage>;
   activities: ReadonlyArray<OrchestrationThreadActivity>;
@@ -939,12 +1207,9 @@ export function deriveHistoricalWorkLogSummaries(input: {
   const latestTurnId = input.latestTurnId ?? null;
   const historicalTurnIds = new Set<TurnId>();
   for (const message of input.messages) {
-    if (
-      message.turnId !== null &&
-      message.turnId !== undefined &&
-      message.turnId !== latestTurnId
-    ) {
-      historicalTurnIds.add(message.turnId);
+    const turnId = messageTimelineTurnId(message);
+    if (turnId !== null && turnId !== undefined && turnId !== latestTurnId) {
+      historicalTurnIds.add(turnId);
     }
   }
   for (const activity of input.activities) {
@@ -1214,9 +1479,9 @@ function toDerivedWorkLogEntry(
       ? stripTrailingExitCode(payload.detail).output
       : null
     : extractActivityDetail(activity.kind, payload, title ?? activity.summary);
-  const toolCallId = isTaskActivity
-    ? null
-    : (readWorkLogOperationIdentity(activity)?.id ?? extractToolCallId(payload));
+  const toolCallId =
+    readWorkLogOperationIdentity(activity)?.id ??
+    (isTaskActivity ? null : extractToolCallId(payload));
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
     turnId: activity.turnId,
@@ -1230,12 +1495,29 @@ function toDerivedWorkLogEntry(
           ? "info"
           : activity.tone,
     activityKind: activity.kind,
+    ...((activity.kind === "tool.completed" || activity.kind === "task.completed") &&
+    Number.isFinite(Date.parse(activity.createdAt))
+      ? { operationCompletedAt: activity.createdAt }
+      : {}),
+    ...(payload?.status === "inProgress" ||
+    payload?.status === "completed" ||
+    payload?.status === "failed"
+      ? { operationStatus: payload.status }
+      : payload?.status === "stopped" && toolCallId && isTaskActivity
+        ? { operationStatus: "failed" as const }
+        : {}),
   };
   const publicSummary =
-    activity.kind === "reasoning.summary" ? readClaudePublicSummary(payload) : undefined;
+    activity.kind === "reasoning.summary" ? readProviderPublicSummary(payload) : undefined;
   if (publicSummary) {
-    entry.label = "Claude summary";
-    entry.displayLabel = uiText("Claude summary");
+    // The plain label stays canonical English for transcript copy/search.
+    if (publicSummary.provider === "opencode") {
+      entry.label = "OpenCode thinking";
+      entry.displayLabel = uiText("OpenCode thinking");
+    } else {
+      entry.label = "Claude summary";
+      entry.displayLabel = uiText("Claude summary");
+    }
     entry.tone = "info";
     entry.publicSummary = publicSummary;
     entry.detail = publicSummary.text;
@@ -1325,13 +1607,37 @@ function toDerivedWorkLogEntry(
 function foldClaudeOperationSnapshots(entries: DerivedWorkLogEntry[]): DerivedWorkLogEntry[] {
   const folded: DerivedWorkLogEntry[] = [];
   const positions = new Map<string, number>();
+  const commandKey = (entry: DerivedWorkLogEntry) =>
+    entry.turnId && entry.toolCallId
+      ? JSON.stringify([entry.turnId, "command", entry.toolCallId])
+      : undefined;
+  // Older background edges omitted the inspection marker. Only an admitted
+  // command in this bounded input can supply its disclosure; native identity
+  // can join lifecycle metadata but never promote arbitrary legacy tool JSON.
+  const inspectedCommands = new Set(
+    entries.filter((entry) => entry.commandInspection).map(commandKey),
+  );
   for (const entry of entries) {
-    const kind = entry.publicSummary ? "summary" : entry.commandInspection ? "command" : null;
+    const keyForCommand = commandKey(entry);
+    const isCommandLifecycle =
+      keyForCommand !== undefined &&
+      inspectedCommands.has(keyForCommand) &&
+      (isCollapsibleToolLifecycleActivity(entry.activityKind) ||
+        entry.activityKind === "task.progress" ||
+        entry.activityKind === "task.completed");
+    const kind = entry.publicSummary ? "summary" : isCommandLifecycle ? "command" : null;
     if (!kind || !entry.toolCallId || !entry.turnId) {
       folded.push(entry);
       continue;
     }
-    const key = JSON.stringify([entry.turnId, kind, entry.toolCallId]);
+    // Provider-native block ids are not a shared namespace. In particular an
+    // OpenCode thinking replay must never replace a Claude public block merely
+    // because their turn and native item labels happen to match.
+    const key = JSON.stringify(
+      kind === "summary"
+        ? [entry.turnId, kind, entry.publicSummary?.provider, entry.toolCallId]
+        : [entry.turnId, kind, entry.toolCallId],
+    );
     const position = positions.get(key);
     const previous = position === undefined ? undefined : folded[position];
     if (!previous || position === undefined) {
@@ -1342,7 +1648,63 @@ function foldClaudeOperationSnapshots(entries: DerivedWorkLogEntry[]): DerivedWo
     // A delayed replay/update cannot revive an already terminal operation.
     // Summary completion may have a same-status proven snapshot repair, but
     // an ordinary tool's authoritative completion is its final disclosure.
-    if (previous.commandInspection && previous.activityKind === "tool.completed") continue;
+    if (kind === "command") {
+      // Bash can return a successful background-start receipt before the
+      // associated native task finishes. Its exact task outcome still belongs
+      // to this command; ordinary delayed tool updates cannot reopen it.
+      const taskCompletion =
+        entry.activityKind === "task.completed" && previous.activityKind !== "task.completed";
+      if (
+        previous.commandInspection &&
+        ((isCommandCompletion(previous) && !taskCompletion) ||
+          entry.activityKind === "task.progress")
+      )
+        continue;
+      const merged =
+        entry.commandInspection || !previous.commandInspection
+          ? mergeDerivedWorkLogEntries(previous, entry)
+          : { ...previous, activityKind: entry.activityKind };
+      const terminal = taskCompletion
+        ? entry
+        : isCommandCompletion(previous)
+          ? previous
+          : isCommandCompletion(entry)
+            ? entry
+            : undefined;
+      const status =
+        isCommandCompletion(previous) && previous.operationStatus === "failed"
+          ? "failed"
+          : (terminal?.operationStatus ?? entry.operationStatus ?? previous.operationStatus);
+      if (merged.commandInspection) {
+        merged.commandInspection = {
+          ...merged.commandInspection,
+          ...(status ? { status } : {}),
+          ...(terminal?.operationCompletedAt &&
+          (taskCompletion || !merged.commandInspection.completedAt)
+            ? { completedAt: terminal.operationCompletedAt }
+            : {}),
+        };
+        // Generic task summaries and legacy output never replace the admitted
+        // description, command or output, including copy/search presentation.
+        delete merged.detail;
+        delete merged.command;
+        delete merged.rawCommand;
+        if (merged.commandInspection.description)
+          merged.detail = merged.commandInspection.description;
+        if (merged.commandInspection.command) merged.command = merged.commandInspection.command;
+      }
+      folded[position] = {
+        ...merged,
+        ...(terminal ? { activityKind: terminal.activityKind } : {}),
+        ...(terminal?.operationCompletedAt
+          ? { operationCompletedAt: terminal.operationCompletedAt }
+          : {}),
+        ...(status ? { operationStatus: status } : {}),
+        id: previous.id,
+        createdAt: previous.createdAt,
+      };
+      continue;
+    }
     const previousSummaryStatus = previous.publicSummary?.status;
     if (
       (previousSummaryStatus === "completed" || previousSummaryStatus === "failed") &&
@@ -1353,6 +1715,10 @@ function foldClaudeOperationSnapshots(entries: DerivedWorkLogEntry[]): DerivedWo
     folded[position] = { ...merged, id: previous.id, createdAt: previous.createdAt };
   }
   return folded;
+}
+
+function isCommandCompletion(entry: DerivedWorkLogEntry): boolean {
+  return entry.activityKind === "tool.completed" || entry.activityKind === "task.completed";
 }
 
 function providerDiagnosticSubjectKey(entry: DerivedWorkLogEntry): string | null {
@@ -2134,19 +2500,11 @@ function compareActivitiesByOrder(
   left: OrchestrationThreadActivity,
   right: OrchestrationThreadActivity,
 ): number {
-  if (left.sequence !== undefined && right.sequence !== undefined) {
-    if (left.sequence !== right.sequence) {
-      return left.sequence - right.sequence;
-    }
-  } else if (left.sequence !== undefined) {
-    return 1;
-  } else if (right.sequence !== undefined) {
-    return -1;
-  }
-
-  const createdAtComparison = left.createdAt.localeCompare(right.createdAt);
-  if (createdAtComparison !== 0) {
-    return createdAtComparison;
+  // Match the SQLite/retention total order independently of the viewer's
+  // locale. Lifecycle rank applies only at a genuine sequence/clock tie; it
+  // cannot override a newer owner observation or a known sequence boundary.
+  if (left.sequence !== right.sequence || left.createdAt !== right.createdAt) {
+    return compareActivityWindowOrder(left, right);
   }
 
   const lifecycleRankComparison =
@@ -2155,7 +2513,7 @@ function compareActivitiesByOrder(
     return lifecycleRankComparison;
   }
 
-  return left.id.localeCompare(right.id);
+  return compareActivityWindowOrder(left, right);
 }
 
 function compareActivityLifecycleRank(kind: string): number {
@@ -2179,11 +2537,128 @@ export function hasToolActivityForTurn(
   return activities.some((activity) => activity.turnId === turnId && activity.tone === "tool");
 }
 
+/**
+ * Only the server's completed MCP-handling activity enters this display
+ * contract. Requested/failed operations and native user-input envelopes never
+ * become completion receipts just because their payload mentions MCP. The
+ * backend establishes provenance and native acceptance; this reader only
+ * refuses unsupported presentation versions and copies finite public fields.
+ */
+function readMcpQuestionResolution(
+  payload: unknown,
+): Pick<
+  Extract<TimelineEntry, { kind: "question-resolution" }>,
+  "action" | "questionCount" | "items"
+> | null {
+  // Projections arrive as JSON. Copy only own data descriptors into fresh
+  // inert objects before encoding the finite receipt or rendering exact text.
+  // Unknown native fields, accessors and a payload's toJSON are never invoked.
+  const own = (value: unknown, key: string): unknown => {
+    if (value === null || typeof value !== "object") return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  };
+  const array = (value: unknown, limit: number): unknown[] | null => {
+    if (!Array.isArray(value)) return null;
+    const length = own(value, "length");
+    if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > limit)
+      return null;
+    const result: unknown[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !("value" in descriptor)) return null;
+      result.push(descriptor.value);
+    }
+    return result;
+  };
+  const text = (value: unknown, limit: number): value is string =>
+    typeof value === "string" && value.length <= limit && value.trim().length > 0;
+  try {
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+    const version = own(payload, "version");
+    if ((version !== 1 && version !== 2) || own(payload, "source") !== "mcp") return null;
+    const action = own(payload, "action");
+    const questionCount = own(payload, "questionCount");
+    if (
+      (action !== "answered" && action !== "skipped" && action !== "cleared") ||
+      typeof questionCount !== "number" ||
+      !Number.isSafeInteger(questionCount) ||
+      questionCount < 1 ||
+      questionCount > 64
+    )
+      return null;
+    if (version === 1) return { action, questionCount, items: null };
+    const rawItems = array(own(payload, "items"), 64);
+    if (rawItems === null || rawItems.length !== questionCount) return null;
+    const items: McpQuestionResolutionItem[] = [];
+    const seenIds = new Set<string>();
+    let chars = 0;
+    for (const raw of rawItems) {
+      const rawQuestion = own(raw, "question");
+      const id = own(rawQuestion, "id");
+      const header = own(rawQuestion, "header");
+      const questionText = own(rawQuestion, "question");
+      if (
+        !text(id, 16_384) ||
+        typeof header !== "string" ||
+        header.length > 65_536 ||
+        !text(questionText, 65_536) ||
+        seenIds.has(id)
+      )
+        return null;
+      seenIds.add(id);
+      const question = { id, header, question: questionText };
+      chars += id.length + header.length + questionText.length;
+      const rawAnswer = own(raw, "answer");
+      const disposition = own(raw, "disposition");
+      if (action === "answered") {
+        if (disposition !== undefined) return null;
+        let answer: string | readonly string[];
+        if (typeof rawAnswer === "string") {
+          if (!text(rawAnswer, PROVIDER_SEND_TURN_MAX_INPUT_CHARS)) return null;
+          answer = rawAnswer;
+          chars += answer.length;
+        } else {
+          const values = array(rawAnswer, 64);
+          if (
+            values === null ||
+            values.length === 0 ||
+            values.some((value) => !text(value, PROVIDER_SEND_TURN_MAX_INPUT_CHARS))
+          )
+            return null;
+          const selected = values as string[];
+          if (new Set(selected).size !== selected.length) return null;
+          answer = selected;
+          chars += selected.reduce((total, value) => total + value.length, 0);
+        }
+        items.push({ question, answer });
+      } else {
+        const expectedDisposition = action === "skipped" ? "skipped" : "dismissed";
+        if (rawAnswer !== undefined || disposition !== expectedDisposition) return null;
+        items.push({ question, disposition: expectedDisposition });
+      }
+      // Reject cheaply before allocating encoded copies. This is an aggregate
+      // character pre-bound, followed by the actual UTF-8 receipt limit below.
+      if (chars > 1_048_576) return null;
+    }
+    const encoder = new TextEncoder();
+    if (
+      encoder.encode(JSON.stringify({ version: 2, source: "mcp", action, questionCount, items }))
+        .byteLength > 1_048_576
+    )
+      return null;
+    return { action, questionCount, items };
+  } catch {
+    return null;
+  }
+}
+
 export function deriveTimelineEntries(
   messages: ChatMessage[],
   proposedPlans: ProposedPlan[],
   workEntries: WorkLogEntry[],
   visualizations: readonly VisualizationTimelineEntry[] = [],
+  retainedActivities: ReadonlyArray<OrchestrationThreadActivity> = [],
 ): TimelineEntry[] {
   const messageRows: TimelineEntry[] = messages.map((message) => ({
     id: message.id,
@@ -2197,21 +2672,77 @@ export function deriveTimelineEntries(
     createdAt: proposedPlan.createdAt,
     proposedPlan,
   }));
-  const workRows: TimelineEntry[] = workEntries.map((entry) => ({
-    id: entry.id,
-    kind: "work",
-    createdAt: entry.createdAt,
-    entry,
-  }));
+  // Public Claude summaries are conversation prose, not a completed root
+  // response. Reuse the existing strict disclosure/folding path so neither
+  // raw thinking nor arbitrary activity detail can enter the primary chat.
+  // The bounded snapshot also contains prior turns: replay their known public
+  // summaries without a database rewrite or an unbounded history fetch.
+  const summaryEntries = deriveWorkLogEntries(
+    retainedActivities.filter((activity) => activity.kind === "reasoning.summary"),
+    undefined,
+  );
+  const summaries = new Map<string, Extract<TimelineEntry, { kind: "provider-summary" }>>();
+  for (const entry of [...summaryEntries, ...workEntries]) {
+    const operationKey = primaryClaudeSummaryKey(entry);
+    if (!operationKey || !entry.turnId || !entry.publicSummary || summaries.has(operationKey))
+      continue;
+    summaries.set(operationKey, {
+      id: `provider-summary:${operationKey}`,
+      kind: "provider-summary",
+      createdAt: entry.createdAt,
+      turnId: entry.turnId,
+      operationKey,
+      summary: entry.publicSummary,
+    });
+  }
+  const placedSummaries = new Set<string>();
+  const workRows = workEntries.flatMap<TimelineEntry>((entry) => {
+    const operationKey = primaryClaudeSummaryKey(entry);
+    if (!operationKey)
+      return [{ id: entry.id, kind: "work" as const, createdAt: entry.createdAt, entry }];
+    const summary = summaries.get(operationKey);
+    if (!summary || placedSummaries.has(operationKey)) return [];
+    placedSummaries.add(operationKey);
+    // Keep an interleaved command's existing position even when its clock
+    // equals this block's first receipt. Later text snapshots never move it.
+    return [summary];
+  });
   const visualizationRows: TimelineEntry[] = visualizations.map((visualization) => ({
     id: `visualization:${visualizationEntryIdentity(visualization)}`,
     kind: "visualization",
     createdAt: visualization.occurredAt,
     visualization,
   }));
-  return [...messageRows, ...proposedPlanRows, ...workRows, ...visualizationRows].toSorted((a, b) =>
-    a.createdAt.localeCompare(b.createdAt),
-  );
+  const resolutionActivities = new Map<string, OrchestrationThreadActivity>();
+  for (const activity of retainedActivities
+    .filter((entry) => entry.kind === "mcp.question.resolved")
+    .toSorted(compareActivitiesByOrder)) {
+    // The same immutable activity can be present in both the ordinary tail and
+    // the retained-notice window. It represents one visible handling receipt.
+    resolutionActivities.set(activity.id, activity);
+  }
+  const resolutionRows = [...resolutionActivities.values()].flatMap<TimelineEntry>((activity) => {
+    const resolution = readMcpQuestionResolution(activity.payload);
+    return resolution
+      ? [
+          {
+            id: `question-resolution:${activity.id}`,
+            kind: "question-resolution",
+            createdAt: activity.createdAt,
+            turnId: activity.turnId,
+            ...resolution,
+          },
+        ]
+      : [];
+  });
+  return [
+    ...messageRows,
+    ...proposedPlanRows,
+    ...workRows,
+    ...[...summaries.values()].filter((summary) => !placedSummaries.has(summary.operationKey)),
+    ...visualizationRows,
+    ...resolutionRows,
+  ].toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
 export function deriveCompletionDividerBeforeEntryId(
@@ -2277,6 +2808,7 @@ export function deriveCompletionDividerAfterEntryId(
     if (
       (timelineEntry.kind === "message" && timelineEntry.message.turnId === latestTurn.turnId) ||
       (timelineEntry.kind === "work" && timelineEntry.entry.turnId === latestTurn.turnId) ||
+      (timelineEntry.kind === "provider-summary" && timelineEntry.turnId === latestTurn.turnId) ||
       (timelineEntry.kind === "visualization" &&
         timelineEntry.visualization.turnId === latestTurn.turnId) ||
       (timelineEntry.kind === "proposed-plan" &&

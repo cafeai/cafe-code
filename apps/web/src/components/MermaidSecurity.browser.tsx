@@ -4,6 +4,7 @@ import { admitMermaidSource, MERMAID_FAILURE, MAX_MERMAID_SVG_BYTES } from "../l
 import { createMermaidSandboxDocument } from "../lib/mermaid/sandboxDocument";
 import { sanitizeMermaidSvg } from "../lib/mermaid/sanitizeSvg";
 import {
+  instrumentMermaidProbeBootstrap,
   mermaidProbePhaseScript,
   readMermaidProbeSentinel,
   runMermaidProbe,
@@ -15,7 +16,15 @@ function svgDocument(contents: string, attributes = ""): string {
   return `<svg xmlns="${SVG_NAMESPACE}" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 60" ${attributes}>${contents}</svg>`;
 }
 
-async function admitsParsedGraph(source: string, parsedMutation = ""): Promise<boolean> {
+async function admitsParsedGraph(
+  source: string,
+  parsedMutation = "",
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const assertActive = () => {
+    if (signal?.aborted) throw new Error("Graph admission probe fixture retired");
+  };
+  assertActive();
   const nonce = crypto.randomUUID();
   const id = crypto.randomUUID();
   // Execute the real pinned parser and production admission code. Replacing
@@ -56,13 +65,23 @@ async function admitsParsedGraph(source: string, parsedMutation = ""): Promise<b
   // callbacks/ports, rejects late replies even before timer delivery, and
   // accepts a negative result only for the production { id, failed: true }
   // shape. Malformed replies must fail qualification, never count as refusal.
+  const documentSource = instrumentMermaidProbeBootstrap(instrumentedDocument, nonce, id);
+  // Document construction is inert but synchronous. Do not append a new owner
+  // if this exact test was retired before the continuation enters transport.
+  assertActive();
   return runMermaidProbe({
     id,
-    documentSource: instrumentedDocument,
+    documentSource,
     source,
     theme: "dark",
     kind: "Graph admission probe",
     invocation: parsedMutation ? "mutation" : "baseline",
+    // Observe the exact engine/receiver/override startup without changing this
+    // graph probe's original load gate or renewing its absolute allowance.
+    // An expired port message is rejected before its phase is decoded, so a
+    // missing parser breadcrumb alone cannot establish that parsing never ran.
+    bootstrapObservation: { nonce, admitSourceOnReady: false },
+    ...(signal ? { signal } : {}),
     readResult: (data) => readMermaidProbeSentinel(data, [], admittedSvg),
   });
 }
@@ -312,7 +331,7 @@ describe("Mermaid source and parsed-graph admission", () => {
     expect(await admitsParsedGraph(source(16, 16))).toBe(false);
   });
 
-  it.each([
+  it.for([
     [
       "XY categories plus series and numeric axis ticks",
       (count: number) =>
@@ -374,9 +393,12 @@ describe("Mermaid source and parsed-graph admission", () => {
     ],
   ] as const)(
     "counts %s in the 250-item chart limits",
-    async (_name, source, admitted, rejected) => {
-      expect(await admitsParsedGraph(source(admitted))).toBe(true);
-      expect(await admitsParsedGraph(source(rejected))).toBe(false);
+    async ([, source, admitted, rejected], { signal }) => {
+      // Capture this row's public owner before either native probe. A hard
+      // test retirement must close its exact frame/ports and prevent a late
+      // first result from admitting the second source in a later test.
+      expect(await admitsParsedGraph(source(admitted), "", signal)).toBe(true);
+      expect(await admitsParsedGraph(source(rejected), "", signal)).toBe(false);
     },
   );
 

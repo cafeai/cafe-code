@@ -7,6 +7,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as DesktopAppIcon from "./DesktopAppIcon.ts";
 import * as DesktopAssets from "./DesktopAssets.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 
@@ -37,6 +38,7 @@ const normalizeCommitHash = (value: string): Option.Option<string> => {
 
 const make = Effect.gen(function* () {
   const assets = yield* DesktopAssets.DesktopAssets;
+  const appIcon = yield* Effect.serviceOption(DesktopAppIcon.DesktopAppIcon);
   const electronApp = yield* ElectronApp.ElectronApp;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -106,8 +108,12 @@ const make = Effect.gen(function* () {
     }
 
     if (environment.platform === "darwin") {
-      const iconPaths = yield* assets.iconPaths;
-      yield* Option.match(iconPaths.png, {
+      // Settings are loaded before configure runs, so a saved custom or
+      // unlocked icon replaces the shipped Dock tile from the first frame.
+      const dockIcon = Option.isSome(appIcon)
+        ? yield* appIcon.value.effectiveIconPath
+        : (yield* assets.iconPaths).png;
+      yield* Option.match(dockIcon, {
         onNone: () => Effect.void,
         onSome: electronApp.setDockIcon,
       });

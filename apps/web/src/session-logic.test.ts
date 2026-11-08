@@ -16,6 +16,7 @@ import {
   derivePendingApprovals,
   derivePendingUserInputs,
   deriveTimelineEntries,
+  deriveFailedUserMessageIds,
   deriveSubagentWorkEntries,
   deriveWorkLogEntries,
   findLatestProposedPlan,
@@ -25,6 +26,7 @@ import {
   hasActionableProposedPlan,
   hasToolActivityForTurn,
   isLatestTurnSettled,
+  workLogDisplayLabel,
 } from "./session-logic";
 
 function makeActivity(overrides: {
@@ -66,6 +68,113 @@ describe("turn duration formatting", () => {
 });
 
 describe("derivePendingApprovals", () => {
+  it.each(["approval", "question"] as const)(
+    "uses persisted BINARY tie order for stale responses in the %s channel",
+    (lane) => {
+      // These equal-clock edges share lifecycle rank. Locale collation can
+      // reverse mixed-case ids, while UTF-16 comparison reverses the final
+      // Unicode pair. Both would disagree with persisted SQLite BINARY order.
+      const cases = [
+        { requestedId: "A-request", failedId: "a-response", pending: false },
+        { requestedId: "a-request", failedId: "A-response", pending: true },
+        { requestedId: "\uE000-request", failedId: "\u{10000}-response", pending: false },
+      ];
+      for (const sequence of [undefined, 100]) {
+        for (const scenario of cases) {
+          const requestId = "same-clock-request";
+          const requested = makeActivity({
+            id: scenario.requestedId,
+            kind: lane === "approval" ? "approval.requested" : "user-input.requested",
+            ...(sequence !== undefined ? { sequence } : {}),
+            payload:
+              lane === "approval"
+                ? { requestId, requestKind: "command", defaultToNo: true }
+                : {
+                    requestId,
+                    questions: [
+                      {
+                        id: "choice",
+                        header: "Choice",
+                        question: "Continue?",
+                        options: [{ label: "Continue", description: "Continue this request" }],
+                        multiSelect: false,
+                      },
+                    ],
+                  },
+          });
+          const failed = makeActivity({
+            id: scenario.failedId,
+            kind:
+              lane === "approval"
+                ? "provider.approval.respond.failed"
+                : "provider.user-input.respond.failed",
+            ...(sequence !== undefined ? { sequence } : {}),
+            payload: {
+              requestId,
+              detail:
+                lane === "approval"
+                  ? "unknown pending permission request"
+                  : "unknown pending user-input request",
+            },
+          });
+          // Delivery order is deliberately opposite one of the persisted
+          // orders; folding must use canonical evidence rather than insertion.
+          const pending =
+            lane === "approval"
+              ? derivePendingApprovals([failed, requested])
+              : derivePendingUserInputs([failed, requested]);
+          expect(pending.map((entry) => entry.requestId)).toEqual(
+            scenario.pending ? [requestId] : [],
+          );
+        }
+      }
+    },
+  );
+
+  it("does not retire either request channel on the other channel's stale response text", () => {
+    const rows = [
+      makeActivity({
+        id: EventId.make("approval-request"),
+        sequence: 1,
+        kind: "approval.requested",
+        payload: { requestId: "shared-id", requestKind: "command", defaultToNo: true },
+      }),
+      makeActivity({
+        id: EventId.make("question-request"),
+        sequence: 2,
+        kind: "user-input.requested",
+        payload: {
+          requestId: "shared-id",
+          questions: [
+            {
+              id: "choice",
+              header: "Choice",
+              question: "Continue?",
+              options: [{ label: "Continue", description: "Continue this request" }],
+              multiSelect: false,
+            },
+          ],
+        },
+      }),
+      makeActivity({
+        id: EventId.make("approval-wrong-channel-error"),
+        sequence: 3,
+        kind: "provider.approval.respond.failed",
+        payload: { requestId: "shared-id", detail: "unknown pending user-input request" },
+      }),
+      makeActivity({
+        id: EventId.make("question-wrong-channel-error"),
+        sequence: 4,
+        kind: "provider.user-input.respond.failed",
+        payload: { requestId: "shared-id", detail: "unknown pending approval request" },
+      }),
+    ];
+    expect(derivePendingApprovals(rows)).toMatchObject([
+      { requestId: "shared-id", defaultToNo: true },
+    ]);
+    expect(derivePendingUserInputs(rows)).toMatchObject([{ requestId: "shared-id" }]);
+  });
+
   it("preserves only boolean provider approval safety hints", () => {
     const rows = derivePendingApprovals([
       makeActivity({
@@ -303,6 +412,31 @@ describe("private interaction projection", () => {
 });
 
 describe("derivePendingUserInputs", () => {
+  it.each([true, false, undefined, "true"])(
+    "advertises unanswered controls only for a literal capability: %s",
+    (supportsUnanswered) => {
+      const [pending] = derivePendingUserInputs([
+        makeActivity({
+          id: "claude-unanswered-request",
+          kind: "user-input.requested",
+          payload: {
+            requestId: "claude-unanswered-request",
+            supportsUnanswered,
+            questions: [
+              {
+                id: "choice",
+                header: "Choice",
+                question: "Which option?",
+                options: [{ label: "Keep", description: "Keep the current behavior" }],
+              },
+            ],
+          },
+        }),
+      ]);
+      expect(pending?.supportsUnanswered).toBe(supportsUnanswered === true ? true : undefined);
+    },
+  );
+
   it("tracks open structured prompts and removes resolved ones", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -1150,6 +1284,58 @@ describe("deriveWorkLogEntries", () => {
     ).toEqual([]);
   });
 
+  it("labels OpenCode thinking rows by provenance and keeps them distinct from tool rows", () => {
+    const entries = deriveWorkLogEntries(
+      [
+        makeActivity({
+          id: "opencode-thinking",
+          turnId: "turn-a",
+          sequence: 1,
+          kind: "reasoning.summary",
+          tone: "info",
+          createdAt: "2026-10-09T00:00:01.000Z",
+          summary: "OpenCode thinking",
+          payload: {
+            itemId: "prt_reasoning",
+            streamKind: "reasoning_summary_text",
+            summaryVersion: 1,
+            provider: "opencode",
+            detail: "Comparing the two fixtures.",
+            status: "completed",
+            truncated: false,
+          },
+        }),
+        makeActivity({
+          id: "opencode-codex-shape",
+          turnId: "turn-a",
+          sequence: 2,
+          kind: "reasoning.summary",
+          payload: {
+            itemId: "other",
+            streamKind: "reasoning_summary_text",
+            summaryVersion: 1,
+            provider: "codex",
+            detail: "Not an admitted provider",
+            status: "completed",
+            truncated: false,
+          },
+        }),
+      ],
+      undefined,
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: "opencode-thinking",
+      label: "OpenCode thinking",
+      toolCallId: "prt_reasoning",
+      publicSummary: {
+        provider: "opencode",
+        text: "Comparing the two fixtures.",
+        status: "completed",
+      },
+    });
+  });
+
   it("retains a live Claude command with description and merges received output/status/observed timing", () => {
     const command = (id: string, kind: string, second: number, payload: Record<string, unknown>) =>
       makeActivity({
@@ -1217,6 +1403,189 @@ describe("deriveWorkLogEntries", () => {
       deriveWorkLogEntries([completed], undefined)[0]?.commandInspection?.startedAt,
     ).toBeUndefined();
   });
+  it.each([false, true])(
+    "folds background command echoes across interleaved work (legacy markers: %s)",
+    (legacy) => {
+      const command = (
+        id: string,
+        sequence: number,
+        itemId: string,
+        kind: string,
+        status: string,
+        inspected = true,
+      ) =>
+        makeActivity({
+          id,
+          turnId: "turn-a",
+          sequence,
+          createdAt: `2026-10-09T00:00:0${sequence}.000Z`,
+          kind,
+          summary: "Command run",
+          payload: {
+            itemId,
+            itemType: "command_execution",
+            status,
+            data: inspected
+              ? {
+                  toolName: "Bash",
+                  commandInspectionVersion: 1,
+                  inspectionProvider: "claudeAgent",
+                  input: { description: "Search for the auth file", command: "rg auth fixture" },
+                  output: "Received command output",
+                }
+              : { input: { command: "unadmitted command" }, result: "unadmitted output" },
+          },
+        });
+      const start = command("start", 1, "background-command", "tool.started", "inProgress");
+      const update = command(
+        "background",
+        3,
+        "background-command",
+        "tool.updated",
+        "inProgress",
+        !legacy,
+      );
+      const done = command("done", 5, "background-command", "tool.completed", "failed", !legacy);
+      const task = (
+        id: string,
+        sequence: number,
+        kind: string,
+        workLogToolCallId?: string,
+        status = "failed",
+      ) =>
+        makeActivity({
+          id,
+          turnId: "turn-a",
+          sequence,
+          createdAt: `2026-10-09T00:00:0${sequence}.000Z`,
+          kind,
+          tone: "error",
+          summary: "Task failed",
+          payload: {
+            taskId: "native-background-task",
+            workLogToolCallId,
+            status,
+            detail: "Search for the auth file",
+          },
+        });
+      const taskDone = task("task-done", 6, "task.completed", "background-command");
+      const entries = deriveWorkLogEntries(
+        [
+          start,
+          command("same-description", 2, "different-command", "tool.completed", "completed"),
+          update,
+          task("progress", 4, "task.progress", "background-command"),
+          done,
+          taskDone,
+          command("late", 7, "background-command", "tool.updated", "inProgress", !legacy),
+          task("unknown-legacy-task", 8, "task.completed"),
+        ],
+        undefined,
+      );
+      expect(entries.map(({ id }) => id)).toEqual([
+        "start",
+        "same-description",
+        "unknown-legacy-task",
+      ]);
+      expect(entries[0]).toMatchObject({
+        id: "start",
+        createdAt: start.createdAt,
+        command: "rg auth fixture",
+        detail: "Search for the auth file",
+        commandInspection: {
+          status: "failed",
+          output: "Received command output",
+          startedAt: start.createdAt,
+          completedAt: taskDone.createdAt,
+        },
+      });
+      expect(entries[0]?.rawCommand).toBeUndefined();
+      expect(entries[1]?.commandInspection?.status).toBe("completed");
+      expect(entries[2]?.tone).toBe("error");
+      const taskFailure = task("task-only-completion", 4, "task.completed", "background-command");
+      expect(
+        deriveWorkLogEntries([start, update, taskFailure], undefined)[0]?.commandInspection,
+      ).toMatchObject({ status: "failed", completedAt: taskFailure.createdAt });
+      expect(deriveWorkLogEntries([taskFailure], undefined)).toHaveLength(1);
+      const backgroundReceipt = command(
+        "background-receipt",
+        2,
+        "background-command",
+        "tool.completed",
+        "completed",
+      );
+      expect(
+        deriveWorkLogEntries([start, backgroundReceipt, taskFailure], undefined)[0]
+          ?.commandInspection,
+      ).toMatchObject({ status: "failed", completedAt: taskFailure.createdAt });
+      expect(
+        deriveWorkLogEntries(
+          [
+            start,
+            done,
+            task("task-success", 6, "task.completed", "background-command", "completed"),
+          ],
+          undefined,
+        )[0]?.commandInspection?.status,
+      ).toBe("failed");
+      const foreign = {
+        ...taskFailure,
+        id: EventId.make("other-turn-task"),
+        turnId: TurnId.make("turn-b"),
+      };
+      expect(deriveWorkLogEntries([start, foreign], undefined)).toHaveLength(2);
+    },
+  );
+
+  it("retains an exact legacy terminal status when inspection arrives later without promoting legacy output", () => {
+    const legacy = (id: string, sequence: number, kind: string) =>
+      makeActivity({
+        id,
+        sequence,
+        turnId: "turn-a",
+        kind,
+        createdAt: `2026-10-09T00:00:0${sequence}.000Z`,
+        payload: {
+          itemId: "tool-a",
+          itemType: "command_execution",
+          status: kind === "tool.completed" ? "failed" : "inProgress",
+          data: { result: "private legacy JSON" },
+        },
+      });
+    const update = legacy("legacy-update", 1, "tool.updated");
+    const completion = legacy("legacy-completion", 2, "tool.completed");
+    const inspected = makeActivity({
+      id: "admitted",
+      sequence: 3,
+      turnId: "turn-a",
+      kind: "tool.updated",
+      payload: {
+        itemId: "tool-a",
+        itemType: "command_execution",
+        status: "inProgress",
+        data: {
+          toolName: "Bash",
+          commandInspectionVersion: 1,
+          inspectionProvider: "claudeAgent",
+          input: { description: "Admitted description" },
+        },
+      },
+    });
+    const entries = deriveWorkLogEntries([update, completion, inspected], undefined);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: update.id,
+      createdAt: update.createdAt,
+      commandInspection: {
+        status: "failed",
+        description: "Admitted description",
+        completedAt: completion.createdAt,
+      },
+    });
+    expect(entries[0]?.commandInspection?.output).toBeUndefined();
+    expect(entries[0]?.rawCommand).toBeUndefined();
+  });
+
   it("omits tool started entries and keeps completed entries", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -1514,6 +1883,7 @@ describe("deriveWorkLogEntries", () => {
     };
     const started = makeActivity({
       id: "subagent-start",
+      sequence: 40,
       createdAt: "2026-02-23T00:00:01.000Z",
       kind: "task.started",
       summary: "Subagent started",
@@ -1542,6 +1912,7 @@ describe("deriveWorkLogEntries", () => {
     });
     const completed = makeActivity({
       id: "subagent-complete",
+      sequence: 43,
       createdAt: "2026-02-23T00:01:06.000Z",
       kind: "task.completed",
       summary: "Subagent completed",
@@ -1556,6 +1927,7 @@ describe("deriveWorkLogEntries", () => {
     });
     const ordinaryStart = makeActivity({
       id: "ordinary-task-start",
+      sequence: 41,
       createdAt: "2026-02-23T00:00:03.000Z",
       kind: "task.started",
       summary: "Default task started",
@@ -1618,6 +1990,7 @@ describe("deriveWorkLogEntries", () => {
 
     const delayedProgress = makeActivity({
       id: "subagent-delayed-progress",
+      sequence: 44,
       createdAt: "2026-02-23T00:01:07.000Z",
       kind: "task.progress",
       summary: "Subagent update",
@@ -1641,6 +2014,10 @@ describe("deriveWorkLogEntries", () => {
 
     const restarted = makeActivity({
       id: "subagent-restarted",
+      // This is a genuinely newer restart in canonical provider order. A
+      // future legacy clock without a sequence is covered separately and must
+      // never move an old start beyond the known completion watermark.
+      sequence: 45,
       createdAt: "2026-02-23T00:02:00.000Z",
       kind: "task.started",
       summary: "Subagent started",
@@ -1994,6 +2371,10 @@ describe("deriveWorkLogEntries", () => {
       { kind: "task.progress", payload: { taskId: "codex-turn-steer-processing:receipt-1" } },
       {
         kind: "task.progress",
+        payload: { taskId: `claude-turn-steer-processing:${"a".repeat(64)}` },
+      },
+      {
+        kind: "task.progress",
         payload: { detail: "Codex app-server began processing turn/steer." },
       },
       {
@@ -2074,7 +2455,6 @@ describe("deriveWorkLogEntries", () => {
       ).map((entry) => entry.id),
     ).toEqual(visible.map((activity) => activity.id));
     expect(deriveWorkLogEntries(hidden, undefined)).toEqual([]);
-    expect(hidden).toHaveLength(7);
   });
 
   it("shows runtime warning message details in work log entries", () => {
@@ -3266,6 +3646,165 @@ describe("deriveWorkLogEntries", () => {
 });
 
 describe("deriveTimelineEntries", () => {
+  it("promotes retained Claude public blocks across turns without moving tools or inventing messages", () => {
+    const summary = (
+      id: string,
+      turnId: string,
+      sequence: number,
+      createdAt: string,
+      itemId: string,
+      detail: string,
+      provider = "claudeAgent",
+      status = "completed",
+    ) =>
+      makeActivity({
+        id,
+        turnId,
+        sequence,
+        createdAt,
+        kind: "reasoning.summary",
+        payload: {
+          itemId,
+          streamKind: "reasoning_summary_text",
+          summaryVersion: 1,
+          provider,
+          detail,
+          status,
+          truncated: false,
+        },
+      });
+    const currentTurnId = TurnId.make("turn-current");
+    const activities = [
+      summary("older", "turn-older", 1, "2026-02-23T00:00:00.000Z", "block-a", "Earlier answer"),
+      summary(
+        "current-start",
+        "turn-current",
+        2,
+        "2026-02-23T00:00:01.000Z",
+        "block-a",
+        "Checking",
+        "claudeAgent",
+        "inProgress",
+      ),
+      makeActivity({
+        id: "tool-between",
+        turnId: "turn-current",
+        sequence: 3,
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.completed",
+        summary: "Read file",
+      }),
+      summary(
+        "current-end",
+        "turn-current",
+        4,
+        "2026-02-23T00:00:03.000Z",
+        "block-a",
+        "**Checking complete**",
+      ),
+      summary(
+        "another-block",
+        "turn-current",
+        5,
+        "2026-02-23T00:00:04.000Z",
+        "block-b",
+        "**Checking complete**",
+      ),
+      summary(
+        "opencode-start",
+        "turn-current",
+        6,
+        "2026-02-23T00:00:05.000Z",
+        "block-a",
+        "OpenCode thinking in progress",
+        "opencode",
+        "inProgress",
+      ),
+      summary(
+        "opencode-end",
+        "turn-current",
+        7,
+        "2026-02-23T00:00:07.000Z",
+        "block-a",
+        "OpenCode thinking stays secondary",
+        "opencode",
+      ),
+      makeActivity({
+        id: "private-thinking",
+        turnId: "turn-current",
+        sequence: 8,
+        kind: "reasoning.summary",
+        payload: {
+          itemId: "hidden",
+          streamKind: "reasoning_text",
+          summaryVersion: 1,
+          provider: "claudeAgent",
+          detail: "Private thinking must not be promoted",
+          status: "completed",
+          truncated: false,
+        },
+      }),
+    ];
+    const message = {
+      id: MessageId.make("canonical-answer"),
+      turnId: currentTurnId,
+      role: "assistant" as const,
+      text: "The canonical response stays unchanged.",
+      createdAt: "2026-02-23T00:00:06.000Z",
+      streaming: false,
+    };
+    const entries = deriveTimelineEntries(
+      [message],
+      [],
+      deriveWorkLogEntries(activities, currentTurnId),
+      [],
+      activities,
+    );
+
+    expect(entries.map((entry) => [entry.kind, entry.id])).toEqual([
+      ["provider-summary", 'provider-summary:["turn-older","block-a"]'],
+      ["provider-summary", 'provider-summary:["turn-current","block-a"]'],
+      ["work", "tool-between"],
+      ["provider-summary", 'provider-summary:["turn-current","block-b"]'],
+      ["work", "opencode-start"],
+      ["message", "canonical-answer"],
+    ]);
+    expect(
+      entries.flatMap((entry) =>
+        entry.kind === "provider-summary"
+          ? [[entry.createdAt, entry.summary.text, entry.summary.status]]
+          : [],
+      ),
+    ).toEqual([
+      ["2026-02-23T00:00:00.000Z", "Earlier answer", "completed"],
+      ["2026-02-23T00:00:01.000Z", "**Checking complete**", "completed"],
+      ["2026-02-23T00:00:04.000Z", "**Checking complete**", "completed"],
+    ]);
+    expect(entries.filter((entry) => entry.kind === "message")).toEqual([
+      { id: "canonical-answer", kind: "message", createdAt: message.createdAt, message },
+    ]);
+    expect(
+      entries.find((entry) => entry.kind === "work" && entry.id === "opencode-start"),
+    ).toMatchObject({
+      entry: {
+        publicSummary: {
+          provider: "opencode",
+          text: "OpenCode thinking stays secondary",
+          status: "completed",
+        },
+      },
+    });
+    // A terminal summary is not evidence that the native root turn completed.
+    expect(
+      deriveCompletionDividerAfterEntryId(entries, {
+        turnId: currentTurnId,
+        assistantMessageId: null,
+        startedAt: "2026-02-23T00:00:00.000Z",
+        completedAt: null,
+      }),
+    ).toBeNull();
+  });
+
   it("includes proposed plans alongside messages and work entries in chronological order", () => {
     const entries = deriveTimelineEntries(
       [
@@ -3347,6 +3886,340 @@ describe("deriveTimelineEntries", () => {
         completedAt: "2026-02-23T00:00:04.000Z",
       }),
     ).toBe("work-after-assistant");
+  });
+});
+
+describe("failed user message presentation", () => {
+  const message = {
+    id: MessageId.make("failed-input"),
+    role: "user" as const,
+    text: "Exact input",
+    turnId: null,
+    createdAt: "2026-11-06T00:00:00.000Z",
+    completedAt: "2026-11-06T00:00:00.000Z",
+    streaming: false,
+  };
+  it("uses an exact projected failed input owner and leaves other terminal outcomes alone", () => {
+    for (const state of ["running", "completed", "interrupted", "error"] as const) {
+      const ids = deriveFailedUserMessageIds({
+        messages: [{ ...message, originatingTurn: { turnId: TurnId.make("failed-turn"), state } }],
+        activities: [],
+      });
+      expect(ids.has(message.id)).toBe(state === "error");
+    }
+    expect(
+      deriveFailedUserMessageIds({
+        messages: [{ ...message, sendFailed: true }],
+        activities: [],
+      }).has(message.id),
+    ).toBe(true);
+  });
+  it("requires exact, current structured start-failure evidence rather than error prose or timestamps alone", () => {
+    const failure = {
+      ...makeActivity({
+        kind: "provider.turn.start.failed",
+        tone: "error",
+        createdAt: "2026-11-06T00:00:01.000Z",
+        payload: { messageId: message.id, intentSequence: 2 },
+      }),
+      turnId: null,
+    };
+    expect([...deriveFailedUserMessageIds({ messages: [message], activities: [failure] })]).toEqual(
+      [message.id],
+    );
+    for (const payload of [
+      { detail: "failed" },
+      { messageId: "other-input", intentSequence: 2 },
+      { messageId: message.id, intentSequence: -1 },
+      { messageId: message.id, intentSequence: "2" },
+    ]) {
+      expect([
+        ...deriveFailedUserMessageIds({
+          messages: [message],
+          activities: [{ ...failure, payload }],
+        }),
+      ]).toEqual([]);
+    }
+    expect([
+      ...deriveFailedUserMessageIds({
+        messages: [{ ...message, completedAt: "2026-11-06T00:00:02.000Z" }],
+        activities: [failure],
+      }),
+    ]).toEqual([]);
+    expect([
+      ...deriveFailedUserMessageIds({
+        messages: [
+          { ...message, originatingTurn: { turnId: TurnId.make("new-turn"), state: "completed" } },
+        ],
+        activities: [failure],
+      }),
+    ]).toEqual([]);
+  });
+});
+
+describe("unstarted message failure visibility", () => {
+  const previousTurn = {
+    turnId: TurnId.make("previous-completed-turn"),
+    requestedAt: "2026-02-23T00:00:00.000Z",
+    startedAt: "2026-02-23T00:00:01.000Z",
+    completedAt: "2026-02-23T00:00:02.000Z",
+  };
+  const message = {
+    id: MessageId.make("accepted-unstarted-message"),
+    role: "user" as const,
+    text: "private accepted prompt",
+    turnId: null,
+    createdAt: "2026-02-23T00:00:03.000Z",
+    streaming: false,
+  };
+  const failure = (overrides: Parameters<typeof makeActivity>[0] = {}) =>
+    makeActivity({
+      id: "unstarted-failure",
+      kind: "provider.turn.start.failed",
+      summary: "private provider summary",
+      tone: "error",
+      createdAt: "2026-02-23T00:00:04.000Z",
+      sequence: 43,
+      payload: {
+        messageId: message.id,
+        intentSequence: 42,
+        detail: "private provider daemon diagnostic",
+        command: "private command must not become a preview",
+      },
+      ...overrides,
+    });
+
+  it("shows an accepted message's pre-turn failure with fixed public wording after the old turn ends", () => {
+    const activities = [
+      failure(),
+      makeActivity({ id: "unrelated-unscoped-warning", kind: "runtime.warning" }),
+    ];
+    const entries = deriveWorkLogEntries(activities, previousTurn.turnId, {
+      unstartedTurnFailures: { messages: [message], latestTurn: previousTurn },
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: "unstarted-failure",
+      turnId: null,
+      tone: "error",
+    });
+    expect(workLogDisplayLabel(entries[0]!)).toBe("Provider turn start failed");
+    expect(entries[0]).not.toHaveProperty("detail");
+    expect(entries[0]).not.toHaveProperty("command");
+    expect(entries[0]).not.toHaveProperty("providerDiagnostic");
+    expect(JSON.stringify(entries)).not.toContain("private");
+    expect(deriveTimelineEntries([message], [], entries).map((row) => [row.kind, row.id])).toEqual([
+      ["message", "accepted-unstarted-message"],
+      ["work", "unstarted-failure"],
+    ]);
+
+    // Other readers do not opt into a null-turn failure under the old turn.
+    expect(deriveWorkLogEntries(activities, previousTurn.turnId)).toEqual([]);
+    expect(
+      deriveHistoricalWorkLogSummaries({
+        messages: [message],
+        activities,
+        latestTurnId: previousTurn.turnId,
+      }).size,
+    ).toBe(0);
+  });
+
+  it("shows only an unambiguous legacy failed-start notice without treating its timestamp as a receipt", () => {
+    const legacy = failure({
+      createdAt: message.createdAt,
+      payload: { detail: "private legacy daemon failure" },
+    });
+    const entries = deriveWorkLogEntries([legacy], previousTurn.turnId, {
+      unstartedTurnFailures: { messages: [message], latestTurn: previousTurn },
+    });
+    expect(entries).toHaveLength(1);
+    expect(workLogDisplayLabel(entries[0]!)).toBe("Provider turn start failed");
+    expect(entries[0]).not.toHaveProperty("providerDiagnostic");
+    expect(JSON.stringify(entries)).not.toContain("private");
+    expect(entries[0]).not.toHaveProperty("messageId");
+    expect(entries[0]).not.toHaveProperty("intentSequence");
+    expect(
+      deriveWorkLogEntries([legacy], previousTurn.turnId, {
+        unstartedTurnFailures: {
+          messages: [message, { ...message, id: MessageId.make("ambiguous-same-time-message") }],
+          latestTurn: previousTurn,
+        },
+      }),
+    ).toEqual([]);
+  });
+
+  it.each([
+    [
+      "glide-attach",
+      "Glide desktop tools could not be attached. Check Computer use in the chat controls.",
+    ],
+    [
+      "glide-activate",
+      "Glide desktop tools could not be activated. Check Computer use in the chat controls.",
+    ],
+    [
+      "glide-capacity",
+      "Computer use connections are full. Stop an unused provider session, then try again.",
+    ],
+  ] as const)("shows only fixed public guidance for %s", (startupFailureCategory, detail) => {
+    const activity = failure({
+      payload: {
+        messageId: message.id,
+        intentSequence: 42,
+        startupFailureCategory,
+        detail: "private provider body /private/account and prompt text",
+        command: "private provider command",
+      },
+    });
+    const entries = deriveWorkLogEntries([activity], previousTurn.turnId, {
+      unstartedTurnFailures: { messages: [message], latestTurn: previousTurn },
+    });
+    expect(entries).toHaveLength(1);
+    expect(workLogDisplayLabel(entries[0]!)).toBe("Provider turn start failed");
+    expect(entries[0]?.detail).toBe(detail);
+    expect(entries[0]).not.toHaveProperty("command");
+    expect(entries[0]).not.toHaveProperty("providerDiagnostic");
+    expect(JSON.stringify(entries)).not.toContain("private");
+    expect(deriveTimelineEntries([message], [], entries).map((row) => [row.kind, row.id])).toEqual([
+      ["message", "accepted-unstarted-message"],
+      ["work", "unstarted-failure"],
+    ]);
+  });
+
+  it.each([
+    ...[undefined, null, "", "future-category", "GLIDE-ATTACH", 1, true, {}, ["glide-attach"]].map(
+      (startupFailureCategory) => ({ startupFailureCategory, field: "own" as const }),
+    ),
+    { startupFailureCategory: "glide-attach", field: "inherited" as const },
+    { startupFailureCategory: "glide-attach", field: "accessor" as const },
+  ])(
+    "keeps $field unknown or malformed startup category $startupFailureCategory private",
+    ({ startupFailureCategory, field }) => {
+      let getterCalls = 0;
+      const ownFields = {
+        messageId: message.id,
+        intentSequence: 42,
+        detail: "private received error must never be a display fallback",
+      };
+      // Both descriptor negatives retain the same valid own correlation. They
+      // must fail at the new category boundary, not at message admission.
+      const payload: Record<string, unknown> =
+        field === "inherited"
+          ? Object.assign(Object.create({ startupFailureCategory }), ownFields)
+          : { ...ownFields };
+      if (field === "accessor") {
+        Object.defineProperty(payload, "startupFailureCategory", {
+          enumerable: true,
+          get() {
+            getterCalls += 1;
+            throw new Error("private category getter must never run");
+          },
+        });
+      } else if (field === "own") payload.startupFailureCategory = startupFailureCategory;
+      const entries = deriveWorkLogEntries([failure({ payload })], previousTurn.turnId, {
+        unstartedTurnFailures: { messages: [message], latestTurn: previousTurn },
+      });
+      expect(entries).toHaveLength(1);
+      expect(workLogDisplayLabel(entries[0]!)).toBe("Provider turn start failed");
+      expect(entries[0]).not.toHaveProperty("detail");
+      expect(entries[0]).not.toHaveProperty("providerDiagnostic");
+      expect(JSON.stringify(entries)).not.toContain("private");
+      expect(getterCalls).toBe(0);
+    },
+  );
+
+  it.each([
+    { name: "missing canonical message", messages: [], overrides: {} },
+    {
+      name: "assistant message",
+      messages: [{ ...message, role: "assistant" as const }],
+      overrides: {},
+    },
+    {
+      name: "already-started message",
+      messages: [{ ...message, turnId: previousTurn.turnId }],
+      overrides: {},
+    },
+    {
+      name: "foreign message identity",
+      messages: [message],
+      overrides: { payload: { messageId: "another-message", intentSequence: 42 } },
+    },
+    {
+      name: "missing intent identity",
+      messages: [message],
+      overrides: { payload: { messageId: message.id } },
+    },
+    {
+      name: "public category without message and intent ownership",
+      messages: [message],
+      overrides: { payload: { startupFailureCategory: "glide-attach" } },
+    },
+    {
+      name: "partial legacy correlation",
+      messages: [message],
+      overrides: {
+        createdAt: message.createdAt,
+        payload: { detail: "private", messageId: message.id },
+      },
+    },
+    {
+      name: "future legacy payload",
+      messages: [message],
+      overrides: {
+        createdAt: message.createdAt,
+        payload: { detail: "private", futureCorrelation: true },
+      },
+    },
+    {
+      name: "malformed intent sequence",
+      messages: [message],
+      overrides: { payload: { messageId: message.id, intentSequence: -1 } },
+    },
+    { name: "failure predating intent", messages: [message], overrides: { sequence: 41 } },
+    {
+      name: "failure predating message",
+      messages: [message],
+      overrides: { createdAt: "2026-02-23T00:00:02.500Z" },
+    },
+  ])("does not borrow visibility from $name", ({ messages, overrides }) => {
+    expect(
+      deriveWorkLogEntries([failure(overrides)], previousTurn.turnId, {
+        unstartedTurnFailures: { messages, latestTurn: previousTurn },
+      }),
+    ).toEqual([]);
+  });
+
+  it("retires the failed suffix after another turn starts and refuses a mismatched turn boundary", () => {
+    const laterTurn = {
+      turnId: TurnId.make("later-successful-turn"),
+      requestedAt: "2026-02-23T00:00:05.000Z",
+      startedAt: "2026-02-23T00:00:06.000Z",
+      completedAt: "2026-02-23T00:00:07.000Z",
+    };
+    const laterMessage = {
+      ...message,
+      id: MessageId.make("later-message"),
+      turnId: laterTurn.turnId,
+      createdAt: laterTurn.requestedAt,
+    };
+    expect(
+      deriveWorkLogEntries([failure()], laterTurn.turnId, {
+        unstartedTurnFailures: { messages: [message, laterMessage], latestTurn: laterTurn },
+      }),
+    ).toEqual([]);
+    // A clipped message window still cannot move the old failure past the
+    // selected latest turn's timestamp boundary.
+    expect(
+      deriveWorkLogEntries([failure()], laterTurn.turnId, {
+        unstartedTurnFailures: { messages: [message], latestTurn: laterTurn },
+      }),
+    ).toEqual([]);
+    expect(
+      deriveWorkLogEntries([failure()], previousTurn.turnId, {
+        unstartedTurnFailures: { messages: [message], latestTurn: laterTurn },
+      }),
+    ).toEqual([]);
   });
 });
 

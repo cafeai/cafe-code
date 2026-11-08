@@ -39,11 +39,44 @@ built desktop. Neither start command builds the app. Run `build:desktop` again
 after changing source; launching an existing desktop package directly also
 requires built output.
 
+On macOS, console starts keep following that launch's stdout and stderr after
+LaunchServices opens the app. Startup output and later entries appear in the
+terminal, while the original private files remain under the Debug profile's
+`restart-logs` directory. Press **Ctrl+C** to stop following and return to the
+shell; Cafe keeps running. Quit Cafe through its normal app controls. The
+follower continues until interrupted, including after the app quits, and does
+not attach to a different launch's logs.
+
+For a script that needs the previous launch-and-return behavior, use:
+
+```bash
+corepack yarn workspace @cafecode/desktop start --no-follow
+```
+
+The same option works with `start:debug`. It controls only the console observer;
+it is not forwarded to Electron or the backend. Development watchers and other
+platforms retain their existing process and console behavior. Profile restart
+control requests automatically return without starting a log follower.
+
 Source launchers require successful Debug-profile build receipts for both the
 desktop and server bundles. These bind their exact emitted JavaScript bytes,
 including shared chunks; missing, legacy or inconsistent output refuses with a
 `yarn build:desktop` rebuild instruction before launching an app or provider.
 Watch builds publish each receipt only after their successful output settles.
+These receipts also bind the local reduced dependency generation. Application
+dependencies are copied from the production runtime workspace using the same
+exclusions as desktop packaging. The application loader refuses to borrow a
+missing package or file from the checkout's development dependencies, including
+inside the PDF extraction child. Build tools/types remain installed for
+compilation and tests. Default production bundles omit source maps, and the
+launcher-owned Electron copy keeps only English, Japanese and Korean resources.
+Desktop and backend build tasks execute freshly rather than restoring a cached
+builder-private dependency pointer; their ordinary build dependencies can still
+use Turbo caching. Old dependency generations remain available to held processes.
+The desktop build depends on the backend build, which depends on the renderer
+build. A forced desktop build therefore recompiles the renderer before copying
+its assets into the backend and completing the desktop output.
+See [desktop payload selection](desktop-releases-and-updates.md#desktop-payload-selection).
 Diagnostic flags and ambient profile variables cannot make an old bundle safe;
 there is no automatic rebuild or Production fallback. Packaged release behavior
 is unchanged.
@@ -63,6 +96,14 @@ backend is HTTP `13773`, HTTPS `13775`, with Vite at `5733`. A busy port or
 `CAFE_CODE_DEV_INSTANCE` / `CAFE_CODE_PORT_OFFSET` can select another instance;
 always use the printed URLs.
 
+The backend watcher compiles with the same bundler configuration as the desktop
+backend, then runs `dist/bin.mjs` against that reduced dependency generation.
+It validates the successful build receipt and joins its exact previous child
+before starting a replacement. `corepack yarn dev:server` uses the same watcher;
+direct TypeScript server/provider launches refuse with a rebuild instruction.
+Vite retains hot updates for renderer development. These commands keep the
+normal Debug data profile.
+
 All source desktop launches use a persistent **Debug data profile**, including
 normal built `start:desktop`, explicit diagnostic starts and development
 watchers. Their database is `~/.cafe-code/.debug/userdata/state.sqlite` on
@@ -75,8 +116,11 @@ Installed packaged releases retain the standard Production database at
 `~/.cafe-code/userdata/state.sqlite` (the equivalent home-root path on Windows).
 Starting a release with diagnostic logging does not change its profile. Source
 windows and their native app identity are labeled **Cafe Code (Debug)**. The
-copied macOS source app/helpers use `com.cafeai.cafecode.debug` and a separate
-Debug runtime cache; installed release identities and Electron dependencies
+copied macOS source app/helpers use the `com.cafeai.cafecode.debug.runtime.*`
+family, with a stable suffix derived from the canonical checkout path, and a
+separate Debug runtime cache. The immutable native source host uses its new
+version 2 namespace; the old host and held runtime copies remain untouched.
+Installed release identities and Electron dependencies
 are not modified. A new native identity can require separate OS consent; no
 release consent, browser profile or credentials are copied.
 
@@ -111,6 +155,15 @@ Omitting the target refuses before inspecting a database. Its existing
 maintenance, database copying or compression service is introduced by profile
 separation. Do not use maintenance to import Production into Debug.
 
+## Saved environments
+
+Saved environments in Settings can be edited without a working connection. The
+edit dialog updates the name, IP address or hostname, and port on this device;
+it also contains the confirmed Delete action. Names stay local when reconnecting,
+and address changes keep the same environment identity and saved credential.
+Drag the row handles to reorder saved environments, or focus a handle and use
+Space, the arrow keys, and Space again. The order persists on this device.
+
 ## Diagnostic logging
 
 After building:
@@ -144,6 +197,35 @@ Cafe does not weaken that requirement or change home-directory permissions.
 Chat and backend startup remain available, but push operations fail explicitly.
 No replacement keys, subscription reset, background retry or delivery is admitted.
 Preserve the existing state for recovery; do not delete it to hide the warning.
+
+### Notification preferences
+
+On macOS, each checkout has its own source runtime bundle identifier and every
+launch verifies and registers its exact signed copy with LaunchServices,
+including when reusing a cached runtime. A shared Debug bundle identifier can
+otherwise resolve to another checkout and open Electron's default window there;
+refreshing that shared registration alone does not guarantee which copy macOS
+prefers. Registration refreshes only the selected Debug app and never resets
+LaunchServices or unregisters another app. The version 2 native host admits only
+the bounded source-runtime identifier family and a matching valid code-signing
+identity. The new native identity may require fresh OS consent on the next
+normal launch; no existing host, grant or running app is replaced. Notifications
+already posted by an older identity retain their original OS association.
+A notification still routes
+only to its original live renderer document and scoped chat.
+
+Settings → Notifications has separate, opt-in controls for chat completion and
+structured user-input requests. Each preference defaults to off and is saved in
+client settings. Input notifications use a fixed localized message without
+question contents; clicking one opens its chat. The desktop app suppresses
+notifications for the currently focused chat and seeds its initial snapshot
+without announcing existing prompts. Answered prompts retire delayed desktop
+delivery. Browser Web Push stores both category preferences on the same private,
+authenticated subscription; legacy subscriptions retain completion delivery
+only. Disabling one category keeps the subscription while the other is enabled.
+Both categories retain the existing scheduled-follow-up notification policy and
+session revocation checks. Native OS delivery and closed-browser push delivery
+remain separate manual host checks from synthetic notification fixtures.
 
 ## Verification
 

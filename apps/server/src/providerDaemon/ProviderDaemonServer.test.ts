@@ -2,10 +2,13 @@ import {
   EventId,
   PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LIVENESS_PATH,
+  PROVIDER_DAEMON_RETIRE_PATH,
   ProviderDaemonHealth,
   ProviderDaemonLeaseRequest,
   ProviderDaemonLeaseResponse,
   ProviderDaemonLiveness,
+  ProviderDaemonRetirementResponse,
+  type ProviderDaemonRetirementRequest,
   ProviderDaemonRpcRequest,
   ProviderDaemonRpcEnvelope,
   ProviderDriverKind,
@@ -20,7 +23,9 @@ import {
 import { assert, describe, expect, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as PubSub from "effect/PubSub";
@@ -53,12 +58,16 @@ import {
   captureProviderDaemonProcessIdentity,
   handleProviderDaemonEventStream,
   runProviderDaemonServer,
+  runProviderDaemonServerForever,
   writeProviderDaemonStreamLine,
   type ProviderDaemonServerOptions,
   type ProviderDaemonProcessIdentityDependencies,
 } from "./ProviderDaemonServer.ts";
 import type { ProviderDaemonPersistentEventJournal } from "./EventJournal.ts";
-import { ProviderRuntimeInventoryLocalLive } from "./ProviderRuntimeInventory.ts";
+import {
+  ProviderRuntimeInventory,
+  ProviderRuntimeInventoryLocalLive,
+} from "./ProviderRuntimeInventory.ts";
 import {
   ProviderDaemonRpcResponseError,
   RemoteProviderServiceLive,
@@ -323,7 +332,599 @@ const makeProviderDaemonServerTestLayer = (providerService: ProviderServiceShape
 
 const providerDaemonServerTestLayer = makeProviderDaemonServerTestLayer(mockProviderService);
 
+const retirementProfileLayer = Layer.effect(
+  ServerConfig,
+  Effect.gen(function* () {
+    const config = yield* ServerConfig;
+    return { ...config, dataProfile: "debug" as const };
+  }),
+).pipe(
+  Layer.provide(
+    ServerConfig.layerTest(process.cwd(), { prefix: "cafe-cooperative-retirement-" }).pipe(
+      Layer.provide(NodeServices.layer),
+    ),
+  ),
+);
+
+class SyntheticRetirementTransportError extends Data.TaggedError(
+  "SyntheticRetirementTransportError",
+)<{
+  readonly message: string;
+}> {}
+
+/** Register exact cancellation and completion ownership before native IO.
+ * Effect interruption alone does not join an original promise's late close. */
+const retirementNative = <A>(execute: (signal: AbortSignal) => Promise<A>) =>
+  Effect.gen(function* () {
+    const owner = yield* Effect.acquireRelease(
+      Effect.sync(() => ({
+        abort: new AbortController(),
+        pending: undefined as Promise<A> | undefined,
+      })),
+      (resource) =>
+        Effect.promise(async () => {
+          resource.abort.abort();
+          if (resource.pending !== undefined) await resource.pending.catch(() => undefined);
+        }),
+    );
+    return yield* Effect.tryPromise({
+      try: () => {
+        owner.pending = execute(owner.abort.signal);
+        return owner.pending;
+      },
+      catch: () =>
+        new SyntheticRetirementTransportError({
+          message: "Synthetic retirement transport failed.",
+        }),
+    }).pipe(Effect.orDie);
+  }).pipe(Effect.scoped);
+
+const retirementHttp = (port: number, path: string, token: string, body?: string) =>
+  retirementNative(async (signal) => {
+    const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+      signal,
+      method: body === undefined ? "GET" : "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      ...(body === undefined ? {} : { body }),
+    });
+    return { status: response.status, text: await response.text() };
+  });
+
+const startRetirementDaemon = (options: Partial<ProviderDaemonServerOptions> = {}) =>
+  Effect.gen(function* () {
+    const listening = yield* Deferred.make<number>();
+    const closed = yield* Deferred.make<void>();
+    const logger = Logger.make<unknown, void>(({ message }) => {
+      if (!Array.isArray(message) || message[0] !== "provider daemon listening") return;
+      const metadata: unknown = message[1];
+      if (
+        typeof metadata === "object" &&
+        metadata !== null &&
+        "port" in metadata &&
+        typeof metadata.port === "number"
+      )
+        Deferred.doneUnsafe(listening, Effect.succeed(metadata.port));
+    });
+    const fiber = yield* runProviderDaemonServerForever(
+      {
+        port: 0,
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+        runtimeBuildId: "a".repeat(64),
+        ...options,
+      },
+      { platform: "linux" },
+    ).pipe(
+      Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+      Effect.ensuring(Deferred.succeed(closed, undefined)),
+      Effect.forkScoped,
+    );
+    return { port: yield* Deferred.await(listening), closed, fiber };
+  });
+
+const retirementRequestFromHealth = (
+  health: ProviderDaemonHealth,
+): ProviderDaemonRetirementRequest => {
+  if (
+    health.runtimeBuildId === undefined ||
+    health.dataProfile === undefined ||
+    health.dataProfileId === undefined
+  )
+    throw new Error("Expected the synthetic daemon's exact profiled identity.");
+  return {
+    protocolVersion: 1,
+    pid: health.pid,
+    startedAt: health.startedAt,
+    runtimeBuildId: health.runtimeBuildId,
+    dataProfile: health.dataProfile,
+    dataProfileId: health.dataProfileId,
+    nonce: "c".repeat(64),
+  };
+};
+
 describe("ProviderDaemonServer", () => {
+  it.effect.skipIf(process.platform === "win32")(
+    "retires only the exact root-authenticated profiled owner after its finite reply",
+    () =>
+      Effect.gen(function* () {
+        const daemon = yield* startRetirementDaemon();
+        const healthReply = yield* retirementHttp(
+          daemon.port,
+          PROVIDER_DAEMON_HEALTH_PATH,
+          TEST_TOKEN,
+        );
+        assert.equal(healthReply.status, 200);
+        const health = decodeProviderDaemonHealth(decodeProviderJsonString(healthReply.text));
+        assert.equal(health.retirementProtocol, 1);
+        const request = retirementRequestFromHealth(health);
+        const leaseReply = yield* retirementHttp(
+          daemon.port,
+          "/api/provider-daemon/leases",
+          TEST_TOKEN,
+          encodeProviderDaemonLeaseRequestJson({
+            clientKind: "desktop-main",
+            capabilities: ["health", "events", "rpc", "lease"],
+          }),
+        );
+        const lease = decodeProviderDaemonLeaseResponseJson(leaseReply.text);
+        for (const token of ["not-the-root-credential", lease.token]) {
+          const denied = yield* retirementHttp(
+            daemon.port,
+            PROVIDER_DAEMON_RETIRE_PATH,
+            token,
+            encodeProviderJsonString(request),
+          );
+          assert.equal(denied.status, 403);
+          assert.deepEqual(decodeProviderJsonString(denied.text), {
+            error: "Provider daemon retirement refused.",
+          });
+        }
+        const invalidBodies = [
+          ...[
+            { ...request, pid: request.pid + 1 },
+            { ...request, startedAt: "2026-01-01T00:00:00.000Z" },
+            { ...request, runtimeBuildId: "b".repeat(64) },
+            { ...request, dataProfile: "production" },
+            { ...request, dataProfileId: "b".repeat(64) },
+            { ...request, nonce: "c".repeat(63) },
+            { ...request, nonce: `${"c".repeat(64)}\n` },
+            { ...request, extra: "synthetic-secret-must-not-echo" },
+            { padding: "synthetic-secret-must-not-echo".repeat(100) },
+          ].map((value) => encodeProviderJsonString(value)),
+          '{"nonce":"synthetic-secret-must-not-echo"',
+        ];
+        for (const body of invalidBodies) {
+          const denied = yield* retirementHttp(
+            daemon.port,
+            PROVIDER_DAEMON_RETIRE_PATH,
+            TEST_TOKEN,
+            body,
+          );
+          assert.equal(denied.status, 403);
+          assert.deepEqual(decodeProviderJsonString(denied.text), {
+            error: "Provider daemon retirement refused.",
+          });
+          assert.isFalse(yield* Deferred.isDone(daemon.closed));
+        }
+        const accepted = yield* retirementHttp(
+          daemon.port,
+          PROVIDER_DAEMON_RETIRE_PATH,
+          TEST_TOKEN,
+          encodeProviderJsonString(request),
+        );
+        assert.equal(accepted.status, 200);
+        assert.deepEqual(
+          Schema.decodeUnknownSync(ProviderDaemonRetirementResponse)(
+            decodeProviderJsonString(accepted.text),
+          ),
+          { accepted: true, ...request },
+        );
+        // The actual completed response is observed before joining the real
+        // lifecycle. No test callback or copied PID substitutes for closure.
+        yield* Deferred.await(daemon.closed);
+        yield* Fiber.join(daemon.fiber);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(Layer.merge(providerDaemonServerTestLayer, retirementProfileLayer)),
+      ),
+  );
+
+  it.effect.skipIf(process.platform === "win32")(
+    "consumes retirement once and closes an actual open event stream without a shutdown deadlock",
+    () => {
+      const journaled = Deferred.makeUnsafe<void>();
+      const service: ProviderServiceShape = {
+        ...mockProviderService,
+        streamEvents: Stream.make(makeDaemonRecord(1).event),
+      };
+      return Effect.gen(function* () {
+        const daemon = yield* startRetirementDaemon({
+          onRuntimeEventJournaled: () => {
+            Deferred.doneUnsafe(journaled, Effect.void);
+          },
+        });
+        yield* Deferred.await(journaled);
+        const healthReply = yield* retirementHttp(
+          daemon.port,
+          PROVIDER_DAEMON_HEALTH_PATH,
+          TEST_TOKEN,
+        );
+        const health = decodeProviderDaemonHealth(decodeProviderJsonString(healthReply.text));
+        const request = retirementRequestFromHealth(health);
+        const streamOwner = yield* Effect.acquireRelease(
+          Effect.sync(() => ({
+            abort: new AbortController(),
+            pending: undefined as Promise<Response> | undefined,
+          })),
+          (resource) =>
+            Effect.promise(async () => {
+              resource.abort.abort();
+              if (resource.pending !== undefined) {
+                const lateResponse = await resource.pending.catch(() => undefined);
+                await lateResponse?.body?.cancel().catch(() => undefined);
+              }
+            }),
+        );
+        const events = yield* Effect.promise(() => {
+          streamOwner.pending = fetch(
+            `http://127.0.0.1:${daemon.port}/api/provider-daemon/events?after=0`,
+            {
+              signal: streamOwner.abort.signal,
+              headers: { authorization: `Bearer ${TEST_TOKEN}` },
+            },
+          );
+          return streamOwner.pending;
+        });
+        assert.equal(events.status, 200);
+        // Two original native requests compete for the same one-use reserve.
+        // Closure can retire the losing socket before its refusal is received;
+        // it must never produce a second accepted response.
+        const replies = yield* retirementNative((signal) =>
+          Promise.allSettled(
+            [0, 1].map(async () => {
+              const reply = await fetch(
+                `http://127.0.0.1:${daemon.port}${PROVIDER_DAEMON_RETIRE_PATH}`,
+                {
+                  signal,
+                  method: "POST",
+                  headers: {
+                    authorization: `Bearer ${TEST_TOKEN}`,
+                    "content-type": "application/json",
+                  },
+                  body: encodeProviderJsonString(request),
+                },
+              );
+              return { status: reply.status, text: await reply.text() };
+            }),
+          ),
+        );
+        const accepted = replies.flatMap((reply) =>
+          reply.status === "fulfilled" && reply.value.status === 200 ? [reply.value] : [],
+        );
+        assert.equal(accepted.length, 1);
+        assert.deepEqual(decodeProviderJsonString(accepted[0]?.text ?? ""), {
+          accepted: true,
+          ...request,
+        });
+        for (const reply of replies) {
+          if (reply.status === "fulfilled" && reply.value.status !== 200) {
+            assert.equal(reply.value.status, 403);
+            assert.deepEqual(decodeProviderJsonString(reply.value.text), {
+              error: "Provider daemon retirement refused.",
+            });
+          }
+        }
+        yield* Deferred.await(daemon.closed);
+        yield* Fiber.join(daemon.fiber);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.merge(makeProviderDaemonServerTestLayer(service), retirementProfileLayer),
+        ),
+      );
+    },
+  );
+
+  it.effect(
+    "omits retirement authority from directly hosted, legacy, supervised and Windows lifecycles",
+    () =>
+      Effect.gen(function* () {
+        const direct = yield* startProviderDaemonServerOnEphemeralPort({
+          token: TEST_TOKEN,
+          version: "0.0.0-test",
+          runtimeBuildId: "a".repeat(64),
+        });
+        const directHealth = yield* retirementHttp(direct, PROVIDER_DAEMON_HEALTH_PATH, TEST_TOKEN);
+        assert.isUndefined(
+          decodeProviderDaemonHealth(decodeProviderJsonString(directHealth.text))
+            .retirementProtocol,
+        );
+        const directDenied = yield* retirementHttp(
+          direct,
+          PROVIDER_DAEMON_RETIRE_PATH,
+          TEST_TOKEN,
+          "{}",
+        );
+        assert.equal(directDenied.status, 403);
+        const cases: ReadonlyArray<Partial<ProviderDaemonServerOptions>> = [
+          { runtimeBuildId: "legacy-build-without-binding" },
+          { mode: "provider-supervisor" },
+        ];
+        for (const options of cases) {
+          yield* Effect.gen(function* () {
+            const daemon = yield* startRetirementDaemon(options);
+            const reply = yield* retirementHttp(
+              daemon.port,
+              PROVIDER_DAEMON_HEALTH_PATH,
+              TEST_TOKEN,
+            );
+            assert.isUndefined(
+              decodeProviderDaemonHealth(decodeProviderJsonString(reply.text)).retirementProtocol,
+            );
+            const denied = yield* retirementHttp(
+              daemon.port,
+              PROVIDER_DAEMON_RETIRE_PATH,
+              TEST_TOKEN,
+              "{}",
+            );
+            assert.equal(denied.status, 403);
+            assert.isFalse(yield* Deferred.isDone(daemon.closed));
+          }).pipe(Effect.scoped);
+        }
+        const upstream = yield* startRetirementDaemon().pipe(
+          Effect.provideService(ProviderRuntimeInventory, {
+            snapshot: Effect.succeed({
+              configuredInstanceCount: 0,
+              upstreamSupervisor: { configured: true, reachable: false },
+            }),
+          }),
+        );
+        const upstreamHealth = yield* retirementHttp(
+          upstream.port,
+          PROVIDER_DAEMON_HEALTH_PATH,
+          TEST_TOKEN,
+        );
+        assert.isUndefined(
+          decodeProviderDaemonHealth(decodeProviderJsonString(upstreamHealth.text))
+            .retirementProtocol,
+        );
+        const upstreamDenied = yield* retirementHttp(
+          upstream.port,
+          PROVIDER_DAEMON_RETIRE_PATH,
+          TEST_TOKEN,
+          "{}",
+        );
+        assert.equal(upstreamDenied.status, 403);
+        if (process.platform === "win32") {
+          const daemon = yield* startRetirementDaemon();
+          const reply = yield* retirementHttp(daemon.port, PROVIDER_DAEMON_HEALTH_PATH, TEST_TOKEN);
+          assert.isUndefined(
+            decodeProviderDaemonHealth(decodeProviderJsonString(reply.text)).retirementProtocol,
+          );
+        }
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(Layer.merge(providerDaemonServerTestLayer, retirementProfileLayer)),
+      ),
+  );
+
+  it.effect("preserves ordinary opaque cursor data and strips unrelated unknown extras", () => {
+    const seen: unknown[] = [];
+    const service: ProviderServiceShape = {
+      ...mockProviderService,
+      startSession: (_threadId, input) =>
+        Effect.sync(() => {
+          seen.push(input);
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ProviderValidationError({
+                operation: "startSession",
+                issue: "Synthetic refusal.",
+              }),
+            ),
+          ),
+        ),
+      sendTurn: (input) =>
+        Effect.sync(() => {
+          seen.push(input);
+        }).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ProviderValidationError({ operation: "sendTurn", issue: "Synthetic refusal." }),
+            ),
+          ),
+        ),
+    };
+    return Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+      });
+      const opaque = {
+        permit: "ordinary-value",
+        attemptId: "ordinary-attempt",
+        entries: Array.from({ length: 5000 }, (_, index) => index),
+      };
+      const requests = [
+        {
+          method: "startSession",
+          commandId: "ordinary-cursor-command-0000000000001",
+          payload: {
+            threadId: "ordinary-thread",
+            provider: "codex",
+            runtimeMode: "full-access",
+            resumeCursor: opaque,
+          },
+        },
+        {
+          method: "sendTurn",
+          commandId: "ordinary-extra-command-0000000000001",
+          payload: {
+            threadId: "ordinary-thread",
+            input: "ordinary input",
+            extra: { deeper: { continuationToken: "unknown-field-secret" } },
+          },
+        },
+      ];
+      for (const body of requests) {
+        const response = yield* Effect.promise(() =>
+          fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${TEST_TOKEN}`, "content-type": "application/json" },
+            body: encodeProviderJsonString(body),
+          }),
+        );
+        assert.equal(response.status, 400);
+        yield* Effect.promise(() => response.text());
+      }
+      assert.equal(seen.length, 2);
+      assert.deepEqual((seen[0] as { resumeCursor: unknown }).resumeCursor, opaque);
+      assert.notProperty(seen[1] as object, "extra");
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql`SELECT request_json FROM provider_daemon_commands`;
+      assert.notInclude(encodeProviderJsonString(rows), "unknown-field-secret");
+    }).pipe(Effect.scoped, Effect.provide(makeProviderDaemonServerTestLayer(service)));
+  });
+
+  it.effect("redacts malformed private recovery before RPC validation and diagnostics", () =>
+    Effect.gen(function* () {
+      const port = yield* startProviderDaemonServerOnEphemeralPort({
+        host: "127.0.0.1",
+        token: TEST_TOKEN,
+        version: "0.0.0-test",
+      });
+      const secret = "malformed-private-secret-canary";
+      const prompt = "malformed-private-prompt-canary";
+      const validSecret = "a".repeat(64);
+      const digest = "c".repeat(64);
+      const requests = [
+        {
+          method: "prepareFailedRootRecovery",
+          commandId: secret,
+          payload: { continuationToken: secret, request: { input: prompt } },
+        },
+        {
+          method: "sendTurn",
+          commandId: secret,
+          payload: { preparedFailedRootRecovery: { permit: secret }, input: prompt },
+        },
+        {
+          method: "unrecognized",
+          payload: { preparedFailedRootRecovery: { permit: secret }, input: prompt },
+        },
+        {
+          method: "sendTurn",
+          commandId: "10000000-0000-4000-8000-000000000013",
+          payload: {
+            attemptId: "spoof",
+            preparationSequence: 1,
+            continuationToken: secret,
+            request: { threadId: "synthetic-thread", input: prompt },
+          },
+        },
+        {
+          method: "unrecognized",
+          payload: { attemptId: "spoof", requestCommitment: digest, input: prompt },
+        },
+        {
+          method: "sendTurn",
+          commandId: "10000000-0000-4000-8000-000000000015",
+          continuationToken: secret,
+          payload: { threadId: "synthetic-thread", input: prompt },
+        },
+        {
+          method: "sendTurn",
+          commandId: "10000000-0000-4000-8000-000000000009",
+          payload: {
+            threadId: "synthetic-thread",
+            preparedFailedRootRecovery: null,
+            input: prompt,
+          },
+        },
+        {
+          method: "steerTurn",
+          commandId: "10000000-0000-4000-8000-000000000010",
+          payload: {
+            threadId: "synthetic-thread",
+            input: prompt,
+            preparedFailedRootRecovery: { permit: secret },
+          },
+        },
+        { method: "readFailedRootRecovery", payload: { requestCommitment: secret, input: prompt } },
+        {
+          method: "cancelFailedRootRecovery",
+          payload: { requestCommitment: secret, input: prompt },
+        },
+        {
+          method: "prepareFailedRootRecovery",
+          commandId: "10000000-0000-4000-8000-000000000011",
+          payload: {
+            attemptId: "synthetic",
+            preparationSequence: 1,
+            continuationToken: validSecret,
+            request: {
+              threadId: "synthetic-thread",
+              input: prompt,
+              expectedFailedRoot: {
+                turnId: "synthetic-root",
+                providerThreadId: "synthetic-history",
+                subagentRuntimeId: "10000000-0000-4000-8000-000000000012",
+                providerInstanceId: "codex",
+                observedAt: "2026-10-19T01:00:00.000Z",
+                restartSession: true,
+              },
+            },
+          },
+        },
+      ];
+      for (const body of requests) {
+        const response = yield* Effect.promise(() =>
+          fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+            method: "POST",
+            headers: { authorization: `Bearer ${TEST_TOKEN}`, "content-type": "application/json" },
+            body: encodeProviderJsonString(body),
+          }),
+        );
+        assert.equal(response.status, 400);
+        const text = yield* Effect.promise(() => response.text());
+        assert.notInclude(text, secret);
+        assert.notInclude(text, prompt);
+        assert.notInclude(text, validSecret);
+        assert.notInclude(text, digest);
+      }
+      const broken = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/rpc`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${TEST_TOKEN}`, "content-type": "application/json" },
+          body: `{ "method": "prepareFailedRootRecovery", "secret": "${secret}"`,
+        }),
+      );
+      assert.equal(broken.status, 400);
+      const brokenText = yield* Effect.promise(() => broken.text());
+      assert.notInclude(brokenText, secret);
+      const healthResponse = yield* Effect.promise(() =>
+        fetch(`http://127.0.0.1:${port}/api/provider-daemon/health`, {
+          headers: { authorization: `Bearer ${TEST_TOKEN}` },
+        }),
+      );
+      const health = yield* Effect.promise(() => healthResponse.text());
+      assert.notInclude(health, secret);
+      assert.notInclude(health, prompt);
+      assert.notInclude(health, validSecret);
+      assert.notInclude(health, digest);
+      const sql = yield* SqlClient.SqlClient;
+      const rows =
+        yield* sql`SELECT request_json, response_json, error_json FROM provider_daemon_commands`;
+      assert.notInclude(encodeProviderJsonString(rows), secret);
+      assert.notInclude(encodeProviderJsonString(rows), prompt);
+      assert.notInclude(encodeProviderJsonString(rows), validSecret);
+      assert.notInclude(encodeProviderJsonString(rows), digest);
+    }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer)),
+  );
+
   for (const profile of ["production", "debug", undefined] as const) {
     it.effect(
       `echoes only actual admitted ${profile ?? "legacy-unknown"} profile in native health and liveness`,
@@ -1963,6 +2564,11 @@ describe("ProviderDaemonServer", () => {
       assert.equal(health.supervisorProcess?.leaseId, "lease-000000000000000000000000000");
       assert.isDefined(health.pipelineDiagnostics);
       assert.equal(health.pipelineDiagnostics?.daemonStream.activeStreamCount, 0);
+      assert.deepEqual(health.glideStartup, {
+        attachFailureCount: 0,
+        activationFailureCount: 0,
+        trayFailureCount: 0,
+      });
       assert.notInclude(encodeProviderDaemonHealthJson(health), TEST_TOKEN);
     }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer)),
   );

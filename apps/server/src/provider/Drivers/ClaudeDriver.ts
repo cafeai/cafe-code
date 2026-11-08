@@ -54,40 +54,21 @@ import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   makePackageManagedProviderMaintenanceResolver,
-  normalizeCommandPath,
   resolveProviderMaintenanceCapabilitiesEffect,
-  makeManualOnlyProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
 import { resolveProviderRuntimeEnvironment } from "../managedProviderRuntime.ts";
+import { CLAUDE_PROVIDER_MAINTENANCE } from "../claudeMaintenance.ts";
 import { makeClaudeCapabilitiesCacheKey, makeClaudeContinuationGroupKey } from "./ClaudeHome.ts";
 import { makeClaudeAuthenticationEnvironment } from "./ClaudeAuthenticationEnvironment.ts";
 import { makeClaudeAccountQuotaReader } from "../claudeAccountQuota.ts";
+import { makeClaudeCredentialExpiry } from "../claudeCredentialExpiry.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
 const CAPABILITIES_PROBE_TTL = Duration.minutes(5);
 
-function isClaudeNativeCommandPath(commandPath: string): boolean {
-  const normalized = normalizeCommandPath(commandPath);
-  return (
-    normalized.endsWith("/.local/bin/claude") ||
-    normalized.endsWith("/.local/bin/claude.exe") ||
-    normalized.includes("/.local/share/claude/")
-  );
-}
-
-const UPDATE_DEFINITION = {
-  provider: DRIVER_KIND,
-  npmPackageName: "@anthropic-ai/claude-code",
-  homebrewFormula: "claude-code",
-  nativeUpdate: {
-    executable: "claude",
-    args: ["update"],
-    lockKey: "claude-native",
-    isCommandPath: isClaudeNativeCommandPath,
-  },
-} as const;
+const UPDATE_DEFINITION = CLAUDE_PROVIDER_MAINTENANCE;
 const UPDATE = makePackageManagedProviderMaintenanceResolver(UPDATE_DEFINITION);
 
 export type ClaudeDriverEnv =
@@ -185,17 +166,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         resolveEnvironment,
       );
       const maintenanceCapabilities =
-        serverConfig.dataProfile === "debug"
-          ? makeManualOnlyProviderMaintenanceCapabilities({
-              provider: DRIVER_KIND,
-              packageName: UPDATE_DEFINITION.npmPackageName,
-            })
-          : effectiveConfig.runtimeSource === "bundled"
-            ? runtime.maintenanceCapabilities
-            : yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-                binaryPath: effectiveConfig.binaryPath,
-                env: effectiveEnvironment,
-              });
+        effectiveConfig.runtimeSource === "bundled"
+          ? runtime.maintenanceCapabilities
+          : yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+              binaryPath: effectiveConfig.binaryPath,
+              env: effectiveEnvironment,
+            });
       const continuationGroupKey = yield* makeClaudeContinuationGroupKey(effectiveConfig);
       let observedCliVersion: string | null = null;
       const stampInstanceIdentity = withInstanceIdentity({
@@ -217,10 +193,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       // credentials are invisible to the local probes (`--version`, the
       // capabilities init probe, `claude auth status` — all read local
       // credential material without an authenticated request), so the adapter
-      // reports 401s here and the status probe consults this flag. On a state
+      // reports typed primary auth failures here and the status probe consults
+      // this flag. Local sign-out need not carry an HTTP status. On a state
       // flip, re-run the snapshot check immediately so the provider tile
       // shows needs-login (or recovers) without waiting for the periodic
       // refresh.
+      // Result expiry stays a volatile level of exact live query owners. It
+      // neither selects an auth environment nor requests another native probe.
+      const credentialExpiry = yield* makeClaudeCredentialExpiry();
       const authFailureRef = yield* Ref.make(false);
       const snapshotRefreshRef = yield* Ref.make<Effect.Effect<unknown> | undefined>(undefined);
       const scope = yield* Effect.scope;
@@ -253,6 +233,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         resolveEnvironment,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         onAuthStatusChanged,
+        onCredentialExpiryOwner: credentialExpiry.onOwner,
         getModelCapabilities: (model: string) =>
           Ref.get(nativeModelsRef).pipe(
             Effect.map((models) =>
@@ -303,7 +284,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         Effect.provideService(Path.Path, path),
       );
 
-      const snapshot = yield* makeManagedServerProvider<ClaudeSettings>({
+      const baseSnapshot = yield* makeManagedServerProvider<ClaudeSettings>({
         maintenanceCapabilities,
         getSettings: Effect.succeed(effectiveConfig),
         streamSettings: Stream.never,
@@ -335,7 +316,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         ),
       );
 
-      yield* Ref.set(snapshotRefreshRef, snapshot.refresh);
+      const snapshot = credentialExpiry.decorate(baseSnapshot);
+      // An observed auth transition must not reuse an initialization cached
+      // before sign-out or recovery. The same existing refresh owns the probe.
+      yield* Ref.set(
+        snapshotRefreshRef,
+        Cache.invalidateAll(capabilitiesProbeCache).pipe(Effect.andThen(snapshot.refresh)),
+      );
 
       return {
         instanceId,

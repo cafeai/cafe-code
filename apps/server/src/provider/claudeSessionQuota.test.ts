@@ -37,6 +37,129 @@ describe("Claude get_usage allowance projection", () => {
       ["weekly_all", 18.25, "2026-10-20T11:00:00.000Z"],
     ]);
   });
+  it("preserves current model-only allowances in native order without inventing unknown utilization", () => {
+    const report = mapClaudeAccountQuotaReport(
+      {
+        rate_limits_available: true,
+        rate_limits: {
+          model_scoped: [
+            { display_name: "Fable", utilization: 1.5, resets_at: "2026-10-20T11:00:00Z" },
+            { display_name: "Opus", utilization: null, resets_at: null },
+            { display_name: "Fable", utilization: 75, resets_at: null },
+          ],
+        },
+      },
+      observedAt,
+    );
+    expect(report?.source).toBe("claude-cli");
+    expect(
+      report?.meters?.map((meter) => [
+        meter.kind,
+        meter.modelLabel,
+        meter.usedPercent,
+        meter.resetsAt,
+      ]),
+    ).toEqual([
+      ["weekly_scoped", "Fable", 1.5, "2026-10-20T11:00:00.000Z"],
+      ["weekly_scoped", "Fable", 75, null],
+    ]);
+  });
+  it("preserves separately reported legacy windows when additive scoped rows share a label", () => {
+    for (const model_scoped of [[], [{ display_name: "Opus", utilization: 12, resets_at: null }]]) {
+      const report = mapClaudeAccountQuotaReport(
+        {
+          ...legacy,
+          rate_limits: {
+            ...legacy.rate_limits,
+            seven_day_opus: { utilization: 99, resets_at: null },
+            seven_day_sonnet: { utilization: 88, resets_at: null },
+            model_scoped,
+          },
+        },
+        observedAt,
+      );
+      const expected: Array<[string | null, number]> = [
+        [null, 57],
+        [null, 18.25],
+        ["Opus", 99],
+        ["Sonnet", 88],
+      ];
+      if (model_scoped.length) expected.push(["Opus", 12]);
+      expect(report?.meters?.map((meter) => [meter.modelLabel ?? null, meter.usedPercent])).toEqual(
+        expected,
+      );
+    }
+  });
+  it("rejects malformed or oversized scoped levels without partial fallback or getter reads", () => {
+    const scoped = { display_name: "Fable", utilization: 5, resets_at: null };
+    let reads = 0;
+    const accessor = Object.defineProperty([scoped], "0", {
+      get() {
+        reads++;
+        return scoped;
+      },
+    });
+    for (const model_scoped of [
+      null,
+      {},
+      new Array(1),
+      accessor,
+      Array.from({ length: PROVIDER_SESSION_QUOTA_MAX_METERS + 1 }, () => scoped),
+      [{ ...scoped, display_name: "" }],
+      [{ ...scoped, utilization: 101 }],
+      [{ ...scoped, resets_at: "not-an-instant" }],
+    ]) {
+      expect(
+        mapClaudeAccountQuotaReport(
+          {
+            ...legacy,
+            rate_limits: { ...legacy.rate_limits, model_scoped },
+          },
+          observedAt,
+        ),
+      ).toBeNull();
+    }
+    expect(reads).toBe(0);
+    // Two admitted legacy windows and the scoped level share one output budget.
+    // A scoped list can fit its own bound while overflowing the combined report.
+    const scopedAtCombinedLimit = Array.from(
+      { length: PROVIDER_SESSION_QUOTA_MAX_METERS - 2 },
+      () => scoped,
+    );
+    expect(
+      mapClaudeAccountQuotaReport(
+        {
+          ...legacy,
+          rate_limits: { ...legacy.rate_limits, model_scoped: scopedAtCombinedLimit },
+        },
+        observedAt,
+      )?.meters,
+    ).toHaveLength(PROVIDER_SESSION_QUOTA_MAX_METERS);
+    expect(
+      mapClaudeAccountQuotaReport(
+        {
+          ...legacy,
+          rate_limits: { ...legacy.rate_limits, model_scoped: [...scopedAtCombinedLimit, scoped] },
+        },
+        observedAt,
+      ),
+    ).toBeNull();
+    for (const model_scoped of [[], [{ ...scoped, utilization: null }]])
+      expect(
+        mapClaudeAccountQuotaReport(
+          { rate_limits_available: true, rate_limits: { model_scoped } },
+          observedAt,
+        ),
+      ).toBeNull();
+    // Complete native rows, including empty, remain the higher-precedence level.
+    expect(
+      mapClaudeAccountQuotaReport(
+        { ...legacy, rate_limits: { limits: [], model_scoped: accessor } },
+        observedAt,
+      )?.meters,
+    ).toEqual([]);
+    expect(reads).toBe(0);
+  });
   it("prefers the complete ordered endpoint meters, including empty and future rows", () => {
     for (const limits of [[], [row, { ...row, kind: "future", percent: 99 }]]) {
       const report = mapClaudeAccountQuotaReport(

@@ -47,6 +47,141 @@ const result = (models: Record<string, ReturnType<typeof modelUsage>>) => ({
 });
 
 describe("Claude billing accounting", () => {
+  it("keeps observed cache durations prospective across duplicate messages and result settlement", () => {
+    const state = makeClaudeUsageAccounting(SCOPE);
+    const first = assistant("duration-1", 10, { written: 30 });
+    const withSplit = {
+      ...first,
+      message: {
+        ...first.message,
+        usage: {
+          ...first.message.usage,
+          cache_creation: {
+            ephemeral_5m_input_tokens: 10,
+            ephemeral_1h_input_tokens: 20,
+          },
+        },
+      },
+    };
+    expect(observeClaudeAssistantUsage(state, withSplit)?.models[0]).toMatchObject({
+      cacheWriteInputTokens: 30,
+      cacheWrite5mInputTokens: 10,
+      cacheWrite1hInputTokens: 20,
+    });
+    expect(observeClaudeAssistantUsage(state, withSplit)).toBeUndefined();
+    const settled = observeClaudeResultUsage(state, result({ [MODEL]: modelUsage(10, 2, 0, 30) }));
+    expect(settled?.models[0]).toMatchObject({
+      cacheWriteInputTokens: 30,
+      cacheWrite5mInputTokens: 10,
+      cacheWrite1hInputTokens: 20,
+    });
+    const legacy = observeClaudeAssistantUsage(state, assistant("duration-2", 1, { written: 9 }));
+    expect(legacy?.models[0]).toMatchObject({
+      cacheWriteInputTokens: 39,
+      cacheWrite5mInputTokens: 10,
+      cacheWrite1hInputTokens: 20,
+    });
+  });
+  it("settles SDK result duration buckets only when prior writes have no unknown portion", () => {
+    const state = makeClaudeUsageAccounting(SCOPE);
+    const sdkResult = {
+      modelUsage: {
+        [MODEL]: {
+          ...modelUsage(10, 5, 0, 30),
+          cacheCreationEphemeral5mInputTokens: 10,
+          cacheCreationEphemeral1hInputTokens: 20,
+        },
+      },
+    };
+    expect(observeClaudeResultUsage(state, sdkResult)?.models[0]).toMatchObject({
+      cacheWriteInputTokens: 30,
+      cacheWrite5mInputTokens: 10,
+      cacheWrite1hInputTokens: 20,
+    });
+    expect(
+      observeClaudeResultUsage(state, {
+        modelUsage: {
+          [MODEL]: {
+            ...modelUsage(10, 5, 0, 30),
+            cacheCreationEphemeral5mInputTokens: 20,
+            cacheCreationEphemeral1hInputTokens: 10,
+          },
+        },
+      }),
+    ).toBeUndefined();
+    const unknown = makeClaudeUsageAccounting(SCOPE);
+    observeClaudeAssistantUsage(unknown, assistant("unknown", 10, { written: 30 }));
+    expect(observeClaudeResultUsage(unknown, sdkResult)?.models[0]).not.toHaveProperty(
+      "cacheWrite1hInputTokens",
+    );
+  });
+  it("keeps resumed and regressing result splits from reclassifying saved writes", () => {
+    const state = makeClaudeUsageAccounting(SCOPE, {
+      status: "known",
+      models: decodeClaudeCumulativeUsage({ [MODEL]: modelUsage(10, 5, 0, 30) })!,
+    });
+    configureClaudeUsageVersion(state, "2.1.311");
+    const newer = {
+      modelUsage: {
+        [MODEL]: {
+          ...modelUsage(15, 7, 0, 40),
+          cacheCreationEphemeral5mInputTokens: 15,
+          cacheCreationEphemeral1hInputTokens: 25,
+        },
+      },
+    };
+    const observed = observeClaudeResultUsage(state, newer);
+    expect(observed?.models[0]).toMatchObject({ cacheWriteInputTokens: 10 });
+    expect(observed?.models[0]).not.toHaveProperty("cacheWrite1hInputTokens");
+    expect(
+      observeClaudeResultUsage(state, {
+        modelUsage: {
+          [MODEL]: {
+            ...modelUsage(10, 5, 0, 30),
+            cacheCreationEphemeral5mInputTokens: 10,
+            cacheCreationEphemeral1hInputTokens: 20,
+          },
+        },
+      }),
+    ).toBeUndefined();
+  });
+  it("combines canonical result aliases and never accepts malformed TTL sums", () => {
+    const one = {
+      ...modelUsage(1, 0, 0, 10),
+      canonicalModel: MODEL,
+      cacheCreationEphemeral5mInputTokens: 2,
+      cacheCreationEphemeral1hInputTokens: 8,
+    };
+    const two = {
+      ...modelUsage(1, 0, 0, 20),
+      canonicalModel: MODEL,
+      cacheCreationEphemeral5mInputTokens: 5,
+      cacheCreationEphemeral1hInputTokens: 15,
+    };
+    const observed = observeClaudeResultUsage(makeClaudeUsageAccounting(SCOPE), {
+      modelUsage: { alias1: one, alias2: two },
+    });
+    expect(observed?.models[0]).toMatchObject({
+      model: MODEL,
+      cacheWriteInputTokens: 30,
+      cacheWrite5mInputTokens: 7,
+      cacheWrite1hInputTokens: 23,
+    });
+    const malformed = observeClaudeResultUsage(makeClaudeUsageAccounting(SCOPE), {
+      modelUsage: {
+        alias1: {
+          ...one,
+          cacheCreationEphemeral1hInputTokens: 9,
+        },
+      },
+    });
+    expect(malformed?.models[0]).toMatchObject({ cacheWriteInputTokens: 10 });
+    expect(malformed?.models[0]).not.toHaveProperty("cacheWrite5mInputTokens");
+    expect(
+      observeClaudeResultUsage(makeClaudeUsageAccounting(SCOPE), { modelUsage: { alias1: one } })
+        ?.models[0],
+    ).toMatchObject({ cacheWrite5mInputTokens: 2, cacheWrite1hInputTokens: 8 });
+  });
   it("attributes a saved gateway alias from the live result's explicit canonical model", () => {
     const state = makeClaudeUsageAccounting(SCOPE, {
       status: "known",

@@ -28,6 +28,7 @@ import {
 } from "./orchestration.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 import { MaxConcurrentSubagents } from "./subagentLimits.ts";
+import { ProviderUserInputUnanswered, hasDisjointUserInputAnswers } from "./providerUserInput.ts";
 import { CodexContextWindowOverride } from "./codexContextWindow.ts";
 import { CodexReviewTarget } from "./codexReview.ts";
 import {
@@ -247,6 +248,39 @@ export const ProviderSubagentPolicySession = Schema.Struct({
 });
 export type ProviderSubagentPolicySession = typeof ProviderSubagentPolicySession.Type;
 
+/** Private daemon-only recovery coordinates. Secrets never belong in session
+ * projections, debug metadata, durable command bodies or native events. */
+export const ProviderFailedRootRecoveryAttemptId = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(128),
+);
+export type ProviderFailedRootRecoveryAttemptId = typeof ProviderFailedRootRecoveryAttemptId.Type;
+export const ProviderFailedRootRecoveryCommitment = Schema.String.check(
+  Schema.isPattern(/^[0-9a-f]{64}(?![\s\S])/u),
+);
+export type ProviderFailedRootRecoveryCommitment = typeof ProviderFailedRootRecoveryCommitment.Type;
+export const ProviderFailedRootRecoverySecret = Schema.String.check(
+  Schema.isPattern(/^[0-9a-f]{64}(?![\s\S])/u),
+);
+export type ProviderFailedRootRecoverySecret = typeof ProviderFailedRootRecoverySecret.Type;
+export const ProviderFailedRootRecoverySequence = Schema.Number.check(
+  Schema.isInt(),
+  Schema.isGreaterThanOrEqualTo(0),
+  Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+);
+export const ProviderPreparedFailedRootRecovery = Schema.Struct({
+  attemptId: ProviderFailedRootRecoveryAttemptId,
+  preparationSequence: ProviderFailedRootRecoverySequence,
+  requestCommitment: ProviderFailedRootRecoveryCommitment,
+  permit: ProviderFailedRootRecoverySecret,
+});
+export type ProviderPreparedFailedRootRecovery = typeof ProviderPreparedFailedRootRecovery.Type;
+export const ProviderFailedRootRecoverySession = Schema.Struct({
+  previousSubagentRuntimeId: SubagentRuntimeId,
+  subagentRuntimeId: SubagentRuntimeId,
+  providerThreadId: TrimmedNonEmptyString,
+});
+export type ProviderFailedRootRecoverySession = typeof ProviderFailedRootRecoverySession.Type;
+
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
   /** Explicit Axiom desktop web consent for this message only. */
@@ -284,6 +318,7 @@ export const ProviderSendTurnInput = Schema.Struct({
   expectedCompletedRootTurnId: Schema.optional(TurnId),
   // Server-only continuation admission. All three coordinates are required;
   // another process resuming the same transcript cannot inherit this proof.
+  preparedFailedRootRecovery: Schema.optional(ProviderPreparedFailedRootRecovery),
   expectedFailedRoot: Schema.optional(
     Schema.Struct({
       turnId: TurnId,
@@ -308,6 +343,70 @@ export const ProviderSendTurnInput = Schema.Struct({
 });
 export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 
+/** Private recovery RPC input; runtime admission rejects a prepared nested request. */
+export const ProviderPrepareFailedRootRecoveryInput = Schema.Struct({
+  attemptId: ProviderFailedRootRecoveryAttemptId,
+  preparationSequence: ProviderFailedRootRecoverySequence,
+  request: ProviderSendTurnInput,
+  continuationToken: Schema.optional(ProviderFailedRootRecoverySecret),
+});
+export type ProviderPrepareFailedRootRecoveryInput =
+  typeof ProviderPrepareFailedRootRecoveryInput.Type;
+export const ProviderReadFailedRootRecoveryInput = Schema.Struct({
+  threadId: ThreadId,
+  attemptId: ProviderFailedRootRecoveryAttemptId,
+  requestCommitment: ProviderFailedRootRecoveryCommitment,
+});
+export type ProviderReadFailedRootRecoveryInput = typeof ProviderReadFailedRootRecoveryInput.Type;
+const failedRootRecoveryCommon = {
+  threadId: ThreadId,
+  attemptId: ProviderFailedRootRecoveryAttemptId,
+  requestCommitment: ProviderFailedRootRecoveryCommitment,
+  preparationSequence: ProviderFailedRootRecoverySequence,
+};
+export const ProviderFailedRootRecoveryPreparation = Schema.Union([
+  Schema.Struct({
+    ...failedRootRecoveryCommon,
+    state: Schema.Literal("preparing"),
+    phase: Schema.Literals(["retiring", "opening", "retiring-opening"]),
+  }),
+  Schema.Struct({
+    ...failedRootRecoveryCommon,
+    state: Schema.Literal("prepared"),
+    phase: Schema.Literal("prepared"),
+    providerInstanceId: ProviderInstanceId,
+    recoverySession: ProviderFailedRootRecoverySession,
+    permit: ProviderFailedRootRecoverySecret,
+  }),
+  Schema.Struct({
+    ...failedRootRecoveryCommon,
+    state: Schema.Literal("retryable"),
+    phase: Schema.Literal("retired"),
+    category: CodexTransientFailureCategory,
+    reason: Schema.optional(
+      Schema.Literals(["native-transient", "pre-retirement-refusal", "startup-timeout"]),
+    ),
+    continuationToken: ProviderFailedRootRecoverySecret,
+  }),
+  Schema.Struct({
+    ...failedRootRecoveryCommon,
+    state: Schema.Literal("uncertain"),
+    phase: Schema.Literals(["retiring", "opening", "retiring-opening"]),
+  }),
+  Schema.Struct({
+    ...failedRootRecoveryCommon,
+    state: Schema.Literal("consumed"),
+    phase: Schema.Literal("consumed"),
+  }),
+  Schema.Struct({
+    ...failedRootRecoveryCommon,
+    state: Schema.Literals(["retired", "unavailable"]),
+    phase: Schema.Literal("retired"),
+  }),
+]);
+export type ProviderFailedRootRecoveryPreparation =
+  typeof ProviderFailedRootRecoveryPreparation.Type;
+
 export const ProviderSteerTurnInput = Schema.Struct({
   threadId: ThreadId,
   axiomWebEnabled: Schema.optional(Schema.Boolean),
@@ -329,6 +428,17 @@ export const ProviderSteerTurnInput = Schema.Struct({
   // provider-owned state. It is optional for adapters whose upstream protocol
   // does not expose an equivalent correlation field.
   messageId: Schema.optional(MessageId),
+  // The durable Cafe event sequence identifies this particular delivery
+  // attempt when a saved MessageId is reused by an explicit retry. It is
+  // correlation metadata only: adapters must not forward it as native policy,
+  // infer provider consumption from its presence, or use it to authorize IO.
+  intentSequence: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   input: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
   ),
@@ -344,13 +454,7 @@ export const ProviderTurnStartResult = Schema.Struct({
   // Authenticated Cafe-owner evidence of one guarded cold restart. It binds
   // the old failed generation to the new accepting generation without ever
   // making a native conversation identifier into client authority.
-  recoverySession: Schema.optional(
-    Schema.Struct({
-      previousSubagentRuntimeId: SubagentRuntimeId,
-      subagentRuntimeId: SubagentRuntimeId,
-      providerThreadId: TrimmedNonEmptyString,
-    }),
-  ),
+  recoverySession: Schema.optional(ProviderFailedRootRecoverySession),
   // Native Codex session routing frozen at this start's admission. Optional
   // for older daemons/providers; standard must be explicit, never guessed.
   resolvedServiceTier: Schema.optional(
@@ -405,7 +509,8 @@ export const ProviderRespondToUserInputInput = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
-});
+  unanswered: Schema.optional(ProviderUserInputUnanswered),
+}).check(Schema.makeFilter(hasDisjointUserInputAnswers));
 export type ProviderRespondToUserInputInput = typeof ProviderRespondToUserInputInput.Type;
 
 /**

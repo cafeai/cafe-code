@@ -1,6 +1,7 @@
-/** The exact offline chat families from apps/web/src/index.css. Keep this small
- * policy module independent of the binary payload: ordinary renderer imports
- * must not retain four font files merely to present a font-family declaration. */
+/** Shared chat text families. Main chat additionally loads its local Cafe Emoji
+ * fallback in index.css; generated visualizations keep their separate four-face
+ * payload and existing export bounds. Keep this policy independent of binaries:
+ * ordinary renderer imports must not retain font files just to name a family. */
 export const CHAT_SANS_FONT_FAMILY =
   '"DM Sans Variable", "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
 export const CHAT_MONO_FONT_FAMILY =

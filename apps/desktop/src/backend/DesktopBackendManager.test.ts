@@ -5,6 +5,8 @@ import {
 import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -27,6 +29,7 @@ import * as DesktopBackendManager from "./DesktopBackendManager.ts";
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
+import { DesktopMacKeepAwake } from "../app/DesktopMacKeepAwake.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 // Native fixture boundary: exercise actual filesystem and host-path identity semantics.
@@ -77,6 +80,7 @@ function makeProcess(options?: {
   readonly kill?: ChildProcessSpawner.ChildProcessHandle["kill"];
   readonly isRunning?: Effect.Effect<boolean>;
   readonly progress?: Stream.Stream<Uint8Array>;
+  readonly power?: Stream.Stream<Uint8Array>;
 }): ChildProcessSpawner.ChildProcessHandle {
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(123),
@@ -88,7 +92,12 @@ function makeProcess(options?: {
     kill: options?.kill ?? (() => Effect.void),
     stdin: Sink.drain,
     getInputFd: () => Sink.drain,
-    getOutputFd: (fd) => (fd === 4 ? (options?.progress ?? Stream.empty) : Stream.empty),
+    getOutputFd: (fd) =>
+      fd === 4
+        ? (options?.progress ?? Stream.empty)
+        : fd === 5
+          ? (options?.power ?? Stream.empty)
+          : Stream.empty,
     unref: Effect.succeed(Effect.void),
   });
 }
@@ -130,6 +139,7 @@ function makeManagerLayer(input: {
   readonly config?: DesktopBackendManager.DesktopBackendStartConfig;
   readonly readinessProof?: (token: string, challenge: string) => string | undefined;
   readonly onBootstrap?: (bootstrap: DesktopBackendBootstrapValue) => void;
+  readonly macPower?: Context.Service.Shape<typeof DesktopMacKeepAwake>;
 }) {
   // Each layer owns the exact private fd3 opening token of its synthetic child.
   // No module-global secret or mock-only manager input can qualify readiness.
@@ -200,6 +210,7 @@ function makeManagerLayer(input: {
       return DesktopBackendManager.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            input.macPower ? Layer.succeed(DesktopMacKeepAwake, input.macPower) : Layer.empty,
             FileSystem.layerNoop({
               exists: () => Effect.succeed(true),
             }),
@@ -242,6 +253,73 @@ function makeManagerLayer(input: {
 }
 
 describe("DesktopBackendManager", () => {
+  it.effect.skipIf(process.platform !== "darwin")(
+    "binds private power input to the actual child and retires it on malformed stream input",
+    () =>
+      Effect.gen(function* () {
+        const observed = yield* Queue.unbounded<unknown>();
+        const retired = yield* Deferred.make<void>();
+        const ready = yield* Deferred.make<void>();
+        const exit = yield* Deferred.make<void>();
+        const powerInput = yield* Queue.unbounded<Uint8Array>();
+        let bootstrap: DesktopBackendBootstrapValue | undefined;
+        let command: ChildProcess.Command | undefined;
+        const managerLayer = makeManagerLayer({
+          onBootstrap: (value) => {
+            bootstrap = value;
+          },
+          macPower: {
+            bindBackend: Effect.succeed({
+              observe: (value) => {
+                Queue.offerUnsafe(observed, value);
+              },
+              retire: () => {
+                Deferred.doneUnsafe(retired, Exit.succeed(undefined));
+              },
+            }),
+            snapshot: Effect.succeed({ phase: "off", reason: null }),
+            setIntent: () => Effect.void,
+          },
+          desktopWindow: {
+            handleBackendReady: Deferred.succeed(ready, undefined).pipe(Effect.asVoid),
+          },
+          spawnerLayer: Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make((value) =>
+              Effect.sync(() => {
+                command = value;
+                return makeProcess({
+                  power: Stream.fromQueue(powerInput),
+                  exitCode: Deferred.await(exit).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
+                  kill: () => Deferred.succeed(exit, undefined).pipe(Effect.asVoid),
+                });
+              }),
+            ),
+          ),
+        });
+        yield* Effect.gen(function* () {
+          const manager = yield* DesktopBackendManager.DesktopBackendManager;
+          yield* manager.start;
+          yield* Deferred.await(ready);
+          assert.equal(bootstrap?.desktopPowerStateFd, 5);
+          assert.equal(command?._tag, "StandardCommand");
+          if (command?._tag === "StandardCommand")
+            assert.deepEqual(command.options.additionalFds?.fd5, { type: "output" });
+          const frame = { version: 1, sequence: 0, enabled: true, workActive: true };
+          const encoder = new TextEncoder();
+          yield* Queue.offer(powerInput, encoder.encode(encodeDiagnosticJson(frame) + "\n"));
+          assert.deepEqual(yield* Queue.take(observed), frame);
+          yield* Queue.offer(powerInput, encoder.encode("malformed\n"));
+          yield* Deferred.await(retired);
+          yield* Queue.offer(
+            powerInput,
+            encoder.encode(encodeDiagnosticJson({ ...frame, sequence: 1 }) + "\n"),
+          );
+          yield* manager.stop();
+          assert.equal(yield* Queue.size(observed), 0);
+        }).pipe(Effect.ensuring(Deferred.succeed(exit, undefined)), Effect.provide(managerLayer));
+      }),
+  );
   const profiledConfig = (
     profile: "production" | "debug",
   ): DesktopBackendManager.DesktopBackendStartConfig => {
@@ -1401,11 +1479,128 @@ describe("DesktopBackendManager", () => {
 
   it.effect(
     "terminates a stalled migration at the absolute cap despite repeated progress starts",
-    () =>
-      Effect.gen(function* () {
+    (context) => {
+      const startedAt = performance.now();
+      let probeCount = 0;
+      type Phase =
+        | "fixture-entered"
+        | "manager-start-entered"
+        | "manager-started"
+        | "first-offered"
+        | "first-consumed"
+        | "first-probe-entered"
+        | "first-timer-queued"
+        | "adjust-599-entered"
+        | "adjust-599-finished"
+        | "post-jump-sleep-queued"
+        | "second-offered"
+        | "second-consumed"
+        | "adjust-1-entered"
+        | "adjust-1-finished"
+        | "native-exit-signalling"
+        | "native-exit-signalled"
+        | "progress-retired";
+      const phases: Array<{ phase: Phase; elapsedMs: number; probes: number }> = [];
+      const mark = (phase: Phase) => {
+        try {
+          if (phases.length >= 32) return;
+          const elapsed = performance.now() - startedAt;
+          phases.push({
+            phase,
+            elapsedMs: Number.isFinite(elapsed)
+              ? Math.min(60_000, Math.max(0, Math.floor(elapsed)))
+              : 0,
+            probes: Math.min(1_000_000, probeCount),
+          });
+        } catch {
+          // Failure diagnostics must not affect the test or ownership.
+        }
+      };
+      context.onTestFailed(() => {
+        try {
+          process.stderr.write(`Synthetic migration cap phases: ${encodeDiagnosticJson(phases)}\n`);
+        } catch {
+          // Keep the original timeout or assertion failure.
+        }
+      });
+      return Effect.gen(function* () {
+        mark("fixture-entered");
         const progress = yield* Queue.unbounded<Uint8Array>();
+        const firstConsumed = yield* Deferred.make<void>();
+        const secondConsumed = yield* Deferred.make<void>();
         const nativeExited = yield* Deferred.make<void>();
+        const firstProbeEntered = yield* Deferred.make<void>();
+        const firstTimerQueued = yield* Deferred.make<void>();
+        const postJumpSleepQueued = yield* Deferred.make<void>();
         let killCount = 0;
+        let probeRetired = false;
+        let clockRetired = false;
+        let clockMillis = 0;
+        const beforeCap = Duration.seconds(599);
+        const finalCapStep = Duration.seconds(1);
+        const beforeCapMillis = Duration.toMillis(beforeCap);
+        const pendingSleeps = new Map<Deferred.Deferred<void>, number>();
+        // This case checks an absolute monotonic deadline, not how many HTTP
+        // polls fit into ten minutes. Model a host pause: move time first and
+        // wake only the sleeps already due at that jump. Newly queued sleeps
+        // start at the resumed time, rather than replaying every intermediate
+        // timeout/poll as TestClock.adjust does. Real manager timeouts, the
+        // default scheduler, and Vitest's native five-second guard stay intact.
+        const jumpClock: Clock.Clock = {
+          currentTimeMillisUnsafe: () => clockMillis,
+          currentTimeNanosUnsafe: () => BigInt(clockMillis) * 1_000_000n,
+          currentTimeMillis: Effect.sync(() => clockMillis),
+          currentTimeNanos: Effect.sync(() => BigInt(clockMillis) * 1_000_000n),
+          sleep: (duration) =>
+            Effect.gen(function* () {
+              const delay = Duration.toMillis(duration);
+              assert.isTrue(Number.isFinite(delay) && delay >= 0);
+              if (delay === 0) return;
+              const sleeper = yield* Deferred.make<void>();
+              yield* Effect.acquireUseRelease(
+                Effect.sync(() => {
+                  assert.equal(clockRetired, false);
+                  assert.isBelow(pendingSleeps.size, 32);
+                  pendingSleeps.set(sleeper, clockMillis + delay);
+                }),
+                () =>
+                  Effect.gen(function* () {
+                    yield* Deferred.succeed(firstTimerQueued, undefined);
+                    // The held request has retired before the real readiness loop
+                    // may schedule its next sleep. Do not freeze its poll interval.
+                    if (probeRetired && clockMillis === beforeCapMillis) {
+                      yield* Deferred.succeed(postJumpSleepQueued, undefined);
+                    }
+                    yield* Deferred.await(sleeper);
+                  }),
+                () =>
+                  Effect.sync(() => {
+                    pendingSleeps.delete(sleeper);
+                  }),
+              );
+            }),
+        };
+        const advance = (duration: Duration.Duration) =>
+          Effect.gen(function* () {
+            const millis = Duration.toMillis(duration);
+            assert.isTrue(Number.isSafeInteger(millis) && millis >= 0);
+            assert.equal(clockRetired, false);
+            clockMillis += millis;
+            const due = [...pendingSleeps].filter(([, deadline]) => deadline <= clockMillis);
+            for (const [sleeper] of due) yield* Deferred.succeed(sleeper, undefined);
+          });
+        // These one-element sources are consumed serially by the manager's
+        // real runForEach. An acknowledgement is emitted only when that
+        // consumer pulls the following stream, after decoding and observing
+        // the preceding frame; queue admission or a pre-delivery tap is not
+        // proof that the startup deadline was updated. The stream stays open.
+        const progressStream = Stream.fromEffect(Queue.take(progress)).pipe(
+          Stream.concat(Stream.fromEffectDrain(Deferred.succeed(firstConsumed, undefined))),
+          Stream.concat(Stream.fromEffect(Queue.take(progress))),
+          Stream.concat(Stream.fromEffectDrain(Deferred.succeed(secondConsumed, undefined))),
+          Stream.concat(Stream.never),
+          Stream.ensuring(Effect.sync(() => mark("progress-retired"))),
+        );
         const managerLayer = makeManagerLayer({
           spawnerLayer: Layer.succeed(
             ChildProcessSpawner.ChildProcessSpawner,
@@ -1422,32 +1617,75 @@ describe("DesktopBackendManager", () => {
                       Effect.andThen(Deferred.succeed(nativeExited, undefined)),
                       Effect.asVoid,
                     ),
-                  progress: Stream.fromQueue(progress),
+                  progress: progressStream,
                 }),
               ),
             ),
           ),
           config: { ...baseConfig, readinessTimeout: Duration.seconds(2) },
-          httpClientLayer: httpClientLayer(() => Effect.never),
+          httpClientLayer: httpClientLayer(() =>
+            Effect.sync(() => {
+              probeCount = Math.min(1_000_000, probeCount + 1);
+            }).pipe(
+              Effect.andThen(Deferred.succeed(firstProbeEntered, undefined)),
+              Effect.andThen(Effect.never),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  probeRetired = true;
+                }),
+              ),
+            ),
+          ),
         });
         yield* Effect.gen(function* () {
           const manager = yield* DesktopBackendManager.DesktopBackendManager;
+          mark("manager-start-entered");
           yield* manager.start;
+          mark("manager-started");
           const frame = new TextEncoder().encode(
             encodeBackendMigrationProgress({ phase: "start", migrationId: 92 }),
           );
           yield* Queue.offer(progress, frame);
-          yield* TestClock.adjust(Duration.seconds(599));
+          mark("first-offered");
+          yield* Deferred.await(firstConsumed);
+          mark("first-consumed");
+          yield* Deferred.await(firstProbeEntered);
+          mark("first-probe-entered");
+          yield* Deferred.await(firstTimerQueued);
+          mark("first-timer-queued");
+          mark("adjust-599-entered");
+          yield* advance(beforeCap);
+          mark("adjust-599-finished");
+          yield* Deferred.await(postJumpSleepQueued);
+          mark("post-jump-sleep-queued");
           assert.equal(killCount, 0);
           yield* Queue.offer(progress, frame);
-          yield* TestClock.adjust(Duration.seconds(1));
-          yield* Effect.yieldNow;
+          mark("second-offered");
+          yield* Deferred.await(secondConsumed);
+          mark("second-consumed");
+          mark("adjust-1-entered");
+          yield* advance(finalCapStep);
+          mark("adjust-1-finished");
+          yield* Deferred.await(nativeExited);
           assert.equal(killCount > 0, true);
         }).pipe(
-          Effect.ensuring(Deferred.succeed(nativeExited, undefined)),
-          Effect.provide(Layer.merge(TestClock.layer(), managerLayer)),
+          Effect.ensuring(
+            Effect.gen(function* () {
+              mark("native-exit-signalling");
+              yield* Deferred.succeed(nativeExited, undefined);
+              mark("native-exit-signalled");
+            }),
+          ),
+          Effect.provide(Layer.merge(Layer.succeed(Clock.Clock, jumpClock), managerLayer)),
+          Effect.ensuring(
+            Effect.sync(() => {
+              clockRetired = true;
+              assert.equal(pendingSleeps.size, 0);
+            }),
+          ),
         );
-      }),
+      });
+    },
   );
 
   it.effect("does not grant migration time to stdout or malformed private frames", () =>

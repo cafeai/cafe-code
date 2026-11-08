@@ -33,6 +33,12 @@ the tab keeps it. Preview references are excluded from persisted layouts and
 reopen history, including preview-only panes. A restored current URL may show
 the preview again but cannot silently make it permanent. New-chat editors and
 first-send promotion retain their existing ownership and permanence rules.
+Single-view exception: while Desk and chat tabs are both off there is no
+surface for managing open tabs, so `reduceDeskWithPolicy` makes ordinary opens
+previews, ignores Keep open, and marks a selected first-send result as the
+preview only after promotion has moved its identity. Ownership, draft editors,
+draft tabs and already-kept tabs are unchanged, and the policy is a non-persisted
+mirror of those two settings.
 Flat, identity-keyed pane placement preserves a selected view when moving it
 between groups. Switching selected chats retains their existing composer store
 and a bounded in-memory timeline position/follow-tail cache.
@@ -116,10 +122,10 @@ new provider mutation permissions.
 
 The backend-authoritative `showDeskTabs` client setting (default on) only
 chooses what fills each pane's bar. Off keeps the same bar component, native
-titlebar reservations and focus/actions controls, and asks ChatView for its full
+titlebar reservations and focus control, and asks ChatView for its full
 header (visible title) in place of the tab strip and group grip. The title text
 is the drag area, so the separating drag strip that keeps overflowing tabs
-away from the actions is omitted.
+away from the actions is omitted. The tab actions menu is hidden with the tab bar.
 It never rewrites the layout, tabs, previews or reopen history, and narrow web
 clients keep their separate bar-free header.
 
@@ -130,6 +136,13 @@ the target setting. Existing composer task/context/quota popovers remain the
 entry point when undocked or too narrow; group menus can also set the pin. Pane
 width, not full-window width, controls whether the rail fits. Focusing a group
 temporarily expands it without discarding the saved layout.
+
+The shared Tasks/authored-plan column has a draggable left divider with keyboard
+arrow/Home/End resizing. Its preferred width is a bounded client-local UI
+preference across chats and servers. Fit the displayed width to its actual pane,
+keeping room for the chat, without overwriting the wider saved preference when
+the window or a split narrows. Unpinning/unmounting retires the exact pointer and
+animation-frame owner; resizing never remounts chat content or changes provider work.
 
 Divider bounds include each descendant pane's 380px width/280px height minimum
 and the persisted 20–80% ratio limits. Pointer and keyboard resizing share those

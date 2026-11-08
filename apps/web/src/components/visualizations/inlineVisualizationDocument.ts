@@ -30,7 +30,6 @@ export function inlineVisualizationColors(
  * comments and raw-text scripts/styles must not be mistaken for a real head.
  * This is composition, not sanitization: authorized source remains executable. */
 function documentInsertion(html: string): { index: number; missingHead: boolean } | null {
-  const lower = html.toLowerCase();
   const rawText = new Set([
     "script",
     "style",
@@ -48,8 +47,8 @@ function documentInsertion(html: string): { index: number; missingHead: boolean 
   while (position < html.length && ++tags <= 100_000) {
     const start = html.indexOf("<", position);
     if (start < 0) break;
-    if (lower.startsWith("<!--", start)) {
-      const end = lower.indexOf("-->", start + 4);
+    if (html.startsWith("<!--", start)) {
+      const end = html.indexOf("-->", start + 4);
       if (end < 0) break;
       position = end + 3;
       continue;
@@ -59,7 +58,10 @@ function documentInsertion(html: string): { index: number; missingHead: boolean 
     if (closing) cursor++;
     const nameStart = cursor;
     while (cursor < html.length && /[a-zA-Z0-9:-]/.test(html[cursor]!)) cursor++;
-    const name = lower.slice(nameStart, cursor);
+    // HTML tag names use ASCII case-insensitivity. Only this already-ASCII
+    // slice may be folded: a whole-source Unicode lowercase copy can expand
+    // UTF-16 (for example U+0130), invalidating offsets into authored source.
+    const name = html.slice(nameStart, cursor).toLowerCase();
     let quote: string | undefined;
     while (cursor < html.length) {
       const character = html[cursor++]!;
@@ -75,9 +77,19 @@ function documentInsertion(html: string): { index: number; missingHead: boolean 
     // the prelude into the string instead of the actual document head.
     if (!closing && name === "plaintext") break;
     if (!closing && rawText.has(name)) {
-      let end = lower.indexOf(`</${name}`, cursor);
-      while (end >= 0 && !/[\s/>]/.test(lower[end + name.length + 2] ?? ">"))
-        end = lower.indexOf(`</${name}`, end + 2);
+      // Search only the unchanged source, advancing monotonically past each
+      // candidate. Comparing a bounded known raw-text name never supplies an
+      // offset, and the original boundary rejects suffixes such as </scripted>.
+      let end = html.indexOf("</", cursor);
+      while (end >= 0) {
+        const nameEnd = end + name.length + 2;
+        if (
+          html.slice(end + 2, nameEnd).toLowerCase() === name &&
+          /[\s/>]/.test(html[nameEnd] ?? ">")
+        )
+          break;
+        end = html.indexOf("</", end + 2);
+      }
       if (end < 0) break;
       position = end;
     }

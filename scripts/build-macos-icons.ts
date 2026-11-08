@@ -42,6 +42,13 @@ export async function buildMacIcons(): Promise<void> {
   mkdirSync(resources, { recursive: true });
   writeFileSync(sourcePng, macPng);
   writeFileSync(join(resources, "icon-macos.png"), macPng);
+  // The unlockable Dekai icon is only a runtime Dock override, so it needs the
+  // same inset tile but no ICNS.
+  const dekaiArtwork = await loadImage(join(repoRoot, BRAND_ASSET_PATHS.appIconDekaiPng));
+  writeFileSync(
+    join(repoRoot, BRAND_ASSET_PATHS.appIconDekaiMacPng),
+    await renderMacAppIcon(dekaiArtwork, 1024),
+  );
 
   const temporaryRoot = mkdtempSync(join(tmpdir(), "cafe-mac-icons-"));
   try {

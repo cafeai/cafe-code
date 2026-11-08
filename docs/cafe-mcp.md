@@ -10,6 +10,148 @@ Codex receives a private stdio server through the existing structured app-server
 
 Management tools have owner authority over Cafe projects, chats, providers and settings. Cafe adds no management approval prompt and does not modify provider approval policy. This is broader than scheduling's proposal/list/pause capability; enabling management never approves a recurring task.
 
+## Context and quota status
+
+Use `get_thread_usage` to check remaining context and provider quota without
+loading messages or starting a provider request:
+
+```json
+{ "threadId": "the-cafe-thread-id" }
+```
+
+Cafe-issued management connections may omit `threadId` to use their signed
+launch chat. External/manual and legacy connections must pass it explicitly.
+An inherited subagent connection still identifies the launch **Cafe chat**;
+it does not identify the child's independent native context window. An owner
+may request another Cafe chat explicitly, as with the other management reads.
+
+The response contains three separate records:
+
+- `target` identifies the selected Cafe chat. `launchMatchesSession` compares
+  launch intent with the projected provider instance when both are known;
+  it is not a native-generation or liveness proof.
+- `context` reports last-observed tokens, native capacity when available,
+  remaining tokens/percentage, processed tokens and reported compaction
+  settings. `observedAt` dates that report. Historical reports lack native
+  owner attribution and remain labelled `ownerAttribution: "not-recorded"`,
+  including after an account switch. Native token totals already include
+  reasoning; the tool does not add it again or expose Codex's hidden internal
+  compaction estimate. Saved context overrides do not replace reported capacity.
+- `quota` reports cached account-shared allowance for `providerInstanceId`,
+  including separate exact limit buckets, primary/secondary percentages and
+  native durations, reset timestamps in **epoch seconds**, credit balance and
+  the authoritative available reset count. This is not a per-chat token budget.
+  Multiple chats using the same provider account share it. `checkedAt` dates
+  the cached account snapshot; retained individual windows may be older.
+
+Missing readings are `null`/`unknown`, not zero or unlimited. A reset-only
+window retains its reset time while its remaining percentage stays unknown.
+Credit balances remain provider strings without an inferred currency. Up to
+128 limit buckets are returned with an explicit `truncated` flag. The exact
+legacy view uses the existing `codex` bucket key when no limit ID was reported;
+that compatibility key alone does not identify a model-specific allowance. The
+projected session instance takes precedence over a configured next-turn
+selection; a legacy session without that instance is labelled `configured`.
+Providers without cached account quota return unknown rather than triggering
+a native probe or borrowing another chat's passive report.
+
+These are passive reads of projection metadata and the provider registry.
+They do not refresh account state, enumerate native sessions, renew runtime
+ownership, run inference, or return authentication details or transcripts.
+The context lookup uses a dedicated partial ordering index and hydrates one
+context activity, independently of the chat's recent tool-activity cap.
+Existing `get_thread` clients may use `messageLimit: 0` for an empty message
+list; `get_thread_usage` is the dedicated usage-only interface.
+
+The default target is taken only from an internally issued signed launch
+claim on the verified bearer session. Subject strings, cookies, client labels,
+query parameters and extra thread headers cannot choose it. Existing manually
+issued owner tokens retain explicit-target access. See
+[the resource-status decision](decisions/mcp-thread-resource-status.md).
+
+## Pending questions and answers
+
+The owner-authorized management connection provides five question tools. Each
+requires an explicit Cafe `threadId`; these tools do not infer a native child
+thread or use the currently selected window.
+
+| Tool                     | Behavior                                                                                                |
+| ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| `list_thread_questions`  | List current native callback requests and one page of saved inline questions, without question wording. |
+| `get_thread_question`    | Read the complete questionnaire or selected inline question, including every available option.          |
+| `answer_thread_question` | Submit a complete native response, or durably record an inline answer as an ordinary chat message.      |
+| `skip_thread_question`   | Explicitly skip the selected inline question, or every question in a supported native callback.         |
+| `clear_thread_question`  | Explicitly dismiss the selected inline question, or every question in a supported native callback.      |
+
+Start with `list_thread_questions`, then copy its exact `target` to
+`get_thread_question`. Callback targets contain `kind: "callback"`, the opaque
+`requestId` and its exact `createdAt`; inline targets contain `kind: "async"`,
+the saved `activityId` and zero-based `questionIndex`. Preserve these values
+unchanged. A reused ID with a different creation time is another callback
+incarnation, not permission to answer the original one.
+
+The list's `limit` is 1–64 **inline activity records**, default 20; one activity
+can contain several questions. `asyncPendingQuestionCount` counts only the
+current page. Native requests repeat on every page. Follow `nextCursor` while
+`hasMore` is true, deduplicating repeated native targets. Pagination uses the
+immutable creation-time/activity-ID tuple, so marking an inline question
+handled does not move it across a cursor. Unreadable, oversized or unsupported
+records remain explicit omission/availability evidence. An empty incomplete
+view reports `hasPendingQuestions: null`; only a complete first-page view can
+report `false`. Do not interpret a page count, a missing card, or a truncated
+native-retention budget as proof that the entire chat has no questions.
+
+For a callback, `answer_thread_question` takes an `answers` map keyed by the
+exact question IDs. Values are nonempty text or text arrays. Every question
+must occur exactly once across `answers` and any `unanswered` map. Explicit
+`"skipped"` or `"dismissed"` dispositions require the callback's advertised
+unanswered capability. `canAnswer`, `canSkip`, `canClear` and
+`unsupportedReason` explain availability; an absent capability never means
+support. Provider-specific interaction forms and malformed/duplicate question
+IDs are not treated as ordinary questionnaires. Permission approvals remain
+separate: none of these tools approves a command or changes provider policy.
+
+For an inline question, use the single `answer` text field. Cafe rechecks the
+exact saved question under its database writer and atomically records the
+quoted question/answer message, ordinary start-or-steer intent, handled index,
+and primary-chat notice. Skip and clear record handling plus a notice without
+starting a turn or supplying an invented answer. Neither operation deletes
+chat history. A stale, already handled, malformed or foreign question is
+refused; concurrent callers cannot consume the same question twice.
+
+Mutation receipts distinguish `resolution: "recorded"` for durable inline
+handling from `resolution: "provider-confirmation-required"` for a queued
+native callback response. `accepted: true` and a dispatch sequence do **not**
+prove native resolution, provider submission or completed work. Native
+responses retain their exact provider/session ownership and require canonical
+callback settlement. A native method returning or an ordinary response-failed
+activity alone is not settlement. Re-read pending questions after confirmation;
+never automatically retry an uncertain mutation response.
+
+Successful MCP handling appears as normal primary-chat content identifying
+that the question was resolved through MCP and showing the exact question and
+submitted answer, skip, or dismissal. It is not hidden solely in the work log
+and is not inserted into the provider's model conversation as a system
+message. Native notices appear only after actual canonical settlement; inline
+notices share the answer/handling transaction. Native dispatch receipts do not
+guarantee a later notice across backend interruption: uncertain correlation
+is not reconstructed from a matching answer or saved intent. Reconcile the
+current callback state rather than treating that receipt as resolution.
+Additional notice retention is limited to the newest prefix of at most 64
+eligible notices and 1 MiB of encoded payload beyond the ordinary activity
+tail. A large receipt can exhaust the byte budget before 64 notices; this
+does not promise unlimited visible history or erase pending callbacks.
+
+Reads use a dedicated question context: thread metadata plus the existing
+bounded native pending-attention projection, without hydrating messages,
+plans or checkpoints. Indexed inline pages and exact saved-activity lookups
+reach questions older than the recent tool tail. Full question details are
+bounded and refused rather than silently truncated. Fixed public errors do
+not expose native errors, database details, credentials or unrelated chat
+content. Listing or reading never starts a provider, refreshes credentials,
+answers a callback or invokes paid inference. See
+[the pending-question decision](decisions/mcp-pending-questions.md).
+
 ## External MCP clients
 
 External clients can connect to Cafe's authenticated Streamable HTTP endpoint at
@@ -20,46 +162,43 @@ and request provider restarts. The resume restart variant records the exact
 active chats and submits durable continuation messages after that provider
 restarts. Restart acknowledgements precede shutdown.
 
-Issue a dedicated owner bearer session against the **same Cafe home and state
-database as the running backend**. A built source desktop normally uses
-`userdata`; development launches with a development URL use `dev` instead.
+Issue a dedicated owner bearer session against the **same configured Cafe root
+and explicit data profile as the running backend**. Source desktop and repository
+development launches use Debug; installed releases use Production even with
+diagnostic logging enabled. Direct standalone CLI commands retain their existing
+defaults unless a profile is explicit. See [data profiles](data-profiles.md).
 
-For a built source checkout, from the repository root:
-
-```bash
-node apps/server/src/bin.ts auth session issue --role owner --label cafe-mcp --ttl 30d --token-only
-```
-
-Only for a backend started with a development URL, pass that exact URL:
+For a source Debug desktop, from the repository root:
 
 ```bash
-node apps/server/src/bin.ts auth session issue --dev-url http://127.0.0.1:5733 --role owner --label cafe-mcp --ttl 30d --token-only
+node apps/server/src/bin.ts auth session issue --data-profile debug --role owner --label cafe-mcp --ttl 30d --token-only
 ```
 
-Use the URL printed by your development runner if it differs. Do not add
-`--dev-url` solely because the application was built from source: that selects
-a different database. Both commands must inherit the backend's configured
-`CAFE_CODE_HOME`, if any. Where the `cafe-code` CLI is already available,
-`cafe-code auth session issue` accepts the same options; installing the old
-registry package is not required to use these commands from a source checkout.
+Use `--data-profile production` when administering Production. If the backend
+uses a custom configured parent, pass that same `--base-dir /chosen/cafe-root`
+or inherit its configured `CAFE_CODE_HOME`; do not append `.debug` yourself.
+Preserve any explicit development-URL selection used by that backend, rather
+than adding `--dev-url` merely because the code was built from source. Where
+the `cafe-code` CLI is available it accepts the same auth options; installing
+an older registry package is unnecessary.
 
-Configure the client with `http://127.0.0.1:3773/mcp` for the default local built
-desktop, or the actual server origin and `/mcp` path. A development backend
-normally uses port `13773`, not the Vite frontend port `5733`. Use HTTPS for
-non-loopback connections. Send the credential only as
-`Authorization: Bearer <token>`; keep it out of URLs, prompts, logs, and
-source-controlled configuration.
+Connect to the actual backend origin with `/mcp`: packaged Production normally
+uses `http://127.0.0.1:3773/mcp` and source Debug normally uses
+`http://127.0.0.1:13773/mcp`. Use the origin printed by the runner if it differs;
+the Vite frontend port is not the backend MCP port. Use HTTPS for non-loopback
+connections. Send the credential only as `Authorization: Bearer <token>`; keep
+it out of URLs, prompts, logs and source-controlled configuration.
 
-List and revoke sessions against the same home/database:
+List and revoke sessions using the same root and profile:
 
 ```bash
-node apps/server/src/bin.ts auth session list
-node apps/server/src/bin.ts auth session revoke <session-id>
+node apps/server/src/bin.ts auth session list --data-profile debug
+node apps/server/src/bin.ts auth session revoke <session-id> --data-profile debug
 ```
 
-For development state, add the same `--dev-url` to each command.
-Owner credentials grant management authority; they are separate from the narrow
-session-only scheduling and visualization credentials below.
+Replace the profile and retain the same root/development selection when
+administering another backend. Owner credentials grant management authority;
+they are separate from the narrow scheduling and visualization credentials below.
 
 ## Separate scheduling and visualization connections
 

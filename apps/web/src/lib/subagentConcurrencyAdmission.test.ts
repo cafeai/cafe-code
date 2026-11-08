@@ -12,6 +12,7 @@ import {
   subagentConcurrencyAdmissionError,
   UNSUPPORTED_SUBAGENT_LIMIT_MESSAGE,
   UNSUPPORTED_ACCOUNT_SUBAGENT_LIMIT_MESSAGE,
+  UNVERIFIED_SUBAGENT_LIMIT_MESSAGE,
   UNRECORDED_STEER_SUBAGENT_OWNER_MESSAGE,
 } from "./subagentConcurrencyAdmission";
 
@@ -69,6 +70,22 @@ describe("subagent limit send admission", () => {
         ...base,
         continuation,
         configuration: continuationOwner,
+      }),
+    ).toBeNull();
+    // An unavailable launch executable does not retire the separately bound
+    // native owner of this unchanged, already-materialized policy.
+    expect(
+      subagentConcurrencyAdmissionError({
+        ...base,
+        continuation,
+        configuration: {
+          ...continuationOwner,
+          providers: continuationOwner.providers.map((account) => ({
+            ...account,
+            installed: false,
+            version: null,
+          })),
+        },
       }),
     ).toBeNull();
     expect(subagentConcurrencyAdmissionError({ ...base, configuration: continuationOwner })).toBe(
@@ -304,6 +321,82 @@ describe("subagent limit send admission", () => {
           },
         }),
       ).toBeNull();
+    }
+  });
+
+  it.each([
+    { installed: false, version: null, supported: false, unverified: true },
+    { installed: false, version: "0.166.0", supported: false, unverified: true },
+    { installed: true, version: null, supported: false, unverified: true },
+    { installed: true, version: "0.158.0", supported: false, unverified: false },
+    { installed: true, version: "0.166.0", supported: true, unverified: false },
+  ])(
+    "distinguishes unavailable or unverified support without clearing the account limit: %j",
+    ({ installed, version, supported, unverified }) => {
+      const savedPolicy = { driver: provider, defaultMaxConcurrentSubagents: 9 };
+      const configuration = {
+        environment: { environmentId },
+        settings: {
+          ...DEFAULT_SERVER_SETTINGS,
+          providerInstances: { [instanceId]: savedPolicy },
+        },
+        providers: [
+          {
+            instanceId,
+            driver: provider,
+            installed,
+            version,
+            runtimeCapabilities: { subagentConcurrency: supported },
+          },
+        ],
+      };
+      for (const limits of [{}, { codex: 9 }]) {
+        expect(subagentConcurrencyAdmissionError({ ...base, limits, configuration })).toBe(
+          supported
+            ? null
+            : unverified
+              ? UNVERIFIED_SUBAGENT_LIMIT_MESSAGE
+              : "codex" in limits
+                ? UNSUPPORTED_SUBAGENT_LIMIT_MESSAGE
+                : UNSUPPORTED_ACCOUNT_SUBAGENT_LIMIT_MESSAGE,
+        );
+      }
+      expect(configuration.settings.providerInstances[instanceId]).toEqual({
+        driver: provider,
+        defaultMaxConcurrentSubagents: 9,
+      });
+      // Unavailability must not replace the stronger refusal for an unknown
+      // active session owner with ordinary selected-account advice.
+      expect(
+        subagentConcurrencyAdmissionError({
+          ...base,
+          limits: {},
+          configuration,
+          hasRecordedSessionOwner: false,
+        }),
+      ).toBe(UNRECORDED_STEER_SUBAGENT_OWNER_MESSAGE);
+    },
+  );
+
+  it("does not borrow unavailable status from a foreign environment, account, or driver", () => {
+    const unavailable = { instanceId, driver: provider, installed: false, version: null };
+    for (const configuration of [
+      {
+        environment: { environmentId: EnvironmentId.make("foreign") },
+        providers: [unavailable],
+      },
+      {
+        environment: { environmentId },
+        providers: [{ ...unavailable, instanceId: ProviderInstanceId.make("foreign") }],
+      },
+      {
+        environment: { environmentId },
+        providers: [{ ...unavailable, driver: ProviderDriverKind.make("claudeAgent") }],
+      },
+    ]) {
+      expect(
+        subagentConcurrencyAdmissionError({ ...base, limits: { codex: 9 }, configuration }),
+      ).toBe(UNSUPPORTED_SUBAGENT_LIMIT_MESSAGE);
     }
   });
 

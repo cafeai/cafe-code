@@ -7,9 +7,6 @@ import {
 import type { EnvironmentId } from "@cafecode/contracts";
 import { useEffect, useState } from "react";
 
-import sidebarBrandIcon128 from "./assets/cafe-code-sidebar-icon-128.png";
-import sidebarBrandIcon256 from "./assets/cafe-code-sidebar-icon-256.png";
-import sidebarBrandIcon384 from "./assets/cafe-code-sidebar-icon-384.png";
 import { resolvePrimaryEnvironmentHttpUrl } from "./environments/primary/target";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "./environments/primary";
 import { readWorkspaceEnvironmentId, useWorkspaceEnvironmentId } from "./environments/workspace";
@@ -17,8 +14,7 @@ import { useSavedEnvironmentRuntimeStore } from "./environments/runtime/catalog"
 
 import { fileRequest, readBounded } from "./attachments/fileAttachments";
 
-export const DEFAULT_SIDEBAR_BRAND_IMAGE_SRC = sidebarBrandIcon256;
-export const DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET = `${sidebarBrandIcon128} 128w, ${sidebarBrandIcon256} 256w, ${sidebarBrandIcon384} 384w`;
+/** The sidebar card renders 102 CSS px wide; pair with built-in srcsets. */
 export const DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES = "102px";
 
 function isSidebarBrandImageAsset(value: unknown): value is SidebarBrandImageAsset {
@@ -53,8 +49,9 @@ function resolveBrandingImageUrl(pathname: string): string {
   }
 }
 
-export function resolveSidebarBrandImageSrc(asset: SidebarBrandImageAsset | null): string {
-  return asset ? resolveBrandingImageUrl(asset.url) : DEFAULT_SIDEBAR_BRAND_IMAGE_SRC;
+/** URL of an uploaded custom sidebar image, or null when none is saved. */
+export function resolveSidebarBrandImageSrc(asset: SidebarBrandImageAsset | null): string | null {
+  return asset ? resolveBrandingImageUrl(asset.url) : null;
 }
 
 async function requestRemoteBrandImage(
@@ -78,8 +75,10 @@ async function requestRemoteBrandImage(
 }
 
 /** Image elements cannot send the saved server's bearer. Resolve a private
- * blob URL instead of attaching credentials to a URL or reading primary data. */
-export function useSidebarBrandImageSrc(asset: SidebarBrandImageAsset | null): string {
+ * blob URL instead of attaching credentials to a URL or reading primary data.
+ * Returns null until a custom image is available, so callers can show the
+ * built-in scene instead of an empty card. */
+export function useSidebarBrandImageSrc(asset: SidebarBrandImageAsset | null): string | null {
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
   const environmentId = useWorkspaceEnvironmentId();
@@ -114,7 +113,7 @@ export function useSidebarBrandImageSrc(asset: SidebarBrandImageAsset | null): s
   return remote
     ? connected && image?.key === key
       ? image.url
-      : DEFAULT_SIDEBAR_BRAND_IMAGE_SRC
+      : null
     : uiPresentation.resolveSidebarBrandImageSrc(asset);
 }
 

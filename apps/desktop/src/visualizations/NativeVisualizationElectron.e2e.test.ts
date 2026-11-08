@@ -44,6 +44,7 @@ async function retainFluidCaptures(directory: string): Promise<void> {
     "native-inline-chart-color.png",
     "native-inline-chart-motion.png",
     "native-clipped-capture-failed.png",
+    "native-app-preview-failed.png",
     "native-bar-top5.png",
     "native-bar-top10.png",
     "native-bar-narrow.png",
@@ -578,7 +579,7 @@ it.runIf(
       retainCompletedNativeDiagnostics(stderr, "fixture");
       const report = JSON.parse(stdout.trim()) as Record<string, unknown>;
       expect(report).toMatchObject({
-        electron: "42.11.15",
+        electron: "43.8.4",
         platform: process.platform,
         arch: process.arch,
         graphics:
@@ -612,8 +613,8 @@ it.runIf(
         consent: "passed",
         watchdog: "passed",
       });
-      expect(report.electronNode).toBe("24.19.0");
-      expect(report.electronAbi).toBe("146");
+      expect(report.electronNode).toBe("24.22.1");
+      expect(report.electronAbi).toBe("148");
       // Retain only fixed fixture outcomes and native runtime provenance. No
       // source, profile path, bridge credential or received private JSON is logged.
       process.stdout.write(`Native visualization qualification: ${JSON.stringify(report)}\n`);
@@ -746,8 +747,8 @@ it.runIf(
         ].sort(),
       );
       expect(report).toMatchObject({
-        electron: "42.11.15",
-        electronAbi: "146",
+        electron: "43.8.4",
+        electronAbi: "148",
         platform: process.platform,
         arch: process.arch,
         graphics:
@@ -765,7 +766,7 @@ it.runIf(
         offscreenRetirement: "passed",
         genuineVisibilityReplay: "authored",
       });
-      expect(report.electronNode).toBe("24.19.0");
+      expect(report.electronNode).toBe("24.22.1");
       expect((report.retirementCrashPids as number[]).length).toBe(
         process.platform === "linux" ? 1 : 0,
       );
@@ -892,8 +893,8 @@ it.runIf(
         ].sort(),
       );
       expect(report).toMatchObject({
-        electron: "42.11.15",
-        electronAbi: "146",
+        electron: "43.8.4",
+        electronAbi: "148",
         platform: process.platform,
         arch: process.arch,
         graphics:
@@ -911,7 +912,7 @@ it.runIf(
         fontReadyCapture: "passed",
         retirement: "passed",
       });
-      expect(report.electronNode).toBe("24.19.0");
+      expect(report.electronNode).toBe("24.22.1");
       expect((report.retirementCrashPids as number[]).length).toBe(
         process.platform === "linux" ? 3 : 0,
       );

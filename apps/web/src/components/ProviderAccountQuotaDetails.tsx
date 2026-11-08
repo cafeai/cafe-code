@@ -4,27 +4,45 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import type { CodexRateLimitPresentation } from "../lib/codexRateLimits";
 import { cn } from "../lib/utils";
+import { scrollViewportOnEndKey } from "../lib/viewportKeyboardScroll";
 import { CLAUDE_QUOTA_STALE_AFTER_MS, formatClaudeSessionQuota } from "../lib/claudeSessionQuota";
 import type { ProviderQuotaState } from "./chat/useProviderQuota";
 import type { ClaudeSessionQuotaPresentation } from "../lib/claudeSessionQuota";
 
 type ClaudeQuotaMeter = NonNullable<ClaudeSessionQuotaPresentation["meters"]>[number];
 
-function ClaudeQuotaMeterRow({ meter }: { readonly meter: ClaudeQuotaMeter }) {
+function ClaudeQuotaMeterRow({
+  meter,
+  layout,
+}: {
+  readonly meter: ClaudeQuotaMeter;
+  readonly layout: "compact" | "popover" | "panel" | "settings";
+}) {
   const uiLocale = useUiLocale();
   return (
     <section
       aria-label={uiText("{value0} quota", { value0: meter.label }, undefined, uiLocale)}
-      className="min-w-0 space-y-1"
+      className={cn(
+        "min-w-0",
+        layout === "settings" ? "flex flex-wrap items-baseline gap-x-4 gap-y-1" : "space-y-1",
+      )}
       data-claude-quota-meter={meter.id}
     >
-      <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+      <div
+        className={cn(
+          "min-w-0 gap-x-3 gap-y-1",
+          layout === "settings"
+            ? "flex max-w-full flex-wrap items-baseline"
+            : "grid grid-cols-[minmax(0,1fr)_auto]",
+        )}
+      >
         <span>{meter.label}</span>
         <span className="font-medium text-foreground tabular-nums">{meter.value}</span>
       </div>
-      <UsageMeterBar percent={meter.remainingPercent} testId={`claude-${meter.id}`} />
-      {meter.reset ? <p className="text-2xs text-subtle-foreground">{meter.reset}</p> : null}
-      {meter.severity !== "normal" && meter.severity !== "unknown" ? <p>{meter.severity}</p> : null}
+      {layout === "panel" ? (
+        <UsageMeterBar percent={meter.remainingPercent} testId={`claude-${meter.id}`} />
+      ) : null}
+      {meter.reset ? <p className="min-w-0 max-w-full">{meter.reset}</p> : null}
     </section>
   );
 }
@@ -115,13 +133,11 @@ export function ProviderAccountQuotaDetails(props: {
         >
           {session ? (
             <>
-              <div className="label-overline">
-                {uiText("Account usage", undefined, undefined, uiLocale)}
-              </div>
               <div
-                className="focus-ring min-h-0 min-w-0 max-h-[40vh] space-y-3 overflow-y-auto rounded-sm"
+                className="focus-ring min-h-0 min-w-0 max-h-[40vh] space-y-2.5 overflow-y-auto rounded-sm"
                 data-account-quota-scroll
                 tabIndex={0}
+                onKeyDown={scrollViewportOnEndKey}
                 role="region"
                 aria-label={uiText(
                   "Claude reported quota meters and extra usage",
@@ -145,7 +161,7 @@ export function ProviderAccountQuotaDetails(props: {
                   </p>
                 ) : (
                   session.meters.map((meter) => (
-                    <ClaudeQuotaMeterRow key={meter.id} meter={meter} />
+                    <ClaudeQuotaMeterRow key={meter.id} meter={meter} layout={layout} />
                   ))
                 )}
                 {session.extraUsageSummary ? (
@@ -200,16 +216,18 @@ export function ProviderAccountQuotaDetails(props: {
                     {window ? (
                       layout === "panel" ? (
                         <>
-                          {/* The rail already has its one overline ("Context
-                              window"); window names are ordinary labels. */}
-                          <div className="text-xs text-muted-foreground">{window.label}</div>
+                          {/* Same shape as the Claude rows: name and what is
+                              left on one line, then the bar, then the reset. */}
+                          <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3">
+                            <span>{window.label}</span>
+                            <span className="font-medium text-foreground tabular-nums">
+                              {window.value}
+                            </span>
+                          </div>
                           <UsageMeterBar
                             percent={window.remainingPercent}
                             testId={`${kind}-window`}
                           />
-                          <div className="text-ui font-medium text-foreground tabular-nums">
-                            {window.value}
-                          </div>
                         </>
                       ) : (
                         <div

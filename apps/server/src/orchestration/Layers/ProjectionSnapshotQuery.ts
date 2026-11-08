@@ -3,14 +3,17 @@ import {
   AdditionalWorkspaceRoots,
   IsoDateTime,
   MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
+  MAX_UNCONFIRMED_NATIVE_AGENTS,
   MessageId,
   NonNegativeInt,
   SubagentRuntimeId,
   OrchestrationCheckpointFile,
   OrchestrationProposedPlanId,
   OrchestrationReadModel,
+  OrchestrationMessageOriginatingTurn,
   OrchestrationShellSnapshot,
   OrchestrationThread,
+  OrchestrationThreadActivity,
   OrchestrationThreadTurnActivityPageInput,
   OrchestrationThreadTurnSubagentDetailInput,
   OrchestrationThreadActivityCursor,
@@ -28,7 +31,6 @@ import {
   type OrchestrationProposedPlan,
   type OrchestrationProject,
   type OrchestrationSession,
-  type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
   type OrchestrationLiveWork,
   ModelSelection,
@@ -42,7 +44,9 @@ import {
   CODEX_STEER_WAIT_MESSAGE,
   CODEX_TURN_RUNNING_MESSAGE,
   HIDDEN_PROVIDER_WARNING_MESSAGES,
+  PUBLIC_REASONING_SUMMARY_PROVIDERS,
 } from "@cafecode/shared/providerWorkLog";
+import { MAX_PENDING_REQUEST_RETENTION_IDENTITIES } from "@cafecode/shared/pendingRequestRetention";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -57,6 +61,7 @@ import { readThreadForkSourceVersion } from "../threadForkSourceVersion.ts";
 
 import {
   isPersistenceError,
+  PersistenceDecodeError,
   toPersistenceDecodeError,
   toPersistenceSqlError,
   type ProjectionRepositoryError,
@@ -105,6 +110,41 @@ import {
 const decodeReadModel = Schema.decodeUnknownEffect(OrchestrationReadModel);
 const decodeShellSnapshot = Schema.decodeUnknownEffect(OrchestrationShellSnapshot);
 const decodeThread = Schema.decodeUnknownEffect(OrchestrationThread);
+const decodeQuestionActivity = Schema.decodeUnknownOption(OrchestrationThreadActivity);
+const MAX_QUESTION_ACTIVITY_BYTES = 1_048_576;
+const ASYNC_QUESTION_ACTIVITY_ID = /^codex-async-questions:[a-f0-9]{64}$/u;
+
+interface BoundedQuestionActivityRow {
+  readonly id: string;
+  readonly turnId: string | null;
+  readonly tone: string;
+  readonly kind: string;
+  readonly summary: string;
+  readonly payloadJson: string | null;
+  readonly sequence: number | null;
+  readonly createdAt: string;
+}
+
+/** The SQL boundary replaces oversized bodies with null before they enter JS.
+ * Decode one finite body at a time; malformed records are omission evidence,
+ * never error text containing provider-authored question or answer content. */
+function decodeBoundedQuestionActivity(row: BoundedQuestionActivityRow) {
+  if (!ASYNC_QUESTION_ACTIVITY_ID.test(row.id) || row.payloadJson === null) return Option.none();
+  try {
+    return decodeQuestionActivity({
+      id: row.id,
+      turnId: row.turnId,
+      tone: row.tone,
+      kind: row.kind,
+      summary: row.summary,
+      payload: JSON.parse(row.payloadJson),
+      ...(row.sequence !== null ? { sequence: row.sequence } : {}),
+      createdAt: row.createdAt,
+    });
+  } catch {
+    return Option.none();
+  }
+}
 export const THREAD_DETAIL_ACTIVITY_LIMIT = THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT;
 export const THREAD_DETAIL_MESSAGE_LIMIT = 2_000;
 const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
@@ -118,6 +158,7 @@ const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
   Struct.assign({
     isStreaming: Schema.Number,
     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
+    originatingTurn: Schema.NullOr(Schema.fromJsonString(OrchestrationMessageOriginatingTurn)),
   }),
 );
 type ProjectionThreadMessageDbRow = Schema.Schema.Type<typeof ProjectionThreadMessageDbRowSchema>;
@@ -135,6 +176,8 @@ const ProjectionThreadDetailActivityDbRowSchema = Schema.Struct({
   subagentRetentionTruncated: Schema.Number,
   /** True only when the all-turn normalized lifecycle sidecar is complete. */
   subagentRetentionHydrated: Schema.Number,
+  /** Bounded pending interactions omitted from this detail, never retired. */
+  pendingRequestRetentionTruncated: Schema.Number,
 });
 const ProjectionThreadSessionDbRowSchema = ProjectionThreadSessionSqlRow;
 const ProjectionThreadGoalDbRowSchema = ProviderThreadGoal;
@@ -435,10 +478,16 @@ function mapSessionRow(
   };
 }
 
-function reconcileSessionWithLatestTurn(
-  session: OrchestrationSession,
-  latestTurn: OrchestrationLatestTurn | null | undefined,
-): OrchestrationSession {
+type SessionLifecycle = Pick<
+  OrchestrationSession,
+  "status" | "activeTurnId" | "lastError" | "updatedAt"
+>;
+type LatestTurnLifecycle = Pick<OrchestrationLatestTurn, "turnId" | "state" | "completedAt">;
+
+function reconcileSessionLifecycle(
+  session: SessionLifecycle,
+  latestTurn: LatestTurnLifecycle | null | undefined,
+): SessionLifecycle {
   if (session.activeTurnId === null) {
     return session;
   }
@@ -506,7 +555,8 @@ function mapSessionRowForThread(
   row: Schema.Schema.Type<typeof ProjectionThreadSessionDbRowSchema>,
   latestTurn: OrchestrationLatestTurn | null | undefined,
 ): OrchestrationSession {
-  return reconcileSessionWithLatestTurn(mapSessionRow(row), latestTurn);
+  const session = mapSessionRow(row);
+  return { ...session, ...reconcileSessionLifecycle(session, latestTurn) };
 }
 
 function codexSnapshotAssistantMessageKey(row: ProjectionThreadMessageDbRow): string | undefined {
@@ -618,6 +668,98 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const diagnosticStore = makeProviderActivityDiagnosticStore(sql);
+  /**
+   * A native child can be re-admitted under a newer root turn. Its immutable
+   * per-turn history is deliberately retained, but those earlier heads are
+   * not independent live workers. An exact structured start binds the current
+   * presentation owner. Late terminal/progress edges from an older turn cannot
+   * retire that newer owner. Generic task controls and tool item IDs keep their
+   * original turn namespace; this read policy grants no native control.
+   *
+   * Ingestion qualifies the shared full schema once and materializes one
+   * binding per native task slot. Recheck only that exact source witness here;
+   * progress refreshes never hydrate historical starts or parse their payloads.
+   * All binding owner/watermark metadata remains relevant to stale-copy
+   * suppression, so metadata work is proportional to stored native slots.
+   * Source payload equality is checked only for active owners and identities
+   * already selected by detail's bounded lanes, never every completed slot.
+   * An invalidated binding retains its owner/order watermark and suppresses
+   * unconfirmed agent heads until qualified evidence renews it. That is unknown
+   * presentation, never provider termination or native-control permission.
+   */
+  const liveWorkBindingCtes = (
+    threadId: typeof ThreadId.Encoded | null,
+    detail = false,
+    activeOnly = false,
+  ) => sql`
+    current_live_work AS MATERIALIZED (
+      SELECT work.* FROM projection_thread_sessions AS sessions
+      JOIN projection_live_work AS work
+        ON work.thread_id = sessions.thread_id AND work.runtime_id = sessions.subagent_runtime_id
+      WHERE sessions.status NOT IN ('stopped', 'error')
+        AND ${activeOnly ? sql`work.active = 1` : sql`1 = 1`}
+        AND ${threadId === null ? sql`1 = 1` : sql`sessions.thread_id = ${threadId}`}
+    ),
+    known_native_agent_bindings AS MATERIALIZED (
+      -- 0: unconfirmed source/head; 1: exact witness checked; 2: inactive,
+      -- unselected owner metadata only. State2 can suppress obsolete copies,
+      -- but cannot hydrate a start, count active work or emit an unknown hint.
+      SELECT binding.thread_id, binding.runtime_id, binding.work_id,
+        binding.turn_id, binding.activity_id,
+        CASE WHEN binding.valid != 1 OR owning_activity.activity_id IS NULL THEN 0
+          WHEN owning_head.active = 1 OR ${
+            detail
+              ? sql`binding.work_id IN (
+            SELECT work_id FROM retained_native_agent_identity_keys
+          )`
+              : sql`0 = 1`
+          } THEN
+            CASE WHEN activity.activity_id IS NOT NULL THEN 1 ELSE 0 END
+          ELSE 2 END AS source_current
+      FROM projection_native_agent_bindings AS binding
+      JOIN projection_thread_sessions AS sessions
+        ON sessions.thread_id = binding.thread_id
+          AND sessions.subagent_runtime_id = binding.runtime_id
+          AND sessions.status NOT IN ('stopped', 'error')
+      LEFT JOIN projection_live_work AS owning_head
+        ON owning_head.thread_id = binding.thread_id AND owning_head.runtime_id = binding.runtime_id
+          AND owning_head.turn_id = COALESCE(binding.turn_id, '')
+          AND owning_head.lane = 'task' AND owning_head.work_id = binding.work_id
+      LEFT JOIN projection_thread_activities AS owning_activity
+        ON owning_activity.activity_id = owning_head.activity_id
+          AND owning_activity.thread_id = binding.thread_id
+          AND owning_activity.turn_id IS binding.turn_id
+          AND owning_activity.sequence IS owning_head.sequence
+          AND owning_activity.created_at = owning_head.created_at
+          AND owning_activity.kind IN ('task.started', 'task.progress', 'task.completed')
+      LEFT JOIN projection_thread_activities AS activity
+        ON activity.activity_id = CASE WHEN binding.valid = 1
+          AND owning_activity.activity_id IS NOT NULL
+          AND (owning_head.active = 1 OR ${
+            detail
+              ? sql`binding.work_id IN (
+            SELECT work_id FROM retained_native_agent_identity_keys
+          )`
+              : sql`0 = 1`
+          }) THEN binding.activity_id END
+          AND activity.thread_id = binding.thread_id AND activity.turn_id IS binding.turn_id
+          AND activity.kind = 'task.started' AND activity.sequence IS binding.activity_sequence
+          AND activity.created_at = binding.created_at
+          AND activity.payload_json = CASE WHEN activity.activity_id IS NOT NULL THEN binding.payload_json END
+      WHERE ${threadId === null ? sql`1 = 1` : sql`sessions.thread_id = ${threadId}`}
+    ),
+    native_agent_start_anchors AS (
+      SELECT * FROM known_native_agent_bindings WHERE source_current = 1
+    ),
+    current_live_work_heads AS (
+      SELECT work.* FROM current_live_work AS work
+      LEFT JOIN known_native_agent_bindings AS anchor
+        ON anchor.thread_id = work.thread_id AND anchor.runtime_id = work.runtime_id
+          AND anchor.work_id = work.work_id AND work.lane = 'task' AND work.is_agent = 1
+      WHERE anchor.activity_id IS NULL OR
+        ((anchor.source_current = 1 OR (anchor.source_current = 2 AND work.active = 0))
+          AND COALESCE(anchor.turn_id, '') = work.turn_id)
+    )`;
   const listLiveWorkRows = SqlSchema.findAll({
     Request: Schema.NullOr(ThreadId),
     Result: Schema.Struct({
@@ -625,19 +767,33 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       runtimeId: SubagentRuntimeId,
       taskCount: NonNegativeInt,
       agentCount: NonNegativeInt,
+      unconfirmedAgentIds: Schema.fromJsonString(Schema.Array(Schema.String)),
     }),
     execute: (threadId) => sql`
+      WITH ${liveWorkBindingCtes(threadId)}
       SELECT sessions.thread_id AS "threadId", sessions.subagent_runtime_id AS "runtimeId",
         SUM(CASE WHEN work.is_agent = 0 AND work.active = 1 THEN 1 ELSE 0 END) AS "taskCount",
-        SUM(CASE WHEN work.is_agent = 1 AND work.active = 1 THEN 1 ELSE 0 END) AS "agentCount"
+        SUM(CASE WHEN work.is_agent = 1 AND work.active = 1 THEN 1 ELSE 0 END) AS "agentCount",
+        (
+          SELECT json_group_array(work_id) FROM (
+            SELECT binding.work_id FROM known_native_agent_bindings AS binding
+            WHERE binding.thread_id = sessions.thread_id
+              AND binding.runtime_id = sessions.subagent_runtime_id
+              AND binding.source_current = 0
+            ORDER BY binding.work_id LIMIT ${MAX_UNCONFIRMED_NATIVE_AGENTS + 1}
+          )
+        ) AS "unconfirmedAgentIds"
       FROM projection_thread_sessions AS sessions
-      LEFT JOIN projection_live_work AS work
+      LEFT JOIN current_live_work_heads AS work
         ON work.thread_id = sessions.thread_id AND work.runtime_id = sessions.subagent_runtime_id
         AND work.active = 1
       WHERE sessions.status NOT IN ('stopped', 'error')
         AND ${threadId === null ? sql`1 = 1` : sql`sessions.thread_id = ${threadId}`}
-        AND EXISTS (SELECT 1 FROM projection_live_work AS observed
+        AND (EXISTS (SELECT 1 FROM projection_live_work AS observed
           WHERE observed.thread_id = sessions.thread_id AND observed.runtime_id = sessions.subagent_runtime_id)
+          OR EXISTS (SELECT 1 FROM known_native_agent_bindings AS binding
+            WHERE binding.thread_id = sessions.thread_id
+              AND binding.runtime_id = sessions.subagent_runtime_id))
       GROUP BY sessions.thread_id, sessions.subagent_runtime_id`,
   });
   const readLiveWorkSummaries = (threadId: ThreadId | null) =>
@@ -646,8 +802,28 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         (rows) =>
           new Map(
             rows.map(
-              ({ threadId: id, ...summary }) =>
-                [id, summary satisfies OrchestrationLiveWork] as const,
+              ({ threadId: id, unconfirmedAgentIds, ...summary }) =>
+                [
+                  id,
+                  {
+                    ...summary,
+                    // These exact-runtime display hints prevent retained historical
+                    // starts from reviving an invalidated owner while another agent is
+                    // still live. They grant no provider/control/history authority. Keep
+                    // one bounded sentinel so clients can fail closed on hint overflow.
+                    ...(unconfirmedAgentIds.length === 0
+                      ? {}
+                      : {
+                          unconfirmedAgentIds: unconfirmedAgentIds.slice(
+                            0,
+                            MAX_UNCONFIRMED_NATIVE_AGENTS,
+                          ),
+                          ...(unconfirmedAgentIds.length > MAX_UNCONFIRMED_NATIVE_AGENTS
+                            ? { unconfirmedAgentIdsTruncated: true }
+                            : {}),
+                        }),
+                  } satisfies OrchestrationLiveWork,
+                ] as const,
             ),
           ),
       ),
@@ -709,6 +885,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   // SQLite length counts Unicode scalars; JS presentation bounds UTF-16 units.
   // The common ASCII/BMP path is constant work. Only an astral-containing near-
   // limit row needs a bounded walk, stopped as soon as 4,097 units are reached.
+  // Provenance comes from the same application-owned constant ingestion uses;
+  // these are literal code identifiers, never received values.
+  const summaryProviders = PUBLIC_REASONING_SUMMARY_PROVIDERS.map(
+    (provider) => `'${provider}'`,
+  ).join(",");
   const summaryUtf16Bound = `(CASE WHEN length(${summaryDetail}) > 4096 THEN 0 WHEN length(${summaryDetail}) <= 2048 OR ${summaryDetail} NOT GLOB ('*[' || char(65536) || '-' || char(1114111) || ']*') THEN 1 ELSE (WITH RECURSIVE summary_source(detail) AS (SELECT ${summaryDetail}), summary_units(position,total) AS (VALUES(0,0) UNION ALL SELECT position+1,total+CASE WHEN unicode(substr(detail,position+1,1)) > 65535 THEN 2 ELSE 1 END FROM summary_units,summary_source WHERE position < length(detail) AND total <= 4096) SELECT max(total) <= 4096 FROM summary_units) END)`;
   const historicalWorkLogActivityPredicate = sql.and([
     "kind != 'context-window.updated'",
@@ -727,7 +908,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     "kind != 'provider.async-questions'",
     "summary != 'Checkpoint captured'",
     "(kind != 'tool.started' OR json_extract(payload_json, '$.itemType') = 'context_compaction' OR (json_extract(payload_json, '$.itemType') = 'command_execution' AND json_extract(payload_json, '$.data.toolName') = 'Bash' AND json_type(payload_json, '$.data.commandInspectionVersion') IN ('integer', 'real') AND json_extract(payload_json, '$.data.commandInspectionVersion') = 1 AND json_extract(payload_json, '$.data.inspectionProvider') = 'claudeAgent'))",
-    `(kind != 'reasoning.summary' OR (json_type(payload_json, '$.summaryVersion') IN ('integer', 'real') AND json_extract(payload_json, '$.summaryVersion') = 1 AND json_extract(payload_json, '$.provider') = 'claudeAgent' AND json_extract(payload_json, '$.streamKind') = 'reasoning_summary_text' AND json_type(payload_json, '$.itemId') = 'text' AND length(trim(json_extract(payload_json, '$.itemId'), ${ecmaTrimCharacters})) > 0 AND json_type(payload_json, '$.detail') = 'text' AND length(trim(${summaryDetail}, ${ecmaTrimCharacters})) > 0 AND instr(${summaryDetail},char(0)) = 0 AND ${summaryDetail} NOT GLOB ${unsafeSummaryPattern} AND ${summaryUtf16Bound} AND json_type(payload_json, '$.truncated') IN ('true', 'false') AND json_extract(payload_json, '$.status') IN ('inProgress', 'completed', 'failed')))`,
+    `(kind != 'reasoning.summary' OR (json_type(payload_json, '$.summaryVersion') IN ('integer', 'real') AND json_extract(payload_json, '$.summaryVersion') = 1 AND json_extract(payload_json, '$.provider') IN (${summaryProviders}) AND json_extract(payload_json, '$.streamKind') = 'reasoning_summary_text' AND json_type(payload_json, '$.itemId') = 'text' AND length(trim(json_extract(payload_json, '$.itemId'), ${ecmaTrimCharacters})) > 0 AND json_type(payload_json, '$.detail') = 'text' AND length(trim(${summaryDetail}, ${ecmaTrimCharacters})) > 0 AND instr(${summaryDetail},char(0)) = 0 AND ${summaryDetail} NOT GLOB ${unsafeSummaryPattern} AND ${summaryUtf16Bound} AND json_type(payload_json, '$.truncated') IN ('true', 'false') AND json_extract(payload_json, '$.status') IN ('inProgress', 'completed', 'failed')))`,
     "NOT (kind IN ('task.started', 'task.progress', 'task.completed') AND json_type(payload_json, '$.subagent') IS NOT NULL)",
     // GLOB is case-sensitive, matching the renderer's exact startsWith check.
     // SQLite LIKE would also hide ordinary lower/mixed-case provider output.
@@ -964,6 +1145,22 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  // Reuse the indexed durable input association without rewriting canonical
+  // message.turnId or deriving ownership from chronology. A same-ID newer
+  // submission cannot borrow an earlier turn's outcome.
+  const originatingTurnSql = sql`
+    (SELECT json_object('turnId', owner.turn_id, 'state', owner.state)
+     FROM projection_turns owner
+     WHERE messages.role = 'user'
+       AND owner.thread_id = messages.thread_id
+       AND owner.pending_message_id = messages.message_id
+       AND owner.turn_id IS NOT NULL
+       AND (messages.turn_id IS NULL OR messages.turn_id = owner.turn_id)
+       AND owner.requested_at >= messages.updated_at
+       AND owner.state IN ('running', 'interrupted', 'completed', 'error')
+     ORDER BY owner.requested_at DESC, owner.turn_id DESC LIMIT 1)
+  `;
+
   const listThreadMessageRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: ProjectionThreadMessageDbRowSchema,
@@ -978,8 +1175,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           attachments_json AS "attachments",
           is_streaming AS "isStreaming",
           created_at AS "createdAt",
-          updated_at AS "updatedAt"
-        FROM projection_thread_messages
+          updated_at AS "updatedAt",
+          ${originatingTurnSql} AS "originatingTurn"
+        FROM projection_thread_messages messages
         ORDER BY thread_id ASC, created_at ASC, message_id ASC
       `,
   });
@@ -1473,6 +1671,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
    * correlation must also carry the exact MessageId. That distinction keeps a
    * provider-authored partial observation from destroying Cafe's only durable
    * recovery candidate. Trusted recovered evidence may settle it directly.
+   *
+   * Both processing witnesses must start from the selected thread/turn activity
+   * range, then authenticate each candidate through its exact command-id index.
+   * An ordinary inner join lets SQLite reverse that order and walk the mature
+   * thread's entire event stream before applying the activity predicates. Since
+   * the native SQLite call is synchronous, that plan can starve HTTP readiness
+   * and WebSocket heartbeats even though all ownership predicates are correct.
+   * CROSS JOIN fixes the loop order; the existing indexes fix the two admitted
+   * lookup shapes. Do not replace either with a stream scan or drop any of the
+   * provenance predicates, including the deliberately different pruning rule.
    */
   const findPostTerminalAcceptedSteerCandidateRow = SqlSchema.findOne({
     Request: CodexSteerAcceptedBarrierCandidateLookupInput,
@@ -1540,7 +1748,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             EXISTS (
               SELECT 1
               FROM projection_thread_activities AS processing
-              INNER JOIN orchestration_events AS processing_event
+                INDEXED BY idx_projection_thread_activities_thread_turn_kind_created_id
+              CROSS JOIN orchestration_events AS processing_event
+                INDEXED BY idx_orch_events_command_id
                 ON processing_event.command_id =
                   'provider:codex:' || processing.thread_id || ':' ||
                   processing.activity_id || ':thread-activity-append:' ||
@@ -1592,7 +1802,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             EXISTS (
               SELECT 1
               FROM projection_thread_activities AS processing
-              INNER JOIN orchestration_events AS processing_event
+                INDEXED BY idx_projection_thread_activities_thread_turn_kind_created_id
+              CROSS JOIN orchestration_events AS processing_event
+                INDEXED BY idx_orch_events_command_id
                 ON processing_event.command_id =
                   'provider:codex:' || processing.thread_id || ':' ||
                   processing.activity_id || ':thread-activity-append:' ||
@@ -1814,10 +2026,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       exactClientCorrelationId,
       exactAcceptedAt,
     }) => {
-      // Do not express the exact form as `(parameter IS NULL OR column =
-      // parameter)`: SQLite cannot reliably select the primary-key access
-      // path through that shape. Startup supplies both immutable primary keys,
-      // so emit plain equalities and keep work independent of thread age.
+      // Emit supplied identities as equalities in both forms. An optional
+      // `(parameter IS NULL OR column = parameter)` hides the legacy caller's
+      // known thread/turn from SQLite's index selection, even when both values
+      // are present. Missing filters still mean complete historical coverage;
+      // this changes the access path, never the admitted evidence set.
       const acceptedIdentityPredicate = exactLookup
         ? sql`
             accepted.activity_id = ${exactActivityId}
@@ -1828,14 +2041,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             AND json_extract(accepted.payload_json, '$.clientCorrelationId') IS
               ${exactClientCorrelationId}
           `
-        : sql`
-            (${threadId} IS NULL OR accepted.thread_id = ${threadId})
-            AND (${acceptedTurnId} IS NULL OR accepted.turn_id = ${acceptedTurnId})
-            AND (
-              ${messageId} IS NULL
-              OR json_extract(accepted.payload_json, '$.messageId') = ${messageId}
-            )
-          `;
+        : sql.and([
+            threadId === null ? sql`1 = 1` : sql`accepted.thread_id = ${threadId}`,
+            acceptedTurnId === null ? sql`1 = 1` : sql`accepted.turn_id = ${acceptedTurnId}`,
+            messageId === null
+              ? sql`1 = 1`
+              : sql`json_extract(accepted.payload_json, '$.messageId') = ${messageId}`,
+          ]);
       const acceptedEventIdentityPredicate = exactLookup
         ? sql`accepted_event.sequence = ${exactEventSequence}`
         : sql`
@@ -1876,7 +2088,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           EXISTS (
             SELECT 1
             FROM projection_thread_activities AS processing
-            INNER JOIN orchestration_events AS processing_event
+              INDEXED BY idx_projection_thread_activities_thread_turn_kind_created_id
+            CROSS JOIN orchestration_events AS processing_event
+              INDEXED BY idx_orch_events_command_id
               ON processing_event.command_id =
                 'provider:codex:' || processing.thread_id || ':' ||
                 processing.activity_id || ':thread-activity-append:' || processing.activity_id
@@ -2012,7 +2226,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             LIMIT 1
           ) AS "sessionStopRequested"
         FROM projection_thread_activities AS accepted
-        INNER JOIN orchestration_events AS accepted_event
+        -- The projected acceptance is the narrow outer owner. In particular,
+        -- do not let a mature thread's event stream drive the correlated
+        -- processing lookup repeatedly before its exact command-id probe.
+        CROSS JOIN orchestration_events AS accepted_event
           ON ${acceptedEventIdentityPredicate}
           AND accepted_event.aggregate_kind = 'thread'
           AND accepted_event.stream_id = accepted.thread_id
@@ -2031,7 +2248,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             accepted_event.payload_json,
             '$.activity.payload.clientCorrelationId'
           ) IS json_extract(accepted.payload_json, '$.clientCorrelationId')
-        INNER JOIN orchestration_events AS accepted_intent
+        CROSS JOIN orchestration_events AS accepted_intent
           ON ${acceptedIntentIdentityPredicate}
           AND accepted_intent.sequence < accepted_event.sequence
           AND accepted_intent.aggregate_kind = 'thread'
@@ -2046,11 +2263,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             json_extract(accepted.payload_json, '$.messageId')
           AND json_extract(accepted_intent.payload_json, '$.createdAt') =
             accepted_intent.occurred_at
-        INNER JOIN projection_thread_messages AS message
+        CROSS JOIN projection_thread_messages AS message
           ON message.thread_id = accepted.thread_id
           AND message.message_id = json_extract(accepted.payload_json, '$.messageId')
           AND message.role = 'user'
-        INNER JOIN projection_turns AS accepted_turn
+        CROSS JOIN projection_turns AS accepted_turn
           ON accepted_turn.thread_id = accepted.thread_id
           AND accepted_turn.turn_id = accepted.turn_id
         WHERE accepted.kind = 'provider.turn.steer.accepted'
@@ -2458,8 +2675,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             attachments_json AS "attachments",
             is_streaming AS "isStreaming",
             created_at AS "createdAt",
-            updated_at AS "updatedAt"
-          FROM projection_thread_messages
+            updated_at AS "updatedAt",
+            ${originatingTurnSql} AS "originatingTurn"
+          FROM projection_thread_messages messages
           WHERE thread_id = ${threadId}
           ORDER BY created_at DESC, message_id DESC
           LIMIT ${THREAD_DETAIL_MESSAGE_LIMIT}
@@ -2488,6 +2706,21 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  const getThreadContextWindowRow = SqlSchema.findOneOption({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ threadId }) => sql`
+      SELECT activity_id AS "activityId", thread_id AS "threadId",
+        turn_id AS "turnId", tone, kind, summary, payload_json AS "payload",
+        sequence, created_at AS "createdAt"
+      FROM projection_thread_activities INDEXED BY idx_projection_context_window_latest
+      WHERE thread_id = ${threadId} AND kind = 'context-window.updated'
+      ORDER BY CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+        sequence DESC, created_at DESC, activity_id DESC
+      LIMIT 1
+    `,
+  });
+
   const listThreadActivityRowsByThread = SqlSchema.findAll({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadDetailActivityDbRowSchema,
@@ -2503,6 +2736,127 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             created_at DESC,
             activity_id DESC
           LIMIT ${THREAD_DETAIL_ACTIVITY_LIMIT}
+        ),
+        request_lifecycle_rows AS MATERIALIZED (
+          -- Only indexed interaction kinds are inspected. Ordinary tool history
+          -- never expands this lane; selected payloads remain bounded below.
+          SELECT activity_id, kind, sequence, created_at,
+            CASE WHEN kind IN ('approval.requested', 'approval.resolved',
+              'provider.approval.respond.failed') THEN 'approval' ELSE 'question' END AS lane,
+            json_extract(payload_json, '$.requestId') AS request_id,
+            CASE WHEN kind IN ('approval.resolved', 'user-input.resolved') THEN 2 ELSE 1 END AS lifecycle_rank
+          FROM projection_thread_activities
+            INDEXED BY idx_projection_thread_activities_thread_kind_created_id
+          WHERE thread_id = ${threadId}
+            AND kind IN ('approval.requested', 'approval.resolved', 'provider.approval.respond.failed',
+              'user-input.requested', 'user-input.resolved', 'provider.user-input.respond.failed')
+            AND CASE WHEN json_valid(payload_json) THEN
+              json_type(payload_json, '$.requestId') = 'text'
+              AND length(json_extract(payload_json, '$.requestId')) > 0
+              AND (kind NOT IN ('provider.approval.respond.failed', 'provider.user-input.respond.failed')
+                OR (kind = 'provider.approval.respond.failed'
+                  AND json_type(payload_json, '$.detail') = 'text' AND (
+                  lower(COALESCE(json_extract(payload_json, '$.detail'), '')) LIKE '%stale pending approval request%'
+                  OR lower(COALESCE(json_extract(payload_json, '$.detail'), '')) LIKE '%unknown pending approval request%'
+                  OR lower(COALESCE(json_extract(payload_json, '$.detail'), '')) LIKE '%unknown pending permission request%'))
+                OR (kind = 'provider.user-input.respond.failed'
+                  AND json_type(payload_json, '$.detail') = 'text' AND (
+                  lower(COALESCE(json_extract(payload_json, '$.detail'), '')) LIKE '%stale pending user-input request%'
+                  OR lower(COALESCE(json_extract(payload_json, '$.detail'), '')) LIKE '%unknown pending user-input request%')))
+            ELSE 0 END
+        ),
+        request_lifecycle_heads AS (
+          SELECT * FROM (
+            SELECT lifecycle.*, ROW_NUMBER() OVER (
+              PARTITION BY lane, request_id ORDER BY
+                CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+                sequence DESC, created_at DESC, lifecycle_rank DESC, activity_id DESC
+            ) AS head_rank FROM request_lifecycle_rows AS lifecycle
+          ) WHERE head_rank = 1
+        ),
+        pending_request_heads AS (
+          SELECT * FROM request_lifecycle_heads
+          WHERE kind IN ('approval.requested', 'user-input.requested')
+            AND (lane != 'approval' OR EXISTS (
+              SELECT 1 FROM projection_pending_approvals AS approval
+              WHERE approval.thread_id = ${threadId}
+                AND approval.request_id = request_lifecycle_heads.request_id
+                AND approval.status = 'pending'
+            ))
+          ORDER BY CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+            sequence DESC, created_at DESC, lifecycle_rank DESC, activity_id DESC
+        ),
+        retained_pending_request_heads AS (
+          SELECT * FROM pending_request_heads
+          ORDER BY CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+            sequence DESC, created_at DESC, lifecycle_rank DESC, activity_id DESC
+          LIMIT ${MAX_PENDING_REQUEST_RETENTION_IDENTITIES}
+        ),
+        retained_request_identities AS (
+          SELECT lane, request_id FROM retained_pending_request_heads
+          UNION
+          SELECT lifecycle.lane, lifecycle.request_id
+          FROM recent_activity_ids AS recent JOIN request_lifecycle_rows AS lifecycle
+            ON lifecycle.activity_id = recent.activity_id
+          WHERE lifecycle.kind IN ('approval.requested', 'user-input.requested')
+        ),
+        retained_request_terminal_ids AS (
+          -- A legacy same-clock terminal can sort just before its request in
+          -- the ordinary cursor order. Keep that exact witness too so trimming
+          -- cannot resurrect a settled card. At most 500+64 identities qualify.
+          SELECT activity_id FROM (
+            SELECT lifecycle.activity_id, ROW_NUMBER() OVER (
+              PARTITION BY lifecycle.lane, lifecycle.request_id ORDER BY
+                CASE WHEN lifecycle.sequence IS NULL THEN 0 ELSE 1 END DESC,
+                lifecycle.sequence DESC, lifecycle.created_at DESC,
+                lifecycle.lifecycle_rank DESC, lifecycle.activity_id DESC
+            ) AS terminal_rank
+            FROM retained_request_identities AS retained
+            JOIN request_lifecycle_rows AS lifecycle
+              ON lifecycle.lane = retained.lane AND lifecycle.request_id = retained.request_id
+            WHERE lifecycle.kind NOT IN ('approval.requested', 'user-input.requested')
+          ) WHERE terminal_rank = 1
+        ),
+        mcp_question_notice_candidates AS MATERIALIZED (
+          -- Primary-chat notices must survive an ordinary burst of tool work.
+          -- Legacy v1 notices contain only metadata. V2 includes exact bounded
+          -- questions/answers, so count and encoded-byte budgets are distinct.
+          -- Ordinary-tail rows cost no additional hydration bytes here.
+          SELECT activity_id, created_at,
+            CASE WHEN activity_id IN (SELECT activity_id FROM recent_activity_ids)
+              THEN 0 ELSE length(CAST(payload_json AS BLOB)) END AS extra_bytes
+          FROM projection_thread_activities
+            INDEXED BY idx_projection_thread_activities_thread_kind_created_id
+          WHERE thread_id = ${threadId} AND kind = 'mcp.question.resolved'
+            AND length(CAST(payload_json AS BLOB)) <= 1048576
+            AND CASE WHEN json_valid(payload_json) THEN
+              json_type(payload_json, '$.version') = 'integer'
+              AND json_extract(payload_json, '$.source') = 'mcp'
+              AND json_extract(payload_json, '$.action') IN ('answered', 'skipped', 'cleared')
+              AND json_type(payload_json, '$.questionCount') = 'integer'
+              AND json_extract(payload_json, '$.questionCount') BETWEEN 1 AND 64
+              AND (
+                (json_extract(payload_json, '$.version') = 1
+                  AND length(CAST(payload_json AS BLOB)) <= 1024)
+                OR (json_extract(payload_json, '$.version') = 2
+                  AND json_type(payload_json, '$.items') = 'array'
+                  AND json_array_length(payload_json, '$.items') = json_extract(payload_json, '$.questionCount'))
+              )
+            ELSE 0 END
+          ORDER BY created_at DESC, activity_id DESC
+          LIMIT 64
+        ),
+        retained_mcp_question_notice_ids AS (
+          -- Retain the newest prefix that fits a cumulative 1 MiB *extra*
+          -- budget. Older small receipts do not jump over an omitted newer
+          -- one. UI still applies the exact versioned payload policy; this
+          -- storage envelope never grants callback or MCP response authority.
+          SELECT activity_id FROM (
+            SELECT activity_id, SUM(extra_bytes) OVER (
+              ORDER BY created_at DESC, activity_id DESC ROWS UNBOUNDED PRECEDING
+            ) AS retained_extra_bytes
+            FROM mcp_question_notice_candidates
+          ) WHERE retained_extra_bytes <= 1048576
         ),
         latest_task_plan_activity_id AS (
           SELECT activity_id
@@ -2823,17 +3177,95 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           WHERE edges.turn_id = identity.turn_id
             AND edges.child_id = identity.child_id
         ),
+        ${liveWorkBindingCtes(threadId, true)},
+        recent_native_agent_identity_keys AS MATERIALIZED (
+          -- Inspect only the already-selected ordinary tail. These exact
+          -- opaque strings select existing current-runtime binding evidence;
+          -- they do not qualify a new owner or trim/alias a native identity.
+          -- CASE guards every JSON read, including corrupt legacy tail rows.
+          -- A qualified 512-UTF16-unit key uses at most 1536 UTF8 bytes. Bound
+          -- both dimensions before UNION; SQLite character length alone stops
+          -- at embedded NUL and cannot bound an adversarial trailing string.
+          SELECT CASE WHEN json_valid(activity.payload_json) THEN
+            CASE WHEN json_type(activity.payload_json, '$.taskId') = 'text'
+              AND length(json_extract(activity.payload_json, '$.taskId')) BETWEEN 1 AND 512
+              AND length(CAST(json_extract(activity.payload_json, '$.taskId') AS BLOB)) BETWEEN 1 AND 1536
+              THEN json_extract(activity.payload_json, '$.taskId') END
+          END AS work_id
+          FROM recent_activity_ids AS recent
+          CROSS JOIN projection_thread_activities AS activity
+          WHERE activity.activity_id = recent.activity_id
+            AND substr(activity.kind, 1, 5) = 'task.'
+            AND CASE WHEN json_valid(activity.payload_json) THEN
+              json_extract(activity.payload_json, '$.nativeWorkRuntimeId') = (
+                SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+              OR json_extract(activity.payload_json, '$.individualTaskControl.runtimeId') = (
+                SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+              OR json_extract(activity.payload_json, '$.subagent.runtimeId') = (
+                SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+            ELSE 0 END
+          UNION
+          SELECT CASE WHEN json_valid(activity.payload_json) THEN
+            CASE WHEN json_type(activity.payload_json, '$.subagent.threadId') = 'text'
+              AND length(json_extract(activity.payload_json, '$.subagent.threadId')) BETWEEN 1 AND 512
+              AND length(CAST(json_extract(activity.payload_json, '$.subagent.threadId') AS BLOB)) BETWEEN 1 AND 1536
+              THEN json_extract(activity.payload_json, '$.subagent.threadId') END
+          END AS work_id
+          FROM recent_activity_ids AS recent
+          CROSS JOIN projection_thread_activities AS activity
+          WHERE activity.activity_id = recent.activity_id
+            AND substr(activity.kind, 1, 5) = 'task.'
+            AND CASE WHEN json_valid(activity.payload_json) THEN
+              json_extract(activity.payload_json, '$.nativeWorkRuntimeId') = (
+                SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+              OR json_extract(activity.payload_json, '$.individualTaskControl.runtimeId') = (
+                SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+              OR json_extract(activity.payload_json, '$.subagent.runtimeId') = (
+                SELECT subagent_runtime_id FROM projection_thread_sessions WHERE thread_id = ${threadId})
+            ELSE 0 END
+        ),
+        retained_native_agent_identity_keys AS (
+          SELECT work_id FROM recent_native_agent_identity_keys WHERE work_id IS NOT NULL
+          UNION
+          SELECT child_id AS work_id FROM retained_global_subagent_identities
+          UNION
+          SELECT child_id AS work_id FROM retained_current_turn_subagent_identities
+        ),
+        retained_native_agent_start_anchors AS MATERIALIZED (
+          -- Binding rows persist after completion. Retain their payloads only
+          -- for identities the existing bounded detail lanes already selected,
+          -- rather than reopening every completed native start in this runtime.
+          -- source_current=1 already means a checked active owner or one of
+          -- these selected identities. Inactive unselected metadata is state2
+          -- and cannot expand the payload set or masquerade as a live start.
+          SELECT * FROM native_agent_start_anchors
+        ),
+        retained_native_agent_owning_head_ids AS (
+          -- A selected owner may already be completed, or its latest terminal
+          -- may omit repeated subagent metadata. Its exact one-per-slot head
+          -- must accompany the start so the start cannot revive that owner.
+          SELECT work.activity_id FROM retained_native_agent_start_anchors AS anchor
+          CROSS JOIN current_live_work AS work
+          WHERE work.thread_id = anchor.thread_id AND work.runtime_id = anchor.runtime_id
+            AND work.turn_id = COALESCE(anchor.turn_id, '')
+            AND work.lane = 'task' AND work.work_id = anchor.work_id
+        ),
         retained_activity_ids AS (
           SELECT activity_id
           FROM recent_activity_ids
           UNION
+          SELECT activity_id FROM retained_pending_request_heads
+          UNION
+          SELECT activity_id FROM retained_request_terminal_ids
+          UNION
+          SELECT activity_id FROM retained_mcp_question_notice_ids
+          UNION
           SELECT work.activity_id
-          FROM projection_live_work AS work
-          JOIN projection_thread_sessions AS sessions
-            ON sessions.thread_id = work.thread_id
-            AND sessions.subagent_runtime_id = work.runtime_id
-          WHERE work.thread_id = ${threadId} AND work.active = 1
-            AND sessions.status NOT IN ('stopped', 'error')
+          FROM current_live_work_heads AS work WHERE work.active = 1
+          UNION
+          SELECT activity_id FROM retained_native_agent_start_anchors
+          UNION
+          SELECT activity_id FROM retained_native_agent_owning_head_ids
           UNION
           SELECT activity_id
           FROM latest_task_plan_activity_id
@@ -2880,7 +3312,13 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 SELECT COUNT(*) FROM current_turn_subagent_identities
               ) > ${MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN} THEN 1 ELSE 0 END
             END AS "subagentRetentionTruncated",
-            subagent_hydration.complete AS "subagentRetentionHydrated"
+            subagent_hydration.complete AS "subagentRetentionHydrated",
+            CASE WHEN EXISTS (
+              SELECT 1 FROM pending_request_heads AS pending
+              WHERE pending.activity_id NOT IN (SELECT activity_id FROM recent_activity_ids)
+                AND pending.activity_id NOT IN (SELECT activity_id FROM retained_pending_request_heads)
+            ) THEN 1 ELSE 0 END
+              AS "pendingRequestRetentionTruncated"
           -- Keep the bounded retained-id set outermost. Mature sqlite_stat1
           -- estimates can otherwise reorder this join into a synchronous scan
           -- of the entire activity primary-key index before probing retained.
@@ -2942,11 +3380,15 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     const toolId = sql`COALESCE(NULLIF(CASE
       WHEN json_type(payload_json, '$.data.toolCallId') = 'text'
       THEN trim(json_extract(payload_json, '$.data.toolCallId'), ${trimCharacters}) END, ''), ${itemId})`;
+    const taskToolId = sql`CASE WHEN json_type(payload_json, '$.workLogToolCallId') = 'text'
+      THEN trim(json_extract(payload_json, '$.workLogToolCallId'), ${trimCharacters}) END`;
     return sql.and([
       ids?.length ? sql`activity_id NOT IN ${sql.in(ids)}` : sql`1 = 1`,
       tools?.length
-        ? sql`NOT (kind IN ('tool.started', 'tool.updated', 'tool.completed')
-            AND COALESCE(${toolId} IN ${sql.in(tools)}, 0))`
+        ? sql`NOT ((kind IN ('tool.started', 'tool.updated', 'tool.completed')
+            AND COALESCE(${toolId} IN ${sql.in(tools)}, 0)) OR
+            (kind IN ('task.started', 'task.progress', 'task.completed')
+            AND COALESCE(${taskToolId} IN ${sql.in(tools)}, 0)))`
         : sql`1 = 1`,
       summaries?.length
         ? sql`NOT (kind = 'reasoning.summary' AND COALESCE(${itemId} IN ${sql.in(summaries)}, 0))`
@@ -3309,6 +3751,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   text: row.text,
                   ...(row.attachments !== null ? { attachments: row.attachments } : {}),
                   turnId: row.turnId,
+                  ...(row.originatingTurn ? { originatingTurn: row.originatingTurn } : {}),
                   streaming: row.isStreaming === 1,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -3449,6 +3892,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 messages: messagesByThread.get(row.threadId) ?? [],
                 proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
                 activities: activitiesByThread.get(row.threadId) ?? [],
+                // The complete legacy read model carries every activity; the
+                // bounded-detail omission budget does not apply to this path.
+                pendingRequestRetentionTruncated: false,
                 checkpoints: checkpointsByThread.get(row.threadId) ?? [],
                 session: sessionsByThread.get(row.threadId) ?? null,
                 goal: goalsByThread.get(row.threadId) ?? null,
@@ -4964,6 +5410,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             role: row.role,
             text: row.text,
             turnId: row.turnId,
+            ...(row.originatingTurn ? { originatingTurn: row.originatingTurn } : {}),
             streaming: row.isStreaming === 1,
             createdAt: row.createdAt,
             updatedAt: row.updatedAt,
@@ -4975,6 +5422,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         }),
         proposedPlans: proposedPlanRows.map(mapProposedPlanRow),
         activities: activityRows.map(mapActivityRow),
+        pendingRequestRetentionTruncated: activityRows[0]?.pendingRequestRetentionTruncated === 1,
         checkpoints: checkpointRows.map((row) => ({
           turnId: row.turnId,
           checkpointTurnCount: row.checkpointTurnCount,
@@ -5005,7 +5453,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       };
     });
 
-  const repairLegacyThreadActivityOrder = (thread: OrchestrationThread) =>
+  const repairLegacyThreadActivityOrder = <
+    Thread extends {
+      readonly id: ThreadId;
+      readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
+    },
+  >(
+    thread: Thread,
+  ) =>
     Effect.gen(function* () {
       const repairRows = thread.activities.map((activity) => ({
         ...activity,
@@ -5029,8 +5484,57 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           const { threadId: _threadId, activityId: _activityId, ...activity } = row;
           return activity;
         }),
-      } satisfies OrchestrationThread;
+      };
     });
+
+  const getThreadQuestionContextById: ProjectionSnapshotQueryShape["getThreadQuestionContextById"] =
+    (threadId) =>
+      Effect.gen(function* () {
+        // Reuse the detail projection's exact pending lifecycle selection and
+        // bounded extra retention. This read needs no messages, plans,
+        // checkpoints or subagent-history hydration to expose callback state.
+        const [shell, rows] = yield* sql
+          .withTransaction(
+            Effect.all([
+              getThreadShellById(threadId),
+              listThreadActivityRowsByThread({ threadId }).pipe(
+                Effect.mapError(
+                  toPersistenceSqlOrDecodeError(
+                    "ProjectionSnapshotQuery.getThreadQuestionContextById:listActivities:query",
+                    "ProjectionSnapshotQuery.getThreadQuestionContextById:listActivities:decodeRows",
+                  ),
+                ),
+              ),
+            ]),
+          )
+          .pipe(
+            Effect.mapError((error) =>
+              isPersistenceError(error)
+                ? error
+                : toPersistenceSqlError(
+                    "ProjectionSnapshotQuery.getThreadQuestionContextById:query",
+                  )(error),
+            ),
+          );
+        if (Option.isNone(shell)) return Option.none();
+        const context = {
+          ...shell.value,
+          activities: rows.map(mapActivityRow),
+          pendingRequestRetentionTruncated: rows[0]?.pendingRequestRetentionTruncated === 1,
+        };
+        // Legacy rows may lack ledger sequences. The same ordering repair as
+        // full detail preserves exact request/resolution order without
+        // pretending an empty transcript was hydrated.
+        return Option.some(
+          yield* repairLegacyThreadActivityOrder(context).pipe(
+            Effect.mapError(
+              toPersistenceSqlError(
+                "ProjectionSnapshotQuery.getThreadQuestionContextById:repairLegacyActivityOrder",
+              ),
+            ),
+          ),
+        );
+      });
 
   const repairLoadedThreadDetail = (
     loaded: Effect.Success<ReturnType<typeof loadThreadDetailById>>,
@@ -5115,7 +5619,143 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     `,
   });
 
+  const getThreadAsyncQuestionActivitiesPage: ProjectionSnapshotQueryShape["getThreadAsyncQuestionActivitiesPage"] =
+    (input) =>
+      Effect.gen(function* () {
+        const limit = input.limit ?? 20;
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64)
+          return yield* new PersistenceDecodeError({
+            operation: "ProjectionSnapshotQuery.questionPage:limit",
+            issue: "Question pages require a finite limit from 1 to 64.",
+          });
+        const before =
+          input.before === undefined
+            ? undefined
+            : yield* Schema.decodeUnknownEffect(OrchestrationThreadActivityCursor)(
+                input.before,
+              ).pipe(
+                Effect.mapError(
+                  toPersistenceDecodeError("ProjectionSnapshotQuery.questionPage:cursor"),
+                ),
+              );
+        const predicate =
+          before === undefined
+            ? sql`thread_id = ${input.threadId} AND kind = 'provider.async-questions'`
+            : sql`thread_id = ${input.threadId} AND kind = 'provider.async-questions'
+              AND (created_at < ${before.createdAt}
+                OR (created_at = ${before.createdAt} AND activity_id < ${before.activityId}))`;
+        // Creation time/id are immutable when handled indexes are updated.
+        // The existing index therefore bounds both scanning and hydration,
+        // whereas ordering by the mutable sequence would sort the whole lane
+        // and could move a handled question across an already issued cursor.
+        const rows = yield* sql<BoundedQuestionActivityRow>`
+          SELECT activity_id AS id, turn_id AS "turnId", tone, kind, summary,
+            CASE WHEN length(CAST(payload_json AS BLOB)) <= ${MAX_QUESTION_ACTIVITY_BYTES}
+              THEN payload_json ELSE NULL END AS "payloadJson",
+            sequence, created_at AS "createdAt"
+          FROM projection_thread_activities
+            INDEXED BY idx_projection_thread_activities_thread_kind_created_id
+          WHERE ${predicate}
+          ORDER BY created_at DESC, activity_id DESC
+          LIMIT ${limit + 1}
+        `.pipe(
+          Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.questionPage:query")),
+        );
+        const selected = rows.slice(0, limit);
+        const activities: OrchestrationThreadActivity[] = [];
+        let omittedCount = 0;
+        for (const row of selected) {
+          const decoded = decodeBoundedQuestionActivity(row);
+          if (Option.isSome(decoded)) activities.push(decoded.value);
+          else omittedCount += 1;
+        }
+        const hasMore = rows.length > limit;
+        const last = selected.at(-1);
+        const nextCursor =
+          hasMore && last
+            ? yield* Schema.decodeUnknownEffect(OrchestrationThreadActivityCursor)({
+                sequence: last.sequence,
+                createdAt: last.createdAt,
+                activityId: last.id,
+              }).pipe(
+                Effect.mapError(
+                  toPersistenceDecodeError("ProjectionSnapshotQuery.questionPage:nextCursor"),
+                ),
+              )
+            : null;
+        return { activities, hasMore, nextCursor, omittedCount };
+      });
+
+  const getThreadAsyncQuestionActivity: ProjectionSnapshotQueryShape["getThreadAsyncQuestionActivity"] =
+    (input) =>
+      Effect.gen(function* () {
+        if (!ASYNC_QUESTION_ACTIVITY_ID.test(input.activityId)) return Option.none();
+        const [row] = yield* sql<BoundedQuestionActivityRow>`
+          SELECT activity_id AS id, turn_id AS "turnId", tone, kind, summary,
+            CASE WHEN length(CAST(payload_json AS BLOB)) <= ${MAX_QUESTION_ACTIVITY_BYTES}
+              THEN payload_json ELSE NULL END AS "payloadJson",
+            sequence, created_at AS "createdAt"
+          FROM projection_thread_activities
+          WHERE activity_id = ${input.activityId} AND thread_id = ${input.threadId}
+            AND kind = 'provider.async-questions'
+          LIMIT 1
+        `.pipe(
+          Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.exactQuestion:query")),
+        );
+        return row ? decodeBoundedQuestionActivity(row) : Option.none();
+      });
+
   return {
+    hasActiveDesktopWork: () =>
+      Effect.gen(function* () {
+        // Reuse the shell's canonical lifecycle reconciliation, including ready
+        // rows with a still-running exact turn and terminalized stale sessions.
+        // Read only finite lifecycle columns, never titles/transcripts/history.
+        const roots = yield* sql<
+          SessionLifecycle & {
+            latestTurnId: TurnId | null;
+            latestState: OrchestrationLatestTurn["state"] | null;
+            latestCompletedAt: string | null;
+          }
+        >`
+        SELECT sessions.status, sessions.active_turn_id AS "activeTurnId",
+          NULL AS "lastError", sessions.updated_at AS "updatedAt",
+          turns.turn_id AS "latestTurnId", turns.state AS "latestState",
+          turns.completed_at AS "latestCompletedAt"
+        FROM projection_thread_sessions AS sessions
+        LEFT JOIN projection_threads AS threads ON threads.thread_id = sessions.thread_id
+        LEFT JOIN projection_turns AS turns ON turns.thread_id = threads.thread_id
+          AND turns.turn_id = threads.latest_turn_id
+        WHERE sessions.status IN ('starting', 'running')
+          OR (sessions.status = 'ready' AND sessions.active_turn_id IS NOT NULL)
+        LIMIT 4097
+      `.pipe(Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.desktopRoots")));
+        // More than 4096 candidate roots is explicit conservative power intent,
+        // not permission to load an unbounded model or claim all work is idle.
+        if (
+          roots.length > 4096 ||
+          roots.some((row) => {
+            const latest =
+              row.latestTurnId !== null && row.latestState !== null
+                ? {
+                    turnId: row.latestTurnId,
+                    state: row.latestState,
+                    completedAt: row.latestCompletedAt,
+                  }
+                : null;
+            const session = reconcileSessionLifecycle(row, latest);
+            return session.status === "starting" || session.status === "running";
+          })
+        )
+          return true;
+        return yield* sql<{ active: number }>`
+        WITH ${liveWorkBindingCtes(null, false, true)}
+        SELECT EXISTS (SELECT 1 FROM current_live_work_heads WHERE active = 1) AS active
+      `.pipe(
+          Effect.map((rows) => rows[0]?.active === 1),
+          Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.desktopChildren")),
+        );
+      }),
     getCommandReadModel,
     hasPendingContextBootstrap: (threadId) =>
       getContextBootstrapRow(threadId).pipe(
@@ -5154,6 +5794,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getFirstActiveThreadIdByProjectId,
     getThreadCheckpointContext,
     getThreadShellById,
+    getThreadContextWindowActivity: (threadId) =>
+      getThreadContextWindowRow({ threadId }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.getThreadContextWindowActivity:query",
+            "ProjectionSnapshotQuery.getThreadContextWindowActivity:decodeRow",
+          ),
+        ),
+        Effect.map(Option.map(mapActivityRow)),
+      ),
+    getThreadAsyncQuestionActivitiesPage,
+    getThreadAsyncQuestionActivity,
     getPostTerminalStaleSteerCandidates,
     getPostTerminalStaleSteerCandidateThreadIds,
     getCodexSteerAcceptanceEvidence,
@@ -5164,6 +5816,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadTurnWorkLogPresence,
     hasThreadTurnSubagentActivity,
     getThreadDetailById,
+    getThreadQuestionContextById,
     getThreadDetailSnapshotById,
   } satisfies ProjectionSnapshotQueryShape;
 });

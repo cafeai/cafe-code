@@ -78,3 +78,18 @@ describe("source localization migration", () => {
     expect(result.code).toContain('uiText("Close {value0}", { value0: name })');
   });
 });
+
+it("keeps received literal update output outside translation while localizing the adjacent authored control", () => {
+  const result = migrateUiCopy(
+    'const View = ({ output }) => <><pre translate="no">{output.text}</pre><button>Show failure details</button></>;',
+    "view.tsx",
+  );
+  expect(result.code).toContain('<pre translate="no">{output.text}</pre>');
+  expect(result.code).toContain('{uiText("Show failure details")}');
+  expect(result.code).not.toContain("uiText(output");
+  expect(
+    collectCopySites(
+      ts.createSourceFile("view.tsx", result.code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX),
+    ),
+  ).toHaveLength(0);
+});

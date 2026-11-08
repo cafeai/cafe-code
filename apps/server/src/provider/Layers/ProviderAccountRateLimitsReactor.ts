@@ -15,6 +15,13 @@
  * allowance, instead of when the prompt is submitted. The provider drivers own all credential
  * access; this reactor sees only the redacted resulting snapshot.
  *
+ * Codex sessions usually live in the separate provider daemon, whose driver instance
+ * observes native sign-in refusals. Settings reads the backend's instance instead, so a
+ * fresh definitive refusal (structured `unauthorized`, or a permanent refresh-token
+ * failure) is forwarded here to the backend instance, which re-binds it to the
+ * credentials currently on disk. Replayed or delayed events beyond a short freshness
+ * window are ignored so they cannot sign out credentials written by a later login.
+ *
  * This is a self-starting daemon layer: building it forks a scoped consumer of
  * `ProviderService.streamEvents` (a fresh PubSub subscription, independent of the other
  * consumers) for the lifetime of the runtime.
@@ -29,6 +36,7 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
 import { parseClaudeRateLimitUpdate } from "../claudeRateLimits.ts";
+import { codexRuntimeEventAuthenticationObservation } from "../codexAuthentication.ts";
 import { parseCodexRateLimitUpdate } from "../codexRateLimits.ts";
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { ProviderService } from "../Services/ProviderService.ts";
@@ -37,6 +45,24 @@ const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const GROK_DRIVER = ProviderDriverKind.make("grok");
 const TERMINAL_ACCOUNT_USAGE_REFRESH_THROTTLE_MS = 60_000;
+/** Daemon and backend share one host clock; replay overlap is older than this. */
+export const AUTHENTICATION_REFUSAL_FRESHNESS_MS = 60_000;
+
+export function providerAuthenticationRefusalInstanceFromEvent(
+  event: ProviderRuntimeEvent,
+  nowMs: number,
+) {
+  if (event.provider !== CODEX_DRIVER || event.providerInstanceId === undefined) return null;
+  const createdAtMs = Date.parse(event.createdAt);
+  if (
+    !Number.isFinite(createdAtMs) ||
+    Math.abs(nowMs - createdAtMs) > AUTHENTICATION_REFUSAL_FRESHNESS_MS
+  )
+    return null;
+  return codexRuntimeEventAuthenticationObservation(event) === false
+    ? event.providerInstanceId
+    : null;
+}
 
 export function providerAccountRateLimitUpdateFromEvent(event: ProviderRuntimeEvent) {
   if (event.type !== "account.rate-limits.updated") return null;
@@ -101,10 +127,15 @@ export const ProviderAccountRateLimitsReactorLive = Layer.effectDiscard(
           }
         }
 
+        const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+        const refusedInstanceId = providerAuthenticationRefusalInstanceFromEvent(event, nowMs);
+        if (refusedInstanceId !== null && registry.observeInstanceAuthenticationRefusal) {
+          yield* registry.observeInstanceAuthenticationRefusal(refusedInstanceId);
+        }
+
         const refreshInstanceId = providerAccountUsageRefreshInstanceFromEvent(event);
         if (refreshInstanceId === null) return;
 
-        const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
         const shouldRefresh = yield* Ref.modify(terminalUsageRefreshAtRef, (previous) => {
           const refreshKey = String(refreshInstanceId);
           const previousRefreshAt = previous.get(refreshKey);

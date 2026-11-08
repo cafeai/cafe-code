@@ -17,6 +17,37 @@ import {
 } from "./windows-native-artifact-smoke.ts";
 
 describe("Windows native artifact smoke", () => {
+  it("recognizes the sealed provider bundle's Node without a second bootstrap distribution", () => {
+    const install = join(import.meta.dirname, "private-install");
+    const cafe = join(import.meta.dirname, "private-cafe");
+    const bundledNode = join(
+      install,
+      "resources",
+      "managed-runtime",
+      "providers",
+      "win-x64",
+      "content",
+      "node",
+      "node.exe",
+    );
+    const oldDuplicate = join(
+      install,
+      "resources",
+      "managed-runtime",
+      "node",
+      "win-x64",
+      "node.exe",
+    );
+    assert.equal(
+      inspectWindowsInstallFailure(install, cafe, (path) => path === bundledNode).managedNode,
+      true,
+    );
+    assert.equal(
+      inspectWindowsInstallFailure(install, cafe, (path) => path === oldDuplicate).managedNode,
+      false,
+    );
+  });
+
   it("distinguishes extraction from bootstrap progress using only fixed presence receipts", () => {
     const install = join(import.meta.dirname, "private-install");
     const cafe = join(import.meta.dirname, "private-cafe");

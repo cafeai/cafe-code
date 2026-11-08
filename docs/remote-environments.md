@@ -15,7 +15,7 @@ session storage. Reconnect uses the bearer and mints a fresh short-lived WS toke
 An expired or revoked session requires signing in again.
 
 Owners can optionally enable **Two-factor authentication** in Settings →
-Connections & remote access on the selected server. Scan the QR code in an
+Connections on the selected server. Scan the QR code in an
 authenticator app (or enter the manual key), then confirm a working six-digit
 code. Enrollment expires after ten minutes and belongs to the exact owner
 session that started it. Ten recovery codes are shown once; save them privately.
@@ -96,7 +96,14 @@ before launching the successor, retaining the same responsible app and permissio
 The absolute main entrypoint and configured Debug home remain fixed, and inherited
 Electron Node-only mode is cleared. Packaged release relaunch is unchanged. App output
 remains in private `source-launch-*.stdout.log` / `*.stderr.log` files under Cafe's
-restart log directory. An explicit custom restart command retains its chosen
+restart log directory. Console source starts now mirror those exact files to
+the terminal until Ctrl+C stops the observer; the LaunchServices app keeps
+running. `corepack yarn workspace @cafecode/desktop start --no-follow` retains
+launch-and-return behavior for scripts. The read-only follower binds to the
+file identities captured at creation, refuses links/replacements or unsafe
+ownership, preserves stdout/stderr bytes separately and bounds each pending
+read/write to 64 KiB. It never probes or signals an app PID. Planned restarts
+remain detached, and an explicit custom restart command retains its chosen
 launch context.
 
 This is a source-development identity policy, not a general macOS privacy reset.
@@ -117,8 +124,16 @@ origin (including its port) and certificate, is stored privately in the local
 Cafe app data, and does not change operating-system trust. A changed certificate
 needs new approval. Expired certificates, wrong addresses and other TLS failures
 cannot be overridden. Pure browser clients use their browser/OS certificate trust.
-Approval is offered only when explicitly adding a saved environment; background
-reconnects never display trust prompts or replay a password.
+Approval is offered when explicitly adding a saved environment or selecting **Review
+certificate** on a saved connection. When a failed connection presents a changed or
+untrusted certificate, Cafe stops retrying and displays a security warning. Background
+inspection sends no HTTP credentials, never displays a dialog, and never grants trust.
+The explicit review warns about interception and disclosure of the saved sign-in, shows
+the previous and new SHA-256 fingerprints, and defaults to **Cancel**. Accepting pins
+only the displayed certificate and origin; Cafe verifies the public server identity
+before reconnecting with the existing bearer. Cancellation, invalid certificates and
+failed persistence keep the connection blocked. An edited or removed connection cannot
+be revived by a late review. Background reconnects never replay a password.
 
 Source launches through `yarn start:desktop` filter only Chromium's exact
 `ssl_client_socket_impl.cc` authority-handshake line (`net_error -202`) from
@@ -128,8 +143,9 @@ Cafe's `TLS certificate rejected` warning with a finite reason, without URLs,
 query tokens or certificate contents. Other TLS failures, GPU errors and app
 output retain their original bytes. Filtering uses bounded line buffering and
 backpressure and drains final stderr before the launcher exits. Headless server
-output, direct packaged-app launches and macOS LaunchServices restart logs keep
-their existing output path.
+output, direct packaged-app launches and macOS LaunchServices logs keep their
+existing output path. The macOS source console follower mirrors those raw log
+files, including their original stderr, without rewriting the stored files.
 
 This changes log presentation only. Certificate approval remains bound to the
 exact HTTPS/WSS origin, port and fingerprint. Electron's earlier session verifier
@@ -139,8 +155,9 @@ not move its origin-bound approval there or change global TLS trust.
 Cafe refreshes its generated self-signed certificate on backend startup when
 the current LAN addresses are missing from it. After a DHCP address change,
 restart/update Cafe on the server before connecting to the new address. That
-refresh changes its fingerprint, so saved desktop clients need to add the server
-again and approve its new certificate. Externally provisioned certificates keep
+refresh changes its fingerprint, so saved desktop clients need to select **Review
+certificate** and explicitly approve the new identity. Pairing again is unnecessary
+while the saved session remains valid. Externally provisioned certificates keep
 their existing identity policy.
 
 The **Workspace server** selector beneath the sidebar logo appears only after a
@@ -188,6 +205,16 @@ policy still apply. Adding a connection does not install an SSH tunnel or alter
 the host's firewall. The Mac desktop app continues to run its local Cafe helper
 for its own UI, storage and native integrations; project execution can stay on
 the PC.
+
+## Custom artwork and installed web apps
+
+The primary server's custom sidebar image also supplies its WebUI loading
+screens, favicon, PWA home-screen/launch icon and notification artwork. Signed-out
+startup uses a neutral coffee mark. Existing Android installs may retain their
+old icon; after updating the server, sign in with the custom image selected and
+install the web app again. The image does not need to be uploaded again. See
+[web application artwork](web-app-branding.md) for private delivery, Android
+installer handling and qualification limits.
 
 ## LAN access and firewall ports
 

@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { ProjectId, ThreadId } from "@cafecode/contracts";
+import { EventId, ProjectId, ThreadId, TurnId } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -17,6 +17,8 @@ import {
 import { checkpointRefForThreadTurn } from "../checkpointing/Utils.ts";
 import { ServerConfig } from "../config.ts";
 import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
+import { ProjectionThreadActivityRepositoryLive } from "../persistence/Layers/ProjectionThreadActivities.ts";
+import { ProjectionThreadActivityRepository } from "../persistence/Services/ProjectionThreadActivities.ts";
 import { RepositoryIdentityResolver } from "../project/Services/RepositoryIdentityResolver.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./Layers/ProjectionSnapshotQuery.ts";
 import {
@@ -76,6 +78,7 @@ const hardDeleteEngineLayer = Layer.effect(
 );
 
 const testLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
+  Layer.provideMerge(ProjectionThreadActivityRepositoryLive),
   Layer.provideMerge(hardDeleteEngineLayer),
   Layer.provideMerge(repositoryIdentityResolverLayer),
   Layer.provideMerge(checkpointStoreLayer),
@@ -97,6 +100,7 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
       checkpointDeleteCalls.length = 0;
 
       const sql = yield* SqlClient.SqlClient;
+      const activities = yield* ProjectionThreadActivityRepository;
       const snapshotQuery = yield* ProjectionSnapshotQuery;
       const config = yield* ServerConfig;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -273,6 +277,40 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
             ${now}
           )
       `;
+
+      // Mint owner witnesses through the real repository transaction. A raw
+      // sidecar row would not prove that admitted starts survive until purge.
+      for (const [threadId, turnId, activityId] of [
+        [targetThreadId, "turn-hard-delete", "native-agent-start-hard-delete"],
+        [survivorThreadId, "turn-survivor", "native-agent-start-survivor"],
+      ] as const) {
+        yield* activities.upsert({
+          activityId: EventId.make(activityId),
+          threadId,
+          turnId: TurnId.make(turnId),
+          tone: "info",
+          kind: "task.started",
+          summary: "Native agent started",
+          payload: {
+            taskId: "native-hard-delete-task",
+            subagent: {
+              threadId: "native-hard-delete-task",
+              runtimeId: "10000000-0000-4000-8000-000000000207",
+              status: "active",
+            },
+          },
+          sequence: 100,
+          createdAt: now,
+        });
+      }
+      const bindingOwnersBefore = yield* sql<{ readonly threadId: string; readonly valid: number }>`
+        SELECT thread_id AS "threadId", valid FROM projection_native_agent_bindings
+        ORDER BY thread_id
+      `;
+      assert.deepEqual(bindingOwnersBefore, [
+        { threadId: targetThreadId, valid: 1 },
+        { threadId: survivorThreadId, valid: 1 },
+      ]);
 
       yield* sql`
         INSERT INTO projection_thread_sessions (
@@ -812,7 +850,29 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
       assert.isTrue(yield* exists(attachmentPath));
       assert.isTrue(yield* exists(survivorAttachmentPath));
 
-      const result = yield* hardDeleteThreadLocalData({ threadId: targetThreadId });
+      // Qualify explicit purge and tombstone guards independently of SQLite's
+      // optional FK enforcement. Both late writes copy a previously accepted
+      // witness; only the permanently retired target identity has changed.
+      yield* sql`PRAGMA foreign_keys = OFF`;
+      const result = yield* Effect.gen(function* () {
+        const result = yield* hardDeleteThreadLocalData({ threadId: targetThreadId });
+        const lateInsert = yield* Effect.result(sql`
+          INSERT INTO projection_native_agent_bindings(
+            thread_id, runtime_id, work_id, turn_id, activity_id,
+            sequence_known, sequence, activity_sequence, created_at, payload_json, valid
+          )
+          SELECT ${targetThreadId}, runtime_id, work_id, turn_id, activity_id,
+            sequence_known, sequence, activity_sequence, created_at, payload_json, valid
+          FROM projection_native_agent_bindings WHERE thread_id = ${survivorThreadId}
+        `);
+        assert.equal(lateInsert._tag, "Failure");
+        const lateUpdate = yield* Effect.result(sql`
+          UPDATE projection_native_agent_bindings SET thread_id = ${targetThreadId}
+          WHERE thread_id = ${survivorThreadId}
+        `);
+        assert.equal(lateUpdate._tag, "Failure");
+        return result;
+      }).pipe(Effect.ensuring(sql`PRAGMA foreign_keys = ON`.pipe(Effect.orDie)));
       assert.deepEqual(result, { deleted: true });
 
       // Model an overlapping older backend attempting lazy hydration after
@@ -849,6 +909,7 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
         SELECT
           (SELECT COUNT(*) FROM projection_thread_messages WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM projection_thread_activities WHERE thread_id = ${targetThreadId}) +
+          (SELECT COUNT(*) FROM projection_native_agent_bindings WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM projection_thread_sessions WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM provider_session_runtime WHERE thread_id = ${targetThreadId}) +
           (SELECT COUNT(*) FROM provider_supervisor_sessions WHERE thread_id = ${targetThreadId}) +
@@ -871,6 +932,11 @@ it.layer(Layer.fresh(testLayer))("hardDeleteThreadLocalData", (it) => {
       `;
       assert.equal(targetProjectionRows[0]?.count, 0);
       assert.equal(targetDetailRows[0]?.count, 0);
+
+      const survivingBindings = yield* sql<{ readonly threadId: string; readonly valid: number }>`
+        SELECT thread_id AS "threadId", valid FROM projection_native_agent_bindings
+      `;
+      assert.deepEqual(survivingBindings, [{ threadId: survivorThreadId, valid: 1 }]);
 
       const targetTombstones = yield* sql<{ readonly count: number }>`
         SELECT COUNT(*) AS "count"

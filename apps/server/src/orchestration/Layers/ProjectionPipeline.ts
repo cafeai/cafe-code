@@ -1759,6 +1759,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               "recovery" in event.payload.activity.payload &&
               typeof event.payload.activity.payload.recovery === "string" &&
               [
+                "codex-transient-preparation",
                 "codex-transient-recovery-waiting",
                 "codex-transient-continuation-attempted",
                 "codex-transient-continuation-resubmit-attempted",

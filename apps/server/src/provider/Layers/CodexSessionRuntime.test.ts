@@ -67,6 +67,7 @@ import {
   CODEX_SUMMARY_HISTORY_MAX_PAGES,
   CODEX_SUMMARY_HISTORY_MAX_TURNS,
   CODEX_SUMMARY_HISTORY_PAGE_TURN_LIMIT,
+  CodexSessionRuntimePendingUserInputNotFoundError,
   acceptsCodexChildNotification,
   acknowledgeCodexPendingSteerProcessing,
   acknowledgeCodexReasoningEffortRequest,
@@ -216,6 +217,7 @@ for (const request of [
     expected: 600_000,
   },
   { label: "failed-opening", context: 800_000, failed: true, expected: 800_000 },
+  { label: "native-question-response-winner", questionRace: true, expected: null },
   {
     label: "diagnostic-source",
     context: 800_000,
@@ -225,7 +227,9 @@ for (const request of [
   },
 ] as const)
   effectIt.effect(
-    `records ${request.label} opening request before retaining explicit goal controls`,
+    "questionRace" in request
+      ? "accepts only one concurrent answer for an exact native question and emits one acknowledgement"
+      : `records ${request.label} opening request before retaining explicit goal controls`,
     () =>
       Effect.gen(function* () {
         // The real runtime and typed JSONL client run against a scoped in-memory
@@ -238,6 +242,11 @@ for (const request of [
         const resumeWillFailRecoverably = "recoverable" in request;
         const responseWillBeMismatched = "mismatched" in request;
         const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
+        const nativeQuestionReplies: unknown[] = [];
+        const nativeQuestionReturned = yield* Deferred.make<{
+          readonly result?: unknown;
+          readonly error?: unknown;
+        }>();
         const nativeThreadId = "synthetic-goal-thread";
         const goal = {
           threadId: nativeThreadId,
@@ -293,7 +302,17 @@ for (const request of [
                       id?: string | number;
                       method: string;
                       params?: Record<string, unknown>;
+                      result?: unknown;
+                      error?: unknown;
                     };
+                    if (
+                      request.id === "single-winner-native-question" &&
+                      request.method === undefined
+                    ) {
+                      nativeQuestionReplies.push(request);
+                      yield* Deferred.succeed(nativeQuestionReturned, request);
+                      continue;
+                    }
                     calls.push({
                       method: request.method,
                       ...(request.params ? { params: request.params } : {}),
@@ -358,7 +377,7 @@ for (const request of [
         let accessorReads = 0;
         const runtimeOptions = {
           threadId: ThreadId.make("synthetic-goal-cafe-thread"),
-          binaryPath: "never-launched-provider",
+          binaryPath: "/test-only/never-launched-provider.exe",
           environment: {},
           cwd: process.cwd(),
           runtimeMode: "full-access",
@@ -452,6 +471,97 @@ for (const request of [
             ? { model_auto_compact_token_limit: request.expected }
             : {}),
         });
+        if ("questionRace" in request) {
+          // Exercise the public runtime and its real typed JSONL request
+          // handler. The peer owns one native callback; no injected callback,
+          // copied Deferred or implementation helper supplies its outcome.
+          const questionObserved = yield* Deferred.make<ProviderEvent>();
+          const isBarrier = (event: ProviderEvent) =>
+            event.method === "warning" &&
+            event.payload !== null &&
+            typeof event.payload === "object" &&
+            Reflect.get(event.payload, "message") === "Question response fixture barrier";
+          const events = yield* runtime.events.pipe(
+            Stream.tap((event) =>
+              event.method === "item/tool/requestUserInput"
+                ? Deferred.succeed(questionObserved, event)
+                : Effect.void,
+            ),
+            Stream.takeUntil(isBarrier),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          yield* Queue.offer(
+            output,
+            encoder.encode(
+              `${encodeProviderJsonString({
+                id: "single-winner-native-question",
+                method: "item/tool/requestUserInput",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: "native-question-turn",
+                  itemId: "native-question-item",
+                  isBlocking: true,
+                  questions: [
+                    {
+                      id: "route",
+                      header: "Route",
+                      question: "Which route?",
+                      options: [
+                        { label: "A", description: "Take route A" },
+                        { label: "B", description: "Take route B" },
+                      ],
+                    },
+                  ],
+                },
+              })}\n`,
+            ),
+          );
+          const question = yield* Deferred.await(questionObserved);
+          const requestId = question.requestId;
+          assert.ok(requestId);
+          const attempts = yield* Effect.all(
+            ["A", "B"].map((value) =>
+              runtime.respondToUserInput(requestId, { route: value }).pipe(
+                Effect.match({
+                  onFailure: (error) => ({ accepted: false as const, value, error }),
+                  onSuccess: () => ({ accepted: true as const, value }),
+                }),
+              ),
+            ),
+            { concurrency: "unbounded" },
+          );
+          const accepted = attempts.filter((attempt) => attempt.accepted);
+          const rejected = attempts.filter((attempt) => !attempt.accepted);
+          assert.equal(accepted.length, 1);
+          assert.equal(rejected.length, 1);
+          const loser = rejected[0]!;
+          if (!Schema.is(CodexSessionRuntimePendingUserInputNotFoundError)(loser.error))
+            return assert.fail("Expected the exact native pending-question loser error");
+          assert.equal(loser.error.requestId, requestId);
+          const nativeReply = yield* Deferred.await(nativeQuestionReturned);
+          const expectedAnswer = { answers: { route: { answers: [accepted[0]!.value] } } };
+          assert.equal(nativeReply.error, undefined);
+          assert.deepEqual(nativeReply.result, expectedAnswer);
+          yield* Queue.offer(
+            output,
+            encoder.encode(
+              `${encodeProviderJsonString({
+                method: "warning",
+                params: { threadId: nativeThreadId, message: "Question response fixture barrier" },
+              })}\n`,
+            ),
+          );
+          const observed = Array.from(yield* Fiber.join(events));
+          const answered = observed.filter(
+            (event) => event.method === "item/tool/requestUserInput/answered",
+          );
+          assert.equal(answered.length, 1);
+          assert.equal(answered[0]!.requestId, requestId);
+          assert.deepEqual(answered[0]!.payload, expectedAnswer);
+          assert.equal(nativeQuestionReplies.length, 1);
+          return;
+        }
         if ("diagnostic" in request) {
           // Exercise the real runtime's typed JSONL notification admission,
           // not merely the pure tracker. Install the exact output observer
@@ -2846,7 +2956,7 @@ describe("Codex subagent thread ownership validation", () => {
           );
         });
         const failure = yield* readCodexSubagentThreadTransient({
-          binaryPath: "synthetic-provider-never-spawned",
+          binaryPath: "/test-only/synthetic-provider-never-spawned.exe",
           appServerCwd: "synthetic-cwd",
           rootProviderThreadId: root.id,
           subagentThreadId: nestedChild.id,
@@ -3506,6 +3616,122 @@ describe("Codex notification emission timestamps", () => {
 });
 
 describe("Codex protocol diagnostic redaction", () => {
+  it("redacts image attachment identities only from decoded diagnostic copies", () => {
+    const item = {
+      type: "imageGeneration",
+      id: "image-1",
+      status: "completed",
+      fileId: "private-image-file-sentinel",
+      generationId: "private-image-generation-sentinel",
+      inputImages: [
+        { path: "/private-input-path-sentinel.png", sha256: "private-input-digest-sentinel" },
+      ],
+      revisedPrompt: "A public image description",
+      savedPath: "/synthetic/generated.png",
+    } as const;
+    const wire = {
+      method: "item/completed",
+      params: { threadId: "thread-1", turnId: "turn-1", completedAtMs: 123, item },
+    } as const;
+    // The real typed decoder must admit the original File representation.
+    // Its diagnostic copy intentionally lacks a usable attachment reference;
+    // it is never substituted for this decoded native notification.
+    const decoded = decodeNativeNotificationForDiagnostics(wire);
+    assert.deepEqual(decoded, wire);
+    const diagnostic = sanitizeCodexProtocolDiagnosticPayload({
+      direction: "incoming",
+      stage: "decoded",
+      payload: decoded,
+    });
+    const serialized = encodeProviderJsonString(diagnostic);
+    assert.doesNotMatch(
+      serialized,
+      /private-(?:image-file|image-generation|input-path|input-digest)-sentinel/,
+    );
+    assert.doesNotMatch(serialized, /"(?:fileId|generationId|inputImages)"/);
+    assert.match(serialized, /"imageGeneration"/);
+    assert.match(serialized, /"image-1"/);
+    assert.match(serialized, /A public image description/);
+    assert.equal(item.fileId, "private-image-file-sentinel");
+    assert.equal(item.generationId, "private-image-generation-sentinel");
+    assert.equal(item.inputImages[0].path, "/private-input-path-sentinel.png");
+    assert.equal(item.inputImages[0].sha256, "private-input-digest-sentinel");
+    assert.deepEqual(decodeNativeNotificationForDiagnostics(wire), wire);
+  });
+
+  it("redacts image references in aggregate turn and retained-thread diagnostics", () => {
+    const item = {
+      type: "imageGeneration",
+      id: "image-1",
+      status: "completed",
+      result: "legacy-inline-image",
+      fileId: "private-aggregate-file-sentinel",
+      generationId: "private-aggregate-generation-sentinel",
+      inputImages: [
+        { path: "/private-aggregate-path-sentinel.png", sha256: "private-aggregate-hash-sentinel" },
+      ],
+    } as const;
+    const turn = { id: "turn-1", status: "completed", items: [item], error: null };
+    for (const method of ["turn/started", "turn/completed", "thread/started"] as const) {
+      const params =
+        method === "thread/started"
+          ? { thread: { turns: [turn] } }
+          : { threadId: "thread-1", turn };
+      const diagnostic = sanitizeCodexProtocolDiagnosticPayload({
+        direction: "incoming",
+        stage: "decoded",
+        payload: { method, params },
+      });
+      const serialized = encodeProviderJsonString(diagnostic);
+      assert.doesNotMatch(serialized, /private-aggregate-(?:file|generation|path|hash)-sentinel/);
+      assert.match(serialized, /"imageGeneration"/);
+      assert.match(serialized, /"legacy-inline-image"/);
+    }
+    assert.equal(item.fileId, "private-aggregate-file-sentinel");
+    assert.equal(item.generationId, "private-aggregate-generation-sentinel");
+    assert.equal(item.inputImages[0].path, "/private-aggregate-path-sentinel.png");
+  });
+
+  it("does not invoke received proxy or accessor code while selecting diagnostic methods", () => {
+    let reads = 0;
+    const receivedProxy = new Proxy(
+      {},
+      {
+        get() {
+          reads += 1;
+          throw new Error("private-proxy-sentinel");
+        },
+        ownKeys() {
+          reads += 1;
+          throw new Error("private-proxy-sentinel");
+        },
+        getOwnPropertyDescriptor() {
+          reads += 1;
+          throw new Error("private-proxy-sentinel");
+        },
+      },
+    );
+    const accessor = Object.defineProperty({}, "method", {
+      get() {
+        reads += 1;
+        throw new Error("private-accessor-sentinel");
+      },
+    });
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    for (const payload of [receivedProxy, accessor, revoked.proxy]) {
+      assert.equal(
+        sanitizeCodexProtocolDiagnosticPayload({
+          direction: "incoming",
+          stage: "decoded",
+          payload,
+        }),
+        "[Private image metadata omitted]",
+      );
+    }
+    assert.equal(reads, 0);
+  });
+
   it("redacts the actual typed schema cause of malformed private attachment metadata", () => {
     for (const invalidField of ["attachmentId", "identityKey", "operation"] as const) {
       const params = {
@@ -4248,7 +4474,33 @@ describe("Codex failed-root continuation authority", () => {
     () =>
       Effect.gen(function* () {
         for (const lateStatus of [false, true]) {
-          for (const transient of [false, true]) {
+          for (const failure of [
+            {
+              error: {
+                message: "Definitive native request failed",
+                codexErrorInfo: "unauthorized",
+              },
+              category: undefined,
+            },
+            {
+              error: {
+                message: "Definitive native request failed",
+                codexErrorInfo: "internalServerError",
+              },
+              category: "server",
+            },
+            // Exercise the exact native response ceiling through decoding,
+            // completion commit and owner proof, not a fabricated category.
+            {
+              error: {
+                message: "Incomplete response returned, reason: max_output_tokens",
+                codexErrorInfo: "other",
+                additionalDetails: null,
+                misalignment: null,
+              },
+              category: "response-limit",
+            },
+          ] as const) {
             const boundary = yield* makeBoundary();
             yield* Ref.set(boundary.completionsRef, new Map());
             yield* Ref.set(boundary.sessionRef, {
@@ -4276,10 +4528,7 @@ describe("Codex failed-root continuation authority", () => {
               threadId: "native-thread",
               turnId: failedTurnId,
               willRetry: false,
-              error: {
-                message: "Definitive native request failed",
-                codexErrorInfo: transient ? "internalServerError" : "unauthorized",
-              },
+              error: failure.error,
             });
             assert.equal(
               yield* commitCodexRootErrorLifecycleBoundary({
@@ -4354,7 +4603,7 @@ describe("Codex failed-root continuation authority", () => {
             assert.equal(published, true);
             assert.equal(after.status, "ready");
             assert.equal(after.activeTurnId, undefined);
-            assert.equal(after.lastError, "Definitive native request failed");
+            assert.equal(after.lastError, failure.error.message);
             assert.equal(after.updatedAt, observedAt);
             assert.deepEqual(
               readCodexRootTurnFailure({
@@ -4370,7 +4619,7 @@ describe("Codex failed-root continuation authority", () => {
                 turnId: failedTurnId,
                 providerThreadId: "native-thread",
                 observedAt,
-                ...(transient ? { category: "server" } : {}),
+                ...(failure.category !== undefined ? { category: failure.category } : {}),
               },
             );
             assert.equal((yield* Ref.get(pendingAggregateRef)).size, 0);
@@ -9465,6 +9714,53 @@ describe("openCodexThread", () => {
       assert.equal(Reflect.has(calls[1]!.payload as object, "threadId"), false);
     },
   );
+
+  it.each([
+    {
+      type: "modelProviderMismatch",
+      modelProvider: "thread not found",
+      currentModelProvider: "current-provider",
+    },
+    { type: "modelProviderNotConfigured", modelProvider: "missing thread" },
+    {
+      type: "modelProviderPolicyConflict",
+      modelProvider: "unknown thread",
+      requiredModelProvider: "required-provider",
+    },
+  ])("preserves the exact native resume refusal without a blank fallback: %j", async (data) => {
+    const calls: Array<{ method: string; payload: unknown }> = [];
+    const failure = CodexErrors.CodexAppServerRequestError.invalidRequest(
+      "This chat uses thread not found, but its provider configuration has changed.",
+      data,
+    );
+    const error = await Effect.runPromise(
+      openCodexThread({
+        client: {
+          raw: {
+            request: (method, payload) => {
+              calls.push({ method, payload });
+              return method === "thread/resume"
+                ? Effect.fail(failure)
+                : Effect.succeed(makeThreadOpenResponse("unrelated-blank-thread"));
+            },
+          },
+        },
+        threadId: ThreadId.make("provider-refusal-thread"),
+        runtimeMode: "approval-required",
+        cwd: process.cwd(),
+        requestedModel: "gpt-6.1-sol",
+        serviceTier: undefined,
+        resumeThreadId: "preserved-native-history",
+        // Exercise ordinary manual resume as well: the strict failed-root
+        // recovery policy already disallows every blank-thread fallback.
+      }).pipe(Effect.flip),
+    );
+    assert.equal(error, failure);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.method, "thread/resume");
+    assert.equal(Reflect.get(calls[0]!.payload as object, "threadId"), "preserved-native-history");
+    assert.deepEqual(failure.data, data);
+  });
 
   it("propagates non-recoverable resume failures", async () => {
     const client = {

@@ -16,9 +16,7 @@ describe("SettingsSidebarNav", () => {
     expect(items.find((item) => item.label === "History")?.activePaths).toEqual([
       "/settings/recently-deleted",
     ]);
-    expect(items.find((item) => item.to === "/settings/connections")?.label).toBe(
-      "Connections & remote access",
-    );
+    expect(items.find((item) => item.to === "/settings/connections")?.label).toBe("Connections");
   });
   it("places Dictation in the AI and integrations settings group", () => {
     const integrations = SETTINGS_NAV_GROUPS.find((group) => group.label === "AI & Integrations");

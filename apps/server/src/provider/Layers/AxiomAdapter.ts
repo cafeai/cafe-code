@@ -1849,7 +1849,12 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* <Browser
             );
           content[id] = property.type === "array" ? values : (values[0] ?? "");
         }
-        yield* Deferred.succeed(pending.deferred, { action: "accept", content });
+        // The callback's finalizer, not this method, owns map retirement. It
+        // may not have run when a concurrent UI/MCP reply reaches this same
+        // entry, so only the Deferred's atomic settlement winner receives ACK.
+        const accepted = yield* Deferred.succeed(pending.deferred, { action: "accept", content });
+        if (!accepted)
+          return yield* invalid("respondToUserInput", "The Axiom question is no longer pending.");
       }),
     compactThread: (threadId) =>
       lock(

@@ -14,6 +14,7 @@ import { CheckIcon, CopyIcon, Maximize2Icon, MinusIcon, PlusIcon } from "lucide-
 import { copyTextToClipboard } from "../lib/copyToClipboard";
 import { createMermaidPng } from "../lib/imageExport";
 import { renderMermaid, type MermaidResult } from "../lib/mermaid/renderService";
+import { scrollViewportOnArrowKey } from "../lib/viewportKeyboardScroll";
 import { useDelayedFlag } from "../hooks/useDelayedFlag";
 import { Button } from "./ui/button";
 import { Dialog, DialogDescription, DialogPopup, DialogTitle, DialogTrigger } from "./ui/dialog";
@@ -199,6 +200,7 @@ function ExpandedDiagram({
           uiLocale,
         )}
         tabIndex={0}
+        onKeyDown={scrollViewportOnArrowKey}
         onPointerDown={beginPan}
         onPointerMove={(event) => {
           const drag = dragRef.current;

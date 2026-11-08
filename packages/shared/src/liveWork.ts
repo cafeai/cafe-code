@@ -91,6 +91,74 @@ export function isLiveWorkRuntimeCurrent(
   );
 }
 
+/** SQLite BINARY text order, including non-BMP ids, without viewer locale rules. */
+function compareText(left: string, right: string): number {
+  const a = [...left];
+  const b = [...right];
+  for (let index = 0; index < Math.min(a.length, b.length); index++) {
+    const difference = a[index]!.codePointAt(0)! - b[index]!.codePointAt(0)!;
+    if (difference !== 0) return difference;
+  }
+  return a.length - b.length;
+}
+
+function compareActivities(
+  left: OrchestrationThreadActivity,
+  right: OrchestrationThreadActivity,
+): number {
+  if (left.sequence !== right.sequence) {
+    if (left.sequence === undefined) return -1;
+    if (right.sequence === undefined) return 1;
+    return left.sequence - right.sequence;
+  }
+  return compareText(left.createdAt, right.createdAt) || compareText(left.id, right.id);
+}
+
+function orderActivities(activities: ReadonlyArray<OrchestrationThreadActivity>) {
+  return activities.every(
+    (activity, index) => index === 0 || compareActivities(activities[index - 1]!, activity) <= 0,
+  )
+    ? activities
+    : activities.toSorted(compareActivities);
+}
+
+/**
+ * Current explicit native-agent binding evidence, independently of whether its
+ * latest lifecycle head is active. Shared active-only rosters and work counts
+ * must not lose the owning start when completion or visibility retires a head.
+ * This selects presentation evidence only; it never grants a control or history
+ * route and preserves the source activity's exact turn/runtime/child identity.
+ */
+export function deriveCurrentNativeAgentStarts(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+) {
+  const agentStarts = new Map<
+    string,
+    { activity: OrchestrationThreadActivity; observation: LiveWorkObservation }
+  >();
+  for (const activity of orderActivities(activities)) {
+    if (activity.kind !== "task.started") continue;
+    const observation = readLiveWorkObservation(activity);
+    const subagent = record(activity.payload)?.subagent;
+    // Claude and Codex use one stable native task/child identity inside the
+    // exact query runtime. A generic task control or two different task/child
+    // namespaces do not establish that contract. Only a fully bound explicit
+    // start may replace its owning root turn; progress alone cannot do so.
+    if (
+      !observation ||
+      !isSubagent(subagent) ||
+      subagent.runtimeId !== observation.runtimeId ||
+      subagent.threadId !== observation.workId
+    )
+      continue;
+    agentStarts.set(JSON.stringify([observation.runtimeId, observation.workId]), {
+      activity,
+      observation,
+    });
+  }
+  return [...agentStarts.values()];
+}
+
 /** Shared with the small server projection. A quiet transcript is never liveness evidence. */
 export function deriveLiveWorkObservations(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
@@ -100,11 +168,14 @@ export function deriveLiveWorkObservations(
     string,
     { activity: OrchestrationThreadActivity; observation: LiveWorkObservation }
   >();
-  for (const activity of activities.toSorted((a, b) =>
-    a.sequence !== undefined && b.sequence !== undefined && a.sequence !== b.sequence
-      ? a.sequence - b.sequence
-      : a.createdAt.localeCompare(b.createdAt) || String(a.id).localeCompare(String(b.id)),
-  )) {
+  const ordered = orderActivities(activities);
+  const agentStarts = new Map(
+    deriveCurrentNativeAgentStarts(ordered).map(({ activity, observation }) => [
+      JSON.stringify([observation.runtimeId, observation.workId]),
+      activity,
+    ]),
+  );
+  for (const activity of ordered) {
     const observation = readLiveWorkObservation(activity);
     if (!observation) {
       const payload = record(activity.payload);
@@ -125,6 +196,22 @@ export function deriveLiveWorkObservations(
         }
       continue;
     }
+    const agentStart = observation.agent
+      ? agentStarts.get(JSON.stringify([observation.runtimeId, observation.workId]))
+      : undefined;
+    // The explicit start owns this native task slot across root turns. Keep
+    // historical activity and control identities untouched, but do not count
+    // their obsolete per-turn heads as additional workers. A delayed terminal,
+    // progress or visibility edge from an older owning turn cannot retire or
+    // resurrect the replacement, even if it has a later canonical sequence.
+    // Retaining start evidence separately also fences a late old-turn update
+    // after an unstamped same-turn edge has invalidated the current live head.
+    if (agentStart && activity.turnId !== agentStart.turnId) continue;
+    //
+    // Tasks without this exact child binding and all tools retain their
+    // existing turn namespace. Item/control ids alone do not prove a runtime-
+    // global child binding. Same-turn task reincarnation remains subject to
+    // the producer's unchanged explicit run/tool/generation admission guards.
     const key = JSON.stringify([
       observation.runtimeId,
       activity.turnId,

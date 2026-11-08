@@ -27,7 +27,13 @@ import {
   SubagentRuntimeId,
 } from "@cafecode/contracts";
 import { readCafeCodeEnv } from "@cafecode/shared/compatEnv";
-import { claudePublicSummaryDisplayText } from "../../provider/claudePublicSummary.ts";
+import {
+  isPublicReasoningSummaryProvider,
+  PUBLIC_REASONING_SUMMARY_CHARS,
+  PUBLIC_REASONING_SUMMARY_STREAM_KIND,
+  PUBLIC_REASONING_SUMMARY_VERSION,
+  publicReasoningSummaryDisplayText,
+} from "../../provider/publicReasoningSummary.ts";
 import { normalizeCodexAsyncQuestions } from "@cafecode/shared/codexAsyncQuestions";
 import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
 import * as Cache from "effect/Cache";
@@ -94,6 +100,7 @@ import {
 } from "../codexSteerIntentLedger.ts";
 import { sanitizeProviderToolData } from "@cafecode/shared/activityPayloadSanitizer";
 import { readProviderTaskOwnerPayload } from "@cafecode/shared/providerTaskOwnership";
+import { readWorkLogOperationId } from "@cafecode/shared/providerWorkLog";
 import { readMatchingCodexCompactionObservationField } from "@cafecode/shared/codexCompactionDiagnostics";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { isSupersededSessionLifecycle, sessionLifecycleSnapshot } from "../sessionLifecycle.ts";
@@ -590,6 +597,12 @@ function runtimeEventToActivities(
   // Reconstruct only its finite fields; never promote raw tool receivers,
   // labels, private extra data or a control target into source ownership.
   const taskOwner = readProviderTaskOwnerPayload(event.payload);
+  // Claude's exact task/tool association is display identity only. Keep the
+  // native task lifecycle and its independent control/ownership unchanged.
+  const workLogToolCallId =
+    event.provider === "claudeAgent"
+      ? readWorkLogOperationId(event.providerRefs?.providerItemId)
+      : undefined;
   // The adapter already compared native turn coordinates (a routed child has
   // a different Cafe parent turn). Rebind the finite evidence to this exact
   // activity phase/item/source; never promote a tool's nested diagnostic copy.
@@ -652,42 +665,48 @@ function runtimeEventToActivities(
   })();
   if (
     (event.type === "item.updated" || event.type === "item.completed") &&
-    event.provider === "claudeAgent" &&
+    isPublicReasoningSummaryProvider(event.provider) &&
     event.payload.itemType === "reasoning" &&
     event.itemId !== undefined &&
     event.turnId !== undefined
   ) {
+    const provider = event.provider;
     const data = readUnknownRecord(event.payload.data);
     const status = event.payload.status ?? "inProgress";
-    // Only the adapter's bounded disclosed-summary contract is promoted.
-    // Generic reasoning/content deltas and other providers remain unchanged.
+    // Only an admitted adapter's bounded disclosed-summary contract is
+    // promoted (Claude public summaries and OpenCode primary-session reasoning
+    // parts). Generic reasoning/content deltas and other providers remain
+    // unchanged, so a raw provider structure never becomes a summary by shape.
     if (
-      data?.summaryVersion !== 1 ||
-      data.streamKind !== "reasoning_summary_text" ||
+      data?.summaryVersion !== PUBLIC_REASONING_SUMMARY_VERSION ||
+      data.streamKind !== PUBLIC_REASONING_SUMMARY_STREAM_KIND ||
       typeof data.truncated !== "boolean" ||
       typeof event.payload.detail !== "string" ||
       event.payload.detail.trim().length === 0 ||
-      event.payload.detail.length > 4_096 ||
-      claudePublicSummaryDisplayText(event.payload.detail) !== event.payload.detail ||
+      event.payload.detail.length > PUBLIC_REASONING_SUMMARY_CHARS ||
+      publicReasoningSummaryDisplayText(event.payload.detail) !== event.payload.detail ||
       (status !== "inProgress" && status !== "completed" && status !== "failed")
     )
       return [];
+    // Each (turn, item) maps to one replace-in-place activity. Claude keeps its
+    // original id prefix so already persisted summaries continue to update.
+    const activityIdPrefix = provider === "claudeAgent" ? "claude-summary" : `${provider}-summary`;
     return [
       {
         id: EventId.make(
-          `claude-summary:${Crypto.createHash("sha256")
+          `${activityIdPrefix}:${Crypto.createHash("sha256")
             .update(encodeJsonString([event.turnId, event.itemId]), "utf8")
             .digest("hex")}`,
         ),
         createdAt: event.createdAt,
         tone: "info",
         kind: "reasoning.summary",
-        summary: "Claude summary",
+        summary: provider === "claudeAgent" ? "Claude summary" : "OpenCode thinking",
         payload: {
-          summaryVersion: 1,
-          provider: "claudeAgent",
+          summaryVersion: PUBLIC_REASONING_SUMMARY_VERSION,
+          provider,
           itemId: event.itemId,
-          streamKind: "reasoning_summary_text",
+          streamKind: PUBLIC_REASONING_SUMMARY_STREAM_KIND,
           detail: event.payload.detail,
           status,
           truncated: data.truncated,
@@ -839,6 +858,7 @@ function runtimeEventToActivities(
           payload: {
             ...(event.requestId ? { requestId: event.requestId } : {}),
             questions: event.payload.questions,
+            ...(event.payload.supportsUnanswered === true ? { supportsUnanswered: true } : {}),
             isBlocking: event.payload.isBlocking,
             ...(event.payload.interaction ? { interaction: event.payload.interaction } : {}),
           },
@@ -855,12 +875,18 @@ function runtimeEventToActivities(
           createdAt: event.createdAt,
           tone: "info",
           kind: "user-input.resolved",
-          summary: event.payload.autoResolved
-            ? "User input continued automatically"
-            : "User input submitted",
+          summary: event.payload.cancelled
+            ? "User input cancelled"
+            : event.payload.autoResolved
+              ? "User input continued automatically"
+              : "User input submitted",
           payload: {
             ...(event.requestId ? { requestId: event.requestId } : {}),
             answers: event.payload.answers,
+            ...(event.payload.cancelled ? { cancelled: true } : {}),
+            ...(event.payload.unanswered !== undefined
+              ? { unanswered: event.payload.unanswered }
+              : {}),
             ...(event.payload.autoResolved ? { autoResolved: true } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
@@ -892,6 +918,7 @@ function runtimeEventToActivities(
               ? { individualTaskControl: event.payload.individualTaskControl }
               : {}),
             taskId: event.payload.taskId,
+            ...(workLogToolCallId ? { workLogToolCallId } : {}),
             ...(event.payload.taskType ? { taskType: event.payload.taskType } : {}),
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
@@ -921,6 +948,7 @@ function runtimeEventToActivities(
               ? { individualTaskControl: event.payload.individualTaskControl }
               : {}),
             taskId: event.payload.taskId,
+            ...(workLogToolCallId ? { workLogToolCallId } : {}),
             detail: truncateDetail(event.payload.summary ?? event.payload.description),
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),
@@ -958,6 +986,7 @@ function runtimeEventToActivities(
             ...(taskOwner ? { taskOwner } : {}),
             ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             taskId: event.payload.taskId,
+            ...(workLogToolCallId ? { workLogToolCallId } : {}),
             status: event.payload.status,
             ...(event.payload.visibility ? { visibility: event.payload.visibility } : {}),
             ...(event.payload.subagent ? { subagent: event.payload.subagent } : {}),

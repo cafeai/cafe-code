@@ -7,6 +7,7 @@ import {
   observationSchema,
 } from "./protocol.ts";
 import { GlideChild, type GlideNativeBridge } from "./runtime.ts";
+import type { GlideActivityEvent } from "./activity.ts";
 
 export interface GlideNativePeer {
   request(frame: Record<string, unknown>): Promise<unknown>;
@@ -78,6 +79,7 @@ export function createGlideNativePeer(
         await child!.send({
           ...frame,
           id,
+          ...(frame.method === "get_app_state" ? { visibilityVersion: 1 } : {}),
           ...(typeof frame.method === "string" && isGlideAction(frame.method)
             ? { receiptVersion: 1 }
             : {}),
@@ -104,6 +106,7 @@ interface Session {
   epoch: number;
   closed: boolean;
   readonly observations: Map<string, number>;
+  readonly activity?: (event: GlideActivityEvent) => Promise<void>;
 }
 interface Job {
   readonly session: Session;
@@ -127,6 +130,7 @@ export class GlideNativeHost {
   private generation = 0;
   private active: Job | undefined;
   private closed = false;
+  private sequence = 0;
 
   private readonly factory: (
     apps: readonly string[],
@@ -150,6 +154,7 @@ export class GlideNativeHost {
   attach(
     id: string,
     authorize: Session["authorize"],
+    activity?: Session["activity"],
   ): GlideNativeBridge & { close(): Promise<void> } {
     if (
       this.closed ||
@@ -158,7 +163,14 @@ export class GlideNativeHost {
       !z.uuid().safeParse(id).success
     )
       throw new Error("Glide session cannot be admitted.");
-    const session: Session = { id, authorize, epoch: 0, closed: false, observations: new Map() };
+    const session: Session = {
+      id,
+      authorize,
+      epoch: 0,
+      closed: false,
+      observations: new Map(),
+      ...(activity ? { activity } : {}),
+    };
     this.sessions.set(id, session);
     const retire = async (executionId?: string) => {
       session.epoch++;
@@ -215,6 +227,7 @@ export class GlideNativeHost {
           cancelled: false,
         };
         this.jobs.add(job);
+        const operationId = ++this.sequence;
         const check = () => {
           if (
             this.closed ||
@@ -322,6 +335,14 @@ export class GlideNativeHost {
             // observations nor a successful process receipt grant later input.
             for (const key of session.observations.keys())
               if (key.startsWith(`${installed.path}\0`)) session.observations.delete(key);
+            await session.activity?.({
+              phase: "start",
+              operation: operationId,
+              method: "launch_app",
+              appName: installed.name,
+              app: installed.path,
+              screenshot: false,
+            });
             return dispatch("launch_app", { app: installed.path });
           }
           const apps = appListSchema
@@ -354,6 +375,21 @@ export class GlideNativeHost {
                 "Obtain a fresh observation of this window before input; the native host or session changed.",
               );
           }
+          if (request.method !== "list_windows") {
+            // The native status item acknowledges the visible activity before
+            // capture/input dispatch. Awaiting UI never bypasses the original
+            // deadline, cancellation or exact grant recheck inside dispatch.
+            await session.activity?.({
+              phase: "start",
+              operation: operationId,
+              method: request.method,
+              appName: app.name,
+              app: app.path,
+              ...(typeof windowId === "number" ? { windowId } : {}),
+              screenshot:
+                request.method === "get_app_state" && request.input.includeScreenshot !== false,
+            });
+          }
           const value = await dispatch(request.method, input);
           if (isGlideAction(request.method) && value !== null) {
             const outcome = actionReceiptSchema.safeParse(value);
@@ -383,6 +419,16 @@ export class GlideNativeHost {
             session.observations.set(`${app.path}\0${observed.windowId}`, this.generation);
             if (windowId === undefined)
               session.observations.set(`${app.path}\0primary`, this.generation);
+            await session.activity?.({
+              phase: "observation",
+              operation: operationId,
+              observation: observed,
+            });
+            check();
+            if (!grant.current()) throw new Error("Glide observation belongs to a revoked grant.");
+            const publicObservation = { ...observed };
+            delete publicObservation.screenshotPreview;
+            return publicObservation;
           }
           return value;
         });
@@ -390,9 +436,12 @@ export class GlideNativeHost {
           .then(resolve, (error) =>
             reject(error instanceof Error ? error : new Error("Glide operation failed.")),
           )
-          .finally(() => {
+          .finally(async () => {
             this.jobs.delete(job);
             if (this.active === job) this.active = undefined;
+            await session
+              .activity?.({ phase: "end", operation: operationId })
+              .catch(() => undefined);
           });
         return result;
       },

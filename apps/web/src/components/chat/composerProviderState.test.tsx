@@ -8,6 +8,7 @@ import {
 } from "@cafecode/contracts";
 import {
   getComposerProviderState,
+  getModelOptionsForModelChange,
   renderProviderTraitsMenuContent,
   renderProviderTraitsPicker,
 } from "./composerProviderState";
@@ -61,6 +62,73 @@ const ULTRATHINK_FRAME_CLASSES = {
   composerSurfaceClassName: "shadow-[0_0_0_1px_rgba(255,255,255,0.04)_inset]",
   modelPickerIconClassName: "ultrathink-chroma",
 } as const;
+
+describe("Daybreak model changes", () => {
+  it.each([
+    ["daybreakBlue", ["standard", "daybreakBlue"], "daybreakBlue"],
+    ["daybreakRed", ["standard", "daybreakBlue", "daybreakRed"], "daybreakRed"],
+    ["daybreakBlue", ["standard", "daybreakRed"], "standard"],
+    ["daybreakRed", ["standard", "daybreakBlue"], "standard"],
+    ["daybreakBlue", ["standard"], "standard"],
+    ["daybreakRed", [], "standard"],
+    ["standard", ["standard", "daybreakBlue"], "standard"],
+    ["daybreakBlue", ["daybreakRed"], "daybreakBlue"],
+  ] as const)(
+    "resolves saved %s against %j to %s without changing other options",
+    (saved, advertised, expected) => {
+      const modelOptions = selections(["reasoningEffort", "high"], ["cyberAccessProgram", saved]);
+      const result = getModelOptionsForModelChange({
+        provider: PROVIDER,
+        model: MODEL,
+        models: modelWith(
+          advertised.length > 0
+            ? [
+                selectDescriptor(
+                  "cyberAccessProgram",
+                  advertised.map((id) => ({ id, label: id })),
+                ),
+              ]
+            : [],
+        ),
+        modelOptions,
+      });
+      expect(result).toEqual(
+        selections(["reasoningEffort", "high"], ["cyberAccessProgram", expected]),
+      );
+      expect(modelOptions[1]?.value).toBe(saved);
+      if (saved === expected) expect(result).toBe(modelOptions);
+    },
+  );
+
+  it("leaves omitted, malformed and other-provider choices unchanged without enabling Daybreak", () => {
+    for (const modelOptions of [
+      undefined,
+      selections(["reasoningEffort", "high"]),
+      selections(["cyberAccessProgram", true]),
+      selections(["cyberAccessProgram", "future-program"]),
+    ]) {
+      expect(
+        getModelOptionsForModelChange({
+          provider: PROVIDER,
+          model: MODEL,
+          models: modelWith([
+            selectDescriptor("cyberAccessProgram", [{ id: "daybreakRed", label: "Red" }]),
+          ]),
+          modelOptions,
+        }),
+      ).toBe(modelOptions);
+    }
+    const modelOptions = selections(["cyberAccessProgram", "daybreakBlue"]);
+    expect(
+      getModelOptionsForModelChange({
+        provider: ProviderDriverKind.make("claudeAgent"),
+        model: MODEL,
+        models: modelWith([]),
+        modelOptions,
+      }),
+    ).toBe(modelOptions);
+  });
+});
 
 describe("getComposerProviderState", () => {
   it("dispatches Standard for an unset cached tier without borrowing a paid catalogue default", () => {

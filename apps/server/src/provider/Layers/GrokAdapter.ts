@@ -60,6 +60,7 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { prepareFileAttachmentPrompt } from "../fileAttachmentPrompt.ts";
 import type { SessionCredentialServiceShape } from "../../auth/Services/SessionCredentialService.ts";
 import { readProviderMcpCredentialIssuer } from "../../auth/ProviderMcpCredentialBroker.ts";
+import { makeManagementLaunchContext } from "../../auth/managementLaunchContext.ts";
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
 import {
   readSchedulingSessionBroker,
@@ -770,6 +771,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           status: "ready",
           updatedAt,
         };
+        liveCtx.glideBinding?.observeTurn?.({
+          type: "turn.completed",
+          threadId,
+          turnId: settleTurnId,
+        });
         if (options?.emitTurnCompletion === false) {
           return;
         }
@@ -1362,12 +1368,18 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               detail: "Cafe MCP credential service is unavailable for this Grok session.",
             });
           }
+          const managementLaunchContext = makeManagementLaunchContext({
+            threadId: input.threadId,
+            providerInstanceId: boundInstanceId,
+            launchNonce: yield* randomUUIDv4,
+          });
           const mcpCredential = yield* credentialIssuer
             .issue({
               ttl: Duration.hours(24),
               subject: `provider:grok:${boundInstanceId}`,
               method: "bearer-session-token",
               role: "owner",
+              ...(managementLaunchContext ? { managementLaunchContext } : {}),
               client: {
                 label: "Grok ACP",
                 deviceType: "bot",
@@ -2075,6 +2087,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 updatedAt: yield* nowIso,
                 ...(displayModel ? { model: displayModel } : {}),
               };
+              ctx.glideBinding?.observeTurn?.({
+                type: "turn.started",
+                threadId: input.threadId,
+                turnId,
+              });
 
               yield* offerRuntimeEvent({
                 type: "turn.started",
@@ -2297,6 +2314,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   updatedAt: completedAt,
                   ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
                 };
+                ctx.glideBinding?.observeTurn?.({
+                  type: "turn.completed",
+                  threadId: input.threadId,
+                  turnId: prepared.turnId,
+                });
                 const completedStopReason = completedStopReasonFromPromptResponse(result);
                 yield* offerRuntimeEvent({
                   type: "turn.completed",
@@ -2570,15 +2592,36 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     ) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
-        const pending = ctx.pendingUserInputs.get(requestId);
-        if (!pending) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "_x.ai/ask_user_question",
-            detail: `Unknown pending user-input request: ${requestId}`,
-          });
-        }
-        yield* Deferred.succeed(pending.resolution, { _tag: "answered", answers });
+        return yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            const pending = ctx.pendingUserInputs.get(requestId);
+            if (!pending) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "_x.ai/ask_user_question",
+                detail: `Unknown pending user-input request: ${requestId}`,
+              });
+            }
+            // Consume this exact callback synchronously before any scheduler
+            // boundary. Its waiting native handler deletes the entry later, so
+            // relying on that cleanup lets another UI/MCP caller acknowledge the
+            // same Deferred even after the first response already won. Keep the
+            // claim and completion interruption-safe; an already cancelled
+            // Deferred is not an accepted answer.
+            ctx.pendingUserInputs.delete(requestId);
+            const accepted = yield* Deferred.succeed(pending.resolution, {
+              _tag: "answered",
+              answers,
+            });
+            if (!accepted) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "_x.ai/ask_user_question",
+                detail: `Unknown pending user-input request: ${requestId}`,
+              });
+            }
+          }),
+        );
       });
 
     const getGoal: NonNullable<GrokAdapterShape["getGoal"]> = (threadId) =>

@@ -82,6 +82,7 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   /** Exact-child readiness key, admitted only through private desktop bootstrap. */
   readonly desktopReadinessToken?: string;
   readonly startupProgressFd?: 4;
+  readonly desktopPowerStateFd?: 5;
   readonly autoBootstrapProjectFromCwd: boolean;
   readonly logWebSocketEvents: boolean;
   readonly providerDaemon?: ProviderDaemonClientConfig | undefined;

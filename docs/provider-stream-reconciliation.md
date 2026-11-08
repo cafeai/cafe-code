@@ -159,6 +159,14 @@ no inference calls, provider restart, or changes to platform launch behavior.
 
 ## Claude block snapshots and compatibility
 
+Claude query retirement must close the exact owned query before joining its
+async message reader. A pending generator read can otherwise prevent its
+`return()` from finishing and hold later sends/stops behind retirement. Keep the
+existing deadline and uncertain-owner fence; a daemon transport timeout never
+authorizes replay. Pre-turn failures remain visible through bounded, fixed-wording
+Work Log notices. See [query stream retirement](decisions/claude-query-stream-retirement.md)
+for the ownership, legacy-presentation and adoption boundaries.
+
 The [official Claude streaming flow](https://code.claude.com/docs/en/agent-sdk/streaming-output#message-flow) emits an `assistant` snapshot for one completed content block before `content_block_stop`. Multiple snapshots may share the API `message.id`; each wrapper UUID identifies its own frame. A later model response can reuse block index zero within the same long-running Cafe turn.
 
 `ClaudeAdapter` tracks those identities separately. It matches a snapshot to one unmatched block in the native message, verifies the exact streamed prefix, and appends only a missing suffix under that block's existing canonical item id. A no-delta block uses its full snapshot. Ambiguous or nonmatching snapshots cannot overwrite another block. Delayed snapshots of already-closed blocks are recognized without duplicating a message. Nested subagent streams remain isolated from primary assistant text.

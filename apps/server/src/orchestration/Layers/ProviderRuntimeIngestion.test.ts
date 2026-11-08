@@ -444,7 +444,11 @@ describe("ProviderRuntimeIngestion", () => {
         }),
       ),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
-      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      // Runtime disposal already joins this layer's finalizers. Keep its
+      // derived data directories temporary without changing the workspace cwd.
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "cafe-provider-ingestion-" }),
+      ),
       Layer.provideMerge(NodeServices.layer),
     );
     runtime = ManagedRuntime.make(
@@ -3119,6 +3123,7 @@ describe("ProviderRuntimeIngestion", () => {
   it.each([
     "transient",
     "remote-compaction",
+    "output-limit",
     "permanent",
     "missing-marker",
     "missing-proof",
@@ -3147,6 +3152,18 @@ describe("ProviderRuntimeIngestion", () => {
       codexErrorInfo: "other",
     });
     if (scenario === "remote-compaction") expect(remoteCompactionCategory).toBe("server");
+    const recoveryCategory =
+      scenario === "output-limit"
+        ? classifyCodexTransientFailure({
+            message: "Incomplete response returned, reason: max_output_tokens",
+            codexErrorInfo: "other",
+            additionalDetails: null,
+            misalignment: null,
+          })
+        : scenario === "remote-compaction"
+          ? remoteCompactionCategory
+          : ("server" as const);
+    if (scenario === "output-limit") expect(recoveryCategory).toBe("response-limit");
     const session: ProviderSession = {
       provider: ProviderDriverKind.make("codex"),
       providerInstanceId: instanceId,
@@ -3163,7 +3180,7 @@ describe("ProviderRuntimeIngestion", () => {
         observedAt:
           scenario === "proof-time-disagreement" ? "2026-01-01T00:00:01.999Z" : completedAt,
         ...(transient && scenario !== "category-disagreement"
-          ? { category: "server" as const }
+          ? { category: recoveryCategory! }
           : {}),
       },
     };
@@ -3232,8 +3249,7 @@ describe("ProviderRuntimeIngestion", () => {
         ...(scenario === "missing-marker" ? {} : { nativeContextAvailable: true as const }),
         ...(transient
           ? {
-              codexTransientFailure:
-                scenario === "remote-compaction" ? remoteCompactionCategory! : ("server" as const),
+              codexTransientFailure: recoveryCategory!,
             }
           : {}),
       },
@@ -3383,6 +3399,7 @@ describe("ProviderRuntimeIngestion", () => {
     const available =
       scenario === "transient" ||
       scenario === "remote-compaction" ||
+      scenario === "output-limit" ||
       scenario === "permanent" ||
       scenario === "partial-fanout" ||
       scenario === "delayed-error" ||
@@ -10020,6 +10037,100 @@ describe("ProviderRuntimeIngestion", () => {
     ).toBe(false);
   });
 
+  it("promotes marked OpenCode reasoning snapshots to one replace-in-place thinking row", async () => {
+    const harness = await createHarness();
+    const startedAt = "2026-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("opencode-thinking-turn"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: startedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-opencode-thinking"),
+      payload: {},
+    });
+    const markers = {
+      summaryVersion: 1,
+      streamKind: "reasoning_summary_text",
+      truncated: false,
+    } as const;
+    harness.emit({
+      type: "item.updated",
+      eventId: asEventId("opencode-thinking-live"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: startedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-opencode-thinking"),
+      itemId: asItemId("prt_reasoning_1"),
+      payload: {
+        itemType: "reasoning",
+        status: "inProgress",
+        title: "OpenCode thinking",
+        detail: "Reading the adapter",
+        data: markers,
+      },
+    });
+    const live = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "reasoning.summary"),
+    );
+    const liveRow = live.activities.find((activity) => activity.kind === "reasoning.summary");
+    expect(liveRow?.summary).toBe("OpenCode thinking");
+    expect(liveRow?.id.startsWith("opencode-summary:")).toBe(true);
+    // An unmarked OpenCode reasoning item (for example a raw native part) is
+    // not summary authority even from an admitted provider.
+    harness.emit({
+      type: "item.updated",
+      eventId: asEventId("opencode-unmarked"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: startedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-opencode-thinking"),
+      itemId: asItemId("prt_unmarked"),
+      payload: {
+        itemType: "reasoning",
+        detail: "not promoted",
+        data: { streamKind: "reasoning_text" },
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("opencode-thinking-final"),
+      provider: ProviderDriverKind.make("opencode"),
+      createdAt: startedAt,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-opencode-thinking"),
+      itemId: asItemId("prt_reasoning_1"),
+      payload: {
+        itemType: "reasoning",
+        status: "completed",
+        title: "OpenCode thinking",
+        detail: "Reading the adapter; the delta path is missing a guard.",
+        data: markers,
+      },
+    });
+    const settled = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity) =>
+          activity.kind === "reasoning.summary" &&
+          (activity.payload as { status?: string }).status === "completed",
+      ),
+    );
+    const rows = settled.activities.filter((activity) => activity.kind === "reasoning.summary");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe(liveRow?.id);
+    expect(rows[0]?.createdAt).toBe(startedAt);
+    expect(rows[0]?.payload).toEqual({
+      summaryVersion: 1,
+      provider: "opencode",
+      itemId: "prt_reasoning_1",
+      streamKind: "reasoning_summary_text",
+      detail: "Reading the adapter; the delta path is missing a guard.",
+      status: "completed",
+      truncated: false,
+    });
+    expect(settled.messages).toHaveLength(0);
+  });
+
   it("retains bounded Claude summary snapshots separately from answers and keeps sanitized primary command starts", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -10145,6 +10256,67 @@ describe("ProviderRuntimeIngestion", () => {
       startedAt: now,
     });
     expect(thread.activities.some((activity) => activity.id.startsWith("unowned-"))).toBe(false);
+  });
+
+  it("retains exact Claude task/tool display correlation without borrowing task ids or other providers", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("background-turn"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-background"),
+      payload: {},
+    });
+    for (const provider of ["claudeAgent", "codex"] as const) {
+      for (const type of ["task.started", "task.progress", "task.completed"] as const) {
+        harness.emit({
+          type,
+          eventId: asEventId(`${provider}-${type}`),
+          provider: ProviderDriverKind.make(provider),
+          createdAt: now,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-background"),
+          providerRefs: { providerItemId: ProviderItemId.make("exact-command") },
+          payload: {
+            taskId: RuntimeTaskId.make(`${provider}-native-task`),
+            description: "Command description",
+            status: "failed",
+            summary: "Command failed",
+          },
+        });
+      }
+    }
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("unidentified-task"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-background"),
+      payload: {
+        taskId: RuntimeTaskId.make("exact-command"),
+        status: "failed",
+        summary: "Command failed",
+      },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(({ id }) => id === "unidentified-task"),
+    );
+    for (const provider of ["claudeAgent", "codex"] as const) {
+      for (const kind of ["task.started", "task.progress", "task.completed"] as const) {
+        const activity = thread.activities.find(({ id }) => id === `${provider}-${kind}`);
+        expect(activity?.kind).toBe(kind);
+        if (provider === "claudeAgent")
+          expect(activity?.payload).toHaveProperty("workLogToolCallId", "exact-command");
+        else expect(activity?.payload).not.toHaveProperty("workLogToolCallId");
+      }
+    }
+    const unlinked = thread.activities.find(({ id }) => id === "unidentified-task");
+    expect(unlinked?.payload).not.toHaveProperty("workLogToolCallId");
+    expect(unlinked?.tone).toBe("error");
   });
 
   it("strips counterfeit command inspector provenance from other provider lifecycle data", async () => {
@@ -11599,6 +11771,55 @@ describe("ProviderRuntimeIngestion", () => {
       sandbox_mode: "workspace-write",
     });
     expect(resolvedPayload?.autoResolved).toBe(true);
+  });
+
+  it("projects native unanswered capability and explicit resolution separately from answers", async () => {
+    const harness = await createHarness();
+    const now = "2026-10-30T00:00:00.000Z";
+    harness.emit({
+      type: "user-input.requested",
+      eventId: asEventId("unanswered-request"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-unanswered"),
+      requestId: ApprovalRequestId.make("request-unanswered"),
+      payload: {
+        questions: [{ id: "Later?", header: "Choice", question: "Later?", options: [] }],
+        supportsUnanswered: true,
+      },
+    });
+    harness.emit({
+      type: "user-input.resolved",
+      eventId: asEventId("unanswered-resolution"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-unanswered"),
+      requestId: ApprovalRequestId.make("request-unanswered"),
+      payload: { answers: {}, unanswered: { "Later?": "dismissed" } },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "unanswered-resolution",
+      ),
+    );
+    const requested = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "unanswered-request",
+    );
+    const resolved = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "unanswered-resolution",
+    );
+    expect(requested?.payload).toMatchObject({
+      requestId: "request-unanswered",
+      supportsUnanswered: true,
+    });
+    expect(resolved?.payload).toMatchObject({
+      requestId: "request-unanswered",
+      answers: {},
+      unanswered: { "Later?": "dismissed" },
+    });
+    expect(resolved?.summary).toBe("User input submitted");
   });
 
   it("continues processing runtime events after a single event handler failure", async () => {

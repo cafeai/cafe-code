@@ -1,4 +1,8 @@
-import { OpenCodeSettings, ProviderInstanceId } from "@cafecode/contracts";
+import {
+  OpenCodeSettings,
+  ProviderInstanceId,
+  type UsageAccountingSnapshot,
+} from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
@@ -17,6 +21,7 @@ import {
 } from "../provider/opencodeRuntime.ts";
 import { type TextGenerationShape } from "./TextGeneration.ts";
 import { makeOpenCodeTextGeneration } from "./OpenCodeTextGeneration.ts";
+import { AuxiliaryUsage } from "../usageStats/Services/AuxiliaryUsage.ts";
 
 const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
@@ -28,7 +33,12 @@ const runtimeMock = {
     authHeaders: [] as Array<string | null>,
     closeCalls: [] as string[],
     promptResult: undefined as
-      | { data?: { info?: { error?: unknown }; parts?: Array<{ type: string; text?: string }> } }
+      | {
+          data?: {
+            info?: { error?: unknown } & Record<string, unknown>;
+            parts?: Array<{ type: string; text?: string } & Record<string, unknown>>;
+          };
+        }
       | undefined,
   },
   reset() {
@@ -169,6 +179,72 @@ const advanceIdleClock = Effect.gen(function* () {
 });
 
 it.layer(OpenCodeTextGenerationTestLayer)("OpenCodeTextGeneration", (it) => {
+  it.effect("records helper step usage and native cost even when output validation fails", () =>
+    Effect.gen(function* () {
+      const received: UsageAccountingSnapshot[] = [];
+      const sessionID = "http://127.0.0.1:4301/session";
+      const tokens = { input: 10, output: 4, reasoning: 2, cache: { read: 20, write: 3 } };
+      runtimeMock.state.promptResult = {
+        data: {
+          info: {
+            id: "helper-message",
+            sessionID,
+            role: "assistant",
+            providerID: "openai",
+            modelID: "gpt-5",
+            time: { created: 1_000 },
+            tokens,
+            cost: 999,
+          },
+          parts: [
+            {
+              id: "helper-step",
+              messageID: "helper-message",
+              sessionID,
+              type: "step-finish",
+              tokens,
+              cost: 0.000123,
+            },
+            { type: "text", text: "invalid structured output" },
+          ],
+        },
+      };
+      const result = yield* withOpenCodeTextGeneration(
+        DEFAULT_OPENCODE_SETTINGS,
+        (textGeneration) =>
+          Effect.exit(
+            textGeneration.generateThreadTitle({
+              cwd: process.cwd(),
+              message: "A title",
+              modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+            }),
+          ),
+      ).pipe(
+        Effect.provideService(AuxiliaryUsage, {
+          installSink: () => Effect.void,
+          record: (provider, snapshot) =>
+            Effect.sync(() => {
+              expect(provider).toBe("opencode");
+              received.push(snapshot);
+            }),
+        }),
+      );
+      expect(result._tag).toBe("Failure");
+      expect(received).toHaveLength(1);
+      expect(received[0]?.models).toEqual([
+        {
+          model: "openai/gpt-5",
+          inputTokens: 33,
+          outputTokens: 6,
+          cachedInputTokens: 20,
+          cacheWriteInputTokens: 3,
+          reasoningOutputTokens: 2,
+          reportedCostMicrousd: "123",
+        },
+      ]);
+      expect(runtimeMock.state.promptRequests).toHaveLength(1);
+    }),
+  );
   it.effect("uses generic file metadata for labels without sending a whole document part", () =>
     withOpenCodeTextGeneration(DEFAULT_OPENCODE_SETTINGS, (textGeneration) =>
       Effect.gen(function* () {

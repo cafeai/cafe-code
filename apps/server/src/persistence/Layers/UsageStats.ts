@@ -117,6 +117,8 @@ const makeUsageStatsRepository = Effect.gen(function* () {
           input_tokens AS "inputTokens",
           cached_input_tokens AS "cachedInputTokens",
           cache_write_input_tokens AS "cacheWriteInputTokens",
+          cache_write_5m_input_tokens AS "cacheWrite5mInputTokens",
+          cache_write_1h_input_tokens AS "cacheWrite1hInputTokens",
           reasoning_output_tokens AS "reasoningOutputTokens"
         FROM usage_stats_token_breakdown_days
         ORDER BY day ASC, provider_driver ASC, model ASC
@@ -135,6 +137,8 @@ const makeUsageStatsRepository = Effect.gen(function* () {
           input_tokens,
           cached_input_tokens,
           cache_write_input_tokens,
+          cache_write_5m_input_tokens,
+          cache_write_1h_input_tokens,
           reasoning_output_tokens
         )
         VALUES (
@@ -145,6 +149,8 @@ const makeUsageStatsRepository = Effect.gen(function* () {
           ${row.inputTokens},
           ${row.cachedInputTokens},
           ${row.cacheWriteInputTokens},
+          ${row.cacheWrite5mInputTokens ?? 0},
+          ${row.cacheWrite1hInputTokens ?? 0},
           ${row.reasoningOutputTokens}
         )
         ON CONFLICT (day, provider_driver, model)
@@ -154,6 +160,10 @@ const makeUsageStatsRepository = Effect.gen(function* () {
           cached_input_tokens = cached_input_tokens + excluded.cached_input_tokens,
           cache_write_input_tokens =
             cache_write_input_tokens + excluded.cache_write_input_tokens,
+          cache_write_5m_input_tokens =
+            cache_write_5m_input_tokens + excluded.cache_write_5m_input_tokens,
+          cache_write_1h_input_tokens =
+            cache_write_1h_input_tokens + excluded.cache_write_1h_input_tokens,
           reasoning_output_tokens =
             reasoning_output_tokens + excluded.reasoning_output_tokens
       `,
@@ -219,9 +229,11 @@ const makeUsageStatsRepository = Effect.gen(function* () {
   const listTokenBreakdownDays: UsageStatsRepositoryShape["listTokenBreakdownDays"] =
     listUsageStatsTokenBreakdownRows({}).pipe(
       Effect.map((rows) =>
-        rows.map(({ reportedCost, ...row }) => ({
+        rows.map(({ reportedCost, cacheWrite5mInputTokens, cacheWrite1hInputTokens, ...row }) => ({
           ...row,
           ...(reportedCost !== null ? { reportedCost } : {}),
+          ...(cacheWrite5mInputTokens ? { cacheWrite5mInputTokens } : {}),
+          ...(cacheWrite1hInputTokens ? { cacheWrite1hInputTokens } : {}),
         })),
       ),
       Effect.mapError(
@@ -319,6 +331,18 @@ const makeUsageStatsRepository = Effect.gen(function* () {
                   throw new Error("Invalid reported cost coverage.");
                 for (const field of USAGE_TOKEN_FIELDS)
                   delta[field] = model[field] - (prior?.[field] ?? 0);
+                const five = model.cacheWrite5mInputTokens ?? 0;
+                const hour = model.cacheWrite1hInputTokens ?? 0;
+                const previousFive = prior?.cacheWrite5mInputTokens ?? 0;
+                const previousHour = prior?.cacheWrite1hInputTokens ?? 0;
+                if (
+                  five < previousFive ||
+                  hour < previousHour ||
+                  five - previousFive > delta.cacheWriteInputTokens - (hour - previousHour)
+                )
+                  throw new Error("Usage accounting changed a settled cache duration.");
+                delta.cacheWrite5mInputTokens = five - previousFive;
+                delta.cacheWrite1hInputTokens = hour - previousHour;
                 // Fresh input and non-reasoning output are disjoint billed buckets
                 // too. Monotone parent/subset counters alone allow an old request's
                 // fresh tokens to be reclassified as cache on a later day, producing

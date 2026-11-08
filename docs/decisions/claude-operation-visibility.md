@@ -2,10 +2,11 @@
 
 Decision status: Accepted — implementation and release verification remain separate.
 Created: 2026-10-09 10:17:43 JST (UTC+0900)
-Last updated: 2026-10-09 10:44:22 JST (UTC+0900)
+Last updated: 2026-11-03 14:26:25 JST (UTC+0900)
 Decision authority: implementation discretion within the user's explicit request to show Claude's public progress and command/output details and push this changeset.
 Implementation status: implemented with synthetic focused qualification; whole-repository, final-build and release CI verification remain separate.
 Supersedes: none. The narrower authenticated child-history policy remains unchanged.
+Superseded by: [Primary-chat presentation of Claude public summaries](claude-primary-public-summaries.md), only the secondary work-log placement of admitted Claude summaries. The admission, privacy, resource, command and result-truth decisions below remain in force.
 
 ## Context and alternatives
 

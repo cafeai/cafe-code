@@ -1228,6 +1228,7 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-failed-root-ret
           });
           yield* pipeline.bootstrap;
           for (const recovery of [
+            "codex-transient-preparation",
             "codex-transient-continuation-resubmit-attempted",
             "codex-transient-continuation-unsubmitted",
           ]) {

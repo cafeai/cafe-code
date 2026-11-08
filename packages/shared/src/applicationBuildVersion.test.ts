@@ -20,7 +20,8 @@ import { tmpdir } from "node:os";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { dirname, join } from "node:path";
 import { brotliCompressSync, brotliDecompressSync, gzipSync, gunzipSync } from "node:zlib";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import * as Effect from "effect/Effect";
+import { afterEach, describe, expect, it, onTestFailed, vi } from "vitest";
 
 // The native fixture filesystem and crypto remain real. Observe only guard IO
 // to prove that invalid receipts cannot cause payload hashing before admission.
@@ -60,12 +61,13 @@ interface TestManifest {
     readonly sha256: string;
   }[];
 }
-function output(files: Readonly<Record<string, string | Uint8Array>>) {
+function output(files: Readonly<Record<string, string | Uint8Array>>, onFileWritten?: () => void) {
   const root = mkdtempSync(join(tmpdir(), "cafe-build-version-"));
   temporary.push(root);
   for (const [name, bytes] of Object.entries(files)) {
     mkdirSync(dirname(join(root, name)), { recursive: true });
     writeFileSync(join(root, name), bytes);
+    onFileWritten?.();
   }
   return { root, files, manifest: join(root, APPLICATION_BUILD_VERSION_MANIFEST_FILENAME) };
 }
@@ -145,13 +147,77 @@ describe("application build version", () => {
     );
   });
 
-  it("admits a realistic split web closure larger than the legacy256-file bound", () => {
+  it("admits a realistic split web closure larger than the legacy256-file bound", (context) => {
+    // A synchronous outer timeout reports no internal blocked phase. Retain
+    // only bounded passive call-site/return observations on failure; these are
+    // not readiness proofs and do not identify an earlier timeout's cause.
+    type Phase =
+      | "files-prepared"
+      | "fixture-start"
+      | "fixture-file-written"
+      | "fixture-returned"
+      | "publish-start"
+      | "publish-returned"
+      | "verify-start"
+      | "verify-returned";
+    const start = performance.now();
+    const observations: {
+      readonly phase: Phase;
+      readonly elapsedMs: number;
+      readonly written: number;
+      readonly opens: number;
+      readonly hashes: number;
+    }[] = [];
+    let written = 0;
+    let recording = true;
+    const bounded = (count: number) => Math.max(0, Math.min(4096, count));
+    const record = (phase: Phase) => {
+      if (!recording || observations.length >= 16) return;
+      const elapsed = performance.now() - start;
+      observations.push({
+        phase,
+        elapsedMs: Number.isFinite(elapsed)
+          ? Math.max(0, Math.min(86_400_000, Math.round(elapsed)))
+          : 0,
+        written: bounded(written),
+        opens: bounded(vi.mocked(openSync).mock.calls.length),
+        hashes: bounded(vi.mocked(createHash).mock.calls.length),
+      });
+    };
+    const retire = () => {
+      recording = false;
+    };
+    // Registration precedes all fixture IO. Do not retain filenames, file
+    // contents, hashes, mock arguments, environment or received error objects.
+    context.signal.addEventListener("abort", retire, { once: true });
+    context.onTestFinished(() => {
+      retire();
+      context.signal.removeEventListener("abort", retire);
+    });
+    onTestFailed(() => {
+      // Print only snapshots captured before mock cleanup, never reread mock
+      // arguments or cleared histories from a later lifecycle phase.
+      Effect.runSync(
+        Effect.logError("Synthetic build-version closure passive phases", { observations }),
+      );
+    });
+    if (context.signal.aborted) retire();
     const files: Record<string, string> = { "index.html": "<h1>Cafe</h1>" };
     for (let index = 0; index < 300; index++)
       files[`assets/part-${index}.js`] = `export const part = ${index};\n`;
-    const fixture = output(files);
+    record("files-prepared");
+    record("fixture-start");
+    const fixture = output(files, () => {
+      written += 1;
+      if (written % 64 === 0 || written === 301) record("fixture-file-written");
+    });
+    record("fixture-returned");
+    record("publish-start");
     publishApplicationBuildVersionManifest(fixture.root, "web", "0.2.2", files);
+    record("publish-returned");
+    record("verify-start");
     expect(() => verifyApplicationBuildVersionManifest(fixture.root, "web", "0.2.2")).not.toThrow();
+    record("verify-returned");
   });
 
   it.each(["0.2.2", "0.2.3-nightly.20261019.1"])(

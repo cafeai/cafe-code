@@ -1,6 +1,11 @@
 export const BRAND_ASSET_PATHS = {
   appIconOriginalPng: "assets/source/cafe-code-app-icon-original.png",
   appIconMasterPng: "assets/source/cafe-code-app-icon-master.png",
+  // Unlockable alternative default (Settings → Appearance → App icon). The
+  // desktop applies it at runtime only; packaged bundles keep the master.
+  appIconDekaiPng: "assets/source/cafe-code-app-icon-dekai.png",
+  appIconDekaiDesktopPng: "apps/desktop/resources/icon-dekai.png",
+  appIconDekaiMacPng: "apps/desktop/resources/icon-dekai-macos.png",
   appIconDesktopPng: "assets/app-icon/cafe-code-app-icon-1024.png",
   appIconMacPng: "assets/app-icon/cafe-code-app-icon-macos-1024.png",
   appIconWindowsIco: "assets/app-icon/cafe-code-app-icon-windows.ico",

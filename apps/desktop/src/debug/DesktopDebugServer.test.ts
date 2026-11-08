@@ -334,6 +334,51 @@ describe("Daemon-local qualification debug summary", () => {
   });
 });
 
+describe("Content-free optional desktop-tools startup summary", () => {
+  const project = (glideStartup: unknown) => {
+    debugServer.reset();
+    debugServer.publishProviderDaemonSnapshot({ lastHealth: { glideStartup } });
+    const daemon = debugServer.buildCompactDebugSnapshot().providerDaemon as Record<
+      string,
+      unknown
+    >;
+    return (daemon.lastHealth as Record<string, unknown>).glideStartup;
+  };
+  it("projects only finite counters and Cafe-authored phases, leaving legacy state unknown", () => {
+    assert.deepEqual(
+      project({
+        attachFailureCount: 1,
+        activationFailureCount: 2,
+        trayFailureCount: 3,
+        lastFailurePhase: "tray",
+        error: "private-path-or-credential",
+      }),
+      {
+        attachFailureCount: 1,
+        activationFailureCount: 2,
+        trayFailureCount: 3,
+        lastFailurePhase: "tray",
+      },
+    );
+    assert.isNull(project(undefined));
+    const get = () => {
+      throw new Error("received accessor must not execute");
+    };
+    const received = {
+      activationFailureCount: -1,
+      trayFailureCount: Infinity,
+      lastFailurePhase: "private-error",
+    };
+    Object.defineProperty(received, "attachFailureCount", { get });
+    assert.deepEqual(project(received), {
+      attachFailureCount: null,
+      activationFailureCount: null,
+      trayFailureCount: null,
+      lastFailurePhase: null,
+    });
+  });
+});
+
 describe("Content-free failed-root retirement refusal debug summary", () => {
   const failure = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
     method: "sendTurn",
@@ -844,6 +889,16 @@ const makeLargeProviderDaemonSnapshot = () => ({
       lastTurnId: "turn-1",
     },
     pipelineDiagnostics: {
+      sqlite: {
+        activeConnectionCount: 1,
+        activeOperationCount: 1,
+        completedOperationCount: 42,
+        failedOperationCount: 2,
+        workerFailureCount: 0,
+        longestActiveOperationMs: 1234,
+        query: "private SQL must not enter compact debug",
+        parameters: ["private bound value must not enter compact debug"],
+      },
       eventLoop: {
         retainedSampleCount: 600,
         currentLagMs: 1,
@@ -880,6 +935,63 @@ const makeLargeProviderDaemonSnapshot = () => ({
 });
 
 describe("DesktopDebugServer compact snapshots", () => {
+  it("retains canonical provider update diagnostics through rich and compact snapshots without inventing legacy evidence", () => {
+    debugServer.reset();
+    const recordedUpdate = {
+      status: "failed",
+      startedAt: "2026-10-30T10:00:00.000Z",
+      finishedAt: "2026-10-30T10:00:02.000Z",
+      diagnostics: {
+        phase: "command",
+        category: "command_failed",
+        exitCode: 1,
+        timedOut: false,
+        stdoutTruncated: true,
+        stderrTruncated: false,
+        outputTruncated: true,
+      },
+    };
+    const legacyUpdate = {
+      status: "failed",
+      startedAt: "2026-10-30T09:00:00.000Z",
+      finishedAt: "2026-10-30T09:00:02.000Z",
+    };
+    try {
+      // The renderer producer owns omission of raw message/output and future
+      // fields. This fixture qualifies only the real desktop rich/compact
+      // forwarding boundary for its canonical metadata, not a new sanitizer.
+      debugServer.publishRendererSnapshot({
+        capturedAt: "2026-10-30T10:00:03.000Z",
+        source: "fixture",
+        provider: {
+          fleet: {
+            totalCount: 2,
+            includedCount: 2,
+            omittedCount: 0,
+            limit: 64,
+            instances: [
+              { instanceId: "synthetic-codex", driver: "codex", update: recordedUpdate },
+              { instanceId: "synthetic-legacy", driver: "claudeAgent", update: legacyUpdate },
+            ],
+          },
+        },
+      });
+      const richRenderer = debugServer.buildFullDebugSnapshot().renderer as Record<string, unknown>;
+      const rich = richRenderer.snapshot as Record<string, unknown>;
+      const compact = debugServer.buildCompactDebugSnapshot().renderer as Record<string, unknown>;
+      for (const renderer of [rich, compact]) {
+        const provider = renderer.provider as Record<string, unknown>;
+        const fleet = provider.fleet as Record<string, unknown>;
+        const instances = fleet.instances as ReadonlyArray<Record<string, unknown>>;
+        assert.deepEqual(instances[0]?.update, recordedUpdate);
+        assert.deepEqual(instances[1]?.update, legacyUpdate);
+        assert.isFalse(Object.hasOwn(instances[1]?.update as object, "diagnostics"));
+      }
+    } finally {
+      debugServer.reset();
+    }
+  });
+
   it("reports fixed Mac shortcut lifecycle without forwarding injected private fields", () => {
     debugServer.reset();
     debugServer.publishGlobalDictationShortcutSnapshot({
@@ -1039,6 +1151,81 @@ describe("DesktopDebugServer compact snapshots", () => {
     assert.equal(compactJson.includes("nested-dictation-error-secret"), false);
     assert.equal(compactJson.includes("daemon stream secret"), false);
     assert.equal(compactJson.includes("daemon bridge credential secret"), false);
+    assert.equal(compactJson.includes("private SQL must not enter compact debug"), false);
+    assert.equal(compactJson.includes("private bound value must not enter compact debug"), false);
+    const compactDaemon = compact.providerDaemon as Record<string, unknown>;
+    const compactHealth = compactDaemon.lastHealth as Record<string, unknown>;
+    const compactPipeline = compactHealth.pipelineDiagnostics as Record<string, unknown>;
+    assert.deepEqual(compactPipeline.sqlite, {
+      activeConnectionCount: 1,
+      activeOperationCount: 1,
+      completedOperationCount: 42,
+      failedOperationCount: 2,
+      workerFailureCount: 0,
+      longestActiveOperationMs: 1234,
+    });
+    // The six worker observations are data-only schema fields. A received
+    // accessor/proxy must not execute during compact serialization, and one
+    // malformed field must not erase the other safe observations.
+    const expectedSqlite = {
+      activeConnectionCount: 1,
+      activeOperationCount: 1,
+      completedOperationCount: 42,
+      failedOperationCount: 2,
+      workerFailureCount: 0,
+      longestActiveOperationMs: 1234,
+    };
+    const sqliteFields = Object.keys(expectedSqlite) as Array<keyof typeof expectedSqlite>;
+    const projectSqlite = (pipelineDiagnostics: unknown): Record<string, unknown> | null => {
+      debugServer.publishProviderDaemonSnapshot({ lastHealth: { pipelineDiagnostics } });
+      const daemon = debugServer.buildCompactDebugSnapshot().providerDaemon as Record<
+        string,
+        unknown
+      >;
+      const health = daemon.lastHealth as Record<string, unknown>;
+      const pipeline = health.pipelineDiagnostics as Record<string, unknown>;
+      return pipeline.sqlite as Record<string, unknown> | null;
+    };
+    let receivedCodeCalls = 0;
+    const rejectReceivedCode = () => {
+      receivedCodeCalls += 1;
+      throw new Error("PRIVATE_SQLITE_GETTER_OR_PROXY");
+    };
+    for (const field of sqliteFields) {
+      const accessor = { ...expectedSqlite };
+      Object.defineProperty(accessor, field, { get: rejectReceivedCode });
+      assert.deepEqual(projectSqlite({ sqlite: accessor }), { ...expectedSqlite, [field]: null });
+    }
+    assert.isNull(projectSqlite(Object.defineProperty({}, "sqlite", { get: rejectReceivedCode })));
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    for (const sqlite of [
+      new Proxy(
+        {},
+        {
+          get: rejectReceivedCode,
+          getPrototypeOf: rejectReceivedCode,
+          getOwnPropertyDescriptor: rejectReceivedCode,
+        },
+      ),
+      revoked.proxy,
+    ])
+      assert.isNull(projectSqlite({ sqlite }));
+    const inherited = projectSqlite({ sqlite: Object.create(expectedSqlite) })!;
+    for (const field of sqliteFields) assert.isNull(inherited[field]);
+    assert.equal(receivedCodeCalls, 0);
+    const invalidSqliteValues = [
+      -1,
+      0.5,
+      Number.MAX_SAFE_INTEGER + 1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      "PRIVATE_SQLITE_VALUE",
+    ];
+    for (const [index, field] of sqliteFields.entries()) {
+      const malformed = { ...expectedSqlite, [field]: invalidSqliteValues[index] };
+      assert.deepEqual(projectSqlite({ sqlite: malformed }), { ...expectedSqlite, [field]: null });
+    }
     assert.equal(compactJson.includes('"authenticationFailureCount":2'), true);
     assert.equal(compactJson.includes('"lastAuthenticationFailureStatus":401'), true);
     assert.equal(compactJson.includes('"authenticationRetryDelayMs":30000'), true);

@@ -1,5 +1,7 @@
 # Mermaid diagrams in chat
 
+Last updated: 2026-10-23 09:31:33 JST (UTC+0900)
+
 Cafe renders closed code fences labeled `mermaid`. The first line inside the
 fence declares the diagram type: for example, `flowchart TD` means a top-to-bottom
 flowchart. The `flowchart` declaration is part of Mermaid, not a replacement for
@@ -65,7 +67,9 @@ gantt
 - **Diagram / Source** switches between the image and original Mermaid DSL.
 - **Copy** copies that DSL, without adding fences or altering its contents.
 - **Expand** opens a larger view with Fit, Reset, zoom, scrolling and pointer
-  panning. Escape closes it and restores keyboard focus.
+  panning. Unmodified arrows on the focused viewport scroll in bounded instant
+  steps; selected text, descendant controls and modified shortcuts retain their
+  behavior. Escape closes it and restores keyboard focus.
 - **⋯ Image actions** offers **Copy image** and **Save as PNG**, in the inline
   toolbar and expanded viewer. Copy writes an actual PNG image and confirms
   with a brief toast; the existing Copy button still copies the original DSL.
@@ -89,6 +93,8 @@ instead of producing a silently incomplete table. Export never follows links,
 replays provider work, reads the clipboard or sends content to a remote renderer.
 See the [image export decision](decisions/diagram-table-image-export.md) for
 resource, publication, lifecycle and verification boundaries.
+Their expanded viewport uses the same focused arrow-scroll behavior as diagrams,
+without consuming cell-text selection or descendant control keys.
 
 Diagrams render as soon as their own closing fence arrives, even while later
 prose is still streaming. Unclosed fences stay source even in truncated history.

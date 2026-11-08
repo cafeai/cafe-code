@@ -69,7 +69,7 @@ const atriumHarness = vi.hoisted(() => {
                 itemId: "task-1",
                 detail: "explore: mapping canvas call sites",
               },
-              turnId: null,
+              turnId: "turn-1",
               createdAt: new Date(now - 5_000).toISOString(),
             },
             a2: {

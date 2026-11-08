@@ -4,6 +4,7 @@ import { getUiLocale, getUiTranslator, setUiLocale } from "@cafecode/shared/i18n
 import {
   WebPushSubscriptionInput,
   webPushCompletionBody,
+  webPushUserInputBody,
   withWebPushSubscriptionLocale,
 } from "./WebPushNotifications.ts";
 
@@ -20,6 +21,10 @@ describe("recipient-scoped Web Push locale", () => {
       setUiLocale("ko");
       expect(webPushCompletionBody(locale)).toBe(getUiTranslator(locale).text("Finished running"));
       expect(webPushCompletionBody(undefined)).toBe("Finished running");
+      expect(webPushUserInputBody(locale)).toBe(
+        getUiTranslator(locale).text("Waiting for your input"),
+      );
+      expect(webPushUserInputBody(undefined)).toBe("Waiting for your input");
       expect(getUiLocale()).toBe("ko");
     } finally {
       setUiLocale(original);

@@ -1,6 +1,6 @@
 # Usage statistics
 
-Last updated: 2026-10-09 08:52:36 JST (UTC+0900)
+Last updated: 2026-10-23 15:29:39 JST (UTC+0900)
 
 Settings → Usage has one date-range selector for its reporting statistics. The default is 30 days. Selecting 7 days, 30 days, 90 days or All updates generated tokens, chats sent, generating time, estimated USD cost, provider/model breakdowns, token composition, cache savings, cost quality and usage charts together. Activity always shows all recorded daily history, independently of this selector. Cost/Tokens changes the graph's measurement without changing the selected period. The shared detailed cost view in Atrium uses the same range semantics; Atrium's ambient lifetime counters remain lifetime counters.
 
@@ -32,6 +32,46 @@ and lost when their execution owner/runtime restarts, not restored by scanning
 saved transcripts. A presentation-backend reconnect can reread a surviving owner
 inventory after revalidating its saved source authority.
 See the [quota report decision](decisions/claude-account-quota-report.md).
+
+## OpenCode tokens, cost and context
+
+OpenCode records the primary chat's completed model steps, including tool-call
+rounds and compaction steps, in the same daily and model usage ledger. Input
+includes native cache reads/writes; output includes native reasoning tokens.
+OpenCode reports those as separate buckets, so Cafe combines them once and
+retains the cache/reasoning breakdown. Repeated native parts and replay after a
+backend restart settle through the same opaque step checkpoint rather than
+adding the usage again. The bounded in-memory join retains at most 1,024 message
+model identities, 256 unmatched numeric steps and 2,048 recent step receipts;
+old receipt eviction does not remove durable deduplication. Only observed root
+steps are recorded; child sessions and unobserved historical work are not
+reconstructed. Unsupported or missing model labels retain their numeric usage
+in the existing “Model not reported” category. Metadata helpers also record the completed steps returned by
+their prompt response, even when the text fails structured-output validation.
+
+The installed OpenCode 1.18.3 compatibility API exposes a USD cost estimate on
+each `step-finish`. Cafe uses that estimate, rounded once per step to integer
+micro-USD, instead of applying another provider's bundled rates. This can
+preserve OpenCode's configured model/cache/context-tier pricing. It remains an
+OpenCode-reported estimate, not an invoice: OpenCode can return zero for free or
+subscription models and when its pricing metadata is missing. A zero estimate
+is retained as reported; missing, negative or nonfinite costs leave those
+tokens unpriced. The assistant's separate cumulative cost is never added too.
+
+The chat context meter uses the latest nonempty assistant call's input, cache,
+output and reasoning sum, matching OpenCode's own context presentation. It is a
+last-reported occupancy snapshot, not accumulated processed volume or a live
+token estimate. A later call or compaction may reduce it. One optional,
+session-scoped provider inventory request supplies the actual serving model's
+context ceiling. Missing/unavailable limits retain the count without inventing
+a percentage; context updates never bill tokens again. Existing chats acquire
+these observations with their next native usage reports, without scanning their
+saved transcripts or restarting a running provider.
+
+Source semantics were checked against the pinned upstream
+[usage normalization and cost calculation](https://github.com/anomalyco/opencode/blob/127bdb30784d508cc556c71a0f32b508a3061517/packages/opencode/src/session/session.ts#L338-L406),
+[completed-step publication](https://github.com/anomalyco/opencode/blob/127bdb30784d508cc556c71a0f32b508a3061517/packages/opencode/src/session/processor.ts#L435-L456)
+and [context calculation](https://github.com/anomalyco/opencode/blob/127bdb30784d508cc556c71a0f32b508a3061517/packages/app/src/components/session/session-context-metrics.ts#L28-L59).
 
 ## Calendar and data boundaries
 
@@ -130,6 +170,16 @@ with no fabricated history, added polling or changed collection/accounting.
 Long activity histories retain their complete scrollable extent while rendering only visible week columns plus a small overscan. This bounds page content even for an unusually old calendar, without imposing a historical date cutoff or hiding older records.
 
 Money is an API-equivalent USD estimate using the shared pricing table or explicit user overrides, not a subscription invoice. Long-context and speed-tier adjustments cannot be reconstructed from aggregate counters and remain excluded. Unknown model rates and missing model attribution remain unpriced; the priced/unpriced percentages include the recorded unattributed gap. The cost table shows unattributed usage as its own unpriced row.
+
+Known historical Daybreak aliases and GPT-5.6 Cyber have specific standard-rate
+entries rather than the generic GPT fallback. Their currently documented alias
+mappings are pricing inputs only, not model availability or routing authority;
+deprecated aliases stay out of picker fallbacks. User-entered rates remain
+authoritative, and a rate for an underlying model is not automatically an
+override for a differently named alias. The shorter documented cache-write
+baseline is used; aggregate usage cannot identify 12-hour writes or recover
+the price charged for a historical request. See the
+[coordinated provider audit](provider-updates-2026-10-22.md#model-pricing-recheck).
 
 Each surface labels the currency once (for example "Cost (USD)") and keeps the `$` on individual figures. Token totals show the full comma-separated count on top and a smaller `K`/`M`/`B` abbreviation below. Both lines use the same animated value; the abbreviation is hidden only from screen readers to avoid repeating the total. Provider totals and the range total use the same shared ticker as composition and model figures. The long-context/speed-tier exclusion sits in an info tooltip beside the estimate, while "Estimates from recorded usage; may be incomplete." stays visible.
 

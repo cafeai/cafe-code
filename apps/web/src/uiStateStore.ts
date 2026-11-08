@@ -2,6 +2,7 @@ import { Debouncer } from "@tanstack/react-pacer";
 import { parseScopedThreadKey } from "@cafecode/client-runtime";
 import type { EnvironmentId } from "@cafecode/contracts";
 import { create } from "zustand";
+import { normalizeChatRightPanelWidth } from "./rightPanelLayout";
 
 export const PERSISTED_STATE_KEY = "cafe-code:ui-state:v1";
 const LEGACY_PERSISTED_STATE_KEYS = [
@@ -33,11 +34,24 @@ export interface PersistedUiState {
   /** Legacy per-thread preferences, read only when migrating to the global choice. */
   threadCodeReviewCollapsedById?: Record<string, boolean>;
   sessionRailDocked?: boolean;
+  chatRightPanelWidth?: number | null;
+  standaloneChatsExpanded?: boolean;
+  projectsSectionExpanded?: boolean;
 }
 
 export interface UiProjectState {
   projectExpandedById: Record<string, boolean>;
   projectOrder: string[];
+  /**
+   * Whether the sidebar's projectless Chats section is open. A local layout
+   * preference like project folders; collapsing it never hides the active chat.
+   */
+  standaloneChatsExpanded: boolean;
+  /**
+   * Whether the sidebar's Projects section is open. Like the Chats section, a
+   * local layout preference; collapsing it never hides the active chat's project.
+   */
+  projectsSectionExpanded: boolean;
 }
 
 export interface UiThreadState {
@@ -72,6 +86,8 @@ export interface UiSessionRailState {
    * inferred from `autoOpenPlanSidebar` or per-thread plan state.
    */
   sessionRailDocked: boolean;
+  /** Client-local preferred width shared by the docked Tasks and authored-plan column. */
+  chatRightPanelWidth: number | null;
 }
 
 export interface UiState
@@ -99,12 +115,15 @@ export interface SyncThreadInput {
 const initialState: UiState = {
   projectExpandedById: {},
   projectOrder: [],
+  standaloneChatsExpanded: true,
+  projectsSectionExpanded: true,
   threadLastVisitedAtById: {},
   threadPlanSidebarOpenById: {},
   composerTabCollapsed: false,
   defaultAdvertisedEndpointKey: null,
   navigationSidebarOpen: true,
   sessionRailDocked: false,
+  chatRightPanelWidth: null,
 };
 
 const persistedCollapsedProjectCwds = new Set<string>();
@@ -243,6 +262,9 @@ export function hydratePersistedUiState(parsed: PersistedUiState): UiState {
           (typeof parsed.codeReviewCollapsed !== "boolean" &&
             hasLegacyCodeReviewCollapsed(parsed.threadCodeReviewCollapsedById)),
     sessionRailDocked: parsed.sessionRailDocked === true,
+    chatRightPanelWidth: normalizeChatRightPanelWidth(parsed.chatRightPanelWidth),
+    standaloneChatsExpanded: parsed.standaloneChatsExpanded !== false,
+    projectsSectionExpanded: parsed.projectsSectionExpanded !== false,
   };
 }
 
@@ -298,6 +320,9 @@ export function persistState(state: UiState): void {
         threadPlanSidebarOpenById: state.threadPlanSidebarOpenById,
         composerTabCollapsed: state.composerTabCollapsed,
         sessionRailDocked: state.sessionRailDocked,
+        chatRightPanelWidth: state.chatRightPanelWidth,
+        standaloneChatsExpanded: state.standaloneChatsExpanded,
+        projectsSectionExpanded: state.projectsSectionExpanded,
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -643,6 +668,34 @@ export function setSessionRailDocked(state: UiState, docked: boolean): UiState {
   };
 }
 
+export function setChatRightPanelWidth(state: UiState, width: number | null): UiState {
+  const nextWidth = normalizeChatRightPanelWidth(width);
+  if ((width !== null && nextWidth === null) || state.chatRightPanelWidth === nextWidth) {
+    return state;
+  }
+  return { ...state, chatRightPanelWidth: nextWidth };
+}
+
+export function setStandaloneChatsExpanded(state: UiState, expanded: boolean): UiState {
+  if (state.standaloneChatsExpanded === expanded) {
+    return state;
+  }
+  return {
+    ...state,
+    standaloneChatsExpanded: expanded,
+  };
+}
+
+export function setProjectsSectionExpanded(state: UiState, expanded: boolean): UiState {
+  if (state.projectsSectionExpanded === expanded) {
+    return state;
+  }
+  return {
+    ...state,
+    projectsSectionExpanded: expanded,
+  };
+}
+
 export function toggleProject(state: UiState, projectId: string): UiState {
   const expanded = state.projectExpandedById[projectId] ?? true;
   return {
@@ -721,6 +774,9 @@ interface UiStateStore extends UiState {
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setNavigationSidebarOpen: (open: boolean) => void;
   setSessionRailDocked: (docked: boolean) => void;
+  setChatRightPanelWidth: (width: number | null) => void;
+  setStandaloneChatsExpanded: (expanded: boolean) => void;
+  setProjectsSectionExpanded: (expanded: boolean) => void;
   toggleProject: (projectId: string) => void;
   setProjectExpanded: (projectId: string, expanded: boolean) => void;
   reorderProjects: (
@@ -745,6 +801,11 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setNavigationSidebarOpen: (open) => set((state) => setNavigationSidebarOpen(state, open)),
   setSessionRailDocked: (docked) => set((state) => setSessionRailDocked(state, docked)),
+  setChatRightPanelWidth: (width) => set((state) => setChatRightPanelWidth(state, width)),
+  setStandaloneChatsExpanded: (expanded) =>
+    set((state) => setStandaloneChatsExpanded(state, expanded)),
+  setProjectsSectionExpanded: (expanded) =>
+    set((state) => setProjectsSectionExpanded(state, expanded)),
   toggleProject: (projectId) => set((state) => toggleProject(state, projectId)),
   setProjectExpanded: (projectId, expanded) =>
     set((state) => setProjectExpanded(state, projectId, expanded)),

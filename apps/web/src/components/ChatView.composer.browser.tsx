@@ -84,19 +84,247 @@ import {
 import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
-import { page, userEvent } from "vitest/browser";
+import { cdp, page, userEvent } from "vitest/browser";
 import { failBrowserWsRpc } from "../../test/wsRpcHarness";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { deskTabKey } from "../deskModel";
 import { useDeskStore } from "../deskStore";
-import { __setEnvironmentApiOverrideForTests, readEnvironmentApi } from "../environmentApi";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+  readEnvironmentApi,
+} from "../environmentApi";
 import { selectThreadByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
+import { createChatViewCallerOwner } from "./chatViewCallerOwner.test.fixture";
 import { createFollowUpQueuePersistence } from "./chat/followUpQueuePersistence";
 import { toastManager } from "./ui/toast";
+import { browserInputPoint } from "./nativeInput.browser.fixture";
+
+const attachmentUploadObservation = vi.hoisted(() => ({
+  capture: undefined as
+    | ((
+        input: Parameters<typeof import("../attachments/fileAttachments").uploadFileAttachment>[0],
+        operation: ReturnType<typeof import("../attachments/fileAttachments").uploadFileAttachment>,
+      ) => void)
+    | undefined,
+  hasFailure: false,
+  failure: undefined as unknown,
+}));
+vi.mock("../attachments/fileAttachments", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../attachments/fileAttachments")>();
+  return {
+    ...original,
+    uploadFileAttachment: (...args: Parameters<typeof original.uploadFileAttachment>) => {
+      // Preserve the real helper's exact arguments and Promise. This observes
+      // native fetch/body/decode completion without replacing transport, a
+      // response stream, a deadline or the caller's error/result semantics.
+      const operation = original.uploadFileAttachment(...args);
+      try {
+        attachmentUploadObservation.capture?.(args[0], operation);
+      } catch (failure) {
+        if (!attachmentUploadObservation.hasFailure) {
+          attachmentUploadObservation.hasFailure = true;
+          attachmentUploadObservation.failure = failure;
+        }
+      }
+      return operation;
+    },
+  };
+});
 
 describe("ChatView full app (composer)", () => {
   registerChatViewBrowserHooks();
+
+  for (const busy of [false, true]) {
+    it(`keeps a failed input's work log anchored and resends exact content only on request (busy=${busy})`, async (context) => {
+      let release!: () => void;
+      const ack = new Promise<{ sequence: number }>((resolve) => {
+        release = () => resolve({ sequence: 20 });
+      });
+      let restoreDispatch: (() => void) | undefined;
+      let acknowledged = false;
+      const owner = createChatViewCallerOwner(context, mountChatView, {
+        label: "failed-message-resend",
+        beforeDrain: () => release(),
+        afterUnmount: () => restoreDispatch?.(),
+      });
+      await owner.run(async () => {
+        const failedId = MessageId.make("failed-message-to-resend");
+        const failedTurn = TurnId.make("failed-message-turn");
+        const laterTurn = TurnId.make("later-message-turn");
+        const sourceText = "Review this exact prompt.\nKeep the original content.";
+        const imageBase64 =
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6dAAAAABJRU5ErkJggg==";
+        worker.use(
+          http.get(
+            "*/attachments/retry-source-image",
+            () =>
+              new HttpResponse(
+                Uint8Array.from(atob(imageBase64), (c) => c.charCodeAt(0)),
+                { headers: { "Content-Type": "image/png" } },
+              ),
+          ),
+        );
+        const file = {
+          type: "file" as const,
+          id: "retry-source-file",
+          name: "source.txt",
+          mimeType: "text/plain",
+          sizeBytes: 12,
+        };
+        const original = createUserMessage({ id: failedId, text: sourceText, offsetSeconds: 1 });
+        const later = createUserMessage({
+          id: MessageId.make("later-message"),
+          text: "A later message",
+          offsetSeconds: 10,
+        });
+        const base = createSnapshotForTargetUser({
+          targetMessageId: failedId,
+          targetText: sourceText,
+          provider: "claudeAgent",
+          history: "essential",
+        });
+        const snapshot: OrchestrationReadModel = {
+          ...base,
+          threads: base.threads.map((thread) => ({
+            ...thread,
+            messages: [
+              {
+                ...original,
+                originatingTurn: { turnId: failedTurn, state: "error" },
+                attachments: [
+                  {
+                    type: "image",
+                    id: "retry-source-image",
+                    name: "source.png",
+                    mimeType: "image/png",
+                    sizeBytes: 67,
+                  },
+                  file,
+                ],
+              },
+              later,
+            ],
+            latestTurn: {
+              turnId: laterTurn,
+              state: busy ? "running" : "completed",
+              requestedAt: isoAt(10),
+              startedAt: isoAt(10),
+              completedAt: busy ? null : isoAt(12),
+              assistantMessageId: null,
+            },
+            session: {
+              ...thread.session!,
+              status: busy ? "running" : "ready",
+              activeTurnId: busy ? laterTurn : null,
+            },
+            activities: [
+              {
+                id: EventId.make("failed-message-error"),
+                turnId: failedTurn,
+                kind: "runtime.error",
+                tone: "error",
+                summary: "Provider error",
+                payload: { detail: "Synthetic provider failure" },
+                createdAt: isoAt(2),
+              },
+            ],
+          })),
+        };
+        await owner.mount({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? body.type === "thread.turn.start"
+                ? ack
+                : { sequence: 19 }
+              : undefined,
+        });
+        const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+        const dispatch = api.orchestration.dispatchCommand;
+        const spy = vi.spyOn(api.orchestration, "dispatchCommand").mockImplementation(function (
+          this: typeof api.orchestration,
+          ...args
+        ) {
+          return owner.own("ack", async () => {
+            const result = await dispatch.apply(this, args);
+            if (args[0].type === "thread.turn.start") acknowledged = true;
+            return result;
+          });
+        });
+        restoreDispatch = () => spy.mockRestore();
+        await owner.own("editor", () => waitForComposerEditor());
+        await owner.own("draft", () =>
+          page.getByTestId("composer-editor").fill("Keep my unsent draft"),
+        );
+        const resend = page.getByRole("button", { name: "Resend", exact: true });
+        await owner.own("controls", () => expect.element(resend).toBeVisible());
+        expect(resend.element().checkVisibility({ checkOpacity: true })).toBe(true);
+        expect(resend.element().textContent).toBe("");
+        const failedBubble = document.querySelector<HTMLElement>(
+          `[data-message-id="${failedId}"] [data-message-send-failed="true"]`,
+        );
+        expect(failedBubble).not.toBeNull();
+        const ids = Array.from(
+          document.querySelectorAll<HTMLElement>("[data-timeline-row-id]"),
+        ).map((row) => row.dataset.timelineRowId);
+        expect(ids.indexOf(`historical-work:${failedTurn}`)).toBeGreaterThan(ids.indexOf(failedId));
+        expect(ids.indexOf(`historical-work:${failedTurn}`)).toBeLessThan(ids.indexOf(later.id));
+        const sends = () =>
+          wsRequests.filter(
+            (request) =>
+              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              request.type === "thread.turn.start",
+          );
+        expect(sends()).toHaveLength(0);
+        if (busy) {
+          await owner.own("controls", () => expect.element(resend).toBeDisabled());
+          return;
+        }
+        await owner.own("controls", () => expect.element(resend).toBeEnabled());
+        await owner.own("preview", () =>
+          page.screenshot({ path: "../../../../.logs/failed-message-resend.png" }),
+        );
+        await owner.own("send", () => resend.click());
+        await owner.own("request", () => vi.waitFor(() => expect(sends()).toHaveLength(1)));
+        expect(sends()[0]).toMatchObject({
+          type: "thread.turn.start",
+          threadId: THREAD_ID,
+          message: {
+            role: "user",
+            text: sourceText,
+            attachments: [
+              {
+                type: "image",
+                name: "source.png",
+                mimeType: "image/png",
+                dataUrl: `data:image/png;base64,${imageBase64}`,
+              },
+              file,
+            ],
+          },
+        });
+        expect(sends()[0]).not.toMatchObject({ message: { messageId: failedId } });
+        expect(acknowledged).toBe(false);
+        await owner.own("controls", () => expect.element(resend).toBeDisabled());
+        await owner.own("controls", () =>
+          expect.element(resend).toHaveAttribute("aria-busy", "true"),
+        );
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "Keep my unsent draft",
+        );
+        expect(page.getByTestId("composer-editor").element().textContent).toBe(
+          "Keep my unsent draft",
+        );
+        release();
+        await owner.own("receipt", () => vi.waitFor(() => expect(acknowledged).toBe(true)));
+        expect(sends()).toHaveLength(1);
+      });
+    });
+  }
 
   const createCodexRecoverySnapshot = (uncertain = false): OrchestrationReadModel => {
     const base = createSnapshotWithActiveSubagent();
@@ -151,6 +379,473 @@ describe("ChatView full app (composer)", () => {
       ),
     };
   };
+  const createConnectingStopSnapshot = (runtimeId: string | null): OrchestrationReadModel => {
+    const base = createSnapshotForTargetUser({
+      targetMessageId: MessageId.make("connecting-stop-target"),
+      targetText: "Preserved conversation before provider opening",
+      history: "essential",
+    });
+    return {
+      ...base,
+      threads: base.threads.map((thread) => ({
+        ...thread,
+        latestTurn: {
+          turnId: TurnId.make("connecting-stop-failed-root"),
+          state: "error",
+          requestedAt: isoAt(2_000),
+          startedAt: isoAt(2_001),
+          completedAt: isoAt(2_002),
+          assistantMessageId: null,
+        },
+        session: {
+          ...thread.session!,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          status: "starting",
+          activeTurnId: null,
+          subagentRuntimeId: runtimeId,
+          updatedAt: isoAt(2_003),
+        },
+        activities: [],
+      })),
+    };
+  };
+
+  it("keeps connecting Stop and draft ownership independent across two real chat panes", async (context) => {
+    const base = createConnectingStopSnapshot(null);
+    const first = base.threads[0]!;
+    const secondId = ThreadId.make("connecting-stop-other-chat");
+    const secondRef = scopeThreadRef(LOCAL_ENVIRONMENT_ID, secondId);
+    const firstKey = deskTabKey({ kind: "server", threadRef: THREAD_REF });
+    const secondTarget = { kind: "server" as const, threadRef: secondRef };
+    const secondKey = deskTabKey(secondTarget);
+    const snapshot: OrchestrationReadModel = {
+      ...base,
+      threads: [
+        first,
+        {
+          ...first,
+          id: secondId,
+          title: "Other connecting chat",
+          messages: [],
+          latestTurn: {
+            ...first.latestTurn!,
+            turnId: TurnId.make("connecting-stop-other-failed-root"),
+          },
+          session: { ...first.session!, threadId: secondId },
+        },
+      ],
+    };
+    let resolveFirst!: (value: { sequence: number }) => void;
+    let resolveSecond!: (value: { sequence: number }) => void;
+    const firstReply = new Promise<{ sequence: number }>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondReply = new Promise<{ sequence: number }>((resolve) => {
+      resolveSecond = resolve;
+    });
+    let firstReleased = false;
+    let secondReleased = false;
+    const releaseFirst = () => {
+      if (firstReleased) return;
+      firstReleased = true;
+      resolveFirst({ sequence: snapshot.snapshotSequence + 1 });
+    };
+    const releaseSecond = () => {
+      if (secondReleased) return;
+      secondReleased = true;
+      resolveSecond({ sequence: snapshot.snapshotSequence + 2 });
+    };
+    let restoreDispatch: (() => void) | undefined;
+    let apiOverrideAcquired = false;
+    const acknowledged = new Set<ThreadId>();
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "composer-opening-stop",
+      beforeDrain: () => {
+        releaseFirst();
+        releaseSecond();
+      },
+      afterUnmount: () => {
+        try {
+          restoreDispatch?.();
+        } finally {
+          if (apiOverrideAcquired) {
+            __resetEnvironmentApiOverridesForTests();
+            apiOverrideAcquired = false;
+          }
+        }
+      },
+    });
+    await owner.run(async () => {
+      await owner.mount({
+        viewport: { ...DEFAULT_VIEWPORT, width: 2100 },
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+          body.type === "thread.session.stop"
+            ? body.threadId === THREAD_ID
+              ? firstReply
+              : body.threadId === secondId
+                ? secondReply
+                : undefined
+            : undefined,
+      });
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      const dispatchCommand = api.orchestration.dispatchCommand;
+      const dispatchSpy = vi
+        .spyOn(api.orchestration, "dispatchCommand")
+        .mockImplementation(function (this: unknown, ...args) {
+          // Own the actual wire completion separately from the native click and
+          // held response. Releasing a fake reply is not an acknowledgement.
+          let completion: ReturnType<typeof dispatchCommand> | undefined;
+          const joined = owner.own("ack", () => {
+            completion = (async () => {
+              const result = await dispatchCommand.apply(this, args);
+              if (args[0].type === "thread.session.stop") acknowledged.add(args[0].threadId);
+              return result;
+            })();
+            return completion;
+          });
+          void joined.then(
+            () => undefined,
+            () => undefined,
+          );
+          return completion ?? joined;
+        });
+      restoreDispatch = () => dispatchSpy.mockRestore();
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, api);
+      apiOverrideAcquired = true;
+      owner.assertActive();
+      const dispatch = useDeskStore.getState().dispatch;
+      dispatch({ type: "keepOpen", tabKey: firstKey });
+      dispatch({ type: "open", target: secondTarget });
+      dispatch({ type: "split", tabKey: secondKey, targetGroupId: "g1", edge: "right" });
+      await owner.own("layout", () =>
+        vi.waitFor(() =>
+          expect(document.querySelectorAll('[data-testid="composer-editor"]')).toHaveLength(2),
+        ),
+      );
+      const secondGroup = Object.values(useDeskStore.getState().desk.groups).find(
+        (group) => group.id !== "g1",
+      )!;
+      const firstPane = page.getByRole("region", { name: "Main chat group", exact: true });
+      const secondPane = page.getByRole("region", {
+        name: `${secondGroup.name} chat group`,
+        exact: true,
+      });
+      owner.assertActive();
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep first unsent instruction");
+      useComposerDraftStore.getState().setPrompt(secondRef, "Keep second unsent instruction");
+      await owner.own("prompt", () =>
+        expect
+          .element(firstPane.getByTestId("composer-editor"))
+          .toHaveTextContent("Keep first unsent instruction"),
+      );
+      await owner.own("prompt", () =>
+        expect
+          .element(secondPane.getByTestId("composer-editor"))
+          .toHaveTextContent("Keep second unsent instruction"),
+      );
+      const firstStop = firstPane.getByRole("button", { name: "Stop", exact: true });
+      const secondStop = secondPane.getByRole("button", { name: "Stop", exact: true });
+      await owner.own("controls", () => expect.element(firstStop).toBeEnabled());
+      await owner.own("input", () => firstStop.dblClick());
+      const stops = () =>
+        wsRequests.filter(
+          (request) =>
+            request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            request.type === "thread.session.stop",
+        );
+      await owner.own("request", () =>
+        vi.waitFor(() => expect(stops().map((request) => request.threadId)).toEqual([THREAD_ID])),
+      );
+      await owner.own("controls", () => expect.element(firstStop).toBeDisabled());
+      expect(acknowledged.has(THREAD_ID)).toBe(false);
+      await owner.own("controls", () => expect.element(secondStop).toBeEnabled());
+      await owner.own("input", () => secondStop.click());
+      await owner.own("request", () =>
+        vi.waitFor(() =>
+          expect(stops().map((request) => request.threadId)).toEqual([THREAD_ID, secondId]),
+        ),
+      );
+      await owner.own("controls", () => expect.element(secondStop).toBeDisabled());
+      owner.assertActive();
+      releaseFirst();
+      await owner.own("ack", () =>
+        vi.waitFor(() => expect(acknowledged.has(THREAD_ID)).toBe(true)),
+      );
+      await owner.own("controls", () => expect.element(firstStop).toBeEnabled());
+      await owner.own("controls", () => expect.element(secondStop).toBeDisabled());
+      expect(acknowledged.has(secondId)).toBe(false);
+      expect(stops()).toHaveLength(2);
+      expect(
+        wsRequests.some(
+          (request) =>
+            request.type === "thread.turn.start" || request.type === "thread.turn.interrupt",
+        ),
+      ).toBe(false);
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+        "Keep first unsent instruction",
+      );
+      expect(useComposerDraftStore.getState().getComposerDraft(secondRef)?.prompt).toBe(
+        "Keep second unsent instruction",
+      );
+      owner.assertActive();
+      releaseSecond();
+      await owner.own("ack", () => vi.waitFor(() => expect(acknowledged.has(secondId)).toBe(true)));
+      await owner.own("controls", () => expect.element(secondStop).toBeEnabled());
+    });
+  });
+
+  it("uses ordinary turn interrupt after the same connecting owner accepts a running root", async (context) => {
+    const snapshot = createConnectingStopSnapshot(SUBAGENT_RUNTIME_ID);
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "composer-stop-accepted",
+    });
+    await owner.run(async () => {
+      await owner.mount({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: snapshot.snapshotSequence + 2 }
+            : undefined,
+      });
+      await owner.own("controls", () =>
+        expect.element(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled(),
+      );
+      const acceptedTurnId = TurnId.make("connecting-stop-accepted-root");
+      const source = snapshot.threads[0]!;
+      const accepted = {
+        ...source,
+        latestTurn: {
+          ...source.latestTurn!,
+          turnId: acceptedTurnId,
+          state: "running" as const,
+          requestedAt: isoAt(2_004),
+          startedAt: isoAt(2_005),
+          completedAt: null,
+        },
+        session: {
+          ...source.session!,
+          status: "running" as const,
+          activeTurnId: acceptedTurnId,
+          updatedAt: isoAt(2_005),
+        },
+        updatedAt: isoAt(2_005),
+      };
+      owner.assertActive();
+      const sequence = snapshot.snapshotSequence + 1;
+      chatViewFixture.fixture.snapshot = {
+        ...snapshot,
+        snapshotSequence: sequence,
+        threads: [accepted],
+      };
+      rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+        kind: "snapshot",
+        snapshot: { snapshotSequence: sequence, thread: accepted },
+      });
+      await owner.own("canonical", () =>
+        vi.waitFor(() => {
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.session?.activeTurnId).toBe(
+            acceptedTurnId,
+          );
+          expect(
+            selectThreadByRef(useStore.getState(), THREAD_REF)?.session?.subagentRuntimeId,
+          ).toBe(SUBAGENT_RUNTIME_ID);
+        }),
+      );
+      const stop = page.getByRole("button", { name: "Stop generation", exact: true });
+      await owner.own("controls", () => expect.element(stop).toBeEnabled());
+      await owner.own("input", () => stop.click());
+      await owner.own("request", () =>
+        vi.waitFor(() => {
+          const commands = wsRequests.filter(
+            (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+          );
+          expect(commands.filter((request) => request.type === "thread.turn.interrupt")).toEqual([
+            expect.objectContaining({ threadId: THREAD_ID, turnId: acceptedTurnId }),
+          ]);
+          expect(
+            commands.some(
+              (request) =>
+                request.type === "thread.session.stop" || request.type === "thread.turn.start",
+            ),
+          ).toBe(false);
+        }),
+      );
+    });
+  });
+
+  it("keeps an accepted preparation Stop disabled without a live session or losing the draft", async (context) => {
+    const base = createConnectingStopSnapshot(null);
+    const failedRoot = base.threads[0]!.latestTurn!.turnId;
+    const marker = (
+      intent: number,
+      phase: "preparing" | "uncertain" | "retired",
+      sequence: number,
+    ) => ({
+      id: EventId.make(`server:codex-preparation:${intent}:0:${phase}`),
+      kind: "runtime.warning" as const,
+      tone: "info" as const,
+      summary: "Synthetic session preparation",
+      turnId: failedRoot,
+      createdAt: isoAt(2_004 + sequence),
+      sequence,
+      payload: {
+        recovery: "codex-transient-preparation",
+        phase,
+        recoveryIntentSequence: intent,
+        sourceEventSequence: 41,
+        preparationSequence: 0,
+        observedWaits: 0,
+      },
+    });
+    const initialMarker = marker(42, "preparing", 43);
+    const source = {
+      ...base.threads[0]!,
+      // The old native context has already retired, while its separately
+      // budgeted preparation still owns opening. A session-derived spinner
+      // must not be required for the human's durable Stop control.
+      session: null,
+      activities: [initialMarker],
+    };
+    const snapshot: OrchestrationReadModel = {
+      ...base,
+      snapshotSequence: 44,
+      threads: [source],
+    };
+    let resolveStop!: (value: { sequence: number }) => void;
+    const stopReply = new Promise<{ sequence: number }>((resolve) => {
+      resolveStop = resolve;
+    });
+    let released = false;
+    const releaseStop = () => {
+      if (released) return;
+      released = true;
+      resolveStop({ sequence: 45 });
+    };
+    let restoreDispatch: (() => void) | undefined;
+    let apiOverrideAcquired = false;
+    let acknowledged = false;
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "composer-preparation-stop",
+      beforeDrain: releaseStop,
+      afterUnmount: () => {
+        try {
+          restoreDispatch?.();
+        } finally {
+          if (apiOverrideAcquired) {
+            __resetEnvironmentApiOverridesForTests();
+            apiOverrideAcquired = false;
+          }
+        }
+      },
+    });
+    await owner.run(async () => {
+      await owner.mount({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+          body.type === "thread.session.stop" &&
+          body.threadId === THREAD_ID
+            ? stopReply
+            : undefined,
+      });
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      const dispatchCommand = api.orchestration.dispatchCommand;
+      const dispatchSpy = vi
+        .spyOn(api.orchestration, "dispatchCommand")
+        .mockImplementation(function (this: unknown, ...args) {
+          // Retain the original wire completion. Resolving the held response
+          // alone does not establish that the Stop acknowledgement arrived.
+          let completion: ReturnType<typeof dispatchCommand> | undefined;
+          const joined = owner.own("ack", () => {
+            completion = (async () => {
+              const result = await dispatchCommand.apply(this, args);
+              if (args[0].type === "thread.session.stop") acknowledged = true;
+              return result;
+            })();
+            return completion;
+          });
+          void joined.then(
+            () => undefined,
+            () => undefined,
+          );
+          return completion ?? joined;
+        });
+      restoreDispatch = () => dispatchSpy.mockRestore();
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, api);
+      apiOverrideAcquired = true;
+      owner.assertActive();
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep this unsent preparation draft");
+      const editor = page.getByTestId("composer-editor");
+      const stop = page.getByRole("button", { name: "Stop recovery", exact: true });
+      await owner.own("prompt", () =>
+        expect.element(editor).toHaveTextContent("Keep this unsent preparation draft"),
+      );
+      await owner.own("controls", () => expect.element(stop).toBeEnabled());
+      await owner.own("input", () => stop.dblClick());
+      const commands = () =>
+        wsRequests.filter((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand);
+      await owner.own("request", () =>
+        vi.waitFor(() =>
+          expect(commands()).toEqual([
+            expect.objectContaining({ type: "thread.session.stop", threadId: THREAD_ID }),
+          ]),
+        ),
+      );
+      expect(acknowledged).toBe(false);
+      await owner.own("controls", () => expect.element(stop).toBeDisabled());
+      owner.assertActive();
+      releaseStop();
+      await owner.own("ack", () => vi.waitFor(() => expect(acknowledged).toBe(true)));
+      await owner.own("controls", () => expect.element(stop).toBeDisabled());
+
+      const publish = (activities: typeof source.activities, sequence: number) => {
+        owner.assertActive();
+        const thread = { ...source, activities };
+        chatViewFixture.fixture.snapshot = {
+          ...snapshot,
+          snapshotSequence: sequence,
+          threads: [thread],
+        };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence: sequence, thread },
+        });
+      };
+      // Progress for this same preparation cannot reopen an accepted Stop.
+      // The marker remains observational and does not attest native closure.
+      publish([initialMarker, marker(42, "uncertain", 46)], 47);
+      await owner.own("canonical", () =>
+        vi.waitFor(() => {
+          const current = selectThreadByRef(useStore.getState(), THREAD_REF);
+          expect(current?.session).toBeNull();
+          expect(current?.activities.at(-1)?.id).toBe("server:codex-preparation:42:0:uncertain");
+        }),
+      );
+      await owner.own("controls", () => expect.element(stop).toBeDisabled());
+      expect(commands()).toHaveLength(1);
+
+      const retired = marker(42, "retired", 48);
+      publish([initialMarker, retired], 49);
+      await owner.own("controls", () => expect.element(stop).not.toBeInTheDocument());
+      // A distinct current intent supplies its own usable Stop; the prior
+      // accepted intent must not permanently disable controls for this chat.
+      publish([initialMarker, retired, marker(50, "preparing", 51)], 52);
+      await owner.own("controls", () => expect.element(stop).toBeEnabled());
+      await owner.own("prompt", () =>
+        expect.element(editor).toHaveTextContent("Keep this unsent preparation draft"),
+      );
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+        "Keep this unsent preparation draft",
+      );
+      expect(commands()).toEqual([
+        expect.objectContaining({ type: "thread.session.stop", threadId: THREAD_ID }),
+      ]);
+    });
+  });
   it.each(["light", "dark"] as const)(
     "uses only a compact notice for exact pending recovery without dismissing failures in %s mode",
     async (theme) => {
@@ -507,6 +1202,202 @@ describe("ChatView full app (composer)", () => {
       ],
     };
   };
+
+  for (const supportsUnanswered of [true, false]) {
+    it(`keeps explicit question dispositions capability-bound without stopping work (supported: ${supportsUnanswered})`, async (context) => {
+      const base = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("claude-unanswered-request"),
+        targetText: "Continue the current work",
+        provider: "claudeAgent",
+        sessionStatus: "running",
+        history: "essential",
+      });
+      const question = (label: string) => ({
+        id: `Question ${label}`,
+        header: label,
+        question: `Question ${label}`,
+        options: [{ label, description: label }],
+        multiSelect: true,
+      });
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          modelSelection: responseLimitSelection,
+          activities: [
+            {
+              id: EventId.make("claude-unanswered-pending"),
+              createdAt: NOW_ISO,
+              kind: "user-input.requested",
+              tone: "info",
+              summary: "Claude has questions",
+              turnId: thread.latestTurn?.turnId ?? null,
+              payload: {
+                requestId: "claude-unanswered-pending",
+                isBlocking: true,
+                ...(supportsUnanswered ? { supportsUnanswered: true } : {}),
+                questions: [
+                  question("First choice"),
+                  question("Second choice"),
+                  question("Last choice"),
+                ],
+              },
+            },
+          ],
+        })),
+      };
+      let releaseReply!: () => void;
+      const reply = new Promise<{ sequence: number }>((resolve) => {
+        releaseReply = () => resolve({ sequence: snapshot.snapshotSequence + 1 });
+      });
+      let restoreDispatch: (() => void) | undefined;
+      let overrideAcquired = false;
+      const owner = createChatViewCallerOwner(context, mountChatView, {
+        label: "composer-unanswered",
+        beforeDrain: () => releaseReply(),
+        afterUnmount: () => {
+          try {
+            restoreDispatch?.();
+          } finally {
+            if (overrideAcquired) __resetEnvironmentApiOverridesForTests();
+          }
+        },
+      });
+      await owner.run(async () => {
+        await owner.mount({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot,
+          configureFixture: configureResponseLimitFixture,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            body.type === "thread.user-input.respond"
+              ? reply
+              : undefined,
+        });
+        const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+        const dispatch = api.orchestration.dispatchCommand;
+        const spy = vi.spyOn(api.orchestration, "dispatchCommand").mockImplementation(function (
+          this: unknown,
+          ...args
+        ) {
+          let completion: ReturnType<typeof dispatch> | undefined;
+          // Join the actual held wire operation before shared RPC/store reset,
+          // including when the native action or the enclosing test times out.
+          const joined = owner.own("ack", () => {
+            completion = dispatch.apply(this, args);
+            return completion;
+          });
+          void joined.catch(() => undefined);
+          return completion ?? joined;
+        });
+        restoreDispatch = () => spy.mockRestore();
+        __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, api);
+        overrideAcquired = true;
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep this independent draft");
+        await owner.own("controls", () =>
+          expect.element(page.getByText("Question First choice", { exact: true })).toBeVisible(),
+        );
+        if (!supportsUnanswered) {
+          await owner.own("controls", () =>
+            expect
+              .element(page.getByRole("button", { name: "Skip", exact: true }))
+              .not.toBeInTheDocument(),
+          );
+          await owner.own("controls", () =>
+            expect
+              .element(page.getByRole("button", { name: "Dismiss", exact: true }))
+              .not.toBeInTheDocument(),
+          );
+        }
+        await owner.own("input", () =>
+          page.getByRole("button", { name: "1 First choice", exact: true }).click(),
+        );
+        await owner.own("input", () =>
+          supportsUnanswered
+            ? page.getByRole("button", { name: "Skip", exact: true }).click()
+            : page.getByRole("button", { name: /^Next(?: question)?$/ }).click(),
+        );
+        await owner.own("controls", () =>
+          expect.element(page.getByText("Question Second choice", { exact: true })).toBeVisible(),
+        );
+        expect(
+          wsRequests.filter((request) => request.type === "thread.user-input.respond"),
+        ).toHaveLength(0);
+        await owner.own("input", () =>
+          page.getByRole("button", { name: "1 Second choice", exact: true }).click(),
+        );
+        await owner.own("input", () =>
+          page.getByRole("button", { name: /^Next(?: question)?$/ }).click(),
+        );
+        await owner.own("controls", () =>
+          expect.element(page.getByText("Question Last choice", { exact: true })).toBeVisible(),
+        );
+        if (supportsUnanswered) {
+          await owner.own("input", () =>
+            page.getByRole("button", { name: "Dismiss", exact: true }).click(),
+          );
+          await owner.own("controls", () =>
+            expect
+              .element(page.getByRole("button", { name: "Dismiss", exact: true }))
+              .toBeDisabled(),
+          );
+          await owner.own("controls", () =>
+            expect.element(page.getByRole("button", { name: "Skip", exact: true })).toBeDisabled(),
+          );
+        } else {
+          await owner.own("input", () =>
+            page.getByRole("button", { name: "1 Last choice", exact: true }).click(),
+          );
+          await owner.own("input", () =>
+            // The responsive footer uses the same native submit control with
+            // either its compact or expanded accessible label.
+            page.getByRole("button", { name: /^Submit(?: answers)?$/ }).click(),
+          );
+        }
+        await owner.own("request", () =>
+          vi.waitFor(() =>
+            expect(
+              wsRequests.filter((request) => request.type === "thread.user-input.respond"),
+            ).toHaveLength(1),
+          ),
+        );
+        const response = wsRequests.find(
+          (request) => request.type === "thread.user-input.respond",
+        )!;
+        expect(response).toMatchObject({
+          threadId: THREAD_ID,
+          requestId: "claude-unanswered-pending",
+          answers: supportsUnanswered
+            ? { "Question Second choice": ["Second choice"] }
+            : {
+                "Question First choice": ["First choice"],
+                "Question Second choice": ["Second choice"],
+                "Question Last choice": ["Last choice"],
+              },
+        });
+        if (supportsUnanswered)
+          expect(response.unanswered).toEqual({
+            "Question First choice": "skipped",
+            "Question Last choice": "dismissed",
+          });
+        else expect(response).not.toHaveProperty("unanswered");
+        expect(
+          wsRequests.some((request) =>
+            [
+              "thread.turn.interrupt",
+              "thread.session.stop",
+              "thread.turn.start",
+              "thread.turn.steer",
+            ].includes(String(request.type)),
+          ),
+        ).toBe(false);
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "Keep this independent draft",
+        );
+        releaseReply();
+      });
+    });
+  }
 
   const readResponseLimitCaretText = (editor: HTMLElement) => {
     const selection = editor.ownerDocument.getSelection();
@@ -886,7 +1777,109 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
-  it("shows manual compaction in the used-tools list without a user turn or composer notice", async () => {
+  it("shows manual compaction in the used-tools list without a user turn or composer notice", async ({
+    signal,
+    onTestFinished,
+    onTestFailed,
+  }) => {
+    type Step =
+      | "mount"
+      | "layout"
+      | "send-button"
+      | "request"
+      | "draft-cleared"
+      | "work-log-requested"
+      | "work-log-running"
+      | "work-log-completed";
+    type Phase =
+      | `${Step}:${"entered" | "settled"}`
+      | `mount:${"viewport" | "styles" | "render" | "websocket" | "bootstrap" | "layout"}`
+      | "send-clicked"
+      | "cleanup:entered"
+      | "cleanup:settled";
+    const startedAt = performance.now();
+    const phases: { phase: Phase; elapsedMs: number }[] = [];
+    let recording = true;
+    let retired = false;
+    let bodyFailed = false;
+    let mounting: ReturnType<typeof mountChatView> | undefined;
+    let mountCleanup: (() => Promise<void>) | undefined;
+    let cleanupPromise: Promise<void> | undefined;
+    const pendingOperations = new Set<Promise<unknown>>();
+    const recordPhase = (phase: Phase) => {
+      if (!recording) return;
+      try {
+        if (phases.length === 16) phases.shift();
+        const elapsed = performance.now() - startedAt;
+        phases.push({
+          phase,
+          elapsedMs: Number.isFinite(elapsed)
+            ? Math.min(60_000, Math.max(0, Math.round(elapsed)))
+            : 0,
+        });
+      } catch {
+        /* Passive diagnostics cannot replace an original result. */
+      }
+    };
+    const assertActive = () => {
+      if (retired || signal.aborted)
+        throw new Error("The exact manual-compaction fixture was retired.");
+    };
+    const cleanup = (): Promise<void> => {
+      retired = true;
+      signal.removeEventListener("abort", onAbort);
+      // Publish one completion before invoking asynchronous disposal. Cleanup
+      // itself and the test body never enter the set they must drain.
+      return (cleanupPromise ??= Promise.resolve().then(async () => {
+        recordPhase("cleanup:entered");
+        try {
+          try {
+            await mounting;
+          } catch {
+            // Join the original mount without replacing its body rejection.
+          }
+          // Keep the exact controls alive until their admitted work settles;
+          // a later fixture must not satisfy an old continuation or locator.
+          await Promise.allSettled([...pendingOperations]);
+        } finally {
+          try {
+            await mountCleanup?.();
+          } finally {
+            recordPhase("cleanup:settled");
+            recording = false;
+          }
+        }
+      }));
+    };
+    const onAbort = () => {
+      void cleanup().catch(() => undefined);
+    };
+    const observe = async <T,>(step: Step, operation: () => PromiseLike<T>): Promise<T> => {
+      assertActive();
+      recordPhase(`${step}:entered`);
+      const original = Promise.resolve(operation());
+      pendingOperations.add(original);
+      try {
+        const result = await original;
+        assertActive();
+        recordPhase(`${step}:settled`);
+        return result;
+      } finally {
+        pendingOperations.delete(original);
+      }
+    };
+    // Public retirement is installed before mount can yield. The shared hook
+    // joins this same callback before resetting the RPC harness or DOM.
+    onTestFinished(cleanup);
+    onTestFailed(() => {
+      try {
+        console.error("Synthetic manual-compaction phases", { phases });
+      } catch {
+        /* Preserve the original failure without payload or error text. */
+      }
+    });
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
     const base = createSnapshotForTargetUser({
       targetMessageId: "compact-history" as MessageId,
       targetText: "Existing conversation",
@@ -909,24 +1902,46 @@ describe("ChatView full app (composer)", () => {
         }),
       ),
     };
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot,
-      resolveRpc: (body) =>
-        body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
-    });
     try {
+      await observe(
+        "mount",
+        () =>
+          (mounting = mountChatView({
+            viewport: DEFAULT_VIEWPORT,
+            snapshot,
+            lifecycle: {
+              assertActive,
+              retire: cleanup,
+              ownCleanup: (ownedCleanup) => {
+                mountCleanup = ownedCleanup;
+              },
+              observePhase: (phase) => {
+                assertActive();
+                recordPhase(`mount:${phase}`);
+              },
+            },
+            resolveRpc: (body) =>
+              body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+          })),
+      );
       useComposerDraftStore.getState().setPrompt(THREAD_REF, "/compact");
-      await waitForLayout();
-      (await waitForSendButton()).click();
-      await vi.waitFor(() =>
-        expect(
-          wsRequests.some(
-            (request) =>
-              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
-              request.type === "thread.compact",
-          ),
-        ).toBe(true),
+      await observe("layout", () => waitForLayout());
+      const sendButton = await observe("send-button", () => waitForSendButton());
+      assertActive();
+      // Preserve the original synchronous HTML activation, not another native
+      // input or a new readiness condition.
+      sendButton.click();
+      recordPhase("send-clicked");
+      await observe("request", () =>
+        vi.waitFor(() =>
+          expect(
+            wsRequests.some(
+              (request) =>
+                request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                request.type === "thread.compact",
+            ),
+          ).toBe(true),
+        ),
       );
       const request = wsRequests.find(
         (request) =>
@@ -971,6 +1986,7 @@ describe("ChatView full app (composer)", () => {
         [4, [requested, started], "running", "Compacting context"],
         [5, [requested, started, completed], "completed", "Context compacted"],
       ] as const) {
+        assertActive();
         const thread = {
           ...snapshot.threads[0]!,
           activities,
@@ -995,88 +2011,107 @@ describe("ChatView full app (composer)", () => {
           kind: "snapshot",
           snapshot: { snapshotSequence: sequence, thread },
         });
-        await vi.waitFor(() =>
-          expect(
-            [...document.querySelectorAll("[data-work-log]")]
-              .map((node) => node.textContent)
-              .join(" "),
-          ).toContain(label),
+        await observe(`work-log-${state}`, () =>
+          vi.waitFor(() =>
+            expect(
+              [...document.querySelectorAll("[data-work-log]")]
+                .map((node) => node.textContent)
+                .join(" "),
+            ).toContain(label),
+          ),
         );
       }
       expect(document.querySelector("[data-compaction-status]")).toBeNull();
       expect(document.body.textContent).not.toContain("Compacting context");
       expect(wsRequests.some((request) => request.type === "thread.turn.start")).toBe(false);
-      await vi.waitFor(() =>
-        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "").toBe(
-          "",
+      await observe("draft-cleared", () =>
+        vi.waitFor(() =>
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "").toBe(
+            "",
+          ),
         ),
       );
+    } catch (error) {
+      bodyFailed = true;
+      throw error;
     } finally {
-      await mounted.cleanup();
+      if (bodyFailed) {
+        try {
+          await cleanup();
+        } catch {
+          // Preserve the primary body failure. Shared retirement still joins
+          // and reports the same rejected cleanup under the existing policy.
+        }
+      } else {
+        await cleanup();
+      }
     }
   });
 
-  it.each([
+  it.for([
     ["completed", "Context compacted"],
     ["failed", "Context compaction failed"],
     ["declined", "Context compaction interrupted"],
   ] as const)(
     "restores %s manual compaction in the used-tools list without an assistant message",
-    async (status, title) => {
-      const base = createSnapshotForTargetUser({
-        targetMessageId: "compact-restored" as MessageId,
-        targetText: "Existing conversation",
+    async ([status, title], testContext) => {
+      const owner = createChatViewCallerOwner(testContext, mountChatView, {
+        label: "restored-compaction",
       });
-      const snapshot = {
-        ...base,
-        threads: base.threads.map((thread) =>
-          Object.assign({}, thread, {
-            latestTurn: {
-              turnId: "compact-turn" as TurnId,
-              state:
-                status === "failed"
-                  ? ("error" as const)
-                  : status === "declined"
-                    ? ("interrupted" as const)
-                    : ("completed" as const),
-              requestedAt: isoAt(178),
-              startedAt: isoAt(179),
-              completedAt: isoAt(180),
-              assistantMessageId: null,
-            },
-            activities: [
-              {
-                id: EventId.make("restored-compaction"),
-                kind: "tool.completed",
-                tone: "tool" as const,
-                summary: title,
-                createdAt: isoAt(180),
+      await owner.run(async () => {
+        const base = createSnapshotForTargetUser({
+          targetMessageId: "compact-restored" as MessageId,
+          targetText: "Existing conversation",
+        });
+        const snapshot = {
+          ...base,
+          threads: base.threads.map((thread) =>
+            Object.assign({}, thread, {
+              latestTurn: {
                 turnId: "compact-turn" as TurnId,
-                payload: {
-                  itemType: "context_compaction",
-                  itemId: "item",
-                  title: "Context compaction",
-                  status,
-                },
+                state:
+                  status === "failed"
+                    ? ("error" as const)
+                    : status === "declined"
+                      ? ("interrupted" as const)
+                      : ("completed" as const),
+                requestedAt: isoAt(178),
+                startedAt: isoAt(179),
+                completedAt: isoAt(180),
+                assistantMessageId: null,
               },
-            ],
-          }),
-        ),
-      };
-      const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
-      try {
-        await vi.waitFor(() =>
-          expect(
-            [...document.querySelectorAll("[data-work-log]")]
-              .map((node) => node.textContent)
-              .join(" "),
-          ).toContain(title),
+              activities: [
+                {
+                  id: EventId.make("restored-compaction"),
+                  kind: "tool.completed",
+                  tone: "tool" as const,
+                  summary: title,
+                  createdAt: isoAt(180),
+                  turnId: "compact-turn" as TurnId,
+                  payload: {
+                    itemType: "context_compaction",
+                    itemId: "item",
+                    title: "Context compaction",
+                    status,
+                  },
+                },
+              ],
+            }),
+          ),
+        };
+        await owner.mount({ viewport: DEFAULT_VIEWPORT, snapshot });
+        await owner.own("work-log", () =>
+          vi.waitFor(() =>
+            expect(
+              [...document.querySelectorAll("[data-work-log]")]
+                .map((node) => node.textContent)
+                .join(" "),
+            ).toContain(title),
+          ),
         );
         expect(document.querySelector("[data-compaction-status]")).toBeNull();
         expect(wsRequests.some((request) => request.type === "thread.compact")).toBe(false);
-      } finally {
-        await mounted.cleanup();
-      }
+      });
     },
   );
 
@@ -1642,48 +2677,55 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
-  it("docks the runtime checklist and context usage into the session rail on a wide viewport", async () => {
-    const mounted = await mountChatView({
-      viewport: WIDE_FOOTER_VIEWPORT,
-      snapshot: createSnapshotWithRuntimeTaskProgress({ withContextWindow: true }),
-      configureFixture: (nextFixture) => {
-        const [codexProvider] = nextFixture.serverConfig.providers;
-        if (!codexProvider) return;
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          providers: [
-            {
-              ...codexProvider,
-              accountRateLimits: {
-                checkedAt: NOW_ISO,
-                rateLimits: {
-                  limitId: "codex",
-                  primary: {
-                    usedPercent: 1,
-                    windowDurationMins: 10_080,
-                    resetsAt: 1_788_278_880,
+  it("docks the runtime checklist and context usage into the session rail on a wide viewport", async (context) => {
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "composer-rail-docking",
+    });
+    await owner.run(async () => {
+      await owner.mount({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot: createSnapshotWithRuntimeTaskProgress({ withContextWindow: true }),
+        configureFixture: (nextFixture) => {
+          const [codexProvider] = nextFixture.serverConfig.providers;
+          if (!codexProvider) return;
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            providers: [
+              {
+                ...codexProvider,
+                accountRateLimits: {
+                  checkedAt: NOW_ISO,
+                  rateLimits: {
+                    limitId: "codex",
+                    primary: {
+                      usedPercent: 1,
+                      windowDurationMins: 10_080,
+                      resetsAt: 1_788_278_880,
+                    },
                   },
                 },
               },
-            },
-          ],
-        };
-      },
-    });
+            ],
+          };
+        },
+      });
 
-    try {
       const trigger = page.getByRole("button", {
         name: /^Task progress: step 5 of 12\b/i,
       });
-      await trigger.click();
-      await vi.waitFor(() => expect(findComposerTaskProgressPopup()).not.toBeNull());
-      await page.getByRole("button", { name: "Show on the side" }).click();
+      await owner.own("controls", () => trigger.click());
+      await owner.own("preview", () =>
+        vi.waitFor(() => expect(findComposerTaskProgressPopup()).not.toBeNull()),
+      );
+      await owner.own("rail", () => page.getByRole("button", { name: "Show on the side" }).click());
 
-      await vi.waitFor(() => {
-        expect(findSessionRail()).not.toBeNull();
-        expect(useDeskStore.getState().desk.groups.g1?.sessionRailDocked).toBe(true);
-        expect(useUiStateStore.getState().sessionRailDocked).toBe(false);
-      });
+      await owner.own("rail", () =>
+        vi.waitFor(() => {
+          expect(findSessionRail()).not.toBeNull();
+          expect(useDeskStore.getState().desk.groups.g1?.sessionRailDocked).toBe(true);
+          expect(useUiStateStore.getState().sessionRailDocked).toBe(false);
+        }),
+      );
 
       const rail = findSessionRail();
       expect(rail).not.toBeNull();
@@ -1701,18 +2743,91 @@ describe("ChatView full app (composer)", () => {
       expect(document.querySelector('button[aria-label^="Context window"]')).toBeNull();
       expect(findComposerTaskProgressTrigger()).toBeNull();
 
-      await page.getByRole("button", { name: "Show in composer" }).click();
-      await vi.waitFor(() => {
-        expect(findSessionRail()).toBeNull();
-        expect(useDeskStore.getState().desk.groups.g1?.sessionRailDocked).toBe(false);
-        expect(useUiStateStore.getState().sessionRailDocked).toBe(false);
+      const column = rail.closest<HTMLElement>('[data-chat-right-column="true"]')!;
+      const initialWidth = column.getBoundingClientRect().width;
+      const separator = page.getByRole("separator", { name: "Resize Sidebar", exact: true });
+      await expect.element(separator).toBeVisible();
+      await owner.own("controls", () => separator.click());
+      await expect.element(separator).toHaveFocus();
+      await owner.own("input", async () => {
+        const bounds = separator.element().getBoundingClientRect();
+        const start = browserInputPoint({
+          x: bounds.left + bounds.width / 2,
+          y: bounds.top + bounds.height / 2,
+        });
+        const end = browserInputPoint({
+          x: bounds.left + bounds.width / 2 - 80,
+          y: bounds.top + bounds.height / 2,
+        });
+        const input = cdp();
+        let releaseRequired = false;
+        await input.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...start });
+        try {
+          // Own release before native press admission; a rejected response
+          // cannot prove Chromium did not receive that exact press.
+          releaseRequired = true;
+          await input.send("Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            ...start,
+            button: "left",
+            buttons: 1,
+            clickCount: 1,
+          });
+          await input.send("Input.dispatchMouseEvent", {
+            type: "mouseMoved",
+            ...end,
+            button: "left",
+            buttons: 1,
+          });
+        } finally {
+          if (releaseRequired) {
+            await input.send("Input.dispatchMouseEvent", {
+              type: "mouseReleased",
+              ...end,
+              button: "left",
+              buttons: 0,
+              clickCount: 1,
+            });
+          }
+        }
       });
+      await owner.own("rail", () =>
+        vi.waitFor(() => {
+          expect(column.getBoundingClientRect().width).toBeCloseTo(initialWidth + 80, 0);
+          expect(useUiStateStore.getState().chatRightPanelWidth).toBe(
+            Math.round(initialWidth + 80),
+          );
+          expect(findSessionRail()).toBe(rail);
+        }),
+      );
+      await owner.own("input", () => userEvent.keyboard("{ArrowRight}"));
+      await owner.own("rail", () =>
+        vi.waitFor(() => {
+          expect(column.getBoundingClientRect().width).toBeCloseTo(initialWidth + 70, 0);
+          expect(useUiStateStore.getState().chatRightPanelWidth).toBe(
+            Math.round(initialWidth + 70),
+          );
+        }),
+      );
+
+      await owner.own("controls", () =>
+        page.getByRole("button", { name: "Show in composer" }).click(),
+      );
+      await owner.own("rail", () =>
+        vi.waitFor(() => {
+          expect(findSessionRail()).toBeNull();
+          expect(useDeskStore.getState().desk.groups.g1?.sessionRailDocked).toBe(false);
+          expect(useUiStateStore.getState().sessionRailDocked).toBe(false);
+        }),
+      );
       expect(document.querySelector('button[aria-label^="Context window"]')).not.toBeNull();
-      await page.getByRole("button", { name: /^Task progress: step 5 of 12\b/i }).click();
-      await vi.waitFor(() => expect(findComposerTaskProgressPopup()).not.toBeNull());
-    } finally {
-      await mounted.cleanup();
-    }
+      await owner.own("reopen", () =>
+        page.getByRole("button", { name: /^Task progress: step 5 of 12\b/i }).click(),
+      );
+      await owner.own("preview", () =>
+        vi.waitFor(() => expect(findComposerTaskProgressPopup()).not.toBeNull()),
+      );
+    });
   });
 
   it("keeps the Tasks column aligned and full height while an Axiom provider warning is visible", async () => {
@@ -2771,105 +3886,126 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
-  it("clears pending worktree overrides when switching empty server threads", async () => {
-    const secondThreadId = "thread-browser-test-second" as ThreadId;
-    const snapshot = addThreadToSnapshot(createDraftOnlySnapshot(), THREAD_ID);
-    const snapshotWithSecondThread = addThreadToSnapshot(snapshot, secondThreadId);
-    const snapshotWithTwoThreads = {
-      ...snapshotWithSecondThread,
-      threads: snapshotWithSecondThread.threads.map((thread) => {
-        if (thread.id === THREAD_ID) {
-          return Object.assign({}, thread, { session: null, title: "Thread alpha" });
-        }
-        if (thread.id === secondThreadId) {
-          return Object.assign({}, thread, { session: null, title: "Thread beta" });
-        }
-        return thread;
-      }),
-    };
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: snapshotWithTwoThreads,
-      resolveRpc: (body) => {
-        if (body._tag === WS_METHODS.vcsListRefs) {
-          return {
-            isRepo: true,
-            hasPrimaryRemote: true,
-            nextCursor: null,
-            totalCount: 2,
-            refs: [
-              {
-                name: "main",
-                current: true,
-                isDefault: true,
-                worktreePath: null,
-              },
-              {
-                name: "release/next",
-                current: false,
-                isDefault: false,
-                worktreePath: null,
-              },
-            ],
-          };
-        }
-        if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
-          return {
-            sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1,
-          };
-        }
-        return undefined;
-      },
+  it("clears pending worktree overrides when switching empty server threads", async (testContext) => {
+    const owner = createChatViewCallerOwner(testContext, mountChatView, {
+      label: "worktree-overrides",
     });
-
-    try {
-      (await waitForButtonByText("Current checkout")).click();
-      await page.getByText("New worktree", { exact: true }).click();
-      await page.getByText("From main", { exact: true }).click();
-      await page.getByText("release/next", { exact: true }).click();
-
-      await vi.waitFor(
-        () => {
-          expect(findButtonByText("From release/next")).toBeTruthy();
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      await mounted.router.navigate({
-        to: "/$environmentId/$threadId",
-        params: {
-          environmentId: LOCAL_ENVIRONMENT_ID,
-          threadId: secondThreadId,
+    await owner.run(async () => {
+      const secondThreadId = "thread-browser-test-second" as ThreadId;
+      const snapshot = addThreadToSnapshot(createDraftOnlySnapshot(), THREAD_ID);
+      const snapshotWithSecondThread = addThreadToSnapshot(snapshot, secondThreadId);
+      const snapshotWithTwoThreads = {
+        ...snapshotWithSecondThread,
+        threads: snapshotWithSecondThread.threads.map((thread) => {
+          if (thread.id === THREAD_ID) {
+            return Object.assign({}, thread, { session: null, title: "Thread alpha" });
+          }
+          if (thread.id === secondThreadId) {
+            return Object.assign({}, thread, { session: null, title: "Thread beta" });
+          }
+          return thread;
+        }),
+      };
+      const mounted = await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: snapshotWithTwoThreads,
+        resolveRpc: (body) => {
+          if (body._tag === WS_METHODS.vcsListRefs) {
+            return {
+              isRepo: true,
+              hasPrimaryRemote: true,
+              nextCursor: null,
+              totalCount: 2,
+              refs: [
+                {
+                  name: "main",
+                  current: true,
+                  isDefault: true,
+                  worktreePath: null,
+                },
+                {
+                  name: "release/next",
+                  current: false,
+                  isDefault: false,
+                  worktreePath: null,
+                },
+              ],
+            };
+          }
+          if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+            return {
+              sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1,
+            };
+          }
+          return undefined;
         },
       });
 
-      await waitForURL(
-        mounted.router,
-        (path) => path === serverThreadPath(secondThreadId),
-        "Route should switch to the second empty server thread.",
+      const currentCheckout = await owner.own("controls", () =>
+        waitForButtonByText("Current checkout"),
+      );
+      owner.assertActive();
+      currentCheckout.click();
+      owner.mark("controls");
+      await owner.own("controls", () => page.getByText("New worktree", { exact: true }).click());
+      await owner.own("controls", () => page.getByText("From main", { exact: true }).click());
+      await owner.own("controls", () => page.getByText("release/next", { exact: true }).click());
+
+      await owner.own("value", () =>
+        vi.waitFor(
+          () => {
+            expect(findButtonByText("From release/next")).toBeTruthy();
+          },
+          { timeout: 8_000, interval: 16 },
+        ),
       );
 
-      await vi.waitFor(
-        () => {
-          expect(findButtonByText("Current checkout")).toBeTruthy();
-          expect(findButtonByText("From release/next")).toBeNull();
-        },
-        { timeout: 8_000, interval: 16 },
+      await owner.own("route", () =>
+        mounted.router.navigate({
+          to: "/$environmentId/$threadId",
+          params: {
+            environmentId: LOCAL_ENVIRONMENT_ID,
+            threadId: secondThreadId,
+          },
+        }),
       );
 
-      (await waitForButtonByText("Current checkout")).click();
-      await page.getByText("New worktree", { exact: true }).click();
-
-      await vi.waitFor(
-        () => {
-          expect(findButtonByText("From main")).toBeTruthy();
-          expect(findButtonByText("From release/next")).toBeNull();
-        },
-        { timeout: 8_000, interval: 16 },
+      await owner.own("route", () =>
+        waitForURL(
+          mounted.router,
+          (path) => path === serverThreadPath(secondThreadId),
+          "Route should switch to the second empty server thread.",
+        ),
       );
-    } finally {
-      await mounted.cleanup();
-    }
+
+      await owner.own("value", () =>
+        vi.waitFor(
+          () => {
+            expect(findButtonByText("Current checkout")).toBeTruthy();
+            expect(findButtonByText("From release/next")).toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        ),
+      );
+
+      const nextCheckout = await owner.own("controls", () =>
+        waitForButtonByText("Current checkout"),
+      );
+      owner.assertActive();
+      nextCheckout.click();
+      owner.mark("controls");
+      await owner.own("controls", () => page.getByText("New worktree", { exact: true }).click());
+
+      await owner.own("value", () =>
+        vi.waitFor(
+          () => {
+            expect(findButtonByText("From main")).toBeTruthy();
+            expect(findButtonByText("From release/next")).toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        ),
+      );
+    });
   });
 
   it("shows the send state once bootstrap dispatch is in flight", async () => {
@@ -2992,7 +4128,8 @@ describe("ChatView full app (composer)", () => {
       await vi.waitFor(
         () => {
           expect(turnStartAttempts).toBe(1);
-          expect(findOptimisticMessage()).toHaveLength(0);
+          expect(findOptimisticMessage()).toHaveLength(1);
+          expect(document.querySelectorAll('[data-message-send-failed="true"]')).toHaveLength(1);
           expect(
             document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent,
           ).toBe(messageText);
@@ -3034,7 +4171,8 @@ describe("ChatView full app (composer)", () => {
           // The dismissed banner remains suppressed, proving the new toast
           // is what makes an identical second rejection visible.
           expect(document.querySelector('button[aria-label="Dismiss error"]')).toBeNull();
-          expect(findOptimisticMessage()).toHaveLength(0);
+          expect(findOptimisticMessage()).toHaveLength(2);
+          expect(document.querySelectorAll('[data-message-send-failed="true"]')).toHaveLength(2);
           expect(
             document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent,
           ).toBe(messageText);
@@ -3045,21 +4183,27 @@ describe("ChatView full app (composer)", () => {
         { timeout: 8_000, interval: 16 },
       );
 
-      // A third press succeeds. The restored draft is consumed exactly once
-      // and its optimistic row remains until the canonical snapshot arrives.
+      // Resend is explicit new input. It preserves a different draft while
+      // retaining both failed attempts and submitting one fresh message.
+      await page.getByTestId("composer-editor").fill("Keep my new draft");
+      await vi.waitFor(() =>
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "Keep my new draft",
+        ),
+      );
       const closeCountBeforeSuccessfulRetry = closeToastSpy.mock.calls.length;
-      (await waitForSendButton()).click();
+      await page.getByRole("button", { name: "Resend", exact: true }).first().click();
       await vi.waitFor(
         () => {
           expect(turnStartAttempts).toBe(3);
           expect(closeToastSpy.mock.calls).toHaveLength(closeCountBeforeSuccessfulRetry + 1);
-          expect(findOptimisticMessage()).toHaveLength(1);
+          expect(findOptimisticMessage()).toHaveLength(3);
           expect(
             document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent ??
               "",
-          ).toBe("");
+          ).toBe("Keep my new draft");
           expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "").toBe(
-            "",
+            "Keep my new draft",
           );
           expect(dispatchedMessageTexts).toEqual([messageText, messageText, messageText]);
           expect(findSendFailureToastTitle()).toBeNull();
@@ -3180,49 +4324,58 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
-  it.each([
+  it.for([
     { provider: "codex", sessionStatus: "ready" },
     { provider: "claudeAgent", sessionStatus: "ready" },
     { provider: "codex", sessionStatus: "running" },
     { provider: "claudeAgent", sessionStatus: "running" },
   ] as const)(
     "sends an image without text to $provider in a $sessionStatus chat",
-    async ({ provider, sessionStatus }) => {
-      const mounted = await mountChatView({
-        viewport: DEFAULT_VIEWPORT,
-        snapshot: createSnapshotForTargetUser({
-          targetMessageId: "msg-user-attach-image" as MessageId,
-          targetText: "attach image target",
-          provider,
-          sessionStatus,
-        }),
-        resolveRpc: (body) =>
-          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
-            ? { sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1 }
-            : undefined,
-        configureFixture: (nextFixture) => {
-          nextFixture.serverConfig = {
-            ...nextFixture.serverConfig,
-            providers: [
-              {
-                ...nextFixture.serverConfig.providers[0]!,
-                driver: ProviderDriverKind.make(provider),
-                instanceId: ProviderInstanceId.make(provider),
-              },
-            ],
-          };
+    async ({ provider, sessionStatus }, testContext) => {
+      let restorePicker: (() => void) | undefined;
+      const owner = createChatViewCallerOwner(testContext, mountChatView, {
+        label: "image-only-send",
+        afterUnmount: () => {
+          restorePicker?.();
         },
       });
+      await owner.run(async () => {
+        await owner.mount({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: createSnapshotForTargetUser({
+            targetMessageId: "msg-user-attach-image" as MessageId,
+            targetText: "attach image target",
+            provider,
+            sessionStatus,
+          }),
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? { sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1 }
+              : undefined,
+          configureFixture: (nextFixture) => {
+            nextFixture.serverConfig = {
+              ...nextFixture.serverConfig,
+              providers: [
+                {
+                  ...nextFixture.serverConfig.providers[0]!,
+                  driver: ProviderDriverKind.make(provider),
+                  instanceId: ProviderInstanceId.make(provider),
+                },
+              ],
+            };
+          },
+        });
 
-      try {
-        await waitForComposerEditor();
+        await owner.own("editor", () => waitForComposerEditor());
 
-        const attachButton = await waitForElement(
-          () =>
-            document.querySelector<HTMLButtonElement>(
-              '[data-chat-composer-form="true"] button[aria-label="Attach files or images"]',
-            ),
-          "Unable to find composer attach-image button.",
+        const attachButton = await owner.own("picker", () =>
+          waitForElement(
+            () =>
+              document.querySelector<HTMLButtonElement>(
+                '[data-chat-composer-form="true"] button[aria-label="Attach files or images"]',
+              ),
+            "Unable to find composer attach-image button.",
+          ),
         );
 
         const fileInput = document.querySelector<HTMLInputElement>(
@@ -3235,10 +4388,18 @@ describe("ChatView full app (composer)", () => {
         // Tapping the button forwards to the hidden file input's native picker.
         let pickerOpened = false;
         const originalClick = fileInput!.click.bind(fileInput!);
-        fileInput!.click = () => {
+        const ownedPickerClick = () => {
           pickerOpened = true;
         };
+        restorePicker = () => {
+          // Restore only this exact fixture's override, after admitted actions
+          // drain; the original normal-path restoration remains below.
+          if (fileInput!.click === ownedPickerClick) fileInput!.click = originalClick;
+        };
+        owner.assertActive();
+        fileInput!.click = ownedPickerClick;
         attachButton.click();
+        owner.mark("picker");
         expect(pickerOpened).toBe(true);
         fileInput!.click = originalClick;
 
@@ -3251,31 +4412,39 @@ describe("ChatView full app (composer)", () => {
         fileInput!.dispatchEvent(new Event("change", { bubbles: true }));
 
         // The chosen image shows up in the composer preview strip.
-        await waitForElement(
-          () =>
-            document.querySelector<HTMLButtonElement>('button[aria-label="Preview diagram.png"]'),
-          "Unable to find attached image preview.",
+        await owner.own("preview", () =>
+          waitForElement(
+            () =>
+              document.querySelector<HTMLButtonElement>('button[aria-label="Preview diagram.png"]'),
+            "Unable to find attached image preview.",
+          ),
         );
-        await waitForElement(
-          () =>
-            document.querySelector<HTMLButtonElement>('button[aria-label="Remove diagram.png"]'),
-          "Unable to find attached image remove control.",
+        await owner.own("attachments", () =>
+          waitForElement(
+            () =>
+              document.querySelector<HTMLButtonElement>('button[aria-label="Remove diagram.png"]'),
+            "Unable to find attached image remove control.",
+          ),
         );
 
-        await page
-          .getByRole("button", {
-            name: sessionStatus === "running" ? "Queue message" : "Send message",
-            exact: true,
-          })
-          .click();
+        await owner.own("send", () =>
+          page
+            .getByRole("button", {
+              name: sessionStatus === "running" ? "Queue message" : "Send message",
+              exact: true,
+            })
+            .click(),
+        );
         if (sessionStatus === "running") {
-          await vi.waitFor(() => {
-            const saved = createFollowUpQueuePersistence().load(LOCAL_ENVIRONMENT_ID);
-            expect(saved.ok && saved.value.pending[0]).toMatchObject({
-              promptText: "",
-              images: [{ name: "diagram.png" }],
-            });
-          });
+          await owner.own("draft", () =>
+            vi.waitFor(() => {
+              const saved = createFollowUpQueuePersistence().load(LOCAL_ENVIRONMENT_ID);
+              expect(saved.ok && saved.value.pending[0]).toMatchObject({
+                promptText: "",
+                images: [{ name: "diagram.png" }],
+              });
+            }),
+          );
           expect(wsRequests.some((request) => request.type === "thread.turn.start")).toBe(false);
           const readyThread = {
             ...chatViewFixture.fixture.snapshot.threads[0]!,
@@ -3296,31 +4465,32 @@ describe("ChatView full app (composer)", () => {
               thread: readyThread,
             },
           });
+          owner.mark("snapshot");
         }
-        await vi.waitFor(
-          () => {
-            const requests = wsRequests.filter((request) => request.type === "thread.turn.start");
-            expect(requests).toHaveLength(1);
-            expect(requests[0]).toMatchObject({
-              message: {
-                text: "",
-                attachments: [
-                  {
-                    type: "image",
-                    name: "diagram.png",
-                    dataUrl: "data:image/png;base64,AQIDBA==",
-                  },
-                ],
-              },
-              modelSelection: { instanceId: provider },
-            });
-          },
-          { timeout: 8_000, interval: 16 },
+        await owner.own("request", () =>
+          vi.waitFor(
+            () => {
+              const requests = wsRequests.filter((request) => request.type === "thread.turn.start");
+              expect(requests).toHaveLength(1);
+              expect(requests[0]).toMatchObject({
+                message: {
+                  text: "",
+                  attachments: [
+                    {
+                      type: "image",
+                      name: "diagram.png",
+                      dataUrl: "data:image/png;base64,AQIDBA==",
+                    },
+                  ],
+                },
+                modelSelection: { instanceId: provider },
+              });
+            },
+            { timeout: 8_000, interval: 16 },
+          ),
         );
         expect(document.body.textContent).not.toContain("User attached one or more images");
-      } finally {
-        await mounted.cleanup();
-      }
+      });
     },
   );
 
@@ -4111,11 +5281,99 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
-  it("keeps pending and failed document uploads visible and blocks sending until retry succeeds", async () => {
+  it("keeps pending and failed document uploads visible and blocks sending until retry succeeds", async (context) => {
     let releaseFailure: (() => void) | undefined;
     const failureGate = new Promise<void>((resolve) => {
       releaseFailure = resolve;
     });
+    type UploadPromise = ReturnType<
+      typeof import("../attachments/fileAttachments").uploadFileAttachment
+    >;
+    type UploadOperation = { original: UploadPromise; joined: UploadPromise };
+    const uploads: UploadOperation[] = [];
+    const handlerCompletions: Promise<unknown>[] = [];
+    let selectedFile: File | undefined;
+    let retired = false;
+    let observerInstalled = false;
+    let handlerInstalled = false;
+    let resolveRetry!: (operation: UploadOperation) => void;
+    let retireRetry!: (failure: Error) => void;
+    const retryAdmission = new Promise<UploadOperation>((resolve, reject) => {
+      resolveRetry = resolve;
+      retireRetry = reject;
+    });
+    // Early body failure may retire before the admission is awaited. Observe
+    // that private waiter without changing its rejection for the real await.
+    void retryAdmission.catch(() => undefined);
+    const joinOriginalOperations = async () => {
+      let uploadIndex = 0;
+      let handlerIndex = 0;
+      while (uploadIndex < uploads.length || handlerIndex < handlerCompletions.length) {
+        const uploadEnd = uploads.length;
+        const handlerEnd = handlerCompletions.length;
+        await Promise.allSettled([
+          ...uploads.slice(uploadIndex, uploadEnd).map((operation) => operation.original),
+          ...handlerCompletions.slice(handlerIndex, handlerEnd),
+        ]);
+        uploadIndex = uploadEnd;
+        handlerIndex = handlerEnd;
+      }
+    };
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "document-upload-retry",
+      beforeDrain: () => {
+        retired = true;
+        // This gate is resolved even before the first handler arrives. A late
+        // admitted original request must never strand retirement behind it.
+        releaseFailure?.();
+        // Only the private admission waiter is retired; native uploads keep
+        // their original signals, results, errors and sixty-second transport.
+        retireRetry(new Error("The exact upload admission waiter was retired."));
+      },
+      afterUnmount: async () => {
+        // Keep observing through exact native input/mount disposal and late
+        // helper admission. These are original client promises, including body
+        // read/cancel/decode, not MSW handler-return or request:end receipts.
+        await joinOriginalOperations();
+        if (observerInstalled) {
+          if (attachmentUploadObservation.capture !== capture)
+            throw new Error("The exact attachment upload observer was replaced.");
+          attachmentUploadObservation.capture = undefined;
+          observerInstalled = false;
+        }
+        if (handlerInstalled) worker.resetHandlers();
+        if (attachmentUploadObservation.hasFailure) {
+          const failure = attachmentUploadObservation.failure;
+          attachmentUploadObservation.failure = undefined;
+          attachmentUploadObservation.hasFailure = false;
+          throw failure;
+        }
+      },
+    });
+    const capture: NonNullable<typeof attachmentUploadObservation.capture> = (input, original) => {
+      if (
+        input.environmentId !== LOCAL_ENVIRONMENT_ID ||
+        input.targetThreadId !== THREAD_ID ||
+        selectedFile === undefined ||
+        input.file !== selectedFile
+      )
+        return;
+      // Register the actual Promise synchronously before returning it to the
+      // composer. The caller owns that original directly, never its own body or
+      // cleanup. A late retired admission is still retained for final joining.
+      const operation = { original, joined: original };
+      uploads.push(operation);
+      if (!retired && !context.signal.aborted)
+        operation.joined = owner.own("upload", () => original);
+      void operation.joined.catch(() => undefined);
+      owner.mark("request");
+      void original.then(
+        () => owner.mark("receipt"),
+        () => owner.mark("receipt"),
+      );
+      if (uploads.length === 2) resolveRetry(operation);
+      if (retired) releaseFailure?.();
+    };
     const contents = "<html>source only</html>";
     const attachment = {
       type: "file" as const,
@@ -4125,81 +5383,114 @@ describe("ChatView full app (composer)", () => {
       sizeBytes: contents.length,
     };
     let attempts = 0;
-    worker.use(
-      http.post("*/api/attachments", async () => {
-        attempts += 1;
-        if (attempts === 1) {
-          await failureGate;
-          return HttpResponse.json({}, { status: 500 });
-        }
-        return HttpResponse.json(attachment);
-      }),
-    );
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-upload-retry" as MessageId,
-        targetText: "upload retry target",
-      }),
-      resolveRpc: (body) =>
-        body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
-          ? { sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1 }
-          : undefined,
-    });
     const draft = () => useComposerDraftStore.getState().getComposerDraft(THREAD_REF);
     const turnRequests = () =>
       wsRequests.filter(
         (request) => request.type === "thread.turn.start" || request.type === "thread.turn.steer",
       );
-    try {
-      const input = await waitForElement(
-        () =>
-          document.querySelector<HTMLInputElement>(
-            '[data-chat-composer-form="true"] input[type="file"]',
-          ),
-        "Attachment input was not available.",
+    await owner.run(async () => {
+      owner.assertActive();
+      if (
+        attachmentUploadObservation.capture !== undefined ||
+        attachmentUploadObservation.hasFailure
+      )
+        throw new Error("A previous attachment upload observer remains owned.");
+      attachmentUploadObservation.capture = capture;
+      observerInstalled = true;
+      worker.use(
+        http.post("*/api/attachments", () => {
+          const response = (async () => {
+            attempts += 1;
+            if (attempts === 1) {
+              await failureGate;
+              return HttpResponse.json({}, { status: 500 });
+            }
+            return HttpResponse.json(attachment);
+          })();
+          handlerCompletions.push(response);
+          return response;
+        }),
       );
+      handlerInstalled = true;
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-upload-retry" as MessageId,
+          targetText: "upload retry target",
+        }),
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1 }
+            : undefined,
+      });
+      const input = await owner.own("attachments", () =>
+        waitForElement(
+          () =>
+            document.querySelector<HTMLInputElement>(
+              '[data-chat-composer-form="true"] input[type="file"]',
+            ),
+          "Attachment input was not available.",
+        ),
+      );
+      owner.assertActive();
       const transfer = new DataTransfer();
       transfer.items.add(new File([contents], attachment.name, { type: attachment.mimeType }));
       input.files = transfer.files;
+      selectedFile = input.files[0];
       input.dispatchEvent(new Event("change", { bubbles: true }));
       useComposerDraftStore.getState().setPrompt(THREAD_REF, "Read the attached source");
-      await vi.waitFor(() => {
-        expect(attempts).toBe(1);
-        expect(draft()?.files[0]?.status).toBe("uploading");
-      });
+      await owner.own("upload", () =>
+        vi.waitFor(() => {
+          expect(attempts).toBe(1);
+          expect(draft()?.files[0]?.status).toBe("uploading");
+        }),
+      );
       const form = document.querySelector<HTMLFormElement>('[data-chat-composer-form="true"]')!;
+      owner.assertActive();
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      await waitForLayout();
+      await owner.own("layout", () => waitForLayout());
       expect(turnRequests()).toHaveLength(0);
       releaseFailure!();
-      await vi.waitFor(() => {
-        expect(draft()?.files[0]?.status).toBe("failed");
-        expect(document.body.textContent).toContain("Upload failed.");
-      });
+      await owner.own("upload", () =>
+        vi.waitFor(() => {
+          expect(draft()?.files[0]?.status).toBe("failed");
+          expect(document.body.textContent).toContain("Upload failed.");
+        }),
+      );
+      owner.assertActive();
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      await waitForLayout();
+      await owner.own("layout", () => waitForLayout());
       expect(turnRequests()).toHaveLength(0);
+      owner.assertActive();
       buttonWithText("Retry upload")!.click();
-      await vi.waitFor(() => {
-        expect(draft()?.files[0]?.status).toBe("ready");
-        expect(attempts).toBe(2);
-      });
-      await vi.waitFor(() =>
-        expect(form.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(
-          false,
+      const retry = await owner.own("request", () => retryAdmission);
+      // The original short state poll is meaningful after the exact existing
+      // retry helper finishes native fetch/body/decode. Waiting for that real
+      // operation does not manufacture a ready receipt or change its deadline.
+      await retry.joined;
+      owner.assertActive();
+      await owner.own("receipt", () =>
+        vi.waitFor(() => {
+          expect(draft()?.files[0]?.status).toBe("ready");
+          expect(attempts).toBe(2);
+        }),
+      );
+      await owner.own("send-target", () =>
+        vi.waitFor(() =>
+          expect(form.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(
+            false,
+          ),
         ),
       );
+      owner.assertActive();
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      await vi.waitFor(() => {
-        expect(turnRequests()).toHaveLength(1);
-        expect(turnRequests()[0]).toMatchObject({ message: { attachments: [attachment] } });
-      });
-    } finally {
-      releaseFailure?.();
-      worker.resetHandlers();
-      await mounted.cleanup();
-    }
+      await owner.own("receipt", () =>
+        vi.waitFor(() => {
+          expect(turnRequests()).toHaveLength(1);
+          expect(turnRequests()[0]).toMatchObject({ message: { attachments: [attachment] } });
+        }),
+      );
+    });
   });
 
   it("uploads a document and saves or cancels queue edits without losing the prior draft", async () => {
@@ -4781,105 +6072,126 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
-  it("keeps a steer pending when another message starts processing on the same turn", async () => {
-    const activeTurnId = "turn-correlated-steer-processing" as TurnId;
-    const baseSnapshot = createSnapshotForTargetUser({
-      targetMessageId: "msg-user-correlated-steer-processing" as MessageId,
-      targetText: "correlated steer processing target",
-      sessionStatus: "running",
-    });
-    const runningSnapshot: OrchestrationReadModel = {
-      ...baseSnapshot,
-      threads: baseSnapshot.threads.map((thread) =>
-        Object.assign({}, thread, {
-          latestTurn: {
-            turnId: activeTurnId,
-            state: "running" as const,
-            requestedAt: isoAt(1_000),
-            startedAt: isoAt(1_001),
-            completedAt: null,
-            assistantMessageId: null,
-          },
-          session: {
-            ...thread.session!,
-            status: "running" as const,
-            activeTurnId,
-            updatedAt: isoAt(1_001),
-          },
-          updatedAt: isoAt(1_001),
-        }),
-      ),
-    };
+  it("keeps a steer pending when another message starts processing on the same turn", async (testContext) => {
     let releaseSteerReceipt: (() => void) | undefined;
-    const steerReceipt = new Promise<{ sequence: number }>((resolve) => {
-      releaseSteerReceipt = () => resolve({ sequence: runningSnapshot.snapshotSequence + 1 });
+    let steerReceiptReleased = false;
+    const owner = createChatViewCallerOwner(testContext, mountChatView, {
+      label: "pending-steer",
+      beforeDrain: () => {
+        releaseSteerReceipt?.();
+      },
     });
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: runningSnapshot,
-      configureFixture: (testFixture) => {
-        testFixture.serverConfig = {
-          ...testFixture.serverConfig,
-          providers: testFixture.serverConfig.providers.map((provider) => ({
-            ...provider,
-            runtimeCapabilities: {
-              liveSteer: "supported" as const,
-              threadGoals: "unsupported" as const,
+    await owner.run(async () => {
+      const activeTurnId = "turn-correlated-steer-processing" as TurnId;
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-user-correlated-steer-processing" as MessageId,
+        targetText: "correlated steer processing target",
+        sessionStatus: "running",
+      });
+      const runningSnapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) =>
+          Object.assign({}, thread, {
+            latestTurn: {
+              turnId: activeTurnId,
+              state: "running" as const,
+              requestedAt: isoAt(1_000),
+              startedAt: isoAt(1_001),
+              completedAt: null,
+              assistantMessageId: null,
             },
-          })),
+            session: {
+              ...thread.session!,
+              status: "running" as const,
+              activeTurnId,
+              updatedAt: isoAt(1_001),
+            },
+            updatedAt: isoAt(1_001),
+          }),
+        ),
+      };
+      const steerReceipt = new Promise<{ sequence: number }>((resolve) => {
+        releaseSteerReceipt = () => {
+          if (steerReceiptReleased) return;
+          steerReceiptReleased = true;
+          resolve({ sequence: runningSnapshot.snapshotSequence + 1 });
         };
-      },
-      resolveRpc: (body) => {
-        if (
-          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
-          body.type === "thread.turn.steer"
-        ) {
-          return steerReceipt;
-        }
-        return undefined;
-      },
-    });
+      });
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: runningSnapshot,
+        configureFixture: (testFixture) => {
+          testFixture.serverConfig = {
+            ...testFixture.serverConfig,
+            providers: testFixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: {
+                liveSteer: "supported" as const,
+                threadGoals: "unsupported" as const,
+              },
+            })),
+          };
+        },
+        resolveRpc: (body) => {
+          if (
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            body.type === "thread.turn.steer"
+          ) {
+            return steerReceipt;
+          }
+          return undefined;
+        },
+      });
 
-    try {
       useComposerDraftStore
         .getState()
         .setPrompt(THREAD_REF, "Keep this steer pending until its own marker arrives");
 
-      const queueButton = await waitForElement(
-        () => document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]'),
-        "Unable to find the running composer Send button.",
+      const queueButton = await owner.own("controls", () =>
+        waitForElement(
+          () => document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]'),
+          "Unable to find the running composer Send button.",
+        ),
       );
+      owner.assertActive();
       queueButton.click();
+      owner.mark("send");
 
-      const steerButton = await waitForElement(
-        () =>
-          document.querySelector<HTMLButtonElement>(
-            '[data-cafe-followup-queue="true"] .cafe-followup-steer-button',
-          ),
-        "Unable to find the queued follow-up Send action.",
+      const steerButton = await owner.own("steer", () =>
+        waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[data-cafe-followup-queue="true"] .cafe-followup-steer-button',
+            ),
+          "Unable to find the queued follow-up Send action.",
+        ),
       );
+      owner.assertActive();
       steerButton.click();
+      owner.mark("steer");
 
       let dispatchedMessageId: MessageId | null = null;
-      await vi.waitFor(
-        () => {
-          const request = wsRequests.find(
-            (candidate) =>
-              candidate._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
-              candidate.type === "thread.turn.steer",
-          ) as
-            | {
-                readonly type: "thread.turn.steer";
-                readonly message: { readonly messageId: MessageId };
-              }
-            | undefined;
-          dispatchedMessageId = request?.message.messageId ?? null;
-          expect(dispatchedMessageId).not.toBeNull();
-          expect(
-            document.querySelector('[aria-label="Follow-up steering into active turn"]'),
-          ).not.toBeNull();
-        },
-        { timeout: 8_000, interval: 16 },
+      await owner.own("request", () =>
+        vi.waitFor(
+          () => {
+            const request = wsRequests.find(
+              (candidate) =>
+                candidate._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                candidate.type === "thread.turn.steer",
+            ) as
+              | {
+                  readonly type: "thread.turn.steer";
+                  readonly message: { readonly messageId: MessageId };
+                }
+              | undefined;
+            dispatchedMessageId = request?.message.messageId ?? null;
+            expect(dispatchedMessageId).not.toBeNull();
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).not.toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        ),
       );
 
       const emitSteeringActivity = (
@@ -4888,6 +6200,7 @@ describe("ChatView full app (composer)", () => {
         payload: Record<string, unknown>,
         turnId: TurnId = activeTurnId,
       ) => {
+        owner.assertActive();
         const currentThread = chatViewFixture.fixture.snapshot.threads[0]!;
         const snapshotSequence =
           Math.max(
@@ -4923,6 +6236,7 @@ describe("ChatView full app (composer)", () => {
             thread: nextThread,
           },
         });
+        owner.mark("snapshot");
       };
 
       const deliveryBadge = () => document.querySelector<HTMLElement>("[data-steering-status]");
@@ -4933,8 +6247,8 @@ describe("ChatView full app (composer)", () => {
         intentSequence: runningSnapshot.snapshotSequence + 1,
         detail: "private native metadata must not enter the public row",
       });
-      await vi.waitFor(() =>
-        expect(document.body.textContent).toContain("Steer delivery attempted"),
+      await owner.own("receipt", () =>
+        vi.waitFor(() => expect(document.body.textContent).toContain("Steer delivery attempted")),
       );
       expect(document.body.textContent).not.toContain("private native metadata");
       emitSteeringActivity(
@@ -4946,14 +6260,16 @@ describe("ChatView full app (composer)", () => {
         },
         TurnId.make("unrelated-child-turn"),
       );
-      await waitForLayout();
+      await owner.own("layout", () => waitForLayout());
       expect(deliveryBadge()?.dataset.steeringStatus).toBe("sending");
       emitSteeringActivity("exact-compaction-start", "tool.started", {
         itemType: "context_compaction",
         itemId: "exact-compact",
       });
-      await vi.waitFor(() =>
-        expect(deliveryBadge()?.dataset.steeringStatus).toBe("waiting-for-compaction"),
+      await owner.own("canonical", () =>
+        vi.waitFor(() =>
+          expect(deliveryBadge()?.dataset.steeringStatus).toBe("waiting-for-compaction"),
+        ),
       );
       expect(deliveryBadge()?.textContent).toBe("Waiting for compaction");
       expect(document.querySelectorAll('[data-cafe-followup-steering="true"]')).toHaveLength(1);
@@ -4975,7 +6291,7 @@ describe("ChatView full app (composer)", () => {
         kind: "snapshot",
         snapshot: { snapshotSequence: terminalSequence, thread: terminalThread },
       });
-      await waitForLayout();
+      await owner.own("layout", () => waitForLayout());
       expect(deliveryBadge()?.dataset.steeringStatus).toBe("waiting-for-compaction");
       expect(document.querySelectorAll('[data-cafe-followup-steering="true"]')).toHaveLength(1);
       emitSteeringActivity("exact-compaction-end", "tool.completed", {
@@ -4983,9 +6299,12 @@ describe("ChatView full app (composer)", () => {
         itemId: "exact-compact",
         status: "completed",
       });
-      await vi.waitFor(() => expect(deliveryBadge()?.dataset.steeringStatus).toBe("sending"));
+      await owner.own("canonical", () =>
+        vi.waitFor(() => expect(deliveryBadge()?.dataset.steeringStatus).toBe("sending")),
+      );
       releaseSteerReceipt!();
-      await waitForLayout();
+      owner.mark("ack");
+      await owner.own("layout", () => waitForLayout());
       expect(deliveryBadge()?.dataset.steeringStatus).toBe("sending");
       const acceptancePayload = {
         provider: "codex",
@@ -4997,35 +6316,41 @@ describe("ChatView full app (composer)", () => {
         ...acceptancePayload,
         messageId: "sibling-message",
       });
-      await waitForLayout();
+      await owner.own("layout", () => waitForLayout());
       expect(deliveryBadge()?.dataset.steeringStatus).toBe("sending");
       emitSteeringActivity("exact-accepted", "provider.turn.steer.accepted", {
         ...acceptancePayload,
         messageId: dispatchedMessageId!,
       });
-      await vi.waitFor(() => expect(deliveryBadge()?.dataset.steeringStatus).toBe("received"));
+      await owner.own("receipt", () =>
+        vi.waitFor(() => expect(deliveryBadge()?.dataset.steeringStatus).toBe("received")),
+      );
       expect(deliveryBadge()?.textContent).toBe("Accepted");
       expect(document.body.textContent).toContain("Steer accepted");
       emitSteeringActivity("accepted-compaction-start", "tool.started", {
         itemType: "context_compaction",
         itemId: "accepted-compact",
       });
-      await vi.waitFor(() =>
-        expect(deliveryBadge()?.dataset.steeringStatus).toBe("waiting-for-compaction"),
+      await owner.own("canonical", () =>
+        vi.waitFor(() =>
+          expect(deliveryBadge()?.dataset.steeringStatus).toBe("waiting-for-compaction"),
+        ),
       );
       emitSteeringActivity("accepted-compaction-end", "tool.completed", {
         itemType: "context_compaction",
         itemId: "accepted-compact",
         status: "completed",
       });
-      await vi.waitFor(() => expect(deliveryBadge()?.dataset.steeringStatus).toBe("received"));
+      await owner.own("canonical", () =>
+        vi.waitFor(() => expect(deliveryBadge()?.dataset.steeringStatus).toBe("received")),
+      );
       const waitMessage =
         "Codex accepted turn/steer; it is queued until the active turn finishes current child-process work (4 live descendant processes).";
       emitSteeringActivity("sibling-waiting", "runtime.warning", {
         message: waitMessage,
         detail: { clientCorrelationId: "sibling-correlation" },
       });
-      await waitForLayout();
+      await owner.own("layout", () => waitForLayout());
       expect(deliveryBadge()?.dataset.steeringStatus).toBe("received");
       for (const delay of [15, 60, 120]) {
         emitSteeringActivity(`exact-waiting-${delay}`, "runtime.warning", {
@@ -5035,7 +6360,9 @@ describe("ChatView full app (composer)", () => {
             elapsedDelay: `${delay} seconds`,
           },
         });
-        await vi.waitFor(() => expect(deliveryBadge()?.dataset.steeringStatus).toBe("waiting"));
+        await owner.own("receipt", () =>
+          vi.waitFor(() => expect(deliveryBadge()?.dataset.steeringStatus).toBe("waiting")),
+        );
         expect(document.querySelectorAll('[data-cafe-followup-steering="true"]')).toHaveLength(1);
         expect(document.body.textContent).not.toContain(waitMessage);
         expect(document.body.textContent).toContain("Steer accepted");
@@ -5056,7 +6383,7 @@ describe("ChatView full app (composer)", () => {
         "activity-other-steer-processing",
         "usage",
       );
-      await waitForLayout();
+      await owner.own("layout", () => waitForLayout());
       expect(deliveryBadge()?.dataset.steeringStatus).toBe("waiting");
       expect(
         document.querySelector('[aria-label="Follow-up steering into active turn"]'),
@@ -5067,13 +6394,15 @@ describe("ChatView full app (composer)", () => {
         "activity-correlated-steer-processing",
         "payload",
       );
-      await vi.waitFor(
-        () => {
-          expect(
-            document.querySelector('[aria-label="Follow-up steering into active turn"]'),
-          ).toBeNull();
-        },
-        { timeout: 8_000, interval: 16 },
+      await owner.own("processing", () =>
+        vi.waitFor(
+          () => {
+            expect(
+              document.querySelector('[aria-label="Follow-up steering into active turn"]'),
+            ).toBeNull();
+          },
+          { timeout: 8_000, interval: 16 },
+        ),
       );
       expect(document.body.textContent).not.toContain(
         "Codex app-server began processing turn/steer.",
@@ -5085,94 +6414,299 @@ describe("ChatView full app (composer)", () => {
             request.type === "thread.turn.steer",
         ),
       ).toHaveLength(1);
-    } finally {
-      releaseSteerReceipt?.();
-      await mounted.cleanup();
-    }
+    });
   });
 
-  it("retains a direct steer after the exact-command reconnect window exhausts without replay", async () => {
-    const activeTurnId = TurnId.make("turn-direct-unknown");
-    const baseSnapshot = createSnapshotForTargetUser({
-      targetMessageId: MessageId.make("direct-unknown-original"),
-      targetText: "Original running work",
-      sessionStatus: "running",
-    });
-    const snapshot: OrchestrationReadModel = {
-      ...baseSnapshot,
-      threads: baseSnapshot.threads.map((thread) => ({
-        ...thread,
-        latestTurn: {
-          turnId: activeTurnId,
-          state: "running" as const,
-          requestedAt: isoAt(1_000),
-          startedAt: isoAt(1_001),
-          completedAt: null,
-          assistantMessageId: null,
+  it("settles only the consumed Claude follow-up while its primary query keeps working", async (testContext) => {
+    const owner = createChatViewCallerOwner(testContext, mountChatView, { label: "pending-steer" });
+    await owner.run(async () => {
+      const activeTurnId = TurnId.make("claude-consumed-follow-up-turn");
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const runtimeId = "c7cb1b13-6a31-4669-82e4-8306a09364bb";
+      const base = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("claude-consumed-follow-up-original"),
+        targetText: "Keep the primary query running",
+        sessionStatus: "running",
+        provider: "claudeAgent",
+        history: "essential",
+      });
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          latestTurn: {
+            turnId: activeTurnId,
+            state: "running",
+            requestedAt: isoAt(1_000),
+            startedAt: isoAt(1_001),
+            completedAt: null,
+            assistantMessageId: null,
+          },
+          session: {
+            ...thread.session!,
+            status: "running",
+            providerInstanceId: instanceId,
+            subagentRuntimeId: runtimeId,
+            activeTurnId,
+          },
+        })),
+      };
+      const intentByMessageId = new Map<string, number>();
+      const outgoingTexts: string[] = [];
+      let nextIntent = snapshot.snapshotSequence + 1;
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        configureFixture: (fixture) => {
+          configureResponseLimitFixture(fixture);
+          fixture.serverConfig = {
+            ...fixture.serverConfig,
+            providers: fixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
+            })),
+          };
         },
-        session: {
-          ...thread.session!,
-          status: "running" as const,
-          activeTurnId,
-          updatedAt: isoAt(1_001),
+        resolveRpc: (body) => {
+          if (body._tag !== ORCHESTRATION_WS_METHODS.dispatchCommand) return undefined;
+          if (body.type !== "thread.turn.steer") return { sequence: nextIntent };
+          const message = body.message as { readonly messageId: MessageId; readonly text: string };
+          const sequence = nextIntent++;
+          intentByMessageId.set(message.messageId, sequence);
+          outgoingTexts.push(message.text);
+          return { sequence };
         },
-        updatedAt: isoAt(1_001),
-      })),
-    };
-    const text = "Preserve the exact indeterminate direct steer";
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot,
-      configureFixture: (next) => {
-        next.serverConfig = {
-          ...next.serverConfig,
-          keybindings: [
+      });
+
+      const prompts = ["First Claude follow-up", "Second Claude follow-up"];
+      for (const [index, prompt] of prompts.entries()) {
+        owner.assertActive();
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+        await owner.own("controls", () =>
+          vi.waitFor(() => {
+            expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+              prompt,
+            );
+            expect(
+              document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent,
+            ).toBe(prompt);
+            expect(
+              document.querySelector<HTMLButtonElement>('button[aria-label="Queue message"]')
+                ?.disabled,
+            ).toBe(false);
+          }),
+        );
+        await owner.own("send", () =>
+          page.getByRole("button", { name: "Queue message", exact: true }).click(),
+        );
+        await owner.own("controls", () =>
+          vi.waitFor(() => expect(queuedSendButtons()).toHaveLength(1)),
+        );
+        await owner.own("steer", () =>
+          page.getByRole("button", { name: "Send", exact: true }).click(),
+        );
+        await owner.own("request", () =>
+          vi.waitFor(() => {
+            expect(intentByMessageId.size).toBe(index + 1);
+            expect(outgoingTexts).toEqual(prompts.slice(0, index + 1));
+          }),
+        );
+        await owner.own("ack", () => vi.waitFor(() => expect(queuedSendButtons()).toHaveLength(0)));
+      }
+      const receipts = [...intentByMessageId];
+      expect(receipts).toHaveLength(2);
+      const [firstMessageId, firstIntent] = receipts[0]!;
+      const [secondMessageId, secondIntent] = receipts[1]!;
+      const steeringRows = () => [
+        ...document.querySelectorAll<HTMLElement>('[data-cafe-followup-steering="true"]'),
+      ];
+      await owner.own("canonical", () => vi.waitFor(() => expect(steeringRows()).toHaveLength(2)));
+
+      const emitProcessing = (
+        id: string,
+        changes: Record<string, unknown> = {},
+        taskId = `claude-turn-steer-processing:${"a".repeat(64)}`,
+      ) => {
+        owner.assertActive();
+        const current = chatViewFixture.fixture.snapshot;
+        const currentThread = current.threads[0]!;
+        const snapshotSequence = Math.max(current.snapshotSequence, nextIntent) + 1;
+        const nextThread = {
+          ...currentThread,
+          activities: [
+            ...currentThread.activities,
             {
-              command: "composer.steer",
-              shortcut: {
-                key: "enter",
-                modKey: false,
-                ctrlKey: true,
-                metaKey: false,
-                altKey: false,
-                shiftKey: false,
+              id: EventId.make(id),
+              tone: "info" as const,
+              kind: "task.progress",
+              summary: "Reasoning update",
+              turnId: activeTurnId,
+              sequence: snapshotSequence,
+              createdAt: new Date().toISOString(),
+              payload: {
+                taskId,
+                visibility: "ambient",
+                nativeWorkRuntimeId: runtimeId,
+                detail: "Claude began processing the submitted follow-up.",
+                usage: {
+                  provider: "claudeAgent",
+                  messageId: firstMessageId,
+                  intentSequence: firstIntent,
+                  providerInstanceId: instanceId,
+                  subagentRuntimeId: runtimeId,
+                  ...changes,
+                },
               },
             },
           ],
-          providers: next.serverConfig.providers.map((provider) => ({
-            ...provider,
-            runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
-          })),
         };
+        chatViewFixture.fixture.snapshot = { ...current, snapshotSequence, threads: [nextThread] };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence, thread: nextThread },
+        });
+      };
+      const rejected: ReadonlyArray<{
+        readonly id: string;
+        readonly changes: Record<string, unknown>;
+        readonly taskId?: string;
+      }> = [
+        { id: "claude-generic-progress", changes: {}, taskId: "ordinary-background-task" },
+        { id: "claude-stale-attempt", changes: { intentSequence: firstIntent - 1 } },
+        { id: "claude-foreign-runtime", changes: { subagentRuntimeId: "foreign-runtime" } },
+        { id: "claude-unrelated-message", changes: { messageId: "unrelated-message" } },
+      ];
+      for (const observation of rejected) {
+        emitProcessing(observation.id, observation.changes, observation.taskId);
+        await owner.own("layout", () => waitForLayout());
+        expect(steeringRows()).toHaveLength(2);
+      }
+
+      // The exact native lifecycle receipt, not assistant text or root
+      // completion, retires this row while background work remains active.
+      emitProcessing("claude-first-consumed");
+      await owner.own("processing", () =>
+        vi.waitFor(() => {
+          expect(steeringRows()).toHaveLength(1);
+          expect(steeringRows()[0]?.textContent).toContain("Second Claude follow-up");
+        }),
+      );
+      expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.session?.status).toBe("running");
+      expect(
+        selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn?.completedAt,
+      ).toBeNull();
+      emitProcessing(
+        "claude-second-consumed",
+        { messageId: secondMessageId, intentSequence: secondIntent },
+        `claude-turn-steer-processing:${"b".repeat(64)}`,
+      );
+      await owner.own("processing", () => vi.waitFor(() => expect(steeringRows()).toHaveLength(0)));
+      expect(wsRequests.filter((request) => request.type === "thread.turn.steer")).toHaveLength(2);
+      expect(
+        wsRequests.some(
+          (request) =>
+            request.type === "thread.turn.start" || request.type === "thread.turn.interrupt",
+        ),
+      ).toBe(false);
+    });
+  });
+
+  it("retains a direct steer after the exact-command reconnect window exhausts without replay", async (testContext) => {
+    let restoreDispatch: (() => void) | undefined;
+    const owner = createChatViewCallerOwner(testContext, mountChatView, {
+      label: "reconnect-exhaustion",
+      afterUnmount: () => {
+        restoreDispatch?.();
       },
     });
-    const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
-    const originalDispatch = api.orchestration.dispatchCommand;
-    // This API boundary models only the final rejection after wsRpcClient's
-    // unchanged 90.75-second exact-command retry window. The separate RPC
-    // tests qualify that real bounded window; no production delays change.
-    const dispatchSpy = vi
-      .spyOn(api.orchestration, "dispatchCommand")
-      .mockImplementation(async (command) => {
-        if (command.type === "thread.turn.steer") throw new Error("SocketCloseError: 1006");
-        return originalDispatch(command);
+    await owner.run(async () => {
+      const activeTurnId = TurnId.make("turn-direct-unknown");
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("direct-unknown-original"),
+        targetText: "Original running work",
+        sessionStatus: "running",
       });
-    __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, api);
-    try {
+      const snapshot: OrchestrationReadModel = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread) => ({
+          ...thread,
+          latestTurn: {
+            turnId: activeTurnId,
+            state: "running" as const,
+            requestedAt: isoAt(1_000),
+            startedAt: isoAt(1_001),
+            completedAt: null,
+            assistantMessageId: null,
+          },
+          session: {
+            ...thread.session!,
+            status: "running" as const,
+            activeTurnId,
+            updatedAt: isoAt(1_001),
+          },
+          updatedAt: isoAt(1_001),
+        })),
+      };
+      const text = "Preserve the exact indeterminate direct steer";
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        configureFixture: (next) => {
+          next.serverConfig = {
+            ...next.serverConfig,
+            keybindings: [
+              {
+                command: "composer.steer",
+                shortcut: {
+                  key: "enter",
+                  modKey: false,
+                  ctrlKey: true,
+                  metaKey: false,
+                  altKey: false,
+                  shiftKey: false,
+                },
+              },
+            ],
+            providers: next.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
+            })),
+          };
+        },
+      });
+      const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+      const originalDispatch = api.orchestration.dispatchCommand;
+      // This API boundary models only the final rejection after wsRpcClient's
+      // unchanged 90.75-second exact-command retry window. The separate RPC
+      // tests qualify that real bounded window; no production delays change.
+      const dispatchSpy = vi
+        .spyOn(api.orchestration, "dispatchCommand")
+        .mockImplementation(async (command) => {
+          if (command.type === "thread.turn.steer") throw new Error("SocketCloseError: 1006");
+          return originalDispatch(command);
+        });
+      // The original API remains installed until this exact mount/native drain
+      // finishes. A late old handler must not observe a restored replacement.
+      restoreDispatch = () => {
+        dispatchSpy.mockRestore();
+      };
+      __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, api);
       useComposerDraftStore.getState().setPrompt(THREAD_REF, text);
-      await page.getByTestId("composer-editor").click();
-      await userEvent.keyboard("{Control>}{Enter}{/Control}");
-      await vi.waitFor(() => {
-        expect(
-          dispatchSpy.mock.calls.filter(([command]) => command.type === "thread.turn.steer"),
-        ).toHaveLength(1);
-        expect(
-          document.querySelector<HTMLElement>("[data-steering-status]")?.dataset.steeringStatus,
-        ).toBe("sending");
-        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "").toBe(
-          "",
-        );
-      });
+      await owner.own("editor", () => page.getByTestId("composer-editor").click());
+      await owner.own("input", () => userEvent.keyboard("{Control>}{Enter}{/Control}"));
+      await owner.own("request", () =>
+        vi.waitFor(() => {
+          expect(
+            dispatchSpy.mock.calls.filter(([command]) => command.type === "thread.turn.steer"),
+          ).toHaveLength(1);
+          expect(
+            document.querySelector<HTMLElement>("[data-steering-status]")?.dataset.steeringStatus,
+          ).toBe("sending");
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "").toBe(
+            "",
+          );
+        }),
+      );
       const command = dispatchSpy.mock.calls
         .map(([value]) => value)
         .find((value) => value.type === "thread.turn.steer")!;
@@ -5185,11 +6719,12 @@ describe("ChatView full app (composer)", () => {
       ).toHaveLength(1);
       expect(document.querySelector('button[aria-label="Retry delivery"]')).toBeNull();
       expect(document.body.textContent).not.toContain("Failed to steer turn.");
-      await waitForLayout();
+      await owner.own("layout", () => waitForLayout());
       expect(
         dispatchSpy.mock.calls.filter(([value]) => value.type === "thread.turn.steer"),
       ).toHaveLength(1);
       const emit = (kind: string, payload: Record<string, unknown>) => {
+        owner.assertActive();
         const current = chatViewFixture.fixture.snapshot.threads[0]!;
         const sequence = chatViewFixture.fixture.snapshot.snapshotSequence + 1;
         const thread = {
@@ -5217,32 +6752,34 @@ describe("ChatView full app (composer)", () => {
           kind: "snapshot",
           snapshot: { snapshotSequence: sequence, thread },
         });
+        owner.mark("snapshot");
       };
       emit("provider.turn.steer.accepted", {
         provider: "codex",
         messageId: command.message.messageId,
         acceptedTurnId: activeTurnId,
       });
-      await vi.waitFor(() =>
-        expect(
-          document.querySelector<HTMLElement>("[data-steering-status]")?.dataset.steeringStatus,
-        ).toBe("received"),
+      await owner.own("receipt", () =>
+        vi.waitFor(() =>
+          expect(
+            document.querySelector<HTMLElement>("[data-steering-status]")?.dataset.steeringStatus,
+          ).toBe("received"),
+        ),
       );
       emit("task.progress", {
         taskId: `codex-turn-steer-processing:${activeTurnId}`,
         messageId: command.message.messageId,
         detail: "Codex app-server began processing turn/steer.",
       });
-      await vi.waitFor(() =>
-        expect(document.querySelector('[data-cafe-followup-steering="true"]')).toBeNull(),
+      await owner.own("processing", () =>
+        vi.waitFor(() =>
+          expect(document.querySelector('[data-cafe-followup-steering="true"]')).toBeNull(),
+        ),
       );
       expect(
         dispatchSpy.mock.calls.filter(([value]) => value.type === "thread.turn.steer"),
       ).toHaveLength(1);
-    } finally {
-      dispatchSpy.mockRestore();
-      await mounted.cleanup();
-    }
+    });
   });
 
   it.each(["unchanged", "newer-edited"] as const)(

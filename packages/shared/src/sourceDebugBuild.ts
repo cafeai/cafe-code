@@ -16,6 +16,7 @@ import {
 // Native path boundary: preserve host drive, namespace and separator semantics.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as path from "node:path";
+import { SOURCE_RUNTIME_DEPENDENCIES } from "./runtimeDependencies.ts";
 
 export type SourceDebugBuildRole = "desktop" | "server";
 const CAPABILITY = "cafecode.debug-data-profile.v1";
@@ -295,6 +296,42 @@ export function assertSourceDebugBuild(entryPath: string, role: SourceDebugBuild
   } catch {
     throw new SourceDebugBuildError();
   }
+}
+
+/** A published npm source launcher uses consumer-installed dependencies. Copy
+ * qualification precedes removing its builder-private dependency pointer, then
+ * bind the unchanged JavaScript closure again without persisting a host path.
+ */
+export function publishPortableSourceDebugBuild(
+  entryPath: string,
+  role: SourceDebugBuildRole,
+): void {
+  const metadata = readManifest(sourceDebugBuildManifestPath(entryPath));
+  assertSourceDebugBuild(entryPath, role);
+  if (readManifest(sourceDebugBuildManifestPath(entryPath)) !== metadata)
+    throw new SourceDebugBuildError();
+  const manifest = JSON.parse(metadata) as {
+    files: Array<{ file: string }>;
+  };
+  const files = manifest.files
+    .filter((entry) => entry.file !== SOURCE_RUNTIME_DEPENDENCIES)
+    .map((entry) => localFile(path.dirname(entryPath), entry.file));
+  publishSourceDebugBuildManifest(entryPath, role, files);
+  try {
+    unlinkSync(path.join(path.dirname(entryPath), SOURCE_RUNTIME_DEPENDENCIES));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
+/** The watch coordinator keeps only this fixed digest, never raw metadata or
+ * environment values, and uses the same bounded no-follow manifest reader. */
+export function sourceDebugBuildFingerprint(entryPath: string, role: SourceDebugBuildRole): string {
+  const metadata = readManifest(sourceDebugBuildManifestPath(entryPath));
+  assertSourceDebugBuild(entryPath, role);
+  if (readManifest(sourceDebugBuildManifestPath(entryPath)) !== metadata)
+    throw new SourceDebugBuildError();
+  return createHash("sha256").update(metadata).digest("hex");
 }
 
 export function assertSourceDebugDesktopBuilds(desktopDirectory: string): void {

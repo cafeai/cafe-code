@@ -1,7 +1,7 @@
 # Agent visualizations and MCP Apps
 
 Status: Full-access inline-browser implementation
-Last updated: 2026-10-19 12:42:24 JST (UTC+0900)
+Last updated: 2026-10-27
 
 Visualizations are live, ordinary same-origin browser documents embedded in the
 conversation. They are not image previews. They fill the available chat width,
@@ -41,8 +41,14 @@ network resource. Request UUID/content idempotency, tombstones, private
 commitments, storage quotas, transport bounds and opaque failures remain enforced.
 Grok and other provider paths are not advertised without qualified provenance.
 
-Ordinary history contains compact references, not source, raw JSON, credentials
-or executable authority. Existing immutable artifacts need no migration or
+Artifact history contains compact references. Ordinary tool activity retains the
+actual service/tool names, App attribution, arguments, results, errors and progress,
+including generated source and App JSON. App metadata alone never anonymizes a
+call. Only the internal visualization receipt's authorization proof is omitted
+from structured and JSON-text activity/history/log copies, after observing the
+original for native completion. Existing credential filters and finite inspection
+bounds remain. Previously anonymized stored rows are not rewritten by this change.
+Existing immutable artifacts need no migration or
 poster deletion; old poster metadata remains decodable but is never a live-display
 fallback. Exact authenticated historical source loading does not start a provider.
 
@@ -121,6 +127,17 @@ Generated documents receive the actual bundled DM Sans Variable faces used by
 chat, with semantic code left monospace. Font bytes, descriptors and OFL notice
 are fixed and offline. External Apps retain their own typography.
 
+Inline composition preserves the authored root/head attributes and source order
+while placing its fixed prelude in the document head. Fragments receive a
+standards-mode wrapper. The bounded lexical
+pass skips comments, templates and raw-text bodies; its offsets always refer to
+the unchanged source. Compare tag names case-insensitively only in their bounded
+ASCII spelling, never by indexing a whole-source Unicode lowercase copy: Unicode
+inside a comment or script can otherwise expand UTF-16 and move the insertion.
+Mixed-case closing tags and suffix refusals retain the same raw-text boundaries.
+The complete wrapped document keeps its 16 MiB UTF-8 limit. This is composition,
+not sanitization or an additional execution-containment boundary.
+
 Generated inline native selects do not retain a pointer-only focus outline or glow
 after a choice. A finite document-owned controller suppresses only those two
 decorations without blurring, changing selection or consuming input. Actual
@@ -189,7 +206,9 @@ consent, exact source/frame/account/server ownership and a current catalogue.
 Read-only annotations grant nothing. No general MCP/network proxy or provider
 fallback is supplied. Consent is bounded to 30 seconds and consumed before
 dispatch; a lost acknowledgement is not authority to repeat a mutation.
-Private original JSON is not in ordinary history/debug logs.
+Original tool input/result remains available in ordinary tool activity. The
+artifact's separate owner-bound source/JSON inspection and action consent retain
+their existing access checks; displaying tool data never grants App authority.
 
 The UI broker still validates exact WindowProxy/srcdoc routing and bounded JSON.
 That is routing hygiene, not a guarantee against a same-origin malicious page
@@ -198,7 +217,7 @@ while leaving owned history inspectable; viewing history never restarts inferenc
 
 ## Diagnostics, verification and decisions
 
-Debug output uses fixed mode/access/queue/frame/byte/status scalars only, never
+Visualization pool debug output uses fixed mode/access/queue/frame/byte/status scalars only, never
 source, private JSON, tokens, URLs, native buffers or paths. A failure classification
 is not its initiating cause. Preserve exact raw private failure logs before
 diagnosis, and do not recover by resetting a live runtime.

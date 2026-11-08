@@ -17,21 +17,14 @@ import {
   CopyIcon,
   FileTextIcon,
   MessageSquareIcon,
+  MinusIcon,
   PlusIcon,
   RefreshCwIcon,
   Trash2Icon,
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import {
-  type ChangeEvent,
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   defaultInstanceIdForDriver,
   DEFAULT_PROVIDER_INSTANCES,
@@ -52,18 +45,10 @@ import { copyTextToClipboard } from "../../lib/copyToClipboard";
 import {
   DEFAULT_UNIFIED_SETTINGS,
   DEFAULT_APP_ACCENT_COLOR,
-  DEFAULT_BRAND_WORDMARK_PREFIX,
   DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS,
   DEFAULT_INTERFACE_SCALE_PERCENT,
-  DEFAULT_SHOW_SIDEBAR_ATTRIBUTION,
-  DEFAULT_SIDEBAR_BRAND_IMAGE,
   DEFAULT_SIDEBAR_STAR_SPEED,
-  DEFAULT_SHOW_SIDEBAR_MASCOT,
-  DEFAULT_SHOW_SIDEBAR_SEARCH,
-  DEFAULT_THEME_ACCENT_COLOR,
-  MAX_BRAND_WORDMARK_PREFIX_LENGTH,
   MAX_INTERFACE_SCALE_PERCENT,
-  MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
   MAX_SIDEBAR_STAR_SPEED,
   MIN_SIDEBAR_STAR_SPEED,
   MIN_INTERFACE_SCALE_PERCENT,
@@ -115,12 +100,12 @@ import {
 } from "../ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
-import { Slider } from "../ui/slider";
 import { Skeleton } from "../ui/skeleton";
 import { Spinner } from "../ui/spinner";
 import { InfoTip } from "../ui/info-tip";
 import { useDelayedFlag } from "../../hooks/useDelayedFlag";
 import { Switch } from "../ui/switch";
+import { MacKeepAwakeSettings } from "./MacKeepAwakeSettings";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
@@ -153,15 +138,14 @@ import {
   useServerProviders,
 } from "../../rpc/serverState";
 import { resolveEditorOpenOptions, type EditorOpenOption } from "../../editorOpenOptions";
-import { snapInterfaceScalePercent } from "../../interfaceScale";
+import { stepInterfaceScalePercent } from "../../interfaceScale";
 import { openInPreferredEditor } from "../../editorPreferences";
-import {
-  DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES,
-  DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET,
-  useSidebarBrandImageSrc,
-  uploadSidebarBrandImage,
-} from "../../brandingImages";
 import { ColorWheelPicker } from "./ColorWheelPicker";
+import {
+  AccentColorSwatches,
+  AppIconSettingsSection,
+  SidebarSettingsSection,
+} from "./SidebarAppearanceSettings";
 
 const THEME_OPTIONS = [
   {
@@ -188,9 +172,6 @@ function canRestartProviderRuntime(driver: ProviderDriverKind): boolean {
   return driver === "codex" || driver === "claudeAgent";
 }
 const DEFAULT_APP_ACCENT_PICKER_COLOR = "#2563eb";
-const DEFAULT_SIDEBAR_ACCENT_PICKER_COLOR = "#48cfff";
-const SIDEBAR_IMAGE_ACCEPT = "image/png,image/jpeg,image/gif,image/webp";
-const SIDEBAR_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 function clampSidebarStarSpeed(value: number | null): number {
   if (value === null || !Number.isFinite(value)) {
@@ -569,15 +550,27 @@ export function useSettingsRestore(onRestored?: () => void, pathname = "/setting
   const { theme, setTheme } = useTheme();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
-  const languagePreference = useSettings((current) => current.languagePreference, {
-    environmentId: null,
-  });
-  const { updateSettings: updateLanguageSettings } = useUpdateSettings({ environmentId: null });
+  const clientPreferences = useSettings(
+    (current) => ({
+      languagePreference: current.languagePreference,
+      interfaceScalePercent: current.interfaceScalePercent,
+      keepAwakeWithLidClosed: current.keepAwakeWithLidClosed,
+    }),
+    { environmentId: null },
+  );
+  const { updateSettings: updateClientPreferences } = useUpdateSettings({ environmentId: null });
   const reset = getSettingsPageReset(
     pathname,
-    settings,
+    {
+      ...settings,
+      interfaceScalePercent: clientPreferences.interfaceScalePercent,
+      keepAwakeWithLidClosed: clientPreferences.keepAwakeWithLidClosed,
+    },
     {
       desktop: typeof window.desktopBridge?.setPowerSaveBlockerState === "function",
+      macKeepAwake:
+        typeof window.desktopBridge?.getMacKeepAwakeState === "function" &&
+        typeof window.desktopBridge?.setMacKeepAwakeIntent === "function",
     },
     uiLocale,
   );
@@ -585,7 +578,7 @@ export function useSettingsRestore(onRestored?: () => void, pathname = "/setting
   const appearance = pathname === "/settings/appearance";
   const changedSettingLabels = [
     ...(appearance && theme !== "system" ? [uiText("Theme", undefined, undefined, uiLocale)] : []),
-    ...(general && languagePreference !== "system"
+    ...(general && clientPreferences.languagePreference !== "system"
       ? [uiText("Language", undefined, undefined, uiLocale)]
       : []),
     ...reset.labels,
@@ -603,8 +596,14 @@ export function useSettingsRestore(onRestored?: () => void, pathname = "/setting
     if (!confirmed) return;
     if (appearance) setTheme("system");
     if (general)
-      updateLanguageSettings({ languagePreference: DEFAULT_UNIFIED_SETTINGS.languagePreference });
-    updateSettings(reset.patch);
+      updateClientPreferences({ languagePreference: DEFAULT_UNIFIED_SETTINGS.languagePreference });
+    const { interfaceScalePercent, keepAwakeWithLidClosed, ...workspacePatch } = reset.patch;
+    if (interfaceScalePercent !== undefined) updateClientPreferences({ interfaceScalePercent });
+    if (keepAwakeWithLidClosed !== undefined) {
+      await window.desktopBridge?.setMacKeepAwakeIntent?.(keepAwakeWithLidClosed);
+      updateClientPreferences({ keepAwakeWithLidClosed });
+    }
+    if (Object.keys(workspacePatch).length > 0) updateSettings(workspacePatch);
     onRestored?.();
   };
   return { changedSettingLabels, restoreDefaults };
@@ -934,94 +933,13 @@ export function AppearanceSettingsPanel() {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
-  const environmentId = useWorkspaceEnvironmentId();
   const { theme, setTheme } = useTheme();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
-  const sidebarImageInputRef = useRef<HTMLInputElement | null>(null);
-  const sidebarImagePreviewUrlRef = useRef<string | null>(null);
-  const [sidebarImageError, setSidebarImageError] = useState<string | null>(null);
-  const [sidebarImagePreviewUrl, setSidebarImagePreviewUrl] = useState<string | null>(null);
-  const [sidebarImageUploading, setSidebarImageUploading] = useState(false);
-  const savedSidebarImageSrc = useSidebarBrandImageSrc(settings.sidebarBrandImage);
-  const sidebarImageSrc = sidebarImagePreviewUrl ?? savedSidebarImageSrc;
-  const sidebarImageUsesDefault =
-    sidebarImagePreviewUrl === null && settings.sidebarBrandImage === DEFAULT_SIDEBAR_BRAND_IMAGE;
-  const sidebarImageSrcSet = sidebarImageUsesDefault
-    ? DEFAULT_SIDEBAR_BRAND_IMAGE_SRC_SET
-    : undefined;
-
-  const clearSidebarImagePreviewUrl = useCallback(() => {
-    if (sidebarImagePreviewUrlRef.current) {
-      if (typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
-        URL.revokeObjectURL(sidebarImagePreviewUrlRef.current);
-      }
-      sidebarImagePreviewUrlRef.current = null;
-    }
-    setSidebarImagePreviewUrl(null);
-  }, []);
-
-  const setTemporarySidebarImagePreviewUrl = useCallback(
-    (file: File) => {
-      clearSidebarImagePreviewUrl();
-      if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
-        return;
-      }
-      const previewUrl = URL.createObjectURL(file);
-      sidebarImagePreviewUrlRef.current = previewUrl;
-      setSidebarImagePreviewUrl(previewUrl);
-    },
-    [clearSidebarImagePreviewUrl],
-  );
-
-  useEffect(() => clearSidebarImagePreviewUrl, [clearSidebarImagePreviewUrl]);
-
-  const handleSidebarImageChange = useCallback(
-    async (event: ChangeEvent<HTMLInputElement>) => {
-      const file = event.currentTarget.files?.[0];
-      event.currentTarget.value = "";
-      if (!file) {
-        return;
-      }
-
-      if (!SIDEBAR_IMAGE_MIME_TYPES.has(file.type)) {
-        setSidebarImageError(
-          uiText("Choose a PNG, JPEG, GIF, or WebP image.", undefined, undefined, uiLocale),
-        );
-        return;
-      }
-
-      if (file.size > MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES) {
-        setSidebarImageError(uiText("Choose an image under 1 MB.", undefined, undefined, uiLocale));
-        return;
-      }
-
-      setTemporarySidebarImagePreviewUrl(file);
-      setSidebarImageUploading(true);
-      try {
-        const sidebarBrandImage = await uploadSidebarBrandImage(file, environmentId);
-        setSidebarImageError(null);
-        updateSettings({ sidebarBrandImage, sidebarBrandImageDataUrl: "" });
-        clearSidebarImagePreviewUrl();
-      } catch (error) {
-        clearSidebarImagePreviewUrl();
-        setSidebarImageError(
-          error instanceof Error
-            ? error.message
-            : uiText("Could not upload that image.", undefined, undefined, uiLocale),
-        );
-      } finally {
-        setSidebarImageUploading(false);
-      }
-    },
-    [
-      clearSidebarImagePreviewUrl,
-      environmentId,
-      setTemporarySidebarImagePreviewUrl,
-      updateSettings,
-      uiLocale,
-    ],
-  );
+  const interfaceScalePercent = useSettings((current) => current.interfaceScalePercent, {
+    environmentId: null,
+  });
+  const { updateSettings: updateClientPreferences } = useUpdateSettings({ environmentId: null });
 
   return (
     <SettingsPageContainer title={uiText("Appearance", undefined, undefined, uiLocale)}>
@@ -1070,30 +988,53 @@ export function AppearanceSettingsPanel() {
           searchId="appearance.interfaceSize"
           title={uiText("Interface size", undefined, undefined, uiLocale)}
           resetAction={
-            settings.interfaceScalePercent !== DEFAULT_INTERFACE_SCALE_PERCENT ? (
+            interfaceScalePercent !== DEFAULT_INTERFACE_SCALE_PERCENT ? (
               <SettingResetButton
                 label={uiText("interface size", undefined, undefined, uiLocale)}
                 onClick={() =>
-                  updateSettings({ interfaceScalePercent: DEFAULT_INTERFACE_SCALE_PERCENT })
+                  updateClientPreferences({
+                    interfaceScalePercent: DEFAULT_INTERFACE_SCALE_PERCENT,
+                  })
                 }
               />
             ) : null
           }
           control={
-            <div className="flex w-full items-center gap-3 sm:w-56">
-              <Slider
-                value={settings.interfaceScalePercent}
-                min={MIN_INTERFACE_SCALE_PERCENT}
-                max={MAX_INTERFACE_SCALE_PERCENT}
-                step={5}
-                aria-label={uiText("Interface size", undefined, undefined, uiLocale)}
-                onValueChange={(value) =>
-                  updateSettings({ interfaceScalePercent: snapInterfaceScalePercent(value) })
+            // Buttons rather than a slider: each step resizes the whole page,
+            // which moved a slider's thumb out from under the pointer mid-drag.
+            <div className="flex items-center gap-1">
+              <Button
+                size="icon-sm"
+                variant="outline"
+                aria-label={uiText("Smaller interface", undefined, undefined, uiLocale)}
+                disabled={interfaceScalePercent <= MIN_INTERFACE_SCALE_PERCENT}
+                onClick={() =>
+                  updateClientPreferences({
+                    interfaceScalePercent: stepInterfaceScalePercent(interfaceScalePercent, -1),
+                  })
                 }
-              />
-              <span className="w-10 shrink-0 text-right font-mono text-xs text-muted-foreground">
-                {settings.interfaceScalePercent}%
+              >
+                <MinusIcon />
+              </Button>
+              <span
+                aria-live="polite"
+                className="w-12 text-center font-mono text-xs tabular-nums text-muted-foreground"
+              >
+                {interfaceScalePercent}%
               </span>
+              <Button
+                size="icon-sm"
+                variant="outline"
+                aria-label={uiText("Larger interface", undefined, undefined, uiLocale)}
+                disabled={interfaceScalePercent >= MAX_INTERFACE_SCALE_PERCENT}
+                onClick={() =>
+                  updateClientPreferences({
+                    interfaceScalePercent: stepInterfaceScalePercent(interfaceScalePercent, 1),
+                  })
+                }
+              >
+                <PlusIcon />
+              </Button>
             </div>
           }
         />
@@ -1102,7 +1043,7 @@ export function AppearanceSettingsPanel() {
           searchId="appearance.accentColor"
           title={uiText("Accent color", undefined, undefined, uiLocale)}
           description={uiText(
-            "Used for buttons, selection and focus.",
+            "Buttons, selection, the sidebar and the app icon.",
             undefined,
             undefined,
             uiLocale,
@@ -1116,223 +1057,21 @@ export function AppearanceSettingsPanel() {
             ) : null
           }
           control={
-            <ColorWheelPicker
-              value={settings.appAccentColor}
-              defaultPickerColor={DEFAULT_APP_ACCENT_PICKER_COLOR}
-              emptyValue={DEFAULT_APP_ACCENT_COLOR}
-              ariaLabel="App accent color"
-              onCommit={(value) => updateSettings({ appAccentColor: value })}
-            />
-          }
-        />
-      </SettingsSection>
-      <SettingsSection title={uiText("Sidebar", undefined, undefined, uiLocale)}>
-        <SettingsRow
-          searchId="appearance.brandingPrefix"
-          title={uiText("Branding prefix", undefined, undefined, uiLocale)}
-          description={uiText("Replaces ''Cafe'' in the wordmark.", undefined, undefined, uiLocale)}
-          resetAction={
-            settings.brandWordmarkPrefix !== DEFAULT_UNIFIED_SETTINGS.brandWordmarkPrefix ? (
-              <SettingResetButton
-                label={uiText("branding prefix", undefined, undefined, uiLocale)}
-                onClick={() =>
-                  updateSettings({ brandWordmarkPrefix: DEFAULT_BRAND_WORDMARK_PREFIX })
-                }
+            <div className="flex flex-col items-end gap-2.5">
+              <ColorWheelPicker
+                value={settings.appAccentColor}
+                defaultPickerColor={DEFAULT_APP_ACCENT_PICKER_COLOR}
+                emptyValue={DEFAULT_APP_ACCENT_COLOR}
+                ariaLabel="App accent color"
+                onCommit={(value) => updateSettings({ appAccentColor: value })}
               />
-            ) : null
-          }
-          control={
-            <DraftInput
-              aria-label={uiText("Branding prefix", undefined, undefined, uiLocale)}
-              className="w-full sm:w-48"
-              maxLength={MAX_BRAND_WORDMARK_PREFIX_LENGTH}
-              placeholder={DEFAULT_BRAND_WORDMARK_PREFIX}
-              value={settings.brandWordmarkPrefix}
-              onCommit={(value) =>
-                updateSettings({
-                  brandWordmarkPrefix: value.trim().slice(0, MAX_BRAND_WORDMARK_PREFIX_LENGTH),
-                })
-              }
-            />
-          }
-        />
-
-        <SettingsRow
-          searchId="appearance.sidebarEffectsColor"
-          title={uiText("Sidebar effects color", undefined, undefined, uiLocale)}
-          description={uiText("Colors the sidebar stars and glow.", undefined, undefined, uiLocale)}
-          resetAction={
-            settings.themeAccentColor !== DEFAULT_UNIFIED_SETTINGS.themeAccentColor ? (
-              <SettingResetButton
-                label={uiText("sidebar effects color", undefined, undefined, uiLocale)}
-                onClick={() => updateSettings({ themeAccentColor: DEFAULT_THEME_ACCENT_COLOR })}
-              />
-            ) : null
-          }
-          control={
-            <ColorWheelPicker
-              value={settings.themeAccentColor}
-              defaultPickerColor={DEFAULT_SIDEBAR_ACCENT_PICKER_COLOR}
-              emptyValue={DEFAULT_THEME_ACCENT_COLOR}
-              ariaLabel="Animated sidebar color"
-              onCommit={(value) => updateSettings({ themeAccentColor: value })}
-            />
-          }
-        />
-
-        <SettingsRow
-          searchId="appearance.sidebarSearch"
-          title={uiText("Sidebar search", undefined, undefined, uiLocale)}
-          resetAction={
-            settings.showSidebarSearch !== DEFAULT_UNIFIED_SETTINGS.showSidebarSearch ? (
-              <SettingResetButton
-                label={uiText("sidebar search", undefined, undefined, uiLocale)}
-                onClick={() => updateSettings({ showSidebarSearch: DEFAULT_SHOW_SIDEBAR_SEARCH })}
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.showSidebarSearch}
-              onCheckedChange={(checked) => updateSettings({ showSidebarSearch: Boolean(checked) })}
-              aria-label={uiText("Show sidebar search", undefined, undefined, uiLocale)}
-            />
-          }
-        />
-
-        <SettingsRow
-          searchId="appearance.sidebarImageEnabled"
-          title={uiText("Enable sidebar image", undefined, undefined, uiLocale)}
-          resetAction={
-            settings.showSidebarMascot !== DEFAULT_UNIFIED_SETTINGS.showSidebarMascot ? (
-              <SettingResetButton
-                label={uiText("sidebar image visibility", undefined, undefined, uiLocale)}
-                onClick={() => updateSettings({ showSidebarMascot: DEFAULT_SHOW_SIDEBAR_MASCOT })}
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.showSidebarMascot}
-              onCheckedChange={(checked) => updateSettings({ showSidebarMascot: Boolean(checked) })}
-              aria-label={uiText("Enable sidebar image", undefined, undefined, uiLocale)}
-            />
-          }
-        />
-
-        <SettingsRow
-          searchId="appearance.sidebarImage"
-          className={settings.showSidebarMascot ? undefined : "opacity-50"}
-          title={uiText("Sidebar image", undefined, undefined, uiLocale)}
-          description={uiText(
-            "PNG, JPEG, GIF or WebP, under 1 MB.",
-            undefined,
-            undefined,
-            uiLocale,
-          )}
-          resetAction={
-            settings.showSidebarMascot &&
-            !sidebarImageUploading &&
-            settings.sidebarBrandImage !== DEFAULT_UNIFIED_SETTINGS.sidebarBrandImage ? (
-              <SettingResetButton
-                label={uiText("sidebar image", undefined, undefined, uiLocale)}
-                onClick={() => {
-                  setSidebarImageError(null);
-                  clearSidebarImagePreviewUrl();
-                  updateSettings({
-                    sidebarBrandImage: DEFAULT_SIDEBAR_BRAND_IMAGE,
-                    sidebarBrandImageDataUrl: "",
-                  });
-                }}
-              />
-            ) : null
-          }
-          status={
-            sidebarImageError ? (
-              <span className="text-destructive-foreground">{sidebarImageError}</span>
-            ) : null
-          }
-          control={
-            <div className="flex w-full flex-col items-start gap-2 sm:w-72">
-              <div className="flex w-full items-center gap-3">
-                <img
-                  alt=""
-                  aria-hidden="true"
-                  className="h-14 w-11 shrink-0 rounded-lg object-cover ring-1 ring-border"
-                  draggable={false}
-                  sizes={DEFAULT_SIDEBAR_BRAND_IMAGE_SIZES}
-                  src={sidebarImageSrc}
-                  srcSet={sidebarImageSrcSet}
-                />
-                <div className="flex min-w-0 flex-1 items-center gap-2">
-                  <Button
-                    disabled={!settings.showSidebarMascot || sidebarImageUploading}
-                    size="xs"
-                    variant="outline"
-                    onClick={() => sidebarImageInputRef.current?.click()}
-                  >
-                    {sidebarImageUploading ? (
-                      <Spinner aria-hidden="true" className="size-3.5" />
-                    ) : null}
-                    {uiText("Choose image", undefined, undefined, uiLocale)}
-                  </Button>
-                  {settings.sidebarBrandImage ? (
-                    <Button
-                      disabled={!settings.showSidebarMascot || sidebarImageUploading}
-                      size="xs"
-                      variant="ghost"
-                      onClick={() => {
-                        setSidebarImageError(null);
-                        clearSidebarImagePreviewUrl();
-                        updateSettings({
-                          sidebarBrandImage: DEFAULT_SIDEBAR_BRAND_IMAGE,
-                          sidebarBrandImageDataUrl: "",
-                        });
-                      }}
-                    >
-                      {uiText("Use default", undefined, undefined, uiLocale)}
-                    </Button>
-                  ) : null}
-                </div>
-              </div>
-              <input
-                ref={sidebarImageInputRef}
-                type="file"
-                disabled={!settings.showSidebarMascot || sidebarImageUploading}
-                accept={SIDEBAR_IMAGE_ACCEPT}
-                aria-label={uiText("Sidebar image file", undefined, undefined, uiLocale)}
-                className="sr-only"
-                tabIndex={-1}
-                onChange={(event) => void handleSidebarImageChange(event)}
-              />
+              <AccentColorSwatches />
             </div>
           }
         />
-
-        <SettingsRow
-          searchId="appearance.sidebarAttribution"
-          title={uiText("Sidebar attribution", undefined, undefined, uiLocale)}
-          resetAction={
-            settings.showSidebarAttribution !== DEFAULT_UNIFIED_SETTINGS.showSidebarAttribution ? (
-              <SettingResetButton
-                label={uiText("sidebar attribution", undefined, undefined, uiLocale)}
-                onClick={() =>
-                  updateSettings({ showSidebarAttribution: DEFAULT_SHOW_SIDEBAR_ATTRIBUTION })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.showSidebarAttribution}
-              onCheckedChange={(checked) =>
-                updateSettings({ showSidebarAttribution: Boolean(checked) })
-              }
-              aria-label={uiText("Show sidebar attribution", undefined, undefined, uiLocale)}
-            />
-          }
-        />
       </SettingsSection>
+      <SidebarSettingsSection />
+      <AppIconSettingsSection />
       <SettingsSection title={uiText("Motion", undefined, undefined, uiLocale)}>
         <SettingsRow
           searchId="appearance.animateWhileUnfocused"
@@ -1981,6 +1720,7 @@ function SystemSettingsSections() {
               </Select>
             }
           />
+          <MacKeepAwakeSettings />
         </SettingsSection>
       ) : null}
 

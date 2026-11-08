@@ -21,6 +21,7 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import type { SessionRole } from "./SessionCredentialService.ts";
+import type { ManagementLaunchContext } from "../managementLaunchContext.ts";
 
 export interface AuthenticatedSession {
   readonly sessionId: AuthSessionId;
@@ -28,6 +29,7 @@ export interface AuthenticatedSession {
   readonly method: ServerAuthSessionMethod;
   readonly role: SessionRole;
   readonly expiresAt?: DateTime.DateTime;
+  readonly managementLaunchContext?: ManagementLaunchContext;
 }
 
 export class AuthError extends Data.TaggedError("AuthError")<{
@@ -97,6 +99,7 @@ export interface ServerAuthShape {
   readonly clearAdminPassword: () => Effect.Effect<AuthAdminPasswordStatus, AuthError>;
   readonly authenticateHttpRequest: (
     request: HttpServerRequest.HttpServerRequest,
+    options?: { readonly bearerOnly?: boolean },
   ) => Effect.Effect<AuthenticatedSession, AuthError>;
   readonly authenticateWebSocketUpgrade: (
     request: HttpServerRequest.HttpServerRequest,

@@ -1,6 +1,6 @@
 # Debug and Production data
 
-Last updated: 2026-10-20 22:11:35 JST (UTC+0900)
+Last updated: 2026-10-23 07:39:42 JST (UTC+0900)
 
 Source desktop builds and repository development launchers use a separate,
 persistent Debug profile. Installed packaged releases retain their existing
@@ -56,6 +56,17 @@ uses global provider state. It is a build-compatibility check, not a signature
 against a person able to edit the source checkout. Packaged releases do not use
 this source-launch prerequisite.
 
+On macOS, the source launcher explicitly carries its `PATH` through
+LaunchServices to the immutable Debug host, Electron and the provider daemon.
+The value remains one literal environment argument, preserving executable
+directory order and spaces. It is limited to 16 KiB of UTF-8 and refuses NUL or
+line breaks with a fixed error; no other terminal environment or credentials
+are forwarded by this selection. An absent or empty `PATH` retains the existing
+GUI/login-shell fallback. Desktop login-shell hydration still runs before the
+daemon opens and merges the inherited lookup as a fallback. This preserves
+access to already installed provider executables; it does not install a CLI,
+change the selected account, or alter Debug's private provider homes.
+
 General Settings shows the **active server environment's** reported profile
 and directory. This can differ from the local desktop profile when connected to
 a remote server. An older server that omits profile metadata remains unknown;
@@ -94,9 +105,13 @@ selectors: `CODEX_HOME` for Codex, `HOME` plus `CLAUDE_CONFIG_DIR` for Claude,
 and `GROK_HOME` for Grok. Login is an explicit user action, not a background
 credential import.
 
-Provider executables may be shared with Production. Cafe-managed provider
-maintenance is refused in Debug, rather than silently updating/uninstalling a
-shared installation. Native provider behavior outside Cafe's supported controls
+Provider executables may be shared with Production. User-requested provider
+updates use the same installation detection, update command, serialization and
+version verification in Debug and Production. An update from either profile can
+therefore change the executable used by both. Bundled runtimes and installations
+without a supported updater retain their existing update restrictions. Provider
+account homes, sign-in and history remain profile-local unless shared-state
+consent is enabled. Native provider behavior outside Cafe's supported controls
 is not an OS sandbox guarantee.
 
 Do not copy a live Production SQLite/WAL, secret store, browser profile, daemon

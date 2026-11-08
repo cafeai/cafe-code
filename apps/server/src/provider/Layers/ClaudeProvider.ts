@@ -24,6 +24,7 @@ import {
 import { compareSemverVersions, parseSemver } from "@cafecode/shared/semver";
 import {
   query as claudeQuery,
+  type AccountInfo,
   type SlashCommand as ClaudeSlashCommand,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -431,6 +432,8 @@ type ClaudeCapabilitiesProbe = {
   readonly email: string | undefined;
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
+  readonly apiKeySource?: string | undefined;
+  readonly apiProvider?: AccountInfo["apiProvider"];
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
   readonly models?: ReadonlyArray<ClaudeNativeModel> | undefined;
 };
@@ -546,17 +549,13 @@ const probeClaudeCapabilities = (
         },
       });
       const init = await q.initializationResult();
-      const account = init.account as
-        | {
-            readonly email?: string;
-            readonly subscriptionType?: string;
-            readonly tokenSource?: string;
-          }
-        | undefined;
+      const account = init.account;
       return {
         email: account?.email,
         subscriptionType: account?.subscriptionType,
         tokenSource: account?.tokenSource,
+        apiKeySource: account?.apiKeySource,
+        apiProvider: account?.apiProvider,
         slashCommands: parseClaudeInitializationCommands(init.commands),
         models: normalizeClaudeNativeModels(init.models),
       } satisfies ClaudeCapabilitiesProbe;
@@ -597,9 +596,9 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   environment: NodeJS.ProcessEnv = process.env,
   // Neither the capabilities probe (never sends an authenticated request) nor
   // `claude auth status` (reads local credential material only) can detect an
-  // expired/revoked credential — both report a logged-in state while real
-  // turns fail with 401. The owning driver observes those 401s at turn time
-  // through the adapter and feeds the result back here.
+  // expired/revoked credential — both can report a logged-in state while real
+  // turns fail authentication. The owning driver observes typed auth failures
+  // at turn time through the adapter and feeds the result back here.
   resolveAuthFailure?: Effect.Effect<boolean>,
 ): Effect.fn.Return<
   ServerProviderDraft,
@@ -706,7 +705,14 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const modelUpgradeMessage = formatClaudeModelUpgradeMessage(parsedVersion);
 
   const authFailureSeen = resolveAuthFailure !== undefined && (yield* resolveAuthFailure);
-  if (authFailureSeen) {
+  const capabilities =
+    !authFailureSeen && resolveCapabilities
+      ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
+      : undefined;
+  // A shared snapshot refresh may already be awaiting initialization when a
+  // real turn fails. Recheck before publication so that local metadata cannot
+  // overwrite that newer authentication failure.
+  if (authFailureSeen || (resolveAuthFailure !== undefined && (yield* resolveAuthFailure))) {
     return buildServerProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
@@ -718,14 +724,11 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
         status: "error",
         auth: { status: "unauthenticated" },
         message:
-          "Claude rejected the stored credentials (401 authentication error). Run `claude` in a terminal and use `/login`, then retry.",
+          "Claude reported an authentication failure. Run `claude` in a terminal and use `/login`, then retry.",
       },
     });
   }
 
-  const capabilities = resolveCapabilities
-    ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
-    : undefined;
   const slashCommands = capabilities?.slashCommands ?? [];
   const dedupedSlashCommands = dedupeSlashCommands(slashCommands);
 
@@ -746,9 +749,28 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
+  // Initialization is local IPC and also succeeds while signed out. Only
+  // reported login material can establish local authentication; a first-party
+  // `none` token source overrides old account labels. External backends own
+  // their authentication independently of Claude's OAuth login.
+  const tokenSource = capabilities.tokenSource?.trim();
+  const apiKeySource = capabilities.apiKeySource?.trim();
+  const hasApiKey = Boolean(apiKeySource && apiKeySource !== "none");
+  const externalAuth =
+    capabilities.apiProvider !== undefined && capabilities.apiProvider !== "firstParty";
+  let authStatus: "authenticated" | "unauthenticated" | "unknown" = "unknown";
+  if (!externalAuth) {
+    if (hasApiKey) {
+      authStatus = "authenticated";
+    } else if (tokenSource === "none") {
+      if (capabilities.apiProvider === "firstParty") authStatus = "unauthenticated";
+    } else if (tokenSource || capabilities.email?.trim() || capabilities.subscriptionType?.trim()) {
+      authStatus = "authenticated";
+    }
+  }
   const authMetadata = claudeAuthMetadata({
     subscriptionType: capabilities.subscriptionType,
-    authMethod: capabilities.tokenSource,
+    authMethod: hasApiKey ? "apiKey" : capabilities.tokenSource,
   });
   return buildServerProvider({
     presentation: CLAUDE_PRESENTATION,
@@ -768,13 +790,31 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     probe: {
       installed: true,
       version: parsedVersion,
-      status: "ready",
+      status:
+        authStatus === "unauthenticated"
+          ? "error"
+          : authStatus === "unknown" && !externalAuth
+            ? "warning"
+            : "ready",
       auth: {
-        status: "authenticated",
-        ...(capabilities.email ? { email: capabilities.email } : {}),
-        ...(authMetadata ? authMetadata : {}),
+        status: authStatus,
+        ...(authStatus === "authenticated"
+          ? {
+              ...(capabilities.email ? { email: capabilities.email } : {}),
+              ...(authMetadata ? authMetadata : {}),
+            }
+          : {}),
       },
-      ...(modelUpgradeMessage ? { message: modelUpgradeMessage } : {}),
+      ...(authStatus === "unauthenticated"
+        ? {
+            message:
+              "Claude is not signed in. Run `claude` in a terminal and use `/login`, then retry.",
+          }
+        : authStatus === "unknown" && !externalAuth
+          ? { message: "Could not verify Claude authentication status from initialization result." }
+          : modelUpgradeMessage
+            ? { message: modelUpgradeMessage }
+            : {}),
     },
   });
 });

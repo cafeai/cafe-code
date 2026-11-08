@@ -35,8 +35,11 @@ import {
   assertSourceDebugBuild,
   assertSourceDebugDesktopBuilds,
   publishSourceDebugBuildManifest,
+  publishPortableSourceDebugBuild,
+  sourceDebugBuildFingerprint,
   sourceDebugBuildManifestPath,
 } from "./sourceDebugBuild.ts";
+import { SOURCE_RUNTIME_DEPENDENCIES } from "./runtimeDependencies.ts";
 
 const temporary: string[] = [];
 function fixture() {
@@ -54,6 +57,34 @@ afterEach(() => {
 });
 
 describe("source Debug build capability", () => {
+  it("binds the dependency pointer and removes builder paths only from a qualified portable copy", () => {
+    const { root, entry, chunk } = fixture();
+    const pointer = join(root, SOURCE_RUNTIME_DEPENDENCIES);
+    writeFileSync(pointer, JSON.stringify({ generation: join(root, "builder-private-runtime") }));
+    publishSourceDebugBuildManifest(entry, "desktop", [entry, chunk, pointer]);
+    const fingerprint = sourceDebugBuildFingerprint(entry, "desktop");
+    expect(sourceDebugBuildFingerprint(entry, "desktop")).toBe(fingerprint);
+    publishPortableSourceDebugBuild(entry, "desktop");
+    expect(() => lstatSync(pointer)).toThrow();
+    expect(() => assertSourceDebugBuild(entry, "desktop")).not.toThrow();
+    expect(sourceDebugBuildFingerprint(entry, "desktop")).not.toBe(fingerprint);
+    expect(readFileSync(sourceDebugBuildManifestPath(entry), "utf8")).not.toContain(
+      "builder-private-runtime",
+    );
+    writeFileSync(chunk, "changed JavaScript closure");
+    expect(() => assertSourceDebugBuild(entry, "desktop")).toThrow();
+  });
+
+  it("refuses to requalify changed bytes or discard their pointer for portable staging", () => {
+    const { root, entry, chunk } = fixture();
+    const pointer = join(root, SOURCE_RUNTIME_DEPENDENCIES);
+    writeFileSync(pointer, "private pointer bytes");
+    publishSourceDebugBuildManifest(entry, "desktop", [entry, chunk, pointer]);
+    writeFileSync(chunk, "changed JavaScript closure");
+    expect(() => publishPortableSourceDebugBuild(entry, "desktop")).toThrow();
+    expect(readFileSync(pointer, "utf8")).toBe("private pointer bytes");
+  });
+
   it("refuses legacy output without executing it and accepts an exact successful build closure", () => {
     const { entry, chunk } = fixture();
     expect(() => assertSourceDebugBuild(entry, "desktop")).toThrow(

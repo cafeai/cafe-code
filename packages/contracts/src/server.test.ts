@@ -99,6 +99,52 @@ describe("ServerProvider", () => {
     expect(parsed.codexModelCatalogSource).toBeUndefined();
   });
 
+  it("round-trips only bounded native Claude expiry advisory metadata without changing authentication", () => {
+    const advisory = {
+      source: "native-result",
+      expiresAt: "2026-11-10T00:00:00.000Z",
+      observedAt: "2026-11-04T00:00:00.000Z",
+    };
+    const native = {
+      instanceId: "claude-owned",
+      driver: "claudeAgent",
+      enabled: true,
+      installed: true,
+      version: "2.1.318",
+      status: "ready",
+      auth: {
+        status: "authenticated",
+        credentialExpiry: { ...advisory, token: PIPELINE_SENTINEL },
+      },
+      checkedAt: advisory.observedAt,
+      models: [],
+    };
+    const parsed = decodeServerProvider(native);
+    expect(parsed).toHaveProperty("auth.credentialExpiry", advisory);
+    expect(parsed.auth.status).toBe("authenticated");
+    expect(parsed.status).toBe("ready");
+    expect(JSON.stringify(parsed)).not.toContain(PIPELINE_SENTINEL);
+    expect(decodeServerProvider(Schema.encodeSync(ServerProvider)(parsed))).toHaveProperty(
+      "auth.credentialExpiry",
+      advisory,
+    );
+    const { credentialExpiry: _advisory, ...legacyAuth } = native.auth;
+    expect(decodeServerProvider({ ...native, auth: legacyAuth }).auth).not.toHaveProperty(
+      "credentialExpiry",
+    );
+    for (const invalid of [
+      { ...advisory, source: "stored-token" },
+      { ...advisory, expiresAt: "2026-02-30T00:00:00.000Z" },
+      { ...advisory, observedAt: "private credential output" },
+      { ...advisory, expiresAt: "x".repeat(10_000) },
+      { ...advisory, expiresAt: 1_800_000_000 },
+      null,
+    ])
+      expect(() =>
+        decodeServerProvider({ ...native, auth: { ...native.auth, credentialExpiry: invalid } }),
+      ).toThrow();
+  });
+
   it("round-trips only finite catalogue provenance without backfilling legacy snapshots", () => {
     const legacy = {
       instanceId: "codex",

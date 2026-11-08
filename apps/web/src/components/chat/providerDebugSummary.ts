@@ -37,6 +37,21 @@ export function summarizeProviderDebugFleet(providers: ReadonlyArray<ServerProvi
               status: provider.updateState.status,
               startedAt: provider.updateState.startedAt,
               finishedAt: provider.updateState.finishedAt,
+              ...(provider.updateState.diagnostics === undefined
+                ? {}
+                : {
+                    // Project fields explicitly; raw output, message and any
+                    // unknown future diagnostic properties stay outside debug.
+                    diagnostics: {
+                      phase: provider.updateState.diagnostics.phase,
+                      category: provider.updateState.diagnostics.category,
+                      exitCode: provider.updateState.diagnostics.exitCode,
+                      timedOut: provider.updateState.diagnostics.timedOut,
+                      stdoutTruncated: provider.updateState.diagnostics.stdoutTruncated,
+                      stderrTruncated: provider.updateState.diagnostics.stderrTruncated,
+                      outputTruncated: provider.updateState.diagnostics.outputTruncated,
+                    },
+                  }),
             },
       probePhases: (provider.probePhases ?? []).map((phase) => ({
         phase: phase.phase,

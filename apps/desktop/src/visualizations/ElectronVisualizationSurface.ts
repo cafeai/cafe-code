@@ -29,6 +29,7 @@ import {
 } from "./visualizationHostPolicy.ts";
 import type { VisualizationSurfaceDiagnostics } from "./visualizationDiagnostics.ts";
 import {
+  PREVIEW_DEVICE_SCALE_FACTOR,
   admitVisualizationCapture,
   matchesVisualizationCapture,
 } from "./visualizationCapturePolicy.ts";
@@ -319,7 +320,7 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
         // trusted exact-lease update is the viewer's separate exposure commit.
         // Preview is independently offscreen.
         backgroundThrottling: !this.previewWindow,
-        offscreen: this.previewWindow,
+        offscreen: this.previewWindow ? { deviceScaleFactor: PREVIEW_DEVICE_SCALE_FACTOR } : false,
       },
     });
     // Every subsequent native setter/allocation can throw. Observe this exact
@@ -1480,7 +1481,21 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
     if (!this.geometry || zoom !== this.geometry.ownerZoom)
       throw new Error("Visualization capture was refused.");
     const display = Electron.screen.getDisplayMatching(this.window.getBounds());
-    const tuple = admitVisualizationCapture(bounds.width, bounds.height, display.scaleFactor);
+    // Keep the original owner-display/resource admission even for a preview:
+    // its independent fixed offscreen scale cannot excuse unknown native
+    // display metadata or exceed the existing physical-work envelope.
+    const displayTuple = admitVisualizationCapture(
+      bounds.width,
+      bounds.height,
+      display.scaleFactor,
+    );
+    if (!displayTuple) throw new Error("Visualization capture was refused.");
+    // Electron 43's native CapturePage uses the view's configured device scale.
+    // A private preview is explicitly configured at 1x above; visible viewers
+    // retain the original display-DPR tuple and every surrounding owner guard.
+    const tuple = this.previewWindow
+      ? admitVisualizationCapture(bounds.width, bounds.height, PREVIEW_DEVICE_SCALE_FACTOR)
+      : displayTuple;
     if (!tuple) throw new Error("Visualization capture was refused.");
     const image = await this.view.webContents.capturePage(
       { x: 0, y: 0, width: bounds.width, height: bounds.height },
@@ -1495,7 +1510,7 @@ export class ElectronVisualizationSurface implements VisualizationSurface {
     if (
       !matchesVisualizationCapture(tuple, size) ||
       currentDisplay.id !== display.id ||
-      currentDisplay.scaleFactor !== tuple.dpr ||
+      currentDisplay.scaleFactor !== displayTuple.dpr ||
       this.window.webContents.getZoomFactor() !== zoom ||
       currentBounds.x !== bounds.x ||
       currentBounds.y !== bounds.y ||

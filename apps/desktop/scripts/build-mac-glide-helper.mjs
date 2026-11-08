@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -9,6 +10,8 @@ import {
   renameSync,
   rmSync,
   statSync,
+  readFileSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -25,6 +28,46 @@ const keyRescuePath = join(desktopDirectory, "native", "mac-glide-key-rescue-pol
 const keyRescueGuardPath = join(desktopDirectory, "native", "mac-glide-key-rescue-guard.swift");
 const incomingFocusPath = join(desktopDirectory, "native", "mac-glide-incoming-focus.swift");
 const actionPolicyPath = join(desktopDirectory, "native", "mac-glide-action-policy.swift");
+const trayPath = join(desktopDirectory, "native", "mac-glide-tray.swift");
+const trayDirectory = join(desktopDirectory, "native", "glide-tray");
+const trayAssets = [
+  "panel.html",
+  "panel.js",
+  "dm-sans-latin-opsz-normal.woff2",
+  "dm-sans-latin-ext-opsz-normal.woff2",
+  "LICENSE",
+].map((name) => join(trayDirectory, name));
+
+export function writeGlideTrayPayload(destination) {
+  const script = readFileSync(join(trayDirectory, "panel.js"), "utf8");
+  const template = readFileSync(join(trayDirectory, "panel.html"), "utf8").replace(
+    "__SCRIPT__",
+    () => script,
+  );
+  // Hash the actual embedded bytes, including the formatter-owned whitespace
+  // around the placeholder. A source-file hash cannot attest that inline body.
+  const inline = template.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  if (!inline) throw new Error("Glide tray has no fixed inline program.");
+  const hash = createHash("sha256").update(inline).digest("base64");
+  const html = template
+    .replace("__FONT_LICENSE__", () => readFileSync(join(trayDirectory, "LICENSE"), "utf8"))
+    .replace(
+      "__CSP__",
+      `default-src 'none'; script-src 'sha256-${hash}'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'`,
+    )
+    .replace(
+      "__FONT_LATIN__",
+      "data:font/woff2;base64," + readFileSync(trayAssets[2]).toString("base64"),
+    )
+    .replace(
+      "__FONT_EXT__",
+      "data:font/woff2;base64," + readFileSync(trayAssets[3]).toString("base64"),
+    );
+  writeFileSync(
+    destination,
+    `import Foundation\nlet glideTrayHTML = String(data: Data(base64Encoded: "${Buffer.from(html).toString("base64")}")!, encoding: .utf8)!\n`,
+  );
+}
 
 export function sourceMacGlideHelperPath(architecture = process.arch) {
   return join(desktopDirectory, "native", "build", architecture, "mac-glide");
@@ -59,6 +102,8 @@ export function ensureMacGlideHelper({
             statSync(keyRescueGuardPath).mtimeMs,
             statSync(incomingFocusPath).mtimeMs,
             statSync(actionPolicyPath).mtimeMs,
+            statSync(trayPath).mtimeMs,
+            ...trayAssets.map((path) => statSync(path).mtimeMs),
             statSync(scriptPath).mtimeMs,
           )
       )
@@ -69,6 +114,8 @@ export function ensureMacGlideHelper({
   }
   mkdirSync(dirname(outputPath), { recursive: true });
   const temporary = mkdtempSync(join(tmpdir(), "cafe-glide-helper-"));
+  const trayPayload = join(temporary, "glide-tray-payload.swift");
+  writeGlideTrayPayload(trayPayload);
   const run = (tool, args) => {
     const result = spawnSync("xcrun", [tool, ...args], {
       cwd: desktopDirectory,
@@ -92,6 +139,8 @@ export function ensureMacGlideHelper({
       keyRescueGuardPath,
       incomingFocusPath,
       actionPolicyPath,
+      trayPath,
+      trayPayload,
       "-o",
       destination,
     ]);

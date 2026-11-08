@@ -62,6 +62,9 @@ export interface ClaudeUsageAccounting {
   readonly settled: Map<string, Counts>;
   readonly pending: Map<string, Counts>;
   readonly published: Map<string, Counts>;
+  /** Known cache durations are prospective subsets, never inferred from older totals. */
+  readonly knownSettled: Map<string, CacheDurations>;
+  readonly knownPending: Map<string, CacheDurations>;
   incomplete: boolean;
   completeness: UsageAccountingSnapshot["completeness"] | undefined;
   /** Undefined means restored history has not yet been safely separated. */
@@ -71,6 +74,8 @@ export interface ClaudeUsageAccounting {
   baselineIncomplete: boolean;
   readonly carried: Map<string, Counts>;
 }
+
+type CacheDurations = { five: number; hour: number };
 
 export const makeClaudeUsageAccounting = (
   scopeId: string,
@@ -82,6 +87,8 @@ export const makeClaudeUsageAccounting = (
   settled: new Map(),
   pending: new Map(),
   published: new Map(),
+  knownSettled: new Map(),
+  knownPending: new Map(),
   incomplete: false,
   completeness: undefined,
   baseline: resumeBaseline ? undefined : new Map(),
@@ -139,9 +146,20 @@ function publish(
   return {
     scopeId: state.scopeId,
     revision: state.revision,
-    models: Array.from(state.published, ([model, counts]) => ({ model, ...counts })).toSorted(
-      (a, b) => a.model.localeCompare(b.model),
-    ),
+    models: Array.from(state.published, ([model, counts]) => {
+      const settled = state.knownSettled.get(model) ?? { five: 0, hour: 0 };
+      const pending = state.knownPending.get(model) ?? { five: 0, hour: 0 };
+      return {
+        model,
+        ...counts,
+        ...(settled.five + pending.five > 0 || settled.hour + pending.hour > 0
+          ? {
+              cacheWrite5mInputTokens: settled.five + pending.five,
+              cacheWrite1hInputTokens: settled.hour + pending.hour,
+            }
+          : {}),
+      };
+    }).toSorted((a, b) => a.model.localeCompare(b.model)),
     completeness: effectiveCompleteness,
   };
 }
@@ -201,9 +219,31 @@ export function observeClaudeAssistantUsage(
     return undefined;
   }
   state.seenRequestIds.add(id);
+  const previousWrites = state.published.get(model)?.cacheWriteInputTokens ?? 0;
+  const candidateWrites = add(
+    state.settled.get(model)?.cacheWriteInputTokens ?? 0,
+    pending.cacheWriteInputTokens + written,
+  );
   pending.inputTokens += input;
   pending.cachedInputTokens = add(pending.cachedInputTokens, cached);
   pending.cacheWriteInputTokens = add(pending.cacheWriteInputTokens, written);
+  // Capture a split only if the provider proves both categories exactly. An
+  // older runtime's omitted split remains unknown, not an invented 5m write.
+  const creation = record(usage.cache_creation);
+  const five = count(creation?.ephemeral_5m_input_tokens);
+  const hour = count(creation?.ephemeral_1h_input_tokens);
+  if (
+    five !== undefined &&
+    hour !== undefined &&
+    five <= written &&
+    hour === written - five &&
+    candidateWrites - previousWrites >= written
+  ) {
+    const known = state.knownPending.get(model) ?? { five: 0, hour: 0 };
+    known.five += five;
+    known.hour += hour;
+    state.knownPending.set(model, known);
+  }
   state.pending.set(model, pending);
   return publish(state, "input-only");
 }
@@ -266,6 +306,38 @@ export function decodeClaudeCumulativeUsage(
       return undefined;
   }
   return settled;
+}
+
+/** Decode the SDK's optional per-model split without inventing missing detail. */
+function decodeCumulativeDurations(
+  value: unknown,
+  published: ReadonlyMap<string, Counts>,
+): Map<string, CacheDurations> | undefined {
+  const rows = record(value);
+  if (!rows || Object.keys(rows).length > MAX_MODELS) return undefined;
+  const result = new Map<string, CacheDurations>();
+  for (const [rawModel, rawUsage] of Object.entries(rows)) {
+    const usage = record(rawUsage);
+    if (!usage) return undefined;
+    const model = attributedModelName(rawModel, usage, published);
+    const total = count(usage.cacheCreationInputTokens);
+    const five = count(usage.cacheCreationEphemeral5mInputTokens);
+    const hour = count(usage.cacheCreationEphemeral1hInputTokens);
+    if (
+      !model ||
+      total === undefined ||
+      five === undefined ||
+      hour === undefined ||
+      five > total ||
+      hour !== total - five
+    )
+      return undefined;
+    const previous = result.get(model) ?? { five: 0, hour: 0 };
+    if (!Number.isSafeInteger(previous.five + five) || !Number.isSafeInteger(previous.hour + hour))
+      return undefined;
+    result.set(model, { five: previous.five + five, hour: previous.hour + hour });
+  }
+  return result;
 }
 
 /**
@@ -351,6 +423,14 @@ export function observeClaudeResultUsage(
       state.settled.set(model, { ...counts });
     }
     state.pending.clear();
+    for (const [model, pending] of state.knownPending) {
+      const settled = state.knownSettled.get(model) ?? { five: 0, hour: 0 };
+      state.knownSettled.set(model, {
+        five: settled.five + pending.five,
+        hour: settled.hour + pending.hour,
+      });
+    }
+    state.knownPending.clear();
     return publish(state, "input-only");
   }
   const settled = new Map<string, Counts>();
@@ -404,9 +484,45 @@ export function observeClaudeResultUsage(
     )
       return undefined;
   }
+  // A fresh query with no prior unknown writes can safely attribute the result's
+  // extra child writes. A restored or partially observed history cannot: its
+  // cumulative split might reclassify already recorded unknown writes.
+  const resultDurations =
+    state.resumeBaseline === undefined && !state.baselineIncomplete
+      ? decodeCumulativeDurations(result?.modelUsage, state.published)
+      : undefined;
+  const acceptedDurations = new Map<string, CacheDurations>();
+  if (resultDurations) {
+    for (const [model, split] of resultDurations) {
+      const old = state.knownSettled.get(model) ?? { five: 0, hour: 0 };
+      const pending = state.knownPending.get(model) ?? { five: 0, hour: 0 };
+      const knownFive = old.five + pending.five;
+      const knownHour = old.hour + pending.hour;
+      const previousWrites = state.published.get(model)?.cacheWriteInputTokens ?? 0;
+      const nextWrites = settled.get(model)?.cacheWriteInputTokens;
+      if (
+        nextWrites !== undefined &&
+        previousWrites === knownFive + knownHour &&
+        split.five >= knownFive &&
+        split.hour >= knownHour &&
+        split.five - knownFive <= nextWrites - previousWrites - (split.hour - knownHour)
+      ) {
+        acceptedDurations.set(model, split);
+      }
+    }
+  }
   state.settled.clear();
   for (const [model, counts] of settled) state.settled.set(model, counts);
   state.pending.clear();
+  for (const [model, pending] of state.knownPending) {
+    const known = state.knownSettled.get(model) ?? { five: 0, hour: 0 };
+    state.knownSettled.set(model, {
+      five: known.five + pending.five,
+      hour: known.hour + pending.hour,
+    });
+  }
+  state.knownPending.clear();
+  for (const [model, split] of acceptedDurations) state.knownSettled.set(model, split);
   state.incomplete = false;
   return publish(state, "complete");
 }

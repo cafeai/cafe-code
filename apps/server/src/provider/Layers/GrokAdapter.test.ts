@@ -5,7 +5,7 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, it, vi } from "@effect/vitest";
 import * as EffectAcpErrors from "effect-acp/errors";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -455,6 +455,12 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       let activations = 0,
         disposals = 0,
         binds = 0;
+      const completed = Promise.withResolvers<void>();
+      const observeTurn = vi.fn(
+        (event: { type: string; threadId: ThreadId; turnId?: TurnId | undefined }) => {
+          if (event.type === "turn.completed") completed.resolve();
+        },
+      );
       const release = installGlideSessionRuntime({
         bind: async (identity) => {
           assert.deepEqual(identity, {
@@ -475,6 +481,7 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
             },
             cancel: async () => {},
             resume: () => {},
+            observeTurn,
           };
         },
         operation: async () => {
@@ -483,7 +490,13 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       });
       yield* Effect.addFinalizer(() => Effect.sync(release));
       const adapter = yield* makeGrokAdapter(decodeGrokSettings({}), {
-        makeRuntime: fixture.makeRuntime,
+        makeRuntime: (input) =>
+          fixture.makeRuntime(input).pipe(
+            Effect.map((runtime) => ({
+              ...runtime,
+              prompt: () => Effect.succeed({ stopReason: "end_turn" as const }),
+            })),
+          ),
         sessionCredentials: testSessionCredentials,
         instanceId: instance,
       });
@@ -505,6 +518,18 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       );
       assert.equal(fixture.launches[0]!.permissionMode, "default");
       assert.equal(fixture.launches[0]!.sandboxProfile, "read-only");
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "Exercise the synthetic Glide lifecycle.",
+      });
+      yield* Effect.promise(() => completed.promise);
+      assert.deepEqual(
+        observeTurn.mock.calls.map(([event]) => [event.type, event.threadId, event.turnId]),
+        [
+          ["turn.started", threadId, turn.turnId],
+          ["turn.completed", threadId, turn.turnId],
+        ],
+      );
       yield* adapter.stopSession(threadId);
       assert.equal(disposals, 2);
     }),
@@ -516,9 +541,18 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         Effect.gen(function* () {
           const fixture = makeSchedulingRuntimeFixture();
           yield* Effect.addFinalizer(() => Effect.sync(fixture.release));
+          const issued: Parameters<
+            NonNullable<GrokAdapterLiveOptions["sessionCredentials"]>["issue"]
+          >[0][] = [];
           const adapter = yield* makeGrokAdapter(decodeGrokSettings({}), {
             makeRuntime: fixture.makeRuntime,
-            sessionCredentials: testSessionCredentials,
+            sessionCredentials: {
+              ...testSessionCredentials,
+              issue: (input) =>
+                Effect.sync(() => issued.push(input)).pipe(
+                  Effect.andThen(testSessionCredentials.issue()),
+                ),
+            },
             ...(account ? { instanceId: account } : {}),
           });
           const threadId = ThreadId.make("grok-scheduling-thread");
@@ -535,6 +569,16 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
             },
           ]);
           const launch = fixture.launches[0]!;
+          assert.equal(issued.length, 1);
+          assert.deepEqual(issued[0]?.managementLaunchContext, {
+            threadId,
+            providerInstanceId: account ?? ProviderInstanceId.make("grok"),
+            launchNonce: issued[0]?.managementLaunchContext?.launchNonce,
+          });
+          assert.match(
+            issued[0]?.managementLaunchContext?.launchNonce ?? "",
+            /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i,
+          );
           assert.equal(launch.permissionMode, "default");
           assert.equal(launch.sandboxProfile, "read-only");
           assert.deepEqual(
@@ -2058,6 +2102,18 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         },
       );
 
+      // Exercise the public response boundary again before awaiting native
+      // settlement. A successful duplicate ACK would wrongly let a losing
+      // responder claim the first caller's eventual resolution.
+      const duplicate = yield* Effect.exit(
+        adapter.respondToUserInput(
+          threadId,
+          ApprovalRequestId.make(String(requestedEvent.requestId)),
+          { "Which scope should Grok use?": "Workspace" },
+        ),
+      );
+      assert.equal(duplicate._tag, "Failure");
+
       const resolvedEvent = yield* Deferred.await(resolved);
       assert.deepEqual(resolvedEvent.payload.answers, {
         "Which scope should Grok use?": "Workspace",
@@ -2124,6 +2180,21 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
       const adapter = yield* makeTestAdapter(wrapperPath);
 
+      // These are passive failure labels, not startup/event readiness receipts.
+      // Preserve the original guard error and cancellation: the observer never
+      // reads the cause, and even a logger defect cannot replace that failure.
+      type GuardPhase = "start-session-join" | "turn-completed" | "send-turn-join";
+      let guardPhase: GuardPhase = "start-session-join";
+      let guardFailureReported = false;
+      const reportGuardFailure = () =>
+        Effect.suspend(() => {
+          if (guardFailureReported) return Effect.void;
+          guardFailureReported = true;
+          return Effect.logError("Synthetic Grok notification lifetime guard failed", {
+            phase: guardPhase,
+          }).pipe(Effect.catchCause(() => Effect.void));
+        });
+
       const runtimeEvents: ProviderRuntimeEvent[] = [];
       const turnCompleted = yield* Deferred.make<void>();
       const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
@@ -2146,7 +2217,11 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
           runtimeMode: "full-access",
         })
         .pipe(Effect.forkChild);
-      yield* Fiber.join(startSessionFiber).pipe(Effect.timeout("10 seconds"));
+      guardPhase = "start-session-join";
+      yield* Fiber.join(startSessionFiber).pipe(
+        Effect.timeout("10 seconds"),
+        Effect.tapError(reportGuardFailure),
+      );
 
       // Forked, and the assertion waits on the projected event rather than on
       // sendTurn: with the consumer dead the turn never settles, so awaiting it
@@ -2154,8 +2229,16 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       const sendTurnFiber = yield* adapter
         .sendTurn({ threadId, input: "hello grok", attachments: [] })
         .pipe(Effect.forkChild);
-      yield* Deferred.await(turnCompleted).pipe(Effect.timeout("10 seconds"));
-      yield* Fiber.join(sendTurnFiber).pipe(Effect.timeout("10 seconds"));
+      guardPhase = "turn-completed";
+      yield* Deferred.await(turnCompleted).pipe(
+        Effect.timeout("10 seconds"),
+        Effect.tapError(reportGuardFailure),
+      );
+      guardPhase = "send-turn-join";
+      yield* Fiber.join(sendTurnFiber).pipe(
+        Effect.timeout("10 seconds"),
+        Effect.tapError(reportGuardFailure),
+      );
 
       const delta = runtimeEvents.find(
         (event) => event.type === "content.delta" && String(event.threadId) === String(threadId),

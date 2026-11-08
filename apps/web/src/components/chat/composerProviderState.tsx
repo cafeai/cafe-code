@@ -9,12 +9,14 @@ import {
   buildProviderOptionSelectionsFromDescriptors,
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
+  getProviderOptionStringSelectionValue,
   isClaudeUltrathinkPrompt,
 } from "@cafecode/shared/model";
 import type { ReactNode } from "react";
 
 import type { DraftId } from "../../composerDraftStore";
 import { getProviderModelCapabilities } from "../../providerModels";
+import { withoutRetiredProviderOptions } from "../../providerOptionPresentation";
 import {
   getTraitsTriggerLabel,
   shouldRenderTraitsControls,
@@ -53,10 +55,42 @@ type TraitsRenderInput = {
   onPromptChange: (prompt: string) => void;
 };
 
+/** A model switch can turn Daybreak off, but never select a different enabled level. */
+export function getModelOptionsForModelChange(
+  input: Omit<ComposerProviderStateInput, "prompt">,
+): ReadonlyArray<ProviderOptionSelection> | undefined {
+  const options = input.modelOptions ?? undefined;
+  const program = getProviderOptionStringSelectionValue(options, "cyberAccessProgram");
+  if (input.provider !== "codex" || (program !== "daybreakBlue" && program !== "daybreakRed")) {
+    return options;
+  }
+  const descriptor = getProviderModelCapabilities(
+    input.models,
+    input.model,
+    input.provider,
+  ).optionDescriptors?.find((entry) => entry.id === "cyberAccessProgram");
+  if (descriptor !== undefined) {
+    // A program-only model has no Off choice. Keep the saved level for
+    // explicit correction rather than enabling a different program.
+    if (
+      descriptor.type !== "select" ||
+      descriptor.options.some((option) => option.id === program) ||
+      !descriptor.options.some((option) => option.id === "standard")
+    ) {
+      return options;
+    }
+  }
+  return options?.map((option) =>
+    option.id === "cyberAccessProgram" ? { ...option, value: "standard" } : option,
+  );
+}
+
 export function getComposerProviderState(input: ComposerProviderStateInput): ComposerProviderState {
   const { provider, model, models, prompt, modelOptions } = input;
   const caps = getProviderModelCapabilities(models, model, provider);
-  const descriptors = getProviderOptionDescriptors({ caps, selections: modelOptions });
+  const descriptors = withoutRetiredProviderOptions(
+    getProviderOptionDescriptors({ caps, selections: modelOptions }),
+  );
   const primarySelectDescriptor = descriptors.find(
     (descriptor): descriptor is Extract<(typeof descriptors)[number], { type: "select" }> =>
       descriptor.type === "select",

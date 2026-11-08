@@ -13,7 +13,33 @@ const encodeApps = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.S
 export const makeGlidePolicyStore = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   return {
-    initialize: (threadId: string) =>
+    revision: sql<{
+      revision: number;
+    }>`SELECT revision FROM glide_control_state WHERE singleton=1`.pipe(
+      Effect.flatMap((rows) =>
+        rows.length === 1 && Number.isSafeInteger(rows[0]!.revision) && rows[0]!.revision >= 0
+          ? Effect.succeed(String(rows[0]!.revision))
+          : Effect.fail(unavailable()),
+      ),
+    ),
+    stopAll: () =>
+      sql.withTransaction(
+        Effect.gen(function* () {
+          // One durable transaction disables even unopened/saved chats. A stale
+          // draft or in-flight enable cannot publish against the advanced revision.
+          const rows = yield* sql`UPDATE glide_control_state SET revision=revision+1
+        WHERE singleton=1 AND revision<9007199254740991 RETURNING revision`;
+          if (rows.length !== 1) return yield* unavailable();
+          yield* sql`UPDATE glide_thread_preferences SET enabled=0,desktop=0`;
+        }),
+      ),
+    title: (threadId: string) =>
+      sql<{
+        title: string;
+      }>`SELECT title FROM projection_threads WHERE thread_id=${threadId} AND deleted_at IS NULL`.pipe(
+        Effect.map((rows) => String(rows[0]?.title ?? "Chat").slice(0, 128)),
+      ),
+    initialize: (threadId: string, expectedRevision = "0") =>
       Effect.gen(function* () {
         // First-send bootstrap may be retried. An explicit setting already saved
         // for this exact chat always wins, including a later switch-off.
@@ -22,11 +48,15 @@ export const makeGlidePolicyStore = Effect.gen(function* () {
         WHERE EXISTS(SELECT 1 FROM projection_threads WHERE thread_id=${threadId}
           AND deleted_at IS NULL AND runtime_mode='full-access')
         AND NOT EXISTS(SELECT 1 FROM hard_deleted_threads WHERE thread_id=${threadId})
+        AND EXISTS(SELECT 1 FROM glide_control_state WHERE singleton=1 AND CAST(revision AS TEXT)=${expectedRevision})
         ON CONFLICT(thread_id) DO NOTHING`;
         const rows = yield* sql`SELECT thread_id FROM projection_threads WHERE thread_id=${threadId}
         AND deleted_at IS NULL AND runtime_mode='full-access'
         AND NOT EXISTS(SELECT 1 FROM hard_deleted_threads WHERE thread_id=${threadId})`;
         if (rows.length !== 1) return yield* unavailable();
+        const granted =
+          yield* sql`SELECT thread_id FROM glide_thread_preferences WHERE thread_id=${threadId}`;
+        if (granted.length !== 1) return yield* unavailable();
       }),
     read: (threadId: string) =>
       sql.withTransaction(
@@ -57,6 +87,7 @@ export const makeGlidePolicyStore = Effect.gen(function* () {
     write: (
       threadId: string,
       policy: { enabled: boolean; apps: readonly string[]; desktop?: boolean },
+      expectedRevision?: string,
     ) =>
       Effect.gen(function* () {
         const apps = yield* Effect.try({
@@ -72,6 +103,7 @@ export const makeGlidePolicyStore = Effect.gen(function* () {
         WHERE EXISTS(SELECT 1 FROM projection_threads WHERE thread_id = ${threadId} AND deleted_at IS NULL
           AND (${policy.enabled ? 1 : 0} = 0 OR runtime_mode = 'full-access'))
         AND NOT EXISTS(SELECT 1 FROM hard_deleted_threads WHERE thread_id = ${threadId})
+        AND (${expectedRevision ?? null} IS NULL OR EXISTS(SELECT 1 FROM glide_control_state WHERE singleton=1 AND CAST(revision AS TEXT)=${expectedRevision ?? ""}))
         ON CONFLICT(thread_id) DO UPDATE SET enabled=excluded.enabled,apps_json=excluded.apps_json,desktop=excluded.desktop RETURNING thread_id`;
         if (rows.length !== 1) return yield* unavailable();
       }),

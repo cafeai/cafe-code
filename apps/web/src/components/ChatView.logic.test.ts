@@ -74,6 +74,7 @@ import {
   doesSteerActivityMatchPendingAttempt,
   doesRetryableSteerFailureMatchPendingAttempt,
   doesSteerProcessingActivityMatchPending,
+  doesClaudeSteerProcessingActivityMatchPending,
   hasServerAcknowledgedLocalDispatch,
   isSteerProcessingActivityTimely,
   mergePendingSteerSnapshotsForInterruptedTurn,
@@ -527,31 +528,39 @@ describe("mergePendingSteerSnapshotsForInterruptedTurn", () => {
 });
 
 describe("shouldResolvePendingSteerDispatch", () => {
-  it("keeps a Codex steer pending when only the previous turn became terminal", () => {
-    expect(
-      shouldResolvePendingSteerDispatch({
-        provider: "codex",
-        terminalTurnAfterSteer: true,
-        steerProcessingStarted: false,
-        steerFailureRecorded: false,
-        steerRecoveryRecorded: false,
-        assistantResponseAfterSteer: false,
-      }),
-    ).toBe(false);
+  it.each(["codex", "claudeAgent"])("keeps %s pending without explicit consumption", (provider) => {
+    for (const observation of [
+      { terminalTurnAfterSteer: true, assistantResponseAfterSteer: false },
+      { terminalTurnAfterSteer: false, assistantResponseAfterSteer: true },
+      { terminalTurnAfterSteer: true, assistantResponseAfterSteer: true },
+    ]) {
+      expect(
+        shouldResolvePendingSteerDispatch({
+          provider,
+          ...observation,
+          steerProcessingStarted: false,
+          steerFailureRecorded: false,
+          steerRecoveryRecorded: false,
+        }),
+      ).toBe(false);
+    }
   });
 
-  it("resolves once Codex emits the steer processing marker", () => {
-    expect(
-      shouldResolvePendingSteerDispatch({
-        provider: "codex",
-        terminalTurnAfterSteer: true,
-        steerProcessingStarted: true,
-        steerFailureRecorded: false,
-        steerRecoveryRecorded: false,
-        assistantResponseAfterSteer: false,
-      }),
-    ).toBe(true);
-  });
+  it.each(["codex", "claudeAgent"])(
+    "resolves %s once its exact processing is observed",
+    (provider) => {
+      expect(
+        shouldResolvePendingSteerDispatch({
+          provider,
+          terminalTurnAfterSteer: true,
+          steerProcessingStarted: true,
+          steerFailureRecorded: false,
+          steerRecoveryRecorded: false,
+          assistantResponseAfterSteer: false,
+        }),
+      ).toBe(true);
+    },
+  );
 
   it("resolves once the backend records Codex's no-active-turn recovery", () => {
     expect(
@@ -566,17 +575,196 @@ describe("shouldResolvePendingSteerDispatch", () => {
     ).toBe(true);
   });
 
-  it("preserves the existing terminal-resolution rule for non-Codex providers", () => {
+  it.each(["claude", "axiom"])(
+    "preserves the existing terminal-resolution rule for %s",
+    (provider) => {
+      expect(
+        shouldResolvePendingSteerDispatch({
+          provider,
+          terminalTurnAfterSteer: true,
+          steerProcessingStarted: false,
+          steerFailureRecorded: false,
+          steerRecoveryRecorded: false,
+          assistantResponseAfterSteer: false,
+        }),
+      ).toBe(true);
+    },
+  );
+});
+
+describe("doesClaudeSteerProcessingActivityMatchPending", () => {
+  const turnId = TurnId.make("claude-processing-turn");
+  const instanceId = ProviderInstanceId.make("claude-processing-instance");
+  const runtimeId = "082b9e42-e836-46c4-99f0-695fce5d05f9";
+  const usage = {
+    provider: "claudeAgent",
+    messageId: "claude-processing-message",
+    intentSequence: 42,
+    providerInstanceId: instanceId,
+    subagentRuntimeId: runtimeId,
+  };
+  const activity = {
+    id: EventId.make("claude-processing-observation"),
+    kind: "task.progress",
+    tone: "info",
+    summary: "Reasoning update",
+    turnId,
+    sequence: 43,
+    createdAt: "2026-11-08T00:00:00.000Z",
+    payload: {
+      taskId: `claude-turn-steer-processing:${"a".repeat(64)}`,
+      nativeWorkRuntimeId: runtimeId,
+      detail: "Claude began processing the submitted follow-up.",
+      usage,
+    },
+  } satisfies OrchestrationThreadActivity;
+  const pending = {
+    activity,
+    session: {
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: instanceId,
+      subagentRuntimeId: runtimeId,
+      activeTurnId: turnId,
+      status: "running",
+      orchestrationStatus: "running",
+      createdAt: activity.createdAt,
+      updatedAt: activity.createdAt,
+    },
+    pendingMessageId: usage.messageId,
+    pendingIntentSequence: 42,
+    requiresIntentSequence: true,
+    pendingTurnId: turnId,
+    pendingProviderInstanceId: instanceId,
+    pendingSubagentRuntimeId: runtimeId,
+  } satisfies Parameters<typeof doesClaudeSteerProcessingActivityMatchPending>[0];
+
+  it("requires the exact native primary owner, message and admitted attempt", () => {
+    expect(doesClaudeSteerProcessingActivityMatchPending(pending)).toBe(true);
+    for (const activeTurnId of [undefined, TurnId.make("next-current-turn")]) {
+      // Detail snapshots can coalesce consumption with completion or the
+      // next turn. This durable receipt still names the captured old turn;
+      // the same native account/runtime, rather than current-turn timing,
+      // establishes that it may settle this input.
+      expect(
+        doesClaudeSteerProcessingActivityMatchPending({
+          ...pending,
+          session: {
+            ...pending.session,
+            activeTurnId,
+            status: activeTurnId === undefined ? "ready" : "running",
+          },
+        }),
+      ).toBe(true);
+    }
+    for (const changed of [
+      { messageId: "other-message" },
+      { provider: "codex" },
+      { providerInstanceId: "foreign-instance" },
+      { subagentRuntimeId: "foreign-runtime" },
+      { intentSequence: 41 },
+      { intentSequence: 44 },
+      { intentSequence: -1 },
+      { intentSequence: Number.NaN },
+      { intentSequence: undefined },
+    ]) {
+      expect(
+        doesClaudeSteerProcessingActivityMatchPending({
+          ...pending,
+          activity: {
+            ...activity,
+            payload: { ...activity.payload, usage: { ...usage, ...changed } },
+          },
+        }),
+      ).toBe(false);
+    }
+    for (const changed of [
+      { kind: "runtime.warning" },
+      { turnId: TurnId.make("foreign-turn") },
+      { payload: { ...activity.payload, taskId: "ordinary-background-task" } },
+      { payload: { ...activity.payload, nativeWorkRuntimeId: "foreign-runtime" } },
+    ]) {
+      expect(
+        doesClaudeSteerProcessingActivityMatchPending({
+          ...pending,
+          activity: { ...activity, ...changed },
+        }),
+      ).toBe(false);
+    }
     expect(
-      shouldResolvePendingSteerDispatch({
-        provider: "claude",
-        terminalTurnAfterSteer: true,
-        steerProcessingStarted: false,
-        steerFailureRecorded: false,
-        steerRecoveryRecorded: false,
-        assistantResponseAfterSteer: false,
+      doesClaudeSteerProcessingActivityMatchPending({
+        ...pending,
+        session: { ...pending.session, subagentRuntimeId: "replaced-runtime" },
       }),
-    ).toBe(true);
+    ).toBe(false);
+    expect(
+      doesClaudeSteerProcessingActivityMatchPending({
+        ...pending,
+        session: {
+          ...pending.session,
+          providerInstanceId: ProviderInstanceId.make("replaced-account"),
+        },
+      }),
+    ).toBe(false);
+    expect(
+      doesClaudeSteerProcessingActivityMatchPending({ ...pending, pendingSubagentRuntimeId: null }),
+    ).toBe(false);
+    expect(
+      doesClaudeSteerProcessingActivityMatchPending({ ...pending, pendingIntentSequence: null }),
+    ).toBe(false);
+  });
+
+  it("retains optional-sequence compatibility only for unique exact-owner input", () => {
+    const legacyUsage: Record<string, unknown> = { ...usage };
+    delete legacyUsage.intentSequence;
+    const legacy = {
+      ...pending,
+      requiresIntentSequence: false,
+      activity: { ...activity, payload: { ...activity.payload, usage: legacyUsage } },
+    };
+    expect(doesClaudeSteerProcessingActivityMatchPending(legacy)).toBe(true);
+    expect(
+      doesClaudeSteerProcessingActivityMatchPending({ ...legacy, requiresIntentSequence: true }),
+    ).toBe(false);
+    expect(
+      doesClaudeSteerProcessingActivityMatchPending({
+        ...legacy,
+        activity: { ...legacy.activity, sequence: 41 },
+      }),
+    ).toBe(false);
+    let getterCalls = 0;
+    const accessorUsage = Object.defineProperty({ ...legacyUsage }, "intentSequence", {
+      get: () => {
+        getterCalls += 1;
+        return 42;
+      },
+    });
+    expect(
+      doesClaudeSteerProcessingActivityMatchPending({
+        ...legacy,
+        activity: { ...activity, payload: { ...activity.payload, usage: accessorUsage } },
+      }),
+    ).toBe(false);
+    expect(getterCalls).toBe(0);
+    for (const prototype of [
+      { intentSequence: 42 },
+      { intentSequence: undefined },
+      Object.defineProperty({}, "intentSequence", {
+        get: () => {
+          getterCalls += 1;
+          return 42;
+        },
+      }),
+    ]) {
+      const inheritedUsage = { ...legacyUsage };
+      Object.setPrototypeOf(inheritedUsage, prototype);
+      expect(
+        doesClaudeSteerProcessingActivityMatchPending({
+          ...legacy,
+          activity: { ...activity, payload: { ...activity.payload, usage: inheritedUsage } },
+        }),
+      ).toBe(false);
+    }
+    expect(getterCalls).toBe(0);
   });
 });
 

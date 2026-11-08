@@ -1,7 +1,7 @@
 import "../../index.css";
 
 import { getUiLocale, setUiLocale, uiText, type UiLocale } from "@cafecode/shared/i18n";
-import { expect, it, onTestFinished, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
 
@@ -121,58 +121,131 @@ it.each([
   },
 );
 
-it("keeps the main native press a scroll action and dismisses an unpinned hover preview on exit", async () => {
+it("keeps the main native press a scroll action and dismisses an unpinned hover preview on exit", async ({
+  signal,
+  onTestFinished,
+}) => {
   let retainedPopup: HTMLDivElement | null = null;
   const diagnostic = observeNativeInput("scroll-control", () => retainedPopup);
-  // Retire the passive observer even when the enclosing test times out before
-  // an awaited native action returns; a late continuation must not send input.
-  onTestFinished(diagnostic.retire);
   const previousLocale = getUiLocale();
-  setUiLocale("en");
-  const { view, onScrollToBottom, onHideUntilBottom } = await mountControl();
-  try {
+  let retired = false;
+  let mounting: ReturnType<typeof mountControl> | undefined;
+  let entering: Promise<void> | undefined;
+  let cleanupPromise: Promise<void> | undefined;
+  const pendingOperations = new Set<Promise<unknown>>();
+  const assertActive = () => {
+    if (retired || signal.aborted)
+      throw new Error("The exact scroll-control hover fixture was retired.");
     diagnostic.assertActive();
+  };
+  const cleanup = () => {
+    retired = true;
+    signal.removeEventListener("abort", onAbort);
+    diagnostic.retire();
+    return (cleanupPromise ??= (async () => {
+      let mounted: Awaited<ReturnType<typeof mountControl>> | undefined;
+      try {
+        try {
+          mounted = await mounting;
+        } catch {
+          // The original mount await still rejects its caller. Cleanup only
+          // joins that same admitted render; it does not convert it to a pass.
+        }
+        // Keep this fixture's controls available until its original native
+        // commands settle, before another fixture can supply matching nodes.
+        await Promise.allSettled([...pendingOperations]);
+      } finally {
+        try {
+          await mounted?.view.unmount();
+        } finally {
+          try {
+            // An unfinished native entrance can require unmount to cancel.
+            // Observe and join it after disposal, never before that disposal.
+            if (entering) await Promise.allSettled([entering]);
+          } finally {
+            setUiLocale(previousLocale);
+          }
+        }
+      }
+    })());
+  };
+  const onAbort = () => {
+    void cleanup().catch(() => undefined);
+  };
+  const owned = async <T,>(operation: () => PromiseLike<T>): Promise<T> => {
+    assertActive();
+    const pending = Promise.resolve(operation());
+    pendingOperations.add(pending);
+    try {
+      const result = await pending;
+      assertActive();
+      return result;
+    } finally {
+      pendingOperations.delete(pending);
+    }
+  };
+  const expectClosedPopup = () => {
+    assertActive();
+    expect(retainedPopup).not.toBeNull();
+    expect(document.querySelector('[data-scroll-to-bottom-popup="true"][data-open]')).toBeNull();
+    expect(
+      !retainedPopup!.isConnected ||
+        (retainedPopup!.hasAttribute("data-closed") && !retainedPopup!.hasAttribute("data-open")),
+    ).toBe(true);
+  };
+  // Register exact-test retirement before mounting or sending native input.
+  // Abort fences continuations synchronously; the finalizer joins all work.
+  onTestFinished(cleanup);
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) onAbort();
+  try {
+    assertActive();
+    setUiLocale("en");
+    const { onScrollToBottom, onHideUntilBottom } = await owned(() => {
+      mounting = mountControl();
+      return mounting;
+    });
     const before = page.getByRole("button", { name: "Before control", exact: true });
     const scroll = page.getByRole("button", { name: "Scroll to bottom", exact: true });
-    await before.click();
-    diagnostic.assertActive();
-    await scroll.hover();
-    diagnostic.assertActive();
-    await expect
-      .element(page.getByRole("button", { name: "Hide until bottom", exact: true }))
-      .toBeVisible();
-    diagnostic.assertActive();
+    await owned(() => before.click());
+    await owned(() => scroll.hover());
+    await owned(() =>
+      expect
+        .element(page.getByRole("button", { name: "Hide until bottom", exact: true }))
+        .toBeVisible(),
+    );
     retainedPopup = popup();
-    // Visibility can precede the preview's native entrance. Exercise departure
-    // from an observed preview, as the neighboring hover fixtures do, without
-    // bypassing the finite exit or its physical resource-retirement assertion.
-    await settleEntrance(retainedPopup!);
-    diagnostic.assertActive();
+    expect(retainedPopup).not.toBeNull();
+    expect(retainedPopup!.isConnected).toBe(true);
+    expect(retainedPopup!.hasAttribute("data-open")).toBe(true);
+    // Preserve the original observed entrance. The close assertion below is
+    // semantic: Base UI may retain a closed node for its native exit painting.
+    assertActive();
+    entering = settleEntrance(retainedPopup!);
+    await entering;
+    assertActive();
     diagnostic.mark("ready");
     diagnostic.mark("before-exit");
-    await before.hover();
-    diagnostic.assertActive();
+    await owned(() => before.hover());
     diagnostic.mark("after-exit");
-    await vi.waitFor(() => expect(popup()).toBeNull());
-    diagnostic.assertActive();
+    await owned(() => vi.waitFor(expectClosedPopup));
     expect(onScrollToBottom).not.toHaveBeenCalled();
     expect(onHideUntilBottom).not.toHaveBeenCalled();
-    await scroll.click();
-    diagnostic.assertActive();
+    // A closed attribute alone does not prove usable controls. Keep the one
+    // original native main press and its exact action/focus consequences.
+    await owned(() => scroll.click());
     expect(onScrollToBottom).toHaveBeenCalledOnce();
     expect(onHideUntilBottom).not.toHaveBeenCalled();
-    await vi.waitFor(() => expect(popup()).toBeNull());
-    diagnostic.assertActive();
-    await expect.element(scroll).toHaveFocus();
-    diagnostic.assertActive();
+    // That press can hover/reopen the same retained node before closing it;
+    // re-read both its state and global open state, not a cached close result.
+    await owned(() => vi.waitFor(expectClosedPopup));
+    await owned(() => expect.element(scroll).toHaveFocus());
     diagnostic.complete();
   } catch (error) {
     diagnostic.fail();
     throw error;
   } finally {
-    diagnostic.retire();
-    await view.unmount();
-    setUiLocale(previousLocale);
+    await cleanup();
   }
 });
 

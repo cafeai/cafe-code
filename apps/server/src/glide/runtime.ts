@@ -140,11 +140,11 @@ export class GlideChild {
       }
     };
     this.exited = new Promise((resolve) => {
-      this.child.once("exit", () => {
-        fail();
-        resolve();
-      });
-      this.child.once("error", () => {
+      this.child.once("exit", fail);
+      this.child.once("error", fail);
+      // Exit can precede stdio retirement. Join actual native close before a
+      // replacement is admitted, including failure before successful spawn.
+      this.child.once("close", () => {
         fail();
         resolve();
       });
@@ -394,7 +394,13 @@ export class GlideRuntime {
             const action = active.actions.get(rpc.id);
             if (action) action.entered = true;
             const result = await this.invokeNative(rpc.request, active.deadline);
-            if (rpc.request.method === "get_app_state") return observationSchema.parse(result);
+            if (rpc.request.method === "get_app_state") {
+              const observed = observationSchema.parse(result);
+              // The tray's private thumbnail never enters the model worker or
+              // tool/journal output, including standalone native connections.
+              delete observed.screenshotPreview;
+              return observed;
+            }
             if (rpc.request.method === "list_apps") return appListSchema.parse(result);
             if (rpc.request.method === "list_windows") return windowListSchema.parse(result);
             if (rpc.request.method === "resolve_app") return installedAppSchema.parse(result);
@@ -479,6 +485,7 @@ export class GlideRuntime {
         id,
         ...request,
         timeout_ms,
+        ...(request.method === "get_app_state" ? { visibilityVersion: 1 } : {}),
         ...(isGlideAction(request.method) ? { receiptVersion: 1 } : {}),
       });
     } catch {

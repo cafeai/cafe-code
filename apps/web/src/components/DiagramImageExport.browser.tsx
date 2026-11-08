@@ -127,25 +127,49 @@ async function expectEveryGanttTaskPainted(
   expect(baseline.height).toBe(png.height);
   const parsed = new DOMParser().parseFromString(result.svg, "image/svg+xml");
   const viewBox = parsed.documentElement.getAttribute("viewBox")!.split(/\s+/).map(Number);
+  expect(viewBox).toHaveLength(4);
+  expect(viewBox.every(Number.isFinite)).toBe(true);
+  expect(viewBox[2]).toBeGreaterThan(0);
+  expect(viewBox[3]).toBeGreaterThan(0);
   for (const task of GANTT_TASK_DATES) {
     const bar = parsed.querySelector(`rect[id$="-${task.id}"]`)!;
     expect(bar).not.toBeNull();
-    // The known fixture's ordinary bars are wider/taller than this inset. It
-    // lies beyond their rounded stroke and away from centered task labels;
-    // a retained label alone must not qualify missing bar geometry.
-    const x = Number(bar.getAttribute("x")) + 5;
-    const y = Number(bar.getAttribute("y")) + 5;
-    expect(Number(bar.getAttribute("width"))).toBeGreaterThan(10);
-    expect(Number(bar.getAttribute("height"))).toBeGreaterThan(10);
-    const pixelX = Math.floor(((x - viewBox[0]!) * png.width) / viewBox[2]!);
-    const pixelY = Math.floor(((y - viewBox[1]!) * png.height) / viewBox[3]!);
-    const painted = pixelAt(png, pixelX, pixelY);
-    const unpainted = pixelAt(baseline, pixelX, pixelY);
-    expect(painted[3]).toBe(255);
-    expect(unpainted[3]).toBe(255);
-    const contrast = Math.max(
-      ...painted.slice(0, 3).map((channel, index) => Math.abs(channel - unpainted[index]!)),
-    );
+    const left = Number(bar.getAttribute("x"));
+    const top = Number(bar.getAttribute("y"));
+    const width = Number(bar.getAttribute("width"));
+    const height = Number(bar.getAttribute("height"));
+    expect([left, top, width, height].every(Number.isFinite)).toBe(true);
+    expect(width).toBeGreaterThan(10);
+    expect(height).toBeGreaterThan(10);
+    // A foreground marker may cover one interior pixel even when the whole
+    // task remains painted. Sample a fixed 8-by-3 interior grid beyond the
+    // rounded stroke instead. The exact bar-removed baseline retains labels,
+    // grid and annotations, so those alone cannot supply task contrast.
+    let contrast = 0;
+    for (let row = 0; row < 3; row++) {
+      for (let column = 0; column < 8; column++) {
+        const x = left + 5 + ((width - 10) * column) / 7;
+        const y = top + 5 + ((height - 10) * row) / 2;
+        const pixelX = Math.floor(((x - viewBox[0]!) * png.width) / viewBox[2]!);
+        const pixelY = Math.floor(((y - viewBox[1]!) * png.height) / viewBox[3]!);
+        expect(Number.isInteger(pixelX)).toBe(true);
+        expect(Number.isInteger(pixelY)).toBe(true);
+        // Check both axes before linear indexing: an out-of-range column must
+        // not wrap into another row and falsely qualify a missing task.
+        expect(pixelX).toBeGreaterThanOrEqual(0);
+        expect(pixelX).toBeLessThan(png.width);
+        expect(pixelY).toBeGreaterThanOrEqual(0);
+        expect(pixelY).toBeLessThan(png.height);
+        const painted = pixelAt(png, pixelX, pixelY);
+        const unpainted = pixelAt(baseline, pixelX, pixelY);
+        expect(painted[3]).toBe(255);
+        expect(unpainted[3]).toBe(255);
+        contrast = Math.max(
+          contrast,
+          ...painted.slice(0, 3).map((channel, index) => Math.abs(channel - unpainted[index]!)),
+        );
+      }
+    }
     expect(contrast, `Missing painted task ${task.id}`).toBeGreaterThan(16);
   }
 }
@@ -256,6 +280,56 @@ describe("real Mermaid PNG export", () => {
       expect(inkCount(png)).toBeGreaterThan(100);
       await expect(expectEveryGanttTaskPainted(result, png, theme)).rejects.toThrow(
         "Missing painted task src",
+      );
+    },
+  );
+
+  it.each(["light", "dark"] as const)(
+    "recognizes every Gantt task beneath foreground annotations in %s",
+    async (theme) => {
+      const result = await renderMermaid(GANTT_SCHEDULE, theme);
+      const parsed = new DOMParser().parseFromString(result.svg, "image/svg+xml");
+      expect(parsed.querySelector("parsererror")).toBeNull();
+      const root = parsed.documentElement;
+      const viewBox = root.getAttribute("viewBox")!.split(/\s+/).map(Number);
+      expect(viewBox).toHaveLength(4);
+      expect(viewBox.every(Number.isFinite)).toBe(true);
+      // An ordinary foreground annotation may cover a particular task pixel
+      // without removing its bar. Deliberately cover every former x+5 sample
+      // using finite inert geometry, retaining the real native chart, labels,
+      // calendar dates and current-time marker in both comparison images.
+      for (const task of GANTT_TASK_DATES) {
+        const bar = parsed.querySelector(`rect[id$="-${task.id}"]`)!;
+        expect(bar).not.toBeNull();
+        const x = Number(bar.getAttribute("x")) + 5;
+        expect(Number.isFinite(x)).toBe(true);
+        const annotation = parsed.createElementNS(SVG_NAMESPACE, "line");
+        annotation.setAttribute("x1", String(x));
+        annotation.setAttribute("x2", String(x));
+        annotation.setAttribute("y1", String(viewBox[1]));
+        annotation.setAttribute("y2", String(viewBox[1]! + viewBox[3]!));
+        annotation.setAttribute("stroke", "#ff00ff");
+        annotation.setAttribute("stroke-width", "4");
+        root.append(annotation);
+      }
+      const annotated = { ...result, svg: new XMLSerializer().serializeToString(root) };
+      const png = await readPng(
+        await createMermaidPng(annotated, theme, new AbortController().signal),
+      );
+      await expectEveryGanttTaskPainted(annotated, png, theme);
+
+      // The foreground lines and all other bars remain exact in this negative
+      // control. Neither annotations nor neighboring task ink may qualify the
+      // one missing bar, and the oracle must identify that exact task.
+      const missing = parsed.querySelector('rect[id$="-conf"]')!;
+      expect(missing).not.toBeNull();
+      missing.remove();
+      const withoutConf = { ...result, svg: new XMLSerializer().serializeToString(root) };
+      const missingPng = await readPng(
+        await createMermaidPng(withoutConf, theme, new AbortController().signal),
+      );
+      await expect(expectEveryGanttTaskPainted(annotated, missingPng, theme)).rejects.toThrow(
+        "Missing painted task conf",
       );
     },
   );

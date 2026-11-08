@@ -960,6 +960,121 @@ describe("Windows provider runtime ownership lifecycle", () => {
     expect(accepted.marker.appVersion).toBe("1.0.0");
   });
 
+  it("replaces a same-version runtime build only after exact native exit and record retirement", async (context) => {
+    const initial = profileMarker({ runtimeBuildId: "build-old" });
+    const f = fixture(initial);
+    const runtime = createWindowsProviderRuntime(profileOptions(f));
+    // Both the persisted marker and its authenticated native owner report the
+    // older build while retaining the current application version and profile.
+    vi.mocked(f.options.fetchHealth!).mockImplementation(async () => {
+      const health = f.health();
+      return health.pid === identity.pid ? { ...health, runtimeBuildId: "build-old" } : health;
+    });
+    const order: string[] = [];
+    let enterTermination = () => {};
+    const terminationEntered = new Promise<void>((resolve) => {
+      enterTermination = resolve;
+    });
+    let releaseNativeExit = () => {};
+    const nativeExit = new Promise<void>((resolve) => {
+      releaseNativeExit = resolve;
+    });
+    let ensuring: ReturnType<typeof runtime.ensure> | undefined;
+    const retireFixture = () => releaseNativeExit();
+    // Retire this exact held fake native operation on a hard timeout as well
+    // as ordinary failure, then join the original ensure before test disposal.
+    context.signal.addEventListener("abort", retireFixture, { once: true });
+    context.onTestFinished(async () => {
+      retireFixture();
+      try {
+        await ensuring;
+      } finally {
+        context.signal.removeEventListener("abort", retireFixture);
+      }
+    });
+    if (context.signal.aborted) retireFixture();
+    const terminate = vi.mocked(f.session.terminate).getMockImplementation()!;
+    vi.mocked(f.session.terminate).mockImplementation(async (expected) => {
+      expect(expected).toEqual(identity);
+      expect(f.record).toEqual(initial);
+      order.push("exact-native-termination-requested");
+      enterTermination();
+      await nativeExit;
+      // Preserve the fixture's original same-generation/FILETIME comparison
+      // and conclusive exit result; invocation alone is not exit evidence.
+      const outcome = await terminate(expected);
+      expect(outcome).toEqual({ status: "exited" });
+      expect(f.processes.has(identity.pid)).toBe(false);
+      order.push("exact-native-exit-confirmed");
+      return outcome;
+    });
+    const retire = vi.mocked(f.session.retire).getMockImplementation()!;
+    vi.mocked(f.session.retire).mockImplementation(async (expectedRevision) => {
+      expect(order).toEqual(["exact-native-termination-requested", "exact-native-exit-confirmed"]);
+      expect(f.processes.has(identity.pid)).toBe(false);
+      expect(f.spawn).not.toHaveBeenCalled();
+      await retire(expectedRevision);
+      expect(f.record).toBeNull();
+      order.push("exact-record-retired");
+    });
+    const spawn = f.spawn.getMockImplementation()!;
+    f.spawn.mockImplementation(async (...args) => {
+      expect(order).toEqual([
+        "exact-native-termination-requested",
+        "exact-native-exit-confirmed",
+        "exact-record-retired",
+      ]);
+      order.push("replacement-spawned");
+      return spawn(...args);
+    });
+    let bodyFailed = false;
+    try {
+      ensuring = runtime.ensure();
+      // Observe an unexpected early completion/failure rather than leaving the
+      // readiness promise pending until the enclosing test deadline.
+      await Promise.race([
+        terminationEntered,
+        ensuring.then(() => {
+          throw new Error("Expected the held exact-native termination operation.");
+        }),
+      ]);
+      expect(order).toEqual(["exact-native-termination-requested"]);
+      expect(f.session.terminate).toHaveBeenCalledExactlyOnceWith(identity);
+      expect(f.session.retire).not.toHaveBeenCalled();
+      expect(f.session.publish).not.toHaveBeenCalled();
+      expect(f.spawn).not.toHaveBeenCalled();
+      expect(f.record).toEqual(initial);
+      expect(f.processes.get(identity.pid)).toEqual(identity);
+      releaseNativeExit();
+      const accepted = await ensuring;
+      expect(order).toEqual([
+        "exact-native-termination-requested",
+        "exact-native-exit-confirmed",
+        "exact-record-retired",
+        "replacement-spawned",
+      ]);
+      expect(f.session.retire).toHaveBeenCalledExactlyOnceWith("revision-one");
+      expect(f.spawn).toHaveBeenCalledOnce();
+      expect(accepted.marker).toMatchObject({
+        appVersion: initial.appVersion,
+        runtimeBuildId: "build-one",
+        pid: 201,
+        dataProfile: initial.dataProfile,
+        dataProfileId: initial.dataProfileId,
+      });
+      expect(accepted.health.version).toBe(initial.appVersion);
+      expect(accepted.health.runtimeBuildId).toBe("build-one");
+      expect(accepted.ownershipId).not.toBe(ownershipId);
+    } catch (error) {
+      bodyFailed = true;
+      throw error;
+    } finally {
+      retireFixture();
+      if (bodyFailed) await ensuring?.catch(() => {});
+      else await ensuring;
+    }
+  });
+
   it("refuses a PID reused between the last observation and same-handle termination", async () => {
     const f = fixture();
     await f.runtime.ensure();

@@ -295,6 +295,59 @@ describe("provider diagnostic categories", () => {
       "process-exit",
     );
     expect(categoryOf({ error: { message: "exit" } }, "claude/stream/failed")).toBe("process-exit");
+    for (const { error, method, expected } of [
+      {
+        error: { startupFailureReason: "config_file_invalid" },
+        method: "claude/result/error",
+        expected: "configuration",
+      },
+      {
+        error: { startupFailureReason: "config_file_invalid" },
+        method: "claude/turn/failed",
+        expected: undefined,
+      },
+      {
+        error: { startupFailureReason: "config_file_invalid" },
+        method: undefined,
+        expected: undefined,
+      },
+      {
+        error: { startupFailureReason: "future_config_failure" },
+        method: "claude/result/error",
+        expected: undefined,
+      },
+      {
+        error: { message: "config_file_invalid: invalid configuration" },
+        method: "claude/result/error",
+        expected: undefined,
+      },
+      {
+        error: { startupFailureReason: "config_file_invalid", errorType: "authentication_failed" },
+        method: "claude/result/error",
+        expected: "sign-in-required",
+      },
+      {
+        error: { startupFailureReason: "config_file_invalid", apiErrorStatus: 401 },
+        method: "claude/result/error",
+        expected: "sign-in-required",
+      },
+      {
+        error: { startupFailureReason: "config_file_invalid", apiErrorStatus: 403 },
+        method: "claude/result/error",
+        expected: "sign-in-required",
+      },
+      {
+        error: { startupFailureReason: "config_file_invalid", apiErrorStatus: 429 },
+        method: "claude/result/error",
+        expected: "rate-limit",
+      },
+      {
+        error: { startupFailureReason: "config_file_invalid" },
+        method: "claude/stream/failed",
+        expected: "process-exit",
+      },
+    ])
+      expect(categoryOf({ error }, method)).toBe(expected);
   });
 
   it("locates copied error bodies and recognizes capture markers", () => {

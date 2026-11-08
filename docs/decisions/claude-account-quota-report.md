@@ -1,7 +1,7 @@
 # Claude subscription allowance reports
 
 Decision status: Accepted — native control-only reader with passive compatibility.
-Last updated: 2026-10-18.
+Last updated: 2026-11-04 02:11:38 JST (UTC+0900).
 Decision authority: explicit user request to implement the verified Claude Code
 `get_usage` subprocess approach. Supersedes the October 9 passive-only collection
 restriction; authentication, provider turns and usage accounting stay unchanged.
@@ -56,8 +56,15 @@ The native reader emits `ProviderSessionQuotaReport.source = "claude-cli"`.
 `claudeSessionQuota.ts` prefers the endpoint's complete ordered `limits` list,
 including explicit empty levels, unknown kinds and duplicate rows. Legacy replies
 without rows map documented five-hour, seven-day and scoped windows without
-converting their already-percent utilization to fractions. Null utilization never
-becomes zero. Extra usage retains safe integer minor currency units and unknown
+converting their already-percent utilization to fractions. SDK 0.3.317 additionally
+declares ordered, allowlist-filtered per-model weekly `model_scoped` rows. Without
+a complete `limits` level, preserve these additively with separately reported
+legacy windows; a matching display label is not a stable identity for merging.
+A scoped-only reading can supply known model allowances without inventing an
+overall allowance. An empty scoped list does not establish an empty complete
+plan. The combined level retains the existing finite meter limit; malformed or
+over-budget scoped metadata rejects the level rather than hiding rows. Null
+utilization never becomes zero. Extra usage retains safe integer minor currency units and unknown
 currency. No endpoint identity, session cost, behaviors or arbitrary future fields
 are exposed. Receipt time is Cafe's receipt, not proof of endpoint freshness.
 
@@ -85,7 +92,15 @@ query, chat surfaces accept only `claude-cli` reports, rejecting passive reports
 from other chats even when connected to an older remote owner. An exact-chat
 request still requires its saved current runtime/workspace binding. Changed
 configuration, replaced instances, duplicate bindings and stale subscriptions
-cannot publish old results under a new scope. Reconnecting saved environments
+cannot publish old results under a new scope. Each authority resolution compares
+two complete selected-instance configuration/runtime/workspace observations,
+including the existing qualified standalone-workspace lookup. Global projection
+sequence progress from other chats does not invalidate matching selected
+observations. A lasting selected change between observations refuses the read;
+the existing before/after native-read comparison and relevant invalidation
+generation remain in force. This preserves the maximum of two shell/workspace
+assemblies per resolution and the existing timeout, although a stable resolution
+now also takes two observations. Reconnecting saved environments
 uses their existing server connection and never launches a competing local reader.
 
 Invalidation subscriptions start before the initial read. One trailing slot and
@@ -121,7 +136,14 @@ Credential-free tests cover control-only input, exact request matching, split
 NDJSON replies, malformed/oversized output, timeout, cancellation, exact child
 retirement, cache bounds, instance isolation, source replacement and passive
 fallback. Mapper/contract tests cover both native provenance and percent/reset
-semantics. Browser coverage checks selected-model bar replacement, inline extra
+semantics, additive model-only/legacy rows, unknown versus empty allowances,
+getter-free bounded parsing and the combined meter limit. Credential-free actual
+WebSocket fixtures cover matching selected authority during continuous unrelated
+projection progress, plus runtime/configuration/workspace replacement before
+and during a read. Shared subscription tests retain consumed-invalidation ABA
+coverage; equal endpoint observations do not prove that no unprocessed event
+exists. No historical screenshot is attributed to one failure without runtime
+evidence. Browser coverage checks selected-model bar replacement, inline extra
 usage and unchanged metadata subscriptions through the shared presenter. Existing native-host workers, deadlines
 and macOS/Windows subset policies remain unchanged.
 

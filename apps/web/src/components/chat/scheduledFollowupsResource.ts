@@ -5,6 +5,7 @@ import {
   subscribeEnvironmentConnections,
 } from "../../environments/runtime";
 import { ensureScheduledFollowupsApi } from "../../lib/scheduledFollowupsApi";
+import { noteScheduledFollowupsForThread } from "./scheduledFollowupPresence";
 
 const REFRESH_INTERVAL_MS = 15_000;
 const EMPTY_SCHEDULES: readonly ScheduledFollowupRecord[] = Object.freeze([]);
@@ -119,6 +120,7 @@ function createResource(environmentId: EnvironmentId, threadId: ThreadId) {
         // to its exact chat if malformed or stale rows ever cross that layer.
         const schedules = response.schedules.filter((record) => record.threadId === threadId);
         retainNotices(environmentId, threadId, schedules);
+        noteScheduledFollowupsForThread(environmentId, threadId, schedules);
         publish({ schedules, loading: false, error: null });
       }
     } catch {

@@ -27,6 +27,7 @@ const threadCache = new WeakMap<
     turnState: ThreadTurnState | undefined;
     messages: Thread["messages"];
     activities: Thread["activities"];
+    pendingRequestRetentionTruncated: boolean | undefined;
     proposedPlans: Thread["proposedPlans"];
     turnDiffSummaries: Thread["turnDiffSummaries"];
     thread: Thread;
@@ -111,6 +112,8 @@ export function getThreadFromEnvironmentState(
   const turnState = state.threadTurnStateById[threadId];
   const messages = selectThreadMessages(state, threadId);
   const activities = selectThreadActivities(state, threadId);
+  const pendingRequestRetentionTruncated =
+    state.pendingRequestRetentionTruncatedByThreadId?.[threadId];
   const proposedPlans = selectThreadProposedPlans(state, threadId);
   const turnDiffSummaries = selectThreadTurnDiffSummaries(state, threadId);
   const cached = threadCache.get(shell);
@@ -121,6 +124,7 @@ export function getThreadFromEnvironmentState(
     cached.turnState === turnState &&
     cached.messages === messages &&
     cached.activities === activities &&
+    cached.pendingRequestRetentionTruncated === pendingRequestRetentionTruncated &&
     cached.proposedPlans === proposedPlans &&
     cached.turnDiffSummaries === turnDiffSummaries
   ) {
@@ -134,6 +138,7 @@ export function getThreadFromEnvironmentState(
     pendingSourceProposedPlan: turnState?.pendingSourceProposedPlan,
     messages,
     activities,
+    pendingRequestRetentionTruncated,
     proposedPlans,
     turnDiffSummaries,
   };
@@ -143,6 +148,7 @@ export function getThreadFromEnvironmentState(
     turnState,
     messages,
     activities,
+    pendingRequestRetentionTruncated,
     proposedPlans,
     turnDiffSummaries,
     thread,

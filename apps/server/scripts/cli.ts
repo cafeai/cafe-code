@@ -26,6 +26,7 @@ import { stageSourceDesktopLauncherFiles } from "../../../scripts/lib/stage-sour
 import rootPackageJson from "../../../package.json" with { type: "json" };
 import desktopPackageJson from "../../desktop/package.json" with { type: "json" };
 import serverPackageJson from "../package.json" with { type: "json" };
+import { publishPortableSourceDebugBuild } from "@cafecode/shared/sourceDebugBuild";
 
 interface PackageJson {
   name: string;
@@ -264,6 +265,20 @@ const stagePublishedDesktopRuntime = Effect.fn("stagePublishedDesktopRuntime")(f
       preserveTimestamps: true,
     },
   );
+  yield* Effect.try({
+    try: () => {
+      publishPortableSourceDebugBuild(path.join(stagedServerRoot, "dist/bin.mjs"), "server");
+      publishPortableSourceDebugBuild(
+        path.join(stagedDesktopRoot, "dist-electron/main.cjs"),
+        "desktop",
+      );
+    },
+    catch: (cause) =>
+      new CliError({
+        message: "Could not qualify the portable source runtime. Rebuild using yarn build:desktop.",
+        cause,
+      }),
+  });
   yield* fs.makeDirectory(path.join(stagedDesktopRoot, "scripts"), { recursive: true });
   yield* Effect.tryPromise(() =>
     stageSourceDesktopLauncherFiles(repoRoot, path.dirname(stageRoot)),
@@ -330,6 +345,7 @@ const assertServerRuntimeBuildAssets = Effect.fn("assertServerRuntimeBuildAssets
 
   for (const relPath of [
     "dist/bin.mjs",
+    "dist/backend.mjs",
     "dist/launcher.mjs",
     "dist/mcp-bridge.mjs",
     "dist/scheduling-mcp-bridge.mjs",
@@ -396,6 +412,7 @@ const assertPublishPrepared = Effect.fn("assertPublishPrepared")(function* (serv
     "dist/launcher.mjs",
     "dist/client/index.html",
     "dist/apps/server/dist/bin.mjs",
+    "dist/apps/server/dist/backend.mjs",
     "dist/apps/server/dist/client/index.html",
     "dist/apps/desktop/dist-electron/main.cjs",
     "dist/apps/desktop/scripts/start-electron.mjs",
@@ -433,9 +450,11 @@ const assertPublishPrepared = Effect.fn("assertPublishPrepared")(function* (serv
     });
   }
 
-  yield* assertLocalServerBundleImportsPresent(
-    path.join(serverDir, "dist/apps/server/dist/bin.mjs"),
-  );
+  for (const entry of ["bin.mjs", "backend.mjs"]) {
+    yield* assertLocalServerBundleImportsPresent(
+      path.join(serverDir, "dist/apps/server/dist", entry),
+    );
+  }
 });
 
 const preparePublishPackage = Effect.fn("preparePublishPackage")(function* (

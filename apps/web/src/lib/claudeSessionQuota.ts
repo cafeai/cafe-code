@@ -1,4 +1,6 @@
 import { uiFormatDateTime, uiFormatNumber, uiText } from "@cafecode/shared/i18n";
+
+import { formatQuotaResetTime } from "./quotaResetTime";
 import {
   ProviderDriverKind,
   type OrchestrationSessionStatus,
@@ -230,7 +232,9 @@ export function formatClaudeSessionQuota(
           reset: meter.resetsAt
             ? uiText("{expired, select, yes {Reset passed} other {Resets}}: {time}", {
                 expired: expired ? "yes" : "no",
-                time: localTime(meter.resetsAt, options) ?? uiText("time unavailable"),
+                time:
+                  formatQuotaResetTime(Date.parse(meter.resetsAt), { ...options, now }) ??
+                  uiText("time unavailable"),
               })
             : null,
           stale: rowStale,

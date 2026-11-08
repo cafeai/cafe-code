@@ -22,6 +22,9 @@ export interface SettingsSearchAvailability {
   readonly desktop: boolean;
   /** Mac desktop app (global dictation). */
   readonly macDesktop: boolean;
+  /** Desktop shell that can change this computer's app icon. */
+  readonly appIcon?: boolean;
+  readonly macKeepAwake?: boolean;
 }
 
 interface IndexedEntry extends SettingsSearchEntry {
@@ -37,6 +40,7 @@ const section = {
   about: (locale: UiLocale) => uiText("About", undefined, undefined, locale),
   interface: (locale: UiLocale) => uiText("Interface", undefined, undefined, locale),
   sidebar: (locale: UiLocale) => uiText("Sidebar", undefined, undefined, locale),
+  appIcon: (locale: UiLocale) => uiText("App icon", undefined, undefined, locale),
   motion: (locale: UiLocale) => uiText("Motion", undefined, undefined, locale),
   weather: (locale: UiLocale) => uiText("Weather effects", undefined, undefined, locale),
   atrium: (locale: UiLocale) => uiText("Task Atrium", undefined, undefined, locale),
@@ -138,6 +142,16 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
     available: (availability) => availability.keepAwake,
   },
   {
+    id: "general.closedLid",
+    path: "/settings/general",
+    kind: "setting",
+    title: (locale) => uiText("Work with the lid closed", undefined, undefined, locale),
+    section: section.desktop,
+    keywords: (locale) =>
+      uiText("lid, sleep, Mac, background, awake", undefined, "settings search keywords", locale),
+    available: (availability) => availability.macKeepAwake === true,
+  },
+  {
     id: "general.version",
     path: "/settings/general",
     kind: "setting",
@@ -184,7 +198,12 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
     title: (locale) => uiText("Accent color", undefined, undefined, locale),
     section: section.interface,
     keywords: (locale) =>
-      uiText("colour, highlight, tint", undefined, "settings search keywords", locale),
+      uiText(
+        "colour, highlight, tint, sidebar, stars, glow, mascot",
+        undefined,
+        "settings search keywords",
+        locale,
+      ),
   },
   {
     id: "appearance.brandingPrefix",
@@ -196,13 +215,18 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
       uiText("name, wordmark, logo", undefined, "settings search keywords", locale),
   },
   {
-    id: "appearance.sidebarEffectsColor",
+    id: "appearance.desk",
     path: "/settings/appearance",
     kind: "setting",
-    title: (locale) => uiText("Sidebar effects color", undefined, undefined, locale),
+    title: (locale) => uiText("Desk", undefined, undefined, locale),
     section: section.sidebar,
     keywords: (locale) =>
-      uiText("colour, stars, glow", undefined, "settings search keywords", locale),
+      uiText(
+        "open chats, tabs, sidebar view, projects",
+        undefined,
+        "settings search keywords",
+        locale,
+      ),
   },
   {
     id: "appearance.sidebarSearch",
@@ -214,15 +238,6 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
       uiText("command palette, search button", undefined, "settings search keywords", locale),
   },
   {
-    id: "appearance.sidebarImageEnabled",
-    path: "/settings/appearance",
-    kind: "setting",
-    title: (locale) => uiText("Enable sidebar image", undefined, undefined, locale),
-    section: section.sidebar,
-    keywords: (locale) =>
-      uiText("background, wallpaper, picture", undefined, "settings search keywords", locale),
-  },
-  {
     id: "appearance.sidebarImage",
     path: "/settings/appearance",
     kind: "setting",
@@ -230,6 +245,16 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
     section: section.sidebar,
     keywords: (locale) =>
       uiText("background, wallpaper, picture", undefined, "settings search keywords", locale),
+  },
+  {
+    id: "appearance.appIcon",
+    path: "/settings/appearance",
+    kind: "setting",
+    title: (locale) => uiText("Icon", undefined, "app icon setting", locale),
+    section: section.appIcon,
+    keywords: (locale) =>
+      uiText("app icon, dock, taskbar, logo", undefined, "settings search keywords", locale),
+    available: (availability) => availability.appIcon === true,
   },
   {
     id: "appearance.sidebarAttribution",
@@ -444,6 +469,19 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
       ),
   },
   {
+    id: "notifications.userInput",
+    path: "/settings/notifications",
+    kind: "setting",
+    title: (locale) => uiText("User input notifications", undefined, undefined, locale),
+    keywords: (locale) =>
+      uiText(
+        "alert, desktop notification, push, question, response",
+        undefined,
+        "settings search keywords",
+        locale,
+      ),
+  },
+  {
     id: "page:keybindings",
     path: "/settings/keybindings",
     kind: "page",
@@ -569,12 +607,12 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
       uiText("GitHub, GitLab, Bitbucket, CLI", undefined, "settings search keywords", locale),
   },
 
-  // Connections & remote access
+  // Connections
   {
     id: "page:connections",
     path: "/settings/connections",
     kind: "page",
-    title: (locale) => uiText("Connections & remote access", undefined, undefined, locale),
+    title: (locale) => uiText("Connections", undefined, undefined, locale),
     keywords: (locale) =>
       uiText("remote, server, pairing", undefined, "settings search keywords", locale),
   },

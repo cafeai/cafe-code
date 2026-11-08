@@ -1,5 +1,7 @@
 # Browser test input isolation
 
+Last updated: 2026-10-28 17:40:13 JST (UTC+0900)
+
 Current suite design is governed by [Test suite policy](test-suite-policy.md).
 The October 16 overhaul retires the exact fluid inventory, sample commit-chart
 qualification, cosmetic coordinate/animation matrices and fixed frame-count
@@ -7,7 +9,7 @@ readiness below. Historical failure investigations remain useful evidence;
 they do not require reinstating removed tests. Native input/context isolation,
 security admission, worker/deadline limits and feature assertions still apply.
 
-Last updated: 2026-10-15 12:49:47 JST (UTC+0900)
+Historical input-isolation baseline: 2026-10-22 15:13:25 JST (UTC+0900)
 
 Cafe's pinned Vitest browser runner isolates test files by replacing a tester
 iframe. Its owning Playwright page and browser context can be reused for later
@@ -246,6 +248,42 @@ contention was proven. Failure upload admits only this synthetic fixture's exact
 screenshot directory in the existing diagnostic allowlist; diagnostic ZIPs do
 not qualify native release artifacts. Native hosted results remain required.
 
+Graph probes also retain the existing exact engine/receiver/fixture startup
+observations, with `admitSourceOnReady: false`: they still transfer source only
+from their original native load callback. An expiry before that transfer is not
+a parser refusal. An expired exact-ID port message is rejected before its phase
+is decoded, so a last `request-sent` breadcrumb does not prove that parsing never
+ran. Startup observations do not renew the absolute ten-second allowance or
+establish the cause of a historical delay.
+
+The chart-boundary table captures each row's public test signal before its first
+native probe. Its helper refuses a retired owner before document construction
+and again before transport. Optional signal retirement uses the same exact
+frame/port/callback cleanup as ordinary completion, and late callbacks cannot
+send again or accept success. Keep both original admitted/refused counts and
+sources unchanged; this test-lifetime ownership does not alter production
+admission, contexts, worker caps or deadlines. A DOM marker sweep is not evidence
+that an outstanding helper's callbacks and transferred ports have retired.
+
+## Mermaid family scheduling
+
+Complete local browser qualification admits the Mermaid family files serially
+with `--fileParallelism=false` while retaining the existing two-worker cap and
+every file. Probes retain their independent opaque documents and keep their
+original probe and outer deadlines, inputs and sandbox policy. macOS CI uses
+that same serial file admission only for the Mermaid family group. All other
+macOS groups and the Windows/Linux CI plans retain their existing scheduling.
+This bounds overlapping full-engine startup without enlarging the per-probe
+allowance. A late bootstrap observation is not proof of its underlying CPU,
+memory, parser or scheduling cause.
+
+Parsed, allocation and native-output family cases capture their public test
+signal before the first probe; baseline and mutation invocations share that
+exact owner. Probe qualification cases retain their deliberate controller-owned
+cancellation scenarios. Retirement closes the exact frame, ports, timer and
+listeners and fences a later continuation before another native acquisition.
+The independent production rendering fixtures retain their existing lifetime.
+
 ## Native Mermaid family startup readiness
 
 The additional family probes construct fresh opaque documents containing the
@@ -265,6 +303,26 @@ absolute ten-second allowance begins before appending the document and covers
 engine startup, parsing and reply; readiness never renews it or admits an expired
 message ahead of a delayed timer callback. Keep all original source, parsed-data,
 native parser-count and output refusal assertions unchanged.
+
+An otherwise valid next bootstrap marker received after expiry is reported as a
+separate rejected phase, with elapsed milliseconds capped at 60,000. The last
+accepted phase remains unchanged; this witness cannot invoke readiness observers
+or transfer source. It contains no received error, source, result or identity.
+Failure artifacts retain the exact synthetic screenshot directories for every
+split Mermaid family file, rather than only the original unsplit filename.
+
+The parsed-family boundary table also captures each row's public test signal
+before either original accepted/rejected invocation. Its builder checks that
+owner before and after inert document construction and passes it to the same
+exact frame/port retirement path. A failed row retains at most sixteen fixed
+accepted/rejected invocation, startup-phase and bounded elapsed observations;
+it never logs source, received errors, native results or private identities.
+Both invocations otherwise report `baseline`, so a last request-sent breadcrumb
+alone cannot identify which boundary expired. Keep the original counts, sources,
+assertions, readiness gate and absolute allowance. The full-engine cancellation
+control retires its owner synchronously at the real fixture-ready marker and
+requires zero source sends plus closed ports/frame and no queued-load replay;
+this qualifies cancellation propagation, not the cause of a historical timeout.
 
 The full-engine held-load positive separately proves actual receiver readiness
 and successful native parsing without releasing the generic callback. Synthetic
@@ -369,6 +427,15 @@ wheel, exact document/anchor, tail and review assertions. This corrects a
 fixture assumption; it does not change production image layout or establish a
 timeline ownership defect from a failure before those later checks.
 
+The loaded-image review fixture waits for the trusted wheel and scrollend on
+its exact scroller and actual upward review displacement within its existing
+wait before recording the physical anchor. The follow-intent flag alone can
+precede physical scroll completion. The exact test owner joins its render,
+native input and individual image decodes, then unmounts and retires its held
+transfer responses before mocks are restored. Original native input, image and
+anchor assertions, contexts, workers and deadlines remain unchanged; this
+evidence does not establish a historical failure's cause.
+
 ## Native drag finalization and bounded diagnostics
 
 A fixture owns cleanup as soon as it attempts its native pointer press. A failed
@@ -384,3 +451,246 @@ enabled, and the exact expected insertion index, order, painted boundary and
 pixel assertions must not change. A later index mismatch without pointer/scroll
 witnesses does not establish a production indexing defect; a diagnostic pass
 does not establish the original failure's cause.
+
+## Full-app timeout retirement and Settings reveal evidence
+
+Preview-submit fixtures bind retirement to their exact public Vitest test signal
+and register cleanup before the first mount await. The optional mount lifecycle
+publishes its own cleanup before viewport/style/render/bootstrap work, retains
+the exact pending render and clears only its own RPC resolver. Retirement closes
+continuation admission synchronously before releasing the deliberately held ACK;
+join the original mount and already-admitted native operations before destructive
+unmount, keeping their exact locator targets alive until they settle. Receipt of
+the intended RPC is not completion of its original native click. Cleanup must
+release its held response before joining work which can need that response, and
+clear only its own resolver before a later fixture can supply replacement
+controls. Normal completion,
+failure and hard timeout share that idempotent cleanup. Unscoped mount consumers
+retain their established behavior.
+
+Retained-account and manual-compaction callers use this same scoped ownership
+contract, including a mount that fails before returning its cleanup handle.
+Keep their original synchronous DOM Send activation where the journey uses it;
+an activation phase is not provider acceptance or dispatch completion. Their
+failure-only ledgers retain at most sixteen fixed finite phase/count/elapsed
+records and use the browser tester's console channel, never a Node-only stream.
+Preserve the primary body error if exact cleanup also rejects; shared retirement
+still observes that cleanup result under its existing settlement policy.
+
+Other full-app journeys share the test-only caller owner instead of copying
+that retirement protocol. Browser callers inject the existing scoped mount;
+inert Node controls inject a fake mount and never start the application or a
+provider. Each owner admits one exact mount and injects its own lifecycle, so a
+second mount or replacement cleanup handle cannot acquire an old owner's grant.
+Release the exact deliberately held acknowledgement before draining work that
+can depend on it. Restore an image-picker override or API spy only after the
+admitted work and exact mount disposal settle. Cleanup retains failures rather
+than treating a rejected disposal as success, while a primary body failure
+keeps its original identity. Synthetic lifetime controls qualify this ordering,
+not native browser event delivery or a historical timeout's cause.
+
+The late-fork journey owns the original dispatch completion separately from
+the native confirmation click: neither click completion nor releasing a held
+fake response proves that the wire call succeeded. Release that exact response
+before joining the dispatch, retain the success receipt only after its original
+promise resolves, and restore the acquired API spy only after exact unmount.
+Rail-docking journeys use the same owner without a held-response gate. Keep all
+original hover/click, docking, navigation and acknowledgement assertions;
+lifetime ownership does not grant input replay or a longer test allowance.
+
+Detached-review restoration and independent Desk rails use that same caller
+owner before mount and retain their original gestures, docking and geometry
+assertions. The selected delivery and controls-menu composer fixtures register
+their own public-signal owner before viewport or render acquisition, retaining
+a late view, QueryClient, host and previous viewport for exact cleanup. Shared
+`afterEach` joins that owner before resetting drafts, mocks or locale; an
+unproved unmount or viewport restoration keeps the lease and blocks a new
+fixture. Own each existing animation completion independently and fence helper
+continuations before subsequent native input. These lifetime repairs preserve
+original inputs, tables and deadlines and do not establish a historical
+timeout cause.
+
+The Atrium replacement journey also admits its caller owner before mounting.
+It joins the original native actions and exact unmount before restoring the
+Atrium store. Keep both original closed-overlay and absent-detail assertions;
+a retained closed/ending popup does not by itself identify why retirement was
+delayed. Do not sample transient animation state or change motion policy to
+turn that observation into readiness.
+
+Glide's enable/disable fixture models status and activity reads using its last
+confirmed state, while retaining the held enable response and original native
+clicks. Assert the initial exact status read, ordered exact enable/disable
+mutations and every read's chat authority. Legitimate polling can interleave;
+the last call and a fixed total-call count do not identify the user's actions.
+Register its render/action retirement before acquisition and join that same
+owner from `afterEach`. Its native clicks do not depend on the held response,
+so dispose the renderer before releasing an abandoned reply, then settle that
+reply before the next fixture can reset the mock. Preserve primary assertion
+errors as well as cleanup failures.
+
+The shared hook owns one exact scoped caller-retirement lease, admitted before
+mount mutation. Vitest's `afterEach` precedes `onTestFinished`, so the shared
+hook must join that same complete caller cleanup **before** clearing its RPC
+resolver, menu roots or DOM. Repeated retirement joins one completion; only
+actual settlement releases the lease, and cleanup rejection still fails the
+check. A held lease refuses a replacement mount and the next fixture's reset.
+The original hook/native deadlines remain: this is not unlimited target
+survival if a hook itself times out. React's earlier global `beforeEach` cleanup
+can remove an old root in that failure case, but it does not authorize creating
+replacement controls while the prior lease remains held.
+
+The preview diagnostic retains at most 32 fixed phase/elapsed observations and
+prints them only on failure. It adds no input, readiness wait or deadline. A bare
+30-second test timeout and a blank cleanup-time screenshot do not identify the
+historical failing await or establish a production preview-promotion defect.
+
+Settings search likewise owns its pending render, native actions, observers and
+unmount through exact test retirement. Passive failure-only evidence retains at
+most 32 fixed phase/scroll/scrollend/resize observations, finite row/scroll-owner
+and viewport geometry, and fixed ownership/focus booleans. It never logs DOM,
+received text, arbitrary identifiers, source or errors. Successful control focus
+with `preventScroll` is not a receipt that native smooth scrolling has completed:
+keep the original visible-row geometry assertion, native input, motion policy,
+workers and deadlines. These observations distinguish scrolling and layout
+without assuming that focus, a short entrance animation or CPU load caused a
+prior visibility failure. Diagnostics alone are not a production repair.
+
+Native table and Mermaid scrolling diagnostics distinguish the original
+activation from the original keyboard command without adding input or waits.
+Capture-listener microtasks do not necessarily follow all dispatch handlers:
+retain only bounded original events and project their fixed prevention/target
+fields after the corresponding native command has actually fulfilled. Preserve
+completed activation and key rows within the existing bounded ledger so later
+pan/close activity does not erase successful controls. Retirement removes exact
+listeners, frame callbacks and event references. A trusted, unprevented key and
+emulated document focus alone do not prove the browser's native scroll default
+ran; diagnostic passes do not identify an earlier failure's cause.
+
+### Expanded viewport arrow scrolling
+
+Expanded image, Mermaid and table viewports own their unmodified arrow scrolling
+through the shared `viewportKeyboardScroll` helper. Native key input is retained;
+the app applies a bounded instant native scroll only when that exact viewport is
+focused and targeted, can move on the requested physical axis and owns no range
+selection. Editable content, descendant controls, modified/composing/prevented
+events and other keys retain their existing behavior. Physical left/right works
+with the native negative RTL scroll range; direction is not inverted. A generic
+boundary does not consume the key. Images separately retain their existing
+overflow gallery-navigation fence, including at an edge.
+
+This is an explicit user-facing workaround, not a readiness wait or a browser
+engine patch. A fresh inert Chromium reproduction observed a compositor animation
+finish without an offset change after its first tick arrived beyond the keyboard
+curve's duration. Source ordering is consistent with a pending sample being
+discarded before activation and retirement without another sample; exact tree
+flags and historical app causation were not observed. See Chromium's
+[sampling boundary](https://github.com/chromium/chromium/blob/149.0.7827.55/cc/trees/property_tree.cc#L1727)
+and [animation state ordering](https://github.com/chromium/chromium/blob/149.0.7827.55/cc/animation/keyframe_effect.cc#L139).
+Do not infer a reliable repair from extra pre-key frames, focus options or replay.
+
+Pure tests cover policy/geometry combinations, with actual browser wiring for
+movement and non-interception. Keep the original pan/zoom/scroll/close assertions,
+trusted native input, media/context ownership, sandbox, workers and deadlines.
+A moved owner arrow is intentionally default-prevented now; observing that flag
+does not replace the actual scroll-position assertion. No cache hit substitutes
+for a fresh native action claim.
+
+### Focused quota End scrolling
+
+The existing focusable read-only Claude quota region explicitly handles an
+unmodified End with an instant native scroll to its last meter/extra-usage row.
+It uses the same exact-focused-owner, selection/modifier/composition and finite
+both-axis guards as expanded viewport arrows, but a separate End-only entrypoint.
+The horizontal coordinate, including native RTL, is preserved. An already-ended,
+nonoverflowing or unmoved region does not consume the key. Home, other keys,
+descendant controls and legacy Codex quota markup retain their native behavior;
+no quota refresh, provider read or allowance semantics change.
+
+This follows an observed trusted exact-owner native End that completed without
+moving an overflowing panel. The browser's internal cause for that event was not
+established; do not borrow the inert arrow trace as proof of the End mechanism.
+Keep all three original layout journeys' single native End and real bottom/
+extra-usage assertions, adding intentional-prevention evidence only after that
+same action completes. Pure policy tests cover refusal combinations; one native
+modified-End control verifies non-interception without prescribing how an
+unhandled selection command should scroll or select. Do not add waits, replay,
+larger budgets, different media/flags/contexts or worker changes.
+
+Search reveal fixtures arm an exact successful navigation receipt before their
+single native Enter or option click. Keep the original semantic input queries.
+Observe the original navigation, highlight, control-focus and visible-row
+assertions from that receipt while the action remains in flight, then require
+that same action's successful completion before further input or success. The
+sidebar-unmount case also retains its original disappearance assertion. A native
+command acknowledgement is not the start of a transient highlight's lifetime.
+Keep the real highlight timer and original polling/test budgets; navigation
+failure, native rejection and exact-test retirement must reject the observation,
+not turn an unobserved reveal into success. Restore only the observation's own
+mock wrapper, preserving the original navigation result and errors.
+
+Settings search positions the exact admitted anchor with native instant
+`scrollIntoView` before highlighting, focusing and reporting a successful reveal.
+Scheduling a smooth animation is not completion evidence: the focused control
+can still be offscreen. Keep the existing frame/abort/disconnection checks,
+highlight lifetime and native row-visibility assertions. Controller tests own
+their exact queued frames, supersession, timers and synthetic listeners; they
+do not attest native geometry or diagnose a historical animation-engine cause.
+
+Workspace menu fixtures protect long-label containment, usable popup bounds,
+selected-option focus, native cancellation and unchanged selection. Exact icon
+centering, popup/trigger width equality and theme colors are not feature gates.
+Scroll-preview dismissal likewise checks the exact originally open popup is
+disconnected or closed, with no open replacement, then retains the original
+native main press, once-only scroll/zero-hide callbacks and exact button focus.
+A closed attribute alone does not prove usable controls or physical resource
+retirement. Join admitted native work before exact unmount; join an unfinished
+entrance after unmount can cancel it. These fixtures keep original input,
+polls, workers and deadlines, without waiting for exit-animation DOM removal.
+
+Mobile Desk navigation retains the exact open sheet from the original trusted
+thread-selection press. Closing must leave no open sheet and permit the selected
+chat's composer to receive an ordinary native click and printable character,
+with exact editor focus outside that retained sheet and matching DOM/store draft.
+Physical exit-animation DOM removal is not the feature contract; a closed data
+attribute alone is also insufficient. Keep the original other-chat draft,
+split/layout/group identity, viewport-boundary and no-interrupt assertions.
+Register exact-test retirement before mounting and join already-admitted native
+work before a later fixture can provide replacement controls. No forced focus,
+input replay, submission, motion-policy or deadline change qualifies this path.
+
+Context- and subagent-policy ACK fixtures likewise retain the exact originally open editor.
+An acknowledged close may disconnect that popup or leave its closed exit node;
+neither may remain open. Keep the exact canonical policy and absent stale draft
+overlay assertions, along with each journey's original native reopen, current-
+value and Send checks. A closed attribute by itself does not prove usable controls,
+and physical exit-animation removal is not acknowledgement-ordering evidence.
+Bind the deliberately held response to the exact metadata command and release
+it during owned retirement, without holding unrelated dispatches or changing
+the policy controller, ordinary polls, native input or test budget.
+
+Sticky-model navigation fixtures own their mount and original native actions
+before the first await. Failure-only phase observations distinguish inert
+mounting, the original hover/click, route completion and saved-state assertions;
+retain only a finite fixed vocabulary and bounded elapsed/count scalars. A bare
+test deadline or a secondary screenshot-stability timeout does not establish
+which original await failed or prove a provider/default-selection defect.
+
+## Small-fixture timeout ownership
+
+Context-menu, heatmap, workspace-theme, quota-reset and scheduled-review
+fixtures register public test-signal retirement and completion cleanup before
+their first asynchronous acquisition. Keep an exact per-case owner through
+render, original native actions and unmount. Retirement fences new actions and
+post-await continuations synchronously; shared cleanup joins that owner's
+already-admitted work before replacing controls or resetting global state.
+Retain a late render separately so it cannot repopulate the next case's mount
+slot. No input replay, force, added readiness wait or deadline change is implied.
+
+Failure-only diagnostics retain at most sixteen fixed phase/count/elapsed or
+finite geometry observations per owner, never DOM/text, arbitrary identifiers,
+request contents or received errors. Passive trusted pointer receipts on the
+exact scheduled Review button distinguish dispatch from native actionability;
+successful fake-list results are separate observations, not click completion.
+Heatmap range/scroll observations explain only the current captured state.
+These lifetime repairs do not establish the causes of historical timeouts, and
+secondary screenshot failures are not original feature failures.

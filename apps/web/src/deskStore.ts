@@ -9,8 +9,10 @@ import {
   DESK_LIMITS,
   hydrateDesk,
   reduceDesk,
+  reduceDeskWithPolicy,
   serializeDesk,
   type DeskAction,
+  type DeskOpenPolicy,
   type DeskState,
 } from "./deskModel";
 import type { StateStorage } from "./lib/storage";
@@ -23,6 +25,9 @@ export interface DeskStoreState {
   /** Pending editors are view ownership, never persisted open-chat entries. */
   readonly draftEditors: Readonly<Record<string, { draftId: DraftId; groupId: string }>>;
   readonly activeDraftId: DraftId | null;
+  /** Mirrors the Desk/chat-tab settings; see `DeskOpenPolicy`. Not persisted. */
+  readonly openPolicy: DeskOpenPolicy;
+  readonly setOpenPolicy: (policy: DeskOpenPolicy) => void;
   readonly showDraftEditor: (draftId: DraftId, groupId?: string, activate?: boolean) => void;
   readonly promoteDraftEditor: (draftId: DraftId, threadRef: ScopedThreadRef) => boolean;
   readonly reconcileDraftEditors: (draftIds: readonly DraftId[]) => void;
@@ -94,7 +99,13 @@ export function createDeskStore(resolveStorage: () => StateStorage | null = brow
     desk: createDeskState(),
     draftEditors: {},
     activeDraftId: null,
+    openPolicy: "tabs",
     flushPersistence,
+    setOpenPolicy: (openPolicy) => {
+      // Changing the policy never rewrites the current layout: tabs that are
+      // already open stay exactly as they are.
+      if (get().openPolicy !== openPolicy) set({ openPolicy });
+    },
     showDraftEditor: (draftId, groupId, activate = true) => {
       const current = get();
       if (current.desk.environmentId === null) return;
@@ -133,12 +144,18 @@ export function createDeskStore(resolveStorage: () => StateStorage | null = brow
       const editor = current.draftEditors[draftId];
       if (!editor || threadRef.environmentId !== current.desk.environmentId) return false;
       const active = current.activeDraftId === draftId;
-      const next = reduceDesk(current.desk, {
-        type: "open",
-        target: { kind: "server", threadRef },
-        groupId: current.desk.groups[editor.groupId] ? editor.groupId : current.desk.activeGroupId,
-        activate: active,
-      });
+      const next = reduceDeskWithPolicy(
+        current.desk,
+        {
+          type: "open",
+          target: { kind: "server", threadRef },
+          groupId: current.desk.groups[editor.groupId]
+            ? editor.groupId
+            : current.desk.activeGroupId,
+          activate: active,
+        },
+        current.openPolicy,
+      );
       // Respect the existing open-tab limit without retiring a still-owned
       // editor. Reconciliation can promote it when a tab slot becomes free.
       if (!deskGroupForTab(next, deskTabKey({ kind: "server", threadRef }))) return false;
@@ -189,8 +206,8 @@ export function createDeskStore(resolveStorage: () => StateStorage | null = brow
       set({ desk: hydrateDesk(raw, environmentId), draftEditors: {}, activeDraftId: null });
     },
     dispatch: (action) => {
-      const { desk: current, activeDraftId, draftEditors } = get();
-      const next = reduceDesk(current, action);
+      const { desk: current, activeDraftId, draftEditors, openPolicy } = get();
+      const next = reduceDeskWithPolicy(current, action, openPolicy);
       // Pane focus on the editor's own group and sidebar-mode changes do not
       // dismiss it. Explicit chat selection must work even if its saved tab was
       // already selected underneath the pending editor (a reducer no-op).

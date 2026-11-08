@@ -48,6 +48,7 @@ import { UsageStatsService, type UsageStatsServiceShape } from "../Services/Usag
 import { UsageStatsServiceLive } from "./UsageStatsService.ts";
 import { AuxiliaryUsage, AuxiliaryUsageLive } from "../Services/AuxiliaryUsage.ts";
 import { makeCodexChildUsageAccounting } from "../../provider/codexChildUsageAccounting.ts";
+import { makeOpenCodeUsage } from "../../provider/opencodeUsage.ts";
 import * as Schema from "effect/Schema";
 
 const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
@@ -395,6 +396,38 @@ const accountingModel = (
 
 describe("UsageStatsService", () => {
   it.effect(
+    "retains known cache duration subsets in daily and lifetime breakdowns after rehydration",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          const snapshot: UsageAccountingSnapshot = {
+            scopeId: "10000000-0000-4000-8000-000000000008",
+            revision: 1,
+            completeness: "complete",
+            models: [
+              {
+                ...accountingModel(100, 5),
+                cacheWriteInputTokens: 80,
+                cacheWrite5mInputTokens: 20,
+                cacheWrite1hInputTokens: 30,
+              },
+            ],
+          };
+          yield* harness.service.recordAccounting(CLAUDE, snapshot, 0);
+          const first = yield* harness.service.get;
+          assert.equal(first.tokenBreakdown[0]?.cacheWriteInputTokens, 80);
+          assert.equal(first.tokenBreakdown[0]?.cacheWrite5mInputTokens, 20);
+          assert.equal(first.tokenBreakdownDays?.[0]?.cacheWrite1hInputTokens, 30);
+          const rebuilt = yield* harness.rebuildService;
+          yield* rebuilt.recordAccounting(CLAUDE, snapshot, 0);
+          const second = yield* rebuilt.get;
+          assert.equal(second.tokenBreakdown[0]?.cacheWrite5mInputTokens, 20);
+          assert.equal(second.tokenBreakdownDays?.[0]?.cacheWrite1hInputTokens, 30);
+          assert.equal(second.tokenBreakdown[0]?.cacheWriteInputTokens, 80);
+        }),
+      ),
+  );
+  it.effect(
     "hydrates exact Axiom costs after restart and counts settled requests independently of context",
     () =>
       withHarness((harness) =>
@@ -442,6 +475,68 @@ describe("UsageStatsService", () => {
             first.tokenBreakdown[0]?.reportedCost,
           );
           assert.equal(second.totals.inputTokens, 100);
+        }),
+      ),
+  );
+  it.effect(
+    "counts every OpenCode model step once across replay/restart without billing its context snapshots",
+    () =>
+      withHarness((harness) =>
+        Effect.gen(function* () {
+          const provider = ProviderDriverKind.make("opencode");
+          const identity = {
+            instanceId: "private-account",
+            threadId: THREAD_1,
+            directory: "/synthetic/project",
+            serverUrl: null,
+            sessionId: "native-session",
+          };
+          const usage = makeOpenCodeUsage(identity);
+          const tokens = { input: 100, output: 20, reasoning: 5, cache: { read: 30, write: 10 } };
+          const message = {
+            id: "message",
+            sessionID: identity.sessionId,
+            role: "assistant",
+            providerID: "openai",
+            modelID: "gpt-5",
+            time: { created: 1_000 },
+            tokens,
+          };
+          const context = usage.observeMessage(message).context!;
+          const step = {
+            id: "step-1",
+            messageID: message.id,
+            sessionID: identity.sessionId,
+            type: "step-finish",
+            tokens,
+            cost: 0.012345,
+          };
+          const first = usage.observeStep(step)!;
+          const second = usage.observeStep({ ...step, id: "step-2" })!;
+          for (const snapshot of [first, second, first])
+            yield* harness.service.recordAccounting(provider, snapshot, 0);
+          yield* harness.emitProvider({
+            ...providerEventBase(THREAD_1, "opencode-context", provider),
+            type: "thread.token-usage.updated",
+            payload: { usage: context },
+          });
+          const recorded = yield* harness.service.get;
+          assert.equal(recorded.totals.inputTokens, 280);
+          assert.equal(recorded.totals.outputTokens, 50);
+          assert.equal(recorded.totals.reasoningOutputTokens, 10);
+          assert.equal(recorded.totals.cachedInputTokens, 60);
+          assert.equal(recorded.totals.cacheWriteInputTokens, 20);
+          assert.deepEqual(recorded.tokenBreakdown[0]?.reportedCost, {
+            microusd: "24690",
+            tokens: 330,
+          });
+          const rebuilt = yield* harness.rebuildService;
+          const reopened = makeOpenCodeUsage(identity);
+          reopened.observeMessage(message);
+          yield* rebuilt.recordAccounting(provider, reopened.observeStep(step)!, 0);
+          const restored = yield* rebuilt.get;
+          assert.deepEqual(restored.tokenBreakdown, recorded.tokenBreakdown);
+          assert.equal(restored.totals.outputTokens, 50);
         }),
       ),
   );

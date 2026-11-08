@@ -19,6 +19,7 @@ import { ProviderInteraction, ProviderNetworkApproval } from "./providerInteract
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 import { ProviderTaskOwner } from "./providerTaskOwnership.ts";
 import { CodexCompactionObservation } from "./codexCompactionDiagnostics.ts";
+import { ProviderUserInputUnanswered } from "./providerUserInput.ts";
 import { ProviderDiagnostic } from "./providerDiagnostic.ts";
 import {
   ProviderIndividualTaskControl,
@@ -429,7 +430,9 @@ const UsageAccountingCount = NonNegativeInt.check(
 export const UsageAccountingModel = Schema.Struct({
   model: TrimmedNonEmptyString.check(
     Schema.isMaxLength(256),
-    Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._[\]:-]*$/),
+    // OpenCode reports upstream provider/model slugs, including nested model
+    // namespaces. Keep these exact without admitting absolute filesystem paths.
+    Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._[\]:-]*(?:\/[a-zA-Z0-9][a-zA-Z0-9._[\]:-]*)*$/),
   ),
   reportedCostMicrousd: Schema.optional(
     Schema.String.check(Schema.isPattern(/^(0|[1-9][0-9]{0,99})$/)),
@@ -437,12 +440,17 @@ export const UsageAccountingModel = Schema.Struct({
   inputTokens: UsageAccountingCount,
   cachedInputTokens: UsageAccountingCount,
   cacheWriteInputTokens: UsageAccountingCount,
+  // Optional known subsets; omitted historical observations remain unknown.
+  cacheWrite5mInputTokens: Schema.optional(UsageAccountingCount),
+  cacheWrite1hInputTokens: Schema.optional(UsageAccountingCount),
   outputTokens: UsageAccountingCount,
   reasoningOutputTokens: UsageAccountingCount,
 }).check(
   Schema.makeFilter(
     (row) =>
       row.cachedInputTokens <= row.inputTokens - row.cacheWriteInputTokens &&
+      (row.cacheWrite5mInputTokens ?? 0) <=
+        row.cacheWriteInputTokens - (row.cacheWrite1hInputTokens ?? 0) &&
       row.reasoningOutputTokens <= row.outputTokens,
     { expected: "cache and reasoning counters contained in their input/output totals" },
   ),
@@ -534,7 +542,15 @@ export type TurnStartedPayload = typeof TurnStartedPayload.Type;
 
 // Content-free native failure evidence. These categories describe a terminal
 // Codex root, not a general permission to retry an arbitrary provider action.
-export const CodexTransientFailureCategory = Schema.Literals(["transport", "server", "rate-limit"]);
+// `response-limit` is an incomplete output, not account quota or context
+// exhaustion. Retain the historical type/field names; every category
+// still requires the same exact native-owner and one-use continuation proof.
+export const CodexTransientFailureCategory = Schema.Literals([
+  "transport",
+  "server",
+  "rate-limit",
+  "response-limit",
+]);
 export type CodexTransientFailureCategory = typeof CodexTransientFailureCategory.Type;
 
 export const TurnCompletedPayload = Schema.Struct({
@@ -649,6 +665,9 @@ export type UserInputQuestion = typeof UserInputQuestion.Type;
 
 const UserInputRequestedPayload = Schema.Struct({
   questions: Schema.Array(UserInputQuestion),
+  // Display-only advertisement from the exact native callback owner. Missing
+  // remains unsupported; the adapter rechecks authority on every response.
+  supportsUnanswered: Schema.optional(Schema.Boolean),
   interaction: Schema.optional(ProviderInteraction),
   // Codex 0.147 makes this explicit. Older providers and persisted events are
   // blocking by default, preserving the pre-0.147 behavior on decode.
@@ -660,6 +679,8 @@ export type UserInputRequestedPayload = typeof UserInputRequestedPayload.Type;
 
 const UserInputResolvedPayload = Schema.Struct({
   answers: UnknownRecordSchema,
+  unanswered: Schema.optional(ProviderUserInputUnanswered),
+  cancelled: Schema.optional(Schema.Boolean),
   autoResolved: Schema.optional(Schema.Boolean),
 });
 export type UserInputResolvedPayload = typeof UserInputResolvedPayload.Type;

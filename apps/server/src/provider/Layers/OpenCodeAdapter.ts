@@ -12,17 +12,27 @@ import {
   type ToolLifecycleItemType,
   TurnId,
   type UserInputQuestion,
+  type ThreadTokenUsageSnapshot,
+  type UsageAccountingSnapshot,
 } from "@cafecode/contracts";
-import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import type { OpencodeClient, Part, PermissionRequest, QuestionRequest } from "@opencode-ai/sdk/v2";
+import type {
+  OpencodeClient,
+  Part,
+  PermissionRequest,
+  PermissionRuleset,
+  QuestionRequest,
+} from "@opencode-ai/sdk/v2";
 import { getModelSelectionStringOptionValue } from "@cafecode/shared/model";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -32,6 +42,16 @@ import {
 } from "../fileAttachmentPrompt.ts";
 import { ServerConfig } from "../../config.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import {
+  PUBLIC_REASONING_SUMMARY_ACTIVE_BLOCKS,
+  PUBLIC_REASONING_SUMMARY_BLOCKS,
+  PUBLIC_REASONING_SUMMARY_CHARS,
+  PUBLIC_REASONING_SUMMARY_INTERVAL_MS,
+  PUBLIC_REASONING_SUMMARY_STREAM_KIND,
+  PUBLIC_REASONING_SUMMARY_VERSION,
+  publicReasoningSummaryDisplayText,
+  publicReasoningSummaryTail,
+} from "../publicReasoningSummary.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -54,8 +74,50 @@ import {
   type OpenCodeServerConnection,
 } from "../opencodeRuntime.ts";
 import * as Option from "effect/Option";
+import { makeOpenCodeUsage } from "../opencodeUsage.ts";
 
 const PROVIDER = ProviderDriverKind.make("opencode");
+
+const ResumeIdentifier = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(512));
+const ResumeDirectory = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192));
+const OpenCodeResume = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  sessionId: ResumeIdentifier,
+  threadId: ThreadId,
+  instanceId: ProviderInstanceId,
+  directory: ResumeDirectory,
+  serverUrl: Schema.NullOr(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192))),
+});
+const decodeOpenCodeResume = Schema.decodeUnknownEffect(OpenCodeResume);
+
+function hasPermissionSuffix(actual: PermissionRuleset | undefined, expected: PermissionRuleset) {
+  return (
+    Array.isArray(actual) &&
+    actual.length >= expected.length &&
+    expected.every((rule, index) => {
+      const received = actual[actual.length - expected.length + index];
+      return (
+        received?.permission === rule.permission &&
+        received.pattern === rule.pattern &&
+        received.action === rule.action
+      );
+    })
+  );
+}
+
+// Resume failures must preserve the saved identity, never start a blank session
+// or expose an external server's response/error (which may contain credentials).
+const runOpenCodeResumeSdk = <A>(operation: string, request: (signal: AbortSignal) => Promise<A>) =>
+  runOpenCodeSdk(operation, request).pipe(
+    Effect.mapError(
+      () =>
+        new OpenCodeRuntimeError({
+          operation,
+          detail:
+            "The saved OpenCode session could not be reopened. Check the original OpenCode server and data profile before retrying.",
+        }),
+    ),
+  );
 
 interface OpenCodeTurnSnapshot {
   readonly id: TurnId;
@@ -74,6 +136,39 @@ interface OpenCodeManualCompaction {
   readonly controller: AbortController;
 }
 
+interface OpenCodeInterruption {
+  readonly turnId: TurnId;
+  nativeIdleObserved: boolean;
+}
+
+/**
+ * Retired native reasoning part ids. OpenCode re-delivers whole parts through
+ * `message.updated`, so a completed part must not reopen as a new row in a
+ * later turn. FIFO-bounded; an evicted ancient id is the only exception.
+ */
+const OPENCODE_RETIRED_REASONING_PART_IDS = 1_024;
+
+/**
+ * One primary-session OpenCode reasoning part, presented as a bounded thinking
+ * row through the shared public reasoning summary contract. Only the retained
+ * display window is kept here; the adapter already owns the full part text.
+ */
+interface OpenCodeReasoningBlock {
+  readonly partId: string;
+  /** Canonical turn that first observed the part; never borrowed by a later turn. */
+  readonly turnId: TurnId;
+  /** Stable activity time so replace-in-place updates cannot move the row. */
+  readonly startedAt: string | undefined;
+  displayText: string;
+  truncated: boolean;
+  publishedText: string | undefined;
+  publishedTruncated: boolean | undefined;
+  completed: boolean;
+  /** Trailing-edge coalescing timer; terminal publication interrupts it first. */
+  flushFiber: Fiber.Fiber<void, never> | undefined;
+  flushToken: object | undefined;
+}
+
 interface OpenCodeSessionContext {
   session: ProviderSession;
   readonly client: OpencodeClient;
@@ -82,12 +177,24 @@ interface OpenCodeSessionContext {
   readonly openCodeSessionId: string;
   readonly pendingPermissions: Map<string, PermissionRequest>;
   readonly pendingQuestions: Map<string, QuestionRequest>;
+  /**
+   * One-use reply claims are separate from SSE-owned pending metadata. A lost
+   * HTTP acknowledgement is not permission to submit another native answer;
+   * only the canonical terminal event or exact context retirement releases it.
+   */
+  readonly claimedQuestionResponses: Set<string>;
   readonly messageRoleById: Map<string, "user" | "assistant">;
   readonly partById: Map<string, Part>;
   readonly emittedTextByPartId: Map<string, string>;
   readonly completedAssistantPartIds: Set<string>;
+  /** Thinking rows of the active turn, bounded per turn and cleared at its end. */
+  readonly reasoningBlocks: Map<string, OpenCodeReasoningBlock>;
+  readonly retiredReasoningPartIds: Set<string>;
   readonly turns: Array<OpenCodeTurnSnapshot>;
+  readonly usage: ReturnType<typeof makeOpenCodeUsage>;
   manualCompaction?: OpenCodeManualCompaction;
+  /** Retain the stopped generation until ordered native idle then busy edges. */
+  interruption?: OpenCodeInterruption;
   activeTurnId: TurnId | undefined;
   activeAgent: string | undefined;
   activeVariant: string | undefined;
@@ -97,6 +204,7 @@ interface OpenCodeSessionContext {
    * so concurrent callers can race the transition safely via `getAndSet`.
    */
   readonly stopped: Ref.Ref<boolean>;
+  readonly retirementDone: Deferred.Deferred<void, ProviderAdapterProcessError>;
   /**
    * Sole lifecycle handle for the session. Closing this scope:
    *   - aborts the `AbortController` registered as a finalizer
@@ -404,11 +512,22 @@ function sessionErrorMessage(error: unknown): string {
   if (!error || typeof error !== "object") {
     return "OpenCode session failed.";
   }
-  const data = "data" in error && error.data && typeof error.data === "object" ? error.data : null;
-  const message = data && "message" in data ? data.message : null;
-  return typeof message === "string" && message.trim().length > 0
-    ? message
-    : "OpenCode session failed.";
+  switch ("name" in error ? error.name : undefined) {
+    case "ProviderAuthError":
+      return "OpenCode provider authentication failed. Check the selected provider's credentials.";
+    case "ContextOverflowError":
+      return "OpenCode exceeded the model's context limit. Compact the conversation or select a model with a larger context window.";
+    case "MessageOutputLengthError":
+      return "OpenCode reached the model's output limit.";
+    case "MessageAbortedError":
+      return "OpenCode generation was interrupted.";
+    case "StructuredOutputError":
+      return "OpenCode could not produce the required output format.";
+    case "ContentFilterError":
+      return "OpenCode's provider declined the request under its content policy.";
+    default:
+      return "OpenCode session failed. Check the provider configuration and server availability.";
+  }
 }
 
 function updateProviderSession(
@@ -438,27 +557,52 @@ function updateProviderSession(
   });
 }
 
+const closeOpenCodeContext = (context: OpenCodeSessionContext) =>
+  Effect.gen(function* () {
+    context.claimedQuestionResponses.clear();
+    context.manualCompaction?.controller.abort();
+
+    // Best-effort remote abort. The scope close below tears down the local
+    // handles (event-pump fiber, server-exit fiber, event-subscribe fetch),
+    // but we still want to tell OpenCode that this session is done.
+    yield* runOpenCodeSdk("session.abort", () =>
+      context.client.session.abort({ sessionID: context.openCodeSessionId }),
+    ).pipe(Effect.ignore({ log: true }));
+
+    // Closing the session scope interrupts every fiber forked into it and
+    // runs each finalizer we registered — the `AbortController.abort()` call,
+    // the child-process termination, etc.
+    yield* Scope.close(context.sessionScope, Exit.void);
+  }).pipe(
+    Effect.catchCause(() =>
+      Effect.fail(
+        new ProviderAdapterProcessError({
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          detail:
+            "OpenCode session cleanup could not be confirmed. Preserve its recovery state before retrying.",
+        }),
+      ),
+    ),
+    Effect.uninterruptible,
+  );
+
 const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
   context: OpenCodeSessionContext,
+  onClosed: Effect.Effect<void> = Effect.void,
 ) {
-  // Race-safe one-shot: first caller flips the flag, everyone else no-ops.
+  // A second caller must join the original abort/close. Returning early would
+  // let that old abort reach a newly resumed owner of the same native session.
   if (yield* Ref.getAndSet(context.stopped, true)) {
+    yield* Deferred.await(context.retirementDone);
     return false;
   }
-
-  context.manualCompaction?.controller.abort();
-
-  // Best-effort remote abort. The scope close below tears down the local
-  // handles (event-pump fiber, server-exit fiber, event-subscribe fetch),
-  // but we still want to tell OpenCode that this session is done.
-  yield* runOpenCodeSdk("session.abort", () =>
-    context.client.session.abort({ sessionID: context.openCodeSessionId }),
-  ).pipe(Effect.ignore({ log: true }));
-
-  // Closing the session scope interrupts every fiber forked into it and
-  // runs each finalizer we registered — the `AbortController.abort()` call,
-  // the child-process termination, etc.
-  yield* Scope.close(context.sessionScope, Exit.void);
+  yield* updateProviderSession(context, { status: "closed" }, { clearActiveTurnId: true });
+  yield* closeOpenCodeContext(context).pipe(
+    Effect.andThen(onClosed),
+    Effect.onExit((exit) => Deferred.done(context.retirementDone, exit).pipe(Effect.asVoid)),
+    Effect.uninterruptible,
+  );
   return true;
 });
 
@@ -470,6 +614,7 @@ export function makeOpenCodeAdapter(
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("opencode");
     const serverConfig = yield* ServerConfig;
     const openCodeRuntime = yield* OpenCodeRuntime;
+    const adapterScope = yield* Scope.Scope;
     const nativeEventLogger =
       options?.nativeEventLogger ??
       (options?.nativeEventLogPath !== undefined
@@ -483,6 +628,7 @@ export function makeOpenCodeAdapter(
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
     const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const sessions = new Map<ThreadId, OpenCodeSessionContext>();
+    const startingSessions = new Set<ThreadId>();
 
     // Layer-level finalizer: when the adapter layer shuts down, stop every
     // session. Each session's `Scope.close` tears down its spawned OpenCode
@@ -493,8 +639,7 @@ export function makeOpenCodeAdapter(
     yield* Effect.addFinalizer(() =>
       Effect.gen(function* () {
         const contexts = [...sessions.values()];
-        sessions.clear();
-        // `ignoreCause` swallows both typed failures (none here) and defects
+        // `ignoreCause` swallows typed failures and defects
         // from throwing scope finalizers so a sibling's death can't interrupt
         // the remaining cleanups.
         yield* Effect.forEach(
@@ -502,6 +647,10 @@ export function makeOpenCodeAdapter(
           (context) => Effect.ignoreCause(stopOpenCodeContext(context)),
           { concurrency: "unbounded", discard: true },
         );
+        for (const context of contexts) {
+          if (sessions.get(context.session.threadId) === context)
+            sessions.delete(context.session.threadId);
+        }
         // Close the logger AFTER session teardown so any final lifecycle
         // events emitted during shutdown still get written. `close` flushes
         // the `Logger.batched` window and closes each per-thread
@@ -514,6 +663,166 @@ export function makeOpenCodeAdapter(
 
     const emit = (event: ProviderRuntimeEvent) =>
       Queue.offer(runtimeEvents, event).pipe(Effect.asVoid);
+
+    const retireReasoningPart = (context: OpenCodeSessionContext, partId: string) => {
+      const retired = context.retiredReasoningPartIds;
+      retired.delete(partId);
+      retired.add(partId);
+      if (retired.size > OPENCODE_RETIRED_REASONING_PART_IDS) {
+        const oldest = retired.values().next().value;
+        if (oldest !== undefined) retired.delete(oldest);
+      }
+    };
+
+    /**
+     * Publish one replace-in-place thinking snapshot through the shared public
+     * reasoning summary contract. Live snapshots are coalesced, with bounded
+     * text and active block counts rather than a lifetime refresh cutoff. The
+     * terminal snapshot is published once and first retires the pending timer,
+     * so an older in-progress snapshot can never land after the settled one.
+     */
+    const publishReasoningBlock = Effect.fn("publishReasoningBlock")(function* (
+      context: OpenCodeSessionContext,
+      block: OpenCodeReasoningBlock,
+      terminalStatus?: "completed" | "failed",
+    ) {
+      if (block.completed) return;
+      if (terminalStatus) {
+        block.completed = true;
+        retireReasoningPart(context, block.partId);
+        const pending = block.flushFiber;
+        block.flushFiber = undefined;
+        block.flushToken = undefined;
+        if (pending) yield* Fiber.interrupt(pending);
+      } else if (
+        block.publishedText === block.displayText &&
+        block.publishedTruncated === block.truncated
+      ) {
+        return;
+      }
+      // Whitespace-only or encrypted-only reasoning has nothing to disclose.
+      if (block.displayText.length === 0) return;
+      block.publishedText = block.displayText;
+      block.publishedTruncated = block.truncated;
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.session.threadId,
+          turnId: block.turnId,
+          itemId: block.partId,
+          createdAt: block.startedAt,
+        })),
+        type: terminalStatus ? "item.completed" : "item.updated",
+        payload: {
+          itemType: "reasoning",
+          status: terminalStatus ?? "inProgress",
+          title: "OpenCode thinking",
+          detail: block.displayText,
+          data: {
+            summaryVersion: PUBLIC_REASONING_SUMMARY_VERSION,
+            streamKind: PUBLIC_REASONING_SUMMARY_STREAM_KIND,
+            truncated: block.truncated,
+          },
+        },
+        // Deliberately no raw native event: reasoning part metadata can carry
+        // provider signatures or encrypted reasoning content.
+      });
+    });
+
+    /**
+     * Track the latest full text of a primary-session reasoning part. Child
+     * sessions are already filtered by session id. Only a part first observed
+     * while a canonical turn is active becomes a row, bound to that turn; a
+     * part seen with no active turn or beyond the per-turn bounds is retired so
+     * a later `message.updated` cannot attach it to a different turn. Native
+     * completion (`time.end`) or the turn boundary settles each row once.
+     */
+    const observeReasoningPart = Effect.fn("observeReasoningPart")(function* (
+      context: OpenCodeSessionContext,
+      part: Extract<Part, { type: "reasoning" }>,
+      text: string,
+      turnId: TurnId | undefined,
+    ) {
+      if (context.retiredReasoningPartIds.has(part.id)) return;
+      let block = context.reasoningBlocks.get(part.id);
+      if (!block) {
+        let active = 0;
+        for (const entry of context.reasoningBlocks.values()) if (!entry.completed) active += 1;
+        if (
+          !turnId ||
+          context.reasoningBlocks.size >= PUBLIC_REASONING_SUMMARY_BLOCKS ||
+          active >= PUBLIC_REASONING_SUMMARY_ACTIVE_BLOCKS
+        ) {
+          retireReasoningPart(context, part.id);
+          return;
+        }
+        block = {
+          partId: part.id,
+          turnId,
+          startedAt: isoFromEpochMs(part.time.start) ?? (yield* nowIso),
+          displayText: "",
+          truncated: false,
+          publishedText: undefined,
+          publishedTruncated: undefined,
+          completed: false,
+          flushFiber: undefined,
+          flushToken: undefined,
+        };
+        context.reasoningBlocks.set(part.id, block);
+      }
+      if (block.completed || block.turnId !== turnId) return;
+      // SDK 1.18.3 compatibility events carry full reasoning parts plus text
+      // deltas. Keep their newest window moving until native time.end, with
+      // the same trimmed/control-stripped presentation on live and final rows.
+      block.displayText = publicReasoningSummaryDisplayText(
+        publicReasoningSummaryTail(text),
+      ).trim();
+      block.truncated = text.length > PUBLIC_REASONING_SUMMARY_CHARS;
+      if (part.time.end !== undefined) {
+        yield* publishReasoningBlock(context, block, "completed");
+        return;
+      }
+      if (block.publishedText === undefined) {
+        // The first disclosed text appears immediately; later edits coalesce.
+        yield* publishReasoningBlock(context, block);
+        return;
+      }
+      if (
+        block.flushFiber ||
+        (block.publishedText === block.displayText && block.publishedTruncated === block.truncated)
+      )
+        return;
+      const exactBlock = block;
+      const token = {};
+      exactBlock.flushToken = token;
+      exactBlock.flushFiber = yield* Effect.sleep(PUBLIC_REASONING_SUMMARY_INTERVAL_MS).pipe(
+        Effect.andThen(
+          Effect.suspend(() =>
+            // An old timer cannot publish a row its turn already settled.
+            context.reasoningBlocks.get(exactBlock.partId) === exactBlock
+              ? publishReasoningBlock(context, exactBlock)
+              : Effect.void,
+          ),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (exactBlock.flushToken !== token) return;
+            exactBlock.flushToken = undefined;
+            exactBlock.flushFiber = undefined;
+          }),
+        ),
+        Effect.forkIn(context.sessionScope),
+      );
+    });
+
+    /** Settle every thinking row of the ending turn before its terminal event. */
+    const settleReasoningBlocks = Effect.fn("settleReasoningBlocks")(function* (
+      context: OpenCodeSessionContext,
+      status: "completed" | "failed",
+    ) {
+      const blocks = [...context.reasoningBlocks.values()];
+      context.reasoningBlocks.clear();
+      for (const block of blocks) yield* publishReasoningBlock(context, block, status);
+    });
     const finishManualCompaction = Effect.fn("finishManualCompaction")(function* (
       context: OpenCodeSessionContext,
       operation: OpenCodeManualCompaction,
@@ -524,6 +833,7 @@ export function makeOpenCodeAdapter(
       if (context.manualCompaction !== operation || (yield* Ref.get(context.stopped))) return;
       delete context.manualCompaction;
       context.activeTurnId = undefined;
+      yield* settleReasoningBlocks(context, state === "completed" ? "completed" : "failed");
       const message =
         state === "failed"
           ? "OpenCode compaction failed. Try again when the provider is available."
@@ -562,6 +872,42 @@ export function makeOpenCodeAdapter(
       });
     });
 
+    const settleInterruptedTurn = Effect.fn("settleInterruptedTurn")(function* (
+      context: OpenCodeSessionContext,
+      turnId: TurnId,
+    ) {
+      if (
+        context.activeTurnId !== turnId ||
+        sessions.get(context.session.threadId) !== context ||
+        (yield* Ref.get(context.stopped))
+      )
+        return;
+      context.interruption ??= { turnId, nativeIdleObserved: false };
+      const compaction = context.manualCompaction;
+      if (compaction) {
+        yield* finishManualCompaction(context, compaction, "interrupted");
+        compaction.controller.abort();
+        return;
+      }
+      // Claim this terminal edge before any timer joins or event publication.
+      // A native notification and the HTTP abort receipt may race; neither may
+      // publish twice or clear a newer turn admitted during asynchronous work.
+      context.activeTurnId = undefined;
+      context.activeAgent = undefined;
+      context.activeVariant = undefined;
+      yield* updateProviderSession(
+        context,
+        { status: "ready" },
+        { clearActiveTurnId: true, clearLastError: true },
+      );
+      yield* settleReasoningBlocks(context, "failed");
+      yield* emit({
+        ...(yield* buildEventBase({ threadId: context.session.threadId, turnId })),
+        type: "turn.aborted",
+        payload: { reason: "OpenCode generation was interrupted." },
+      });
+    });
+
     const writeNativeEvent = (
       threadId: ThreadId,
       event: {
@@ -589,7 +935,8 @@ export function makeOpenCodeAdapter(
         return;
       }
       const turnId = context.activeTurnId;
-      sessions.delete(context.session.threadId);
+      yield* settleReasoningBlocks(context, "failed");
+      yield* updateProviderSession(context, { status: "closed" }, { clearActiveTurnId: true });
       // Emit lifecycle events BEFORE tearing down the scope. Both call sites
       // run this inside a fiber forked via `Effect.forkIn(context.sessionScope)`;
       // closing that scope triggers the fiber-interrupt finalizer, so any
@@ -617,13 +964,19 @@ export function makeOpenCodeAdapter(
           exitKind: "error",
         },
       }).pipe(Effect.ignore);
-      // Inline the teardown that `stopOpenCodeContext` would do; we can't
-      // delegate to it because our `getAndSet` above already flipped the
-      // one-shot guard, so the call would no-op.
-      yield* runOpenCodeSdk("session.abort", () =>
-        context.client.session.abort({ sessionID: context.openCodeSessionId }),
-      ).pipe(Effect.ignore({ log: true }));
-      yield* Scope.close(context.sessionScope, Exit.void);
+      // Cleanup belongs to the adapter, outside the session scope whose
+      // finalizers interrupt this watcher. Keep the retiring context findable
+      // until native abort and close finish, so resume can join that exact work.
+      yield* closeOpenCodeContext(context).pipe(
+        Effect.onExit((exit) => Deferred.done(context.retirementDone, exit).pipe(Effect.asVoid)),
+        Effect.tap(() =>
+          Effect.sync(() => {
+            if (sessions.get(context.session.threadId) === context)
+              sessions.delete(context.session.threadId);
+          }),
+        ),
+        Effect.forkIn(adapterScope),
+      );
     });
 
     /** Emit content.delta and item.completed events for an assistant text part. */
@@ -668,6 +1021,10 @@ export function makeOpenCodeAdapter(
         });
       }
 
+      if (part.type === "reasoning") {
+        yield* observeReasoningPart(context, part, latestText, turnId);
+      }
+
       if (
         part.type === "text" &&
         part.time?.end !== undefined &&
@@ -693,6 +1050,31 @@ export function makeOpenCodeAdapter(
       }
     });
 
+    const emitUsageAccounting = (
+      context: OpenCodeSessionContext,
+      snapshot: UsageAccountingSnapshot,
+    ) =>
+      buildEventBase({ threadId: context.session.threadId, turnId: context.activeTurnId }).pipe(
+        Effect.flatMap((base) =>
+          emit({
+            ...base,
+            type: "thread.usage-accounting.updated",
+            payload: snapshot,
+          }),
+        ),
+      );
+
+    const emitContextUsage = (context: OpenCodeSessionContext, usage: ThreadTokenUsageSnapshot) =>
+      buildEventBase({ threadId: context.session.threadId, turnId: context.activeTurnId }).pipe(
+        Effect.flatMap((base) =>
+          emit({
+            ...base,
+            type: "thread.token-usage.updated",
+            payload: { usage },
+          }),
+        ),
+      );
+
     const handleSubscribedEvent = Effect.fn("handleSubscribedEvent")(function* (
       context: OpenCodeSessionContext,
       event: OpenCodeSubscribedEvent,
@@ -712,12 +1094,29 @@ export function makeOpenCodeAdapter(
           providerThreadId: context.openCodeSessionId,
           type: event.type,
           ...(turnId ? { turnId } : {}),
-          payload: event,
+          payload:
+            event.type === "session.error"
+              ? {
+                  type: event.type,
+                  properties: {
+                    sessionID: context.openCodeSessionId,
+                    message: sessionErrorMessage(event.properties.error),
+                  },
+                }
+              : event.type === "session.status" && event.properties.status.type === "retry"
+                ? {
+                    type: event.type,
+                    properties: { sessionID: context.openCodeSessionId, status: "retry" },
+                  }
+                : event,
         },
       });
 
       switch (event.type) {
         case "message.updated": {
+          const usage = context.usage.observeMessage(event.properties.info);
+          for (const snapshot of usage.accounting) yield* emitUsageAccounting(context, snapshot);
+          if (usage.context) yield* emitContextUsage(context, usage.context);
           context.messageRoleById.set(event.properties.info.id, event.properties.info.role);
           if (event.properties.info.role === "assistant") {
             for (const part of context.partById.values()) {
@@ -764,6 +1163,14 @@ export function makeOpenCodeAdapter(
               text: nextText,
             });
           }
+          if (existingPart.type === "reasoning") {
+            yield* observeReasoningPart(
+              context,
+              { ...existingPart, text: nextText },
+              nextText,
+              turnId,
+            );
+          }
           yield* emit({
             ...(yield* buildEventBase({
               threadId: context.session.threadId,
@@ -782,6 +1189,10 @@ export function makeOpenCodeAdapter(
 
         case "message.part.updated": {
           const part = event.properties.part;
+          if (part.type === "step-finish") {
+            const snapshot = context.usage.observeStep(part);
+            if (snapshot) yield* emitUsageAccounting(context, snapshot);
+          }
           context.partById.set(part.id, part);
           const messageRole = messageRoleForPart(context, part);
 
@@ -890,10 +1301,13 @@ export function makeOpenCodeAdapter(
         case "question.replied": {
           const request = context.pendingQuestions.get(event.properties.requestID);
           context.pendingQuestions.delete(event.properties.requestID);
+          context.claimedQuestionResponses.delete(event.properties.requestID);
           const answers = Object.fromEntries(
             (request?.questions ?? []).map((question, index) => [
               openCodeQuestionId(index, question),
-              event.properties.answers[index]?.join(", ") ?? "",
+              event.properties.answers[index]?.length === 1
+                ? event.properties.answers[index]![0]!
+                : [...(event.properties.answers[index] ?? [])],
             ]),
           );
           yield* emit({
@@ -911,6 +1325,7 @@ export function makeOpenCodeAdapter(
 
         case "question.rejected": {
           context.pendingQuestions.delete(event.properties.requestID);
+          context.claimedQuestionResponses.delete(event.properties.requestID);
           yield* emit({
             ...(yield* buildEventBase({
               threadId: context.session.threadId,
@@ -926,6 +1341,18 @@ export function makeOpenCodeAdapter(
 
         case "session.status": {
           if (event.properties.status.type === "busy") {
+            // SDK 1.18.3 / upstream 127bdb30: processor cancellation publishes
+            // MessageAbortedError + idle, and the runner may publish idle again
+            // before the abort HTTP response. SSE can lag that response and the
+            // next local send. Only idle followed by a new busy edge retires
+            // the old cancellation witness; an old queued busy is insufficient.
+            if (
+              context.interruption?.nativeIdleObserved &&
+              turnId !== context.interruption.turnId
+            ) {
+              delete context.interruption;
+            }
+            if (!turnId) break;
             yield* updateProviderSession(context, {
               status: "running",
               activeTurnId: turnId,
@@ -937,19 +1364,26 @@ export function makeOpenCodeAdapter(
               ...(yield* buildEventBase({
                 threadId: context.session.threadId,
                 turnId,
-                raw: event,
               })),
               type: "runtime.warning",
               payload: {
-                message: event.properties.status.message,
-                detail: event.properties.status,
+                message: "OpenCode is retrying the current request.",
               },
             });
             break;
           }
 
+          if (event.properties.status.type === "idle" && context.interruption) {
+            context.interruption.nativeIdleObserved = true;
+            if (!context.manualCompaction) {
+              yield* settleInterruptedTurn(context, context.interruption.turnId);
+            }
+            break;
+          }
+
           if (event.properties.status.type === "idle" && turnId && !context.manualCompaction) {
             context.activeTurnId = undefined;
+            yield* settleReasoningBlocks(context, "completed");
             yield* updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
             yield* emit({
               ...(yield* buildEventBase({
@@ -967,6 +1401,14 @@ export function makeOpenCodeAdapter(
         }
 
         case "session.error": {
+          // OpenCode reports ordinary cancellation through the error channel.
+          // Match only the typed native discriminant, never upstream prose or
+          // the mere fact that Stop is in flight. Other errors remain failures.
+          if (event.properties.error?.name === "MessageAbortedError") {
+            const interruptedTurnId = context.interruption?.turnId ?? context.activeTurnId;
+            if (interruptedTurnId) yield* settleInterruptedTurn(context, interruptedTurnId);
+            break;
+          }
           if (context.manualCompaction) {
             const operation = context.manualCompaction;
             operation.controller.abort();
@@ -976,6 +1418,7 @@ export function makeOpenCodeAdapter(
           const message = sessionErrorMessage(event.properties.error);
           const activeTurnId = context.activeTurnId;
           context.activeTurnId = undefined;
+          yield* settleReasoningBlocks(context, "failed");
           yield* updateProviderSession(
             context,
             {
@@ -989,7 +1432,6 @@ export function makeOpenCodeAdapter(
               ...(yield* buildEventBase({
                 threadId: context.session.threadId,
                 turnId: activeTurnId,
-                raw: event,
               })),
               type: "turn.completed",
               payload: {
@@ -1001,13 +1443,11 @@ export function makeOpenCodeAdapter(
           yield* emit({
             ...(yield* buildEventBase({
               threadId: context.session.threadId,
-              raw: event,
             })),
             type: "runtime.error",
             payload: {
               message,
               class: "provider_error",
-              detail: event.properties.error,
             },
           });
           break;
@@ -1056,12 +1496,12 @@ export function makeOpenCodeAdapter(
             if (eventsAbortController.signal.aborted || (yield* Ref.get(context.stopped))) {
               return;
             }
-            if (Exit.isFailure(exit)) {
-              yield* emitUnexpectedExit(
-                context,
-                openCodeRuntimeErrorDetail(Cause.squash(exit.cause)),
-              );
-            }
+            yield* emitUnexpectedExit(
+              context,
+              Exit.isFailure(exit)
+                ? "OpenCode event stream failed. Reconnect to resume the saved conversation."
+                : "OpenCode event stream ended unexpectedly. Reconnect to resume the saved conversation.",
+            );
           }),
         ),
         Effect.forkIn(context.sessionScope),
@@ -1082,21 +1522,50 @@ export function makeOpenCodeAdapter(
       }
     });
 
-    const startSession: OpenCodeAdapterShape["startSession"] = Effect.fn("startSession")(
+    const startSessionUnlocked: OpenCodeAdapterShape["startSession"] = Effect.fn("startSession")(
       function* (input) {
         const binaryPath = openCodeSettings.binaryPath;
         const serverUrl = openCodeSettings.serverUrl;
         const serverPassword = openCodeSettings.serverPassword;
         const directory = input.cwd ?? serverConfig.cwd;
+        const resume =
+          input.resumeCursor == null
+            ? undefined
+            : yield* decodeOpenCodeResume(input.resumeCursor).pipe(
+                Effect.mapError(
+                  () =>
+                    new ProviderAdapterValidationError({
+                      provider: PROVIDER,
+                      operation: "startSession",
+                      issue:
+                        "The saved OpenCode session identity is invalid. No replacement session was created.",
+                    }),
+                ),
+              );
+        const resumeServerUrl = serverUrl?.trim() || null;
+        if (
+          resume &&
+          (resume.threadId !== input.threadId ||
+            resume.instanceId !== boundInstanceId ||
+            resume.directory !== directory ||
+            resume.serverUrl !== resumeServerUrl)
+        ) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue:
+              "The saved OpenCode session belongs to a different chat, provider instance, server or working directory. No replacement session was created.",
+          });
+        }
         const existing = sessions.get(input.threadId);
         if (existing) {
           yield* stopOpenCodeContext(existing);
           sessions.delete(input.threadId);
         }
 
-        const started = yield* Effect.gen(function* () {
-          const sessionScope = yield* Scope.make();
-          const startedExit = yield* Effect.exit(
+        const started = yield* Effect.acquireUseRelease(
+          Scope.make(),
+          (sessionScope) =>
             Effect.gen(function* () {
               // The runtime binds the server's lifetime to the Scope.Scope
               // we provide below — closing `sessionScope` kills the child
@@ -1124,47 +1593,110 @@ export function makeOpenCodeAdapter(
                 directory,
                 ...(server.external && serverPassword ? { serverPassword } : {}),
               });
-              const openCodeSession = yield* runOpenCodeSdk("session.create", () =>
-                client.session.create({
-                  title: `Cafe Code ${input.threadId}`,
-                  permission: buildOpenCodePermissionRules(input.runtimeMode),
-                }),
-              );
+              // OpenCode persists native messages independently of its serve
+              // process. Reopen the exact id with the pinned v2 compatibility
+              // API; a missing/unreachable session must not silently lose history.
+              // Reviewed against SDK 1.18.3 and upstream 127bdb30784d508cc556c71a0f32b508a3061517.
+              const permission = buildOpenCodePermissionRules(input.runtimeMode);
+              let openCodeSession = resume
+                ? yield* runOpenCodeResumeSdk("session.get", (signal) =>
+                    client.session.get({ sessionID: resume.sessionId, directory }, { signal }),
+                  )
+                : yield* runOpenCodeSdk("session.create", (signal) =>
+                    client.session.create(
+                      {
+                        title: `Cafe Code ${input.threadId}`,
+                        permission,
+                      },
+                      { signal },
+                    ),
+                  );
               if (!openCodeSession.data) {
                 return yield* new OpenCodeRuntimeError({
-                  operation: "session.create",
-                  detail: "OpenCode session.create returned no session payload.",
+                  operation: resume ? "session.get" : "session.create",
+                  detail: resume
+                    ? "The saved OpenCode session is unavailable. No replacement session was created."
+                    : "OpenCode session.create returned no session payload.",
                 });
               }
+              if (resume) {
+                if (
+                  openCodeSession.data.id !== resume.sessionId ||
+                  openCodeSession.data.directory !== directory ||
+                  openCodeSession.data.parentID !== undefined
+                ) {
+                  return yield* new OpenCodeRuntimeError({
+                    operation: "session.get",
+                    detail:
+                      "OpenCode returned a different session or working directory. No replacement session was created.",
+                  });
+                }
+                const status = yield* runOpenCodeResumeSdk("session.status", (signal) =>
+                  client.session.status({ directory }, { signal }),
+                );
+                // Native idle entries are removed from the status map. Busy or
+                // retrying external sessions cannot admit another Cafe owner.
+                const nativeStatus = status.data?.[resume.sessionId];
+                if (!status.data || (nativeStatus !== undefined && nativeStatus?.type !== "idle")) {
+                  return yield* new OpenCodeRuntimeError({
+                    operation: "session.status",
+                    detail:
+                      "The saved OpenCode session is not idle. Wait for its current work before retrying.",
+                  });
+                }
+                if (!hasPermissionSuffix(openCodeSession.data.permission, permission)) {
+                  openCodeSession = yield* runOpenCodeResumeSdk("session.update", (signal) =>
+                    client.session.update(
+                      { sessionID: resume.sessionId, directory, permission },
+                      { signal },
+                    ),
+                  );
+                  // Native update appends rules and evaluates the last match.
+                  // Verify the final policy, including after a more privileged
+                  // prior session; never echo or replay the saved transcript.
+                  if (
+                    openCodeSession.data?.id !== resume.sessionId ||
+                    openCodeSession.data.directory !== directory ||
+                    !hasPermissionSuffix(openCodeSession.data.permission, permission)
+                  ) {
+                    return yield* new OpenCodeRuntimeError({
+                      operation: "session.update",
+                      detail:
+                        "OpenCode could not confirm this session's current Cafe permission policy. No replacement session was created.",
+                    });
+                  }
+                }
+              }
+              const resumeCursor = yield* decodeOpenCodeResume({
+                schemaVersion: 1,
+                sessionId: openCodeSession.data.id,
+                threadId: input.threadId,
+                instanceId: boundInstanceId,
+                directory,
+                serverUrl: resumeServerUrl,
+              }).pipe(
+                Effect.mapError(
+                  () =>
+                    new OpenCodeRuntimeError({
+                      operation: resume ? "session.get" : "session.create",
+                      detail: "OpenCode returned an invalid session identity.",
+                    }),
+                ),
+              );
               return {
                 sessionScope,
                 server,
                 client,
                 openCodeSession: openCodeSession.data,
+                resumeCursor,
               };
-            }).pipe(Effect.provideService(Scope.Scope, sessionScope)),
-          );
-          if (Exit.isFailure(startedExit)) {
-            yield* Scope.close(sessionScope, Exit.void).pipe(Effect.ignore);
-            return yield* toProcessError(input.threadId, Cause.squash(startedExit.cause));
-          }
-          return startedExit.value;
-        });
-
-        // Guard against a concurrent startSession call that may have raced
-        // and already inserted a session while we were awaiting async work.
-        const raceWinner = sessions.get(input.threadId);
-        if (raceWinner) {
-          // Another call won the race – clean up the session we just created
-          // (including the remote SDK session) and return the existing one.
-          yield* runOpenCodeSdk("session.abort", () =>
-            started.client.session.abort({
-              sessionID: started.openCodeSession.id,
-            }),
-          ).pipe(Effect.ignore);
-          yield* Scope.close(started.sessionScope, Exit.void).pipe(Effect.ignore);
-          return raceWinner.session;
-        }
+            }).pipe(
+              Effect.provideService(Scope.Scope, sessionScope),
+              Effect.mapError((cause) => toProcessError(input.threadId, cause)),
+            ),
+          (sessionScope, exit) =>
+            Exit.isFailure(exit) ? Scope.close(sessionScope, Exit.void) : Effect.void,
+        );
 
         const createdAt = yield* nowIso;
         const session: ProviderSession = {
@@ -1174,7 +1706,9 @@ export function makeOpenCodeAdapter(
           runtimeMode: input.runtimeMode,
           cwd: directory,
           ...(input.modelSelection ? { model: input.modelSelection.model } : {}),
+          ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
           threadId: input.threadId,
+          resumeCursor: started.resumeCursor,
           createdAt,
           updatedAt: createdAt,
         };
@@ -1187,19 +1721,51 @@ export function makeOpenCodeAdapter(
           openCodeSessionId: started.openCodeSession.id,
           pendingPermissions: new Map(),
           pendingQuestions: new Map(),
+          claimedQuestionResponses: new Set(),
           partById: new Map(),
           emittedTextByPartId: new Map(),
           messageRoleById: new Map(),
           completedAssistantPartIds: new Set(),
+          reasoningBlocks: new Map(),
+          retiredReasoningPartIds: new Set(),
           turns: [],
+          usage: makeOpenCodeUsage({
+            instanceId: boundInstanceId,
+            threadId: input.threadId,
+            directory,
+            serverUrl: resumeServerUrl,
+            sessionId: started.openCodeSession.id,
+          }),
           activeTurnId: undefined,
           activeAgent: undefined,
           activeVariant: undefined,
           stopped: yield* Ref.make(false),
+          retirementDone: yield* Deferred.make<void, ProviderAdapterProcessError>(),
           sessionScope: started.sessionScope,
         };
         sessions.set(input.threadId, context);
         yield* startEventPump(context);
+
+        // One optional, scope-owned inventory read supplies the actual model's
+        // context ceiling. It never blocks readiness or repeats on token/part
+        // updates; unavailable metadata leaves a known token count with no
+        // guessed percentage. Cancellation still aborts the exact SDK request.
+        yield* runOpenCodeSdk("provider.list", (signal) =>
+          context.client.provider.list({ directory }, { signal }),
+        ).pipe(
+          Effect.timeoutOption("5 seconds"),
+          Effect.flatMap((result) =>
+            Effect.gen(function* () {
+              if (yield* Ref.get(context.stopped)) return;
+              const usage = Option.isSome(result)
+                ? context.usage.updateLimits(result.value.data)
+                : undefined;
+              if (usage) yield* emitContextUsage(context, usage);
+            }),
+          ),
+          Effect.catch(() => Effect.void),
+          Effect.forkIn(context.sessionScope),
+        );
 
         yield* emit({
           ...(yield* buildEventBase({ threadId: input.threadId })),
@@ -1220,6 +1786,26 @@ export function makeOpenCodeAdapter(
       },
     );
 
+    const startSession: OpenCodeAdapterShape["startSession"] = (input) =>
+      Effect.suspend(() => {
+        // Concurrent resumes target the same native id. A losing startup must
+        // never abort that id and thereby stop the winner's work.
+        if (startingSessions.has(input.threadId)) {
+          return Effect.fail(
+            new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue:
+                "This OpenCode chat is already starting. Wait for its current startup before retrying.",
+            }),
+          );
+        }
+        startingSessions.add(input.threadId);
+        return startSessionUnlocked(input).pipe(
+          Effect.ensuring(Effect.sync(() => startingSessions.delete(input.threadId))),
+        );
+      });
+
     const sendTurn: OpenCodeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
       const context = ensureSessionContext(sessions, input.threadId);
       if (context.manualCompaction) {
@@ -1232,6 +1818,7 @@ export function makeOpenCodeAdapter(
       const turnId = TurnId.make(`opencode-turn-${yield* Random.nextUUIDv4}`);
       const modelSelection =
         input.modelSelection ??
+        context.session.modelSelection ??
         (context.session.model
           ? { instanceId: boundInstanceId, model: context.session.model }
           : undefined);
@@ -1263,6 +1850,17 @@ export function makeOpenCodeAdapter(
           provider: PROVIDER,
           operation: "sendTurn",
           issue: "File attachments require a locally managed OpenCode runtime.",
+        });
+      }
+      if (
+        openCodeSettings.serverUrl.trim().length > 0 &&
+        input.attachments?.some((attachment) => attachment.type === "image")
+      ) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "sendTurn",
+          issue:
+            "Image attachments require a locally managed OpenCode runtime. The configured server cannot read this backend's private image files.",
         });
       }
       const fileManifest = yield* Effect.tryPromise({
@@ -1299,6 +1897,8 @@ export function makeOpenCodeAdapter(
       const agent = getModelSelectionStringOptionValue(modelSelection, "agent");
       const variant = getModelSelectionStringOptionValue(modelSelection, "variant");
 
+      // A turn that never reached a native boundary cannot lend its rows.
+      yield* settleReasoningBlocks(context, "failed");
       context.activeTurnId = turnId;
       context.activeAgent = agent ?? (input.interactionMode === "plan" ? "plan" : undefined);
       context.activeVariant = variant;
@@ -1308,6 +1908,7 @@ export function makeOpenCodeAdapter(
           status: "running",
           activeTurnId: turnId,
           model: modelSelection?.model ?? context.session.model,
+          ...(modelSelection ? { modelSelection } : {}),
         },
         { clearLastError: true },
       );
@@ -1321,14 +1922,17 @@ export function makeOpenCodeAdapter(
         },
       });
 
-      yield* runOpenCodeSdk("session.promptAsync", () =>
-        context.client.session.promptAsync({
-          sessionID: context.openCodeSessionId,
-          model: parsedModel,
-          ...(context.activeAgent ? { agent: context.activeAgent } : {}),
-          ...(context.activeVariant ? { variant: context.activeVariant } : {}),
-          parts: [...(text ? [{ type: "text" as const, text }] : []), ...fileParts],
-        }),
+      yield* runOpenCodeSdk("session.promptAsync", (signal) =>
+        context.client.session.promptAsync(
+          {
+            sessionID: context.openCodeSessionId,
+            model: parsedModel,
+            ...(context.activeAgent ? { agent: context.activeAgent } : {}),
+            ...(context.activeVariant ? { variant: context.activeVariant } : {}),
+            parts: [...(text ? [{ type: "text" as const, text }] : []), ...fileParts],
+          },
+          { signal },
+        ),
       ).pipe(
         Effect.mapError(toRequestError),
         // On failure: clear active-turn state, flip the session back to ready
@@ -1340,6 +1944,7 @@ export function makeOpenCodeAdapter(
             context.activeTurnId = undefined;
             context.activeAgent = undefined;
             context.activeVariant = undefined;
+            yield* settleReasoningBlocks(context, "failed");
             yield* updateProviderSession(
               context,
               {
@@ -1366,6 +1971,7 @@ export function makeOpenCodeAdapter(
       return {
         threadId: input.threadId,
         turnId,
+        resumeCursor: context.session.resumeCursor,
       };
     });
 
@@ -1456,26 +2062,40 @@ export function makeOpenCodeAdapter(
       function* (threadId, turnId) {
         const context = ensureSessionContext(sessions, threadId);
         const compaction = context.manualCompaction;
-        yield* runOpenCodeSdk("session.abort", () =>
-          context.client.session.abort({ sessionID: context.openCodeSessionId }),
-        ).pipe(Effect.mapError(toRequestError));
-        if (compaction) {
-          yield* finishManualCompaction(context, compaction, "interrupted");
-          compaction.controller.abort();
-          return;
-        }
-        if (turnId ?? context.activeTurnId) {
-          yield* emit({
-            ...(yield* buildEventBase({
-              threadId,
-              turnId: turnId ?? context.activeTurnId,
-            })),
-            type: "turn.aborted",
-            payload: {
-              reason: "Interrupted by user.",
-            },
+        const activeTurnId = context.activeTurnId;
+        if (turnId !== undefined && turnId !== activeTurnId) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "interruptTurn",
+            issue: "This Stop request no longer belongs to the active OpenCode turn.",
           });
         }
+        const interruptedTurnId = activeTurnId ?? compaction?.turnId;
+        if (!interruptedTurnId) return;
+        const interruption: OpenCodeInterruption = {
+          turnId: interruptedTurnId,
+          nativeIdleObserved: false,
+        };
+        context.interruption = interruption;
+        yield* runOpenCodeSdk("session.abort", (signal) =>
+          context.client.session.abort({ sessionID: context.openCodeSessionId }, { signal }),
+        ).pipe(
+          Effect.mapError(toRequestError),
+          Effect.tapError(() =>
+            Effect.sync(() => {
+              // A rejected request alone proves no cancellation. Native evidence
+              // that already settled this turn must retain its echo fence.
+              if (
+                context.interruption === interruption &&
+                context.activeTurnId === interruptedTurnId
+              ) {
+                delete context.interruption;
+              }
+            }),
+          ),
+        );
+        // Native cancellation/idle or replacement may already have settled it.
+        yield* settleInterruptedTurn(context, interruptedTurnId);
       },
     );
 
@@ -1512,12 +2132,39 @@ export function makeOpenCodeAdapter(
         });
       }
 
-      yield* runOpenCodeSdk("question.reply", () =>
-        context.client.question.reply({
-          requestID: requestId,
-          answers: toOpenCodeQuestionAnswers(request, answers),
-        }),
+      // Complete answer conversion before reserving this one-use native
+      // action. No asynchronous work separates the claim check from insertion.
+      const nativeAnswers = toOpenCodeQuestionAnswers(request, answers);
+      if (context.claimedQuestionResponses.has(requestId))
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "question.reply",
+          detail:
+            "The OpenCode question response is already submitted or awaiting confirmation. Review the pending question before retrying.",
+        });
+      context.claimedQuestionResponses.add(requestId);
+      // Keep the claim on transport failure or interruption: the server may
+      // already have accepted the answer. SSE remains authoritative for the
+      // pending card and releases the exact claim after a terminal observation.
+      const acknowledgement = yield* runOpenCodeSdk("question.reply", (signal) =>
+        context.client.question.reply(
+          {
+            requestID: requestId,
+            answers: nativeAnswers,
+          },
+          { signal },
+        ),
       ).pipe(Effect.mapError(toRequestError));
+      // The reviewed SDK contract is a boolean success body. A resolved HTTP
+      // request alone (false/missing data included) cannot prove this caller
+      // won the native question; keep its one-use claim on this uncertainty.
+      if (acknowledgement.data !== true)
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "question.reply",
+          detail:
+            "OpenCode did not confirm the question response. Review the pending question before retrying.",
+        });
     });
 
     const stopSession: OpenCodeAdapterShape["stopSession"] = Effect.fn("stopSession")(
@@ -1529,20 +2176,21 @@ export function makeOpenCodeAdapter(
             threadId,
           });
         }
-        const stopped = yield* stopOpenCodeContext(context);
-        sessions.delete(threadId);
-        if (!stopped) {
-          return;
-        }
-        yield* emit({
-          ...(yield* buildEventBase({ threadId })),
-          type: "session.exited",
-          payload: {
-            reason: "Session stopped.",
-            recoverable: false,
-            exitKind: "graceful",
-          },
-        });
+        yield* stopOpenCodeContext(
+          context,
+          Effect.gen(function* () {
+            yield* emit({
+              ...(yield* buildEventBase({ threadId })),
+              type: "session.exited",
+              payload: {
+                reason: "Session stopped.",
+                recoverable: false,
+                exitKind: "graceful",
+              },
+            });
+          }),
+        );
+        if (sessions.get(threadId) === context) sessions.delete(threadId);
       },
     );
 
@@ -1603,16 +2251,19 @@ export function makeOpenCodeAdapter(
     const stopAll: OpenCodeAdapterShape["stopAll"] = () =>
       Effect.gen(function* () {
         const contexts = [...sessions.values()];
-        sessions.clear();
-        // `stopOpenCodeContext` is typed as never-failing — SDK aborts are
-        // already `Effect.ignore`'d inside it. `ignoreCause` here also
-        // swallows defects from throwing finalizers so one bad close can't
+        // Retiring entries remain findable until native close finishes, so
+        // a concurrent reopen joins them. `ignoreCause` also swallows
+        // defects from throwing finalizers so one bad close can't
         // interrupt the sibling fibers. Same pattern as the layer finalizer.
         yield* Effect.forEach(
           contexts,
           (context) => Effect.ignoreCause(stopOpenCodeContext(context)),
           { concurrency: "unbounded", discard: true },
         );
+        for (const context of contexts) {
+          if (sessions.get(context.session.threadId) === context)
+            sessions.delete(context.session.threadId);
+        }
       });
 
     return {

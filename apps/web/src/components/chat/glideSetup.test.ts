@@ -55,7 +55,8 @@ describe("Glide permission setup policy", () => {
         status: status({ accessibility: true, screenRecording: true }),
       }),
     ).toBe("toggle");
-    expect(glideClickIntent({ error: true, enabled: true, status: status() })).toBe("refresh");
+    expect(glideClickIntent({ error: true, enabled: true, status: status() })).toBe("toggle");
+    expect(glideClickIntent({ error: true, enabled: false, status: status() })).toBe("refresh");
   });
 
   it("disables enabling without the desktop helper or Full access, never revocation", () => {

@@ -5,6 +5,7 @@ import serverPackageJson from "../apps/server/package.json" with { type: "json" 
 import desktopRuntimePackageJson from "../packaging/desktop-runtime/package.json" with { type: "json" };
 
 import { copyStagedYarnProject } from "./lib/staged-yarn-project.ts";
+import { DESKTOP_ELECTRON_LANGUAGES, DESKTOP_RUNTIME_FILES } from "./lib/desktop-runtime-files.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
 import { readYarnCatalog, resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
@@ -59,16 +60,16 @@ const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
 export const MANAGED_WINDOWS_NODE_VERSION = REPOSITORY_NODE_VERSION;
 
 // Hashes are reviewed against Node's official versioned SHASUMS256.txt:
-// https://nodejs.org/dist/v24.21.0/SHASUMS256.txt
+// https://nodejs.org/dist/v24.22.1/SHASUMS256.txt
 // The explicit version key binds the canonical pin to a reviewed tuple; SHA256
 // cryptographically verifies those exact archive bytes. A pin-only update must
 // fail rather than silently reuse a previous release's hashes.
 export const MANAGED_WINDOWS_NODE_ARCHIVE_HASHES: Readonly<
   Record<string, Readonly<Record<"x64" | "arm64", string>>>
 > = {
-  "24.21.0": {
-    x64: "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
-    arm64: "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921",
+  "24.22.1": {
+    x64: "d2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5",
+    arm64: "a0c807319fede24c4a0d8f84564c82a619bd313b16b10c007c383c2609e99171",
   },
 };
 
@@ -783,11 +784,6 @@ const stageWindowsManagedRuntime = Effect.fn("stageWindowsManagedRuntime")(funct
     options.verbose,
   );
 
-  const targetDir = path.join(stageResourcesDir, "managed-runtime", "node", `win-${archive.arch}`);
-  yield* fs.remove(targetDir, { recursive: true, force: true }).pipe(Effect.ignore);
-  yield* fs.makeDirectory(path.dirname(targetDir), { recursive: true });
-  yield* fs.copy(extractedRoot, targetDir);
-
   const providersRoot = path.join(
     stageResourcesDir,
     "managed-runtime",
@@ -828,7 +824,7 @@ const stageWindowsManagedRuntime = Effect.fn("stageWindowsManagedRuntime")(funct
   );
 
   yield* Effect.log("[desktop-artifact] Staged Windows managed provider runtime.").pipe(
-    Effect.annotateLogs({ nodeRuntime: targetDir }),
+    Effect.annotateLogs({ nodeRuntime: path.join(contentRoot, "node") }),
   );
 });
 
@@ -960,6 +956,7 @@ export function resolveMacDesktopBuildConfig(
         to: "mac-dictation-target",
       },
       { from: "apps/desktop/resources/mac-glide", to: "mac-glide" },
+      { from: "apps/desktop/resources/mac-keep-awake", to: "mac-keep-awake" },
       ...(["en", "ja", "ko"] as const).map((locale) => ({
         from: `apps/desktop/resources/ui-locales/${locale}.lproj`,
         to: `${locale}.lproj`,
@@ -1058,6 +1055,8 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     appId: "com.cafeai.cafecode",
     productName: resolveDesktopProductName(version),
     artifactName: "Cafe-Code-${version}-${arch}.${ext}",
+    files: DESKTOP_RUNTIME_FILES,
+    electronLanguages: DESKTOP_ELECTRON_LANGUAGES,
     directories: {
       buildResources: "apps/desktop/resources",
     },
@@ -1274,6 +1273,20 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
           options.arch,
           "--output",
           path.join(stageResourcesDir, "mac-glide"),
+          "--force",
+        ],
+        { cwd: repoRoot, ...commandOutputOptions(options.verbose), shell: false },
+      ),
+    );
+    yield* runCommand(
+      ChildProcess.make(
+        process.execPath,
+        [
+          path.join(repoRoot, "apps/desktop/scripts/build-mac-keep-awake-helper.mjs"),
+          "--arch",
+          options.arch,
+          "--output",
+          path.join(stageResourcesDir, "mac-keep-awake"),
           "--force",
         ],
         { cwd: repoRoot, ...commandOutputOptions(options.verbose), shell: false },

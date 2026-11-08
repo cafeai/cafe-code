@@ -701,6 +701,134 @@ describe("resolveThreadStatusPill", () => {
       }),
     ).toMatchObject({ label: "Completed", pulse: false });
   });
+
+  it.each([
+    { reason: "restart failure", lastError: "The provider process ended during an active turn." },
+    { reason: "other interruption failure", lastError: "Synthetic provider failure" },
+  ])("shows failed for an unseen interrupted turn with a $reason", ({ lastError }) => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          interactionMode: "default",
+          latestTurn: { ...makeLatestTurn(), state: "interrupted" },
+          lastVisitedAt: "2026-03-09T10:04:00.000Z",
+          session: {
+            ...baseThread.session,
+            status: "ready",
+            orchestrationStatus: "interrupted",
+            lastError,
+          },
+        },
+      }),
+    ).toMatchObject({ label: "Failed", dotClass: "bg-status-error", pulse: false });
+  });
+
+  it.each([undefined, ""])(
+    "keeps an ordinary interrupted turn without an error (%s) from showing failed",
+    (lastError) => {
+      expect(
+        resolveThreadStatusPill({
+          thread: {
+            ...baseThread,
+            interactionMode: "default",
+            latestTurn: { ...makeLatestTurn(), state: "interrupted" },
+            session: {
+              ...baseThread.session,
+              status: "ready",
+              orchestrationStatus: "interrupted",
+              ...(lastError !== undefined ? { lastError } : {}),
+            },
+          },
+        }),
+      ).toMatchObject({ label: "Completed", dotClass: "bg-status-done", pulse: false });
+    },
+  );
+
+  it("clears an interrupted failure indicator once the chat is viewed", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          interactionMode: "default",
+          latestTurn: { ...makeLatestTurn(), state: "interrupted" },
+          lastVisitedAt: "2026-03-09T10:05:00.000Z",
+          session: {
+            ...baseThread.session,
+            status: "ready",
+            orchestrationStatus: "interrupted",
+            lastError: "The provider process ended during an active turn.",
+          },
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it("does not attach a session error to a successfully completed turn", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...baseThread,
+          interactionMode: "default",
+          latestTurn: makeLatestTurn(),
+          session: {
+            ...baseThread.session,
+            status: "ready",
+            orchestrationStatus: "ready",
+            lastError: "An unrelated session error",
+          },
+        },
+      }),
+    ).toMatchObject({ label: "Completed", dotClass: "bg-status-done", pulse: false });
+  });
+
+  const settledThread = {
+    ...baseThread,
+    interactionMode: "default" as const,
+    latestTurn: makeLatestTurn(),
+    session: {
+      ...baseThread.session,
+      status: "ready" as const,
+      orchestrationStatus: "ready" as const,
+    },
+  };
+
+  it("shows a scheduled clock instead of an unseen completion", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: { ...settledThread, scheduledFollowUpAt: "2026-03-10T09:00:00.000Z" },
+      }),
+    ).toMatchObject({ label: "Scheduled", clock: true, pulse: false });
+  });
+
+  it("shows a scheduled clock for a viewed, otherwise idle chat", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...settledThread,
+          lastVisitedAt: "2026-03-09T10:05:00.000Z",
+          scheduledFollowUpAt: "2026-03-10T09:00:00.000Z",
+        },
+      }),
+    ).toMatchObject({ label: "Scheduled" });
+  });
+
+  it("keeps working and unseen failure ahead of a schedule", () => {
+    expect(
+      resolveThreadStatusPill({
+        thread: { ...baseThread, scheduledFollowUpAt: "2026-03-10T09:00:00.000Z" },
+      }),
+    ).toMatchObject({ label: "Working" });
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...settledThread,
+          latestTurn: { ...makeLatestTurn(), state: "error" },
+          scheduledFollowUpAt: "2026-03-10T09:00:00.000Z",
+        },
+      }),
+    ).toMatchObject({ label: "Failed" });
+  });
 });
 
 describe("resolveProjectStatusIndicator", () => {

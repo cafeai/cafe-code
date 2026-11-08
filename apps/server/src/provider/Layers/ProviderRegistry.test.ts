@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import type { AccountInfo } from "@anthropic-ai/claude-agent-sdk";
 import { describe, it, assert } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
@@ -75,7 +76,10 @@ import type { ProviderInstance } from "../ProviderDriver.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import {
+  makeManualOnlyProviderMaintenanceCapabilities,
+  makeProviderMaintenanceCapabilities,
+} from "../providerMaintenance.ts";
 import { parseCodexRateLimitUpdate } from "../codexRateLimits.ts";
 import { supportsSubagentConcurrency } from "../Drivers/SubagentConcurrency.ts";
 
@@ -163,6 +167,8 @@ type TestClaudeCapabilities = {
   readonly email: string | undefined;
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
+  readonly apiKeySource?: string;
+  readonly apiProvider?: AccountInfo["apiProvider"];
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
 };
 
@@ -171,7 +177,7 @@ function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
     Effect.succeed({
       email: undefined,
       subscriptionType: undefined,
-      tokenSource: undefined,
+      tokenSource: "claude.ai",
       slashCommands: [],
       ...overrides,
     });
@@ -625,7 +631,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         Effect.gen(function* () {
           const killCalls = yield* Ref.make(0);
           const statusFiber = yield* checkCodexProviderStatus(
-            defaultCodexSettings,
+            { ...defaultCodexSettings, binaryPath: "/cafecode-fixture-missing/codex.exe" },
             undefined,
             isolatedCodexProbeEnvironment,
           ).pipe(Effect.provide(hangingScopedSpawnerLayer(killCalls)), Effect.forkChild);
@@ -804,6 +810,84 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               }).pipe(Effect.provide(runtime));
             }),
           ),
+      );
+
+      it.effect("does not expose update authority for a driver-mismatched instance request", () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const snapshot = catalogProvider();
+            const capabilities = makeProviderMaintenanceCapabilities({
+              provider: snapshot.driver,
+              packageName: "@openai/codex",
+              updateExecutable: "npm",
+              updateArgs: ["install", "-g", "@openai/codex@latest"],
+              updateLockKey: "npm-global",
+            });
+            let capabilityReads = 0;
+            const instance: ProviderInstance = {
+              instanceId: snapshot.instanceId,
+              driverKind: snapshot.driver,
+              continuationIdentity: {
+                driverKind: snapshot.driver,
+                continuationKey: "codex:instance:codex",
+              },
+              displayName: undefined,
+              enabled: true,
+              snapshot: {
+                get maintenanceCapabilities() {
+                  capabilityReads += 1;
+                  return capabilities;
+                },
+                getSnapshot: Effect.succeed(snapshot),
+                refresh: Effect.succeed(snapshot),
+                streamChanges: Stream.empty,
+              },
+              adapter: {} as ProviderInstance["adapter"],
+              textGeneration: {} as ProviderInstance["textGeneration"],
+            };
+            const instanceLayer = Layer.succeed(ProviderInstanceRegistry, {
+              getInstance: (id) =>
+                Effect.succeed(id === instance.instanceId ? instance : undefined),
+              listInstances: Effect.succeed([instance]),
+              listUnavailable: Effect.succeed([]),
+              streamChanges: Stream.empty,
+              subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
+            });
+            const runtime = yield* Layer.build(
+              ProviderRegistryLive.pipe(
+                Layer.provideMerge(instanceLayer),
+                Layer.provideMerge(
+                  ServerConfig.layerTest(process.cwd(), {
+                    prefix: "cafe-maintenance-driver-binding-",
+                  }),
+                ),
+                Layer.provideMerge(NodeServices.layer),
+              ),
+            );
+            yield* Effect.gen(function* () {
+              const registry = yield* ProviderRegistry;
+              const before = capabilityReads;
+              const refused = yield* registry.getProviderMaintenanceCapabilitiesForInstance(
+                instance.instanceId,
+                ProviderDriverKind.make("claudeAgent"),
+              );
+              assert.strictEqual(refused.update, null);
+              assert.strictEqual(capabilityReads, before);
+              const absent = yield* registry.getProviderMaintenanceCapabilitiesForInstance(
+                ProviderInstanceId.make("missing-maintenance-owner"),
+                snapshot.driver,
+              );
+              assert.strictEqual(absent.update, null);
+              assert.strictEqual(capabilityReads, before);
+              const accepted = yield* registry.getProviderMaintenanceCapabilitiesForInstance(
+                instance.instanceId,
+                snapshot.driver,
+              );
+              assert.deepStrictEqual(accepted, capabilities);
+              assert.strictEqual(capabilityReads, before + 1);
+            }).pipe(Effect.provide(runtime));
+          }),
+        ),
       );
 
       for (const includeMaintenance of [false, true]) {
@@ -3304,7 +3388,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 code: 1,
               }));
               const status = yield* checkCodexCliProviderStatus(
-                defaultCodexSettings,
+                { ...defaultCodexSettings, binaryPath: "/cafecode-fixture-missing/codex.exe" },
                 isolatedCodexProbeEnvironment,
               ).pipe(Effect.provide(layer));
 
@@ -3341,7 +3425,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             "Unknown launcher failure with private-secret-sentinel at /private/user/provider-install; Node.js v25.9.0",
           ]) {
             const status = yield* checkCodexCliProviderStatus(
-              defaultCodexSettings,
+              { ...defaultCodexSettings, binaryPath: "/cafecode-fixture-missing/codex.exe" },
               isolatedCodexProbeEnvironment,
             ).pipe(
               Effect.provide(mockSpawnerLayer(() => ({ stdout: detail, stderr: detail, code: 1 }))),
@@ -3360,7 +3444,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       it.effect("does not expose a failed version probe's spawn exception", () =>
         Effect.gen(function* () {
           const status = yield* checkCodexCliProviderStatus(
-            defaultCodexSettings,
+            { ...defaultCodexSettings, binaryPath: "/cafecode-fixture-missing/codex.exe" },
             isolatedCodexProbeEnvironment,
           ).pipe(
             Effect.provide(
@@ -3421,7 +3505,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         Effect.gen(function* () {
           const probeArgs: string[] = [];
           const status = yield* checkCodexCliProviderStatus(
-            defaultCodexSettings,
+            { ...defaultCodexSettings, binaryPath: "/cafecode-fixture-missing/codex.exe" },
             isolatedCodexProbeEnvironment,
           ).pipe(
             Effect.provide(
@@ -3452,6 +3536,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             [
               "gpt-6-astra",
               "gpt-6.1-sol",
+              "gpt-6.1-terra",
               "gpt-6-sol",
               "gpt-6-luna",
               "gpt-5.6-sol",
@@ -3534,7 +3619,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           yield* fileSystem.chmod(authPath, 0o600);
 
           const status = yield* checkCodexCliProviderStatus(
-            decodeCodexSettings({ homePath }),
+            decodeCodexSettings({ homePath, binaryPath: "/cafecode-fixture-missing/codex.exe" }),
             isolatedCodexProbeEnvironment,
           ).pipe(
             Effect.provide(
@@ -3617,7 +3702,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               throw new Error(`Unexpected subscription probe: ${command}`);
             });
             const status = yield* checkCodexCliProviderStatus(
-              decodeCodexSettings({ homePath }),
+              decodeCodexSettings({ homePath, binaryPath: "/cafecode-fixture-missing/codex.exe" }),
               isolatedCodexProbeEnvironment,
             ).pipe(Effect.provide(layer));
             assert.strictEqual(status.auth.label, testCase.label);
@@ -3646,7 +3731,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               return Response.json({ plan_type: "promax" });
             }) as typeof fetch;
             const status = yield* checkCodexCliProviderStatus(
-              decodeCodexSettings({ homePath }),
+              decodeCodexSettings({ homePath, binaryPath: "/cafecode-fixture-missing/codex.exe" }),
               isolatedCodexProbeEnvironment,
             ).pipe(
               Effect.provide(
@@ -3791,7 +3876,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           }) as typeof fetch;
 
           const status = yield* checkCodexCliProviderStatus(
-            decodeCodexSettings({ homePath }),
+            decodeCodexSettings({ homePath, binaryPath: "/cafecode-fixture-missing/codex.exe" }),
             isolatedCodexProbeEnvironment,
           ).pipe(
             Effect.provide(
@@ -4131,7 +4216,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           );
 
           const status = yield* checkCodexCliProviderStatus(
-            decodeCodexSettings({ homePath }),
+            decodeCodexSettings({ homePath, binaryPath: "/cafecode-fixture-missing/codex.exe" }),
             isolatedCodexProbeEnvironment,
           ).pipe(
             Effect.provide(
@@ -4172,7 +4257,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           });
 
           const status = yield* checkCodexCliProviderStatus(
-            decodeCodexSettings({ homePath }),
+            decodeCodexSettings({ homePath, binaryPath: "/cafecode-fixture-missing/codex.exe" }),
             isolatedCodexProbeEnvironment,
           ).pipe(Effect.provide(layer));
 
@@ -4191,7 +4276,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       it.effect("returns unauthenticated when Codex CLI reports not logged in", () =>
         Effect.gen(function* () {
           const status = yield* checkCodexCliProviderStatus(
-            defaultCodexSettings,
+            { ...defaultCodexSettings, binaryPath: "/cafecode-fixture-missing/codex.exe" },
             isolatedCodexProbeEnvironment,
           ).pipe(
             Effect.provide(
@@ -4308,6 +4393,95 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         ),
       );
 
+      for (const testCase of [
+        {
+          name: "reports signed out from a first-party initialization with no token",
+          capabilities: { tokenSource: "none", apiProvider: "firstParty" as const },
+          status: "error",
+          auth: "unauthenticated",
+        },
+        {
+          name: "does not let cached account labels override an explicit missing token",
+          capabilities: {
+            tokenSource: "none",
+            apiProvider: "firstParty" as const,
+            email: "old-account@example.com",
+            subscriptionType: "maxplan",
+          },
+          status: "error",
+          auth: "unauthenticated",
+        },
+        {
+          name: "leaves authentication unknown when initialization has no account evidence",
+          capabilities: { tokenSource: undefined },
+          status: "warning",
+          auth: "unknown",
+        },
+        {
+          name: "leaves legacy missing-token metadata inconclusive without a backend identity",
+          capabilities: { tokenSource: "none" },
+          status: "warning",
+          auth: "unknown",
+        },
+        {
+          name: "retains legacy account evidence when the native token source is absent",
+          capabilities: { tokenSource: undefined, email: "legacy-account@example.com" },
+          status: "ready",
+          auth: "authenticated",
+        },
+        {
+          name: "accepts a reported API key without an OAuth token",
+          capabilities: {
+            tokenSource: "none",
+            apiKeySource: "user",
+            apiProvider: "firstParty" as const,
+          },
+          status: "ready",
+          auth: "authenticated",
+        },
+        ...(
+          [
+            "bedrock",
+            "vertex",
+            "foundry",
+            "anthropicAws",
+            "anthropicGoogleCloud",
+            "mantle",
+            "gateway",
+          ] as const
+        ).map((apiProvider) => ({
+          name: `does not classify external ${apiProvider} authentication as a missing Claude login`,
+          capabilities: { tokenSource: "none", apiProvider },
+          status: "ready",
+          auth: "unknown",
+        })),
+      ]) {
+        it.effect(testCase.name, () =>
+          Effect.gen(function* () {
+            const status = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities(testCase.capabilities),
+            );
+            assert.strictEqual(status.status, testCase.status);
+            assert.strictEqual(status.auth.status, testCase.auth);
+            if (testCase.auth !== "authenticated") {
+              assert.isUndefined(status.auth.email);
+              assert.isUndefined(status.auth.label);
+            }
+            if (testCase.auth === "unauthenticated") assert.include(status.message, "/login");
+          }).pipe(
+            Effect.provide(
+              mockSpawnerLayer((args) => {
+                // Reuse the existing initialization evidence; no additional
+                // status command or model request belongs to this check.
+                assert.deepEqual(args, ["--version"]);
+                return { stdout: "2.1.318\n", stderr: "", code: 0 };
+              }),
+            ),
+          ),
+        );
+      }
+
       it.effect("reports needs-login when the adapter has observed a Claude auth failure", () =>
         Effect.gen(function* () {
           const status = yield* checkClaudeProviderStatus(
@@ -4330,6 +4504,37 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               const joined = args.join(" ");
               if (joined === "--version") return { stdout: "2.1.288\n", stderr: "", code: 0 };
               throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
+      );
+
+      it.effect("retains a turn auth failure received while initialization is pending", () =>
+        Effect.gen(function* () {
+          const initializing = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const authFailure = yield* Ref.make(false);
+          const pending = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            () =>
+              Deferred.succeed(initializing, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(claudeCapabilities()()),
+              ),
+            undefined,
+            Ref.get(authFailure),
+          ).pipe(Effect.forkChild);
+          yield* Deferred.await(initializing);
+          yield* Ref.set(authFailure, true);
+          yield* Deferred.succeed(release, undefined);
+          const status = yield* Fiber.join(pending);
+          assert.strictEqual(status.status, "error");
+          assert.strictEqual(status.auth.status, "unauthenticated");
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              assert.deepEqual(args, ["--version"]);
+              return { stdout: "2.1.318\n", stderr: "", code: 0 };
             }),
           ),
         ),

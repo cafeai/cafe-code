@@ -10,6 +10,9 @@ Decision authority: Agent implementation choice within the user's request to fix
 the auto-updater bootstrap failure and push the verified repair.
 Supplements: [ownership-safe daemon startup](provider-daemon-migration-startup.md)
 and [Windows native process identity](windows-daemon-process-identity.md).
+Successor: [startup self-retirement](provider-daemon-startup-retirement.md) adds a
+separate capability-qualified POSIX startup path. It does not change this
+decision's installer consent or exact-owner installation requirements.
 
 ## Context
 

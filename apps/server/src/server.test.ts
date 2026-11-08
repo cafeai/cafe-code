@@ -4,6 +4,10 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { webAppIconUrl, webAppManifestHref } from "@cafecode/shared/webAppBranding";
+import type { ClientSettings, SidebarBrandImageAsset } from "@cafecode/contracts/settings";
+import { parseImageHeader } from "./rasterImageHeader.ts";
 import {
   BACKEND_READINESS_CHALLENGE_HEADER,
   BACKEND_READINESS_PROOF_HEADER,
@@ -1981,6 +1985,136 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(makeHttpServerTestLayer())),
   );
 
+  it.effect(
+    "uses private custom artwork from the first shell through Android install metadata",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const staticDir = yield* fs.makeTempDirectoryScoped({
+          prefix: "cafe-custom-web-branding-",
+        });
+        const sourceHtml = yield* fs.readFileString(
+          fileURLToPath(new URL("../../web/index.html", import.meta.url)),
+        );
+        yield* fs.writeFileString(path.join(staticDir, "index.html"), sourceHtml);
+        yield* fs.writeFile(
+          path.join(staticDir, "index.html.br"),
+          brotliCompressSync(Buffer.from("stale bundled artwork")),
+        );
+        for (const locale of ["en", "ja", "ko"] as const) {
+          const basename =
+            locale === "en" ? "manifest.webmanifest" : `manifest.${locale}.webmanifest`;
+          const source = yield* fs.readFileString(
+            fileURLToPath(new URL(`../../web/public/${basename}`, import.meta.url)),
+          );
+          yield* fs.writeFileString(path.join(staticDir, basename), source);
+          yield* fs.writeFile(
+            path.join(staticDir, `${basename}.br`),
+            brotliCompressSync(Buffer.from("stale manifest")),
+          );
+        }
+        let settings: ClientSettings = DEFAULT_CLIENT_SETTINGS;
+        yield* buildAppUnderTest({
+          config: { staticDir },
+          layers: { clientSettings: { getSettings: Effect.sync(() => settings) } },
+        });
+        const cookie = yield* getAuthenticatedSessionCookieHeader();
+        const imageBytes = yield* fs.readFile(
+          fileURLToPath(
+            new URL("../../web/public/app-branding/neutral-v1/favicon-32.png", import.meta.url),
+          ),
+        );
+        const upload = yield* HttpClient.post("/api/branding/sidebar-image", {
+          headers: { cookie, "content-type": "image/png" },
+          body: HttpBody.uint8Array(imageBytes, "image/png"),
+        });
+        assert.equal(upload.status, 200);
+        const asset = ((yield* upload.json) as { sidebarBrandImage: SidebarBrandImageAsset })
+          .sidebarBrandImage;
+        settings = {
+          ...settings,
+          showSidebarMascot: true,
+          sidebarImageSource: "custom",
+          sidebarBrandImage: asset,
+        };
+        const branding = `custom:${asset.id}` as const;
+
+        const anonymous = yield* HttpClient.get("/");
+        const anonymousHtml = yield* anonymous.text;
+        assert.include(anonymousHtml, 'content="neutral"');
+        assert.isFalse(anonymousHtml.includes(asset.id));
+        const shell = yield* HttpClient.get("/deep/link", {
+          headers: { cookie, "accept-encoding": "br" },
+        });
+        const html = yield* shell.text;
+        assert.equal(shell.status, 200);
+        assert.equal(getHeader(shell.headers, "cache-control"), "no-store");
+        assert.equal(getHeader(shell.headers, "content-encoding"), undefined);
+        assert.equal(getHeader(shell.headers, "vary"), "Cookie, Authorization, Accept-Encoding");
+        assert.include(html, `content="${branding}"`);
+        assert.include(html, `src="${webAppIconUrl(branding, "touch-180")}"`);
+        assert.include(html, `href="${webAppManifestHref("en", branding)}"`);
+
+        for (const locale of ["en", "ja", "ko"] as const) {
+          const response = yield* HttpClient.get(webAppManifestHref(locale, branding), {
+            headers: { cookie, "accept-encoding": "br" },
+          });
+          const body = (yield* response.json) as {
+            id: string;
+            start_url: string;
+            scope: string;
+            lang: string;
+            icons: Array<{ src: string; sizes: string; purpose: string }>;
+          };
+          assert.equal(response.status, 200);
+          assert.equal(body.id, "/");
+          assert.equal(body.start_url, "/");
+          assert.equal(body.scope, "/");
+          assert.equal(body.lang, locale);
+          assert.equal(getHeader(response.headers, "cache-control"), "private, no-cache");
+          assert.equal(getHeader(response.headers, "content-encoding"), undefined);
+          assert.equal(body.icons.length, 3);
+          for (const icon of body.icons) {
+            assert.isTrue(icon.src.startsWith("data:image/png;base64,"));
+            const pixels = parseImageHeader(
+              Buffer.from(icon.src.slice("data:image/png;base64,".length), "base64"),
+            );
+            assert.equal(`${pixels?.width}x${pixels?.height}`, icon.sizes);
+          }
+          assert.equal(body.icons[2]?.purpose, "maskable");
+        }
+        const anonymousManifest = yield* HttpClient.get(webAppManifestHref("en", branding));
+        const anonymousManifestText = yield* anonymousManifest.text;
+        assert.include(anonymousManifestText, "/app-branding/neutral-v1/app-192.png");
+        assert.isFalse(anonymousManifestText.includes("data:image"));
+        assert.isFalse(anonymousManifestText.includes(asset.id));
+
+        const iconPath = webAppIconUrl(branding, "app-192");
+        const unauthorized = yield* HttpClient.get(iconPath);
+        assert.equal(unauthorized.status, 401);
+        const icon = yield* HttpClient.get(iconPath, { headers: { cookie } });
+        assert.equal(icon.status, 200);
+        assert.equal(
+          getHeader(icon.headers, "cache-control"),
+          "private, max-age=31536000, immutable",
+        );
+        assert.equal(getHeader(icon.headers, "vary"), "Cookie, Authorization");
+        assert.deepEqual(parseImageHeader(new Uint8Array(yield* icon.arrayBuffer)), {
+          mimeType: "image/png",
+          width: 192,
+          height: 192,
+        });
+        settings = { ...settings, showSidebarMascot: false };
+        const retired = yield* HttpClient.get(iconPath, { headers: { cookie } });
+        assert.equal(retired.status, 404);
+        const hidden = yield* HttpClient.get("/", { headers: { cookie } });
+        const hiddenHtml = yield* hidden.text;
+        assert.include(hiddenHtml, 'content="neutral"');
+        assert.isFalse(hiddenHtml.includes(asset.id));
+      }).pipe(Effect.provide(makeHttpServerTestLayer())),
+  );
+
   it.effect("redirects to dev URL when configured", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest({
@@ -3493,6 +3627,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       let calls = 0;
       let enabled = true;
       let replaceDuringRead = false;
+      let sequence = 0;
+      let disableDuringAssembly = false;
       yield* buildAppUnderTest({
         layers: {
           providerRegistry: {
@@ -3524,12 +3660,21 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           },
           projectionSnapshotQuery: {
             getShellSnapshot: () =>
-              Effect.succeed({
-                ...makeDefaultOrchestrationReadModel(),
-                threads: [],
-                snapshotSequence: 0,
+              Effect.sync(() => {
+                const snapshot = {
+                  ...makeDefaultOrchestrationReadModel(),
+                  threads: [],
+                  snapshotSequence: sequence,
+                };
+                // Another chat commits after every coherent shell transaction.
+                sequence++;
+                if (disableDuringAssembly) {
+                  disableDuringAssembly = false;
+                  enabled = false;
+                }
+                return snapshot;
               }),
-            getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
+            getSnapshotSequence: () => Effect.sync(() => ({ snapshotSequence: sequence })),
           },
         },
       });
@@ -3556,6 +3701,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         );
       assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report }]);
       assert.equal(calls, 1);
+      disableDuringAssembly = true;
+      assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report: null }]);
+      assert.equal(calls, 1);
+      enabled = true;
       assert.deepEqual(
         yield* first(wsUrl, { instanceId: ProviderInstanceId.make("different-account") }),
         [{ report: null }],
@@ -3608,15 +3757,42 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       let present = true;
       let archived = false;
       let sequence = 0;
-      let replaceDuringInventory = false;
+      let replaceDuringInventory: "runtime" | "workspace" | "configuration" | undefined;
       let unrelatedDuringInventory = false;
       let moveDuringAssembly = false;
+      let unrelatedDuringEveryAssembly = false;
+      let replaceDuringAssembly: "runtime" | "workspace" | "configuration" | undefined;
       let currentRuntimeId = runtimeId;
+      let currentWorkspace = cwd;
       let inventoryReads = 0;
       let configuredEnabled = true;
       let environmentChanged = false;
       const quotaChanges = yield* PubSub.unbounded<ProviderRuntimeEvent>();
       const project = makeDefaultOrchestrationReadModel().projects[0]!;
+      const settingsSnapshot = () => ({
+        ...DEFAULT_SERVER_SETTINGS,
+        providerInstances: {
+          [instanceId]: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            // No envelope enabled: exercise the inherited driver flag.
+            config: {
+              ...DEFAULT_SERVER_SETTINGS.providers.claudeAgent,
+              enabled: configuredEnabled,
+            },
+            ...(environmentChanged
+              ? {
+                  environment: [
+                    {
+                      name: "ANTHROPIC_BASE_URL",
+                      value: "https://synthetic.invalid",
+                      sensitive: false,
+                    },
+                  ],
+                }
+              : {}),
+          },
+        },
+      });
       yield* buildAppUnderTest({
         layers: {
           providerService: {
@@ -3626,7 +3802,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 inventoryReads++;
                 if (replaceDuringInventory) {
                   sequence++;
-                  currentRuntimeId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+                  if (replaceDuringInventory === "runtime")
+                    currentRuntimeId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+                  else if (replaceDuringInventory === "workspace")
+                    currentWorkspace = path.join(process.cwd(), "different-quota-worktree");
+                  else environmentChanged = true;
                 }
                 if (unrelatedDuringInventory) sequence++;
                 return [
@@ -3655,70 +3835,57 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             refreshInstance: () => Effect.die("passive quota must not probe providers"),
           },
           serverSettings: {
-            getSettings: Effect.sync(() => ({
-              ...DEFAULT_SERVER_SETTINGS,
-              providerInstances: {
-                [instanceId]: {
-                  driver: ProviderDriverKind.make("claudeAgent"),
-                  // No envelope enabled: exercise the inherited driver flag.
-                  config: {
-                    ...DEFAULT_SERVER_SETTINGS.providers.claudeAgent,
-                    enabled: configuredEnabled,
-                  },
-                  ...(environmentChanged
-                    ? {
-                        environment: [
-                          {
-                            name: "ANTHROPIC_BASE_URL",
-                            value: "https://synthetic.invalid",
-                            sensitive: false,
-                          },
-                        ],
-                      }
-                    : {}),
-                },
-              },
-            })),
+            getSettings: Effect.sync(settingsSnapshot),
           },
           projectionSnapshotQuery: {
             getShellSnapshot: () =>
-              Effect.sync(() => ({
-                snapshotSequence: sequence,
-                projects: [
-                  {
-                    ...project,
-                    workspaceRoot: cwd,
-                    additionalWorkspaceRoots: [],
-                    repositoryIdentity: null,
-                  },
-                ],
-                threads: [
-                  makeDefaultOrchestrationThreadShell({
-                    modelSelection: { instanceId, model: "claude-sonnet-5" },
-                    archivedAt: archived ? now : null,
-                    session: {
-                      threadId: defaultThreadId,
-                      providerName: "claudeAgent",
-                      providerInstanceId: instanceId,
-                      subagentRuntimeId: currentRuntimeId,
-                      status: "ready",
-                      runtimeMode: "full-access",
-                      activeTurnId: null,
-                      lastError: null,
-                      updatedAt: now,
-                    },
-                  }),
-                ],
-                updatedAt: now,
-              })),
-            getSnapshotSequence: () =>
               Effect.sync(() => {
-                if (moveDuringAssembly) {
-                  moveDuringAssembly = false;
+                const snapshot = {
+                  snapshotSequence: sequence,
+                  projects: [
+                    {
+                      ...project,
+                      workspaceRoot: currentWorkspace,
+                      additionalWorkspaceRoots: [],
+                      repositoryIdentity: null,
+                    },
+                  ],
+                  threads: [
+                    makeDefaultOrchestrationThreadShell({
+                      modelSelection: { instanceId, model: "claude-sonnet-5" },
+                      archivedAt: archived ? now : null,
+                      session: {
+                        threadId: defaultThreadId,
+                        providerName: "claudeAgent",
+                        providerInstanceId: instanceId,
+                        subagentRuntimeId: currentRuntimeId,
+                        status: "ready",
+                        runtimeMode: "full-access",
+                        activeTurnId: null,
+                        lastError: null,
+                        updatedAt: now,
+                      },
+                    }),
+                  ],
+                  updatedAt: now,
+                };
+                // One-shot and continuous rows both advance only unrelated
+                // projection metadata after a coherent selected shell.
+                if (moveDuringAssembly || unrelatedDuringEveryAssembly) sequence++;
+                moveDuringAssembly = false;
+                if (replaceDuringAssembly) {
+                  const replacement = replaceDuringAssembly;
+                  replaceDuringAssembly = undefined;
                   sequence++;
+                  if (replacement === "runtime")
+                    currentRuntimeId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+                  else if (replacement === "workspace")
+                    currentWorkspace = path.join(process.cwd(), "different-quota-worktree");
+                  else environmentChanged = true;
                 }
-                return { snapshotSequence: sequence };
+                return snapshot;
               }),
+            getSnapshotSequence: () => Effect.sync(() => ({ snapshotSequence: sequence })),
           },
         },
       });
@@ -3744,17 +3911,34 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       present = false;
       assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
       present = true;
-      replaceDuringInventory = true;
-      assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
-      replaceDuringInventory = false;
-      currentRuntimeId = runtimeId;
-      assert.equal(inventoryReads, 4);
+      for (const replacement of ["runtime", "workspace", "configuration"] as const) {
+        replaceDuringInventory = replacement;
+        assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
+        replaceDuringInventory = undefined;
+        currentRuntimeId = runtimeId;
+        currentWorkspace = cwd;
+        environmentChanged = false;
+      }
+      assert.equal(inventoryReads, 6);
       unrelatedDuringInventory = true;
       assert.deepEqual(yield* first(wsUrl, input), [{ report }]);
       unrelatedDuringInventory = false;
       moveDuringAssembly = true;
       assert.deepEqual(yield* first(wsUrl, input), [{ report }]);
-      assert.equal(inventoryReads, 6);
+      unrelatedDuringEveryAssembly = true;
+      assert.deepEqual(yield* first(wsUrl, input), [{ report }]);
+      unrelatedDuringEveryAssembly = false;
+      assert.equal(inventoryReads, 9);
+      for (const replacement of ["runtime", "workspace", "configuration"] as const) {
+        replaceDuringAssembly = replacement;
+        assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
+        currentRuntimeId = runtimeId;
+        currentWorkspace = cwd;
+        environmentChanged = false;
+      }
+      // A selected binding changing inside authority assembly never admits
+      // an inventory read, even if its invalidation has not been consumed.
+      assert.equal(inventoryReads, 9);
       for (const wrong of [
         { ...input, instanceId: ProviderInstanceId.make("different-account") },
         {
@@ -3765,15 +3949,15 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.deepEqual(yield* first(wsUrl, wrong), [{ report: null }]);
       archived = true;
       assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
-      assert.equal(inventoryReads, 6);
+      assert.equal(inventoryReads, 9);
       archived = false;
       configuredEnabled = false;
       assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
-      assert.equal(inventoryReads, 6);
+      assert.equal(inventoryReads, 9);
       configuredEnabled = true;
       environmentChanged = true;
       assert.deepEqual(yield* first(wsUrl, input), [{ report: null }]);
-      assert.equal(inventoryReads, 7);
+      assert.equal(inventoryReads, 10);
       environmentChanged = false;
       const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
         headers: { cookie: ownerCookie },
@@ -3784,7 +3968,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         yield* getAuthenticatedSessionCookieHeader(credential),
       );
       assert.deepEqual(yield* first(guestUrl, input), [{ report: null }]);
-      assert.equal(inventoryReads, 7);
+      assert.equal(inventoryReads, 10);
       yield* Effect.scoped(
         withWsRpcClient(guestUrl, (client) =>
           Effect.gen(function* () {
@@ -3810,7 +3994,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 50)));
             assert.equal(yield* Deferred.isDone(finished), false);
             assert.deepEqual(denied, [{ report: null }]);
-            assert.equal(inventoryReads, 7);
+            assert.equal(inventoryReads, 10);
             yield* Fiber.interrupt(receiver);
             assert.equal(yield* Deferred.isDone(finished), true);
           }),
@@ -3852,7 +4036,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           }),
         ),
       );
-      assert.equal(inventoryReads, 9);
+      assert.equal(inventoryReads, 12);
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 

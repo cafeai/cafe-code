@@ -7,8 +7,8 @@ import { decodeSvg, parsedSvg, textLabels } from "./mermaidFamilyRendering.test.
 installMermaidFamilyCleanup();
 
 describe("new family pre-layout security admission", () => {
-  it("preserves all native event labels and inline data as inert SVG text", async () => {
-    const svg = await renderNativeFamilyOutput("eventmodeling");
+  it("preserves all native event labels and inline data as inert SVG text", async ({ signal }) => {
+    const svg = await renderNativeFamilyOutput("eventmodeling", "", signal);
     expect(svg).not.toBeNull();
     const parsed = parsedSvg(svg!);
     expect(parsed.querySelectorAll("g.em-box")).toHaveLength(4);
@@ -22,7 +22,7 @@ describe("new family pre-layout security admission", () => {
     await decodeSvg(svg!);
   });
 
-  it.each([
+  it.for([
     ["resource-bearing HTML", "bold.append(document.createElement('img'));"],
     ["interactive HTML", "bold.append(document.createElement('a'));"],
     ["script HTML", "bold.append(document.createElement('script'));"],
@@ -74,12 +74,15 @@ describe("new family pre-layout security admission", () => {
       "bold.replaceChildren(...Array.from({ length: 251 }, () => document.createElement('br')));",
     ],
     ["unreadably overwide labels", "bold.textContent = 'W'.repeat(1000);"],
-  ])("refuses %s without widening event HTML or SVG admission", async (_name, mutation) => {
-    expect(await renderNativeFamilyOutput("eventmodeling", mutation)).toBeNull();
-  });
+  ] as const)(
+    "refuses %s without widening event HTML or SVG admission",
+    async ([_name, mutation], { signal }) => {
+      expect(await renderNativeFamilyOutput("eventmodeling", mutation, signal)).toBeNull();
+    },
+  );
 
-  it("binds only the exact pinned native info label to its fixed viewport", async () => {
-    const svg = await renderNativeFamilyOutput("info");
+  it("binds only the exact pinned native info label to its fixed viewport", async ({ signal }) => {
+    const svg = await renderNativeFamilyOutput("info", "", signal);
     expect(svg).not.toBeNull();
     const parsed = parsedSvg(svg!);
     expect(parsed.documentElement.getAttribute("viewBox")).toBe("0 0 400 100");
@@ -88,7 +91,7 @@ describe("new family pre-layout security admission", () => {
     await decodeSvg(svg!);
   });
 
-  it.each([
+  it.for([
     ["a source-shaped viewport", "svg.setAttribute('viewBox', '0 0 99999 99999');"],
     ["a future version label", "svg.querySelector('text').textContent = 'v13.0.0';"],
     ["a foreign fixed width", "svg.style.maxWidth = '500px';"],
@@ -119,7 +122,10 @@ describe("new family pre-layout security admission", () => {
       "unqualified version links",
       "svg.querySelector('text').setAttribute('href', 'https://example.invalid/synthetic');",
     ],
-  ])("refuses %s instead of inventing a generic info viewport", async (_name, mutation) => {
-    expect(await renderNativeFamilyOutput("info", mutation)).toBeNull();
-  });
+  ] as const)(
+    "refuses %s instead of inventing a generic info viewport",
+    async ([_name, mutation], { signal }) => {
+      expect(await renderNativeFamilyOutput("info", mutation, signal)).toBeNull();
+    },
+  );
 });

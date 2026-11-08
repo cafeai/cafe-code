@@ -19,12 +19,20 @@ export function normalizeInterfaceScalePercent(value: number | undefined): numbe
   return value;
 }
 
+/** One press of Settings → Appearance → Interface size −/+. */
+export const INTERFACE_SCALE_STEP_PERCENT = 5;
+
+/** The next size up or down, snapped to the step and kept within bounds. */
+export function stepInterfaceScalePercent(value: number, direction: -1 | 1): number {
+  return snapInterfaceScalePercent(value + direction * INTERFACE_SCALE_STEP_PERCENT);
+}
+
 export function snapInterfaceScalePercent(value: number): number {
   const bounded = Math.min(
     MAX_INTERFACE_SCALE_PERCENT,
     Math.max(MIN_INTERFACE_SCALE_PERCENT, value),
   );
-  return Math.round(bounded / 5) * 5;
+  return Math.round(bounded / INTERFACE_SCALE_STEP_PERCENT) * INTERFACE_SCALE_STEP_PERCENT;
 }
 
 /**

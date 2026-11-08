@@ -5,6 +5,20 @@
 @import "@fontsource-variable/dm-sans/opsz.css";
 @import "@fontsource-variable/dm-sans/opsz-italic.css";
 
+/* Apple Color Emoji can reserve blank glyphs in Chromium under macOS Lockdown
+   Mode. This local COLRv1 face avoids that system bitmap-font rendering path
+   without changing the sandbox, OS protection, or the underlying text. Use only
+   WOFF2 (supported by our browsers), rather than shipping duplicate legacy WOFF
+   assets. The full upstream OFL is in public/licenses/noto-color-emoji-OFL.txt. */
+@font-face {
+  font-family: "Cafe Emoji";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("@fontsource/noto-color-emoji/files/noto-color-emoji-emoji-400-normal.woff2")
+    format("woff2");
+}
+
 @custom-variant dark (&:is(.dark, .dark *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */
 @custom-variant wco (&:is(.wco, .wco *));
@@ -84,9 +98,10 @@
   --color-sidebar-ring: var(--ring);
   --font-sans:
     "DM Sans Variable", "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
-    sans-serif;
+    "Cafe Emoji", sans-serif;
   --font-mono:
-    "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+    "SF Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, "Liberation Mono", "Cafe Emoji",
+    monospace;
   /* Type scale additions. Tailwind supplies xs 12, sm 14, base 16, lg 18, xl 20
      and 2xl 24; 2xs and ui fill the dense-interface gaps. All are rem-based so
      the Interface size setting scales them. */
@@ -213,28 +228,40 @@
      panels read as surfaces instead of hairline outlines on pure white. */
   --background-light: color-mix(in srgb, var(--color-neutral-100) 55%, var(--color-white));
   --background-dark: color-mix(in srgb, var(--color-neutral-950) 95%, var(--color-white));
-  --background: var(--background-light);
+  /* Every surface carries a faint hint of the accent colour (Settings →
+     Appearance → Accent color), so the app reads as that colour instead of
+     grey and the slightly more tinted sidebar meets the chat without a hard
+     edge. The amounts are small enough to leave text contrast unchanged; a
+     grey accent gives the neutral look. Borders keep their strength and only
+     shift hue. */
+  --cafe-surface-tint: var(--cafe-sidebar-accent);
+  --background: color-mix(in oklab, var(--background-light), var(--cafe-surface-tint) 1.8%);
   --cafe-sidebar-star-drift-duration: 60s;
   --app-chrome-background: var(--background);
   --foreground: var(--color-neutral-800);
   /* Preserve the softer reading colour used by assistant prose before the
      UI refresh, independently of full-strength labels and controls. */
   --chat-foreground: --alpha(var(--foreground) / 80%);
-  --card: var(--color-white);
+  --card: color-mix(in oklab, var(--color-white), var(--cafe-surface-tint) 0.7%);
   --card-foreground: var(--color-neutral-800);
-  --popover: var(--color-white);
+  --popover: color-mix(in oklab, var(--color-white), var(--cafe-surface-tint) 0.7%);
   --popover-foreground: var(--color-neutral-800);
   --primary: oklch(0.488 0.217 264);
   --primary-foreground: var(--color-white);
   --secondary: --alpha(var(--color-black) / 4%);
   --secondary-foreground: var(--color-neutral-800);
   --muted: --alpha(var(--color-black) / 4%);
-  --muted-foreground: color-mix(in srgb, var(--color-neutral-500) 90%, var(--color-black));
+  --muted-foreground: color-mix(
+    in oklab,
+    color-mix(in srgb, var(--color-neutral-500) 90%, var(--color-black)),
+    var(--cafe-surface-tint) 4.5%
+  );
   --accent: --alpha(var(--color-black) / 4%);
   --accent-foreground: var(--color-neutral-800);
   --destructive: var(--color-red-500);
-  --border: --alpha(var(--color-black) / 8%);
-  --input: --alpha(var(--color-black) / 10%);
+  --border-tint: color-mix(in oklab, var(--color-black), var(--cafe-surface-tint) 30%);
+  --border: --alpha(var(--border-tint) / 8%);
+  --input: --alpha(var(--border-tint) / 10%);
   --ring: oklch(0.488 0.217 264);
   --destructive-foreground: var(--color-red-700);
   --info: var(--color-blue-500);
@@ -243,13 +270,25 @@
   --success-foreground: var(--color-emerald-700);
   --warning: var(--color-amber-500);
   --warning-foreground: var(--color-amber-700);
-  --cafe-sidebar-accent: #44beda;
-  --sunken: color-mix(in srgb, var(--color-neutral-100) 80%, var(--color-white));
+  /* Matches the default --primary; the accent color overrides both (themeAccent.ts). */
+  --cafe-sidebar-accent: #1b4ed8;
+  /* The sidebar picture's colour (sidebarGlow.ts); the accent until set. */
+  --cafe-sidebar-glow: var(--cafe-sidebar-accent);
+  --cafe-sidebar-surface: color-mix(in oklab, #f3f4f6, var(--cafe-sidebar-accent) 4%);
+  --sunken: color-mix(
+    in oklab,
+    color-mix(in srgb, var(--color-neutral-100) 80%, var(--color-white)),
+    var(--cafe-surface-tint) 1.8%
+  );
   --raised: var(--popover);
-  --subtle-foreground: color-mix(in srgb, var(--color-neutral-500) 95%, var(--color-black));
+  --subtle-foreground: color-mix(
+    in oklab,
+    color-mix(in srgb, var(--color-neutral-500) 95%, var(--color-black)),
+    var(--cafe-surface-tint) 4.5%
+  );
   --disabled-foreground: var(--color-neutral-400);
-  --border-subtle: --alpha(var(--color-black) / 5%);
-  --border-strong: --alpha(var(--color-black) / 14%);
+  --border-subtle: --alpha(var(--border-tint) / 5%);
+  --border-strong: --alpha(var(--border-tint) / 14%);
   --sidebar-accent-surface: --alpha(var(--color-black) / 5%);
   --status-running: var(--primary);
   --status-attention: var(--color-amber-500);
@@ -268,7 +307,7 @@
 
   @variant dark {
     color-scheme: dark;
-    --background: var(--background-dark);
+    --background: color-mix(in oklab, var(--background-dark), var(--cafe-surface-tint) 2.2%);
     --app-chrome-background: var(--background);
     --foreground: var(--color-neutral-100);
     --card: color-mix(in srgb, var(--background) 98%, var(--color-white));
@@ -281,12 +320,17 @@
     --secondary: --alpha(var(--color-white) / 4%);
     --secondary-foreground: var(--color-neutral-100);
     --muted: --alpha(var(--color-white) / 4%);
-    --muted-foreground: color-mix(in srgb, var(--color-neutral-500) 90%, var(--color-white));
+    --muted-foreground: color-mix(
+      in oklab,
+      color-mix(in srgb, var(--color-neutral-500) 90%, var(--color-white)),
+      var(--cafe-surface-tint) 4.5%
+    );
     --accent: --alpha(var(--color-white) / 4%);
     --accent-foreground: var(--color-neutral-100);
     --destructive: color-mix(in srgb, var(--color-red-500) 90%, var(--color-white));
-    --border: --alpha(var(--color-white) / 7%);
-    --input: --alpha(var(--color-white) / 8%);
+    --border-tint: color-mix(in oklab, var(--color-white), var(--cafe-surface-tint) 30%);
+    --border: --alpha(var(--border-tint) / 7.5%);
+    --input: --alpha(var(--border-tint) / 8.5%);
     --ring: oklch(0.588 0.217 264);
     --destructive-foreground: var(--color-red-400);
     --info: var(--color-blue-500);
@@ -295,13 +339,18 @@
     --success-foreground: var(--color-emerald-400);
     --warning: var(--color-amber-500);
     --warning-foreground: var(--color-amber-400);
-    --cafe-sidebar-accent: #48cfff;
-    --sunken: #101011;
+    --cafe-sidebar-accent: #366ffb;
+    --cafe-sidebar-surface: color-mix(in oklab, #101011, var(--cafe-sidebar-accent) 4.4%);
+    --sunken: color-mix(in oklab, #101011, var(--cafe-surface-tint) 2.2%);
     --raised: var(--popover);
-    --subtle-foreground: var(--color-neutral-400);
+    --subtle-foreground: color-mix(
+      in oklab,
+      var(--color-neutral-400),
+      var(--cafe-surface-tint) 4.5%
+    );
     --disabled-foreground: var(--color-neutral-600);
-    --border-subtle: --alpha(var(--color-white) / 4%);
-    --border-strong: --alpha(var(--color-white) / 12%);
+    --border-subtle: --alpha(var(--border-tint) / 4.5%);
+    --border-strong: --alpha(var(--border-tint) / 12.5%);
     --sidebar-accent-surface: --alpha(var(--color-white) / 6.5%);
     --status-attention: var(--color-amber-400);
     --status-attention-foreground: var(--color-amber-300);
@@ -393,29 +442,41 @@ body::after {
   }
 }
 
-.cafe-thread-sidebar [data-slot="sidebar-inner"] {
+/* The sidebar and its portalled server menu share the same surface and stars.
+   The sidebar takes a little more of the accent than the rest of the app, so
+   it reads as part of the same coloured surface rather than a separate strip.
+   While a picture is shown, a soft glow in the picture's colour rises behind
+   it. Declared before the dark rules so the dark versions win in dark mode. */
+.cafe-thread-sidebar [data-slot="sidebar-inner"],
+.cafe-sidebar-surface {
   position: relative;
   isolation: isolate;
   overflow: hidden;
+  background: var(--cafe-sidebar-surface);
+}
+
+.cafe-thread-sidebar.cafe-thread-sidebar--image [data-slot="sidebar-inner"] {
   background:
     radial-gradient(
-      120% 90% at 50% -8%,
-      color-mix(in srgb, var(--cafe-sidebar-accent) 16%, transparent),
-      transparent 42%
+      150% 55% at 50% 104%,
+      color-mix(in oklab, transparent, var(--cafe-sidebar-glow) 8.6%),
+      transparent 66%
     ),
-    radial-gradient(95% 75% at 18% 105%, rgba(126, 137, 151, 0.14), transparent 46%),
-    color-mix(in srgb, var(--card) 96%, #e5edf3);
+    var(--cafe-sidebar-surface);
 }
 
 .cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
-.cafe-thread-sidebar [data-slot="sidebar-inner"]::after {
+.cafe-thread-sidebar [data-slot="sidebar-inner"]::after,
+.cafe-sidebar-surface::before,
+.cafe-sidebar-surface::after {
   content: "";
   position: absolute;
   pointer-events: none;
   z-index: 0;
 }
 
-.cafe-thread-sidebar [data-slot="sidebar-inner"]::before {
+.cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
+.cafe-sidebar-surface::before {
   --cafe-sidebar-star-opacity: 0.86;
 
   inset: -34% -48%;
@@ -450,20 +511,25 @@ body::after {
   will-change: transform, opacity;
 }
 
-.cafe-thread-sidebar [data-slot="sidebar-inner"]::after {
+.cafe-thread-sidebar [data-slot="sidebar-inner"]::after,
+.cafe-sidebar-surface::after {
   inset: -18% -28%;
   background:
     radial-gradient(
       ellipse at 16% 24%,
-      color-mix(in srgb, var(--cafe-sidebar-accent) 18%, transparent),
+      color-mix(in srgb, var(--cafe-sidebar-accent) 10%, transparent),
       transparent 36%
     ),
-    radial-gradient(ellipse at 82% 80%, rgba(132, 142, 156, 0.18), transparent 38%),
-    radial-gradient(ellipse at 72% 12%, rgba(94, 109, 126, 0.08), transparent 34%),
+    radial-gradient(
+      ellipse at 82% 80%,
+      color-mix(in oklab, transparent, var(--cafe-sidebar-glow) 11.5%),
+      transparent 38%
+    ),
+    radial-gradient(ellipse at 72% 12%, rgba(94, 109, 126, 0.06), transparent 34%),
     linear-gradient(
       132deg,
       transparent 20%,
-      color-mix(in srgb, var(--cafe-sidebar-accent) 10%, transparent) 48%,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 6%, transparent) 48%,
       transparent 70%
     );
   opacity: 0.42;
@@ -472,16 +538,21 @@ body::after {
 }
 
 .dark .cafe-thread-sidebar [data-slot="sidebar-inner"] {
-  background:
-    radial-gradient(
-      120% 90% at 50% -8%,
-      color-mix(in srgb, var(--cafe-sidebar-accent) 16%, transparent),
-      transparent 42%
-    ),
-    radial-gradient(95% 75% at 18% 105%, rgba(166, 176, 188, 0.14), transparent 46%), #101011;
+  background: var(--cafe-sidebar-surface);
 }
 
-.dark .cafe-thread-sidebar [data-slot="sidebar-inner"]::before {
+.dark .cafe-thread-sidebar.cafe-thread-sidebar--image [data-slot="sidebar-inner"] {
+  background:
+    radial-gradient(
+      150% 55% at 50% 104%,
+      color-mix(in oklab, transparent, var(--cafe-sidebar-glow) 8.6%),
+      transparent 66%
+    ),
+    var(--cafe-sidebar-surface);
+}
+
+.dark .cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
+.dark .cafe-sidebar-surface::before {
   --cafe-sidebar-star-opacity: 0.44;
 
   background-image:
@@ -500,23 +571,34 @@ body::after {
     radial-gradient(circle at 304px 42px, rgba(214, 221, 230, 0.48) 0 0.7px, transparent 1.25px);
 }
 
-.dark .cafe-thread-sidebar [data-slot="sidebar-inner"]::after {
+.dark .cafe-thread-sidebar [data-slot="sidebar-inner"]::after,
+.dark .cafe-sidebar-surface::after {
   background:
     radial-gradient(
       ellipse at 16% 24%,
-      color-mix(in srgb, var(--cafe-sidebar-accent) 20%, transparent),
+      color-mix(in srgb, var(--cafe-sidebar-accent) 12%, transparent),
       transparent 36%
     ),
-    radial-gradient(ellipse at 82% 80%, rgba(168, 178, 190, 0.18), transparent 38%),
-    radial-gradient(ellipse at 72% 12%, rgba(218, 225, 234, 0.08), transparent 34%),
+    radial-gradient(
+      ellipse at 82% 80%,
+      color-mix(in oklab, transparent, var(--cafe-sidebar-glow) 11.5%),
+      transparent 38%
+    ),
+    radial-gradient(ellipse at 72% 12%, rgba(218, 225, 234, 0.06), transparent 34%),
     linear-gradient(
       132deg,
       transparent 20%,
-      color-mix(in srgb, var(--cafe-sidebar-accent) 8%, transparent) 48%,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 6%, transparent) 48%,
       transparent 70%
     );
   opacity: 0.46;
   mix-blend-mode: screen;
+}
+
+/* Scroll affordances inherit this too, so a long server list keeps the same
+   surface instead of revealing the generic popover colour at either edge. */
+.cafe-sidebar-select {
+  --popover: var(--cafe-sidebar-surface);
 }
 
 .cafe-thread-sidebar [data-slot="sidebar-header"],
@@ -548,6 +630,13 @@ body::after {
      leading clearance; neither dimension scales with interface typography. */
   --app-mac-titlebar-height: 50px;
   --app-mac-titlebar-leading-space: 90px;
+}
+
+/* The native fullscreen transition hides the traffic lights. Retain the Mac
+   header band and trailing toggle while returning the brand and collapsed
+   navigation controls to the ordinary, interface-scaled sidebar inset. */
+:root.mac-fullscreen {
+  --app-mac-titlebar-leading-space: 1rem;
 }
 
 /* These attributes are admitted only by macOS Electron desktop headers.
@@ -665,6 +754,13 @@ body::after {
   block-size: 0.75rem;
   background: none;
 }
+/* Clock hands rotate about the face centre (SVG view-box coordinates). The
+   hour hand's static offset uses the independent `rotate` property so it
+   composes with the animated `transform`. */
+.thread-status-clock-hand {
+  transform-box: view-box;
+  transform-origin: 12px 12px;
+}
 .thread-status-dot-shell[data-visible="true"]:has([data-spinning="true"]) {
   inline-size: 0.75rem;
   margin-inline-end: 0.25rem;
@@ -696,14 +792,15 @@ body::after {
    buttons, so their parent row is treated as the hover surface too. */
 .cafe-thread-sidebar [data-slot="sidebar-menu-button"]:hover,
 .cafe-thread-sidebar [data-desk-chat-row]:hover > :where([data-slot="sidebar-menu-sub-button"]),
-.cafe-thread-sidebar
-  [data-slot="sidebar-menu-sub-button"]:not([data-thread-selected="true"]):hover {
+.cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"]:not([data-thread-selected="true"]):hover,
+.cafe-sidebar-surface [data-slot="select-item"][data-highlighted] {
   background-color: var(--sidebar-accent-surface);
 }
 
 .cafe-thread-sidebar [data-slot="sidebar-menu-button"][data-active="true"],
 .cafe-thread-sidebar
-  [data-slot="sidebar-menu-sub-button"][data-active="true"]:not([data-thread-selected="true"]) {
+  [data-slot="sidebar-menu-sub-button"][data-active="true"]:not([data-thread-selected="true"]),
+.cafe-sidebar-surface [data-slot="select-item"][data-selected] {
   background:
     linear-gradient(
       90deg,
@@ -722,7 +819,8 @@ body::after {
 .cafe-thread-sidebar
   [data-slot="sidebar-menu-sub-button"][data-active="true"]:not(
     [data-thread-selected="true"]
-  ):hover {
+  ):hover,
+.cafe-sidebar-surface [data-slot="select-item"][data-selected][data-highlighted] {
   background:
     linear-gradient(
       90deg,
@@ -847,6 +945,16 @@ html[data-cafe-background-animations="paused"]:is(
     [data-cafe-visibility="hidden"],
     [data-cafe-window-focus="blurred"]
   )
+  .cafe-sidebar-surface::before,
+html[data-cafe-background-animations="paused"]:is(
+    [data-cafe-visibility="hidden"],
+    [data-cafe-window-focus="blurred"]
+  )
+  .cafe-sidebar-surface::after,
+html[data-cafe-background-animations="paused"]:is(
+    [data-cafe-visibility="hidden"],
+    [data-cafe-window-focus="blurred"]
+  )
   :is(.ultrathink-frame, .ultrathink-chroma, .ultrathink-pill, .ultrathink-word) {
   animation-play-state: paused;
 }
@@ -863,6 +971,8 @@ html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"] {
 @media (prefers-reduced-motion: reduce) {
   .cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
   .cafe-thread-sidebar [data-slot="sidebar-inner"]::after,
+  .cafe-sidebar-surface::before,
+  .cafe-sidebar-surface::after,
   .cafe-followup-queue::before,
   .cafe-followup-queue::after {
     animation: none;
@@ -1096,7 +1206,8 @@ html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"] {
 
 pre,
 code {
-  font-family: "SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family:
+    "SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Cafe Emoji", monospace;
 }
 
 /* Window drag region (frameless titlebar) */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatPendingPrimaryActionLabel } from "./ComposerPrimaryActions";
+import { formatPendingPrimaryActionLabel, primaryStopState } from "./ComposerPrimaryActions";
 
 describe("formatPendingPrimaryActionLabel", () => {
   it("returns 'Submitting…' while responding", () => {
@@ -89,5 +89,58 @@ describe("formatPendingPrimaryActionLabel", () => {
         questionIndex: 5,
       }),
     ).toBe("Submit answers");
+  });
+});
+
+describe("primary Stop during provider opening or recovery", () => {
+  const opening = {
+    isRunning: false,
+    isQueueEditing: false,
+    recoveryStopAvailable: false,
+    connectingStopAvailable: true,
+    hasSendableContent: true,
+    postSubmitInterruptGuardActive: false,
+    isEnvironmentUnavailable: false,
+    stopInFlight: false,
+  };
+  it("keeps explicit cancellation visible with unsent input", () => {
+    expect(primaryStopState(opening)).toEqual({ visible: true, disabled: false, showSend: false });
+    expect(
+      primaryStopState({ ...opening, connectingStopAvailable: false, recoveryStopAvailable: true }),
+    ).toEqual({ visible: true, disabled: false, showSend: true });
+  });
+  it("keeps Stop available without introducing Send while editing the queue", () => {
+    expect(
+      primaryStopState({
+        ...opening,
+        isQueueEditing: true,
+        connectingStopAvailable: false,
+        recoveryStopAvailable: true,
+      }),
+    ).toEqual({ visible: true, disabled: false, showSend: false });
+  });
+  it("blocks duplicate Stop and unavailable environments", () => {
+    expect(primaryStopState({ ...opening, stopInFlight: true })).toEqual({
+      visible: true,
+      disabled: true,
+      showSend: false,
+    });
+    expect(primaryStopState({ ...opening, isEnvironmentUnavailable: true })).toEqual({
+      visible: true,
+      disabled: true,
+      showSend: false,
+    });
+  });
+  it("preserves ordinary active-turn draft and send-guard behavior", () => {
+    const running = { ...opening, isRunning: true, connectingStopAvailable: false };
+    expect(primaryStopState(running).visible).toBe(false);
+    expect(
+      primaryStopState({
+        ...running,
+        hasSendableContent: false,
+        postSubmitInterruptGuardActive: true,
+      }).visible,
+    ).toBe(false);
+    expect(primaryStopState({ ...running, hasSendableContent: false }).visible).toBe(true);
   });
 });

@@ -7,7 +7,7 @@ import * as Equal from "effect/Equal";
 export function getSettingsPageReset(
   pathname: string,
   settings: UnifiedSettings,
-  capabilities: { desktop: boolean },
+  capabilities: { desktop: boolean; macKeepAwake?: boolean },
   locale?: UiLocale,
 ) {
   const general = {
@@ -18,19 +18,23 @@ export function getSettingsPageReset(
     ...(capabilities.desktop
       ? { powerSaveBlockerMode: uiText("Keep awake", undefined, undefined, locale) }
       : {}),
+    ...(capabilities.macKeepAwake
+      ? { keepAwakeWithLidClosed: uiText("Work with the lid closed", undefined, undefined, locale) }
+      : {}),
   };
   const appearance = {
     interfaceScalePercent: uiText("Interface size", undefined, undefined, locale),
     appAccentColor: uiText("Accent color", undefined, undefined, locale),
     continueBackgroundAnimations: uiText("Animate while unfocused", undefined, undefined, locale),
-    showSidebarMascot: uiText("Enable sidebar image", undefined, undefined, locale),
+    showSidebarMascot: uiText("Sidebar image", undefined, undefined, locale),
+    sidebarImageSource: uiText("Sidebar image", undefined, undefined, locale),
+    deskEnabled: uiText("Desk", undefined, undefined, locale),
     showSidebarSearch: uiText("Sidebar search", undefined, undefined, locale),
     showSidebarAttribution: uiText("Sidebar attribution", undefined, undefined, locale),
     brandWordmarkPrefix: uiText("Branding prefix", undefined, undefined, locale),
     sidebarBrandImage: uiText("Sidebar image", undefined, undefined, locale),
     sidebarBrandImageDataUrl: uiText("Sidebar image", undefined, undefined, locale),
     sidebarStarSpeed: uiText("Sidebar star speed", undefined, undefined, locale),
-    themeAccentColor: uiText("Sidebar effects color", undefined, undefined, locale),
     ambianceEnabled: uiText("Weather layer", undefined, undefined, locale),
     ambianceEffect: uiText("Effect", undefined, undefined, locale),
     ambianceIntensity: uiText("Intensity", undefined, undefined, locale),

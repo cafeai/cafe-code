@@ -1,10 +1,83 @@
-# Local Linux packages and AUR maintenance
+# Linux installation, updates and local packages
 
 Published [desktop releases](https://github.com/cafeai/cafe-code/releases/latest)
-include a Linux **x64 AppImage**. The commands below are local build helpers;
-they do not mean Debian packages, other architectures, or an updated AUR listing
-are published with a release. See [source prerequisites](source-development.md)
-before building.
+include a Linux **x64 AppImage**. The user installer below downloads that release;
+Debian and Arch helpers build locally. Other architectures and package formats
+are not part of the published release set.
+
+## Install or update with `cafe-code up`
+
+On an x86_64 Linux desktop, bootstrap the user installer:
+
+```bash
+curl -fsSL https://cafecode.sh/install.sh | bash
+```
+
+This URL becomes available when the website's reviewed installer and download
+section are deployed. The website serves a copy of this repository's script;
+it downloads release assets directly from GitHub without requiring the source
+branch to be public. From a checkout containing the script, the equivalent
+command is:
+
+```bash
+bash scripts/install-linux.sh
+```
+
+After the first installation:
+
+```bash
+cafe-code        # launch the desktop app
+cafe-code up     # download and install the latest stable release
+```
+
+Use your normal user account, without `sudo`. The installer requires Bash, curl
+and standard coreutils including `sha256sum`; it needs no Node installation or
+source compilation. If `~/.local/bin` is absent from your terminal's PATH, run
+`export PATH="$HOME/.local/bin:$PATH"` or use `~/.local/bin/cafe-code` directly.
+The applications-menu entry uses an absolute launcher path.
+
+The installer resolves GitHub's latest stable tag once, downloads that tag's
+`SHA256SUMS.txt` and matching x86_64 AppImage over HTTPS, and verifies the exact
+SHA-256 before replacement. Missing or duplicate checksum entries, failed
+downloads and checksum mismatches preserve the installed executable. Linux
+releases remain unsigned: a checksum delivered alongside the binary detects
+corruption, but is not an independent publisher signature.
+
+The launcher lives at `~/.local/bin/cafe-code`; the AppImage lives at
+`${XDG_DATA_HOME:-$HOME/.local/share}/cafe-code-desktop/Cafe-Code.AppImage`.
+The applications entry is `cafe-code-appimage.desktop` in that data home's
+`applications` directory. Keep the same `XDG_DATA_HOME` when installing and
+launching. The versionless AppImage filename is deliberate: Electron Updater
+preserves custom names, so in-app updates retain the launcher target. Files stay
+writable by the installing user. The installer refuses symlinked install paths,
+non-owned targets, unsupported desktop-entry path characters, an unrelated
+`~/.local/bin/cafe-code`, and concurrent installer reservations.
+
+Quit Cafe Code normally before using `cafe-code up`, then launch it when ready.
+The command only installs files; it does not stop running work or launch/restart
+the app. It does not install providers or alter account/profile data. A forcibly
+interrupted installer can leave `cafe-code-desktop/up.lock`; remove that empty
+directory only after establishing that the earlier installer has ended.
+
+## In-app updates on Linux
+
+The published x64 AppImage also supports in-app updates when launched through
+its native AppImage runtime, with `APPIMAGE` available and both the file and its
+directory writable. Cafe checks after startup and periodically, but download
+and installation require explicit actions and native restart confirmation.
+The user installer above retains this path and does not extract the AppImage or
+disable Chromium sandboxing. Normal AppImage host prerequisites still apply;
+see the [AppImage running guide](https://docs.appimage.org/user-guide/run-appimages.html)
+for host setup and troubleshooting.
+
+Local Debian/Arch installs use their package manager rather than this AppImage
+updater. Source checkouts use Git diagnostics. See the complete
+[desktop update behavior](desktop-releases-and-updates.md#runtime-behavior).
+Native Linux upgrade/relaunch qualification remains separate from synthetic
+installer transport tests or qualification on another host.
+
+See [source prerequisites](source-development.md) before building the local
+packages below.
 
 ## Local Arch package
 

@@ -20,7 +20,15 @@ export async function admitsParsedFamily(
   expectedNativeParserCalls?: number,
   observeBootstrap?: (phase: MermaidProbeBootstrapPhase) => void,
   admitSourceOnReady = true,
+  signal?: AbortSignal,
 ): Promise<boolean> {
+  // Bind only this invocation's explicit owner. Inert construction may finish
+  // after outer retirement, but it must never admit a new native frame/port.
+  const owner = signal;
+  const assertActive = () => {
+    if (owner?.aborted) throw new Error("Family admission probe fixture retired");
+  };
+  assertActive();
   const nonce = crypto.randomUUID();
   const id = crypto.randomUUID();
   const admittedSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" />';
@@ -71,12 +79,14 @@ export async function admitsParsedFamily(
        return { svg: ${JSON.stringify(admittedSvg)} };
      };${override}`,
   );
+  assertActive();
   return runMermaidProbe({
     id,
     documentSource,
     source,
     theme: "dark",
     kind: "Family admission probe",
+    ...(owner ? { signal: owner } : {}),
     bootstrapObservation: {
       nonce,
       admitSourceOnReady,
@@ -129,6 +139,27 @@ export async function admitsParsedFamily(
   });
 }
 
+/** Bind every probe in a test case to that case's own retirement signal. */
+export function ownedParsedFamilyProbe(signal: AbortSignal) {
+  return (
+    source: string,
+    parsedMutation = "",
+    parserFixtureSource?: string,
+    expectedNativeStateCalls?: number,
+    expectedNativeParserCalls?: number,
+  ) =>
+    admitsParsedFamily(
+      source,
+      parsedMutation,
+      parserFixtureSource,
+      expectedNativeStateCalls,
+      expectedNativeParserCalls,
+      undefined,
+      true,
+      signal,
+    );
+}
+
 /** Observe the production output adapters after real native parsing and
  * rendering. Mutations below are static synthetic test code, never received
  * diagram source. The ordinary opaque document, CSP and one-use port remain
@@ -136,7 +167,9 @@ export async function admitsParsedFamily(
 export async function renderNativeFamilyOutput(
   family: "eventmodeling" | "info",
   outputMutation = "",
+  signal?: AbortSignal,
 ): Promise<string | null> {
+  if (signal?.aborted) throw new Error("Family output probe fixture retired");
   const source =
     family === "info"
       ? "info"
@@ -177,6 +210,7 @@ export async function renderNativeFamilyOutput(
     source,
     theme: "light",
     kind: "Native diagram-output probe",
+    ...(signal ? { signal } : {}),
     bootstrapObservation: { nonce, admitSourceOnReady: true },
     invocation: outputMutation ? "mutation" : "baseline",
     readResult: (data) => {

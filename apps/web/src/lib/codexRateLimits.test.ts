@@ -7,8 +7,6 @@ import {
   formatCodexRateLimitSummary,
   formatCodexRateLimitBuckets,
   formatCodexRateLimitPresentation,
-  selectCodexRateLimitBuckets,
-  selectCodexRateLimitSnapshot,
   shouldSurfaceProviderAccountRateLimits,
 } from "./codexRateLimits";
 
@@ -34,29 +32,6 @@ describe("codexRateLimits", () => {
     ).toBe(false);
   });
 
-  it("prefers the codex bucket when additional rate limit buckets are present", () => {
-    const snapshot = selectCodexRateLimitSnapshot({
-      checkedAt: "2026-05-28T00:00:00.000Z",
-      rateLimits: {
-        limitId: "other",
-        primary: { usedPercent: 90 },
-      },
-      rateLimitsByLimitId: {
-        other: {
-          limitId: "other",
-          primary: { usedPercent: 90 },
-        },
-        codex: {
-          limitId: "codex",
-          primary: { usedPercent: 20 },
-        },
-      },
-    });
-
-    expect(snapshot?.limitId).toBe("codex");
-    expect(snapshot?.primary?.usedPercent).toBe(20);
-  });
-
   it("formats primary hours, secondary days, left percentages, and local reset times", () => {
     const summary = formatCodexRateLimitSummary(
       {
@@ -80,10 +55,12 @@ describe("codexRateLimits", () => {
 
     expect(summary?.primary?.text).toBe("Primary window (5 hours): 75% left");
     expect(summary?.secondary?.text).toBe("Secondary window (7 days): 37.5% left");
-    expect(summary?.primaryReset).toContain("5h reset:");
-    expect(summary?.primaryReset).toContain("2026");
+    // Local date and time, without a zone name (the year only outside the current one).
+    expect(summary?.primaryReset).toContain("5h reset: May 24");
+    expect(summary?.primaryReset).toContain("9:00 AM");
+    expect(summary?.primaryReset).not.toMatch(/GMT|JST/u);
     expect(summary?.secondaryReset).toContain("7d reset:");
-    expect(summary?.secondaryReset).toContain("2026");
+    expect(summary?.secondaryReset).not.toMatch(/GMT|JST/u);
   });
 
   it("formats both window durations as exact days, hours, and minutes", () => {
@@ -226,12 +203,6 @@ describe("codexRateLimits", () => {
       "75% left",
     ]);
     expect(buckets[1]?.label).toBe("Research quota");
-    expect(
-      selectCodexRateLimitBuckets({
-        ...input,
-        rateLimits: { limitId: "legacy-only", primary: { usedPercent: 10 } },
-      }).map((bucket) => bucket.id),
-    ).toContain("legacy-only");
     expect(formatCodexRateLimitInlineText(input)).toContain(
       "Research quota: Primary window: 75% left",
     );

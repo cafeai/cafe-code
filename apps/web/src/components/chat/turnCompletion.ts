@@ -52,7 +52,10 @@ export function deriveTurnCompletionSummary(input: {
   const activeSubagents =
     summary?.agentCount === 0
       ? []
-      : deriveActiveSubagentWorkEntries(thread.activities, null, { runtimeSession });
+      : deriveActiveSubagentWorkEntries(thread.activities, null, {
+          runtimeSession,
+          liveWork: summary,
+        });
   const recovery = deriveCodexRecoveryPresentation({
     thread,
     activities: thread.activities,

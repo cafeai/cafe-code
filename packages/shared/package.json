@@ -4,6 +4,14 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./webAppBranding": {
+      "types": "./src/webAppBranding.ts",
+      "import": "./src/webAppBranding.ts"
+    },
+    "./runtimeDependencies": {
+      "types": "./src/runtimeDependencies.ts",
+      "import": "./src/runtimeDependencies.ts"
+    },
     "./visualizationRasterPolicy": {
       "types": "./src/visualizationRasterPolicy.ts",
       "import": "./src/visualizationRasterPolicy.ts"
@@ -52,6 +60,10 @@
       "types": "./src/providerDiagnostic.ts",
       "import": "./src/providerDiagnostic.ts"
     },
+    "./providerStartupFailure": {
+      "types": "./src/providerStartupFailure.ts",
+      "import": "./src/providerStartupFailure.ts"
+    },
     "./i18n": {
       "types": "./src/i18n.ts",
       "import": "./src/i18n.ts"
@@ -59,6 +71,10 @@
     "./desktopStartupDocument": {
       "types": "./src/desktopStartupDocument.ts",
       "import": "./src/desktopStartupDocument.ts"
+    },
+    "./desktopPowerState": {
+      "types": "./src/desktopPowerState.ts",
+      "import": "./src/desktopPowerState.ts"
     },
     "./backendStartupProgress": {
       "types": "./src/backendStartupProgress.ts",
@@ -76,6 +92,10 @@
       "types": "./src/liveWork.ts",
       "import": "./src/liveWork.ts"
     },
+    "./pendingRequestRetention": {
+      "types": "./src/pendingRequestRetention.ts",
+      "import": "./src/pendingRequestRetention.ts"
+    },
     "./providerTaskOwnership": {
       "types": "./src/providerTaskOwnership.ts",
       "import": "./src/providerTaskOwnership.ts"
@@ -83,6 +103,10 @@
     "./codexCompactionDiagnostics": {
       "types": "./src/codexCompactionDiagnostics.ts",
       "import": "./src/codexCompactionDiagnostics.ts"
+    },
+    "./threadResourceUsage": {
+      "types": "./src/threadResourceUsage.ts",
+      "import": "./src/threadResourceUsage.ts"
     },
     "./claudeResponseLimits": {
       "types": "./src/claudeResponseLimits.ts",

@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Schema from "effect/Schema";
 import { expect, it } from "@effect/vitest";
 import { AuthSessionId } from "@cafecode/contracts/auth";
+import { ProviderInstanceId, ThreadId } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -13,12 +14,27 @@ import type { ServerConfigShape } from "../../config.ts";
 import { ServerConfig } from "../../config.ts";
 import { SqlitePersistenceTest } from "../../persistence/Sqlite.test.fixture.ts";
 import { SessionCredentialService } from "../Services/SessionCredentialService.ts";
+import { ServerSecretStore } from "../Services/ServerSecretStore.ts";
+import { AuthSessionRepositoryLive } from "../../persistence/Layers/AuthSessions.ts";
+import type { ManagementLaunchContext } from "../managementLaunchContext.ts";
+import { base64UrlDecodeUtf8, base64UrlEncode, signPayload } from "../utils.ts";
 import { ServerSecretStoreLive } from "./ServerSecretStore.ts";
-import { SessionCredentialServiceLive } from "./SessionCredentialService.ts";
+import {
+  makeSessionCredentialService,
+  SessionCredentialServiceLive,
+} from "./SessionCredentialService.ts";
 
 // Preserve deliberately malformed/historical fixture values and exact native JSON bytes;
 // this codec does not replace production admission or grant received-data authority.
 const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeFixtureClaims = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
+const managementLaunchContext: ManagementLaunchContext = {
+  threadId: ThreadId.make("signed-management-chat"),
+  providerInstanceId: ProviderInstanceId.make("claude-work"),
+  launchNonce: "989be62b-0759-49c7-89a8-116a737560fe",
+};
 
 const makeServerConfigLayer = (
   overrides?: Partial<
@@ -128,6 +144,106 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
 
       expect(error._tag).toBe("SessionCredentialError");
       expect(error.message).toContain("Malformed session token");
+    }).pipe(Effect.provide(makeSessionCredentialLayer())),
+  );
+  it.effect("verifies signed management launch intent across independent service instances", () =>
+    Effect.gen(function* () {
+      // Both instances use only this test's shared in-memory repository and
+      // private signing store, matching daemon/backend separation without a
+      // process-local SID-to-thread map or access to a user's data profile.
+      const issuer = yield* makeSessionCredentialService;
+      const verifier = yield* makeSessionCredentialService;
+      const issued = yield* issuer.issue({
+        subject: "provider:cafe-management:fixture",
+        role: "owner",
+        method: "bearer-session-token",
+        managementLaunchContext,
+      });
+      expect((yield* verifier.verify(issued.token)).managementLaunchContext).toEqual(
+        managementLaunchContext,
+      );
+      const manual = yield* issuer.issue({
+        // CLI subjects are arbitrary labels, never authority to invent a launch.
+        subject: "provider:cafe-management:fixture",
+        role: "owner",
+        method: "bearer-session-token",
+      });
+      expect((yield* verifier.verify(manual.token)).managementLaunchContext).toBeUndefined();
+
+      const [payload, signature] = issued.token.split(".");
+      const claims = decodeFixtureClaims(base64UrlDecodeUtf8(payload!));
+      const changedPayload = base64UrlEncode(
+        encodeFixtureJson({
+          ...claims,
+          managementLaunchContext: { ...managementLaunchContext, threadId: "other-chat" },
+        }),
+      );
+      expect(
+        (yield* Effect.flip(verifier.verify(`${changedPayload}.${signature}`))).message,
+      ).toContain("signature");
+
+      // A valid signature cannot make malformed new metadata acceptable.
+      // These are deliberately adversarial raw claims, not a production seam.
+      const secrets = yield* ServerSecretStore;
+      const secret = yield* secrets.getOrCreateRandom("server-signing-key", 32);
+      for (const invalid of [
+        { ...managementLaunchContext, threadId: "x".repeat(513) },
+        { ...managementLaunchContext, providerInstanceId: "x".repeat(513) },
+        { ...managementLaunchContext, providerInstanceId: "invalid instance" },
+        { ...managementLaunchContext, threadId: " leading" },
+        { ...managementLaunchContext, launchNonce: "not-a-uuid" },
+        { ...managementLaunchContext, unknown: "not-admitted" },
+      ]) {
+        const malformedPayload = base64UrlEncode(
+          encodeFixtureJson({ ...claims, managementLaunchContext: invalid }),
+        );
+        const invalidToken = `${malformedPayload}.${signPayload(malformedPayload, secret)}`;
+        expect((yield* Effect.exit(verifier.verify(invalidToken)))._tag).toBe("Failure");
+      }
+      expect(yield* verifier.revoke(issued.sessionId)).toBe(true);
+      expect((yield* Effect.exit(issuer.verify(issued.token)))._tag).toBe("Failure");
+      expect((yield* verifier.verify(manual.token)).managementLaunchContext).toBeUndefined();
+    }).pipe(
+      Effect.provide(
+        Layer.merge(AuthSessionRepositoryLive, ServerSecretStoreLive).pipe(
+          Layer.provideMerge(SqlitePersistenceTest),
+          Layer.provideMerge(makeServerConfigLayer()),
+        ),
+      ),
+    ),
+  );
+  it.effect("refuses malformed or non-owner-bearer launch context before issuing a session", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      for (const invalid of [
+        { ...managementLaunchContext, threadId: "" },
+        { ...managementLaunchContext, threadId: "trailing " },
+        { ...managementLaunchContext, threadId: "line\nbreak" },
+        { ...managementLaunchContext, providerInstanceId: "bidi\u202eowner" },
+        { ...managementLaunchContext, launchNonce: "" },
+      ]) {
+        // The public JSON boundary is intentionally malformed; keep its exact
+        // bytes instead of weakening the typed internal issuance interface.
+        const raw = invalid as ManagementLaunchContext;
+        expect(
+          (yield* Effect.exit(
+            sessions.issue({
+              role: "owner",
+              method: "bearer-session-token",
+              managementLaunchContext: raw,
+            }),
+          ))._tag,
+        ).toBe("Failure");
+      }
+      for (const policy of [
+        { role: "client", method: "bearer-session-token" },
+        { role: "owner", method: "browser-session-cookie" },
+      ] as const) {
+        expect(
+          (yield* Effect.exit(sessions.issue({ ...policy, managementLaunchContext })))._tag,
+        ).toBe("Failure");
+      }
+      expect(yield* sessions.listActive()).toHaveLength(0);
     }).pipe(Effect.provide(makeSessionCredentialLayer())),
   );
   it.effect("verifies session tokens against the Effect clock", () =>

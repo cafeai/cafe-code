@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+// Native opaque-error boundary: reject Proxies before reflective inspection;
+// Effect has no equivalent Proxy-identification primitive.
+import { types } from "node:util";
 import { awaitProcessShutdownEvidence } from "../../processShutdownObservation.ts";
-import { redactVisualizationNativePayload } from "../../visualizations/nativePrivacy.ts";
+import { redactVisualizationReceiptProofs } from "../../visualizations/nativePrivacy.ts";
 import { readMcpAppModelContext } from "../../mcpApps/owner.ts";
 import { readCodexAutoCompactTokenLimit } from "../codexContextWindowPolicy.ts";
 import type { SchedulingSessionBinding } from "../../scheduledFollowups/sessionRuntime.ts";
@@ -42,6 +45,7 @@ import {
   classifyCodexTransientFailure,
   redactCodexFailureDiagnosticPayload,
 } from "../codexTransientFailure.ts";
+import { redactCodexImageGenerationMetadata } from "../codexImageGenerationPrivacy.ts";
 import {
   hasVisibleProviderSubagentPublicText,
   type ProviderSubagentActivityInput,
@@ -91,7 +95,7 @@ import * as Stream from "effect/Stream";
 import * as SchemaIssue from "effect/SchemaIssue";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
-import { codexCommandUsesShell } from "effect-codex-app-server/command";
+import { makeCodexCommand } from "effect-codex-app-server/command";
 import {
   acknowledgeCodexServiceTier,
   observeCodexServiceTier,
@@ -2819,7 +2823,45 @@ export function makeCodexStderrClassifier(now: () => number = Date.now) {
 }
 
 export function isRecoverableThreadResumeError(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  // A provider name can contain any of the legacy missing-thread snippets.
+  // Codex 0.166 now identifies provider mismatch, removal and managed-policy
+  // refusal in JSON-RPC error.data: those refusals must preserve this exact
+  // conversation instead of silently creating a blank native thread. The tag
+  // is a negative admission guard, not permission to switch provider or ignore
+  // policy; missing/malformed variant fields must not reopen the fallback.
+  // https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/app-server-protocol/src/protocol/v2/model_provider_error.rs
+  let nativeMessage: unknown;
+  if (typeof error === "string") {
+    nativeMessage = error;
+  } else {
+    // The native JSONL reader produces ordinary values and typed request
+    // errors. Do not execute a received Proxy, accessor or string conversion
+    // merely to decide whether creating a different conversation is safe.
+    if (error === null || typeof error !== "object" || types.isProxy(error)) return false;
+    const data = Object.getOwnPropertyDescriptor(error, "data");
+    if (data && !("value" in data)) return false;
+    if (data?.value !== null && typeof data?.value === "object") {
+      if (types.isProxy(data.value)) return false;
+      const prototype = Object.getPrototypeOf(data.value);
+      if (prototype !== Object.prototype && prototype !== Array.prototype && prototype !== null)
+        return false;
+      const discriminator = Object.getOwnPropertyDescriptor(data.value, "type");
+      if (discriminator && !("value" in discriminator)) return false;
+      if (
+        discriminator?.value === "modelProviderMismatch" ||
+        discriminator?.value === "modelProviderNotConfigured" ||
+        discriminator?.value === "modelProviderPolicyConflict"
+      )
+        return false;
+    }
+    const messageField =
+      Object.getOwnPropertyDescriptor(error, "errorMessage") ??
+      Object.getOwnPropertyDescriptor(error, "message");
+    if (!messageField || !("value" in messageField)) return false;
+    nativeMessage = messageField.value;
+  }
+  if (typeof nativeMessage !== "string") return false;
+  const message = nativeMessage.toLowerCase();
   if (!message.includes("thread")) {
     return false;
   }
@@ -5231,10 +5273,17 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
     };
   }
 
-  const payload = readRecord(input.payload);
+  // This is an observational copy only. The caller's native payload remains
+  // intact for strict decoding/control; a projected file-only image is not a
+  // valid native item and must never be fed back into that private wire path.
+  // Project before reading received object properties so getters/proxies cannot
+  // execute while this diagnostic's method is being selected.
+  const diagnosticPayload = redactVisualizationReceiptProofs(
+    redactCodexImageGenerationMetadata(input.payload),
+  );
+  const payload = readRecord(diagnosticPayload);
   const method = payload ? readString(payload.method) : undefined;
   if (
-    method === "item/mcpToolCall/progress" ||
     method === "mcpServer/resource/read" ||
     method === "mcpServer/tool/call" ||
     (!method && payload && ("result" in payload || "error" in payload))
@@ -5296,13 +5345,6 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
       // trusted classifier. Preserve only the fixed failure kind and stage.
       return { stage: input.stage, diagnosticClass: "protocol-decode-failure-redacted" };
   }
-  const privateCopy = redactVisualizationNativePayload(input.payload);
-  if (privateCopy !== input.payload)
-    return {
-      diagnosticClass: "private-visualization-redacted",
-      stage: input.stage,
-      ...(method ? { method } : {}),
-    };
   if (
     method === "error" ||
     method === "turn/completed" ||
@@ -5315,15 +5357,15 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
         stage: input.stage,
         diagnosticClass: "native-error-decode-failure-redacted",
       };
-    // Visualization filtering must precede this decoded lifecycle mapper:
-    // old native turns can retain item payloads outside its error projection.
+    // Receipt proofs were removed before selecting this lifecycle mapper;
+    // retained tool activity keeps its original names, inputs and results.
     return { method, params: redactCodexFailureDiagnosticPayload(method, payload?.params) };
   }
   if (
     method !== "modelProvider/authRecoveryStarted" &&
     method !== "modelProvider/authRecoveryCompleted"
   ) {
-    return input.payload;
+    return diagnosticPayload;
   }
 
   const phase = method === "modelProvider/authRecoveryStarted" ? "started" : "completed";
@@ -5334,7 +5376,7 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
       diagnosticClass: "notification-payload-redacted",
     };
   }
-  return input.payload;
+  return diagnosticPayload;
 }
 
 function readString(value: unknown): string | undefined {
@@ -6686,9 +6728,9 @@ export const makeCodexSessionRuntime = (
       transportPolicy: options.transportPolicy,
     });
     const appServerCwd = options.appServerCwd ?? process.cwd();
-    const child = yield* spawner
-      .spawn(
-        ChildProcess.make(options.binaryPath, appServerArgs, {
+    const command = yield* Effect.try({
+      try: () =>
+        makeCodexCommand(options.binaryPath, appServerArgs, {
           // Codex app-server resolves absolute request cwd values through
           // `std::env::current_dir()` as of 0.142. Running the app-server
           // process from a project directory that macOS later denies can make
@@ -6704,19 +6746,19 @@ export const makeCodexSessionRuntime = (
           // Use the same command policy as disposable Codex probes.
           // Native executables must receive structured argv, not a shell's
           // interpretation of generated configuration or configured paths.
-          shell: codexCommandUsesShell(options.binaryPath, process.platform),
         }),
-      )
-      .pipe(
-        Effect.provideService(Scope.Scope, runtimeScope),
-        Effect.mapError(
-          (cause) =>
-            new CodexErrors.CodexAppServerSpawnError({
-              command: `${options.binaryPath} ${appServerArgs.join(" ")}`,
-              cause,
-            }),
-        ),
-      );
+      catch: (cause) => new CodexErrors.CodexAppServerSpawnError({ cause }),
+    });
+    const child = yield* spawner.spawn(command).pipe(
+      Effect.provideService(Scope.Scope, runtimeScope),
+      Effect.mapError(
+        (cause) =>
+          new CodexErrors.CodexAppServerSpawnError({
+            command: `${options.binaryPath} ${appServerArgs.join(" ")}`,
+            cause,
+          }),
+      ),
+    );
 
     const protocolTerminationRef = yield* Ref.make<
       | {
@@ -10923,11 +10965,17 @@ export const makeCodexSessionRuntime = (
           }
           const codexAnswers = yield* toCodexUserInputAnswers(answers);
           yield* Ref.update(pendingUserInputsRef, (current) => {
+            if (current.get(requestId) !== pending) return current;
             const next = new Map(current);
             next.delete(requestId);
             return next;
           });
-          yield* Deferred.succeed(pending.answers, answers);
+          // Validation can yield after another caller has acquired this same
+          // request. Only the actual Deferred winner may acknowledge or emit
+          // a submitted-answer event; a duplicate is not another resolution.
+          const accepted = yield* Deferred.succeed(pending.answers, answers);
+          if (!accepted)
+            return yield* new CodexSessionRuntimePendingUserInputNotFoundError({ requestId });
           yield* emitEvent({
             kind: "notification",
             threadId: options.threadId,

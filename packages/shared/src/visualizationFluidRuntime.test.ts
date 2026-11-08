@@ -54,7 +54,12 @@ function fixture(
     maxTrigonometricArgument = 0;
   const shaderSources: string[] = [];
   const allocations: { width: number; height: number; channels: number }[] = [];
-  const cleared: unknown[] = [];
+  // The assertions observe exact clear counts and the last target, never the
+  // lifetime history. Keep those values in constant space even when the fixed
+  // solver renders every one of the long-run regression frames below.
+  let clearCount = 0,
+    targetClearCount = 0;
+  let lastClearedTarget: unknown;
   let framebuffer: unknown = null;
   const constants = [
     "RED",
@@ -135,7 +140,9 @@ function fixture(
     framebuffer = value;
   };
   gl.clear = () => {
-    cleared.push(framebuffer);
+    clearCount += 1;
+    if (framebuffer !== null) targetClearCount += 1;
+    lastClearedTarget = framebuffer;
   };
   gl.getExtension = () => ({ HALF_FLOAT_OES: 20 });
   gl.getShaderParameter = () => true;
@@ -284,7 +291,9 @@ function fixture(
     motion,
     owned,
     allocations,
-    cleared,
+    clearCount: () => clearCount,
+    targetClearCount: () => targetClearCount,
+    lastClearedTarget: () => lastClearedTarget,
     rafs,
     observers,
     fire,
@@ -430,7 +439,7 @@ describe("fixed generated fluid library", () => {
     expect(value.rafs.size).toBe(0);
     // Transparent page clearing must target the default drawing buffer, not
     // erase the just-swapped dye framebuffer produced by the supplied solver.
-    expect(value.cleared.at(-1)).toBeNull();
+    expect(value.lastClearedTarget()).toBeNull();
     expect(value.owned.textures.size).toBe(8);
     expect(value.owned.programs.size).toBe(10);
     expect(value.owned.shaders.size).toBe(12);
@@ -775,7 +784,7 @@ describe("fixed generated fluid library", () => {
     );
     const allocations = value.allocations.length;
     const draws = value.draws();
-    const clears = value.cleared.length;
+    const clears = value.clearCount();
     const size = [value.canvas.width, value.canvas.height];
     for (let index = 0; index < 24; index++) {
       value.canvas.rect.width = 400 + index;
@@ -787,7 +796,7 @@ describe("fixed generated fluid library", () => {
       expect([value.canvas.width, value.canvas.height]).toEqual(size);
       expect(value.allocations).toHaveLength(allocations);
       expect(value.draws()).toBe(draws);
-      expect(value.cleared).toHaveLength(clears);
+      expect(value.clearCount()).toBe(clears);
       expect(value.rafs.size).toBe(0);
       for (const [kind, resources] of Object.entries(value.owned))
         expect([...resources]).toEqual(retained[kind]);
@@ -821,7 +830,7 @@ describe("fixed generated fluid library", () => {
       Object.entries(value.owned).map(([kind, resources]) => [kind, [...resources]]),
     );
     const allocations = value.allocations.length;
-    const targetClears = value.cleared.filter((target) => target !== null).length;
+    const targetClears = value.targetClearCount();
     const size = [value.canvas.width, value.canvas.height];
     for (let index = 0; index < 32; index++) {
       value.canvas.rect.width = index % 2 === 0 ? 320 : 160;
@@ -830,7 +839,7 @@ describe("fixed generated fluid library", () => {
       expect(value.canvas.dataset.cafeFluidFrames).toBe(String(20 + index));
       expect([value.canvas.width, value.canvas.height]).toEqual(size);
       expect(value.allocations).toHaveLength(allocations);
-      expect(value.cleared.filter((target) => target !== null)).toHaveLength(targetClears);
+      expect(value.targetClearCount()).toBe(targetClears);
       expect(value.rafs.size).toBe(1);
       for (const [kind, resources] of Object.entries(value.owned))
         expect([...resources]).toEqual(retained[kind]);

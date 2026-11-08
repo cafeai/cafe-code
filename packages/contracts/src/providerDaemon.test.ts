@@ -8,6 +8,11 @@ import {
   ProviderDaemonAdapterCapabilities,
   ProviderDaemonEventRecord,
   ProviderDaemonLiveness,
+  ProviderDaemonHealth,
+  ProviderDaemonGlideStartupDiagnostics,
+  ProviderDaemonCapability,
+  ProviderDaemonRetirementRequest,
+  ProviderDaemonRetirementResponse,
   ProviderDaemonMarker,
   ProviderDaemonSubagentDetail,
   ProviderDaemonRpcRequest,
@@ -18,8 +23,222 @@ import {
   WindowsProcessIdentity,
 } from "./providerDaemon.ts";
 
+it("keeps optional desktop-tools failure observations numeric and finite in JSON health", () => {
+  const decode = Schema.decodeUnknownSync(ProviderDaemonGlideStartupDiagnostics);
+  const json = Schema.fromJsonString(ProviderDaemonGlideStartupDiagnostics);
+  for (const phase of [undefined, "attach", "activate", "tray"] as const) {
+    const observation = {
+      attachFailureCount: 1,
+      activationFailureCount: 2,
+      trayFailureCount: 0,
+      ...(phase === undefined ? {} : { lastFailurePhase: phase }),
+    };
+    assert.deepEqual(
+      Schema.decodeUnknownSync(json)(Schema.encodeSync(json)(observation)),
+      observation,
+    );
+  }
+  for (const invalid of [-1, 0.5, Infinity, "1", Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() =>
+      decode({ attachFailureCount: invalid, activationFailureCount: 0, trayFailureCount: 0 }),
+    );
+  }
+  assert.throws(() =>
+    decode({
+      attachFailureCount: 0,
+      activationFailureCount: 0,
+      trayFailureCount: 0,
+      lastFailurePhase: "arbitrary native error",
+    }),
+  );
+});
+
+it("keeps private phased recovery tokens and status shapes finite across the daemon codec", () => {
+  const decodeRequest = Schema.decodeUnknownSync(ProviderDaemonRpcRequest);
+  const decodePreparation = Schema.decodeUnknownSync(
+    ProviderDaemonRpcResultByMethod.prepareFailedRootRecovery,
+  );
+  const common = {
+    threadId: "thread-private",
+    attemptId: "attempt-private",
+    requestCommitment: "a".repeat(64),
+    preparationSequence: 0,
+  };
+  const prepared = {
+    ...common,
+    state: "prepared",
+    phase: "prepared",
+    providerInstanceId: "codex",
+    recoverySession: {
+      previousSubagentRuntimeId: "10000000-0000-4000-8000-000000000001",
+      subagentRuntimeId: "10000000-0000-4000-8000-000000000002",
+      providerThreadId: "history-private",
+    },
+    permit: "b".repeat(64),
+  };
+  assert.deepEqual(decodePreparation(prepared), prepared);
+  for (const bad of [
+    { ...prepared, permit: "short" },
+    { ...prepared, permit: "B".repeat(64) },
+    { ...prepared, permit: `${"b".repeat(64)}\n` },
+    { ...prepared, requestCommitment: "x".repeat(64) },
+    { ...prepared, preparationSequence: -1 },
+    { ...prepared, preparationSequence: Number.MAX_SAFE_INTEGER + 1 },
+    { ...common, state: "consumed", phase: "retired" },
+  ])
+    assert.throws(() => decodePreparation(bad));
+  const payload = {
+    attemptId: "attempt-private",
+    preparationSequence: 0,
+    request: { threadId: "thread-private", input: "synthetic" },
+  };
+  assert.deepEqual(
+    decodeRequest({
+      method: "prepareFailedRootRecovery",
+      commandId: "10000000-0000-4000-8000-000000000001",
+      payload,
+    }),
+    {
+      method: "prepareFailedRootRecovery",
+      commandId: "10000000-0000-4000-8000-000000000001",
+      payload,
+    },
+  );
+  assert.throws(() =>
+    decodeRequest({
+      method: "prepareFailedRootRecovery",
+      commandId: "10000000-0000-4000-8000-000000000001",
+      payload: { ...payload, continuationToken: "bad" },
+    }),
+  );
+  const cancellation = {
+    threadId: payload.request.threadId,
+    attemptId: payload.attemptId,
+    requestCommitment: "c".repeat(64),
+  };
+  assert.deepEqual(
+    decodeRequest({
+      method: "cancelFailedRootRecovery",
+      commandId: "10000000-0000-4000-8000-000000000002",
+      payload: cancellation,
+    }),
+    {
+      method: "cancelFailedRootRecovery",
+      commandId: "10000000-0000-4000-8000-000000000002",
+      payload: cancellation,
+    },
+  );
+  assert.throws(() =>
+    decodeRequest({
+      method: "cancelFailedRootRecovery",
+      payload: { ...cancellation, requestCommitment: "bad" },
+    }),
+  );
+});
+
 const OWNERSHIP_ID = "9a90b48d-868f-4614-ae9c-66d50293d52b";
 const decodeDaemonLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
+
+it("keeps cooperative retirement finite, exact and outside ordinary lease capabilities", () => {
+  const request = {
+    protocolVersion: 1,
+    pid: 123,
+    startedAt: "2026-10-29T00:00:00.000Z",
+    runtimeBuildId: "a".repeat(64),
+    dataProfile: "debug",
+    dataProfileId: "b".repeat(64),
+    nonce: "c".repeat(64),
+  };
+  const decode = Schema.decodeUnknownSync(ProviderDaemonRetirementRequest);
+  const decodeResponse = Schema.decodeUnknownSync(ProviderDaemonRetirementResponse);
+  assert.deepEqual(decode(request), request);
+  assert.deepEqual(decodeResponse({ accepted: true, ...request }), { accepted: true, ...request });
+  for (const [index, invalid] of [
+    { ...request, protocolVersion: 2 },
+    { ...request, pid: 0 },
+    { ...request, pid: 1.5 },
+    { ...request, startedAt: "not-a-time" },
+    { ...request, runtimeBuildId: "A".repeat(64) },
+    { ...request, runtimeBuildId: "a".repeat(65) },
+    { ...request, runtimeBuildId: `${"a".repeat(64)}\n` },
+    { ...request, dataProfile: "other" },
+    { ...request, dataProfileId: "short" },
+    { ...request, dataProfileId: `${"b".repeat(64)}\n` },
+    { ...request, nonce: "c".repeat(63) },
+    { ...request, nonce: `${"c".repeat(64)}\n` },
+    { ...request, extra: "private-input-must-not-be-accepted" },
+  ].entries())
+    assert.throws(() => decode(invalid), `invalid retirement request case ${index}`);
+  assert.throws(() => decodeResponse({ accepted: false, ...request }));
+  assert.throws(() => decodeResponse({ accepted: true, ...request, extra: true }));
+  assert.throws(() => Schema.decodeUnknownSync(ProviderDaemonCapability)("retire"));
+  // Optional health proof is deliberately not a required legacy field.
+  const legacyHealth = {
+    ok: true,
+    mode: "provider-daemon",
+    pid: 123,
+    ppid: 1,
+    version: "0.0.0-test",
+    startedAt: request.startedAt,
+    activeSessionCount: 0,
+    configuredInstanceCount: 0,
+    eventCursor: 0,
+  };
+  const decodeHealth = Schema.decodeUnknownSync(ProviderDaemonHealth);
+  assert.equal(Object.hasOwn(decodeHealth(legacyHealth), "retirementProtocol"), false);
+  assert.equal(
+    decodeHealth({ ...legacyHealth, startedAt: "legacy-native-time" }).startedAt,
+    "legacy-native-time",
+  );
+  assert.equal(decodeHealth({ ...legacyHealth, retirementProtocol: 1 }).retirementProtocol, 1);
+  for (const retirementProtocol of [0, 2, true, null, "1"])
+    assert.throws(() => decodeHealth({ ...legacyHealth, retirementProtocol }));
+});
+
+it("requires a bounded real canonical UTC instant in both retirement wire directions", () => {
+  const request = {
+    protocolVersion: 1,
+    pid: 123,
+    startedAt: "2026-10-29T00:00:00.000Z",
+    runtimeBuildId: "a".repeat(64),
+    dataProfile: "debug",
+    dataProfileId: "b".repeat(64),
+    nonce: "c".repeat(64),
+  };
+  const requestJson = Schema.fromJsonString(ProviderDaemonRetirementRequest);
+  const responseJson = Schema.fromJsonString(ProviderDaemonRetirementResponse);
+  const decodeRequest = Schema.decodeUnknownSync(ProviderDaemonRetirementRequest);
+  const decodeResponse = Schema.decodeUnknownSync(ProviderDaemonRetirementResponse);
+  const decodeRequestJson = Schema.decodeUnknownSync(requestJson);
+  const decodeResponseJson = Schema.decodeUnknownSync(responseJson);
+  const encodeRequestJson = Schema.encodeSync(requestJson);
+  const encodeResponseJson = Schema.encodeSync(responseJson);
+
+  // A leap day and the Unix epoch remain valid through the actual JSON codecs.
+  for (const startedAt of ["2024-02-29T23:59:59.123Z", "1970-01-01T00:00:00.000Z"]) {
+    const value = { ...request, startedAt };
+    const response = { accepted: true, ...value };
+    assert.deepEqual(decodeRequestJson(encodeRequestJson(decodeRequest(value))), value);
+    assert.deepEqual(decodeResponseJson(encodeResponseJson(decodeResponse(response))), response);
+  }
+  for (const [label, startedAt] of [
+    ["invalid text", "not-a-time"],
+    ["impossible month day", "2026-02-30T00:00:00.000Z"],
+    ["non-leap February", "2025-02-29T00:00:00.000Z"],
+    ["normalized next-day hour", "2026-10-29T24:00:00.000Z"],
+    ["missing milliseconds", "2026-10-29T00:00:00Z"],
+    ["alternate UTC offset", "2026-10-29T00:00:00.000+00:00"],
+    ["trailing newline", "2026-10-29T00:00:00.000Z\n"],
+    ["oversized input", "0".repeat(1024)],
+  ] as const) {
+    const value = { ...request, startedAt };
+    const response = { accepted: true, ...value };
+    assert.throws(() => decodeRequest(value), `${label}: request`);
+    assert.throws(() => decodeResponse(response), `${label}: response`);
+    assert.throws(() => decodeRequestJson(JSON.stringify(value)), `${label}: JSON request`);
+    assert.throws(() => decodeResponseJson(JSON.stringify(response)), `${label}: JSON response`);
+  }
+});
 
 it("retains only finite configuration-refusal evidence through current and legacy RPC codecs", () => {
   const decode = Schema.decodeUnknownSync(ProviderDaemonRpcEnvelope);

@@ -99,6 +99,10 @@ describe("workflow security and runtime policy", () => {
     const allowed = new Set([
       "DeskSidebar.browser.tsx",
       "MermaidFamilies.browser.tsx",
+      "MermaidFamilies.allocation.browser.tsx",
+      "MermaidFamilies.output.browser.tsx",
+      "MermaidFamilies.parsed.browser.tsx",
+      "MermaidFamilies.probe.browser.tsx",
       "MermaidSecurity.browser.tsx",
       "Visualizations.browser.tsx",
       "VisualizationFluid.browser.tsx",

@@ -7,6 +7,7 @@ import {
   type UsageStatsTotals,
 } from "@cafecode/contracts";
 import { describe, expect, it, vi } from "vitest";
+import { rollUpCost } from "@cafecode/shared/modelPricing";
 import {
   getUsageRangeBounds,
   selectUsageRange,
@@ -186,6 +187,52 @@ describe("usage range calendar bounds", () => {
 });
 
 describe("selectUsageRange", () => {
+  it("preserves and sums known Claude cache durations across finite ranges", () => {
+    const provider = ProviderDriverKind.make("claudeAgent");
+    const first = {
+      ...row(
+        "2026-09-30",
+        "claude-sonnet-5",
+        { inputTokens: 1_000_000, cacheWriteInputTokens: 1_000_000 },
+        provider,
+      ),
+      cacheWrite1hInputTokens: 1_000_000,
+    };
+    const second = {
+      ...row(
+        "2026-10-01",
+        "claude-sonnet-5",
+        { inputTokens: 1_000_000, cacheWriteInputTokens: 1_000_000 },
+        provider,
+      ),
+      cacheWrite5mInputTokens: 500_000,
+    };
+    const excluded = {
+      ...row(
+        "2026-09-01",
+        "claude-sonnet-5",
+        { inputTokens: 1_000_000, cacheWriteInputTokens: 1_000_000 },
+        provider,
+      ),
+      cacheWrite1hInputTokens: 1_000_000,
+    };
+    for (const range of ["7", "30", "90"] as const) {
+      const single = selectUsageRange(usage({ tokenBreakdownDays: [first] }), range);
+      expect(single.tokenBreakdown[0]?.cacheWrite1hInputTokens).toBe(1_000_000);
+      expect(rollUpCost(single.tokenBreakdown).cost).toBe(4);
+      expect(rollUpCost(single.tokenBreakdown).unknownCacheWriteTokens).toBeUndefined();
+      const many = selectUsageRange(usage({ tokenBreakdownDays: [first, second] }), range);
+      expect(many.tokenBreakdown[0]).toMatchObject({
+        cacheWriteInputTokens: 2_000_000,
+        cacheWrite5mInputTokens: 500_000,
+        cacheWrite1hInputTokens: 1_000_000,
+      });
+      expect(rollUpCost(many.tokenBreakdown).cost).toBe(6.5);
+      expect(rollUpCost(many.tokenBreakdown).unknownCacheWriteTokens).toBe(500_000);
+    }
+    const seven = selectUsageRange(usage({ tokenBreakdownDays: [excluded, first, second] }), "7");
+    expect(seven.tokenBreakdown[0]?.cacheWrite1hInputTokens).toBe(1_000_000);
+  });
   it("omits the entire selected time container when exact aggregation would overflow", () => {
     const source = usage({
       modelGeneratingTime: {

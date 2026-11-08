@@ -107,6 +107,7 @@ function SelectValue({ className, ...props }: SelectPrimitive.Value.Props) {
 function SelectPopup({
   className,
   popupClassName,
+  variant = "default",
   children,
   side = "bottom",
   sideOffset = 4,
@@ -118,6 +119,7 @@ function SelectPopup({
   ...props
 }: SelectPrimitive.Popup.Props & {
   popupClassName?: string;
+  variant?: "default" | "sidebar";
   side?: SelectPrimitive.Positioner.Props["side"];
   sideOffset?: SelectPrimitive.Positioner.Props["sideOffset"];
   align?: SelectPrimitive.Positioner.Props["align"];
@@ -141,6 +143,7 @@ function SelectPopup({
         <SelectPrimitive.Popup
           className={cn(
             "text-foreground transition-[scale,opacity]",
+            variant === "sidebar" && "cafe-sidebar-select",
             POPUP_MOTION_CLASS_NAME,
             // With alignItemWithTrigger the list opens over its trigger
             // (side "none") and Base UI scrolls the selected item under the
@@ -159,12 +162,17 @@ function SelectPopup({
           <div
             className={cn(
               "relative h-full rounded-lg border bg-popover not-dark:bg-clip-padding shadow-lg/5 before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] before:shadow-[0_1px_--theme(--color-black/4%)] dark:before:shadow-[0_-1px_--theme(--color-white/6%)]",
+              variant === "sidebar" && "cafe-sidebar-surface",
               matchTriggerWidth && "min-w-(--anchor-width)",
               popupClassName,
             )}
           >
             <SelectPrimitive.List
-              className={cn("max-h-(--available-height) overflow-y-auto p-1", className)}
+              className={cn(
+                "max-h-(--available-height) overflow-y-auto p-1",
+                variant === "sidebar" && "relative z-10",
+                className,
+              )}
               data-slot="select-list"
             >
               {children}

@@ -22,7 +22,6 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as P from "effect/Predicate";
-import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
@@ -99,13 +98,39 @@ export function openCodeRuntimeErrorDetail(cause: unknown): string {
 
 export const runOpenCodeSdk = <A>(
   operation: string,
-  fn: () => Promise<A>,
+  fn: (signal: AbortSignal) => Promise<A>,
 ): Effect.Effect<A, OpenCodeRuntimeError> =>
-  Effect.tryPromise({
-    try: fn,
-    catch: (cause) =>
-      new OpenCodeRuntimeError({ operation, detail: openCodeRuntimeErrorDetail(cause), cause }),
-  }).pipe(Effect.withSpan(`opencode.${operation}`));
+  Effect.acquireUseRelease(
+    Effect.sync(() => new AbortController()),
+    (controller) =>
+      Effect.tryPromise({
+        try: () => fn(controller.signal),
+        // SDK failures can retain the request, Basic authorization header and raw
+        // upstream body. Only a finite HTTP classification crosses this boundary.
+        catch: (cause) =>
+          new OpenCodeRuntimeError({ operation, detail: openCodeSdkFailureDetail(cause) }),
+      }),
+    (controller) => Effect.sync(() => controller.abort()),
+  ).pipe(Effect.withSpan(`opencode.${operation}`));
+
+export function openCodeSdkFailureDetail(cause: unknown): string {
+  let status: unknown;
+  try {
+    if (typeof cause === "object" && cause !== null) {
+      const response = Object.getOwnPropertyDescriptor(cause, "response")?.value;
+      if (typeof response === "object" && response !== null) status = response.status;
+    }
+  } catch {
+    // Opaque/proxy errors have no reliable status; never stringify them.
+  }
+  if (status === 401 || status === 403)
+    return "OpenCode server rejected authentication. Check the server URL and password.";
+  if (status === 429) return "OpenCode is rate limited. Wait before retrying.";
+  if (typeof status === "number" && Number.isInteger(status) && status >= 400 && status <= 599) {
+    return `OpenCode request failed (HTTP ${status}). Check the provider configuration and server availability.`;
+  }
+  return "OpenCode request failed. Check the provider configuration and server availability.";
+}
 
 export interface OpenCodeCommandResult {
   readonly stdout: string;
@@ -167,15 +192,68 @@ export interface OpenCodeRuntimeShape {
   ) => Effect.Effect<OpenCodeInventory, OpenCodeRuntimeError>;
 }
 
-function parseServerUrlFromOutput(output: string): string | null {
-  for (const line of output.split("\n")) {
+function parseServerUrlFromOutput(output: string, expected: URL): string | null {
+  // Wait for the complete record: a URL prefix can become a different port,
+  // path or query when the next native stdout chunk arrives.
+  for (const line of output.split("\n").slice(0, -1)) {
     if (!line.startsWith(OPENCODE_SERVER_READY_PREFIX)) {
       continue;
     }
     const match = line.match(/on\s+(https?:\/\/[^\s]+)/);
-    return match?.[1] ?? null;
+    if (!match) continue;
+    try {
+      const url = new URL(match[1]!);
+      if (
+        url.origin === expected.origin &&
+        !url.username &&
+        !url.password &&
+        url.pathname === "/" &&
+        !url.search &&
+        !url.hash
+      )
+        return expected.origin;
+    } catch {
+      // Ignore malformed output; it is never an alternate endpoint authority.
+    }
   }
   return null;
+}
+
+export const OPENCODE_STARTUP_OUTPUT_MAX_CHARS = 64 * 1024;
+
+/** Only the launched listener can establish readiness. Retain a bounded partial
+ * line during startup, then keep draining native output without retaining it. */
+export function makeOpenCodeStartupOutput(input: {
+  readonly hostname: string;
+  readonly port: number;
+}) {
+  const hostname =
+    input.hostname.includes(":") && !input.hostname.startsWith("[")
+      ? `[${input.hostname}]`
+      : input.hostname;
+  const expected = new URL(`http://${hostname}:${input.port}`);
+  let pending = "";
+  let finished = false;
+  return {
+    write(chunk: string): string | null {
+      if (finished) return null;
+      pending = (pending + chunk.slice(-OPENCODE_STARTUP_OUTPUT_MAX_CHARS)).slice(
+        -OPENCODE_STARTUP_OUTPUT_MAX_CHARS,
+      );
+      const candidate = parseServerUrlFromOutput(pending, expected);
+      if (!candidate) return null;
+      finished = true;
+      pending = "";
+      return expected.origin;
+    },
+    finish() {
+      finished = true;
+      pending = "";
+    },
+    get bufferedChars() {
+      return pending.length;
+    },
+  };
 }
 
 export function parseOpenCodeModelSlug(
@@ -397,14 +475,12 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       );
       yield* Scope.addFinalizer(runtimeScope, terminateChild);
 
-      const stdoutRef = yield* Ref.make("");
-      const stderrRef = yield* Ref.make("");
+      const startupOutput = makeOpenCodeStartupOutput({ hostname, port });
       const readyDeferred = yield* Deferred.make<string, OpenCodeRuntimeError>();
 
       const setReadyFromStdoutChunk = (chunk: string) =>
-        Ref.updateAndGet(stdoutRef, (stdout) => `${stdout}${chunk}`).pipe(
-          Effect.flatMap((nextStdout) => {
-            const parsed = parseServerUrlFromOutput(nextStdout);
+        Effect.sync(() => startupOutput.write(chunk)).pipe(
+          Effect.flatMap((parsed) => {
             return parsed
               ? Deferred.succeed(readyDeferred, parsed).pipe(Effect.ignore)
               : Effect.void;
@@ -418,8 +494,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         Effect.forkIn(runtimeScope),
       );
       const stderrFiber = yield* child.stderr.pipe(
-        Stream.decodeText(),
-        Stream.runForEach((chunk) => Ref.update(stderrRef, (stderr) => `${stderr}${chunk}`)),
+        Stream.runDrain,
         Effect.ignore,
         Effect.forkIn(runtimeScope),
       );
@@ -427,21 +502,13 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       const exitFiber = yield* child.exitCode.pipe(
         Effect.flatMap((code) =>
           Effect.gen(function* () {
-            const stdout = yield* Ref.get(stdoutRef);
-            const stderr = yield* Ref.get(stderrRef);
             const exitCode = Number(code);
             yield* Deferred.fail(
               readyDeferred,
               new OpenCodeRuntimeError({
                 operation: "startOpenCodeServerProcess",
-                detail: [
-                  `OpenCode server exited before startup completed (code: ${String(exitCode)}).`,
-                  stdout.trim() ? `stdout:\n${stdout.trim()}` : null,
-                  stderr.trim() ? `stderr:\n${stderr.trim()}` : null,
-                ]
-                  .filter(Boolean)
-                  .join("\n\n"),
-                cause: { exitCode, stdout, stderr },
+                detail: `OpenCode server exited before startup completed (code: ${String(exitCode)}).`,
+                cause: { exitCode },
               }),
             ).pipe(Effect.ignore);
           }),
@@ -454,11 +521,14 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         Deferred.await(readyDeferred).pipe(Effect.timeoutOption(timeoutMs)),
       );
 
-      // Startup-time fibers are no longer needed once ready has resolved (either
-      // way). The exit fiber is only interrupted on failure; on success it keeps
-      // the caller's `exitCode` effect observable until the scope closes.
-      yield* Fiber.interrupt(stdoutFiber).pipe(Effect.ignore);
-      yield* Fiber.interrupt(stderrFiber).pipe(Effect.ignore);
+      startupOutput.finish();
+      // A live serve process must keep its output pipes drained; interrupting
+      // them at readiness can fill native pipes and stall later provider work.
+      // No native output is retained or projected into an error after startup.
+      if (Exit.isFailure(readyExit) || Option.isNone(readyExit.value)) {
+        yield* Fiber.interrupt(stdoutFiber).pipe(Effect.ignore);
+        yield* Fiber.interrupt(stderrFiber).pipe(Effect.ignore);
+      }
 
       if (Exit.isFailure(readyExit)) {
         yield* Fiber.interrupt(exitFiber).pipe(Effect.ignore);
@@ -530,7 +600,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
     });
 
   const loadProviders = (client: OpencodeClient) =>
-    runOpenCodeSdk("provider.list", () => client.provider.list()).pipe(
+    runOpenCodeSdk("provider.list", (signal) => client.provider.list(undefined, { signal })).pipe(
       Effect.filterMapOrFail(
         (list) =>
           list.data
@@ -546,7 +616,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
     );
 
   const loadAgents = (client: OpencodeClient) =>
-    runOpenCodeSdk("app.agents", () => client.app.agents()).pipe(
+    runOpenCodeSdk("app.agents", (signal) => client.app.agents(undefined, { signal })).pipe(
       Effect.map((result) => result.data ?? []),
     );
 

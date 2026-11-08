@@ -4,7 +4,7 @@ Decision status: Accepted within the user's explicit retry repair request
 Implementation status: Implemented in source
 Verification status: Exact-source qualification is recorded separately; no live-provider or running-runtime adoption claim
 Created: 2026-10-19 12:16:05 JST (UTC+0900)
-Last updated: 2026-10-19 12:47:21 JST (UTC+0900)
+Last updated: 2026-10-28 20:21:41 JST (UTC+0900)
 Decision authority: the user requests repairing failed-root recovery and continuing
 with backed-off retries until explicitly stopped, without weakening submission safety.
 Partially supersedes: [persistent transient recovery](codex-persistent-transient-recovery.md)
@@ -12,6 +12,13 @@ and [failed-root session restart](codex-failed-root-session-restart.md), only th
 treatment of a consumed attempt whose exact new native result proves that neither
 retirement nor submission began. Unknown acknowledgment remains reconciliation,
 not permission to resend.
+Partially superseded by: [phased failed-root recovery](codex-phased-failed-root-recovery.md)
+for the send-time refusal handoff and combined preparation/submission budget
+under the exact owner's phased capability. The successor retains immutable
+paid claims and uses a separate private one-use preparation continuation only
+after qualified zero-paid outcome and cleanup proof. Unknown paid acknowledgment
+remains non-resendable. Its source implementation and separate exact-source
+qualification do not replace the historical verification status below.
 
 ## Context and alternatives
 

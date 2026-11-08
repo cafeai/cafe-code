@@ -1,8 +1,19 @@
-import type { UserInputQuestion } from "@cafecode/contracts";
+import type {
+  ProviderUserInputUnanswered,
+  ProviderUserInputUnansweredDisposition,
+  UserInputQuestion,
+} from "@cafecode/contracts";
 
 export interface PendingUserInputDraftAnswer {
   selectedOptionLabels?: string[];
   customAnswer?: string;
+  /** An explicit local choice, never an empty or fabricated answer. */
+  unanswered?: "skipped";
+}
+
+export interface PendingUserInputResponse {
+  answers: Record<string, string | string[]>;
+  unanswered?: ProviderUserInputUnanswered;
 }
 
 export interface PendingUserInputProgress {
@@ -45,6 +56,7 @@ export function resolvePendingUserInputAnswer(
   question: UserInputQuestion,
   draft: PendingUserInputDraftAnswer | undefined,
 ): string | string[] | null {
+  if (draft?.unanswered !== undefined) return null;
   const customAnswer = normalizeDraftAnswer(draft?.customAnswer);
   if (customAnswer) {
     return customAnswer;
@@ -56,6 +68,55 @@ export function resolvePendingUserInputAnswer(
   }
 
   return selectedOptionLabels[0] ?? null;
+}
+
+/** Replacing an answer with Skip deliberately removes both answer sources. */
+export function skipPendingUserInputQuestion(): PendingUserInputDraftAnswer {
+  return { unanswered: "skipped" };
+}
+
+/**
+ * Only a capability advertised on this exact pending request permits omitted
+ * answers. Dismiss preserves completed answers and explicit prior skips; it
+ * dismisses only the questions that still have no answer. Unknown draft keys
+ * never enter the wire response, and duplicate question identities refuse it.
+ */
+export function buildPendingUserInputResponse(
+  questions: ReadonlyArray<UserInputQuestion>,
+  draftAnswers: Record<string, PendingUserInputDraftAnswer>,
+  supportsUnanswered: boolean,
+  dismissUnanswered = false,
+): PendingUserInputResponse | null {
+  const answers: Array<[string, string | string[]]> = [];
+  const unanswered: Array<[string, ProviderUserInputUnansweredDisposition]> = [];
+  const seen = new Set<string>();
+  for (const question of questions) {
+    if (seen.has(question.id)) return null;
+    seen.add(question.id);
+    const draft = draftAnswers[question.id];
+    if (draft?.unanswered !== undefined) {
+      // Do not let a stale or malformed draft silently win over an answer.
+      if (
+        !supportsUnanswered ||
+        draft.unanswered !== "skipped" ||
+        normalizeDraftAnswer(draft.customAnswer) !== null ||
+        normalizeSelectedOptionLabels(draft.selectedOptionLabels).length > 0
+      )
+        return null;
+      unanswered.push([question.id, "skipped"]);
+      continue;
+    }
+    const answer = resolvePendingUserInputAnswer(question, draft);
+    if (answer !== null) answers.push([question.id, answer]);
+    else if (supportsUnanswered && dismissUnanswered) unanswered.push([question.id, "dismissed"]);
+    else return null;
+  }
+  // Object.fromEntries creates own data properties even for provider-authored
+  // ids such as __proto__; assignment into {} would invoke its legacy setter.
+  return {
+    answers: Object.fromEntries(answers),
+    ...(unanswered.length > 0 ? { unanswered: Object.fromEntries(unanswered) } : {}),
+  };
 }
 
 export function setPendingUserInputCustomAnswer(
@@ -102,17 +163,19 @@ export function buildPendingUserInputAnswers(
   questions: ReadonlyArray<UserInputQuestion>,
   draftAnswers: Record<string, PendingUserInputDraftAnswer>,
 ): Record<string, string | string[]> | null {
-  const answers: Record<string, string | string[]> = {};
+  const answers: Array<[string, string | string[]]> = [];
 
   for (const question of questions) {
     const answer = resolvePendingUserInputAnswer(question, draftAnswers[question.id]);
     if (!answer) {
       return null;
     }
-    answers[question.id] = answer;
+    answers.push([question.id, answer]);
   }
 
-  return answers;
+  // Preserve the legacy last-answer-wins handling of duplicate ids while
+  // treating every provider-authored id as an inert own data property.
+  return Object.fromEntries(answers);
 }
 
 export function countAnsweredPendingUserInputQuestions(
@@ -139,6 +202,7 @@ export function derivePendingUserInputProgress(
   questions: ReadonlyArray<UserInputQuestion>,
   draftAnswers: Record<string, PendingUserInputDraftAnswer>,
   questionIndex: number,
+  supportsUnanswered = false,
 ): PendingUserInputProgress {
   const normalizedQuestionIndex =
     questions.length === 0 ? 0 : Math.max(0, Math.min(questionIndex, questions.length - 1));
@@ -162,7 +226,8 @@ export function derivePendingUserInputProgress(
     usingCustomAnswer: customAnswer.trim().length > 0,
     answeredQuestionCount,
     isLastQuestion,
-    isComplete: buildPendingUserInputAnswers(questions, draftAnswers) !== null,
-    canAdvance: Boolean(resolvedAnswer),
+    isComplete: buildPendingUserInputResponse(questions, draftAnswers, supportsUnanswered) !== null,
+    canAdvance:
+      Boolean(resolvedAnswer) || (supportsUnanswered && activeDraft?.unanswered === "skipped"),
   };
 }

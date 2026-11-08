@@ -1,7 +1,16 @@
-import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@cafecode/contracts";
+import {
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
+  type ServerProviderVersionAdvisory,
+} from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
 
-import { PROVIDER_STATUS_STYLES, getProviderSummary } from "./providerStatus";
+import {
+  PROVIDER_STATUS_STYLES,
+  getProviderSummary,
+  getProviderVersionAdvisoryPresentation,
+} from "./providerStatus";
 
 function makeProvider(overrides: Partial<ServerProvider> = {}): ServerProvider {
   return {
@@ -19,6 +28,59 @@ function makeProvider(overrides: Partial<ServerProvider> = {}): ServerProvider {
     ...overrides,
   };
 }
+
+describe("provider update availability", () => {
+  const advisory: ServerProviderVersionAdvisory = {
+    status: "behind_latest",
+    currentVersion: "2.1.301",
+    latestVersion: "2.1.302",
+    checkedAt: "2026-10-22T00:00:00.000Z",
+    canUpdate: true,
+    updateCommand: "claude update",
+    message: "Install the update now or review provider settings.",
+  };
+
+  it.each([
+    { canUpdate: false, updateCommand: null, oneClickAvailable: true },
+    { canUpdate: true, updateCommand: null, oneClickAvailable: true },
+    { canUpdate: true, updateCommand: "claude update", oneClickAvailable: false },
+  ])(
+    "explains manual updates when the exact installation cannot be updated here",
+    (availability) => {
+      expect(
+        getProviderVersionAdvisoryPresentation(
+          {
+            ...advisory,
+            canUpdate: availability.canUpdate,
+            updateCommand: availability.updateCommand,
+          },
+          { oneClickAvailable: availability.oneClickAvailable },
+        ),
+      ).toMatchObject({
+        canUpdate: false,
+        detail: "Update this installation outside Cafe Code.",
+        updateCommand: availability.updateCommand,
+      });
+    },
+  );
+
+  it("keeps the qualified updater and its manual command available", () => {
+    expect(
+      getProviderVersionAdvisoryPresentation(advisory, {
+        oneClickAvailable: true,
+      }),
+    ).toMatchObject({
+      canUpdate: true,
+      detail: advisory.message,
+      updateCommand: "claude update",
+    });
+  });
+
+  it.each(["current", "unknown"] as const)("does not offer an update for %s metadata", (status) => {
+    expect(getProviderVersionAdvisoryPresentation({ ...advisory, status })).toBeNull();
+    expect(getProviderVersionAdvisoryPresentation(undefined)).toBeNull();
+  });
+});
 
 describe("Codex subscription provider summary", () => {
   it.each([
@@ -55,6 +117,53 @@ describe("Codex subscription provider summary", () => {
         }),
       ).headline,
     ).toBe("Authenticated · ChatGPT Subscription");
+  });
+});
+
+describe("native Claude sign-in expiry advisory", () => {
+  const now = Date.parse("2026-11-04T00:00:00.000Z");
+  const provider = (expiresAt: string) =>
+    makeProvider({
+      instanceId: ProviderInstanceId.make("claude-owned"),
+      driver: ProviderDriverKind.make("claudeAgent"),
+      status: "ready",
+      auth: {
+        status: "authenticated",
+        credentialExpiry: {
+          source: "native-result",
+          expiresAt,
+          observedAt: "2026-11-04T00:00:00.000Z",
+        },
+      } as ServerProvider["auth"],
+    });
+
+  it.each([
+    ["2026-11-14T00:00:00.000Z", "Claude sign-in may expire soon."],
+    ["2026-11-04T00:00:00.000Z", "Claude sign-in may have expired."],
+    ["2026-11-03T00:00:00.000Z", "Claude sign-in may have expired."],
+  ])("warns truthfully about the reported refresh-chain deadline %s", (expiresAt, headline) => {
+    const current = provider(expiresAt);
+    const summary = getProviderSummary(current, now);
+    expect(summary.headline).toBe("Authenticated");
+    expect(summary.detail).toContain(headline);
+    expect(summary.detail).toContain("estimate");
+    expect(summary.detail).toContain("up to 3 days earlier");
+    expect(current.auth.status).toBe("authenticated");
+    expect(current.status).toBe("ready");
+  });
+
+  it("keeps older, distant and other-provider metadata out of the advance warning", () => {
+    expect(getProviderSummary(provider("2026-11-14T00:00:00.001Z"), now).detail).toBeNull();
+    expect(
+      getProviderSummary(makeProvider({ status: "ready", auth: { status: "authenticated" } }), now)
+        .detail,
+    ).toBeNull();
+    expect(
+      getProviderSummary(
+        { ...provider("2026-11-10T00:00:00.000Z"), driver: ProviderDriverKind.make("codex") },
+        now,
+      ).detail,
+    ).toBeNull();
   });
 });
 

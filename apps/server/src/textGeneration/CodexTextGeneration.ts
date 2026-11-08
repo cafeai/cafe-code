@@ -8,8 +8,8 @@ import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import { codexCommandUsesShell } from "effect-codex-app-server/command";
+import { ChildProcessSpawner } from "effect/unstable/process";
+import { makeCodexCommand } from "effect-codex-app-server/command";
 
 import {
   DEFAULT_GIT_TEXT_GENERATION_REASONING_EFFORT,
@@ -214,49 +214,55 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         tierAuthority ? yield* tierAuthority.getModels() : undefined,
       );
       if (tier.error) return yield* new TextGenerationError({ operation, detail: tier.error });
-      const command = ChildProcess.make(
-        codexConfig.binaryPath || "codex",
-        [
-          "exec",
-          "--json",
-          "--ephemeral",
-          "--skip-git-repo-check",
-          "-s",
-          "read-only",
-          "--model",
-          modelSelection.model,
-          "--config",
-          `model_reasoning_effort="${reasoningEffort}"`,
-          // Match the app-server/TUI wire ids. An explicit Off must override a
-          // user's priority config, otherwise even a short metadata helper can
-          // silently incur the premium the Cafe selection turned off. An unset
-          // Cafe choice also resolves to Standard; explicit advertised tiers
-          // keep their exact validated ids.
-          ...(tier.serviceTier !== undefined
-            ? ["--config", `service_tier=${encodeServiceTier(tier.serviceTier)}`]
-            : []),
-          "--output-schema",
-          schemaPath,
-          "--output-last-message",
-          outputPath,
-          ...imagePaths.flatMap((imagePath) => ["--image", imagePath]),
-          "-",
-        ],
-        {
-          env: {
-            ...environment,
-            ...(codexConfig.homePath ? { CODEX_HOME: expandHomePath(codexConfig.homePath) } : {}),
-          },
-          cwd,
-          // Metadata helpers must preserve the same literal file/config argv
-          // as sessions and probes; the shared policy changes no paid-tier,
-          // authentication, sandbox or stdin behavior.
-          shell: codexCommandUsesShell(codexConfig.binaryPath || "codex", process.platform),
-          stdin: {
-            stream: Stream.encodeText(Stream.make(prompt)),
-          },
-        },
-      );
+      const command = yield* Effect.try({
+        try: () =>
+          makeCodexCommand(
+            codexConfig.binaryPath || "codex",
+            [
+              "exec",
+              "--json",
+              "--ephemeral",
+              "--skip-git-repo-check",
+              "-s",
+              "read-only",
+              "--model",
+              modelSelection.model,
+              "--config",
+              `model_reasoning_effort="${reasoningEffort}"`,
+              // Match the app-server/TUI wire ids. An explicit Off must override a
+              // user's priority config, otherwise even a short metadata helper can
+              // silently incur the premium the Cafe selection turned off. An unset
+              // Cafe choice also resolves to Standard; explicit advertised tiers
+              // keep their exact validated ids.
+              ...(tier.serviceTier !== undefined
+                ? ["--config", `service_tier=${encodeServiceTier(tier.serviceTier)}`]
+                : []),
+              "--output-schema",
+              schemaPath,
+              "--output-last-message",
+              outputPath,
+              ...imagePaths.flatMap((imagePath) => ["--image", imagePath]),
+              "-",
+            ],
+            {
+              env: {
+                ...environment,
+                ...(codexConfig.homePath
+                  ? { CODEX_HOME: expandHomePath(codexConfig.homePath) }
+                  : {}),
+              },
+              cwd,
+              // Metadata helpers must preserve the same literal file/config argv
+              // as sessions and probes; the shared policy changes no paid-tier,
+              // authentication, sandbox or stdin behavior.
+              stdin: {
+                stream: Stream.encodeText(Stream.make(prompt)),
+              },
+            },
+          ),
+        catch: (cause) =>
+          normalizeCliError("codex", operation, cause, "Failed to prepare Codex CLI process"),
+      });
 
       const child = yield* commandSpawner
         .spawn(command)

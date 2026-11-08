@@ -44,6 +44,26 @@ describe("Full-access inline document presentation", () => {
     );
     expect(html.endsWith('<body data-author-body="yes">Chart</body></html>')).toBe(true);
   });
+  it("preserves original mixed-case document indices after Unicode in a valid leading comment", () => {
+    // U+0130 lowercases to two UTF-16 code units. A whole-source lowercase
+    // copy therefore cannot supply offsets into this unchanged authored HTML.
+    const throughHead =
+      '<!doctype html><!-- Unicode: İ 🌸 --><HtMl data-author-root="İ"><HeAd data-author-head="🌸">';
+    const remainder =
+      '<script>window.unicodeDocumentStarts=true;</script></HeAd><BoDy data-author-body="İ">Chart</BoDy></HtMl>';
+    const html = createInlineVisualizationDocument(
+      throughHead + remainder,
+      presentation,
+      false,
+      frameId,
+    );
+    expect(html.startsWith(throughHead)).toBe(true);
+    expect(html.indexOf(INLINE_VISUALIZATION_CSP)).toBeGreaterThan(throughHead.length);
+    expect(html.indexOf(INLINE_VISUALIZATION_CSP)).toBeLessThan(
+      html.indexOf("window.unicodeDocumentStarts"),
+    );
+    expect(html.endsWith(remainder)).toBe(true);
+  });
   it("keeps fixed-font fragments standards-wrapped without changing external App source", () => {
     const source = GENERATED_VISUALIZATION_FONT_APPENDIX + '<main id="chart-fragment">Chart</main>';
     const generated = createInlineVisualizationDocument(source, presentation, false, frameId);
@@ -122,6 +142,28 @@ describe("Full-access inline document presentation", () => {
     expect(html.indexOf(INLINE_VISUALIZATION_CSP)).toBeLessThan(
       html.indexOf("window.actualAuthoredScript"),
     );
+    expect(html).toContain(decoy);
+  });
+  it("keeps Unicode raw text and mixed-case closing-tag boundary decoys outside the actual head", () => {
+    const decoy =
+      '<template><ScRiPt>const unicode="İ";const suffix="</sCrIpTed>";const example="</template><HtMl><HeAd>";</sCrIpT ></TeMpLaTe>';
+    const throughHead = '<HtMl data-author-root="original"><HeAd data-author-head="original">';
+    const remainder =
+      "<title>Original head</title></HeAd><BoDy><script>window.actualMixedCaseScript=true;</script></BoDy></HtMl>";
+    const html = createInlineVisualizationDocument(
+      decoy + throughHead + remainder,
+      presentation,
+      false,
+      frameId,
+    );
+    expect(html.startsWith(decoy + throughHead)).toBe(true);
+    expect(html.indexOf(INLINE_VISUALIZATION_CSP)).toBeGreaterThan(
+      decoy.length + throughHead.length,
+    );
+    expect(html.indexOf(INLINE_VISUALIZATION_CSP)).toBeLessThan(
+      html.indexOf("window.actualMixedCaseScript"),
+    );
+    expect(html.endsWith(remainder)).toBe(true);
     expect(html).toContain(decoy);
   });
 });

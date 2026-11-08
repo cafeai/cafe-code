@@ -35,6 +35,7 @@ import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
@@ -48,6 +49,10 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { makeDrainableWorker, type DrainableWorker } from "@cafecode/shared/DrainableWorker";
+import {
+  providerStartupFailureCategoryFromDetail,
+  providerStartupFailureDetail,
+} from "@cafecode/shared/providerStartupFailure";
 
 import {
   resolveThreadWorkspaceCwd,
@@ -59,6 +64,8 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { hasLiveProviderRuntimeOwner } from "../../provider/providerRuntimeOwnerEvidence.ts";
 import { sessionLifecycleSnapshot, isSupersededSessionLifecycle } from "../sessionLifecycle.ts";
 import { getCodexRootTurnCompletion } from "../../provider/codexRootTurnCompletion.ts";
+import * as Exit from "effect/Exit";
+import { codexFailedRootPreparationCommitment } from "../../provider/codexFailedRootPreparation.ts";
 import { matchesSubagentPolicySession } from "../../provider/subagentPolicyContinuation.ts";
 import { makeProviderSessionTitle } from "../../provider/providerSessionTitle.ts";
 import {
@@ -79,6 +86,10 @@ import {
   type ProviderRuntimeBinding,
 } from "../../provider/Services/ProviderSessionDirectory.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import {
+  makeMcpQuestionResolutionActivity,
+  makeNativeMcpQuestionResolutionItems,
+} from "../mcpQuestionNotice.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   ProviderCommandReactor,
@@ -184,7 +195,8 @@ type ReactorWork =
   | ProviderIntentEvent
   | RuntimeLossEvent
   | RuntimeRecoveryRetry
-  | CodexTransientMarkerRetry;
+  | CodexTransientMarkerRetry
+  | { readonly _tag: "codex-prepared-submission"; readonly run: Effect.Effect<void> };
 interface PreparedProviderTurn {
   readonly request: ProviderSendTurnInput;
   readonly configuration: ProviderTurnConfiguration | undefined;
@@ -437,9 +449,26 @@ function findProviderAdapterProcessError(
   return undefined;
 }
 
-function sanitizeProviderFailureDetail(detail: string): string {
-  return RAW_PROVIDER_PROCESS_FAILURE_PATTERN.test(detail)
-    ? "Provider runtime exited while starting. Cafe Code attempted automatic fresh-session recovery; if this repeats, check the selected provider account, model access, and local CLI install."
+function sanitizeProviderFailureDetail(detail: string, processFailure = false): string {
+  // The daemon can wrap this fixed local capability failure in a process-error
+  // envelope. Preserve the actionable category without projecting that wrapper,
+  // its stack or an arbitrary native cause into the durable work log. A process
+  // error class alone proves neither native exit nor a recovery attempt.
+  if (
+    /\bCould not attach Glide desktop tools\. The computer-use connection limit was reached\./.test(
+      detail,
+    )
+  ) {
+    return providerStartupFailureDetail("glide-capacity");
+  }
+  if (/\bCould not attach Glide desktop tools\./.test(detail)) {
+    return providerStartupFailureDetail("glide-attach");
+  }
+  if (/\bCould not activate Glide desktop tools\./.test(detail)) {
+    return providerStartupFailureDetail("glide-activate");
+  }
+  return processFailure || RAW_PROVIDER_PROCESS_FAILURE_PATTERN.test(detail)
+    ? "Provider runtime request failed. Check the selected provider account, model access, and local CLI install."
     : detail;
 }
 
@@ -564,6 +593,29 @@ const make = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
+  // A successful response call only claims the native callback; Claude can
+  // still cancel before publishing its canonical settlement. Keep these two
+  // independent witnesses joined to the exact immutable MCP intent. The live
+  // observer is registered before native I/O, so either arrival order works.
+  // This bounded, scope-owned join never retries a mutation after an unknown
+  // result, nor guesses attribution from matching answers after a restart.
+  type McpNativeResponse = Extract<
+    ProviderIntentEvent,
+    { type: "thread.user-input-response-requested" }
+  >;
+  type McpSettlement = {
+    readonly event: McpNativeResponse;
+    readonly owner: Pick<
+      OrchestrationSession,
+      "providerName" | "providerInstanceId" | "subagentRuntimeId"
+    >;
+    accepted: boolean;
+    resolved: boolean;
+  };
+  const mcpSettlements = new Map<string, McpSettlement>();
+  const mcpSettlementKey = (threadId: ThreadId, requestId: string) =>
+    JSON.stringify([threadId, requestId]);
+  yield* Effect.addFinalizer(() => Effect.sync(() => mcpSettlements.clear()));
   // Inventory presentation is optional in synthetic/older service graphs.
   // Read only an already-cached catalog; never refresh/probe to decorate a turn.
   const providerAdapterRegistry = yield* Effect.serviceOption(ProviderAdapterRegistry);
@@ -595,8 +647,16 @@ const make = Effect.gen(function* () {
     ThreadId,
     {
       readonly intentSequence: number;
+      readonly pendingControls: Array<ProviderIntentEvent | RuntimeRecoveryRetry>;
       cancel: Effect.Effect<void>;
     }
+  >();
+  // A stopped preparation may still be joining an uninterruptible native
+  // acquire. Only its own thread's later controls wait for that exact owner;
+  // unrelated threads continue through the shared event subscriber and worker.
+  const transientRecoveryControlBarriers = new Map<
+    ThreadId,
+    { readonly pendingControls: Array<ProviderIntentEvent | RuntimeRecoveryRetry> }
   >();
   const sql = yield* SqlClient.SqlClient;
   const serverConfig = yield* ServerConfig;
@@ -845,8 +905,18 @@ const make = Effect.gen(function* () {
     };
     readonly codexNonSteerableTurnKind?: CodexNonSteerableTurnKind;
     readonly recoveryBarrier?: string;
-  }) =>
-    orchestrationEngine.dispatch({
+  }) => {
+    // Only a correlated pre-turn failure may carry this presentation marker.
+    // The detail has already crossed the finite sanitizer above; arbitrary
+    // received payload fields cannot supply the server-authored category.
+    const startupFailureCategory =
+      input.kind === "provider.turn.start.failed" &&
+      input.turnId === null &&
+      input.messageId !== undefined &&
+      input.intentSequence !== undefined
+        ? providerStartupFailureCategoryFromDetail(input.detail)
+        : undefined;
+    return orchestrationEngine.dispatch({
       type: "thread.activity.append",
       commandId: serverCommandId("provider-failure-activity"),
       threadId: input.threadId,
@@ -857,6 +927,7 @@ const make = Effect.gen(function* () {
         summary: input.summary,
         payload: {
           detail: input.detail,
+          ...(startupFailureCategory !== undefined ? { startupFailureCategory } : {}),
           ...(input.requestId ? { requestId: input.requestId } : {}),
           ...(input.messageId ? { messageId: input.messageId } : {}),
           ...(input.intentSequence !== undefined ? { intentSequence: input.intentSequence } : {}),
@@ -878,6 +949,7 @@ const make = Effect.gen(function* () {
       },
       createdAt: input.createdAt,
     });
+  };
 
   const appendProviderDiagnosticActivity = (input: {
     readonly threadId: ThreadId;
@@ -964,11 +1036,14 @@ const make = Effect.gen(function* () {
       ? failReason.error
       : undefined;
     if (providerError) {
-      return sanitizeProviderFailureDetail(providerError.detail);
+      return sanitizeProviderFailureDetail(
+        providerError.detail,
+        providerError.remoteErrorTag === "ProviderAdapterProcessError",
+      );
     }
     const processError = findProviderAdapterProcessError(cause);
     if (processError) {
-      return sanitizeProviderFailureDetail(processError.detail);
+      return sanitizeProviderFailureDetail(processError.detail, true);
     }
     return sanitizeProviderFailureDetail(Cause.pretty(cause));
   };
@@ -2034,7 +2109,15 @@ const make = Effect.gen(function* () {
     const existingSessionThreadId =
       thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
     if (existingSessionThreadId && activeSession !== undefined) {
-      const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
+      // A turn-start intent updates both projected modes before this reactor
+      // opens or reconfigures the native owner. Projection equality therefore
+      // cannot attest adoption: the still-live provider can retain its former
+      // access policy after an earlier mode-replacement refusal. Keep the
+      // existing projected reconciliation guard and
+      // additionally require the exact selected native session to agree.
+      const runtimeModeChanged =
+        desiredRuntimeMode !== thread.session?.runtimeMode ||
+        desiredRuntimeMode !== activeSession.runtimeMode;
       const grokInteractionModeChanged =
         activeSession.provider === ProviderDriverKind.make("grok") &&
         (activeSession.interactionMode ?? "default") !== desiredInteractionMode;
@@ -2137,6 +2220,7 @@ const make = Effect.gen(function* () {
         desiredInstanceId,
         desiredProvider: desiredModelSelection.instanceId,
         currentRuntimeMode: thread.session?.runtimeMode,
+        currentNativeRuntimeMode: activeSession.runtimeMode,
         desiredRuntimeMode: thread.runtimeMode,
         runtimeModeChanged,
         grokInteractionModeChanged,
@@ -3341,6 +3425,8 @@ const make = Effect.gen(function* () {
                   kind: "provider.turn.start.failed",
                   summary: "Provider turn start failed",
                   detail,
+                  messageId: event.payload.messageId,
+                  intentSequence: event.sequence,
                   turnId: null,
                   createdAt: event.payload.createdAt,
                 }).pipe(Effect.asVoid)
@@ -3664,6 +3750,7 @@ const make = Effect.gen(function* () {
           threadId: event.payload.threadId,
           expectedTurnId: activeTurnId,
           messageId: event.payload.messageId,
+          intentSequence: event.sequence,
           ...(event.payload.deliveryPriority !== undefined
             ? {
                 deliveryPriority: event.payload.deliveryPriority,
@@ -3834,6 +3921,7 @@ const make = Effect.gen(function* () {
             : {}),
           expectedTurnId: activeTurnId,
           messageId: event.payload.messageId,
+          intentSequence: event.sequence,
           ...(event.payload.deliveryPriority !== undefined
             ? { deliveryPriority: event.payload.deliveryPriority }
             : {}),
@@ -5176,6 +5264,7 @@ const make = Effect.gen(function* () {
         : {}),
       expectedTurnId,
       messageId: event.payload.messageId,
+      intentSequence: event.sequence,
       ...(normalizedInput ? { input: normalizedInput } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
     }).pipe(
@@ -5299,6 +5388,99 @@ const make = Effect.gen(function* () {
       );
   });
 
+  const publishMcpSettlement = Effect.fnUntraced(function* (key: string, state: McpSettlement) {
+    if (mcpSettlements.get(key) !== state || !state.accepted || !state.resolved) return;
+    // Reserve synchronously before any write. Stable command/activity IDs
+    // additionally make a completed publication idempotent in durable storage.
+    mcpSettlements.delete(key);
+    const source = state.event.payload.mcpResponse;
+    if (source === undefined) return;
+    for (const action of ["answered", "skipped", "cleared"] as const) {
+      const items = makeNativeMcpQuestionResolutionItems({
+        questions: source.questions,
+        answers: state.event.payload.answers,
+        ...(state.event.payload.unanswered !== undefined
+          ? { unanswered: state.event.payload.unanswered }
+          : {}),
+        action,
+      });
+      if (items.length === 0) continue;
+      const createdAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(
+          `server:mcp-question-resolution:${source.noticeMessageId}:${action}`,
+        ),
+        threadId: state.event.payload.threadId,
+        activity: makeMcpQuestionResolutionActivity({
+          noticeMessageId: source.noticeMessageId,
+          action,
+          items,
+          createdAt,
+        }),
+        createdAt,
+      });
+    }
+  });
+
+  /** Native Codex canonicalizes a singleton selection to a scalar. Compare
+   * only that documented equivalence, preserving exact keys, text and order. */
+  const sameQuestionMap = (expected: unknown, observed: unknown, answers: boolean): boolean => {
+    const left = readRecord(expected ?? {});
+    const right = readRecord(observed ?? {});
+    if (left === undefined || right === undefined) return false;
+    const keys = Object.keys(left);
+    if (keys.length !== Object.keys(right).length) return false;
+    return keys.every((key) => {
+      if (!Object.hasOwn(right, key)) return false;
+      const a = left[key];
+      const b = right[key];
+      if (!answers) return a === b;
+      const valuesA = typeof a === "string" ? [a] : a;
+      const valuesB = typeof b === "string" ? [b] : b;
+      return (
+        Array.isArray(valuesA) &&
+        Array.isArray(valuesB) &&
+        valuesA.length === valuesB.length &&
+        valuesA.every((value, index) => typeof value === "string" && value === valuesB[index])
+      );
+    });
+  };
+
+  const observeMcpSettlement = Effect.fnUntraced(function* (
+    event: Extract<OrchestrationEvent, { type: "thread.activity-appended" }>,
+  ) {
+    const activity = event.payload.activity;
+    if (activity.kind !== "user-input.resolved" && activity.kind !== "user-input.requested") return;
+    const payload = readRecord(activity.payload);
+    if (typeof payload?.requestId !== "string") return;
+    const key = mcpSettlementKey(event.payload.threadId, payload.requestId);
+    const state = mcpSettlements.get(key);
+    if (state === undefined) return;
+    if (activity.kind === "user-input.requested") {
+      if (
+        event.sequence > state.event.sequence ||
+        activity.createdAt !== state.event.payload.mcpResponse?.requestCreatedAt
+      )
+        mcpSettlements.delete(key);
+      return;
+    }
+    // Earlier callbacks, cancellation, automatic continuation and a different
+    // winning response are terminal observations, never MCP success evidence.
+    if (
+      event.sequence <= state.event.sequence ||
+      payload.cancelled === true ||
+      payload.autoResolved === true ||
+      !sameQuestionMap(state.event.payload.answers, payload.answers, true) ||
+      !sameQuestionMap(state.event.payload.unanswered, payload.unanswered, false)
+    ) {
+      mcpSettlements.delete(key);
+      return;
+    }
+    state.resolved = true;
+    yield* publishMcpSettlement(key, state);
+  });
+
   const processUserInputResponseRequested = Effect.fn("processUserInputResponseRequested")(
     function* (
       event: Extract<ProviderIntentEvent, { type: "thread.user-input-response-requested" }>,
@@ -5320,27 +5502,74 @@ const make = Effect.gen(function* () {
         });
       }
 
-      yield* providerService
+      const key = mcpSettlementKey(event.payload.threadId, event.payload.requestId);
+      const state: McpSettlement | undefined =
+        event.payload.mcpResponse === undefined
+          ? undefined
+          : { event, owner: thread.session!, accepted: false, resolved: false };
+      if (state !== undefined) {
+        // Refuse before native I/O rather than evict an uncertain live owner.
+        // Ordinary renderer responses retain their existing path and budgets.
+        if (mcpSettlements.size >= 64 || mcpSettlements.has(key)) {
+          return yield* appendProviderFailureActivity({
+            threadId: event.payload.threadId,
+            kind: "provider.user-input.respond.failed",
+            summary: "Provider user input response failed",
+            detail:
+              "An MCP question response is still awaiting confirmation. Review the pending question before retrying.",
+            turnId: null,
+            createdAt: event.payload.createdAt,
+            requestId: event.payload.requestId,
+          });
+        }
+        mcpSettlements.set(key, state);
+      }
+      const accepted = yield* providerService
         .respondToUserInput({
           threadId: event.payload.threadId,
           requestId: event.payload.requestId,
-          answers: event.payload.answers,
+          // Native implementations receive their own data; they cannot mutate
+          // the immutable submitted-answer evidence retained for the receipt.
+          answers: structuredClone(event.payload.answers),
+          ...(event.payload.unanswered !== undefined
+            ? { unanswered: structuredClone(event.payload.unanswered) }
+            : {}),
         })
         .pipe(
+          Effect.as(true),
           Effect.catchCause((cause) =>
-            appendProviderFailureActivity({
-              threadId: event.payload.threadId,
-              kind: "provider.user-input.respond.failed",
-              summary: "Provider user input response failed",
-              detail: isUnknownPendingUserInputRequestError(cause)
-                ? stalePendingRequestDetail("user-input", event.payload.requestId)
-                : Cause.pretty(cause),
-              turnId: null,
-              createdAt: event.payload.createdAt,
-              requestId: event.payload.requestId,
-            }),
+            Effect.sync(() => {
+              // Retire before failure persistence: a failed/interruptible log
+              // write must not retain an uncertain owner or exhaust capacity.
+              if (state !== undefined && mcpSettlements.get(key) === state)
+                mcpSettlements.delete(key);
+            }).pipe(
+              Effect.andThen(
+                appendProviderFailureActivity({
+                  threadId: event.payload.threadId,
+                  kind: "provider.user-input.respond.failed",
+                  summary: "Provider user input response failed",
+                  detail: isUnknownPendingUserInputRequestError(cause)
+                    ? stalePendingRequestDetail("user-input", event.payload.requestId)
+                    : event.payload.mcpResponse !== undefined
+                      ? "The MCP question response was not confirmed. Review the pending question before retrying."
+                      : Cause.pretty(cause),
+                  turnId: null,
+                  createdAt: event.payload.createdAt,
+                  requestId: event.payload.requestId,
+                }),
+              ),
+              Effect.as(false),
+            ),
           ),
         );
+      if (state !== undefined && mcpSettlements.get(key) === state) {
+        if (!accepted) mcpSettlements.delete(key);
+        else {
+          state.accepted = true;
+          yield* publishMcpSettlement(key, state);
+        }
+      }
     },
   );
 
@@ -5952,6 +6181,21 @@ const make = Effect.gen(function* () {
       const transient = recovery?.codexTransientFailure;
       if (recovery === undefined || transient === undefined) return;
       const threadId = event.payload.threadId;
+      const existingOwner =
+        transientRecoveryControlBarriers.get(threadId) ??
+        transientRecoverySubmissions.get(threadId);
+      if (existingOwner !== undefined) {
+        // A prior exact owner can still be running or closing after a later
+        // root event was queued. Both states share one FIFO and transition
+        // synchronously, with no gap that could admit an overlapping claim.
+        existingOwner.pendingControls.push({
+          _tag: "runtime-recovery-retry",
+          event,
+          attempt: preparationAttempt,
+          delayElapsed,
+        });
+        return;
+      }
       const permitted = () =>
         readRuntimeRecoveryBarrier({
           ...recovery,
@@ -6005,7 +6249,10 @@ const make = Effect.gen(function* () {
       if (!threadMatches(thread)) return;
       if (
         (yield* providerService.getCapabilities(transient.providerInstanceId))
-          .codexFailedRootRestart !== true
+          .codexPhasedFailedRootRecovery !== true ||
+        providerService.prepareFailedRootRecovery === undefined ||
+        providerService.readFailedRootRecovery === undefined ||
+        providerService.cancelFailedRootRecovery === undefined
       ) {
         // An older authenticated owner must not silently use retained-session
         // recovery. No provider call or immutable paid attempt is made here.
@@ -6181,362 +6428,665 @@ const make = Effect.gen(function* () {
       )
         return;
       const claimSequence = winner[0]!.sequence;
-      // The immutable claim is consumed even on timeout/unknown ACK. Native's
-      // final semaphore checks exact failed root/generation again before I/O.
-      const inFlight = { intentSequence: event.sequence, cancel: Effect.void };
-      const submission = Effect.gen(function* () {
-        // The live control subscriber can revoke this entry before the parent
-        // has received the new fiber handle. Fence inside the child as well as
-        // after fork: a deleted entry must never enter provider I/O merely
-        // because its cancellation effect was not assigned yet.
-        if (
-          transientRecoverySubmissions.get(threadId) !== inFlight ||
-          !(yield* permitted()) ||
-          !threadMatches(yield* resolveThread(threadId)) ||
-          transientRecoverySubmissions.get(threadId) !== inFlight
-        )
-          return;
-        return yield* sendPreparedProviderTurn(prepared).pipe(
-          Effect.timeout("30 seconds"),
-          Effect.catchCause((cause) =>
-            Effect.gen(function* () {
-              const refusal = readCodexFailedRootRetirementRefusal(cause);
-              if (refusal === undefined) return yield* Effect.failCause(cause);
-              // This catch surrounds provider submission alone. Errors after an
-              // ACK, teardown, opening, timeout or unknown transport delivery
-              // cannot enter it with an authenticated pre-retirement witness.
-              // Preserve both the old consumed claim and its exact no-submit
-              // outcome before allowing a distinct, one-use next claim.
-              const refusedAt = DateTime.formatIso(yield* DateTime.now);
-              const receiptId = codexFailedRootRetryRefusalCommandId(event.sequence, claimSequence);
-              const nextPreparationAttempt = saturateRuntimeRecoveryAttempt(
-                Math.max(
-                  preparationAttempt + 1,
-                  retryState.status === "refused" ? retryState.nextPreparationAttempt + 1 : 1,
-                ),
-              );
-              yield* orchestrationEngine.dispatch({
-                type: "thread.activity.append",
-                commandId: CommandId.make(receiptId),
-                threadId,
-                activity: {
-                  id: EventId.make(receiptId),
-                  kind: "runtime.warning",
-                  tone: "info",
-                  summary: "Codex recovery was not submitted; retrying safely",
-                  turnId: recovery.turnId,
-                  payload: {
-                    recovery: "codex-transient-continuation-unsubmitted",
-                    recoveryIntentSequence: event.sequence,
-                    sourceEventSequence: recovery.sourceEventSequence,
-                    attemptOwnerId,
-                    claimCommandId: attemptCommandId,
-                    claimOwnerId,
-                    requestCommitment,
-                    nativeConversationCommitment: codexRecoveryConversationCommitment({
-                      threadId,
-                      providerInstanceId: transient.providerInstanceId,
-                      providerThreadId: prepared.request.expectedFailedRoot!.providerThreadId,
-                    }),
-                    providerInstanceId: transient.providerInstanceId,
-                    subagentRuntimeId: transient.subagentRuntimeId,
-                    sessionUpdatedAt: recovery.sessionUpdatedAt,
-                    failedRootRetirementRefusal: refusal,
-                    nextPreparationAttempt,
-                  },
-                  createdAt: refusedAt,
+      const paidDone = yield* Deferred.make<void>();
+      const paidSetupDone = yield* Deferred.make<void>();
+      const paidExit = yield* Deferred.make<Exit.Exit<unknown, unknown>>();
+      let signalCoordinator = () => {};
+      let signalPaid = () => {};
+      let paidStarting = false;
+      let paidStarted = false;
+      let paidOutcomeUncertain = false;
+      let cancelPreparedOnExit = false;
+      const inFlight = {
+        intentSequence: event.sequence,
+        pendingControls: [] as Array<ProviderIntentEvent | RuntimeRecoveryRetry>,
+        cancel: Effect.sync(() => {
+          signalCoordinator();
+          signalPaid();
+        }),
+      };
+      const prepareAndSend = Effect.gen(function* () {
+        const prepare = providerService.prepareFailedRootRecovery!;
+        const read = providerService.readFailedRootRecovery!;
+        const requestCommitment = codexFailedRootPreparationCommitment(
+          claimOwnerId,
+          prepared.request,
+        );
+        const lookup = { threadId, attemptId: claimOwnerId, requestCommitment };
+        const currentIntent = (current: OrchestrationThread | undefined) =>
+          current !== undefined &&
+          current.archivedAt === null &&
+          current.deletedAt === null &&
+          current.modelSelection.instanceId === transient.providerInstanceId &&
+          current.runtimeMode === thread?.runtimeMode &&
+          current.latestTurn?.turnId === recovery.turnId &&
+          current.latestTurn.state === "error";
+        let sequence = 0;
+        let phase: import("@cafecode/contracts").ProviderFailedRootRecoveryPreparation | undefined;
+        let observedPhase = "";
+        let pollAttempt = 0;
+        const report = (next: string, count: number) =>
+          Effect.gen(function* () {
+            if (observedPhase === next) return;
+            observedPhase = next;
+            const now = DateTime.formatIso(yield* DateTime.now);
+            const id = `server:codex-preparation:${event.sequence}:${sequence}:${next}`;
+            yield* orchestrationEngine.dispatch({
+              type: "thread.activity.append",
+              commandId: CommandId.make(id),
+              threadId,
+              activity: {
+                id: EventId.make(id),
+                kind: "runtime.warning",
+                tone: "info",
+                summary:
+                  next === "retryable"
+                    ? "Codex recovery will retry its session preparation"
+                    : next === "retired"
+                      ? "Codex recovery preparation is no longer pending"
+                      : "Codex recovery is preparing its session",
+                turnId: recovery.turnId,
+                // Bounded fixed phases/counters are observational. Never copy
+                // the private commitment, capability, input or native identity.
+                payload: {
+                  recovery: "codex-transient-preparation",
+                  phase: next,
+                  recoveryIntentSequence: event.sequence,
+                  sourceEventSequence: recovery.sourceEventSequence,
+                  preparationSequence: sequence,
+                  observedWaits: Math.min(30, count),
                 },
-                createdAt: refusedAt,
-              });
-              if (
-                transientRecoverySubmissions.get(threadId) === inFlight &&
-                (yield* permitted()) &&
-                threadMatches(yield* resolveThread(threadId))
-              )
-                yield* scheduleTransientRecoveryWait(
-                  event,
-                  saturateRuntimeRecoveryAttempt(
-                    transient.retryAttempt + nextPreparationAttempt - 1,
-                  ),
-                  nextPreparationAttempt,
-                );
+                createdAt: now,
+              },
+              createdAt: now,
+            });
+          });
+        return yield* Effect.gen(function* () {
+          yield* report("preparing", pollAttempt);
+          if (!(yield* permitted()) || !currentIntent(yield* resolveThread(threadId)))
+            return undefined;
+          const first = yield* Effect.exit(
+            prepare({
+              attemptId: claimOwnerId,
+              preparationSequence: sequence,
+              request: prepared.request,
+            }),
+          );
+          if (Exit.isSuccess(first)) phase = first.value;
+          // Any missing preparation ACK is reconciled through an inert exact
+          // lookup. Preparation cannot pay by construction, but absence is not
+          // proof that it failed or permission to invoke another mutation.
+          while (true) {
+            if (!(yield* permitted()) || !currentIntent(yield* resolveThread(threadId)))
               return undefined;
-            }),
-          ),
-          Effect.flatMap((turn) =>
-            Effect.gen(function* () {
-              if (turn === undefined) return;
-              const replacement = turn.recoverySession;
-              if (
-                turn.threadId !== threadId ||
-                turn.deliveryKind === "steer" ||
-                turn.clientCorrelationId !== undefined ||
-                turn.turnId === recovery.turnId ||
-                replacement === undefined ||
-                replacement.previousSubagentRuntimeId !== transient.subagentRuntimeId ||
-                replacement.subagentRuntimeId === transient.subagentRuntimeId ||
-                replacement.providerThreadId !==
-                  prepared.request.expectedFailedRoot?.providerThreadId
-              ) {
-                return yield* new ProviderAdapterRequestError({
-                  provider: "Codex",
-                  method: "thread.turn.start",
-                  detail: "Codex continuation acceptance did not match the owned recovery request.",
-                });
-              }
-              const acceptedAt = DateTime.formatIso(yield* DateTime.now);
-              const receiptId = codexTransientAcceptanceCommandId(threadId, turn.turnId);
-              // Persist ACK truth before projection reconciliation. A root that has
-              // already failed must remain terminal while its next marker can now
-              // derive the authenticated, non-resetting chain from this receipt.
-              yield* orchestrationEngine.dispatch({
-                type: "thread.activity.append",
-                commandId: CommandId.make(receiptId),
-                threadId,
-                activity: {
-                  id: EventId.make(receiptId),
-                  kind: "runtime.warning",
-                  tone: "info",
-                  summary: "Codex continuation accepted",
-                  turnId: turn.turnId,
-                  payload: {
-                    recovery: "codex-transient-continuation-accepted",
-                    recoveryIntentSequence: event.sequence,
-                    attemptOwnerId,
-                    providerInstanceId: transient.providerInstanceId,
-                    subagentRuntimeId: replacement.subagentRuntimeId,
-                    previousSubagentRuntimeId: transient.subagentRuntimeId,
-                    nativeConversationCommitment: codexRecoveryConversationCommitment({
-                      threadId,
-                      providerInstanceId: transient.providerInstanceId,
-                      providerThreadId: replacement.providerThreadId,
-                    }),
-                  },
-                  createdAt: acceptedAt,
-                },
-                createdAt: acceptedAt,
+            if (phase && phase.preparationSequence < sequence) phase = undefined;
+            if (
+              phase &&
+              (phase.threadId !== threadId ||
+                phase.attemptId !== claimOwnerId ||
+                phase.requestCommitment !== requestCommitment ||
+                phase.preparationSequence !== sequence)
+            )
+              return yield* new ProviderAdapterRequestError({
+                provider: "Codex",
+                method: "session/prepare",
+                detail: "The private Codex recovery observation did not match its attempt.",
               });
-              // ACK is acceptance, not a liveness signal. The native root may have
-              // failed/completed before the RPC reply, and owner confirmation must
-              // retain that terminal observation/timestamp for ingestion's CAS.
-              const acknowledgedLive = yield* providerService.listSessions().pipe(
-                Effect.map((sessions) => sessions.find((entry) => entry.threadId === threadId)),
-                Effect.catchCause((cause) =>
-                  Cause.hasInterruptsOnly(cause)
-                    ? Effect.failCause(cause)
-                    : Effect.succeed(undefined),
-                ),
+            if (phase?.state === "prepared") {
+              const owner = phase;
+              const live = (yield* providerService.listSessions()).find(
+                (entry) => entry.threadId === threadId,
               );
-              // Retire old materialization evidence even when the old projection
-              // survives until this ACK. Missing new proof remains unknown;
-              // null is preserved only when the new owner actually reported it.
-              const observedSession =
-                acknowledgedLive === undefined
-                  ? undefined
-                  : {
-                      threadId,
-                      providerName: acknowledgedLive.provider,
-                      providerInstanceId: acknowledgedLive.providerInstanceId,
-                      runtimeMode: acknowledgedLive.runtimeMode,
-                      subagentRuntimeId: acknowledgedLive.subagentRuntimeId,
-                      ...(acknowledgedLive.maxConcurrentSubagents !== undefined
-                        ? { maxConcurrentSubagents: acknowledgedLive.maxConcurrentSubagents }
-                        : {}),
-                      ...(acknowledgedLive.codexContextWindowOverride !== undefined
-                        ? {
-                            codexContextWindowOverride: acknowledgedLive.codexContextWindowOverride,
-                          }
-                        : {}),
-                      ...(acknowledgedLive.codexAutoCompactTokenLimit !== undefined
-                        ? {
-                            codexAutoCompactTokenLimit: acknowledgedLive.codexAutoCompactTokenLimit,
-                          }
-                        : {}),
-                    };
               if (
-                (yield* permitted()) &&
-                acknowledgedLive?.provider === "codex" &&
-                acknowledgedLive.providerInstanceId === transient.providerInstanceId &&
-                acknowledgedLive.subagentRuntimeId === replacement.subagentRuntimeId &&
-                acknowledgedLive.status === "running" &&
-                acknowledgedLive.activeTurnId === turn.turnId &&
-                acknowledgedLive.codexRootTurnFailure?.turnId !== turn.turnId
+                live?.provider !== "codex" ||
+                live.providerInstanceId !== transient.providerInstanceId ||
+                live.subagentRuntimeId !== owner.recoverySession.subagentRuntimeId ||
+                owner.providerInstanceId !== transient.providerInstanceId ||
+                owner.recoverySession.previousSubagentRuntimeId !== transient.subagentRuntimeId ||
+                owner.recoverySession.providerThreadId !==
+                  prepared.request.expectedFailedRoot?.providerThreadId ||
+                live.status !== "ready" ||
+                live.activeTurnId !== undefined ||
+                !(yield* permitted()) ||
+                !currentIntent(yield* resolveThread(threadId))
               ) {
-                const current = yield* resolveThread(threadId);
-                if (current?.session == null || observedSession === undefined) return;
-                // Receipt authentication and control ordering are repeated by
-                // the engine in the same admission worker as Stop/new input.
-                // An earlier permitted() or inventory read is not a lock.
-                yield* orchestrationEngine.dispatch({
-                  type: "thread.session.set",
-                  commandId: CommandId.make(`${receiptId}:associate-running-root`),
-                  threadId,
-                  expectedSessionLifecycle: sessionLifecycleSnapshot(current.session),
-                  expectedSubagentRuntimeId: current.session.subagentRuntimeId ?? null,
-                  codexRecoveryAccepted: {
-                    turnId: turn.turnId,
-                    previousTurnId: recovery.turnId,
-                    messageId: message.id,
-                    intentSequence: event.sequence,
-                    requestedAt: event.payload.createdAt,
-                  },
-                  session: {
-                    ...observedSession,
-                    status: "running",
-                    activeTurnId: turn.turnId,
-                    lastError: null,
-                    updatedAt: acceptedAt,
-                  },
-                  createdAt: acceptedAt,
-                });
-              } else if (
-                acknowledgedLive?.provider === "codex" &&
-                acknowledgedLive.providerInstanceId === transient.providerInstanceId &&
-                acknowledgedLive.subagentRuntimeId === replacement.subagentRuntimeId &&
-                acknowledgedLive.status === "ready" &&
-                acknowledgedLive.activeTurnId === undefined &&
-                acknowledgedLive.codexRootTurnFailure?.turnId === turn.turnId &&
-                acknowledgedLive.codexRootTurnFailure.providerThreadId ===
-                  prepared.request.expectedFailedRoot?.providerThreadId &&
-                (yield* permitted())
-              ) {
-                const proof = acknowledgedLive.codexRootTurnFailure;
-                const current = yield* resolveThread(threadId);
-                if (
-                  current?.latestTurn?.turnId !== turn.turnId ||
-                  current.latestTurn.state !== "error" ||
-                  current.session?.status !== "ready" ||
-                  current.session.activeTurnId !== null ||
-                  current.session.updatedAt !== proof.observedAt
-                ) {
-                  if (current?.session == null) return;
-                  // Some roots fail before any turn.started notification. A
-                  // positive exact ACK plus fresh private failure proof binds
-                  // only this admitted request directly to its error outcome.
-                  // The engine reauthenticates the receipt, saved-message
-                  // binding and controls atomically with this lifecycle CAS.
-                  yield* orchestrationEngine.dispatch({
-                    type: "thread.session.set",
-                    commandId: CommandId.make(`${receiptId}:associate-failed-root`),
-                    threadId,
-                    expectedSessionLifecycle: sessionLifecycleSnapshot(current.session),
-                    expectedSubagentRuntimeId: current.session.subagentRuntimeId ?? null,
-                    codexFailedRoot: {
-                      turnId: turn.turnId,
-                      previousTurnId: recovery.turnId,
-                      messageId: message.id,
-                      intentSequence: event.sequence,
-                      requestedAt: event.payload.createdAt,
-                      completedAt: proof.observedAt,
-                    },
-                    session: {
-                      ...observedSession!,
-                      status: "ready",
-                      activeTurnId: null,
-                      lastError: "Codex continuation failed.",
-                      updatedAt: proof.observedAt,
-                    },
-                    createdAt: proof.observedAt,
-                  });
+                // Never abandon a prepared permit silently. An owner mismatch
+                // is not authority to send or retry; retire only the exact
+                // private reservation and retain an honest uncertain marker.
+                // A concurrent explicit control is handled by the existing
+                // finalizer, which records retirement instead.
+                if ((yield* permitted()) && currentIntent(yield* resolveThread(threadId))) {
+                  yield* report("uncertain", pollAttempt);
                 }
-                const associated = yield* resolveThread(threadId);
-                if (
-                  (yield* permitted()) &&
-                  proof.category !== undefined &&
-                  associated?.latestTurn?.turnId === turn.turnId &&
-                  associated.latestTurn.state === "error" &&
-                  associated.session?.status === "ready" &&
-                  associated.session.updatedAt === proof.observedAt &&
-                  associated.session.providerInstanceId === transient.providerInstanceId &&
-                  associated.session.subagentRuntimeId === replacement.subagentRuntimeId
-                ) {
-                  yield* orchestrationEngine.dispatch({
-                    type: "thread.activity.append",
-                    commandId: CommandId.make(`${receiptId}:failed-root`),
-                    threadId,
-                    activity: {
-                      id: EventId.make(`${receiptId}:failed-root`),
-                      kind: "runtime.warning",
-                      tone: "info",
-                      summary: "Reconnecting after a transient provider failure",
-                      turnId: turn.turnId,
-                      payload: buildCodexTransientFailureMarkerPayload({
-                        providerInstanceId: transient.providerInstanceId,
-                        subagentRuntimeId: replacement.subagentRuntimeId,
-                        sessionUpdatedAt: proof.observedAt,
-                      }),
-                      createdAt: proof.observedAt,
-                    },
-                    createdAt: proof.observedAt,
-                  });
-                }
-              } else {
-                // ACK truth is durable, but an unavailable/different owner
-                // cannot certify the current native lifecycle. Stop the old
-                // countdown without claiming a new running/failed turn; a
-                // later exact owner event may still reconcile this receipt.
-                return yield* new ProviderAdapterRequestError({
-                  provider: "Codex",
-                  method: "thread.turn.start",
-                  detail: "Codex continuation lifecycle needs reconciliation.",
-                });
+                return undefined;
               }
-              yield* recordAcceptedTurnConfiguration(prepared, turn);
-              transientRecoveryContexts.delete(threadId);
-            }),
-          ),
-          Effect.catchCause((cause) =>
-            Cause.hasInterruptsOnly(cause)
-              ? Effect.failCause(cause)
-              : Effect.gen(function* () {
-                  // This is an operational reconciliation notice, not execution on
-                  // the already-terminal root. The immutable claim remains consumed
-                  // and an unknown/contradictory ACK can never authorize a resend.
-                  yield* orchestrationEngine.dispatch({
-                    type: "thread.activity.append",
-                    commandId: CommandId.make(`server:codex-transient-uncertain:${event.sequence}`),
-                    threadId,
-                    activity: {
-                      id: EventId.make(`codex-transient-uncertain:${event.sequence}`),
-                      kind: "runtime.warning",
-                      tone: "info",
-                      summary: "Codex recovery needs reconciliation",
-                      turnId: recovery.turnId,
-                      payload: {
-                        recovery: "codex-transient-recovery-uncertain",
-                        providerInstanceId: transient.providerInstanceId,
-                        subagentRuntimeId: transient.subagentRuntimeId,
-                        sessionUpdatedAt: recovery.sessionUpdatedAt,
-                      },
-                      createdAt: now,
-                    },
-                    createdAt: now,
+              // The permit stays private in this closure. Queue publication
+              // is uninterruptible, so cancellation cannot leave an ambiguous
+              // half-admitted handoff.
+              yield* Effect.uninterruptible(
+                Effect.gen(function* () {
+                  yield* worker.enqueue({
+                    _tag: "codex-prepared-submission",
+                    run: Effect.gen(function* () {
+                      if (transientRecoverySubmissions.get(threadId) !== inFlight) return;
+                      const current = (yield* providerService.listSessions()).find(
+                        (entry) => entry.threadId === threadId,
+                      );
+                      if (
+                        current?.provider !== "codex" ||
+                        current.providerInstanceId !== transient.providerInstanceId ||
+                        current.subagentRuntimeId !== owner.recoverySession.subagentRuntimeId ||
+                        current.status !== "ready" ||
+                        current.activeTurnId !== undefined ||
+                        !(yield* permitted()) ||
+                        !currentIntent(yield* resolveThread(threadId)) ||
+                        transientRecoverySubmissions.get(threadId) !== inFlight
+                      ) {
+                        if ((yield* permitted()) && currentIntent(yield* resolveThread(threadId))) {
+                          paidOutcomeUncertain = true;
+                          cancelPreparedOnExit = true;
+                          signalCoordinator();
+                        }
+                        return;
+                      }
+                      // Mark setup synchronously, then install the stable Exit
+                      // observer and signal handle as one uninterruptible lease.
+                      // Stop/shutdown can then join exact setup and actual Exit;
+                      // it cannot mistake an in-progress fork for no paid owner.
+                      paidStarting = true;
+                      yield* Effect.uninterruptible(
+                        Effect.gen(function* () {
+                          const sending = yield* Effect.withFiber((self) => {
+                            self.addObserver((exit) =>
+                              Deferred.doneUnsafe(paidExit, Effect.succeed(exit)),
+                            );
+                            return Effect.interruptible(submission(owner));
+                          }).pipe(
+                            Effect.forkIn(reactorScope, {
+                              startImmediately: true,
+                              uninterruptible: true,
+                            }),
+                          );
+                          signalPaid = () => sending.interruptUnsafe();
+                          paidStarted = true;
+                          if (transientRecoverySubmissions.get(threadId) !== inFlight) signalPaid();
+                        }).pipe(
+                          Effect.ensuring(
+                            Deferred.succeed(paidSetupDone, undefined).pipe(Effect.asVoid),
+                          ),
+                        ),
+                      );
+                      const outcome = yield* Deferred.await(paidExit);
+                      if (Exit.isFailure(outcome)) {
+                        if (Cause.hasInterruptsOnly(outcome.cause)) {
+                          if (transientRecoverySubmissions.get(threadId) !== inFlight) return;
+                          return yield* Effect.failCause(
+                            Cause.fromReasons<never>(
+                              outcome.cause.reasons.filter(Cause.isInterruptReason),
+                            ),
+                          );
+                        }
+                        // The exact child Exit stays in the private completion
+                        // value. An unexpected cause is never forwarded to a
+                        // wider error channel or a raw diagnostic.
+                        paidOutcomeUncertain = true;
+                        if (transientRecoverySubmissions.get(threadId) === inFlight) {
+                          cancelPreparedOnExit = true;
+                          signalCoordinator();
+                        }
+                      }
+                    }).pipe(
+                      Effect.catchCause((cause) =>
+                        Cause.hasInterruptsOnly(cause)
+                          ? Effect.failCause(
+                              Cause.fromReasons<never>(
+                                cause.reasons.filter(Cause.isInterruptReason),
+                              ),
+                            )
+                          : Effect.gen(function* () {
+                              // Provider errors can contain private data. Publish only
+                              // fixed reconciliation state, and retire solely the exact
+                              // reservation; never forward an arbitrary raw cause.
+                              paidOutcomeUncertain = true;
+                              if (transientRecoverySubmissions.get(threadId) === inFlight) {
+                                cancelPreparedOnExit = true;
+                                signalCoordinator();
+                              }
+                            }),
+                      ),
+                      Effect.ensuring(Deferred.succeed(paidDone, undefined).pipe(Effect.asVoid)),
+                    ),
                   });
                 }),
+              );
+              // Remain the owner until the worker has either consumed the
+              // one-use permit or rejected a stale handoff.
+              yield* Deferred.await(paidDone);
+              yield* report(paidOutcomeUncertain ? "uncertain" : "retired", pollAttempt);
+              return undefined;
+            }
+            if (phase?.state === "consumed") {
+              yield* report("uncertain", pollAttempt);
+              return undefined;
+            }
+            if (phase?.state === "retired") {
+              yield* report("retired", pollAttempt);
+              return undefined;
+            }
+            yield* report(
+              phase?.state === "unavailable" ? "uncertain" : (phase?.state ?? "uncertain"),
+              pollAttempt,
+            );
+            const delay = codexTransientRecoveryDelayMs(
+              Math.min(30, pollAttempt),
+              yield* Random.next,
+            );
+            pollAttempt = Math.min(30, pollAttempt + 1);
+            yield* Effect.sleep(delay);
+            if (!(yield* permitted()) || !currentIntent(yield* resolveThread(threadId)))
+              return undefined;
+            if (phase?.state === "retryable") {
+              if (!Number.isSafeInteger(sequence + 1)) return undefined;
+              sequence += 1;
+              yield* report("preparing", pollAttempt);
+              if (!(yield* permitted()) || !currentIntent(yield* resolveThread(threadId)))
+                return undefined;
+              const retry = yield* Effect.exit(
+                prepare({
+                  attemptId: claimOwnerId,
+                  preparationSequence: sequence,
+                  request: prepared.request,
+                  continuationToken: phase.continuationToken,
+                }),
+              );
+              phase = Exit.isSuccess(retry) ? retry.value : undefined;
+            } else {
+              const observed = yield* Effect.exit(read(lookup));
+              phase = Exit.isSuccess(observed) ? observed.value : undefined;
+            }
+          }
+        }).pipe(
+          Effect.onExit((outcome) =>
+            Effect.gen(function* () {
+              // Fence queued handoffs synchronously on every coordinator exit,
+              // including scope shutdown, before any cleanup can suspend. A
+              // matching control barrier retains its own exact entry reference.
+              if (transientRecoverySubmissions.get(threadId) === inFlight) {
+                // Every exit owns cleanup, even without a human control. Keep
+                // later same-thread commands behind this exact cleanup, but
+                // never displace a barrier already owned by another attempt.
+                if (!transientRecoveryControlBarriers.has(threadId))
+                  transientRecoveryControlBarriers.set(threadId, inFlight);
+                transientRecoverySubmissions.delete(threadId);
+              }
+              // Signal the exact paid child before private cancellation can
+              // join it. Fork setup is a short uninterruptible lease, not a
+              // provider operation or a projection/database read.
+              if (paidStarting) {
+                yield* Deferred.await(paidSetupDone);
+                if (paidStarted) signalPaid();
+              }
+              // Revoke exact private authority before any database read or
+              // diagnostic dispatch: shutdown and a failing projection must
+              // not strand an unused permit. The private CAS cannot close a
+              // paid root or a later, unrelated owner.
+              const cancellation = yield* Effect.exit(
+                providerService.cancelFailedRootRecovery!(lookup),
+              );
+              const current = yield* Effect.exit(
+                Effect.gen(function* () {
+                  return (yield* permitted()) && currentIntent(yield* resolveThread(threadId));
+                }),
+              );
+              // This is an intent marker, never proof of native closure. A
+              // failed classification/cleanup remains honestly uncertain.
+              if (Exit.isFailure(current) || Exit.isFailure(cancellation))
+                yield* report("uncertain", pollAttempt);
+              else if (!current.value) yield* report("retired", pollAttempt);
+              else if (cancelPreparedOnExit || Exit.isFailure(outcome))
+                yield* report("uncertain", pollAttempt);
+            }),
           ),
         );
       });
-      // Keep one exact consumed intent on the serial worker, but let the live
-      // control subscriber cancel its scoped ACK wait promptly. Cancellation is
-      // an unknown submission outcome, never permission to replay this attempt.
-      // The queued explicit Stop can then close the owned native context/tree.
+      // The immutable claim is consumed even on timeout/unknown ACK. Native's
+      // final semaphore checks exact failed root/generation again before I/O.
+      const submission = (
+        owner: Extract<
+          import("@cafecode/contracts").ProviderFailedRootRecoveryPreparation,
+          { state: "prepared" }
+        >,
+      ) =>
+        Effect.gen(function* () {
+          if (transientRecoverySubmissions.get(threadId) !== inFlight || !(yield* permitted()))
+            return;
+          return yield* sendPreparedProviderTurn({
+            ...prepared,
+            request: {
+              ...prepared.request,
+              preparedFailedRootRecovery: {
+                attemptId: claimOwnerId,
+                preparationSequence: owner.preparationSequence,
+                requestCommitment: owner.requestCommitment,
+                permit: owner.permit,
+              },
+            },
+          })
+            .pipe(Effect.timeout("30 seconds"))
+            .pipe(
+              Effect.flatMap((turn) =>
+                Effect.gen(function* () {
+                  if (turn === undefined) return;
+                  const replacement = turn.recoverySession;
+                  if (
+                    turn.threadId !== threadId ||
+                    turn.deliveryKind === "steer" ||
+                    turn.clientCorrelationId !== undefined ||
+                    turn.turnId === recovery.turnId ||
+                    replacement === undefined ||
+                    replacement.previousSubagentRuntimeId !== transient.subagentRuntimeId ||
+                    replacement.subagentRuntimeId === transient.subagentRuntimeId ||
+                    replacement.providerThreadId !==
+                      prepared.request.expectedFailedRoot?.providerThreadId
+                  ) {
+                    return yield* new ProviderAdapterRequestError({
+                      provider: "Codex",
+                      method: "thread.turn.start",
+                      detail:
+                        "Codex continuation acceptance did not match the owned recovery request.",
+                    });
+                  }
+                  const acceptedAt = DateTime.formatIso(yield* DateTime.now);
+                  const receiptId = codexTransientAcceptanceCommandId(threadId, turn.turnId);
+                  // Persist ACK truth before projection reconciliation. A root that has
+                  // already failed must remain terminal while its next marker can now
+                  // derive the authenticated, non-resetting chain from this receipt.
+                  yield* orchestrationEngine.dispatch({
+                    type: "thread.activity.append",
+                    commandId: CommandId.make(receiptId),
+                    threadId,
+                    activity: {
+                      id: EventId.make(receiptId),
+                      kind: "runtime.warning",
+                      tone: "info",
+                      summary: "Codex continuation accepted",
+                      turnId: turn.turnId,
+                      payload: {
+                        recovery: "codex-transient-continuation-accepted",
+                        recoveryIntentSequence: event.sequence,
+                        attemptOwnerId,
+                        providerInstanceId: transient.providerInstanceId,
+                        subagentRuntimeId: replacement.subagentRuntimeId,
+                        previousSubagentRuntimeId: transient.subagentRuntimeId,
+                        nativeConversationCommitment: codexRecoveryConversationCommitment({
+                          threadId,
+                          providerInstanceId: transient.providerInstanceId,
+                          providerThreadId: replacement.providerThreadId,
+                        }),
+                      },
+                      createdAt: acceptedAt,
+                    },
+                    createdAt: acceptedAt,
+                  });
+                  // ACK is acceptance, not a liveness signal. The native root may have
+                  // failed/completed before the RPC reply, and owner confirmation must
+                  // retain that terminal observation/timestamp for ingestion's CAS.
+                  const acknowledgedLive = yield* providerService.listSessions().pipe(
+                    Effect.map((sessions) => sessions.find((entry) => entry.threadId === threadId)),
+                    Effect.catchCause((cause) =>
+                      Cause.hasInterruptsOnly(cause)
+                        ? Effect.failCause(cause)
+                        : Effect.succeed(undefined),
+                    ),
+                  );
+                  // Retire old materialization evidence even when the old projection
+                  // survives until this ACK. Missing new proof remains unknown;
+                  // null is preserved only when the new owner actually reported it.
+                  const observedSession =
+                    acknowledgedLive === undefined
+                      ? undefined
+                      : {
+                          threadId,
+                          providerName: acknowledgedLive.provider,
+                          providerInstanceId: acknowledgedLive.providerInstanceId,
+                          runtimeMode: acknowledgedLive.runtimeMode,
+                          subagentRuntimeId: acknowledgedLive.subagentRuntimeId,
+                          ...(acknowledgedLive.maxConcurrentSubagents !== undefined
+                            ? { maxConcurrentSubagents: acknowledgedLive.maxConcurrentSubagents }
+                            : {}),
+                          ...(acknowledgedLive.codexContextWindowOverride !== undefined
+                            ? {
+                                codexContextWindowOverride:
+                                  acknowledgedLive.codexContextWindowOverride,
+                              }
+                            : {}),
+                          ...(acknowledgedLive.codexAutoCompactTokenLimit !== undefined
+                            ? {
+                                codexAutoCompactTokenLimit:
+                                  acknowledgedLive.codexAutoCompactTokenLimit,
+                              }
+                            : {}),
+                        };
+                  if (
+                    (yield* permitted()) &&
+                    acknowledgedLive?.provider === "codex" &&
+                    acknowledgedLive.providerInstanceId === transient.providerInstanceId &&
+                    acknowledgedLive.subagentRuntimeId === replacement.subagentRuntimeId &&
+                    acknowledgedLive.status === "running" &&
+                    acknowledgedLive.activeTurnId === turn.turnId &&
+                    acknowledgedLive.codexRootTurnFailure?.turnId !== turn.turnId
+                  ) {
+                    const current = yield* resolveThread(threadId);
+                    if (current?.session == null || observedSession === undefined) return;
+                    // Receipt authentication and control ordering are repeated by
+                    // the engine in the same admission worker as Stop/new input.
+                    // An earlier permitted() or inventory read is not a lock.
+                    yield* orchestrationEngine.dispatch({
+                      type: "thread.session.set",
+                      commandId: CommandId.make(`${receiptId}:associate-running-root`),
+                      threadId,
+                      expectedSessionLifecycle: sessionLifecycleSnapshot(current.session),
+                      expectedSubagentRuntimeId: current.session.subagentRuntimeId ?? null,
+                      codexRecoveryAccepted: {
+                        turnId: turn.turnId,
+                        previousTurnId: recovery.turnId,
+                        messageId: message.id,
+                        intentSequence: event.sequence,
+                        requestedAt: event.payload.createdAt,
+                      },
+                      session: {
+                        ...observedSession,
+                        status: "running",
+                        activeTurnId: turn.turnId,
+                        lastError: null,
+                        updatedAt: acceptedAt,
+                      },
+                      createdAt: acceptedAt,
+                    });
+                  } else if (
+                    acknowledgedLive?.provider === "codex" &&
+                    acknowledgedLive.providerInstanceId === transient.providerInstanceId &&
+                    acknowledgedLive.subagentRuntimeId === replacement.subagentRuntimeId &&
+                    acknowledgedLive.status === "ready" &&
+                    acknowledgedLive.activeTurnId === undefined &&
+                    acknowledgedLive.codexRootTurnFailure?.turnId === turn.turnId &&
+                    acknowledgedLive.codexRootTurnFailure.providerThreadId ===
+                      prepared.request.expectedFailedRoot?.providerThreadId &&
+                    (yield* permitted())
+                  ) {
+                    const proof = acknowledgedLive.codexRootTurnFailure;
+                    const current = yield* resolveThread(threadId);
+                    if (
+                      current?.latestTurn?.turnId !== turn.turnId ||
+                      current.latestTurn.state !== "error" ||
+                      current.session?.status !== "ready" ||
+                      current.session.activeTurnId !== null ||
+                      current.session.updatedAt !== proof.observedAt
+                    ) {
+                      if (current?.session == null) return;
+                      // Some roots fail before any turn.started notification. A
+                      // positive exact ACK plus fresh private failure proof binds
+                      // only this admitted request directly to its error outcome.
+                      // The engine reauthenticates the receipt, saved-message
+                      // binding and controls atomically with this lifecycle CAS.
+                      yield* orchestrationEngine.dispatch({
+                        type: "thread.session.set",
+                        commandId: CommandId.make(`${receiptId}:associate-failed-root`),
+                        threadId,
+                        expectedSessionLifecycle: sessionLifecycleSnapshot(current.session),
+                        expectedSubagentRuntimeId: current.session.subagentRuntimeId ?? null,
+                        codexFailedRoot: {
+                          turnId: turn.turnId,
+                          previousTurnId: recovery.turnId,
+                          messageId: message.id,
+                          intentSequence: event.sequence,
+                          requestedAt: event.payload.createdAt,
+                          completedAt: proof.observedAt,
+                        },
+                        session: {
+                          ...observedSession!,
+                          status: "ready",
+                          activeTurnId: null,
+                          lastError: "Codex continuation failed.",
+                          updatedAt: proof.observedAt,
+                        },
+                        createdAt: proof.observedAt,
+                      });
+                    }
+                    const associated = yield* resolveThread(threadId);
+                    if (
+                      (yield* permitted()) &&
+                      proof.category !== undefined &&
+                      associated?.latestTurn?.turnId === turn.turnId &&
+                      associated.latestTurn.state === "error" &&
+                      associated.session?.status === "ready" &&
+                      associated.session.updatedAt === proof.observedAt &&
+                      associated.session.providerInstanceId === transient.providerInstanceId &&
+                      associated.session.subagentRuntimeId === replacement.subagentRuntimeId
+                    ) {
+                      yield* orchestrationEngine.dispatch({
+                        type: "thread.activity.append",
+                        commandId: CommandId.make(`${receiptId}:failed-root`),
+                        threadId,
+                        activity: {
+                          id: EventId.make(`${receiptId}:failed-root`),
+                          kind: "runtime.warning",
+                          tone: "info",
+                          summary: "Reconnecting after a transient provider failure",
+                          turnId: turn.turnId,
+                          payload: buildCodexTransientFailureMarkerPayload({
+                            providerInstanceId: transient.providerInstanceId,
+                            subagentRuntimeId: replacement.subagentRuntimeId,
+                            sessionUpdatedAt: proof.observedAt,
+                          }),
+                          createdAt: proof.observedAt,
+                        },
+                        createdAt: proof.observedAt,
+                      });
+                    }
+                  } else {
+                    // ACK truth is durable, but an unavailable/different owner
+                    // cannot certify the current native lifecycle. Stop the old
+                    // countdown without claiming a new running/failed turn; a
+                    // later exact owner event may still reconcile this receipt.
+                    return yield* new ProviderAdapterRequestError({
+                      provider: "Codex",
+                      method: "thread.turn.start",
+                      detail: "Codex continuation lifecycle needs reconciliation.",
+                    });
+                  }
+                  yield* recordAcceptedTurnConfiguration(prepared, turn);
+                  transientRecoveryContexts.delete(threadId);
+                }),
+              ),
+              Effect.catchCause((cause) =>
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.failCause(cause)
+                  : Effect.gen(function* () {
+                      paidOutcomeUncertain = true;
+                      // This is an operational reconciliation notice, not execution on
+                      // the already-terminal root. The immutable claim remains consumed
+                      // and an unknown/contradictory ACK can never authorize a resend.
+                      yield* orchestrationEngine.dispatch({
+                        type: "thread.activity.append",
+                        commandId: CommandId.make(
+                          `server:codex-transient-uncertain:${event.sequence}`,
+                        ),
+                        threadId,
+                        activity: {
+                          id: EventId.make(`codex-transient-uncertain:${event.sequence}`),
+                          kind: "runtime.warning",
+                          tone: "info",
+                          summary: "Codex recovery needs reconciliation",
+                          turnId: recovery.turnId,
+                          payload: {
+                            recovery: "codex-transient-recovery-uncertain",
+                            providerInstanceId: transient.providerInstanceId,
+                            subagentRuntimeId: transient.subagentRuntimeId,
+                            sessionUpdatedAt: recovery.sessionUpdatedAt,
+                          },
+                          createdAt: now,
+                        },
+                        createdAt: now,
+                      });
+                    }),
+              ),
+            );
+        });
+      // Preparation owns no paid I/O and is scoped independently of the
+      // global worker. Its exact cancellation/cleanup is retained per thread.
       transientRecoverySubmissions.set(threadId, inFlight);
-      const sending = yield* Effect.forkScoped(submission);
-      inFlight.cancel = Fiber.interrupt(sending).pipe(Effect.asVoid);
-      if (transientRecoverySubmissions.get(threadId) !== inFlight) yield* inFlight.cancel;
-      yield* Fiber.join(sending).pipe(
-        Effect.catchCause((cause) =>
-          Cause.hasInterruptsOnly(cause) && transientRecoverySubmissions.get(threadId) !== inFlight
-            ? Effect.void
-            : Effect.failCause(cause),
-        ),
-        Effect.ensuring(
-          Effect.sync(() => {
-            if (transientRecoverySubmissions.get(threadId) === inFlight)
-              transientRecoverySubmissions.delete(threadId);
-          }),
+      const coordinator = yield* Effect.forkScoped(
+        prepareAndSend.pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.void
+              : Effect.logWarning("Codex private preparation failed"),
+          ),
+          Effect.ensuring(
+            Effect.gen(function* () {
+              // A queued but unstarted handoff is already ahead of deferred
+              // controls and will reject the revoked owner. Only a started paid
+              // child must join; its worker-owned finalizer settles this gate,
+              // including on shutdown. Never await an unstarted queue item during
+              // scope shutdown, when no worker may remain to dequeue it.
+              if (paidStarting) {
+                yield* Deferred.await(paidSetupDone);
+                if (paidStarted) {
+                  // Scope finalizers may run in LIFO order. Signal the exact paid
+                  // child and join its actual Exit before the worker settlement.
+                  signalPaid();
+                  yield* Deferred.await(paidExit);
+                  yield* Deferred.await(paidDone);
+                }
+              }
+              if (transientRecoverySubmissions.get(threadId) === inFlight)
+                transientRecoverySubmissions.delete(threadId);
+              const barrier = transientRecoveryControlBarriers.get(threadId);
+              if (barrier !== inFlight) return;
+              // Keep the barrier installed while human controls are admitted.
+              // A retry must not be re-enqueued under this same barrier: the
+              // worker would immediately defer it into this FIFO again. Retain
+              // retries privately until the exact barrier is cleared, so no
+              // new coordinator can overtake held human controls or cleanup.
+              const deferredRetries: RuntimeRecoveryRetry[] = [];
+              while (true) {
+                const next = inFlight.pendingControls.shift();
+                if (next === undefined) {
+                  if (transientRecoveryControlBarriers.get(threadId) !== inFlight) return;
+                  transientRecoveryControlBarriers.delete(threadId);
+                  for (const retry of deferredRetries) yield* worker.enqueue(retry);
+                  return;
+                }
+                if ("_tag" in next) deferredRetries.push(next);
+                else yield* enqueueProviderIntentEvent(next);
+              }
+            }),
+          ),
         ),
       );
+      signalCoordinator = () => coordinator.interruptUnsafe();
+      if (transientRecoverySubmissions.get(threadId) !== inFlight) yield* inFlight.cancel;
     },
   );
 
@@ -7007,9 +7557,11 @@ const make = Effect.gen(function* () {
 
   const processDomainEventSafely = (event: ReactorWork) =>
     ("_tag" in event
-      ? event._tag === "codex-transient-marker-retry"
-        ? processCodexTransientFailure(event.event, event.attempt)
-        : processRuntimeRecoveryStart(event.event, event.attempt, event.delayElapsed)
+      ? event._tag === "codex-prepared-submission"
+        ? event.run
+        : event._tag === "codex-transient-marker-retry"
+          ? processCodexTransientFailure(event.event, event.attempt)
+          : processRuntimeRecoveryStart(event.event, event.attempt, event.delayElapsed)
       : isRuntimeLossEvent(event)
         ? processRuntimeLoss(event)
         : processDomainEvent(event as ProviderIntentEvent)
@@ -7148,6 +7700,37 @@ const make = Effect.gen(function* () {
   });
 
   const processEvent = Effect.fn("processEvent")(function* (event: OrchestrationEvent) {
+    if (event.type === "thread.activity-appended")
+      yield* observeMcpSettlement(event).pipe(
+        Effect.catchCause(() =>
+          // Receipt storage is presentation, never authority to replay native
+          // input or terminate the shared domain-event subscription.
+          Effect.logWarning("MCP question resolution notice could not be recorded."),
+        ),
+      );
+    if (
+      event.type === "thread.session-stop-requested" ||
+      event.type === "thread.deleted" ||
+      event.type === "thread.archived" ||
+      event.type === "thread.session-set"
+    ) {
+      for (const [key, state] of mcpSettlements) {
+        if (state.event.payload.threadId !== event.payload.threadId) continue;
+        if (event.type === "thread.session-set") {
+          const session = event.payload.session;
+          if (
+            session !== null &&
+            session.status !== "stopped" &&
+            typeof state.owner.subagentRuntimeId === "string" &&
+            session.providerName === state.owner.providerName &&
+            session.providerInstanceId === state.owner.providerInstanceId &&
+            session.subagentRuntimeId === state.owner.subagentRuntimeId
+          )
+            continue;
+        }
+        mcpSettlements.delete(key);
+      }
+    }
     const isExplicitControl =
       (event.type === "thread.turn-start-requested" &&
         event.payload.runtimeRecovery === undefined) ||
@@ -7170,6 +7753,7 @@ const make = Effect.gen(function* () {
       const submission = transientRecoverySubmissions.get(event.payload.threadId);
       if (submission !== undefined) {
         transientRecoverySubmissions.delete(event.payload.threadId);
+        transientRecoveryControlBarriers.set(event.payload.threadId, submission);
         yield* submission.cancel;
       }
       for (const [sequence, wait] of transientRecoveryWaits) {
@@ -7220,6 +7804,14 @@ const make = Effect.gen(function* () {
       event.type === "thread.compaction-requested" ||
       event.type === "thread.goal-clear-requested"
     ) {
+      const barrier =
+        "threadId" in event.payload
+          ? transientRecoveryControlBarriers.get(event.payload.threadId)
+          : undefined;
+      if (barrier !== undefined) {
+        barrier.pendingControls.push(event);
+        return;
+      }
       return yield* enqueueProviderIntentEvent(event);
     }
   });

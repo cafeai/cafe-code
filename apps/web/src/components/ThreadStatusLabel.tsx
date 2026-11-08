@@ -16,13 +16,67 @@ import { Spinner } from "./ui/spinner";
  * projects, the hidden-chats toggle, Desk tabs and the command palette all
  * draw the same indicator and colour.
  */
+/**
+ * Scheduled follow-up indicator: a small clock whose hands sweep on the same
+ * stepped, pausable `animate-spin` token as the working spinner, but muted
+ * rather than accent-coloured because nothing is running yet (minute hand
+ * 4s, hour hand 48s, both capped at 60 updates/second). Reduced motion leaves
+ * a static clock face.
+ */
+function ScheduledClock({ className }: { className?: string | undefined }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.5}
+      strokeLinecap="round"
+      data-slot="thread-status-dot"
+      data-spinning="true"
+      data-clock="true"
+      className={cn("thread-status-dot text-muted-foreground", className)}
+    >
+      <circle cx="12" cy="12" r="9.5" />
+      <line
+        x1="12"
+        y1="12"
+        x2="12"
+        y2="8.5"
+        className="thread-status-clock-hand animate-spin motion-reduce:animate-none"
+        style={
+          {
+            "--cafe-spin-duration": "48s",
+            "--cafe-spin-steps": "480",
+            rotate: "60deg",
+          } as React.CSSProperties
+        }
+      />
+      <line
+        x1="12"
+        y1="12"
+        x2="12"
+        y2="6"
+        className="thread-status-clock-hand animate-spin motion-reduce:animate-none"
+        style={
+          {
+            "--cafe-spin-duration": "4s",
+            "--cafe-spin-steps": "240",
+          } as React.CSSProperties
+        }
+      />
+    </svg>
+  );
+}
+
 export function ThreadStatusDot({
   status,
   className,
 }: {
-  status: Pick<ThreadStatusPill, "dotClass" | "pulse">;
+  status: Pick<ThreadStatusPill, "dotClass" | "pulse" | "clock">;
   className?: string;
 }) {
+  if (status.clock) return <ScheduledClock className={className} />;
   if (status.pulse)
     return (
       <Spinner

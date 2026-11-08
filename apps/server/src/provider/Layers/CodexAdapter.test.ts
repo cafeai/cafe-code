@@ -16,6 +16,8 @@ import {
   type ProviderDaemonFailedRootRetirementRefusal,
   type ProviderEvent,
   type ProviderSession,
+  type ProviderSendTurnInput,
+  type ProviderFailedRootRecoveryPreparation,
   type ProviderTaskOwner,
   type ProviderThreadGoal,
   type ProviderThreadGoalSetInput,
@@ -78,6 +80,10 @@ import {
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import { makeCodexDaybreakDescriptor } from "../codexDaybreak.ts";
+import {
+  codexFailedRootPreparationCommitment,
+  mayPruneCodexFailedRootPreparation,
+} from "../codexFailedRootPreparation.ts";
 import { buildCodexSteerClientCorrelationId } from "../codexSteerCorrelation.ts";
 import {
   canonicalizeCodexSubagentDetail,
@@ -443,7 +449,7 @@ function makeRuntimeFactory() {
   };
 }
 
-function makeFailedRootRecoveryFixture(fastMode = false) {
+function makeFailedRootRecoveryFixture(fastMode = false, prepareRuntimeHome?: Effect.Effect<void>) {
   const factory = makeRuntimeFactory();
   const generations = [
     SubagentRuntimeId.make("00000000-0000-4000-8000-000000000081"),
@@ -489,10 +495,15 @@ function makeFailedRootRecoveryFixture(fastMode = false) {
         makeRuntime: factory.factory,
         getSubagentConcurrencySupport: () => true,
         getCodexContextWindowSupport: () => true,
+        ...(prepareRuntimeHome !== undefined ? { prepareRuntimeHome } : {}),
       },
     ),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    // Runtime workspace input remains the checkout, but all mutable Cafe state
+    // belongs to this layer's scoped temporary root rather than that workspace.
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -549,6 +560,1459 @@ function makeFailedRootRecoveryFixture(fastMode = false) {
     prepare,
   };
 }
+
+const awaitRecoveryPreparation = (
+  adapter: CodexAdapterShape,
+  request: ProviderSendTurnInput,
+  attemptId: string,
+  state: ProviderFailedRootRecoveryPreparation["state"],
+) =>
+  Effect.gen(function* () {
+    const lookup = {
+      threadId: request.threadId,
+      attemptId,
+      requestCommitment: codexFailedRootPreparationCommitment(attemptId, request),
+    };
+    while (true) {
+      const observed = yield* adapter.readFailedRootRecovery!(lookup);
+      if (observed.state === state) return observed;
+      yield* Effect.yieldNow;
+    }
+  });
+
+it.effect(
+  "phased recovery keeps legal 31-second opening separate from its one-use paid submission",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
+      return yield* Effect.gen(function* () {
+        const originalFactory = fixture.factory.factory.getMockImplementation()!;
+        fixture.factory.factory.mockImplementation((options) =>
+          originalFactory(options).pipe(
+            Effect.tap((runtime) =>
+              Effect.sync(() => {
+                const original = runtime.start;
+                runtime.start = () =>
+                  Deferred.succeed(entered, undefined).pipe(
+                    Effect.andThen(Deferred.await(release)),
+                    Effect.andThen(original()),
+                  );
+              }),
+            ),
+          ),
+        );
+        const request: ProviderSendTurnInput = {
+          threadId: fixture.threadId,
+          input: "Continue from exact history.",
+          allowActiveTurnSteerFallback: false,
+          expectedFailedRoot: fixture.expectedFailedRoot,
+        };
+        const attemptId = "private-phased-attempt";
+        yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust("31 seconds");
+        assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(
+          (yield* adapter.readFailedRootRecovery!({
+            threadId: fixture.threadId,
+            attemptId,
+            requestCommitment: codexFailedRootPreparationCommitment(attemptId, request),
+          })).state,
+          "preparing",
+        );
+        yield* Deferred.succeed(release, undefined);
+        const prepared = yield* awaitRecoveryPreparation(adapter, request, attemptId, "prepared");
+        assert.equal(prepared.state, "prepared");
+        if (prepared.state !== "prepared") return;
+        const paid = {
+          ...request,
+          preparedFailedRootRecovery: {
+            attemptId,
+            preparationSequence: 0,
+            requestCommitment: prepared.requestCommitment,
+            permit: prepared.permit,
+          },
+        };
+        // Changed input cannot consume or borrow the exact live capability.
+        assert.equal(
+          Exit.isFailure(
+            yield* Effect.exit(adapter.sendTurn({ ...paid, input: "Changed input." })),
+          ),
+          true,
+        );
+        const result = yield* adapter.sendTurn(paid);
+        assert.deepEqual(result.recoverySession, prepared.recoverySession);
+        assert.equal(fixture.factory.runtimes[1]!.options.requireExactResume, true);
+        assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 1);
+        assert.equal(Exit.isFailure(yield* Effect.exit(adapter.sendTurn(paid))), true);
+        assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 1);
+        assert.equal(
+          (yield* adapter.readFailedRootRecovery!({
+            threadId: fixture.threadId,
+            attemptId,
+            requestCommitment: prepared.requestCommitment,
+          })).state,
+          "consumed",
+        );
+      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+for (const retire of ["deadline", "stop"] as const) {
+  it.effect(
+    `phased recovery fences late uninterruptible pre-runtime acquisition after ${retire}`,
+    () => {
+      let hold = false;
+      return Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
+        const home = Effect.suspend(() =>
+          hold
+            ? Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.uninterruptible,
+              )
+            : Effect.void,
+        );
+        const fixture = makeFailedRootRecoveryFixture(false, home);
+        return yield* Effect.gen(function* () {
+          const { adapter, oldRuntime } = yield* fixture.prepare;
+          oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+          hold = true;
+          const request: ProviderSendTurnInput = {
+            threadId: fixture.threadId,
+            input: "Continue exact saved history.",
+            allowActiveTurnSteerFallback: false,
+            expectedFailedRoot: fixture.expectedFailedRoot,
+          };
+          const attemptId = `late-${retire}`;
+          yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+          yield* Deferred.await(entered);
+          const stop =
+            retire === "stop"
+              ? yield* adapter.stopSession(fixture.threadId).pipe(Effect.forkChild)
+              : undefined;
+          if (retire === "deadline") {
+            yield* TestClock.adjust("61 seconds");
+            yield* awaitRecoveryPreparation(adapter, request, attemptId, "uncertain");
+          } else yield* awaitRecoveryPreparation(adapter, request, attemptId, "retired");
+          assert.equal(fixture.factory.runtimes.length, 1);
+          yield* Deferred.succeed(release, undefined);
+          if (stop) yield* Fiber.join(stop);
+          const terminal = yield* awaitRecoveryPreparation(
+            adapter,
+            request,
+            attemptId,
+            retire === "deadline" ? "retryable" : "retired",
+          );
+          assert.equal(fixture.factory.runtimes.length, 1);
+          assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+          assert.deepEqual(yield* adapter.listSessions(), []);
+          if (retire === "deadline" && terminal.state === "retryable") {
+            assert.equal(terminal.reason, "startup-timeout");
+            yield* adapter.prepareFailedRootRecovery!({
+              attemptId,
+              preparationSequence: 1,
+              request,
+              continuationToken: terminal.continuationToken,
+            });
+            yield* awaitRecoveryPreparation(adapter, request, attemptId, "prepared");
+            assert.equal(fixture.factory.runtimes.length, 2);
+            assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
+          }
+        }).pipe(
+          Effect.ensuring(Deferred.succeed(release, undefined)),
+          Effect.provide(fixture.layer),
+        );
+      });
+    },
+  );
+}
+
+it.effect(
+  "phased recovery retries only a typed no-retirement refusal of its exact qualified failed root",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl
+        .mockResolvedValueOnce({ retired: false, reason: "notifications-pending" })
+        .mockResolvedValue({ retired: true });
+      const request: ProviderSendTurnInput = {
+        threadId: fixture.threadId,
+        input: "Continue exact history.",
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: fixture.expectedFailedRoot,
+      };
+      const attemptId = "pre-retirement-retry";
+      yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+      const refused = yield* awaitRecoveryPreparation(adapter, request, attemptId, "retryable");
+      if (refused.state !== "retryable") return;
+      assert.equal(oldRuntime.closeImpl.mock.calls.length, 0);
+      assert.equal(fixture.factory.runtimes.length, 1);
+      assert.equal(
+        Exit.isFailure(
+          yield* Effect.exit(
+            adapter.prepareFailedRootRecovery!({
+              attemptId,
+              preparationSequence: 1,
+              request,
+              continuationToken: "0".repeat(64),
+            }),
+          ),
+        ),
+        true,
+      );
+      yield* adapter.prepareFailedRootRecovery!({
+        attemptId,
+        preparationSequence: 1,
+        request,
+        continuationToken: refused.continuationToken,
+      });
+      const prepared = yield* awaitRecoveryPreparation(adapter, request, attemptId, "prepared");
+      assert.equal(prepared.preparationSequence, 1);
+      assert.equal(fixture.factory.runtimes.length, 2);
+      assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
+      assert.equal(
+        Exit.isFailure(
+          yield* Effect.exit(
+            adapter.prepareFailedRootRecovery!({
+              attemptId,
+              preparationSequence: 2,
+              request,
+              continuationToken: refused.continuationToken,
+            }),
+          ),
+        ),
+        true,
+      );
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+it.effect("phased recovery owns the paid wire request across awaited preparation", () => {
+  let holdPaid = false;
+  return Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
+    const home = Effect.suspend(() =>
+      holdPaid
+        ? Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)))
+        : Effect.void,
+    );
+    const fixture = makeFailedRootRecoveryFixture(false, home);
+    return yield* Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+      const request: ProviderSendTurnInput = {
+        threadId: fixture.threadId,
+        input: "The exact committed input.",
+        attachments: [],
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: fixture.expectedFailedRoot,
+      };
+      const attemptId = "owned-paid-wire-request";
+      const invalidRequest = {
+        ...request,
+        get input(): string {
+          throw new Error("private-schema-copy-sentinel");
+        },
+      };
+      const invalidPreparation = yield* Effect.exit(
+        adapter.prepareFailedRootRecovery!({
+          attemptId,
+          preparationSequence: 0,
+          request: invalidRequest,
+        }),
+      );
+      assert.equal(Exit.isFailure(invalidPreparation), true);
+      if (Exit.isFailure(invalidPreparation))
+        assert.doesNotMatch(Cause.pretty(invalidPreparation.cause), /private-schema-copy-sentinel/);
+      yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+      const prepared = yield* awaitRecoveryPreparation(adapter, request, attemptId, "prepared");
+      if (prepared.state !== "prepared") return;
+      const paid = {
+        ...request,
+        expectedFailedRoot: { ...fixture.expectedFailedRoot },
+        preparedFailedRootRecovery: {
+          attemptId,
+          preparationSequence: 0,
+          requestCommitment: prepared.requestCommitment,
+          permit: prepared.permit,
+        },
+      };
+      const invalidPaid = {
+        ...paid,
+        get input(): string {
+          throw new Error("private-schema-copy-sentinel");
+        },
+      };
+      const invalidSubmission = yield* Effect.exit(adapter.sendTurn(invalidPaid));
+      assert.equal(Exit.isFailure(invalidSubmission), true);
+      if (Exit.isFailure(invalidSubmission))
+        assert.doesNotMatch(Cause.pretty(invalidSubmission.cause), /private-schema-copy-sentinel/);
+      holdPaid = true;
+      const sending = yield* adapter.sendTurn(paid).pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      // These objects belong to the untrusted caller, not the admitted native
+      // send. Mutation during the held real async seam must not change bytes.
+      paid.input = "Mutated after permit consumption.";
+      paid.expectedFailedRoot.turnId = asTurnId("foreign-failed-root");
+      paid.preparedFailedRootRecovery.permit = "0".repeat(64);
+      assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
+      yield* Deferred.succeed(release, undefined);
+      const accepted = yield* Fiber.join(sending);
+      assert.deepEqual(accepted.recoverySession, prepared.recoverySession);
+      const native = fixture.factory.runtimes[1]!.sendTurnImpl;
+      assert.equal(native.mock.calls.length, 1);
+      assert.equal(native.mock.calls[0]![0].input, request.input);
+      assert.deepEqual(native.mock.calls[0]![0].expectedRecoverySession, prepared.recoverySession);
+      assert.equal(native.mock.calls[0]![0].expectedFailedRoot, undefined);
+      assert.equal(Exit.isFailure(yield* Effect.exit(adapter.sendTurn(paid))), true);
+      assert.equal(native.mock.calls.length, 1);
+    }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)), Effect.provide(fixture.layer));
+  });
+});
+
+it.effect("phased recovery uses its single absolute lease for a held native opening", () => {
+  const fixture = makeFailedRootRecoveryFixture();
+  return Effect.gen(function* () {
+    const { adapter, oldRuntime } = yield* fixture.prepare;
+    oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+    const entered = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
+    return yield* Effect.gen(function* () {
+      const originalFactory = fixture.factory.factory.getMockImplementation()!;
+      fixture.factory.factory.mockImplementation((options) =>
+        originalFactory(options).pipe(
+          Effect.tap((runtime) =>
+            Effect.sync(() => {
+              const original = runtime.start;
+              runtime.start = () =>
+                Deferred.succeed(entered, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(original()),
+                );
+            }),
+          ),
+        ),
+      );
+      const request: ProviderSendTurnInput = {
+        threadId: fixture.threadId,
+        input: "Continue after the exact startup lease.",
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: fixture.expectedFailedRoot,
+      };
+      const attemptId = "single-absolute-opening-lease";
+      yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust("61 seconds");
+      const terminal = yield* awaitRecoveryPreparation(adapter, request, attemptId, "retryable");
+      if (terminal.state !== "retryable") return;
+      assert.equal(terminal.reason, "startup-timeout");
+      assert.equal(terminal.category, "transport");
+      assert.equal(fixture.factory.runtimes[1]!.closeImpl.mock.calls.length, 1);
+      assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
+      assert.deepEqual(yield* adapter.listSessions(), []);
+    }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+  }).pipe(Effect.provide(fixture.layer));
+});
+
+for (const retire of ["deadline", "stop"] as const) {
+  it.effect(`phased recovery atomically closes a late runtime constructor after ${retire}`, () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
+      return yield* Effect.gen(function* () {
+        const originalFactory = fixture.factory.factory.getMockImplementation()!;
+        fixture.factory.factory.mockImplementation((options) =>
+          originalFactory(options).pipe(
+            Effect.flatMap((runtime) =>
+              fixture.factory.runtimes.length === 2
+                ? Deferred.succeed(entered, undefined).pipe(
+                    Effect.andThen(Deferred.await(release)),
+                    Effect.as(runtime),
+                    Effect.uninterruptible,
+                  )
+                : Effect.succeed(runtime),
+            ),
+          ),
+        );
+        const request: ProviderSendTurnInput = {
+          threadId: fixture.threadId,
+          input: "Continue the exact owned history.",
+          allowActiveTurnSteerFallback: false,
+          expectedFailedRoot: fixture.expectedFailedRoot,
+        };
+        const attemptId = `late-runtime-${retire}`;
+        yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+        yield* Deferred.await(entered);
+        const lateRuntime = fixture.factory.runtimes[1]!;
+        const stopping =
+          retire === "stop"
+            ? yield* adapter.stopSession(fixture.threadId).pipe(Effect.forkChild)
+            : undefined;
+        if (retire === "deadline") {
+          yield* TestClock.adjust("61 seconds");
+          yield* awaitRecoveryPreparation(adapter, request, attemptId, "uncertain");
+        } else yield* awaitRecoveryPreparation(adapter, request, attemptId, "retired");
+        assert.equal(lateRuntime.startImpl.mock.calls.length, 0);
+        assert.equal(lateRuntime.sendTurnImpl.mock.calls.length, 0);
+        yield* Deferred.succeed(release, undefined);
+        if (stopping) yield* Fiber.join(stopping);
+        const terminal = yield* awaitRecoveryPreparation(
+          adapter,
+          request,
+          attemptId,
+          retire === "deadline" ? "retryable" : "retired",
+        );
+        assert.equal(lateRuntime.closeImpl.mock.calls.length, 1);
+        assert.equal(lateRuntime.startImpl.mock.calls.length, 0);
+        assert.equal(lateRuntime.sendTurnImpl.mock.calls.length, 0);
+        assert.deepEqual(yield* adapter.listSessions(), []);
+        if (terminal.state === "retryable") assert.equal(terminal.reason, "startup-timeout");
+      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+    }).pipe(Effect.provide(fixture.layer));
+  });
+}
+
+for (const failure of ["native-transient", "owned-deadline"] as const) {
+  it.effect(`phased recovery never retries ${failure} hidden beside a cleanup defect`, () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const cleanup = yield* Deferred.make<void>();
+      yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
+      return yield* Effect.gen(function* () {
+        const originalFactory = fixture.factory.factory.getMockImplementation()!;
+        fixture.factory.factory.mockImplementation((options) =>
+          originalFactory(options).pipe(
+            Effect.tap((runtime) =>
+              Effect.sync(() => {
+                runtime.close = runtime.close.pipe(
+                  Effect.andThen(Deferred.succeed(cleanup, undefined)),
+                  Effect.andThen(Effect.die(new Error("Synthetic owned cleanup defect"))),
+                );
+                runtime.start = () =>
+                  Deferred.succeed(entered, undefined).pipe(
+                    Effect.andThen(Deferred.await(release)),
+                    Effect.andThen(
+                      Effect.fail(
+                        CodexErrors.CodexAppServerRequestError.internalError(
+                          "Synthetic transient opening failure",
+                          { codexErrorInfo: "serverOverloaded" },
+                        ),
+                      ),
+                    ),
+                  );
+              }),
+            ),
+          ),
+        );
+        const request: ProviderSendTurnInput = {
+          threadId: fixture.threadId,
+          input: "Continue only after proved cleanup.",
+          allowActiveTurnSteerFallback: false,
+          expectedFailedRoot: fixture.expectedFailedRoot,
+        };
+        const attemptId = `cleanup-defect-${failure}`;
+        yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+        yield* Deferred.await(entered);
+        if (failure === "owned-deadline") yield* TestClock.adjust("61 seconds");
+        else yield* Deferred.succeed(release, undefined);
+        yield* Deferred.await(cleanup);
+        const result = yield* awaitRecoveryPreparation(adapter, request, attemptId, "uncertain");
+        assert.equal(Object.hasOwn(result, "continuationToken"), false);
+        assert.equal(Object.hasOwn(result, "permit"), false);
+        assert.equal(fixture.factory.runtimes[1]!.closeImpl.mock.calls.length, 1);
+        assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(
+          Exit.isFailure(
+            yield* Effect.exit(
+              adapter.prepareFailedRootRecovery!({
+                attemptId: `${attemptId}-competitor`,
+                preparationSequence: 0,
+                request,
+              }),
+            ),
+          ),
+          true,
+        );
+        assert.equal(fixture.factory.runtimes.length, 2);
+      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+    }).pipe(Effect.provide(fixture.layer));
+  });
+}
+
+for (const category of ["serverOverloaded", "unauthorized", "wrapped-unauthorized"] as const) {
+  it.effect(
+    `phased recovery classifies a joined zero-paid native opening failure ${category} without borrowing the prior error`,
+    () => {
+      const fixture = makeFailedRootRecoveryFixture();
+      return Effect.gen(function* () {
+        const { adapter, oldRuntime } = yield* fixture.prepare;
+        oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+        const originalFactory = fixture.factory.factory.getMockImplementation()!;
+        fixture.factory.factory.mockImplementation((options) =>
+          originalFactory(options).pipe(
+            Effect.tap((runtime) =>
+              Effect.sync(() => {
+                if (fixture.factory.runtimes.length === 2)
+                  runtime.start = () =>
+                    Effect.fail(
+                      category === "wrapped-unauthorized"
+                        ? new CodexErrors.CodexAppServerTransportError({
+                            detail: "Synthetic transport wrapper",
+                            cause: CodexErrors.CodexAppServerRequestError.internalError(
+                              "Synthetic permanent opening failure",
+                              { codexErrorInfo: "unauthorized" },
+                            ),
+                          })
+                        : CodexErrors.CodexAppServerRequestError.internalError(
+                            "Synthetic classified opening failure",
+                            { codexErrorInfo: category },
+                          ),
+                    );
+              }),
+            ),
+          ),
+        );
+        const request: ProviderSendTurnInput = {
+          threadId: fixture.threadId,
+          input: "Continue from unchanged native history.",
+          allowActiveTurnSteerFallback: false,
+          expectedFailedRoot: fixture.expectedFailedRoot,
+        };
+        const attemptId = `classified-${category}`;
+        yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+        const result = yield* awaitRecoveryPreparation(
+          adapter,
+          request,
+          attemptId,
+          category === "serverOverloaded" ? "retryable" : "retired",
+        );
+        assert.equal(fixture.factory.runtimes[1]!.closeImpl.mock.calls.length, 1);
+        assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
+        if (result.state === "retryable") {
+          assert.equal(result.reason, "native-transient");
+          assert.equal(result.category, "server");
+          yield* adapter.prepareFailedRootRecovery!({
+            attemptId,
+            preparationSequence: 1,
+            request,
+            continuationToken: result.continuationToken,
+          });
+          const prepared = yield* awaitRecoveryPreparation(adapter, request, attemptId, "prepared");
+          assert.equal(prepared.preparationSequence, 1);
+          assert.equal(fixture.factory.runtimes.length, 3);
+          assert.equal(fixture.factory.runtimes[2]!.options.requireExactResume, true);
+          assert.equal(fixture.factory.runtimes[2]!.sendTurnImpl.mock.calls.length, 0);
+        } else assert.equal(Object.hasOwn(result, "continuationToken"), false);
+      }).pipe(Effect.provide(fixture.layer));
+    },
+  );
+}
+
+for (const shape of ["plain-tag", "forged-class-brand"] as const) {
+  it.effect(`phased recovery refuses a ${shape} transport error lookalike`, () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+      const originalFactory = fixture.factory.factory.getMockImplementation()!;
+      fixture.factory.factory.mockImplementation((options) =>
+        originalFactory(options).pipe(
+          Effect.tap((runtime) =>
+            Effect.sync(() => {
+              const lookalike = {
+                _tag: "CodexAppServerTransportError",
+                detail: "Synthetic transport lookalike",
+                message: "Synthetic transport lookalike",
+                cause: new Error("synthetic"),
+                ...(shape === "forged-class-brand"
+                  ? { "~effect/Schema/Class/CodexAppServerTransportError": true }
+                  : {}),
+              };
+              // Deliberately inject an untrusted shape into the native error seam.
+              // Its tag/HMR brand must not become trusted constructor identity.
+              runtime.start = () => Effect.fail(lookalike as CodexSessionRuntimeError);
+            }),
+          ),
+        ),
+      );
+      const request: ProviderSendTurnInput = {
+        threadId: fixture.threadId,
+        input: "Continue only with authenticated native evidence.",
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: fixture.expectedFailedRoot,
+      };
+      const attemptId = `untrusted-native-error-${shape}`;
+      yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+      const terminal = yield* awaitRecoveryPreparation(adapter, request, attemptId, "retired");
+      assert.equal(Object.hasOwn(terminal, "continuationToken"), false);
+      assert.equal(Object.hasOwn(terminal, "permit"), false);
+      assert.equal(fixture.factory.runtimes[1]!.closeImpl.mock.calls.length, 1);
+      assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
+      assert.equal(fixture.factory.runtimes.length, 2);
+    }).pipe(Effect.provide(fixture.layer));
+  });
+}
+
+it.effect("exact preparation cancellation cannot close a newer manual owner", () => {
+  const fixture = makeFailedRootRecoveryFixture();
+  return Effect.gen(function* () {
+    const { adapter, oldRuntime } = yield* fixture.prepare;
+    oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+    const request: ProviderSendTurnInput = {
+      threadId: fixture.threadId,
+      input: "Continue saved native history.",
+      allowActiveTurnSteerFallback: false,
+      expectedFailedRoot: fixture.expectedFailedRoot,
+    };
+    const attemptId = "cancel-old-preparation";
+    const lookup = {
+      threadId: fixture.threadId,
+      attemptId,
+      requestCommitment: codexFailedRootPreparationCommitment(attemptId, request),
+    };
+    yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+    yield* awaitRecoveryPreparation(adapter, request, attemptId, "prepared");
+    yield* adapter.cancelFailedRootRecovery!({ ...lookup, attemptId: "foreign-attempt" });
+    assert.equal((yield* adapter.readFailedRootRecovery!(lookup)).state, "prepared");
+    yield* adapter.startSession({
+      threadId: fixture.threadId,
+      runtimeMode: "approval-required",
+      resumeCursor: { threadId: fixture.nativeThreadId },
+    });
+    const manual = fixture.factory.runtimes[2]!;
+    yield* adapter.cancelFailedRootRecovery!(lookup);
+    assert.equal(manual.closeImpl.mock.calls.length, 0);
+    assert.equal((yield* adapter.listSessions()).length, 1);
+    assert.equal((yield* adapter.readFailedRootRecovery!(lookup)).state, "retired");
+  }).pipe(Effect.provide(fixture.layer));
+});
+
+it.effect(
+  "phased recovery prunes only terminal authority without closing its live replacement",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+      const request: ProviderSendTurnInput = {
+        threadId: fixture.threadId,
+        input: "Continue the original exact history.",
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: fixture.expectedFailedRoot,
+      };
+      const attemptId = "terminal-authority-pruning";
+      const lookup = {
+        threadId: fixture.threadId,
+        attemptId,
+        requestCommitment: codexFailedRootPreparationCommitment(attemptId, request),
+      };
+      yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+      const prepared = yield* awaitRecoveryPreparation(adapter, request, attemptId, "prepared");
+      if (prepared.state !== "prepared") return;
+      const paid = {
+        ...request,
+        preparedFailedRootRecovery: {
+          attemptId,
+          preparationSequence: 0,
+          requestCommitment: prepared.requestCommitment,
+          permit: prepared.permit,
+        },
+      };
+      yield* adapter.sendTurn(paid);
+      assert.equal((yield* adapter.readFailedRootRecovery!(lookup)).state, "consumed");
+      const replacement = fixture.factory.runtimes[1]!;
+      const siblingId = asThreadId("new-chat-triggering-terminal-pruning");
+      const siblingHistory = "independent-native-history";
+      const siblingTurn = asTurnId("independent-failed-root");
+      const siblingObservedAt = "2026-10-28T10:00:00.000Z";
+      yield* adapter.startSession({
+        threadId: siblingId,
+        runtimeMode: "approval-required",
+        resumeCursor: { threadId: siblingHistory },
+      });
+      const sibling = fixture.factory.runtimes[2]!;
+      const base = yield* sibling.getSession;
+      sibling.getSessionImpl.mockResolvedValue({
+        ...base,
+        status: "ready",
+        activeTurnId: undefined,
+        codexRootTurnFailure: {
+          turnId: siblingTurn,
+          providerThreadId: siblingHistory,
+          observedAt: siblingObservedAt,
+          category: "server",
+        },
+      });
+      const siblingRequest: ProviderSendTurnInput = {
+        threadId: siblingId,
+        input: "Continue the independent exact history.",
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: {
+          turnId: siblingTurn,
+          providerThreadId: siblingHistory,
+          subagentRuntimeId: fixture.generations[2]!,
+          providerInstanceId: fixture.account,
+          observedAt: siblingObservedAt,
+          restartSession: true,
+        },
+      };
+      yield* adapter.prepareFailedRootRecovery!({
+        attemptId: "independent-admission",
+        preparationSequence: 0,
+        request: siblingRequest,
+      });
+      yield* awaitRecoveryPreparation(
+        adapter,
+        siblingRequest,
+        "independent-admission",
+        "retryable",
+      );
+      assert.equal((yield* adapter.readFailedRootRecovery!(lookup)).state, "unavailable");
+      assert.equal(replacement.closeImpl.mock.calls.length, 0);
+      assert.equal(replacement.sendTurnImpl.mock.calls.length, 1);
+      assert.equal(
+        (yield* adapter.listSessions()).some((session) => session.threadId === fixture.threadId),
+        true,
+      );
+      // Forgetting a tombstone cannot resurrect its consumed paid capability or
+      // lend the replacement's current generation to the old failed-root tuple.
+      assert.equal(Exit.isFailure(yield* Effect.exit(adapter.sendTurn(paid))), true);
+      assert.equal(
+        Exit.isFailure(
+          yield* Effect.exit(
+            adapter.prepareFailedRootRecovery!({
+              attemptId,
+              preparationSequence: 0,
+              request,
+            }),
+          ),
+        ),
+        true,
+      );
+      assert.equal(replacement.closeImpl.mock.calls.length, 0);
+      assert.equal(replacement.sendTurnImpl.mock.calls.length, 1);
+      assert.equal(fixture.factory.runtimes.length, 3);
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+it.effect("private recovery pruning refuses uncertain cleanup and every live capability", () =>
+  Effect.sync(() => {
+    const completed = {
+      oldRetired: true,
+      oldCleanupJoined: true,
+      pending: false,
+      state: "consumed",
+    };
+    assert.equal(mayPruneCodexFailedRootPreparation(completed), true);
+    assert.equal(mayPruneCodexFailedRootPreparation({ ...completed, state: "retired" }), true);
+    assert.equal(mayPruneCodexFailedRootPreparation({ ...completed, oldRetired: false }), false);
+    assert.equal(
+      mayPruneCodexFailedRootPreparation({ ...completed, oldCleanupJoined: false }),
+      false,
+    );
+    assert.equal(mayPruneCodexFailedRootPreparation({ ...completed, pending: true }), false);
+    for (const state of [
+      "preparing",
+      "prepared",
+      "retryable",
+      "uncertain",
+      "unavailable",
+      "unknown",
+    ])
+      assert.equal(mayPruneCodexFailedRootPreparation({ ...completed, state }), false);
+  }),
+);
+
+it.effect(
+  "phased recovery reserves its final bounded slot atomically across different chats",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    // Use real adapter reservations at the production bound, not a test-only
+    // capacity setting. These synthetic native owners refuse before retirement.
+    for (let index = 0; index < 255; index += 1)
+      fixture.generations.push(
+        SubagentRuntimeId.make(
+          `00000000-0000-4000-8000-${(index + 100).toString(16).padStart(12, "0")}`,
+        ),
+      );
+    return Effect.gen(function* () {
+      const { adapter } = yield* fixture.prepare;
+      const makeRequest = (index: number) =>
+        Effect.gen(function* () {
+          if (index === 0)
+            return {
+              threadId: fixture.threadId,
+              input: "Synthetic bounded recovery.",
+              allowActiveTurnSteerFallback: false,
+              expectedFailedRoot: fixture.expectedFailedRoot,
+            } satisfies ProviderSendTurnInput;
+          const threadId = asThreadId(`bounded-recovery-${index}`);
+          const history = `bounded-native-history-${index}`;
+          const failedTurn = asTurnId(`bounded-failed-root-${index}`);
+          const observedAt = "2026-10-28T10:00:00.000Z";
+          yield* adapter.startSession({
+            threadId,
+            runtimeMode: "approval-required",
+            resumeCursor: { threadId: history },
+          });
+          const native = fixture.factory.runtimes.at(-1)!;
+          const base = yield* native.getSession;
+          native.getSessionImpl.mockResolvedValue({
+            ...base,
+            status: "ready",
+            activeTurnId: undefined,
+            codexRootTurnFailure: {
+              turnId: failedTurn,
+              providerThreadId: history,
+              observedAt,
+              category: "server",
+            },
+          });
+          return {
+            threadId,
+            input: "Synthetic bounded recovery.",
+            allowActiveTurnSteerFallback: false,
+            expectedFailedRoot: {
+              turnId: failedTurn,
+              providerThreadId: history,
+              observedAt,
+              subagentRuntimeId: base.subagentRuntimeId!,
+              providerInstanceId: fixture.account,
+              restartSession: true,
+            },
+          } satisfies ProviderSendTurnInput;
+        });
+      for (let index = 0; index < 255; index += 1) {
+        const request = yield* makeRequest(index);
+        const attemptId = `retained-bound-${index}`;
+        yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+        yield* awaitRecoveryPreparation(adapter, request, attemptId, "retryable");
+      }
+      const release = yield* Deferred.make<void>();
+      yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
+      return yield* Effect.gen(function* () {
+        const candidates: Array<{
+          readonly request: ProviderSendTurnInput;
+          readonly attemptId: string;
+          readonly native: FakeCodexRuntime;
+          readonly preparing: Fiber.Fiber<
+            Exit.Exit<
+              ProviderFailedRootRecoveryPreparation,
+              Effect.Error<ReturnType<NonNullable<CodexAdapterShape["prepareFailedRootRecovery"]>>>
+            >,
+            never
+          >;
+        }> = [];
+        for (const index of [255, 256]) {
+          const request = yield* makeRequest(index);
+          const native = fixture.factory.runtimes.at(-1)!;
+          const entered = yield* Deferred.make<void>();
+          const originalRead = native.getSession;
+          native.getSession = Deferred.succeed(entered, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.andThen(originalRead),
+          );
+          const attemptId = `last-slot-${index}`;
+          const preparing = yield* adapter.prepareFailedRootRecovery!({
+            attemptId,
+            preparationSequence: 0,
+            request,
+          }).pipe(Effect.exit, Effect.forkChild);
+          yield* Deferred.await(entered);
+          candidates.push({ request, attemptId, native, preparing });
+        }
+        yield* Deferred.succeed(release, undefined);
+        const outcomes = yield* Effect.forEach(candidates, (candidate) =>
+          Fiber.join(candidate.preparing),
+        );
+        assert.equal(outcomes.filter(Exit.isSuccess).length, 1);
+        assert.equal(outcomes.filter(Exit.isFailure).length, 1);
+        for (let index = 0; index < candidates.length; index += 1) {
+          const candidate = candidates[index]!;
+          if (Exit.isSuccess(outcomes[index]!))
+            yield* awaitRecoveryPreparation(
+              adapter,
+              candidate.request,
+              candidate.attemptId,
+              "retryable",
+            );
+          else {
+            assert.equal(
+              Exit.isFailure(
+                yield* Effect.exit(
+                  adapter.prepareFailedRootRecovery!({
+                    attemptId: candidate.attemptId,
+                    preparationSequence: 0,
+                    request: candidate.request,
+                  }),
+                ),
+              ),
+              true,
+            );
+            assert.equal(candidate.native.closeIfFailedRootImpl.mock.calls.length, 0);
+          }
+          assert.equal(candidate.native.sendTurnImpl.mock.calls.length, 0);
+          assert.equal(candidate.native.closeImpl.mock.calls.length, 0);
+        }
+        assert.equal(fixture.factory.runtimes.length, 257);
+      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+it.effect(
+  "synchronous private refusals keep each launch completion and ACK bound to its sequence",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      // Retain the qualified scheduler and use a genuinely synchronous native
+      // refusal. Assert observable sequence/ACK and Stop ownership; timing of a
+      // particular cooperative interleave is not part of this fixture's proof.
+      const refusal = vi.fn(() =>
+        Effect.succeed({ retired: false as const, reason: "notifications-pending" as const }),
+      );
+      oldRuntime.closeIfFailedRoot = refusal;
+      const request: ProviderSendTurnInput = {
+        threadId: fixture.threadId,
+        input: "Continue the exact failed root only when admitted.",
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: fixture.expectedFailedRoot,
+      };
+      const attemptId = "synchronous-refusal-sequence-order";
+      const first = yield* adapter.prepareFailedRootRecovery!({
+        attemptId,
+        preparationSequence: 0,
+        request,
+      }).pipe(Effect.forkChild);
+      const refused = yield* awaitRecoveryPreparation(adapter, request, attemptId, "retryable");
+      if (refused.state !== "retryable") return;
+      assert.equal(refused.preparationSequence, 0);
+      const second = yield* adapter.prepareFailedRootRecovery!({
+        attemptId,
+        preparationSequence: 1,
+        request,
+        continuationToken: refused.continuationToken,
+      });
+      assert.equal(second.preparationSequence, 1);
+      assert.equal((yield* Fiber.join(first)).preparationSequence, 0);
+      const next = yield* awaitRecoveryPreparation(adapter, request, attemptId, "retryable");
+      assert.equal(next.preparationSequence, 1);
+      assert.equal(refusal.mock.calls.length, 2);
+      assert.equal(fixture.factory.runtimes.length, 1);
+      assert.equal(oldRuntime.closeImpl.mock.calls.length, 0);
+      assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+      yield* adapter.stopSession(fixture.threadId);
+      assert.equal(oldRuntime.closeImpl.mock.calls.length, 1);
+      assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+it.effect(
+  "private cancellation joins a prepared owner already removed by native retirement",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+      const request: ProviderSendTurnInput = {
+        threadId: fixture.threadId,
+        input: "Continue exact native history.",
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: fixture.expectedFailedRoot,
+      };
+      const attemptId = "cancel-retiring-prepared-owner";
+      const lookup = {
+        threadId: fixture.threadId,
+        attemptId,
+        requestCommitment: codexFailedRootPreparationCommitment(attemptId, request),
+      };
+      yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+      yield* awaitRecoveryPreparation(adapter, request, attemptId, "prepared");
+      const prepared = fixture.factory.runtimes[1]!;
+      const closeEntered = yield* Deferred.make<void>();
+      const closeRelease = yield* Deferred.make<void>();
+      const cancelled = yield* Deferred.make<void>();
+      yield* Effect.addFinalizer(() =>
+        Deferred.succeed(closeRelease, undefined).pipe(Effect.asVoid),
+      );
+      return yield* Effect.gen(function* () {
+        const originalClose = prepared.close;
+        prepared.close = Deferred.succeed(closeEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(closeRelease)),
+          Effect.andThen(originalClose),
+          Effect.uninterruptible,
+        );
+        yield* prepared.emit({
+          id: asEventId("retire-prepared-before-private-cancel"),
+          kind: "session",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: fixture.threadId,
+          subagentRuntimeId: fixture.generations[1],
+          createdAt: "2026-10-28T10:00:00.000Z",
+          method: "session/exited",
+          message: "Synthetic exact owner exit",
+        });
+        yield* Deferred.await(closeEntered);
+        assert.equal(yield* adapter.hasSession(fixture.threadId), false);
+        const cancelling = yield* adapter.cancelFailedRootRecovery!(lookup).pipe(
+          Effect.tap(() => Deferred.succeed(cancelled, undefined)),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust(1);
+        assert.equal(yield* Deferred.isDone(cancelled), false);
+        assert.equal((yield* adapter.readFailedRootRecovery!(lookup)).state, "retired");
+        assert.equal(prepared.closeImpl.mock.calls.length, 0);
+        yield* Deferred.succeed(closeRelease, undefined);
+        yield* Fiber.join(cancelling);
+        assert.equal(yield* Deferred.isDone(cancelled), true);
+        assert.equal(prepared.closeImpl.mock.calls.length, 1);
+        assert.equal(prepared.sendTurnImpl.mock.calls.length, 0);
+      }).pipe(Effect.ensuring(Deferred.succeed(closeRelease, undefined)));
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+it.effect(
+  "manual replacement joins a private cancelled owner whose native retirement is still pending",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+      const request: ProviderSendTurnInput = {
+        threadId: fixture.threadId,
+        input: "Continue exact native history.",
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: fixture.expectedFailedRoot,
+      };
+      const attemptId = "manual-replacement-during-private-cancel";
+      const lookup = {
+        threadId: fixture.threadId,
+        attemptId,
+        requestCommitment: codexFailedRootPreparationCommitment(attemptId, request),
+      };
+      yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+      yield* awaitRecoveryPreparation(adapter, request, attemptId, "prepared");
+      const prepared = fixture.factory.runtimes[1]!;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const cancelled = yield* Deferred.make<void>();
+      const started = yield* Deferred.make<void>();
+      yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
+      return yield* Effect.gen(function* () {
+        const originalClose = prepared.close;
+        prepared.close = Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.andThen(originalClose),
+          Effect.uninterruptible,
+        );
+        yield* prepared.emit({
+          id: asEventId("private-cancel-manual-replacement-native-exit"),
+          kind: "session",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: fixture.threadId,
+          subagentRuntimeId: fixture.generations[1],
+          createdAt: "2026-10-28T10:00:00.000Z",
+          method: "session/exited",
+          message: "Synthetic exact native owner exit",
+        });
+        yield* Deferred.await(entered);
+        assert.equal(yield* adapter.hasSession(fixture.threadId), false);
+        const cancelling = yield* adapter.cancelFailedRootRecovery!(lookup).pipe(
+          Effect.tap(() => Deferred.succeed(cancelled, undefined)),
+          Effect.forkChild,
+        );
+        yield* awaitRecoveryPreparation(adapter, request, attemptId, "retired");
+        const starting = yield* adapter
+          .startSession({
+            threadId: fixture.threadId,
+            runtimeMode: "approval-required",
+            resumeCursor: { threadId: fixture.nativeThreadId },
+          })
+          .pipe(
+            Effect.tap(() => Deferred.succeed(started, undefined)),
+            Effect.forkChild,
+          );
+        yield* TestClock.adjust(1);
+        assert.equal(yield* Deferred.isDone(cancelled), false);
+        assert.equal(yield* Deferred.isDone(started), false);
+        assert.equal(fixture.factory.runtimes.length, 2);
+        assert.equal(prepared.closeImpl.mock.calls.length, 0);
+        assert.equal(prepared.sendTurnImpl.mock.calls.length, 0);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(cancelling);
+        const manual = yield* Fiber.join(starting);
+        assert.equal(manual.subagentRuntimeId, fixture.generations[2]);
+        assert.equal(fixture.factory.runtimes.length, 3);
+        assert.equal(prepared.closeImpl.mock.calls.length, 1);
+        assert.equal(prepared.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(fixture.factory.runtimes[2]!.closeImpl.mock.calls.length, 0);
+        assert.equal(fixture.factory.runtimes[2]!.sendTurnImpl.mock.calls.length, 0);
+        const sessions = yield* adapter.listSessions();
+        assert.equal(sessions.length, 1);
+        assert.equal(sessions[0]!.subagentRuntimeId, fixture.generations[2]);
+      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+it.effect(
+  "phased expiry Stop cancel and adapter scope closure share one exact worker completion",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const scope = yield* Scope.make("sequential");
+      yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid));
+      return yield* Effect.gen(function* () {
+        const context = yield* Layer.buildWithScope(fixture.layer, scope);
+        const { adapter, oldRuntime } = yield* fixture.prepare.pipe(Effect.provide(context));
+        oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+        const originalFactory = fixture.factory.factory.getMockImplementation()!;
+        fixture.factory.factory.mockImplementation((options) =>
+          originalFactory(options).pipe(
+            Effect.flatMap((runtime) =>
+              Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.as(runtime),
+                Effect.uninterruptible,
+              ),
+            ),
+          ),
+        );
+        const request: ProviderSendTurnInput = {
+          threadId: fixture.threadId,
+          input: "Continue exact history only after owned closure.",
+          allowActiveTurnSteerFallback: false,
+          expectedFailedRoot: fixture.expectedFailedRoot,
+        };
+        const attemptId = "overlapping-exact-worker-retirement";
+        const lookup = {
+          threadId: fixture.threadId,
+          attemptId,
+          requestCommitment: codexFailedRootPreparationCommitment(attemptId, request),
+        };
+        yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust("61 seconds");
+        yield* awaitRecoveryPreparation(adapter, request, attemptId, "uncertain");
+        const cancelled = yield* Deferred.make<void>();
+        const stopped = yield* Deferred.make<void>();
+        const closed = yield* Deferred.make<void>();
+        const cancelling = yield* adapter.cancelFailedRootRecovery!(lookup).pipe(
+          Effect.tap(() => Deferred.succeed(cancelled, undefined)),
+          Effect.forkChild,
+        );
+        const stopping = yield* adapter.stopSession(fixture.threadId).pipe(
+          Effect.tap(() => Deferred.succeed(stopped, undefined)),
+          Effect.forkChild,
+        );
+        const closing = yield* Scope.close(scope, Exit.void).pipe(
+          Effect.tap(() => Deferred.succeed(closed, undefined)),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust(1);
+        assert.equal(yield* Deferred.isDone(cancelled), false);
+        assert.equal(yield* Deferred.isDone(stopped), false);
+        assert.equal(yield* Deferred.isDone(closed), false);
+        const late = fixture.factory.runtimes[1]!;
+        assert.equal(late.startImpl.mock.calls.length, 0);
+        assert.equal(late.closeImpl.mock.calls.length, 0);
+        assert.equal(late.sendTurnImpl.mock.calls.length, 0);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(cancelling);
+        yield* Fiber.join(stopping);
+        yield* Fiber.join(closing);
+        assert.equal(yield* Deferred.isDone(cancelled), true);
+        assert.equal(yield* Deferred.isDone(stopped), true);
+        assert.equal(yield* Deferred.isDone(closed), true);
+        assert.equal(late.closeImpl.mock.calls.length, 1);
+        assert.equal(late.startImpl.mock.calls.length, 0);
+        assert.equal(late.sendTurnImpl.mock.calls.length, 0);
+        assert.deepEqual(yield* adapter.listSessions(), []);
+      }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+    });
+  },
+);
+
+it.effect(
+  "phased expiry joins a late native retirement before granting another preparation",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+      const closeEntered = yield* Deferred.make<void>();
+      const closeRelease = yield* Deferred.make<void>();
+      const descriptorEntered = yield* Deferred.make<void>();
+      const descriptorRelease = yield* Deferred.make<void>();
+      yield* Effect.addFinalizer(() =>
+        Deferred.succeed(closeRelease, undefined).pipe(Effect.asVoid),
+      );
+      yield* Effect.addFinalizer(() =>
+        Deferred.succeed(descriptorRelease, undefined).pipe(Effect.asVoid),
+      );
+      return yield* Effect.gen(function* () {
+        const originalFactory = fixture.factory.factory.getMockImplementation()!;
+        fixture.factory.factory.mockImplementation((options) =>
+          originalFactory(options).pipe(
+            Effect.tap((runtime) =>
+              Effect.sync(() => {
+                const originalClose = runtime.close;
+                runtime.close = Deferred.succeed(closeEntered, undefined).pipe(
+                  Effect.andThen(Deferred.await(closeRelease)),
+                  Effect.andThen(originalClose),
+                  Effect.uninterruptible,
+                );
+                const originalRead = runtime.getSession;
+                let reads = 0;
+                runtime.getSession = Effect.suspend(() =>
+                  ++reads === 1
+                    ? originalRead
+                    : Deferred.succeed(descriptorEntered, undefined).pipe(
+                        Effect.andThen(Deferred.await(descriptorRelease)),
+                        Effect.andThen(originalRead),
+                        Effect.uninterruptible,
+                      ),
+                );
+              }),
+            ),
+          ),
+        );
+        const request: ProviderSendTurnInput = {
+          threadId: fixture.threadId,
+          input: "Continue only after exact late cleanup.",
+          allowActiveTurnSteerFallback: false,
+          expectedFailedRoot: fixture.expectedFailedRoot,
+        };
+        const attemptId = "expiry-during-prepared-native-retirement";
+        yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+        yield* Deferred.await(descriptorEntered);
+        assert.equal(yield* adapter.hasSession(fixture.threadId), true);
+        yield* fixture.factory.runtimes[1]!.emit({
+          id: asEventId("late-preparation-native-retirement"),
+          kind: "session",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: fixture.threadId,
+          subagentRuntimeId: fixture.generations[1],
+          createdAt: "2026-10-28T10:00:00.000Z",
+          method: "session/exited",
+          message: "Synthetic exact owner exit",
+        });
+        yield* Deferred.await(closeEntered);
+        assert.equal(yield* adapter.hasSession(fixture.threadId), false);
+        yield* TestClock.adjust("61 seconds");
+        yield* Deferred.succeed(descriptorRelease, undefined);
+        yield* TestClock.adjust(1);
+        const held = yield* adapter.readFailedRootRecovery!({
+          threadId: fixture.threadId,
+          attemptId,
+          requestCommitment: codexFailedRootPreparationCommitment(attemptId, request),
+        });
+        assert.equal(held.state, "uncertain");
+        assert.equal(Object.hasOwn(held, "continuationToken"), false);
+        assert.equal(fixture.factory.runtimes[1]!.closeImpl.mock.calls.length, 0);
+        yield* Deferred.succeed(closeRelease, undefined);
+        const terminal = yield* awaitRecoveryPreparation(adapter, request, attemptId, "retryable");
+        if (terminal.state !== "retryable") return;
+        assert.equal(terminal.reason, "startup-timeout");
+        assert.equal(fixture.factory.runtimes[1]!.closeImpl.mock.calls.length, 1);
+        assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
+      }).pipe(
+        Effect.ensuring(
+          Effect.all(
+            [
+              Deferred.succeed(descriptorRelease, undefined),
+              Deferred.succeed(closeRelease, undefined),
+            ],
+            { discard: true },
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
+
+it.effect("phased recovery retains a typed acquired-runtime cleanup failure as uncertain", () => {
+  const fixture = makeFailedRootRecoveryFixture();
+  return Effect.gen(function* () {
+    const { adapter, oldRuntime } = yield* fixture.prepare;
+    oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+    const originalFactory = fixture.factory.factory.getMockImplementation()!;
+    fixture.factory.factory.mockImplementation((options) =>
+      originalFactory(options).pipe(
+        Effect.tap((runtime) =>
+          Effect.sync(() => {
+            // Model an adversarial runtime implementation returning a typed failure
+            // from its supposedly infallible cleanup boundary. It must not be ignored.
+            Object.defineProperty(runtime, "close", {
+              value: runtime.close.pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new CodexErrors.CodexAppServerTransportError({
+                      detail: "Synthetic cleanup transport failure",
+                      cause: new Error("synthetic"),
+                    }),
+                  ),
+                ),
+              ),
+            });
+            runtime.start = () =>
+              Effect.fail(
+                CodexErrors.CodexAppServerRequestError.internalError(
+                  "Synthetic transient opening failure",
+                  { codexErrorInfo: "serverOverloaded" },
+                ),
+              );
+          }),
+        ),
+      ),
+    );
+    const request: ProviderSendTurnInput = {
+      threadId: fixture.threadId,
+      input: "Continue only after joined cleanup.",
+      allowActiveTurnSteerFallback: false,
+      expectedFailedRoot: fixture.expectedFailedRoot,
+    };
+    const attemptId = "typed-acquired-cleanup-failure";
+    yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+    const observations: Array<{ state: string; phase: string; closes: number }> = [];
+    let result: ProviderFailedRootRecoveryPreparation;
+    while (true) {
+      result = yield* adapter.readFailedRootRecovery!({
+        threadId: fixture.threadId,
+        attemptId,
+        requestCommitment: codexFailedRootPreparationCommitment(attemptId, request),
+      });
+      if (observations.length < 32)
+        observations.push({
+          state: result.state,
+          phase: result.phase,
+          closes: fixture.factory.runtimes[1]?.closeImpl.mock.calls.length ?? 0,
+        });
+      if (result.state !== "preparing") break;
+      yield* Effect.yieldNow;
+    }
+    assert.equal(result.state, "uncertain", encodeProviderJsonString(observations));
+    assert.equal(Object.hasOwn(result, "continuationToken"), false);
+    assert.equal(fixture.factory.runtimes[1]!.closeImpl.mock.calls.length, 1);
+    assert.equal(fixture.factory.runtimes[1]!.sendTurnImpl.mock.calls.length, 0);
+    assert.equal(
+      Exit.isFailure(
+        yield* Effect.exit(
+          adapter.prepareFailedRootRecovery!({
+            attemptId: "competitor-after-typed-cleanup-failure",
+            preparationSequence: 0,
+            request,
+          }),
+        ),
+      ),
+      true,
+    );
+    assert.equal(fixture.factory.runtimes.length, 2);
+  }).pipe(Effect.provide(fixture.layer));
+});
+
+it.effect(
+  "phased recovery joins the old scope but never retries a typed old-owner cleanup failure",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const bridgeEntered = yield* Deferred.make<void>();
+      const bridgeClosed = yield* Deferred.make<void>();
+      const originalFactory = fixture.factory.factory.getMockImplementation()!;
+      fixture.factory.factory.mockImplementation((options) =>
+        originalFactory(options).pipe(
+          Effect.tap((runtime) =>
+            Effect.sync(() => {
+              // Deliberately independent of the fake native queue: its close cannot
+              // accidentally masquerade as the adapter's exact scope join.
+              Object.defineProperty(runtime, "events", {
+                get: () =>
+                  Stream.fromEffect(Deferred.succeed(bridgeEntered, undefined)).pipe(
+                    Stream.flatMap(() => Stream.never),
+                    Stream.ensuring(Deferred.succeed(bridgeClosed, undefined)),
+                  ),
+              });
+            }),
+          ),
+        ),
+      );
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      yield* Deferred.await(bridgeEntered);
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+      const nativeClose = oldRuntime.close;
+      let closeAttempts = 0;
+      Object.defineProperty(oldRuntime, "close", {
+        value: Effect.suspend(() =>
+          ++closeAttempts === 1
+            ? nativeClose
+            : Effect.fail(
+                new CodexErrors.CodexAppServerTransportError({
+                  detail: "Synthetic typed old-scope cleanup failure",
+                  cause: new Error("synthetic"),
+                }),
+              ),
+        ),
+      });
+      const request: ProviderSendTurnInput = {
+        threadId: fixture.threadId,
+        input: "Continue only after the entire old owner closes.",
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: fixture.expectedFailedRoot,
+      };
+      const attemptId = "old-native-closed-but-scope-failed";
+      yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+      yield* Deferred.await(bridgeClosed);
+      const result = yield* awaitRecoveryPreparation(adapter, request, attemptId, "uncertain");
+      assert.equal(oldRuntime.closeImpl.mock.calls.length, 1);
+      assert.equal(closeAttempts, 2);
+      assert.equal(Object.hasOwn(result, "continuationToken"), false);
+      assert.equal(Object.hasOwn(result, "permit"), false);
+      assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+      assert.equal(fixture.factory.runtimes.length, 1);
+      assert.equal(
+        Exit.isFailure(
+          yield* Effect.exit(
+            adapter.prepareFailedRootRecovery!({
+              attemptId: "competitor-after-old-cleanup-failure",
+              preparationSequence: 0,
+              request,
+            }),
+          ),
+        ),
+        true,
+      );
+      assert.equal(fixture.factory.runtimes.length, 1);
+    }).pipe(Effect.provide(fixture.layer));
+  },
+);
 
 it.effect(
   "cold failed-root recovery retires before exact-history reopening and submits one new turn with unchanged launch policy",
@@ -1238,7 +2702,9 @@ it.effect(
       Effect.scoped,
       Effect.provide(
         SqlitePersistenceTest.pipe(
-          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(
+            ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+          ),
           Layer.provideMerge(ServerSettingsService.layerTest()),
           Layer.provideMerge(providerSessionDirectoryTestLayer),
           Layer.provideMerge(NodeServices.layer),
@@ -1351,7 +2817,9 @@ function makeConcurrencyTestLayer(
       },
     ),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -1423,6 +2891,99 @@ it.effect(
     );
   },
 );
+
+it.effect("retires an idle app-server after a permanent refresh-token refusal", () => {
+  const factory = makeRuntimeFactory();
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    const threadId = asThreadId("thread-auth-retire");
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      runtimeMode: "full-access",
+    });
+    const runtime = factory.lastRuntime!;
+    const base: ProviderEvent = {
+      id: asEventId("auth-retire"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      kind: "notification",
+      method: "process/stderr",
+      createdAt: "2026-11-05T01:18:11.207Z",
+      message:
+        "2026-11-05T01:18:11.206235Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+    };
+    // Prose that merely resembles the record is not a refusal.
+    yield* runtime.emit({
+      ...base,
+      id: asEventId("auth-prose"),
+      message: "refresh token was already used",
+    });
+    for (let index = 0; index < 32; index += 1) yield* Effect.yieldNow;
+    assert.equal(
+      (yield* adapter.listSessions()).some((session) => session.threadId === threadId),
+      true,
+    );
+    yield* runtime.emit(base);
+    for (let index = 0; index < 64; index += 1) {
+      if (!(yield* adapter.listSessions()).some((session) => session.threadId === threadId)) break;
+      yield* Effect.yieldNow;
+    }
+    assert.equal(
+      (yield* adapter.listSessions()).some((session) => session.threadId === threadId),
+      false,
+    );
+  }).pipe(Effect.provide(makeConcurrencyTestLayer(factory)));
+});
+
+it.effect("keeps a resumed app-server alive when resume replays an old sign-in failure", () => {
+  const factory = makeRuntimeFactory();
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    const threadId = asThreadId("thread-auth-replay");
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      runtimeMode: "full-access",
+    });
+    const runtime = factory.lastRuntime!;
+    const failedTurn = {
+      threadId: "native-thread",
+      turn: {
+        id: "turn-1",
+        items: [],
+        itemsView: "notLoaded",
+        status: "failed",
+        error: { message: "rejected", codexErrorInfo: "unauthorized", additionalDetails: null },
+      },
+    };
+    const turnCompleted: ProviderEvent = {
+      id: asEventId("codex-snapshot:session-resume:native-thread:native-turn:turn-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      turnId: asTurnId("turn-1"),
+      kind: "notification",
+      method: "turn/completed",
+      createdAt: "2026-11-05T01:14:06.000Z",
+      payload: failedTurn,
+    };
+    const hasSession = Effect.suspend(() => adapter.listSessions()).pipe(
+      Effect.map((sessions) => sessions.some((session) => session.threadId === threadId)),
+    );
+    // The replayed history of the turn that failed before re-login is not a
+    // fresh refusal: the session the user just resumed must stay usable.
+    yield* runtime.emit(turnCompleted);
+    for (let index = 0; index < 64; index += 1) yield* Effect.yieldNow;
+    assert.equal(yield* hasSession, true);
+    // A live terminal refusal still retires the app-server.
+    yield* runtime.emit({ ...turnCompleted, id: asEventId("live-auth-refusal") });
+    for (let index = 0; index < 64; index += 1) {
+      if (!(yield* hasSession)) break;
+      yield* Effect.yieldNow;
+    }
+    assert.equal(yield* hasSession, false);
+  }).pipe(Effect.provide(makeConcurrencyTestLayer(factory)));
+});
 
 it.effect("binds paired compaction support to the current qualified native owner", () => {
   const factory = makeRuntimeFactory();
@@ -1749,7 +3310,9 @@ const validationLayer = it.layer(
       });
     }),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -1757,6 +3320,105 @@ const validationLayer = it.layer(
 );
 
 validationLayer("CodexAdapterLive validation", (it) => {
+  it.effect(
+    "refreshes an independent owner's missing Daybreak catalogue before opening or sending and revalidates refusals without submission",
+    () =>
+      Effect.gen(function* () {
+        for (const program of ["daybreakBlue", "daybreakRed"] as const) {
+          const factory = makeRuntimeFactory();
+          const instanceId = ProviderInstanceId.make(`codex-${program.toLowerCase()}`);
+          const threadId = asThreadId(`independent-catalogue-${program}`);
+          let cachedModels: readonly ServerProviderModel[] = [];
+          let discoveredModels = advertisedTierModels;
+          const refreshModels = vi.fn(() =>
+            Effect.sync(() => {
+              cachedModels = discoveredModels;
+              return cachedModels;
+            }),
+          );
+          const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
+            instanceId,
+            makeRuntime: factory.factory,
+            getModels: () => Effect.sync(() => cachedModels),
+            refreshModels,
+          });
+          const selection = (value: string | boolean, account = instanceId) =>
+            createModelSelection(account, program, [{ id: "cyberAccessProgram", value }]);
+          yield* adapter.startSession({
+            threadId,
+            runtimeMode: "approval-required",
+            modelSelection: selection(program),
+          });
+          assert.equal(refreshModels.mock.calls.length, 1);
+          const runtime = factory.lastRuntime!;
+          assert.equal(factory.factory.mock.calls.length, 1);
+          yield* adapter.sendTurn({
+            threadId,
+            input: "Advertised",
+            modelSelection: selection(program),
+          });
+          assert.equal(refreshModels.mock.calls.length, 1);
+          assert.equal(runtime.sendTurnImpl.mock.calls[0]?.[0].cyberAccessProgram, program);
+
+          cachedModels = [];
+          yield* adapter.sendTurn({
+            threadId,
+            input: "Refresh before send",
+            modelSelection: selection(program),
+          });
+          assert.equal(refreshModels.mock.calls.length, 2);
+          assert.equal(runtime.sendTurnImpl.mock.calls[1]?.[0].cyberAccessProgram, program);
+
+          cachedModels = [];
+          discoveredModels = [];
+          const refusedTurn = yield* Effect.exit(
+            adapter.sendTurn({
+              threadId,
+              input: "Unavailable",
+              modelSelection: selection(program),
+            }),
+          );
+          assert.equal(refusedTurn._tag, "Failure");
+          assert.equal(refreshModels.mock.calls.length, 3);
+          assert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+          const refusedOpening = yield* Effect.exit(
+            adapter.startSession({
+              threadId: asThreadId(`unavailable-opening-${program}`),
+              runtimeMode: "approval-required",
+              modelSelection: selection(program),
+            }),
+          );
+          assert.equal(refusedOpening._tag, "Failure");
+          assert.equal(refreshModels.mock.calls.length, 4);
+          assert.equal(factory.factory.mock.calls.length, 1);
+
+          for (const value of [true, "future-program"] as const) {
+            const invalid = yield* Effect.exit(
+              adapter.sendTurn({ threadId, input: "Invalid", modelSelection: selection(value) }),
+            );
+            assert.equal(invalid._tag, "Failure");
+          }
+          assert.equal(refreshModels.mock.calls.length, 4);
+          assert.equal(runtime.sendTurnImpl.mock.calls.length, 2);
+          yield* adapter.sendTurn({
+            threadId,
+            input: "Off",
+            modelSelection: selection("standard"),
+          });
+          yield* adapter.sendTurn({ threadId, input: "Omitted" });
+          yield* adapter.sendTurn({
+            threadId,
+            input: "Foreign selection",
+            modelSelection: selection(program, ProviderInstanceId.make("another-codex-account")),
+          });
+          assert.equal(refreshModels.mock.calls.length, 4);
+          assert.deepEqual(
+            runtime.sendTurnImpl.mock.calls.slice(2).map(([input]) => input.cyberAccessProgram),
+            ["standard", undefined, undefined],
+          );
+        }
+      }).pipe(Effect.scoped),
+  );
   it.effect(
     "routes exact Daybreak levels and explicit Off and rejects unavailable levels before send",
     () =>
@@ -1923,6 +3585,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
     Effect.gen(function* () {
       validationRuntimeFactory.factory.mockClear();
       const adapter = yield* CodexAdapter;
+      const config = yield* ServerConfig;
 
       yield* adapter.startSession({
         provider: ProviderDriverKind.make("codex"),
@@ -1939,7 +3602,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
       assert.deepStrictEqual(options, {
         customInstructions: undefined,
         historySafety: options?.historySafety,
-        appServerCwd: path.join(process.cwd(), "userdata"),
+        appServerCwd: config.stateDir,
         binaryPath: "codex",
         cwd: process.cwd(),
         model: "gpt-5.3-codex",
@@ -2042,7 +3705,9 @@ const sessionErrorLayer = it.layer(
       });
     }),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -2147,6 +3812,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
   it.effect("uses a transient reader without materializing a session or runtime events", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
+      const config = yield* ServerConfig;
       const threadId = asThreadId("sess-ended-subagent-detail");
       const childId = "provider-child-ended";
       const runtimeCountBefore = sessionRuntimeFactory.factory.mock.calls.length;
@@ -2167,7 +3833,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       );
       assert.deepEqual(transientSubagentHistoryRead.mock.calls[0]?.[0], {
         binaryPath: "codex",
-        appServerCwd: path.join(process.cwd(), "userdata"),
+        appServerCwd: config.stateDir,
         rootProviderThreadId: "provider-root-ended",
         subagentThreadId: childId,
         onHistoryDiagnostic: transientSubagentHistoryRead.mock.calls[0]?.[0].onHistoryDiagnostic,
@@ -2209,6 +3875,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
   it.effect("keeps an ended child pinned to its persisted root when another root is live", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
+      const config = yield* ServerConfig;
       const threadId = asThreadId("sess-live-different-root-subagent-detail");
       const childId = "provider-child-from-ended-root";
       yield* adapter.startSession({
@@ -2235,7 +3902,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       );
       assert.deepEqual(transientSubagentHistoryRead.mock.calls[0]?.[0], {
         binaryPath: "codex",
-        appServerCwd: path.join(process.cwd(), "userdata"),
+        appServerCwd: config.stateDir,
         rootProviderThreadId: "provider-root-that-ended",
         subagentThreadId: childId,
         onHistoryDiagnostic: transientSubagentHistoryRead.mock.calls[0]?.[0].onHistoryDiagnostic,
@@ -2673,7 +4340,9 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         });
       }),
     ).pipe(
-      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+      ),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(providerSessionDirectoryTestLayer),
       Layer.provideMerge(NodeServices.layer),
@@ -2739,7 +4408,9 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
           });
         }),
       ).pipe(
-        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+        Layer.provideMerge(
+          ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+        ),
         Layer.provideMerge(ServerSettingsService.layerTest()),
         Layer.provideMerge(providerSessionDirectoryTestLayer),
         Layer.provideMerge(NodeServices.layer),
@@ -2849,7 +4520,9 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
             });
           }),
         ).pipe(
-          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+          Layer.provideMerge(
+            ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+          ),
           Layer.provideMerge(ServerSettingsService.layerTest()),
           Layer.provideMerge(providerSessionDirectoryTestLayer),
           Layer.provideMerge(NodeServices.layer),
@@ -2947,7 +4620,9 @@ const lifecycleLayer = it.layer(
       });
     }),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -4352,80 +6027,106 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("maps Codex MCP and dynamic-tool identity and arguments into work-log detail", () =>
-    Effect.gen(function* () {
-      const { adapter, runtime } = yield* startLifecycleRuntime();
-      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
-        Stream.runCollect,
-        Effect.forkChild,
-      );
+  it.effect(
+    "preserves connected-app tool identity, arguments and actual MCP progress in the work log",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const eventsFiber = yield* Stream.take(adapter.streamEvents, 3).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
 
-      yield* runtime.emit({
-        id: asEventId("evt-mcp-tool-started"),
-        kind: "notification",
-        provider: ProviderDriverKind.make("codex"),
-        createdAt: "2026-01-01T00:00:00.000Z",
-        method: "item/started",
-        threadId: asThreadId("thread-1"),
-        turnId: asTurnId("turn-1"),
-        itemId: asItemId("mcp-tool-1"),
-        payload: {
-          threadId: "provider-thread-1",
-          turnId: "turn-1",
-          startedAtMs: 1_767_225_600_000,
-          item: {
-            type: "mcpToolCall",
-            id: "mcp-tool-1",
-            server: "openaiDeveloperDocs",
-            tool: "search_openai_docs",
-            arguments: {
-              query: "current Responses API tools",
-              apiKey: "sk-example-secret-value-1234567890",
+        yield* runtime.emit({
+          id: asEventId("evt-mcp-tool-started"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "item/started",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("mcp-tool-1"),
+          payload: {
+            threadId: "provider-thread-1",
+            turnId: "turn-1",
+            startedAtMs: 1_767_225_600_000,
+            item: {
+              type: "mcpToolCall",
+              id: "mcp-tool-1",
+              server: "openaiDeveloperDocs",
+              tool: "search_openai_docs",
+              appContext: {
+                connectorId: "developer-docs",
+                appName: "Developer docs",
+                actionName: "Search documentation",
+              },
+              arguments: {
+                query: "current Responses API tools",
+                apiKey: "sk-example-secret-value-1234567890",
+              },
+              status: "inProgress",
             },
-            status: "inProgress",
           },
-        },
-      } satisfies ProviderEvent);
-      yield* runtime.emit({
-        id: asEventId("evt-dynamic-tool-started"),
-        kind: "notification",
-        provider: ProviderDriverKind.make("codex"),
-        createdAt: "2026-01-01T00:00:01.000Z",
-        method: "item/started",
-        threadId: asThreadId("thread-1"),
-        turnId: asTurnId("turn-1"),
-        itemId: asItemId("dynamic-tool-1"),
-        payload: {
-          threadId: "provider-thread-1",
-          turnId: "turn-1",
-          startedAtMs: 1_767_225_601_000,
-          item: {
-            type: "dynamicToolCall",
-            id: "dynamic-tool-1",
-            namespace: "workspace",
-            tool: "read_file",
-            arguments: { path: "/workspace/README.md" },
-            status: "inProgress",
+        } satisfies ProviderEvent);
+        yield* runtime.emit({
+          id: asEventId("evt-dynamic-tool-started"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+          method: "item/started",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("dynamic-tool-1"),
+          payload: {
+            threadId: "provider-thread-1",
+            turnId: "turn-1",
+            startedAtMs: 1_767_225_601_000,
+            item: {
+              type: "dynamicToolCall",
+              id: "dynamic-tool-1",
+              namespace: "workspace",
+              tool: "read_file",
+              arguments: { path: "/workspace/README.md" },
+              status: "inProgress",
+            },
           },
-        },
-      } satisfies ProviderEvent);
+        } satisfies ProviderEvent);
 
-      const events = Array.from(yield* Fiber.join(eventsFiber));
-      assert.equal(events[0]?.type, "item.started");
-      assert.equal(events[0]?.payload.itemType, "mcp_tool_call");
-      assert.equal(events[0]?.payload.title, "MCP tool call");
-      assert.equal(
-        events[0]?.payload.detail,
-        'openaiDeveloperDocs.search_openai_docs: {"query":"current Responses API tools","apiKey":"[redacted]"}',
-      );
-      assert.equal(events[1]?.type, "item.started");
-      assert.equal(events[1]?.payload.itemType, "dynamic_tool_call");
-      assert.equal(events[1]?.payload.title, "Tool call");
-      assert.equal(
-        events[1]?.payload.detail,
-        'workspace.read_file: {"path":"/workspace/README.md"}',
-      );
-    }),
+        yield* runtime.emit({
+          id: asEventId("evt-mcp-tool-progress"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:02.000Z",
+          method: "item/mcpToolCall/progress",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId("mcp-tool-1"),
+          payload: {
+            threadId: "provider-thread-1",
+            turnId: "turn-1",
+            itemId: "mcp-tool-1",
+            message: "Found three documentation pages",
+          },
+        } satisfies ProviderEvent);
+
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        assert.equal(events[0]?.type, "item.started");
+        assert.equal(events[0]?.payload.itemType, "mcp_tool_call");
+        assert.equal(events[0]?.payload.title, "MCP tool call");
+        assert.equal(
+          events[0]?.payload.detail,
+          'openaiDeveloperDocs.search_openai_docs: {"query":"current Responses API tools","apiKey":"[redacted]"}',
+        );
+        assert.equal(events[1]?.type, "item.started");
+        assert.equal(events[1]?.payload.itemType, "dynamic_tool_call");
+        assert.equal(events[1]?.payload.title, "Tool call");
+        assert.equal(
+          events[1]?.payload.detail,
+          'workspace.read_file: {"path":"/workspace/README.md"}',
+        );
+        assert.equal(events[2]?.type, "tool.progress");
+        assert.equal(events[2]?.payload.summary, "Found three documentation pages");
+      }),
   );
 
   it.effect("maps effective Codex thread settings without persisting sensitive fields", () =>
@@ -4671,6 +6372,11 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             id: "image-generation-1",
             status: "completed",
             result: "base64-result-is-not-used-as-the-visible-detail",
+            fileId: "private-image-adapter-attachment",
+            generationId: "private-image-adapter-generation",
+            inputImages: [
+              { path: "/private-image-adapter-input.png", sha256: "private-image-adapter-digest" },
+            ],
             revisedPrompt: "A precise technical diagram",
             savedPath: "/tmp/image-generation-1.png",
           },
@@ -4685,7 +6391,146 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       assert.equal(firstEvent.value.payload.itemType, "image_generation");
       assert.equal(firstEvent.value.payload.title, "Image generation");
       assert.equal(firstEvent.value.payload.detail, "A precise technical diagram");
+      assert.doesNotMatch(encodeProviderJsonString(firstEvent.value), /private-image-adapter/);
+      assert.match(encodeProviderJsonString(firstEvent.value), /\/tmp\/image-generation-1\.png/);
     }),
+  );
+
+  it.effect(
+    "preserves inline, file-only and transitional image lifecycle without exposing new metadata",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const references = [
+          { result: "legacy-inline-result" },
+          { fileId: "private-image-reference-file" },
+          { result: "", fileId: "private-image-reference-both" },
+        ];
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.take(references.length * 2),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const originals: Array<{ readonly payload: unknown; readonly before: string }> = [];
+        for (const [index, reference] of references.entries()) {
+          for (const method of ["item/started", "item/completed"] as const) {
+            const payload = {
+              threadId: "provider-thread-1",
+              turnId: "turn-image-references",
+              ...(method === "item/started" ? { startedAtMs: 1 } : { completedAtMs: 2 }),
+              item: {
+                type: "imageGeneration",
+                id: `image-reference-${index}`,
+                status: method === "item/started" ? "inProgress" : "completed",
+                revisedPrompt: "The original visible image prompt",
+                savedPath: "/fixture/existing-image.png",
+                generationId: "private-image-reference-generation",
+                inputImages: [
+                  {
+                    path: "/private-image-reference-input.png",
+                    sha256: "private-image-reference-digest",
+                  },
+                ],
+                ...reference,
+              },
+            };
+            originals.push({ payload, before: encodeProviderJsonString(payload) });
+            yield* runtime.emit({
+              id: asEventId(`image-reference-${index}-${method}`),
+              kind: "notification",
+              provider: ProviderDriverKind.make("codex"),
+              createdAt: "2026-10-23T00:00:00.000Z",
+              method,
+              threadId: asThreadId("thread-1"),
+              turnId: asTurnId("turn-image-references"),
+              itemId: asItemId(`image-reference-${index}`),
+              payload,
+            });
+          }
+        }
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        assert.equal(events.length, 6);
+        for (const [index, event] of events.entries()) {
+          assert.equal(event.type, index % 2 === 0 ? "item.started" : "item.completed");
+          if (event.type !== "item.started" && event.type !== "item.completed")
+            assert.fail("Expected the original image lifecycle");
+          assert.equal(event.payload.itemType, "image_generation");
+          assert.equal(event.payload.title, "Image generation");
+          assert.equal(event.payload.detail, "The original visible image prompt");
+          assert.equal(event.itemId, `image-reference-${Math.floor(index / 2)}`);
+          assert.doesNotMatch(encodeProviderJsonString(event), /private-image-reference/);
+          assert.match(encodeProviderJsonString(event), /\/fixture\/existing-image\.png/);
+        }
+        for (const original of originals)
+          assert.equal(encodeProviderJsonString(original.payload), original.before);
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+      }),
+  );
+
+  it.effect(
+    "projects image metadata from public read and rollback history without changing native snapshots",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const snapshot = {
+          threadId: "provider-thread-1",
+          turns: [
+            {
+              id: asTurnId("history-image-turn"),
+              items: [
+                {
+                  type: "imageGeneration",
+                  id: "inline-image",
+                  status: "completed",
+                  result: "legacy-inline-result",
+                  revisedPrompt: "Visible prompt",
+                  savedPath: "/fixture/existing-image.png",
+                  inputImages: [
+                    {
+                      path: "/private-image-history-input.png",
+                      sha256: "private-image-history-digest",
+                    },
+                  ],
+                },
+                {
+                  type: "imageGeneration",
+                  id: "file-image",
+                  status: "completed",
+                  fileId: "private-image-history-file",
+                  generationId: "private-image-history-generation",
+                },
+                {
+                  type: "imageGeneration",
+                  id: "both-image",
+                  status: "completed",
+                  result: "",
+                  fileId: "private-image-history-both",
+                },
+              ],
+            },
+          ],
+        } satisfies CodexThreadSnapshot;
+        const before = encodeProviderJsonString(snapshot);
+        runtime.readThreadImpl.mockResolvedValueOnce(snapshot);
+        runtime.rollbackThreadImpl.mockResolvedValueOnce(snapshot);
+        for (const projected of [
+          yield* adapter.readThread(asThreadId("thread-1")),
+          yield* adapter.rollbackThread(asThreadId("thread-1"), 1),
+        ]) {
+          assert.equal(projected.threadId, "thread-1");
+          assert.equal(projected.turns[0]?.id, "history-image-turn");
+          assert.equal(projected.turns[0]?.items.length, 3);
+          assert.doesNotMatch(encodeProviderJsonString(projected), /private-image-history/);
+          assert.match(encodeProviderJsonString(projected), /legacy-inline-result/);
+          assert.match(encodeProviderJsonString(projected), /\/fixture\/existing-image\.png/);
+        }
+        assert.equal(encodeProviderJsonString(snapshot), before);
+        assert.equal(runtime.readThreadImpl.mock.calls.length, 1);
+        assert.equal(runtime.rollbackThreadImpl.mock.calls.length, 1);
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+      }),
   );
 
   it.effect("maps Codex interrupt hook lifecycle into canonical hook events", () =>
@@ -8866,7 +10711,9 @@ const scopedLifecycleLayer = it.layer(
       });
     }),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -8998,7 +10845,9 @@ const scopedFailureLayer = it.layer(
       });
     }),
   ).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+    ),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(NodeServices.layer),
@@ -9138,7 +10987,7 @@ for (const phase of ["construction", "descriptor", "handshake"] as const) {
     ).pipe(
       Effect.provide(
         Layer.mergeAll(
-          ServerConfig.layerTest(process.cwd(), process.cwd()),
+          ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
           ServerSettingsService.layerTest(),
           providerSessionDirectoryTestLayer,
         ).pipe(Layer.provideMerge(NodeServices.layer)),
@@ -9196,7 +11045,7 @@ it.effect("keeps a Codex session that finishes acquisition before the startup de
   ).pipe(
     Effect.provide(
       Layer.mergeAll(
-        ServerConfig.layerTest(process.cwd(), process.cwd()),
+        ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
         ServerSettingsService.layerTest(),
         providerSessionDirectoryTestLayer,
       ).pipe(Layer.provideMerge(NodeServices.layer)),
@@ -9223,7 +11072,9 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
           });
         }),
       ).pipe(
-        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+        Layer.provideMerge(
+          ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
+        ),
         Layer.provideMerge(ServerSettingsService.layerTest()),
         Layer.provideMerge(providerSessionDirectoryTestLayer),
         Layer.provideMerge(NodeServices.layer),
@@ -9240,12 +11091,12 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       const runtime = runtimeFactory.lastRuntime;
       assert.ok(runtime);
 
-      const mappedEventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
+      const mappedEventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 6)).pipe(
         Effect.forkChild,
       );
       // The fake runtime deliberately bypasses the live runtime's filter.
       // The following visible events are also an ordering barrier: after all
-      // three map, the attachment event must have been discarded before the
+      // six map, the attachment event must have been discarded before the
       // native logger rather than merely ignored by canonical projection.
       yield* runtime.emit({
         id: asEventId("evt-native-log-stored-attachment"),
@@ -9289,6 +11140,40 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
           result: { type: "completed", text: "native-log-secret-prediction" },
         },
       } satisfies ProviderEvent);
+      for (const [index, reference] of [
+        { result: "legacy-inline-result" },
+        { fileId: "native-log-secret-image-file" },
+        { result: "", fileId: "native-log-secret-image-both" },
+      ].entries()) {
+        yield* runtime.emit({
+          id: asEventId(`evt-native-log-image-${index}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-logger"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "item/completed",
+          payload: {
+            threadId: "provider-thread-logger",
+            turnId: "image-log-turn",
+            completedAtMs: 1,
+            item: {
+              type: "imageGeneration",
+              id: `native-log-image-${index}`,
+              status: "completed",
+              revisedPrompt: "Visible image prompt",
+              savedPath: "/fixture/existing-log-image.png",
+              generationId: "native-log-secret-image-generation",
+              inputImages: [
+                {
+                  path: "/native-log-secret-image-input.png",
+                  sha256: "native-log-secret-image-digest",
+                },
+              ],
+              ...reference,
+            },
+          },
+        });
+      }
       yield* runtime.emit({
         id: asEventId("evt-native-log-unknown-root-error"),
         kind: "notification",
@@ -9414,6 +11299,8 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
       assert.match(contents, /NTIVE: .*"model":"gpt-5\.4"/);
       assert.match(contents, /"reason":"subagent-provider-content"/);
       assert.match(contents, /"reason":"model-provider-auth-recovery-content"/);
+      assert.match(contents, /"type":"imageGeneration"/);
+      assert.match(contents, /\/fixture\/existing-log-image\.png/);
       assert.doesNotMatch(contents, /thread\/attachment\/updated/);
       assert.doesNotMatch(contents, /account\/gatewayOAuth\/changed/);
       assert.doesNotMatch(contents, /thread\/prediction\/updated/);
@@ -9481,7 +11368,7 @@ function schedulingCase<FixtureError>(
   ).pipe(
     Effect.provide(
       Layer.mergeAll(
-        ServerConfig.layerTest(process.cwd(), process.cwd()),
+        ServerConfig.layerTest(process.cwd(), { prefix: "cafe-codex-adapter-fixture-" }),
         ServerSettingsService.layerTest(),
         providerSessionDirectoryTestLayer,
       ).pipe(Layer.provideMerge(NodeServices.layer)),
@@ -9515,6 +11402,9 @@ it.effect(
           activate: vi.fn(async () => {}),
           cancel: vi.fn(async () => {}),
           resume: vi.fn(() => {}),
+          observeTurn: vi.fn(
+            (_event: { type: string; threadId: ThreadId; turnId?: TurnId | undefined }) => {},
+          ),
           dispose: vi.fn(async () => {}),
         }));
         let nextBinding = 0;
@@ -9557,6 +11447,47 @@ it.effect(
         yield* adapter.sendTurn({ threadId: second, input: "owned turn" });
         assert.equal(bindings[1]!.resume.mock.calls.length, 1);
         assert.equal(bindings[0]!.resume.mock.calls.length, 0);
+        const lifecycle = yield* adapter.streamEvents.pipe(
+          Stream.filter(
+            (event) => event.type === "turn.started" || event.type === "turn.completed",
+          ),
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        for (const completed of [false, true]) {
+          yield* factory.runtimes[1]!.emit({
+            id: asEventId(`glide-lifecycle-${completed}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: second,
+            turnId: asTurnId("turn-1"),
+            createdAt: "2026-10-21T12:00:00.000Z",
+            method: completed ? "turn/completed" : "turn/started",
+            payload: {
+              threadId: "provider-thread-1",
+              turn: {
+                id: "turn-1",
+                items: [],
+                status: completed ? "completed" : "inProgress",
+                error: null,
+              },
+            },
+          });
+        }
+        yield* Fiber.join(lifecycle);
+        assert.deepEqual(
+          bindings[1]!.observeTurn.mock.calls.map(([event]) => [
+            event.type,
+            event.threadId,
+            event.turnId,
+          ]),
+          [
+            ["turn.started", second, asTurnId("turn-1")],
+            ["turn.completed", second, asTurnId("turn-1")],
+          ],
+        );
+        assert.equal(bindings[0]!.observeTurn.mock.calls.length, 0);
         yield* adapter.interruptTurn(second);
         assert.equal(bindings[1]!.cancel.mock.calls.length, 1);
         assert.equal(bindings[1]!.dispose.mock.calls.length, 2);
@@ -9893,5 +11824,178 @@ it.each(["cafe-desktop", "cafe-native-abcdefghijklmnopqrstuv"])(
       assert.doesNotMatch(JSON.stringify(redacted), new RegExp(reference.id));
       assert.equal(redacted.itemId, event.itemId);
     }
+  },
+);
+
+it.effect(
+  "private cancellation preserves paid completion while joining exact native retirement",
+  () => {
+    const fixture = makeFailedRootRecoveryFixture();
+    return Effect.gen(function* () {
+      const { adapter, oldRuntime } = yield* fixture.prepare;
+      oldRuntime.closeIfFailedRootImpl.mockResolvedValue({ retired: true });
+      const request: ProviderSendTurnInput = {
+        threadId: fixture.threadId,
+        input: "Continue this exact history once.",
+        allowActiveTurnSteerFallback: false,
+        expectedFailedRoot: fixture.expectedFailedRoot,
+      };
+      const attemptId = "paid-completion-during-private-cancel";
+      const lookup = {
+        threadId: fixture.threadId,
+        attemptId,
+        requestCommitment: codexFailedRootPreparationCommitment(attemptId, request),
+      };
+      yield* adapter.prepareFailedRootRecovery!({ attemptId, preparationSequence: 0, request });
+      const prepared = yield* awaitRecoveryPreparation(adapter, request, attemptId, "prepared");
+      if (prepared.state !== "prepared") return;
+      const paid = {
+        ...request,
+        preparedFailedRootRecovery: {
+          attemptId,
+          preparationSequence: 0,
+          requestCommitment: prepared.requestCommitment,
+          permit: prepared.permit,
+        },
+      };
+      const replacement = fixture.factory.runtimes[1]!;
+      const paidEntered = yield* Deferred.make<void>();
+      const closeEntered = yield* Deferred.make<void>();
+      const closeRelease = yield* Deferred.make<void>();
+      const cancellationFinished = yield* Deferred.make<void>();
+      let resolvePaid!: (value: ProviderTurnStartResult) => void;
+      const paidReply = new Promise<ProviderTurnStartResult>((resolve) => {
+        resolvePaid = resolve;
+      });
+      let paidReleased = false;
+      const releasePaid = () => {
+        if (paidReleased) return;
+        paidReleased = true;
+        resolvePaid({
+          threadId: fixture.threadId,
+          turnId: asTurnId("paid-root-acknowledged-during-private-cancel"),
+        });
+      };
+      const releaseHeld = Effect.sync(releasePaid).pipe(
+        Effect.andThen(Deferred.succeed(closeRelease, undefined)),
+        Effect.asVoid,
+      );
+      // Keep the scoped fallback, but release in the body-level ensuring too:
+      // a parent must release these gates before it joins its forked children.
+      yield* Effect.addFinalizer(() => releaseHeld);
+      return yield* Effect.gen(function* () {
+        replacement.sendTurnImpl.mockImplementation(() => {
+          // This receipt follows the actual fake-native paid invocation. It is
+          // distinct from starting the adapter fiber or receiving the later ACK.
+          Deferred.doneUnsafe(paidEntered, Effect.void);
+          return paidReply;
+        });
+        const nativeClose = replacement.close;
+        replacement.close = Deferred.succeed(closeEntered, undefined).pipe(
+          Effect.andThen(Deferred.await(closeRelease)),
+          Effect.andThen(nativeClose),
+          Effect.uninterruptible,
+        );
+        const paying = yield* adapter.sendTurn(paid).pipe(Effect.forkChild);
+        yield* Deferred.await(paidEntered);
+        assert.equal(replacement.sendTurnImpl.mock.calls.length, 1);
+        assert.equal((yield* adapter.readFailedRootRecovery!(lookup)).state, "consumed");
+
+        // Native retirement removes the exact context from inventory before its
+        // close finishes. Private cancel must join that owner, not another one.
+        yield* replacement.emit({
+          id: asEventId("paid-cancel-exact-native-retirement"),
+          kind: "session",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: fixture.threadId,
+          subagentRuntimeId: fixture.generations[1],
+          createdAt: "2026-10-28T10:00:00.000Z",
+          method: "session/exited",
+          message: "Synthetic exact native owner exit",
+        });
+        yield* Deferred.await(closeEntered);
+        assert.equal(yield* adapter.hasSession(fixture.threadId), false);
+        const cancelling = yield* adapter.cancelFailedRootRecovery!(lookup).pipe(
+          Effect.tap(() => Deferred.succeed(cancellationFinished, undefined)),
+          Effect.forkChild,
+        );
+        yield* awaitRecoveryPreparation(adapter, request, attemptId, "retired");
+        assert.equal(yield* Deferred.isDone(cancellationFinished), false);
+        assert.equal(replacement.closeImpl.mock.calls.length, 0);
+
+        // Complete the original paid ACK while cancel is still blocked on the
+        // held exact close. Cancel must not restore its stale pending snapshot.
+        releasePaid();
+        const accepted = yield* Fiber.join(paying);
+        assert.equal(accepted.turnId, asTurnId("paid-root-acknowledged-during-private-cancel"));
+        assert.equal(accepted.recoverySession?.subagentRuntimeId, fixture.generations[1]);
+        assert.equal(yield* Deferred.isDone(cancellationFinished), false);
+        assert.equal(replacement.closeImpl.mock.calls.length, 0);
+        assert.equal(replacement.sendTurnImpl.mock.calls.length, 1);
+        yield* Deferred.succeed(closeRelease, undefined);
+        yield* Fiber.join(cancelling);
+        assert.equal(yield* Deferred.isDone(cancellationFinished), true);
+        assert.equal(replacement.closeImpl.mock.calls.length, 1);
+        assert.equal((yield* adapter.readFailedRootRecovery!(lookup)).state, "retired");
+
+        // Admission performs the real bounded terminal-pruning scan. Observe
+        // forgotten authority through the public exact lookup, never its map.
+        const siblingId = asThreadId("admission-after-paid-cancel-completion");
+        const siblingHistory = "independent-history-after-paid-cancel";
+        const siblingTurn = asTurnId("independent-failed-root-after-paid-cancel");
+        const siblingObservedAt = "2026-10-28T10:00:00.000Z";
+        yield* adapter.startSession({
+          threadId: siblingId,
+          runtimeMode: "approval-required",
+          resumeCursor: { threadId: siblingHistory },
+        });
+        const sibling = fixture.factory.runtimes[2]!;
+        const siblingBase = yield* sibling.getSession;
+        sibling.getSessionImpl.mockResolvedValue({
+          ...siblingBase,
+          status: "ready",
+          activeTurnId: undefined,
+          codexRootTurnFailure: {
+            turnId: siblingTurn,
+            providerThreadId: siblingHistory,
+            observedAt: siblingObservedAt,
+            category: "server",
+          },
+        });
+        const siblingRequest: ProviderSendTurnInput = {
+          threadId: siblingId,
+          input: "Continue the independently owned native history.",
+          allowActiveTurnSteerFallback: false,
+          expectedFailedRoot: {
+            turnId: siblingTurn,
+            providerThreadId: siblingHistory,
+            subagentRuntimeId: fixture.generations[2]!,
+            providerInstanceId: fixture.account,
+            observedAt: siblingObservedAt,
+            restartSession: true,
+          },
+        };
+        yield* adapter.prepareFailedRootRecovery!({
+          attemptId: "independent-after-paid-cancel",
+          preparationSequence: 0,
+          request: siblingRequest,
+        });
+        yield* awaitRecoveryPreparation(
+          adapter,
+          siblingRequest,
+          "independent-after-paid-cancel",
+          "retryable",
+        );
+        assert.equal((yield* adapter.readFailedRootRecovery!(lookup)).state, "unavailable");
+        assert.equal(Exit.isFailure(yield* Effect.exit(adapter.sendTurn(paid))), true);
+        assert.equal(replacement.sendTurnImpl.mock.calls.length, 1);
+        assert.equal(replacement.closeImpl.mock.calls.length, 1);
+        assert.equal(sibling.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(sibling.closeImpl.mock.calls.length, 0);
+        assert.equal(oldRuntime.closeImpl.mock.calls.length, 1);
+        assert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(fixture.factory.runtimes.length, 3);
+      }).pipe(Effect.ensuring(releaseHeld));
+    }).pipe(Effect.provide(fixture.layer));
   },
 );

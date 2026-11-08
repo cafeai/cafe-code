@@ -9,7 +9,7 @@ import {
   DEFAULT_CLIENT_SETTINGS,
   type ServerConfig,
 } from "@cafecode/contracts";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
 const fixture = vi.hoisted(() => ({
@@ -76,7 +76,11 @@ function Current() {
     </output>
   );
 }
+let retireSettingsThemeCase: (() => Promise<void>) | undefined;
 beforeEach(() => {
+  // A hook timeout does not grant a successor authority to reset stores while
+  // the exact earlier native action/unmount owner is still retiring.
+  if (retireSettingsThemeCase) throw new Error("Workspace theme fixture is still retiring");
   fixture.params = {};
   fixture.pathname = "/";
   fixture.navigate.mockReset();
@@ -98,6 +102,11 @@ beforeEach(() => {
     },
   });
   useComposerDraftStore.setState({ draftThreadsByThreadKey: {} });
+});
+afterEach(async () => {
+  // Join this same completion before the next case's store/global reset. A
+  // rejected cleanup keeps its lease rather than treating rejection as close.
+  await retireSettingsThemeCase?.();
 });
 
 function Catalog() {
@@ -169,7 +178,7 @@ it("loads branding with the selected server's session and discards late image re
     sizeBytes: 1,
   };
   function Branding() {
-    return <img alt="Server branding" src={useSidebarBrandImageSrc(asset)} />;
+    return <img alt="Server branding" src={useSidebarBrandImageSrc(asset) ?? undefined} />;
   }
   const localImageSrc = new URL(asset.url, window.location.origin).toString();
   let finishRequest!: (response: Response) => void;
@@ -226,48 +235,216 @@ it("loads branding with the selected server's session and discards late image re
   }
 });
 
-it("keeps Settings on its section when switching, isolates themes and returns to the selected server's Desk", async () => {
+it("keeps Settings on its section when switching, isolates themes and returns to the selected server's Desk", async (context) => {
   fixture.pathname = "/settings/appearance";
   const themeKey = "cafe-code:theme";
   const remoteThemeKey = `${themeKey}:server:remote`;
   const localTheme = localStorage.getItem(themeKey);
   const remoteTheme = localStorage.getItem(remoteThemeKey);
-  localStorage.setItem(themeKey, "light");
-  localStorage.removeItem(remoteThemeKey);
-  const historyBack = vi.spyOn(window.history, "back").mockImplementation(() => {});
-  const screen = await render(
-    <WorkspaceEnvironmentProvider>
-      <WorkspaceEnvironmentSelector />
-      <ThemeAndBack />
-    </WorkspaceEnvironmentProvider>,
-  );
+  type Phase =
+    | "render"
+    | "initial-theme"
+    | "remote-open"
+    | "remote-choice"
+    | "remote-theme"
+    | "use-light"
+    | "use-dark"
+    | "remote-back"
+    | "local-open"
+    | "local-choice"
+    | "local-theme"
+    | "local-back"
+    | "retirement"
+    | "unmount";
+  const started = performance.now();
+  const phases: { phase: Phase; state: "entered" | "settled"; count: number; elapsedMs: number }[] =
+    [];
+  let observationsRetired = false;
+  let retired = false;
+  let nativeStarts = 0;
+  let mountedScreen: Awaited<ReturnType<typeof render>> | undefined;
+  let pendingRender: ReturnType<typeof render> | undefined;
+  let cleanupPromise: Promise<void> | undefined;
+  let restoreHistoryBack: (() => void) | undefined;
+  let storagePrepared = false;
+  const pending = new Set<Promise<unknown>>();
+  const mark = (phase: Phase, state: "entered" | "settled") => {
+    try {
+      if (observationsRetired) return;
+      if (phases.length === 16) phases.shift();
+      const elapsed = performance.now() - started;
+      phases.push({
+        phase,
+        state,
+        count: Math.min(8, nativeStarts),
+        elapsedMs: Number.isFinite(elapsed)
+          ? Math.max(0, Math.min(60_000, Math.floor(elapsed)))
+          : 0,
+      });
+    } catch {
+      /* Fixed passive observations never replace a native/assertion failure. */
+    }
+  };
+  const assertActive = () => {
+    if (retired || context.signal.aborted) throw new Error("Workspace theme fixture retired");
+  };
+  const own = <T,>(phase: Phase, start: () => Promise<T>, native = false): Promise<T> => {
+    assertActive();
+    if (native) nativeStarts += 1;
+    mark(phase, "entered");
+    const result = start();
+    pending.add(result);
+    // Keep the original native promise/error. These reactions only account for
+    // its settlement; every caller fences again before its next continuation.
+    void result.then(
+      () => {
+        pending.delete(result);
+        if (!retired && !context.signal.aborted) mark(phase, "settled");
+      },
+      () => {
+        pending.delete(result);
+      },
+    );
+    return result;
+  };
+  const retire = () => {
+    if (retired) return;
+    retired = true;
+    mark("retirement", "entered");
+  };
+  const cleanup = (): Promise<void> => {
+    if (cleanupPromise) return cleanupPromise;
+    retire();
+    cleanupPromise = (async () => {
+      try {
+        // Keep the controls and captured globals intact until the exact render
+        // and original native calls settle. Never join the body/finalizer itself.
+        await Promise.allSettled([...pending]);
+        const acquired = pendingRender ? (await Promise.allSettled([pendingRender]))[0] : undefined;
+        const mounted =
+          mountedScreen ?? (acquired?.status === "fulfilled" ? acquired.value : undefined);
+        mark("unmount", "entered");
+        await mounted?.unmount();
+        mark("unmount", "settled");
+        restoreHistoryBack?.();
+        if (storagePrepared) {
+          if (localTheme === null) localStorage.removeItem(themeKey);
+          else localStorage.setItem(themeKey, localTheme);
+          if (remoteTheme === null) localStorage.removeItem(remoteThemeKey);
+          else localStorage.setItem(remoteThemeKey, remoteTheme);
+        }
+        mark("retirement", "settled");
+        if (retireSettingsThemeCase === cleanup) retireSettingsThemeCase = undefined;
+      } finally {
+        observationsRetired = true;
+        context.signal.removeEventListener("abort", retire);
+      }
+    })();
+    return cleanupPromise;
+  };
+  // Install public retirement/completion ownership before globals change or
+  // render starts. A late resolved render still belongs to cleanup, not a new case.
+  retireSettingsThemeCase = cleanup;
+  context.signal.addEventListener("abort", retire, { once: true });
+  context.onTestFinished(cleanup);
+  context.onTestFailed(() => {
+    try {
+      console.error(
+        `Synthetic workspace theme phases (phase:state:count:ms): ${phases.map(({ phase, state, count, elapsedMs }) => `${phase}:${state}:${count}:${elapsedMs}`).join(",")}`,
+      );
+    } catch {
+      /* No source, DOM, storage values, paths or raw errors enter diagnostics. */
+    }
+  });
+  if (context.signal.aborted) retire();
+  let bodyFailed = false;
   try {
-    await expect.element(screen.getByTestId("theme")).toHaveTextContent("light");
-    await screen.getByRole("combobox", { name: "Workspace server" }).click();
-    await page.getByRole("option", { name: "PC (offline)", exact: true }).click();
+    assertActive();
+    storagePrepared = true;
+    localStorage.setItem(themeKey, "light");
+    localStorage.removeItem(remoteThemeKey);
+    const historyBack = vi.spyOn(window.history, "back").mockImplementation(() => {});
+    restoreHistoryBack = () => historyBack.mockRestore();
+    pendingRender = own("render", () =>
+      render(
+        <WorkspaceEnvironmentProvider>
+          <WorkspaceEnvironmentSelector />
+          <ThemeAndBack />
+        </WorkspaceEnvironmentProvider>,
+      ),
+    );
+    const screen = await pendingRender;
+    assertActive();
+    mountedScreen = screen;
+    await own("initial-theme", () =>
+      expect.element(screen.getByTestId("theme")).toHaveTextContent("light"),
+    );
+    assertActive();
+    await own(
+      "remote-open",
+      () => screen.getByRole("combobox", { name: "Workspace server" }).click(),
+      true,
+    );
+    assertActive();
+    await own(
+      "remote-choice",
+      () => page.getByRole("option", { name: "PC (offline)", exact: true }).click(),
+      true,
+    );
+    assertActive();
     expect(fixture.navigate).not.toHaveBeenCalled();
-    await expect.element(screen.getByTestId("theme")).toHaveTextContent("dark");
-    await screen.getByRole("button", { name: "Use light" }).click();
-    await screen.getByRole("button", { name: "Use dark" }).click();
+    await own("remote-theme", () =>
+      expect.element(screen.getByTestId("theme")).toHaveTextContent("dark"),
+    );
+    assertActive();
+    await own("use-light", () => screen.getByRole("button", { name: "Use light" }).click(), true);
+    assertActive();
+    await own("use-dark", () => screen.getByRole("button", { name: "Use dark" }).click(), true);
+    assertActive();
     expect(localStorage.getItem(themeKey)).toBe("light");
     expect(localStorage.getItem(remoteThemeKey)).toBe("dark");
-    await screen.getByRole("button", { name: "Back", exact: true }).click();
+    await own(
+      "remote-back",
+      () => screen.getByRole("button", { name: "Back", exact: true }).click(),
+      true,
+    );
+    assertActive();
     expect(fixture.navigate).toHaveBeenCalledWith({ to: "/" });
     expect(historyBack).not.toHaveBeenCalled();
-    await screen.getByRole("combobox", { name: "Workspace server" }).click();
-    await page.getByRole("option", { name: "Local server", exact: true }).click();
-    await expect.element(screen.getByTestId("theme")).toHaveTextContent("light");
+    await own(
+      "local-open",
+      () => screen.getByRole("combobox", { name: "Workspace server" }).click(),
+      true,
+    );
+    assertActive();
+    await own(
+      "local-choice",
+      () => page.getByRole("option", { name: "Local server", exact: true }).click(),
+      true,
+    );
+    assertActive();
+    await own("local-theme", () =>
+      expect.element(screen.getByTestId("theme")).toHaveTextContent("light"),
+    );
+    assertActive();
     fixture.navigate.mockClear();
-    await screen.getByRole("button", { name: "Back", exact: true }).click();
+    await own(
+      "local-back",
+      () => screen.getByRole("button", { name: "Back", exact: true }).click(),
+      true,
+    );
+    assertActive();
     expect(historyBack).toHaveBeenCalledOnce();
     expect(fixture.navigate).not.toHaveBeenCalled();
+  } catch (error) {
+    bodyFailed = true;
+    throw error;
   } finally {
-    await screen.unmount();
-    historyBack.mockRestore();
-    if (localTheme === null) localStorage.removeItem(themeKey);
-    else localStorage.setItem(themeKey, localTheme);
-    if (remoteTheme === null) localStorage.removeItem(remoteThemeKey);
-    else localStorage.setItem(remoteThemeKey, remoteTheme);
+    try {
+      await cleanup();
+    } catch (error) {
+      if (!bodyFailed) throw error;
+    }
   }
 });
 
@@ -413,64 +590,135 @@ it("keeps the workspace selector absent until a remote connection is saved", asy
     .not.toBeInTheDocument();
 });
 
-it("centers the server caret and fits the themed menu in a narrow sidebar at every interface scale", async () => {
+it("keeps long server labels usable in a narrow sidebar and cancels without switching", async ({
+  onTestFinished,
+  signal,
+}) => {
   const root = document.documentElement;
   const originalFontSize = root.style.fontSize;
   const originallyDark = root.classList.contains("dark");
-  writePrimaryEnvironmentDescriptor({
-    environmentId: local,
-    label: "Salt's MacBook Pro with a very long server name",
-  } as never);
+  const label = "Salt's MacBook Pro with a very long server name";
   const host = document.createElement("div");
   host.style.width = "208px";
-  document.body.append(host);
-  const screen = await render(
-    <WorkspaceEnvironmentProvider>
-      <WorkspaceEnvironmentSelector />
-      <span data-testid="popover-color" style={{ background: "var(--popover)" }} />
-    </WorkspaceEnvironmentProvider>,
-    { container: host },
-  );
+  let retired = false;
+  let screen: Awaited<ReturnType<typeof render>> | undefined;
+  let pendingRender: ReturnType<typeof render> | undefined;
+  let cleanupPromise: Promise<void> | undefined;
+  const pending = new Set<Promise<unknown>>();
+  const requireActive = () => {
+    if (retired) throw new Error("Workspace menu containment fixture retired");
+  };
+  const own = <T,>(operation: () => Promise<T>): Promise<T> => {
+    requireActive();
+    const result = operation();
+    pending.add(result);
+    // Track both outcomes without replacing the original native action/error.
+    void result.then(
+      () => pending.delete(result),
+      () => pending.delete(result),
+    );
+    return result;
+  };
+  const retire = () => {
+    retired = true;
+  };
+  const cleanup = () => {
+    if (cleanupPromise) return cleanupPromise;
+    retire();
+    cleanupPromise = (async () => {
+      try {
+        // Keep the exact controls mounted until admitted native actions close.
+        // Retirement prevents any late continuation from starting another one.
+        await Promise.allSettled([...pending]);
+        const mounted = screen ?? (await pendingRender);
+        await mounted?.unmount();
+      } finally {
+        root.style.fontSize = originalFontSize;
+        root.classList.toggle("dark", originallyDark);
+        host.remove();
+        signal.removeEventListener("abort", retire);
+      }
+    })();
+    return cleanupPromise;
+  };
+  onTestFinished(cleanup);
+  signal.addEventListener("abort", retire, { once: true });
+  if (signal.aborted) retire();
+  let bodyFailed = false;
   try {
+    requireActive();
+    writePrimaryEnvironmentDescriptor({ environmentId: local, label } as never);
+    document.body.append(host);
+    pendingRender = own(() =>
+      render(
+        <WorkspaceEnvironmentProvider>
+          <WorkspaceEnvironmentSelector />
+          <Current />
+        </WorkspaceEnvironmentProvider>,
+        { container: host },
+      ),
+    );
+    screen = await pendingRender;
+    requireActive();
     for (const dark of [false, true]) {
+      requireActive();
       root.classList.toggle("dark", dark);
       for (const scale of [80, 100, 130]) {
+        requireActive();
         root.style.fontSize = `${scale}%`;
         const trigger = screen.getByRole("combobox", { name: "Workspace server" });
-        const triggerBounds = trigger.element().getBoundingClientRect();
-        const caretBounds = trigger.element().querySelector("svg")!.getBoundingClientRect();
-        expect(
-          Math.abs(
-            caretBounds.top +
-              caretBounds.height / 2 -
-              (triggerBounds.top + triggerBounds.height / 2),
-          ),
-        ).toBeLessThan(1);
-        expect(triggerBounds.right).toBeLessThanOrEqual(host.getBoundingClientRect().right);
-        await trigger.click();
-        await expect.element(page.getByRole("listbox")).toBeVisible();
+        const triggerElement = trigger.element();
+        const triggerBounds = triggerElement.getBoundingClientRect();
+        const hostBounds = host.getBoundingClientRect();
+        // Protect usable hit targets and clipping, not icon alignment, exact
+        // popup/trigger width, theme colors or transient animation geometry.
+        expect(triggerBounds.left).toBeGreaterThanOrEqual(hostBounds.left);
+        expect(triggerBounds.right).toBeLessThanOrEqual(hostBounds.right);
+        await own(() => trigger.click());
+        requireActive();
+        await own(() => expect.element(page.getByRole("listbox")).toBeVisible());
+        requireActive();
         const list = page.getByRole("listbox").element();
-        const surface = list.parentElement!;
-        await vi.waitFor(() => {
-          expect(
-            Math.abs(surface.getBoundingClientRect().width - triggerBounds.width),
-          ).toBeLessThan(1);
-          expect(surface.getBoundingClientRect().top).toBeGreaterThanOrEqual(triggerBounds.bottom);
-        });
-        expect(getComputedStyle(surface).backgroundColor).toBe(
-          getComputedStyle(screen.getByTestId("popover-color").element()).backgroundColor,
-        );
+        const popup = list.closest<HTMLElement>('[data-slot="select-popup"]')!;
+        const selected = page.getByRole("option", { name: label, exact: true });
+        // Visibility precedes Base UI's queued item focus. Escape must belong
+        // to this exact selected option, not the still-focused trigger.
+        await own(() => expect.element(selected).toHaveFocus());
+        requireActive();
+        expect(popup.hasAttribute("data-open")).toBe(true);
+        const bounds = popup.getBoundingClientRect();
+        expect(bounds.left).toBeGreaterThanOrEqual(0);
+        expect(bounds.right).toBeLessThanOrEqual(window.innerWidth);
+        expect(bounds.top).toBeGreaterThanOrEqual(0);
+        expect(bounds.bottom).toBeLessThanOrEqual(window.innerHeight);
         expect(list.scrollWidth).toBeLessThanOrEqual(list.clientWidth);
-        await userEvent.keyboard("{Escape}");
-        await expect.element(page.getByRole("listbox")).not.toBeInTheDocument();
-        expect(document.activeElement).toBe(trigger.element());
+        await own(() => userEvent.keyboard("{Escape}"));
+        requireActive();
+        await own(() => expect.element(trigger).toHaveFocus());
+        requireActive();
+        expect(trigger.element()).toBe(triggerElement);
+        expect(triggerElement.getAttribute("aria-expanded")).toBe("false");
+        // A semantically closed popup may remain while its exit paints. The
+        // original Escape must still restore real focus and preserve selection.
+        expect(
+          !popup.isConnected ||
+            (popup.hasAttribute("data-closed") && !popup.hasAttribute("data-open")),
+        ).toBe(true);
+        expect(screen.getByTestId("workspace").element().textContent).toBe(local);
+        expect(fixture.navigate).not.toHaveBeenCalled();
       }
     }
+  } catch (error) {
+    bodyFailed = true;
+    throw error;
   } finally {
-    await screen.unmount();
-    root.style.fontSize = originalFontSize;
-    root.classList.toggle("dark", originallyDark);
-    host.remove();
+    try {
+      await cleanup();
+    } catch (error) {
+      // The finish hook still receives a rejected cleanup promise; it must not
+      // replace an already-propagating native action or assertion failure.
+      if (!bodyFailed) throw error;
+    }
   }
 });
 

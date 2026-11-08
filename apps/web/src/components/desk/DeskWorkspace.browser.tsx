@@ -20,6 +20,7 @@ import { applyInterfaceScalePercent } from "../../interfaceScale";
 import type { ThreadRouteTarget } from "../../threadRoutes";
 import { type ThreadStatusPill } from "../Sidebar.logic";
 import { SidebarProvider } from "../ui/sidebar";
+import { browserInputPoint as browserPoint } from "../nativeInput.browser.fixture";
 import DeskWorkspace from "./DeskWorkspace";
 
 const mocks = vi.hoisted(() => ({
@@ -340,25 +341,6 @@ function deferMenu() {
     // a browser frame boundary, not a retry of the action under test.
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   };
-}
-
-function browserPoint(point: { x: number; y: number }) {
-  let { x, y } = point;
-  let frame = window.frameElement;
-  while (frame) {
-    // The containing element belongs to another window's realm, so its
-    // HTMLElement constructor is intentionally not this iframe's constructor.
-    const frameElement = frame as HTMLElement;
-    const rect = frameElement.getBoundingClientRect();
-    // Vitest scales its test iframe to fit the runner's viewport. CDP uses
-    // top-level coordinates, while DOM rectangles below use iframe CSS pixels.
-    // Carry both offset and scale through every frame rather than landing a
-    // nominal pane-center drag on a pane edge at a reduced runner scale.
-    x = rect.left + (x + frameElement.clientLeft) * (rect.width / frameElement.offsetWidth);
-    y = rect.top + (y + frameElement.clientTop) * (rect.height / frameElement.offsetHeight);
-    frame = frame.ownerDocument.defaultView?.frameElement ?? null;
-  }
-  return { x, y };
 }
 
 /** PointerSensor needs an activation move and a subsequent measured move.
@@ -1395,7 +1377,7 @@ describe("Desk workspace navigation chrome", () => {
     }
   });
 
-  it("keeps the bar and its actions for the shown chat when Chat tabs is off", async () => {
+  it("keeps the chat header without the tab actions menu when Chat tabs is off", async () => {
     mocks.settings = { showDeskTabs: false };
     const { screen, host, cleanup } = await setup(["one", "two"]);
     try {
@@ -1404,11 +1386,11 @@ describe("Desk workspace navigation chrome", () => {
       expect(host.querySelector('[role="tablist"]')).toBeNull();
       const bar = host.querySelector<HTMLElement>(".desk-group-bar")!;
       expect(bar.dataset.desktopTitlebar).toBe("true");
-      // The group menu still targets the displayed chat without a visible tab.
-      mocks.showMenu.mockResolvedValueOnce("close");
-      await screen.getByRole("button", { name: "Main tab actions" }).click();
-      await expect.element(screen.getByRole("heading", { name: "Chat two" })).toBeVisible();
-      expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([key("two")]);
+      await expect
+        .element(screen.getByRole("button", { name: "Main tab actions" }))
+        .not.toBeInTheDocument();
+      expect(mocks.showMenu).not.toHaveBeenCalled();
+      expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([key("one"), key("two")]);
     } finally {
       await cleanup();
     }

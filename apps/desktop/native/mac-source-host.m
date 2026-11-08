@@ -1,11 +1,12 @@
 #import <AppKit/AppKit.h>
 #import <Security/Security.h>
 #import <signal.h>
+#import <stdlib.h>
 
 // Versioned, immutable responsible app for source builds. Mutable Electron and
-// JavaScript stay outside this signed bundle. Do not edit a published v1 host
+// JavaScript stay outside this signed bundle. Do not edit a published host
 // in place: bump the host policy version when changing this native protocol.
-static NSString *const RuntimeIdentifier = @"com.cafeai.cafecode.debug";
+static NSString *const RuntimeIdentifierPrefix = @"com.cafeai.cafecode.debug.runtime.";
 static const NSUInteger MaximumArgumentBytes = 65536;
 
 @interface CafeSourceHost : NSObject <NSApplicationDelegate>
@@ -25,12 +26,22 @@ static BOOL AbsolutePath(NSString *value) {
 
 static BOOL ValidRuntime(NSString *bundlePath) {
   NSBundle *bundle = [NSBundle bundleWithPath:bundlePath];
-  if (![bundle.bundleIdentifier isEqualToString:RuntimeIdentifier]) return NO;
+  NSString *identifier = bundle.bundleIdentifier;
+  if (identifier.length != RuntimeIdentifierPrefix.length + 24 ||
+      ![identifier hasPrefix:RuntimeIdentifierPrefix]) return NO;
+  NSString *suffix = [identifier substringFromIndex:RuntimeIdentifierPrefix.length];
+  NSCharacterSet *invalid = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet];
+  if ([suffix rangeOfCharacterFromSet:invalid].location != NSNotFound) return NO;
   SecStaticCodeRef code = NULL;
   OSStatus status = SecStaticCodeCreateWithPath((__bridge CFURLRef)bundle.bundleURL,
                                                kSecCSDefaultFlags, &code);
   if (status != errSecSuccess) return NO;
-  status = SecStaticCodeCheckValidity(code, kSecCSStrictValidate | kSecCSCheckAllArchitectures, NULL);
+  SecRequirementRef requirement = NULL;
+  NSString *text = [NSString stringWithFormat:@"identifier \"%@\"", identifier];
+  status = SecRequirementCreateWithString((__bridge CFStringRef)text, kSecCSDefaultFlags, &requirement);
+  if (status == errSecSuccess)
+    status = SecStaticCodeCheckValidity(code, kSecCSStrictValidate | kSecCSCheckAllArchitectures, requirement);
+  if (requirement) CFRelease(requirement);
   CFRelease(code);
   return status == errSecSuccess;
 }
@@ -54,7 +65,7 @@ static BOOL ValidRuntime(NSString *bundlePath) {
   [environment removeObjectForKey:@"ELECTRON_RUN_AS_NODE"];
   environment[@"CAFE_CODE_HOME"] = self.configuredHome;
   environment[@"CAFE_CODE_DATA_PROFILE"] = @"debug";
-  environment[@"CAFE_CODE_MAC_SOURCE_HOST_VERSION"] = @"1";
+  environment[@"CAFE_CODE_MAC_SOURCE_HOST_VERSION"] = @"2";
   self.child.environment = environment;
   // open(1) supplies the private source launch logs. Keep the same descriptors
   // through native restarts, without a shell, detached proxy, or network service.
@@ -138,6 +149,13 @@ static BOOL ValidRuntime(NSString *bundlePath) {
   if (!self.child.running) return NSTerminateNow;
   [self stopChild];
   return NSTerminateCancel;
+}
+
+- (void)applicationWillTerminate:(NSNotification *)notification {
+  // NSApplication's default terminate path exits with zero instead of returning
+  // from run. Preserve the completed child's status and explicit refusals;
+  // applicationShouldTerminate has already joined any admitted child.
+  exit(self.exitCode);
 }
 @end
 

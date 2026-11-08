@@ -1,0 +1,103 @@
+# Web application artwork
+
+The sidebar image choice also controls the WebUI's initial HTML logo, React
+loading screen, favicon, touch icon, PWA install icons and Web Push icon/badge.
+The existing custom upload needs no migration or second upload. An explicit
+custom choice, or legacy `auto` with an upload, selects it. An explicit matched
+image keeps the bundled branding. Hidden artwork, missing/invalid custom artwork
+and anonymous startup use a neutral coffee mark instead of the character.
+
+Install metadata belongs to the visited origin's primary server. Selecting a
+saved remote workspace may change its sidebar, but never puts that remote's
+bearer, artwork bytes or asset URL into the primary document or manifest. Push
+delivery uses the delivering server's current preference for each notification.
+
+## Startup and installation
+
+For a recognized built web shell, the backend resolves the existing authenticated
+request and current client settings before returning the HTML. It fills finite
+source-owned slots and a finite presentation token. This avoids waiting for React
+or settings hydration before selecting the initial picture. The token is not
+authentication or file-read authority. Unsigned requests stay neutral. The
+restricted desktop recording renderer does not initialize ordinary web branding.
+Vite's separate development document starts neutral and receives the primary
+settings through the ordinary live configuration path.
+
+The renderer preserves that token until an authoritative primary configuration
+arrives, then updates owned logo/icon/manifest slots together. It does not consult
+the settings store's initial default or the selected saved server. Changing UI
+language retains the artwork revision and manifest credentials attribute.
+External/unrecognized manifest and image links are not rewritten.
+
+Custom manifest responses embed three derived PNG data URLs. This is necessary
+for Android Chrome's WebAPK path: its
+[icon hasher explicitly omits credentials](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/components/webapps/browser/android/webapk/webapk_single_icon_hasher.cc),
+and supports data URLs. Requiring browser cookies on those installer follow-up
+downloads can lose the custom icon. The manifest itself is authenticated and
+private; neither the source upload nor an unauthenticated custom-image endpoint
+is published. The browser/OS may retain the installed icon, as with any PWA.
+
+Manifest `id`, `start_url` and `scope` remain `/`; localized descriptions and
+language remain intact. Image identity versions the icon URLs and manifest link.
+Personalized HTML uses `no-store`; manifests use `private, no-cache`. Both vary
+on Cookie, Authorization and Accept-Encoding and bypass prebuilt compressed
+sidecars, which contain the unpersonalized document. Other static assets keep
+their existing delivery policy. The neutral static manifests remain installable
+without a signed-in session.
+
+Notifications carry finite same-origin icon/badge paths in the existing push
+payload. The service worker accepts only the owned versioned variants or known
+bundled/neutral files. Missing or malformed older payloads use neutral artwork.
+Notification resources use the platform's ordinary credentialed image fetching;
+no bearer token or uploaded image bytes enter a push payload. Existing focused
+thread suppression and notification click behavior remain unchanged.
+
+## Image derivation and limits
+
+The existing pinned `@napi-rs/canvas` codec loads lazily on demand. A selected
+upload is read through a bounded held native descriptor, with its SHA-256 ID,
+file type, owner, single-link and before/after named identity checked. POSIX opens
+retain no-follow/nonblocking admission; Windows retains the native platform's
+existing file-open boundary and the subsequent identity checks. No client URL,
+SVG, arbitrary path or decoder network fetch is accepted.
+
+The existing upload bounds still apply: 1,000,000 encoded bytes, 4096 pixels per
+side and 16,777,216 pixels. Header dimensions are checked before decoding and
+matched to the decoded image, allowing the same dimensions to swap for oriented
+JPEGs. Derivation preserves aspect ratio and produces 32, 96, 180, 192 and 512
+pixel PNGs plus a separate 512 pixel maskable variant padded within its safe
+circle. The generated PNGs exclude the upload's original metadata and animation.
+
+Each exact branding store owns at most one decoding job, 16 coalesced callers
+and two cached icon sets, each bounded to 4 MiB. A competing job returns a bounded
+503/Retry-After response. Missing/undecodable current artwork falls back to the
+neutral mark, with a short content-free retry suppression for failed decodes.
+These are encoded-input, concurrency and output bounds, not a hard native codec
+allocation or process-RAM sandbox. No provider process, account selection,
+credential state or startup probe participates in image rendering.
+
+The checked-in neutral PNGs are generated by:
+
+```sh
+nice -n 10 corepack yarn exec node apps/server/scripts/generate-neutral-app-icons.ts
+```
+
+If rendering policy changes, version the custom/neutral paths and service-worker
+matcher together so existing browser caches cannot retain different bytes at
+the same immutable icon URL.
+
+## Existing Android installs
+
+Once the updated server is deployed, open it in the browser, sign in and confirm
+the custom sidebar choice, then remove the old installed app/shortcut and install
+it again. The picture remains saved on the server. Existing installations can
+retain their old launcher and native launch-screen artwork until the browser/OS
+updates their installed metadata; an in-page change cannot promise immediate
+replacement. Android launchers may mask icons and notification badges.
+
+Regressions cover settings policy, exact document slots, localized manifest
+identity, real PNG derivation, private HTTP delivery, native file admission,
+bounded jobs/cache, current push payloads and service-worker fallback behavior.
+Their execution is deferred with the current change batch. A real Android
+install/update journey remains a native-host qualification step; source/browser
+fixtures do not attest an installed Android launcher or WebAPK.

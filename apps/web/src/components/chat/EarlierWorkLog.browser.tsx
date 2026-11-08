@@ -39,6 +39,7 @@ import {
 } from "../../session-logic";
 import { applyOrchestrationEvents, selectThreadByRef, syncServerThreadDetail } from "../../store";
 import { MessagesTimeline } from "./MessagesTimeline";
+import { createChatViewFixtureRetirement } from "../chatViewFixtureRetirement.test.fixture";
 
 // Keep the real timeline, store reducer, derivation, controls and browser input.
 // The virtualizer has separate real-list coverage; this deterministic shell
@@ -438,10 +439,15 @@ function commandRows(label: string) {
   );
 }
 
+const ownerSwitchRetirement = createChatViewFixtureRetirement();
 beforeEach(async () => {
+  ownerSwitchRetirement.assertIdle();
   await page.viewport(1000, 800);
 });
 afterEach(async () => {
+  // Join the exact selected-owner journey before API/media resets can expose
+  // a replacement target to its still-pending native input or page reply.
+  await ownerSwitchRetirement.retire();
   __resetEnvironmentApiOverridesForTests();
   applyInterfaceScalePercent(100);
   document.documentElement.classList.remove("dark");
@@ -917,41 +923,210 @@ describe("Earlier work in a retained current turn", () => {
     },
   );
 
-  it("discards a delayed page after the selected environment/thread owner changes", async () => {
+  it("discards a delayed page after the selected environment/thread owner changes", async (context) => {
     const previous = fixture("codex");
     const api = installApi(previous);
     const next = fixture("codex", 8, "next");
     const nextApi = installApi(next);
     let release!: (value: ReturnType<typeof api.validPage>) => void;
-    api.getThreadTurnActivityPage.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          release = resolve;
-        }),
-    );
-    const screen = await render(<TimelineFixture data={previous} />);
+    let heldPage: Promise<ReturnType<typeof api.validPage>> | undefined;
+    let heldRequest: OrchestrationThreadTurnActivityPageInput | undefined;
+    let released = false;
+    api.getThreadTurnActivityPage.mockImplementationOnce((input) => {
+      heldRequest = input;
+      heldPage = new Promise((resolve) => {
+        release = resolve;
+      });
+      // An already-admitted native click can reach this callback after
+      // retirement's first release pass. Hand off this exact late response
+      // now, before cleanup joins either the click or the held page.
+      if (retired) releaseOldPage();
+      return heldPage;
+    });
+    type Phase =
+      | "render"
+      | "old-open"
+      | "old-page-admitted"
+      | "switch-owner"
+      | "old-page-released"
+      | "new-message"
+      | "new-collapsed"
+      | "new-open"
+      | "new-visible"
+      | "assertions"
+      | "cleanup"
+      | "unmount";
+    const nativeKinds = ["pointerdown", "mousedown", "pointerup", "mouseup", "click"] as const;
+    const nativeCounts = {
+      pointerdown: 0,
+      mousedown: 0,
+      pointerup: 0,
+      mouseup: 0,
+      click: 0,
+      trusted: 0,
+    };
+    const pending = new Set<Promise<unknown>>();
+    const observations: Array<{
+      phase: Phase;
+      state: "entered" | "settled" | "observed";
+      oldCalls: number;
+      nextCalls: number;
+      pending: number;
+      targetConnected: boolean;
+      targetExpanded: boolean | null;
+      native: typeof nativeCounts;
+    }> = [];
+    let phase: Phase = "render";
+    let failurePhase: Phase | undefined;
+    let nativeTarget: HTMLElement | undefined;
+    let rendering: ReturnType<typeof render> | undefined;
+    let retired = false;
+    let completion: Promise<void> | undefined;
+    const record = (observedPhase: Phase, state: "entered" | "settled" | "observed") => {
+      // Fixed phases, counts and flags only. Native capture is an observation,
+      // not click completion, readiness or a historical timeout-cause claim.
+      try {
+        if (observations.length === 32) observations.shift();
+        const expanded = nativeTarget?.getAttribute("aria-expanded");
+        observations.push({
+          phase: observedPhase,
+          state,
+          oldCalls: Math.min(1_000, api.getThreadTurnActivityPage.mock.calls.length),
+          nextCalls: Math.min(1_000, nextApi.getThreadTurnActivityPage.mock.calls.length),
+          pending: Math.min(1_000, pending.size),
+          targetConnected: nativeTarget?.isConnected ?? false,
+          targetExpanded: expanded === "true" ? true : expanded === "false" ? false : null,
+          native: { ...nativeCounts },
+        });
+      } catch {
+        // Passive diagnostics cannot replace an original input/assertion result.
+      }
+    };
+    const captureNative = (event: Event) => {
+      if (
+        retired ||
+        phase !== "new-open" ||
+        !nativeTarget ||
+        !(event.target instanceof Node) ||
+        !nativeTarget.contains(event.target)
+      )
+        return;
+      for (const kind of nativeKinds) {
+        if (event.type !== kind) continue;
+        nativeCounts[kind] = Math.min(1_000, nativeCounts[kind] + 1);
+        if (event.isTrusted) nativeCounts.trusted = Math.min(1_000, nativeCounts.trusted + 1);
+        record(phase, "observed");
+      }
+    };
+    const assertActive = () => {
+      if (retired || context.signal.aborted) throw new Error("Earlier-work owner fixture retired.");
+    };
+    const owned = async <T,>(step: Phase, operation: () => PromiseLike<T>): Promise<T> => {
+      assertActive();
+      phase = step;
+      record(step, "entered");
+      const original = Promise.resolve(operation());
+      pending.add(original);
+      try {
+        const value = await original;
+        assertActive();
+        record(step, "settled");
+        return value;
+      } finally {
+        pending.delete(original);
+      }
+    };
+    const releaseOldPage = () => {
+      if (released || !heldRequest) return;
+      released = true;
+      release(api.validPage(heldRequest));
+    };
+    const cleanup = (): Promise<void> => {
+      retired = true;
+      context.signal.removeEventListener("abort", onAbort);
+      for (const kind of nativeKinds) document.removeEventListener(kind, captureNative, true);
+      return (completion ??= Promise.resolve().then(async () => {
+        record("cleanup", "entered");
+        // Release only this admitted synthetic response, then join original
+        // render/actions before removing their targets or resetting APIs.
+        releaseOldPage();
+        while (pending.size) await Promise.allSettled([...pending]);
+        const screen = await rendering?.catch(() => undefined);
+        record("unmount", "entered");
+        await screen?.unmount();
+        await Promise.allSettled([heldPage]);
+        record("unmount", "settled");
+        record("cleanup", "settled");
+      }));
+    };
+    const onAbort = () => {
+      failurePhase ??= phase;
+      void cleanup().catch(() => undefined);
+    };
+    ownerSwitchRetirement.admit(cleanup);
+    context.onTestFinished(cleanup);
+    context.onTestFailed(() => {
+      failurePhase ??= phase;
+      try {
+        console.error("Synthetic Earlier-work owner phases", {
+          failurePhase,
+          observations: [...observations],
+        });
+      } catch {
+        // The bounded console channel cannot replace an original failure.
+      }
+    });
+    context.signal.addEventListener("abort", onAbort, { once: true });
+    for (const kind of nativeKinds) document.addEventListener(kind, captureNative, true);
+    if (context.signal.aborted) onAbort();
+    let failed = false;
     try {
-      await page.getByRole("button", { name: /^Earlier work/ }).click();
-      await vi.waitFor(() => expect(api.getThreadTurnActivityPage).toHaveBeenCalledTimes(1));
+      const screen = await owned("render", () => {
+        rendering = render(<TimelineFixture data={previous} />);
+        return rendering;
+      });
+      await owned("old-open", () => page.getByRole("button", { name: /^Earlier work/ }).click());
+      await owned("old-page-admitted", () =>
+        vi.waitFor(() => expect(api.getThreadTurnActivityPage).toHaveBeenCalledTimes(1)),
+      );
       const request = api.getThreadTurnActivityPage.mock.calls[0]![0];
-      await screen.rerender(<TimelineFixture data={next} />);
+      await owned("switch-owner", () => screen.rerender(<TimelineFixture data={next} />));
+      phase = "old-page-released";
+      record(phase, "entered");
       release(api.validPage(request));
-      await expect
-        .element(page.getByText("Synthetic next message 0", { exact: true }))
-        .toBeVisible();
+      released = true;
+      record(phase, "settled");
+      await owned("new-message", () =>
+        expect.element(page.getByText("Synthetic next message 0", { exact: true })).toBeVisible(),
+      );
       const nextEarlier = page.getByRole("button", { name: /^Earlier work/ });
-      await expect.element(nextEarlier).toHaveAttribute("aria-expanded", "false");
-      await nextEarlier.click();
-      await expect.element(page.getByText(/next earlier command 7/).first()).toBeVisible();
+      await owned("new-collapsed", () =>
+        expect.element(nextEarlier).toHaveAttribute("aria-expanded", "false"),
+      );
+      try {
+        const target = nextEarlier.element();
+        if (target instanceof HTMLElement) nativeTarget = target;
+      } catch {
+        // Diagnostics never add readiness or alter the original native click.
+      }
+      await owned("new-open", () => nextEarlier.click());
+      await owned("new-visible", () =>
+        expect.element(page.getByText(/next earlier command 7/).first()).toBeVisible(),
+      );
+      phase = "assertions";
       expect(page.getByText(/original earlier command 7/).elements()).toHaveLength(0);
       expect(api.getThreadTurnActivityPage).toHaveBeenCalledTimes(1);
       expect(nextApi.getThreadTurnActivityPage).toHaveBeenCalledTimes(1);
       expect(nextApi.getThreadTurnActivityPage.mock.calls[0]?.[0].threadId).toBe(next.threadId);
+    } catch (failure) {
+      failed = true;
+      throw failure;
     } finally {
-      release?.(
-        api.validPage({ threadId: previous.threadId, turnId: TURN_ID, offset: 0, limit: 6 }),
-      );
-      await screen.unmount();
+      try {
+        await cleanup();
+      } catch (failure) {
+        if (!failed) throw failure;
+      }
     }
   });
 

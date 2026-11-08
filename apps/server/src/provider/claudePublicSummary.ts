@@ -1,18 +1,25 @@
 import { createHash } from "node:crypto";
 
+import {
+  PUBLIC_REASONING_SUMMARY_ACTIVE_BLOCKS,
+  PUBLIC_REASONING_SUMMARY_BLOCKS,
+  PUBLIC_REASONING_SUMMARY_CHARS,
+  PUBLIC_REASONING_SUMMARY_INTERVAL_MS,
+  publicReasoningSummaryDisplayText,
+  publicReasoningSummaryTail,
+} from "./publicReasoningSummary.ts";
+
 // These are presentation/resource bounds, never provider token/effort settings.
-export const CLAUDE_PUBLIC_SUMMARY_CHARS = 4_096;
+// The shared contract bounds live in publicReasoningSummary.ts; Claude keeps
+// its own names for the native-block bookkeeping below.
+export const CLAUDE_PUBLIC_SUMMARY_CHARS = PUBLIC_REASONING_SUMMARY_CHARS;
 export const CLAUDE_PUBLIC_SUMMARY_SNAPSHOT_CHARS = 65_536;
-export const CLAUDE_PUBLIC_SUMMARY_BLOCKS = 64;
-export const CLAUDE_PUBLIC_SUMMARY_ACTIVE_BLOCKS = 16;
-export const CLAUDE_PUBLIC_SUMMARY_INTERVAL_MS = 1_000;
+export const CLAUDE_PUBLIC_SUMMARY_BLOCKS = PUBLIC_REASONING_SUMMARY_BLOCKS;
+export const CLAUDE_PUBLIC_SUMMARY_ACTIVE_BLOCKS = PUBLIC_REASONING_SUMMARY_ACTIVE_BLOCKS;
+export const CLAUDE_PUBLIC_SUMMARY_INTERVAL_MS = PUBLIC_REASONING_SUMMARY_INTERVAL_MS;
 
 /** Display only received printable public summary text, never hidden controls. */
-export function claudePublicSummaryDisplayText(text: string): string {
-  return text
-    .replace(/\p{Cc}/gu, (char) => (char === "\n" || char === "\r" || char === "\t" ? char : ""))
-    .replace(/\p{Bidi_Control}/gu, "");
-}
+export const claudePublicSummaryDisplayText = publicReasoningSummaryDisplayText;
 
 /** Never evict an old identity into becoming a new snapshot-only block. */
 export function retireClaudePublicSummaryKey(keys: Set<string>, key: string): boolean {
@@ -33,12 +40,15 @@ export function makeClaudePublicSummaryText(): ClaudePublicSummaryText {
   return { text: "", receivedLength: 0, receivedHash: createHash("sha256"), truncated: false };
 }
 
-/** Keep the disclosed prefix only, but commit every received UTF-16 unit. */
+/** Keep a rolling disclosed preview, but commit every received UTF-16 unit. */
 export function appendClaudePublicSummary(state: ClaudePublicSummaryText, delta: string): void {
   state.receivedHash.update(delta, "utf16le");
   state.receivedLength += delta.length;
-  const room = Math.max(0, CLAUDE_PUBLIC_SUMMARY_CHARS - state.text.length);
-  state.text += delta.slice(0, room);
+  // Avoid concatenating an oversized incoming delta merely to discard its head.
+  // Hashing above still proves the complete original stream for snapshot repair.
+  state.text = publicReasoningSummaryTail(
+    delta.length >= CLAUDE_PUBLIC_SUMMARY_CHARS ? delta : state.text + delta,
+  );
   state.truncated ||= state.receivedLength > CLAUDE_PUBLIC_SUMMARY_CHARS;
 }
 

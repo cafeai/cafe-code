@@ -1,5 +1,15 @@
 import type { DesktopBridge } from "@cafecode/contracts";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as Effect from "effect/Effect";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  onTestFailed,
+  vi,
+  type TestContext,
+} from "vitest";
 
 function jsonResponse(body: unknown, init?: ResponseInit) {
   return new Response(JSON.stringify(body), {
@@ -39,6 +49,108 @@ function sessionResponse(body: unknown, init?: ResponseInit) {
   return jsonResponse(body, init);
 }
 
+/**
+ * Own the first cold-import case through its complete continuation. A hard
+ * timeout cannot cancel module evaluation or the real bootstrap promise, so
+ * retain its exact globals until those admitted promises settle. Passive
+ * phases do not prove why a historical timeout occurred.
+ */
+type SilentBootstrapPhase =
+  | "owner-start"
+  | "module-import-pending"
+  | "module-import-settled"
+  | "bootstrap-pending"
+  | "bootstrap-settled"
+  | "assertions-completed";
+
+function ownSilentBootstrapFixture(context: TestContext, readFetchCalls: () => number = () => 0) {
+  const startedAt = performance.now();
+  let phase: SilentBootstrapPhase = "owner-start";
+  let retired = false;
+  let cleanupPromise: Promise<void> | undefined;
+  const pending = new Set<Promise<unknown>>();
+  const observe = () => {
+    let elapsed = 0;
+    let calls = 0;
+    try {
+      elapsed = performance.now() - startedAt;
+      calls = readFetchCalls();
+    } catch {
+      // Passive sampling must not prevent retirement or alter test behavior.
+    }
+    return {
+      phase,
+      elapsedMs: Number.isFinite(elapsed)
+        ? Math.max(0, Math.min(86_400_000, Math.round(elapsed)))
+        : 0,
+      fetchCalls: Number.isFinite(calls) ? Math.max(0, Math.min(4, Math.floor(calls))) : 0,
+    };
+  };
+  let retiredObservation: ReturnType<typeof observe> | undefined;
+  const retire = () => {
+    if (retired) return;
+    // Fence admission first, even if diagnostic sampling becomes unavailable.
+    retired = true;
+    retiredObservation = observe();
+  };
+  const assertActive = () => {
+    if (retired || context.signal.aborted) {
+      throw new Error("Synthetic auth bootstrap fixture retired.");
+    }
+  };
+  const record = (next: SilentBootstrapPhase) => {
+    if (!retired) phase = next;
+  };
+  const own = <A>(start: () => Promise<A>): Promise<A> => {
+    assertActive();
+    const operation = start().then((value) => {
+      assertActive();
+      return value;
+    });
+    pending.add(operation);
+    void operation.then(
+      () => pending.delete(operation),
+      () => pending.delete(operation),
+    );
+    return operation;
+  };
+  const cleanup = () => {
+    if (cleanupPromise) return cleanupPromise;
+    retire();
+    cleanupPromise = (async () => {
+      try {
+        // No new operation can be admitted after retirement. Joining the outer
+        // body also joins its awaited import and bootstrap work before reset.
+        await Promise.allSettled([...pending]);
+      } finally {
+        context.signal.removeEventListener("abort", retire);
+      }
+    })();
+    return cleanupPromise;
+  };
+  onTestFailed(() => {
+    try {
+      // Exactly one fixed-field record, with no credentials, URLs, response
+      // bodies, environment values, stacks or received errors.
+      Effect.runSync(
+        Effect.logError(
+          "Synthetic silent bootstrap passive observation",
+          retiredObservation ?? observe(),
+        ).pipe(Effect.catchCause(() => Effect.void)),
+      );
+    } catch {
+      // Diagnostic delivery cannot replace the original failed assertion.
+    }
+  });
+  context.onTestFinished(cleanup);
+  context.signal.addEventListener("abort", retire, { once: true });
+  if (context.signal.aborted) retire();
+  assertActive();
+  return { own, assertActive, record, retire, cleanup };
+}
+
+let silentBootstrapCleanup: (() => Promise<void>) | undefined;
+
 describe("resolveInitialServerAuthGateState", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -47,6 +159,11 @@ describe("resolveInitialServerAuthGateState", () => {
   });
 
   afterEach(async () => {
+    // Vitest completion hooks run later. Join this same exact owner before
+    // resetting auth state, timers or mocks that its late body could still use.
+    const cleanup = silentBootstrapCleanup;
+    silentBootstrapCleanup = undefined;
+    await cleanup?.();
     const { __resetServerAuthBootstrapForTests } = await import("./environments/primary");
     __resetServerAuthBootstrapForTests();
     vi.unstubAllEnvs();
@@ -54,60 +171,115 @@ describe("resolveInitialServerAuthGateState", () => {
     vi.restoreAllMocks();
   });
 
-  it("reuses an in-flight silent bootstrap attempt", async () => {
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        sessionResponse({
-          authenticated: false,
-          auth: {
-            policy: "desktop-managed-local",
-            bootstrapMethods: ["desktop-bootstrap"],
-            sessionMethods: ["browser-session-cookie"],
-            sessionCookieName: "t3_session",
-          },
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonResponse({
-          authenticated: true,
-          sessionMethod: "browser-session-cookie",
-          expiresAt: "2026-04-05T00:00:00.000Z",
-        }),
-      )
-      .mockResolvedValueOnce(
-        sessionResponse({
-          authenticated: true,
-          auth: {
-            policy: "loopback-browser",
-            bootstrapMethods: ["one-time-token"],
-            sessionMethods: ["browser-session-cookie"],
-            sessionCookieName: "t3_session",
-          },
-          sessionMethod: "browser-session-cookie",
-          expiresAt: "2026-04-05T00:00:00.000Z",
-        }),
-      );
-    vi.stubGlobal("fetch", fetchMock);
+  it("reuses an in-flight silent bootstrap attempt", async (context) => {
+    let readFetchCalls = () => 0;
+    const lifetime = ownSilentBootstrapFixture(context, () => readFetchCalls());
+    silentBootstrapCleanup = lifetime.cleanup;
+    try {
+      await lifetime.own(async () => {
+        const fetchMock = vi
+          .fn<typeof fetch>()
+          .mockResolvedValueOnce(
+            sessionResponse({
+              authenticated: false,
+              auth: {
+                policy: "desktop-managed-local",
+                bootstrapMethods: ["desktop-bootstrap"],
+                sessionMethods: ["browser-session-cookie"],
+                sessionCookieName: "t3_session",
+              },
+            }),
+          )
+          .mockResolvedValueOnce(
+            jsonResponse({
+              authenticated: true,
+              sessionMethod: "browser-session-cookie",
+              expiresAt: "2026-04-05T00:00:00.000Z",
+            }),
+          )
+          .mockResolvedValueOnce(
+            sessionResponse({
+              authenticated: true,
+              auth: {
+                policy: "loopback-browser",
+                bootstrapMethods: ["one-time-token"],
+                sessionMethods: ["browser-session-cookie"],
+                sessionCookieName: "t3_session",
+              },
+              sessionMethod: "browser-session-cookie",
+              expiresAt: "2026-04-05T00:00:00.000Z",
+            }),
+          );
+        readFetchCalls = () => fetchMock.mock.calls.length;
+        vi.stubGlobal("fetch", fetchMock);
 
-    const testWindow = installTestBrowser("http://localhost/");
-    testWindow.desktopBridge = {
-      getLocalEnvironmentBootstrap: () => ({
-        label: "Local environment",
-        httpBaseUrl: "http://localhost:3773",
-        wsBaseUrl: "ws://localhost:3773",
-        bootstrapToken: "desktop-bootstrap-token",
-      }),
-    } as DesktopBridge;
+        const testWindow = installTestBrowser("http://localhost/");
+        testWindow.desktopBridge = {
+          getLocalEnvironmentBootstrap: () => ({
+            label: "Local environment",
+            httpBaseUrl: "http://localhost:3773",
+            wsBaseUrl: "ws://localhost:3773",
+            bootstrapToken: "desktop-bootstrap-token",
+          }),
+        } as DesktopBridge;
 
-    const { resolveInitialServerAuthGateState } = await import("./environments/primary");
+        lifetime.record("module-import-pending");
+        const { resolveInitialServerAuthGateState } = await lifetime.own(
+          () => import("./environments/primary"),
+        );
+        lifetime.record("module-import-settled");
+        lifetime.assertActive();
 
-    await Promise.all([resolveInitialServerAuthGateState(), resolveInitialServerAuthGateState()]);
+        lifetime.record("bootstrap-pending");
+        await lifetime.own(() =>
+          Promise.all([
+            lifetime.own(() => resolveInitialServerAuthGateState()),
+            lifetime.own(() => resolveInitialServerAuthGateState()),
+          ]),
+        );
+        lifetime.record("bootstrap-settled");
+        lifetime.assertActive();
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:3773/api/auth/session");
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:3773/api/auth/bootstrap");
-    expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:3773/api/auth/session");
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+        expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:3773/api/auth/session");
+        expect(fetchMock.mock.calls[1]?.[0]).toBe("http://localhost:3773/api/auth/bootstrap");
+        expect(fetchMock.mock.calls[2]?.[0]).toBe("http://localhost:3773/api/auth/session");
+
+        lifetime.record("assertions-completed");
+      });
+    } finally {
+      await lifetime.cleanup();
+    }
+  });
+
+  it("does not start bootstrap after its held import owner retires", async (context) => {
+    const lifetime = ownSilentBootstrapFixture(context);
+    silentBootstrapCleanup = lifetime.cleanup;
+    let releaseImport!: () => void;
+    const heldImport = new Promise<void>((resolve) => {
+      releaseImport = resolve;
+    });
+    const bootstrap = vi.fn(async () => undefined);
+    const operation = lifetime.own(async () => {
+      lifetime.record("module-import-pending");
+      await lifetime.own(() => heldImport);
+      lifetime.record("module-import-settled");
+      lifetime.assertActive();
+      await lifetime.own(bootstrap);
+    });
+    try {
+      // This models completion of the exact already-admitted import after the
+      // public timeout path has retired its owner. It must not start auth work.
+      lifetime.retire();
+      releaseImport();
+      await expect(operation).rejects.toThrow("Synthetic auth bootstrap fixture retired.");
+      expect(bootstrap).not.toHaveBeenCalled();
+      await lifetime.cleanup();
+      expect(bootstrap).not.toHaveBeenCalled();
+    } finally {
+      releaseImport();
+      await lifetime.cleanup();
+    }
   });
 
   it("uses https fetch urls when the primary environment uses wss", async () => {

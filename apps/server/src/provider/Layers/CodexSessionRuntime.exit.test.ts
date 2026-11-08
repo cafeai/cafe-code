@@ -2,6 +2,7 @@ import * as ProviderJsonSchema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Exit from "effect/Exit";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Scope from "effect/Scope";
 import * as PlatformError from "effect/PlatformError";
@@ -11,6 +12,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { ThreadId } from "@cafecode/contracts";
 import { assert, it } from "@effect/vitest";
+import { CodexAppServerSpawnError } from "effect-codex-app-server/errors";
 
 import {
   buildCodexAppServerArgs,
@@ -21,6 +23,8 @@ import {
   markProcessShutdownRequested,
   resetProcessShutdownObservationForTests,
 } from "../../processShutdownObservation.ts";
+
+const isCodexAppServerSpawnError = ProviderJsonSchema.is(CodexAppServerSpawnError);
 
 const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
   ProviderJsonSchema.UnknownFromJsonString,
@@ -53,7 +57,12 @@ it.effect.each([
             }),
           );
         });
-        const environment = { CAFE_TEST_ONLY: "literal & | %fixture%", CODEX_HOME: "overridden" };
+        const environment = {
+          CAFE_TEST_ONLY: "literal & | %fixture%",
+          CODEX_HOME: "overridden",
+          PATH: "",
+          NoDefaultCurrentDirectoryInExePath: "1",
+        };
         const schedulingMcp = {
           name: "cafe-scoped_scheduling",
           launch: {
@@ -78,14 +87,42 @@ it.effect.each([
           Effect.exit,
         );
         assert.equal(Exit.isFailure(result), true);
+        if (process.platform === "win32" && windowsShell && !/\.(?:cmd|bat)$/iu.test(binaryPath)) {
+          assert.equal(commands.length, 0);
+          if (Exit.isSuccess(result)) return assert.fail("Expected command preparation failure");
+          const error = Cause.squash(result.cause);
+          if (!isCodexAppServerSpawnError(error)) {
+            return assert.fail("Expected the existing typed spawn failure");
+          }
+          assert.equal(error.command, undefined);
+          assert.equal(error.message, "Failed to spawn Codex App Server process");
+          return;
+        }
         assert.equal(commands.length, 1);
         const command = commands[0];
         if (command?._tag !== "StandardCommand") {
           throw new Error("Expected one structured session command");
         }
-        assert.equal(command.command, binaryPath);
+        const batch = process.platform === "win32" && windowsShell;
+        assert.equal(
+          batch ? command.command.replace(/\^(.)/gu, "$1") : command.command,
+          binaryPath,
+        );
+        // Decode only this intercepted transport. Independent real-peer tests
+        // qualify cmd.exe; these assertions retain the session's literal inputs.
+        const receivedArgs = batch
+          ? command.args.map((value) =>
+              value
+                .replace(/\^(.)/gu, "$1")
+                .replace(/\^(.)/gu, "$1")
+                .slice(1, -1)
+                .replace(/(\\+)(?="|$)/gu, (slashes) =>
+                  "\\".repeat(Math.floor(slashes.length / 2)),
+                ),
+            )
+          : command.args;
         assert.deepEqual(
-          command.args,
+          receivedArgs,
           buildCodexAppServerArgs({
             maxConcurrentSubagents: 3,
             schedulingMcp,
@@ -160,7 +197,7 @@ it.effect("retires a parent-scoped runtime without recording an unexpected exit"
     );
     const runtime = yield* makeCodexSessionRuntime({
       threadId: ThreadId.make("thread-planned-exit"),
-      binaryPath: "/test-only/codex",
+      binaryPath: "/test-only/codex.exe",
       cwd: "/test-only/workspace",
       runtimeMode: "full-access",
     }).pipe(
@@ -183,7 +220,7 @@ it.effect("publishes an unrequested zero exit as a visible error before session/
     Effect.gen(function* () {
       const runtime = yield* makeCodexSessionRuntime({
         threadId: ThreadId.make("thread-unexpected-zero-exit"),
-        binaryPath: "/test-only/codex",
+        binaryPath: "/test-only/codex.exe",
         cwd: "/test-only/workspace",
         runtimeMode: "full-access",
       });
@@ -233,7 +270,7 @@ it.effect("treats an exit during a requested Cafe shutdown as a stop, not a prov
       yield* Effect.addFinalizer(() => Effect.sync(resetProcessShutdownObservationForTests));
       const runtime = yield* makeCodexSessionRuntime({
         threadId: ThreadId.make("thread-shutdown-zero-exit"),
-        binaryPath: "/test-only/codex",
+        binaryPath: "/test-only/codex.exe",
         cwd: "/test-only/workspace",
         runtimeMode: "full-access",
       });

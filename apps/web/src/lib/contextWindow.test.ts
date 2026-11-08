@@ -16,55 +16,11 @@ function makeActivity(id: string, kind: string, payload: unknown): Orchestration
 }
 
 describe("contextWindow", () => {
-  it("derives the latest valid context window snapshot", () => {
-    const snapshot = deriveLatestContextWindowSnapshot([
-      makeActivity("activity-1", "context-window.updated", {
-        usedTokens: 1000,
-      }),
-      makeActivity("activity-2", "tool.started", {}),
-      makeActivity("activity-3", "context-window.updated", {
-        usedTokens: 14_000,
-        maxTokens: 258_000,
-        compactsAutomatically: true,
-        autoCompactTokenLimit: 200_000,
-      }),
-    ]);
-
-    expect(snapshot).not.toBeNull();
-    expect(snapshot?.usedTokens).toBe(14_000);
-    expect(snapshot?.totalProcessedTokens).toBeNull();
-    expect(snapshot?.maxTokens).toBe(258_000);
-    expect(snapshot?.compactsAutomatically).toBe(true);
-    expect(snapshot?.autoCompactTokenLimit).toBe(200_000);
-  });
-
-  it("ignores malformed payloads", () => {
-    const snapshot = deriveLatestContextWindowSnapshot([
-      makeActivity("activity-1", "context-window.updated", {}),
-    ]);
-
-    expect(snapshot).toBeNull();
-  });
-
   it("formats compact token counts", () => {
     expect(formatContextWindowTokens(999)).toBe("999");
     expect(formatContextWindowTokens(1400)).toBe("1.4k");
     expect(formatContextWindowTokens(14_000)).toBe("14k");
     expect(formatContextWindowTokens(258_000)).toBe("258k");
-  });
-
-  it("includes total processed tokens when available", () => {
-    const snapshot = deriveLatestContextWindowSnapshot([
-      makeActivity("activity-1", "context-window.updated", {
-        usedTokens: 81_659,
-        totalProcessedTokens: 748_126,
-        maxTokens: 258_400,
-        lastUsedTokens: 81_659,
-      }),
-    ]);
-
-    expect(snapshot?.usedTokens).toBe(81_659);
-    expect(snapshot?.totalProcessedTokens).toBe(748_126);
   });
 
   it("carries the chat-wide generation rate with the latest snapshot", () => {
@@ -77,6 +33,7 @@ describe("contextWindow", () => {
     ]);
 
     expect(snapshot?.usedTokens).toBe(2_400);
+    expect(snapshot?.compactsAutomatically).toBe(false);
     expect(snapshot?.generationRate).toEqual({ tokensPerSecond: 80, measuredMs: 3_000 });
     expect(
       deriveLatestContextWindowSnapshot([

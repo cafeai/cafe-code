@@ -59,6 +59,25 @@ function fixture() {
 // The macOS host cache requires POSIX ownership and private mode checks. Windows
 // cannot qualify those filesystem semantics; the UUID parser stays portable.
 describe.skipIf(process.platform === "win32")("immutable ad hoc source host", () => {
+  it("prepares the new policy beside an existing v1 host without modifying its consent identity", () => {
+    const { options, calls } = fixture();
+    const legacy = join(
+      options.homeDirectory,
+      "Library",
+      "Application Support",
+      "Cafe Code Source Hosts",
+      "v1-arm64",
+      "Cafe Code (Debug).app",
+    );
+    mkdirSync(legacy, { recursive: true, mode: 0o700 });
+    const marker = join(legacy, "existing-host");
+    writeFileSync(marker, "held legacy native identity");
+    const app = prepareMacSourceHost(options);
+    expect(app).not.toBe(legacy);
+    expect(readFileSync(marker, "utf8")).toBe("held legacy native identity");
+    expect(calls.every((call) => !call.args.some((arg) => arg.includes("v1-arm64")))).toBe(true);
+  });
+
   it("seals once and verifies the same host across mutable source rebuilds", () => {
     const { options, calls } = fixture();
     const app = prepareMacSourceHost(options);
@@ -111,7 +130,7 @@ describe.skipIf(process.platform === "win32")("immutable ad hoc source host", ()
     mkdirSync(other, { mode: 0o700 });
     symlinkSync(other, join(parent, "Cafe Code Source Hosts"), "dir");
     expect(() => prepareMacSourceHost(options)).toThrow(/private directory/u);
-    expect(() => readFileSync(join(other, "v1-arm64", "Cafe Code (Debug).app"))).toThrow();
+    expect(() => readFileSync(join(other, "v2-arm64", "Cafe Code (Debug).app"))).toThrow();
   });
 
   it("rejects unsupported architectures and relative home paths before preparation", () => {

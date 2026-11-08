@@ -45,6 +45,13 @@ export interface ChatMessage {
   text: string;
   attachments?: ChatAttachment[];
   turnId?: TurnId | null;
+  /** Server-projected exact input association; display only. */
+  originatingTurn?: {
+    readonly turnId: TurnId;
+    readonly state: "running" | "interrupted" | "completed" | "error";
+  };
+  /** Conclusive renderer-local rejection, retired with its optimistic row. */
+  sendFailed?: boolean;
   createdAt: string;
   completedAt?: string | undefined;
   streaming: boolean;
@@ -116,6 +123,8 @@ export interface Thread {
   worktreePath: string | null;
   turnDiffSummaries: TurnDiffSummary[];
   activities: OrchestrationThreadActivity[];
+  /** Display-only bounded-detail omission; never native request authority. */
+  pendingRequestRetentionTruncated?: boolean | undefined;
   goal?: ProviderThreadGoal | null;
 }
 

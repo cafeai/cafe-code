@@ -20,7 +20,7 @@ const buildSourcemap =
     ? false
     : sourcemapEnv === "hidden"
       ? "hidden"
-      : true;
+      : sourcemapEnv === "1" || sourcemapEnv === "true";
 
 function resolveDevProxyTarget(wsUrl: string | undefined): string | undefined {
   if (!wsUrl) {

@@ -10,6 +10,57 @@ import {
 
 const RATE: ModelRate = { input: 10, cachedInput: 1, cacheWrite: 12, output: 50 };
 
+describe("Claude cache-write duration pricing", () => {
+  const entry = {
+    provider: "claudeAgent",
+    model: "claude-opus-5-5",
+    inputTokens: 1_000_000,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 1_000_000,
+    cacheWrite5mInputTokens: 200_000,
+    cacheWrite1hInputTokens: 300_000,
+    outputTokens: 0,
+  };
+
+  it("prices only verified one-hour writes at the one-hour rate", () => {
+    const result = rollUpCost([entry]);
+    expect(result.cost).toBeCloseTo(0.7 * 5 + 0.3 * 8);
+    expect(result.cacheSavings).toBeCloseTo(4 - result.cost);
+    expect(result.unknownCacheWriteTokens).toBe(500_000);
+    expect(result.pricedTokens).toBe(1_000_000);
+  });
+
+  it("keeps older custom write overrides authoritative for both durations", () => {
+    const result = rollUpCost([entry], { "claude-opus": RATE });
+    expect(result.cost).toBe(12);
+    expect(result.cacheSavings).toBe(-2);
+    expect(result.unknownCacheWriteTokens).toBe(500_000);
+  });
+
+  it("does not apply Claude TTL rates to other providers or native reported costs", () => {
+    expect(rollUpCost([{ ...entry, provider: "codex" }]).cost).toBe(5);
+    const reported = rollUpCost([
+      { ...entry, reportedCost: { microusd: "123456", tokens: 1_000_000 } },
+    ]);
+    expect(reported.cost).toBe(0.123456);
+    expect(reported.cacheSavings).toBe(0);
+    expect(reported.unknownCacheWriteTokens).toBeUndefined();
+  });
+
+  it("treats absent or malformed duration detail as unknown", () => {
+    for (const detail of [
+      { cacheWrite5mInputTokens: undefined, cacheWrite1hInputTokens: undefined },
+      { cacheWrite5mInputTokens: 900_000, cacheWrite1hInputTokens: 300_000 },
+      { cacheWrite5mInputTokens: 1, cacheWrite1hInputTokens: -1 },
+      { cacheWrite5mInputTokens: 1, cacheWrite1hInputTokens: 0.5 },
+    ]) {
+      const result = rollUpCost([{ ...entry, ...detail }]);
+      expect(result.cost).toBe(5);
+      expect(result.unknownCacheWriteTokens).toBe(1_000_000);
+    }
+  });
+});
+
 describe("native reported costs", () => {
   const counts = {
     inputTokens: 100,
@@ -17,32 +68,36 @@ describe("native reported costs", () => {
     cacheWriteInputTokens: 0,
     outputTokens: 20,
   };
-  it("uses the native receipt and measured token share instead of estimates or overrides", () => {
-    expect(
-      rollUpCost(
-        [
-          {
-            provider: "axiom",
-            model: "gpt-6-sol",
-            ...counts,
-            reportedCost: { microusd: "123456", tokens: 100 },
-          },
-        ],
-        { gpt: RATE },
-      ),
-    ).toEqual({
-      cost: 0.123456,
-      reportedCost: 0.123456,
-      pricedTokens: 100,
-      unpricedTokens: 20,
-      cacheSavings: 0,
-    });
-  });
-  it("keeps an unreported Axiom model unpriced even when an upstream model name matches", () => {
-    expect(rollUpCost([{ provider: "axiom", model: "gpt-6-sol", ...counts }]).unpricedTokens).toBe(
-      120,
-    );
-  });
+  it.each(["axiom", "opencode"])(
+    "uses %s native cost and measured token share instead of estimates or overrides",
+    (provider) => {
+      expect(
+        rollUpCost(
+          [
+            {
+              provider,
+              model: "gpt-6-sol",
+              ...counts,
+              reportedCost: { microusd: "123456", tokens: 100 },
+            },
+          ],
+          { gpt: RATE },
+        ),
+      ).toEqual({
+        cost: 0.123456,
+        reportedCost: 0.123456,
+        pricedTokens: 100,
+        unpricedTokens: 20,
+        cacheSavings: 0,
+      });
+    },
+  );
+  it.each(["axiom", "opencode"])(
+    "keeps an unreported %s model unpriced even when an upstream model name matches",
+    (provider) => {
+      expect(rollUpCost([{ provider, model: "gpt-6-sol", ...counts }]).unpricedTokens).toBe(120);
+    },
+  );
   it("recognizes a measured zero charge and refuses to round enormous or invalid receipts", () => {
     expect(
       rollUpCost([{ model: "native", ...counts, reportedCost: { microusd: "0", tokens: 120 } }]),
@@ -55,6 +110,12 @@ describe("native reported costs", () => {
 });
 
 describe("resolveModelRate", () => {
+  it("does not interpret inherited object properties as pricing overrides", () => {
+    expect(resolveModelRate("constructor", {})).toBeUndefined();
+    expect(resolveModelRate("toString", {})).toBeUndefined();
+    expect(resolveModelRate("constructor", { constructor: RATE })).toBe(RATE);
+  });
+
   it("matches a bundled family by prefix so dated releases inherit it", () => {
     const dated = resolveModelRate("claude-opus-4-5-20260101");
     expect(dated).toBeDefined();
@@ -109,9 +170,13 @@ describe("resolveModelRate", () => {
 
   it.each([
     ["gpt-6.1-sol", { input: 2, cachedInput: 0.1, cacheWrite: 2.5, output: 10 }],
+    ["gpt-6.1-terra", { input: 1, cachedInput: 0.05, cacheWrite: 1.25, output: 5 }],
     ["gpt-6-sol", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
     ["gpt-6-luna", { input: 0.1, cachedInput: 0.01, cacheWrite: 0.125, output: 0.5 }],
     ["gpt-5.6-sol", { input: 4, cachedInput: 0.4, cacheWrite: 5, output: 20 }],
+    ["gpt-5.6-cyber", { input: 12.5, cachedInput: 1.25, cacheWrite: 15.625, output: 75 }],
+    ["gpt-daybreak-blue-latest", { input: 4, cachedInput: 0.4, cacheWrite: 5, output: 20 }],
+    ["gpt-daybreak-red-latest", { input: 12.5, cachedInput: 1.25, cacheWrite: 15.625, output: 75 }],
     ["gpt-5.6-terra", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 12 }],
     ["gpt-5.6-luna", { input: 0.2, cachedInput: 0.02, cacheWrite: 0.25, output: 1.2 }],
     ["claude-opus-5-5", { input: 4, cachedInput: 0.2, cacheWrite: 5, output: 20 }],
@@ -136,6 +201,36 @@ describe("resolveModelRate", () => {
     const custom: ModelRate = { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 8 };
     expect(resolveModelRate("gpt-6-astra", { "gpt-6-astra": custom })).toEqual(custom);
     expect(resolveModelRate("gpt-6-astra", { gpt: custom })).toEqual(custom);
+  });
+
+  it("keeps alias pricing distinct from underlying-model override identities", () => {
+    const underlyingOverrides = { "gpt-5.6-sol": RATE, "gpt-5.6-cyber": RATE };
+    expect(resolveModelRate("gpt-daybreak-blue-latest", underlyingOverrides)).toEqual({
+      input: 4,
+      cachedInput: 0.4,
+      cacheWrite: 5,
+      output: 20,
+    });
+    expect(resolveModelRate("gpt-daybreak-red-latest", underlyingOverrides)).toEqual({
+      input: 12.5,
+      cachedInput: 1.25,
+      cacheWrite: 15.625,
+      output: 75,
+    });
+    // Existing exact/prefix overrides still apply to the actual recorded id;
+    // looking up a bundled alias must not turn it into another model request.
+    expect(resolveModelRate("gpt-daybreak-blue-latest", { "gpt-daybreak-blue": RATE })).toBe(RATE);
+    expect(resolveModelRate("gpt-daybreak-red-latest", { "gpt-daybreak-red": RATE })).toBe(RATE);
+  });
+
+  it("does not broaden the known aliases into a generic Daybreak price", () => {
+    const legacyGptFallback = { input: 1.25, cachedInput: 0.125, cacheWrite: 1.25, output: 10 };
+    for (const model of [
+      "gpt-daybreak-green-latest",
+      "gpt-daybreak-blue-preview",
+      "gpt-daybreak-red-preview",
+    ])
+      expect(resolveModelRate(model)).toEqual(legacyGptFallback);
   });
 
   it("keeps the Sonnet 5.5 cache reduction separate from older Sonnet 5", () => {
@@ -305,5 +400,24 @@ describe("rollUpCost", () => {
     expect(current.unpricedTokens).toBe(0);
     expect(previous.cost - current.cost).toBeCloseTo(0.06, 6);
     expect(current.cacheSavings - previous.cacheSavings).toBeCloseTo(0.06, 6);
+  });
+
+  it("estimates Terra 6.1 usage at its own standard rate without inferring request tiers", () => {
+    // A lifetime aggregate cannot identify an individual long-context request,
+    // priority service tier or 12-hour cache write.
+    const counts = {
+      inputTokens: 1_000_000,
+      cachedInputTokens: 600_000,
+      cacheWriteInputTokens: 300_000,
+      outputTokens: 100_000,
+    };
+    const current = rollUpCost([{ ...counts, model: "gpt-6.1-terra" }]);
+    const previous = rollUpCost([{ ...counts, model: "gpt-5.6-terra" }]);
+    // 100k fresh + 600k reads + 300k writes + 100k output.
+    expect(current.cost).toBeCloseTo(0.1 + 0.03 + 0.375 + 0.5, 6);
+    expect(current.cacheSavings).toBeCloseTo(0.57 - 0.075, 6);
+    expect(current.pricedTokens).toBe(1_100_000);
+    expect(current.unpricedTokens).toBe(0);
+    expect(previous.cost - current.cost).toBeCloseTo(1.265, 6);
   });
 });

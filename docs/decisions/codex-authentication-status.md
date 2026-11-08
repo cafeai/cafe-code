@@ -50,6 +50,45 @@ appearing during admission refuse the attempt without logout.
 Only the exact successful login completion refreshes account state. No automatic
 logout, credential deletion, active interruption, replay or Cafe restart occurs.
 
+## Daemon-owned sessions (2026-11-04 successor)
+
+Live Codex sessions normally run in the provider daemon, whose own driver
+instance observed the refusal, while Settings reads the backend instance. That
+left a rejected login showing as authenticated. The backend now forwards a
+_fresh_ (60-second window) canonical refusal from the exact native copy in
+`raw` to its own instance, which re-binds it to the credentials currently on
+disk; no digest crosses processes. Replayed/delayed events are ignored so they
+cannot sign out a later login. The permanent refresh-token records now cover
+`revoked`, `already used` and `expired`.
+
+A refused app-server cannot recover with its in-memory login and otherwise
+retries the dead refresh token on every request. After the terminal failed
+turn (or an idle permanent refresh-failure record) the adapter retires that
+app-server; the next send starts from current credentials. Cafe never retries
+the refused turn: `unauthorized` remains outside the transient allowlist.
+
+Resume and reconciliation snapshots (`codex-snapshot:` event ids) replay a
+thread's persisted turns, including a turn that failed before the user signed in
+again. They are history, not native observations: they never reject the current
+credential revision and never retire the resumed app-server. Only live native
+notifications and the permanent refresh-failure record count.
+
+## Preserving native renewals in auth overlays (2026-11-04)
+
+The observed sign-out had a Cafe cause. Codex renews an expired login inside its
+`CODEX_HOME` (the auth-overlay shadow) and the single-use refresh token rotates.
+The materializer then recopied the older shared `auth.json` over the shadow,
+reinstating the consumed refresh token; the next renewal failed with "refresh
+token was already used". The materializer now publishes a strictly newer
+rotated renewal of the same ChatGPT user and workspace account (matching
+`auth_mode`, `account_id` and id-token subject, later `last_refresh`) back to the
+shared file via an exclusive 0600 temp file and rename, after re-reading the
+shared file to confirm it did not change. A different user, API-key login,
+unparseable or oversized file keeps the existing shared-wins behaviour. Values
+read for this comparison are never logged or published. A writer outside Cafe
+(for example a terminal `codex`) holds no common lock, so a narrow race remains;
+the same-user/newer rule bounds its worst case to one renewal replacing another.
+
 ## Qualification
 
 Use inert native-runtime and HTTP fixtures with test-owned credentials, exact

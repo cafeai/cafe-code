@@ -31,8 +31,8 @@ import {
 // A native host is signed once, independently of any checkout or JS build. A
 // native source/protocol change needs a new version and explicit OS consent;
 // never silently replace the app that owns an existing ad hoc privacy grant.
-export const MAC_SOURCE_HOST_VERSION = 1;
-export const MAC_SOURCE_HOST_IDENTIFIER = "com.cafeai.cafecode.debug.source-host.v1";
+export const MAC_SOURCE_HOST_VERSION = 2;
+export const MAC_SOURCE_HOST_IDENTIFIER = "com.cafeai.cafecode.debug.source-host.v2";
 const APP_NAME = "Cafe Code (Debug)";
 const SOURCE_PATH = fileURLToPath(
   new URL("../../apps/desktop/native/mac-source-host.m", import.meta.url),
@@ -67,7 +67,7 @@ function hostInfoPlist(): string {
     CFBundleDisplayName: APP_NAME,
     CFBundlePackageType: "APPL",
     CFBundleVersion: String(MAC_SOURCE_HOST_VERSION),
-    CFBundleShortVersionString: "1.0",
+    CFBundleShortVersionString: "2.0",
     LSMinimumSystemVersion: "15.0",
     NSLocalNetworkUsageDescription: MAC_LOCAL_NETWORK_USAGE_DESCRIPTION,
     NSMicrophoneUsageDescription: MAC_MICROPHONE_USAGE_DESCRIPTION,

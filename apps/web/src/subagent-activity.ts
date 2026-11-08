@@ -1,13 +1,17 @@
 import type {
+  OrchestrationLiveWork,
   OrchestrationSessionStatus,
   OrchestrationThreadActivity,
   TurnId,
 } from "@cafecode/contracts";
-import { ProviderTaskControlCapability } from "@cafecode/contracts";
+import { ProviderTaskControlCapability, RuntimeSubagentPresentation } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import { uiText } from "@cafecode/shared/i18n";
+import { readLiveWorkObservation } from "@cafecode/shared/liveWork";
+import { compareActivityWindowOrder } from "./activityOrder";
 
 const isTaskControlCapability = Schema.is(ProviderTaskControlCapability);
+const isRuntimeSubagentPresentation = Schema.is(RuntimeSubagentPresentation);
 
 export type SubagentRunStatus =
   | "waiting"
@@ -97,6 +101,8 @@ export interface DeriveSubagentActivityOptions {
    * supply the session evidence, including when it is unavailable.
    */
   readonly runtimeSession?: SubagentRuntimeContext | null | undefined;
+  /** Exact-runtime read-model omission evidence; never native task authority. */
+  readonly liveWork?: OrchestrationLiveWork | undefined;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -166,15 +172,9 @@ function compareActivityOrder(
   left: OrchestrationThreadActivity,
   right: OrchestrationThreadActivity,
 ): number {
-  if (
-    left.sequence !== undefined &&
-    right.sequence !== undefined &&
-    left.sequence !== right.sequence
-  ) {
-    return left.sequence - right.sequence;
-  }
-  const byTime = left.createdAt.localeCompare(right.createdAt);
-  return byTime !== 0 ? byTime : left.id.localeCompare(right.id);
+  // Use the persisted nullable-sequence/BINARY order. A future legacy clock
+  // cannot replay an old start after a known current-owner terminal edge.
+  return compareActivityWindowOrder(left, right);
 }
 
 function structuredStatus(
@@ -210,8 +210,18 @@ function terminalStatusFromPayload(
       : fallback;
 }
 
-function subagentMapKey(activity: OrchestrationThreadActivity, id: string): string {
-  return JSON.stringify([activity.turnId ?? null, id]);
+function subagentMapKey(
+  activity: OrchestrationThreadActivity,
+  id: string,
+  runtimeId?: string,
+): string {
+  // An inter-root native task has no canonical turn namespace. Its exact
+  // runtime must therefore participate in the display identity: a terminal
+  // edge from a replaced runtime cannot coalesce with the current worker.
+  // Turn-bound history retains its established identity and capabilities.
+  return JSON.stringify(
+    activity.turnId === null ? [null, runtimeId ?? null, id] : [activity.turnId, id],
+  );
 }
 
 function upsertStructuredSubagent(
@@ -228,7 +238,7 @@ function upsertStructuredSubagent(
   const runtimeId = exactOpaqueIdentity(presentation?.runtimeId);
   const currentRuntimeId = options.runtimeSession?.subagentRuntimeId;
   const superseded = (id: string): boolean => {
-    const previous = byId.get(subagentMapKey(activity, id));
+    const previous = byId.get(subagentMapKey(activity, id, runtimeId));
     return (
       typeof currentRuntimeId === "string" &&
       previous?.runtimeId === currentRuntimeId &&
@@ -248,8 +258,9 @@ function upsertStructuredSubagent(
     // while the worker continues in the background. Delete every exact
     // identity carried by the latest edge so stale visible rows cannot remain
     // in the chat task pill or Atrium; a later visible edge recreates the row.
-    if (presentationId) byId.delete(subagentMapKey(activity, presentationId));
-    if (taskId && taskId !== presentationId) byId.delete(subagentMapKey(activity, taskId));
+    if (presentationId) byId.delete(subagentMapKey(activity, presentationId, runtimeId));
+    if (taskId && taskId !== presentationId)
+      byId.delete(subagentMapKey(activity, taskId, runtimeId));
     return presentation !== null || taskId !== undefined;
   }
 
@@ -266,7 +277,7 @@ function upsertStructuredSubagent(
   const id = presentationId ?? taskId;
   if (!id) return true;
 
-  const key = subagentMapKey(activity, id);
+  const key = subagentMapKey(activity, id, runtimeId);
   const previous = byId.get(key);
   const explicitStartedAt = safeLine(presentation.startedAt, 80);
   const previousTerminal =
@@ -312,7 +323,13 @@ function upsertStructuredSubagent(
     structuredStatus(presentation.status, activity.kind),
   );
   const objective = safeLine(presentation.objective) ?? previous?.objective;
-  const historyId = exactOpaqueIdentity(presentation.historyId) ?? previous?.historyId;
+  // NULL-turn native activity supplies current roster evidence only. The
+  // history/control transports require an exact canonical turn; neither a
+  // native history id nor a received capability may manufacture that owner.
+  const historyId =
+    activity.turnId !== null
+      ? (exactOpaqueIdentity(presentation.historyId) ?? previous?.historyId)
+      : undefined;
   const detail = safeLine(payload.detail);
   const meaningfulDetail = detail && !isGenericWorkingDescription(detail) ? detail : undefined;
   const nextDescription = isRestart
@@ -349,7 +366,7 @@ function upsertStructuredSubagent(
     lifecycleRevision: lifecycleRevision(activity),
     ...(historyId ? { historyId } : {}),
     ...(runtimeId ? { runtimeId } : {}),
-    ...(!terminal && isTaskControlCapability(presentation.taskControl)
+    ...(!terminal && activity.turnId !== null && isTaskControlCapability(presentation.taskControl)
       ? { taskControl: presentation.taskControl }
       : {}),
     ...(terminal
@@ -482,6 +499,71 @@ export function deriveSubagentActivities(
   for (const activity of ordered) {
     const payload = record(activity.payload);
     if (!payload) continue;
+    if (!Object.hasOwn(payload, "subagent")) {
+      const observation = readLiveWorkObservation(activity);
+      if (
+        observation?.lane === "task" &&
+        payload.nativeWorkRuntimeId === observation.runtimeId &&
+        isSubagentRuntimeCurrent(observation.runtimeId, options.runtimeSession ?? null)
+      ) {
+        // Native completion/retraction need not repeat the child descriptor.
+        // Retire only an existing row with this exact turn/task/runtime owner,
+        // including between-root NULL owners. A generic task control cannot
+        // supply the runtime, create a worker or grant history/control access.
+        const terminalStatus =
+          activity.kind === "task.completed" &&
+          (payload.status === "completed" ||
+            payload.status === "failed" ||
+            payload.status === "stopped")
+            ? payload.status
+            : undefined;
+        const ambient =
+          payload.visibility === "ambient" &&
+          (activity.kind === "task.progress" || terminalStatus !== undefined);
+        const key = subagentMapKey(activity, observation.workId, observation.runtimeId);
+        const previous = byId.get(key);
+        if (previous?.runtimeId === observation.runtimeId && (terminalStatus || ambient)) {
+          if (ambient) {
+            byId.delete(key);
+          } else if (
+            terminalStatus &&
+            (previous.status === "active" || previous.status === "waiting")
+          ) {
+            // The old exact history binding remains read-only history after
+            // completion; its live mutation capability must not survive.
+            const { taskControl: _retiredControl, ...retained } = previous;
+            byId.set(key, {
+              ...retained,
+              status: terminalStatus,
+              updatedAt: activity.createdAt,
+              lifecycleRevision: lifecycleRevision(activity),
+              completedAt: activity.createdAt,
+            });
+          }
+          continue;
+        }
+      }
+    }
+    if (activity.turnId === null) {
+      const observation = readLiveWorkObservation(activity);
+      // Claude can start native work between root turns. Admit only the same
+      // complete task/child/runtime evidence as current native work counts,
+      // with explicit current-session ownership. Legacy prose, malformed or
+      // unstamped rows and foreign terminal/visibility edges remain inert.
+      if (
+        (activity.kind !== "task.started" &&
+          activity.kind !== "task.progress" &&
+          activity.kind !== "task.completed") ||
+        !observation ||
+        observation.lane !== "task" ||
+        !isSubagentRuntimeCurrent(observation.runtimeId, options.runtimeSession ?? null) ||
+        !observation.agent ||
+        !isRuntimeSubagentPresentation(payload.subagent) ||
+        payload.subagent.threadId !== observation.workId ||
+        payload.subagent.runtimeId !== observation.runtimeId
+      )
+        continue;
+    }
     if (upsertStructuredSubagent(byId, activity, payload, options)) continue;
     upsertLegacySubagent(byId, activity, payload, options);
   }

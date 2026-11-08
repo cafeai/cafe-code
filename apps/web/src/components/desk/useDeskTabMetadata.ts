@@ -9,6 +9,7 @@ import { selectProjectByRef, selectSidebarThreadSummaryByRef, useStore } from ".
 import type { ThreadRouteTarget } from "../../threadRoutes";
 import { useUiStateStore } from "../../uiStateStore";
 import { resolveThreadStatusPill } from "../Sidebar.logic";
+import { readScheduledFollowUpAt, useScheduledFollowUpAt } from "../chat/scheduledFollowupPresence";
 import { canDuplicateThread } from "../../lib/threadDuplication";
 
 function deriveMetadata(
@@ -17,6 +18,7 @@ function deriveMetadata(
   thread: SidebarThreadSummary | undefined,
   projectName: string | undefined,
   lastVisitedAt: string | undefined,
+  scheduledFollowUpAt: string | undefined,
 ) {
   return {
     title:
@@ -32,7 +34,9 @@ function deriveMetadata(
     attention: thread?.hasPendingApprovals === true || thread?.hasPendingUserInput === true,
     canDuplicate: canDuplicateThread(thread),
     exists: thread !== undefined || (target.kind === "draft" && draft !== undefined),
-    status: thread ? resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt } }) : null,
+    status: thread
+      ? resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt, scheduledFollowUpAt } })
+      : null,
   };
 }
 
@@ -53,7 +57,14 @@ export function readDeskTabMetadata(target: ThreadRouteTarget) {
   const lastVisitedAt = threadRef
     ? useUiStateStore.getState().threadLastVisitedAtById[scopedThreadKey(threadRef)]
     : undefined;
-  return deriveMetadata(target, draft, thread, projectName, lastVisitedAt);
+  return deriveMetadata(
+    target,
+    draft,
+    thread,
+    projectName,
+    lastVisitedAt,
+    readScheduledFollowUpAt(thread?.environmentId, thread?.id),
+  );
 }
 
 /** Resolve a menu's exact shell/draft workspace without loading its transcript. */
@@ -104,7 +115,15 @@ export function useDeskTabMetadata(target: ThreadRouteTarget) {
   const lastVisitedAt = useUiStateStore((state) =>
     threadRef ? state.threadLastVisitedAtById[scopedThreadKey(threadRef)] : undefined,
   );
-  return uiPresentation.deriveMetadata(target, draft, thread, projectName, lastVisitedAt);
+  const scheduledFollowUpAt = useScheduledFollowUpAt(thread?.environmentId, thread?.id);
+  return uiPresentation.deriveMetadata(
+    target,
+    draft,
+    thread,
+    projectName,
+    lastVisitedAt,
+    scheduledFollowUpAt,
+  );
 }
 
 // Finite source-owned labels/helpers only; no received or user data.

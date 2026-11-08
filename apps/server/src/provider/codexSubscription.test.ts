@@ -24,6 +24,8 @@ describe("Codex subscription presentation", () => {
     ["edu", "ChatGPT Edu Subscription"],
     ["edu_plus", "ChatGPT Edu Plus Subscription"],
     ["edu_pro", "ChatGPT Edu Pro Subscription"],
+    ["sci", "ChatGPT Academic Researchers Subscription"],
+    ["sci_plus", "ChatGPT Academic Researchers Plus Subscription"],
     ["ent26", "ChatGPT Enterprise Subscription"],
   ])("formats the reported %s tier", (plan, label) => {
     expect(formatCodexSubscriptionLabel(plan)).toBe(label);

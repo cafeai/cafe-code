@@ -213,6 +213,10 @@ export function mapClaudeAccountQuotaReport(
     let projected: unknown = { rate_limits: limits };
     if (nativeRows === undefined || nativeRows === null) {
       const rows: object[] = [];
+      const modelScoped = own(limits, "model_scoped");
+      // The control contract's scoped level is additive and allowlist-filtered.
+      // It supplies no stable identity for coalescing with legacy named windows:
+      // preserve separately reported fields and each new row's native order.
       for (const [key, kind, group, modelLabel, surfaceLabel] of [
         ["five_hour", "session", "session"],
         ["seven_day", "weekly_all", "weekly"],
@@ -238,7 +242,44 @@ export function mapClaudeAccountQuotaReport(
           },
         });
       }
-      // Do not label an absent legacy level as an explicitly empty complete list.
+      if (modelScoped !== undefined) {
+        // Inspect only bounded own slots. Array.map or indexed property reads
+        // could execute getters, consume inherited rows or consult species.
+        if (!Array.isArray(modelScoped)) return null;
+        const lengthDescriptor = Object.getOwnPropertyDescriptor(modelScoped, "length");
+        const length =
+          lengthDescriptor && "value" in lengthDescriptor ? lengthDescriptor.value : undefined;
+        if (
+          typeof length !== "number" ||
+          !Number.isSafeInteger(length) ||
+          length < 0 ||
+          length > PROVIDER_SESSION_QUOTA_MAX_METERS
+        )
+          return null;
+        for (let index = 0; index < length; index++) {
+          const descriptor = Object.getOwnPropertyDescriptor(modelScoped, String(index));
+          if (!descriptor || !("value" in descriptor)) return null;
+          const data = record(descriptor.value);
+          const modelLabel = text(
+            own(data, "display_name"),
+            PROVIDER_SESSION_QUOTA_MAX_LABEL_CHARS,
+          );
+          const utilization = own(data, "utilization");
+          // A declared null utilization is unknown, never a fabricated zero.
+          if (utilization === null) continue;
+          rows.push({
+            kind: "weekly_scoped",
+            group: "weekly",
+            percent: percent(utilization),
+            resets_at: own(data, "resets_at"),
+            severity: "unknown",
+            is_active: false,
+            scope: { model: { display_name: modelLabel } },
+          });
+        }
+      }
+      // An empty per-model level is not an explicitly empty complete plan.
+      // Keep unknown overall allowance distinct from native limits: [].
       if (rows.length === 0) return null;
       const extra = own(limits, "extra_usage");
       projected = {

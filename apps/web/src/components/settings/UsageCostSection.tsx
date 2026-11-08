@@ -33,7 +33,7 @@ import {
  * Cost and token composition for the Usage page.
  *
  * The shared usage response supplies recorded counters and optional settled
- * cost receipts. Native Axiom receipts retain their reported amounts; other
+ * cost receipts. Native provider receipts retain their reported amounts; other
  * rows use a standard API-rate estimate (or a user-defined rate). The aggregate
  * counters cannot reproduce per-request long-context or speed-tier adjustments
  * or subscription charges. This component performs no provider requests.
@@ -139,6 +139,7 @@ function TokenCountFigure({
   value,
   context,
   suffix = " tokens",
+  stackSuffix = false,
   className,
   valueClassName,
   align = "left",
@@ -146,13 +147,14 @@ function TokenCountFigure({
   value: number;
   context: TokenFigureContext;
   suffix?: string;
+  stackSuffix?: boolean;
   className?: string;
   valueClassName?: string;
   align?: "left" | "right";
 }) {
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
-  const exact = `${formatFullTokenCount(value)}${suffix}`;
+  const exact = formatFullTokenCount(value);
   return (
     <div
       className={cn("min-w-0", align === "right" && "text-right", className)}
@@ -166,6 +168,7 @@ function TokenCountFigure({
         data-usage-token-full={context}
       >
         {exact}
+        {stackSuffix ? <span className="block">{suffix}</span> : suffix}
       </div>
       <div
         className="mt-0.5 text-2xs tabular-nums text-subtle-foreground"
@@ -334,6 +337,7 @@ function StatTile(props: StatTileProps) {
         <TokenCountFigure
           value={props.rawTokens}
           context={`composition-${props.id}`}
+          stackSuffix
           className="mt-1"
           valueClassName="text-lg sm:text-xl"
         />
@@ -685,7 +689,6 @@ function UsageCostMetrics({
       return {
         labels,
         series,
-        hasUnpriced: false,
         format: (value: number) =>
           `${formatFullTokenCount(value)} tokens (${uiPresentation.formatCompactTokenCount(value)})`,
       };
@@ -706,7 +709,6 @@ function UsageCostMetrics({
     return {
       labels,
       series,
-      hasUnpriced: days.some((day) => (dailyCosts.get(day.day)?.unpricedTokens ?? 0) > 0),
       format: (value: number) => formatUsd(value),
     };
   }, [usage, mode, overrides, uiLocale, uiPresentation]);
@@ -772,7 +774,7 @@ function UsageCostMetrics({
             <InfoTip label={uiText("About estimated cost", undefined, undefined, uiLocale)}>
               {view.rollup.reportedCost !== undefined
                 ? uiText(
-                    "Includes settled Axiom costs reported by the native CLI. Other providers use standard API-rate estimates. Only recorded requests are included; this is not the account-wide bill.",
+                    "Includes costs reported by Axiom and OpenCode, with standard API-rate estimates for other usage. OpenCode may report zero when pricing is unavailable. Only recorded requests are included; this is not the account-wide bill.",
                     undefined,
                     undefined,
                     uiLocale,
@@ -782,7 +784,13 @@ function UsageCostMetrics({
                     undefined,
                     undefined,
                     uiLocale,
-                  )}
+                  )}{" "}
+              {uiText(
+                "Claude estimates cannot account for provider-side custom pricing or fallback after a refusal.",
+                undefined,
+                undefined,
+                uiLocale,
+              )}
             </InfoTip>
           </div>
           <div
@@ -791,6 +799,16 @@ function UsageCostMetrics({
           >
             {formatUsd(costDisplay)}
           </div>
+          {view.rollup.unknownCacheWriteTokens !== undefined && (
+            <p className="mt-1 text-xs text-muted-foreground" data-usage-unknown-cache-ttl>
+              {uiText(
+                "Cache-write duration is unknown for {tokens} tokens; the estimate uses the regular cache-write rate for those tokens.",
+                { tokens: formatFullTokenCount(view.rollup.unknownCacheWriteTokens) },
+                undefined,
+                uiLocale,
+              )}
+            </p>
+          )}
 
           <div className="mt-5 flex flex-col gap-3">
             {view.providers.length === 0 ? (
@@ -829,27 +847,6 @@ function UsageCostMetrics({
               suffix=" tokens in range"
               valueClassName="text-xs font-normal text-muted-foreground"
             />
-            {chart.hasUnpriced ? (
-              <span className="flex items-center gap-1 text-xs text-subtle-foreground">
-                <UiMessage
-                  message={"Partial estimate<slot1></slot1>"}
-                  slots={{
-                    slot1: (
-                      <InfoTip
-                        label={uiText("About partial estimate", undefined, undefined, uiLocale)}
-                      >
-                        {uiText(
-                          "Usage without a daily model rate is left out of the daily cost.",
-                          undefined,
-                          undefined,
-                          uiLocale,
-                        )}
-                      </InfoTip>
-                    ),
-                  }}
-                />
-              </span>
-            ) : null}
           </div>
           <UsageAreaChart
             labels={chart.labels}
@@ -922,14 +919,16 @@ function UsageCostMetrics({
           label={uiText("Net cache savings", undefined, undefined, uiLocale)}
           value={
             view.rollup.reportedCost !== undefined &&
-            usage.tokenBreakdown.every((row) => row.provider === "axiom")
+            usage.tokenBreakdown.every(
+              (row) => row.provider === "axiom" || row.provider === "opencode",
+            )
               ? uiText("Not recorded", undefined, undefined, uiLocale)
               : formatUsd(cacheSavingsDisplay)
           }
           info={
             view.rollup.reportedCost !== undefined
               ? uiText(
-                  "Axiom reports settled costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.",
+                  "Axiom and OpenCode report costs without a cache savings breakdown. Cache savings for other providers use their estimated rates.",
                   undefined,
                   undefined,
                   uiLocale,

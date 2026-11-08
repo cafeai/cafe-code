@@ -7,7 +7,7 @@ import {
 } from "@cafecode/contracts";
 import { createRef, type ReactNode, type Ref } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { LegendListRef } from "@legendapp/list/react";
 
 vi.mock("@legendapp/list/react", async () => {
@@ -50,7 +50,11 @@ function readMessagesTimelineModule(): typeof import("./MessagesTimeline") {
   return messagesTimelineModule;
 }
 
-beforeAll(async () => {
+// Keep the synthetic host setup after ordinary imports and the list mock, then
+// collect the real module before registering its tests. Module evaluation is
+// collection work, not a timed feature-action hook; the individual action
+// budgets below remain unchanged.
+{
   const classList = {
     add: () => {},
     remove: () => {},
@@ -83,7 +87,7 @@ beforeAll(async () => {
   });
 
   messagesTimelineModule = await import("./MessagesTimeline");
-}, 30_000);
+}
 
 const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const MESSAGE_CREATED_AT = "2026-03-17T19:12:28.000Z";

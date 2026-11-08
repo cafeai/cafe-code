@@ -134,15 +134,18 @@ describe("committed offline chat typography", () => {
     }
   });
 
-  it("retains the exact chat sans/mono stacks with family-only semantic-code policy", () => {
+  it("retains shared text stacks without importing the main renderer emoji payload", () => {
     const css = readFileSync(new URL("../../../apps/web/src/index.css", import.meta.url), "utf8");
     const declaration = (name: string) =>
       css
         .match(new RegExp(`${name}:([^;]+);`))?.[1]
         ?.trim()
         .replace(/\s+/g, " ");
-    expect(declaration("--font-sans")).toBe(CHAT_SANS_FONT_FAMILY);
-    expect(declaration("--font-mono")).toBe(CHAT_MONO_FONT_FAMILY);
+    // Main chat's separate vector-emoji fallback does not expand the generated
+    // font payload. All shared text families retain their original ordering.
+    const textFamilies = (value: string | undefined) => value?.replace(', "Cafe Emoji"', "");
+    expect(textFamilies(declaration("--font-sans"))).toBe(CHAT_SANS_FONT_FAMILY);
+    expect(textFamilies(declaration("--font-mono"))).toBe(CHAT_MONO_FONT_FAMILY);
     expect(GENERATED_VISUALIZATION_FONT_FAMILY_STYLE).toContain(
       `body,body *{font-family:${CHAT_SANS_FONT_FAMILY}!important}`,
     );

@@ -35,6 +35,11 @@ import { projectQueryKeys } from "~/lib/projectReactQuery";
 import { providerQueryKeys } from "~/lib/providerReactQuery";
 import { getPrimaryKnownEnvironment } from "../primary";
 import {
+  RemoteEnvironmentCertificateError,
+  RemoteCertificateReviewError,
+  remoteCertificatePreparationMessage,
+} from "../remote/certificate";
+import {
   bootstrapRemoteBearerSession,
   bootstrapRemotePasswordBearerSession,
   fetchRemoteEnvironmentDescriptor,
@@ -59,6 +64,7 @@ import {
   writeSavedEnvironmentBearerToken,
 } from "./catalog";
 import { createEnvironmentConnection, type EnvironmentConnection } from "./connection";
+import { applySavedEnvironmentEdit, type SavedEnvironmentEdit } from "./savedEnvironmentEdit";
 import {
   useStore,
   selectProjectsAcrossEnvironments,
@@ -140,6 +146,7 @@ function isSavedEnvironmentConnectionCancelledError(
 
 interface PendingSavedEnvironmentConnection {
   cancelled: boolean;
+  dispose?: () => Promise<void>;
   readonly promise: Promise<EnvironmentConnection>;
 }
 
@@ -983,9 +990,12 @@ function getRuntimeErrorFields(error: unknown) {
     (error instanceof Error &&
       /credential.*(?:expired|missing)|missing.*credential/iu.test(error.message));
   return {
-    lastError: isAuthError
-      ? uiText("Saved environment credential is missing or expired. Add it again to sign in.")
-      : uiText("Saved environment connection failed."),
+    lastError:
+      error instanceof RemoteEnvironmentCertificateError
+        ? error.message
+        : isAuthError
+          ? uiText("Saved environment credential is missing or expired. Add it again to sign in.")
+          : uiText("Saved environment connection failed."),
     lastErrorAt: new Date().toISOString(),
   } as const;
 }
@@ -1049,6 +1059,7 @@ function transitionSavedEnvironmentConnection(
 }
 
 function setRuntimeConnecting(environmentId: EnvironmentId) {
+  useSavedEnvironmentRuntimeStore.getState().patch(environmentId, { certificateStatus: null });
   transitionSavedEnvironmentConnection(environmentId, beginSavedEnvironmentReconnect);
 }
 
@@ -1060,6 +1071,7 @@ function setRuntimeConnected(environmentId: EnvironmentId) {
   const connectedAt = isoNow();
   useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
     authState: "authenticated",
+    certificateStatus: null,
     ...recordSavedEnvironmentConnectionOpened(connectedAt),
   });
   useSavedEnvironmentRegistryStore.getState().markConnected(environmentId, connectedAt);
@@ -1081,8 +1093,17 @@ function setRuntimeDisconnected(environmentId: EnvironmentId) {
 }
 
 function setRuntimeError(environmentId: EnvironmentId, error: unknown) {
-  const fields = getRuntimeErrorFields(error);
+  const previousCertificateStatus =
+    useSavedEnvironmentRuntimeStore.getState().byId?.[environmentId]?.certificateStatus;
+  const fields = getRuntimeErrorFields(
+    !(error instanceof RemoteEnvironmentCertificateError) && previousCertificateStatus
+      ? new RemoteEnvironmentCertificateError(previousCertificateStatus)
+      : error,
+  );
   useSavedEnvironmentRuntimeStore.getState().patch(environmentId, {
+    ...(error instanceof RemoteEnvironmentCertificateError
+      ? { certificateStatus: error.certificateStatus }
+      : {}),
     ...recordSavedEnvironmentTerminalError({
       message: fields.lastError,
       occurredAt: fields.lastErrorAt,
@@ -1341,6 +1362,10 @@ function createSavedEnvironmentClient(
   bearerToken: string,
 ): WsRpcClient {
   useSavedEnvironmentRuntimeStore.getState().ensure(environmentId);
+  // Retain only our finite, sanitized certificate classification. The protocol's
+  // live-session terminal callback owns publication; late retired probes cannot
+  // mutate a replacement environment or expose arbitrary URL-provider errors.
+  let certificateError: RemoteEnvironmentCertificateError | undefined;
 
   return createWsRpcClient(
     new WsTransport(
@@ -1375,13 +1400,17 @@ function createSavedEnvironmentClient(
           setRuntimeConnecting(environmentId);
         },
         onAttempt: () => {
+          certificateError = undefined;
           recordRuntimeConnectionAttempt(environmentId);
         },
         // Only transient token issuance is replayable. The saved bearer is
         // authoritative; enrollment and credential rejection need user action.
-        shouldRetryUrlError: isRetryableRemoteWebSocketUrlError,
+        shouldRetryUrlError: (error) => {
+          certificateError = error instanceof RemoteEnvironmentCertificateError ? error : undefined;
+          return isRetryableRemoteWebSocketUrlError(error);
+        },
         onTerminalError: (message) => {
-          setRuntimeError(environmentId, new Error(message));
+          setRuntimeError(environmentId, certificateError ?? new Error(message));
         },
         onRetryScheduled: (info) => {
           useSavedEnvironmentRuntimeStore
@@ -1439,6 +1468,7 @@ async function refreshSavedEnvironmentMetadata(
   client: WsRpcClient,
   roleHint?: AuthSessionRole | null,
   configHint?: ServerConfig | null,
+  isRetired: () => boolean = () => false,
 ): Promise<void> {
   const record = getSavedEnvironmentRecord(environmentId);
   if (!record) {
@@ -1455,15 +1485,20 @@ async function refreshSavedEnvironmentMetadata(
     }),
   ]);
 
+  const current = getSavedEnvironmentRecord(environmentId);
+  if (isRetired() || !current || current.httpBaseUrl !== record.httpBaseUrl) return;
+
   useSavedEnvironmentRuntimeStore.getState().patch(record.environmentId, {
     authState: sessionState.authenticated ? "authenticated" : "requires-auth",
     descriptor: serverConfig.environment,
     serverConfig,
     role: sessionState.authenticated ? (sessionState.role ?? roleHint ?? null) : null,
   });
-  useSavedEnvironmentRegistryStore
-    .getState()
-    .rename(record.environmentId, serverConfig.environment.label);
+  if (!current.label.trim()) {
+    useSavedEnvironmentRegistryStore
+      .getState()
+      .rename(record.environmentId, serverConfig.environment.label);
+  }
 }
 
 function registerConnection(connection: EnvironmentConnection): EnvironmentConnection {
@@ -1543,6 +1578,15 @@ async function ensureSavedEnvironmentConnection(
       const roleHint = options?.role ?? null;
       const bearerToken =
         options?.bearerToken ?? (await readSavedEnvironmentBearerToken(record.environmentId));
+      const assertCurrent = () => {
+        if (
+          pendingEntry.cancelled ||
+          pendingSavedEnvironmentConnections.get(record.environmentId) !== pendingEntry
+        ) {
+          throw new SavedEnvironmentConnectionCancelledError(record.environmentId);
+        }
+      };
+      assertCurrent();
       if (!bearerToken) {
         useSavedEnvironmentRuntimeStore.getState().patch(record.environmentId, {
           authState: "requires-auth",
@@ -1583,9 +1627,13 @@ async function ensureSavedEnvironmentConnection(
             activeRecord.environmentId,
             activeBearerToken,
             client,
+            undefined,
+            undefined,
+            () => pendingEntry.cancelled,
           );
         },
         onConfigSnapshot: (config) => {
+          if (pendingEntry.cancelled) return;
           initialConfigSnapshot.resolve(config);
           useSavedEnvironmentRuntimeStore.getState().patch(activeRecord.environmentId, {
             descriptor: config.environment,
@@ -1593,6 +1641,7 @@ async function ensureSavedEnvironmentConnection(
           });
         },
         onSettingsUpdated: (payload) => {
+          if (pendingEntry.cancelled) return;
           const store = useSavedEnvironmentRuntimeStore.getState();
           const current = store.byId[activeRecord.environmentId]?.serverConfig;
           if (current)
@@ -1601,6 +1650,7 @@ async function ensureSavedEnvironmentConnection(
             });
         },
         onProviderStatuses: (payload) => {
+          if (pendingEntry.cancelled) return;
           const store = useSavedEnvironmentRuntimeStore.getState();
           const current = store.byId[activeRecord.environmentId]?.serverConfig;
           if (current)
@@ -1609,12 +1659,16 @@ async function ensureSavedEnvironmentConnection(
             });
         },
         onWelcome: (payload) => {
+          if (pendingEntry.cancelled) return;
           useSavedEnvironmentRuntimeStore.getState().patch(activeRecord.environmentId, {
             descriptor: payload.environment,
           });
         },
         ...createEnvironmentConnectionHandlers(),
       });
+      let disposal: Promise<void> | undefined;
+      const dispose = () => (disposal ??= connection.dispose());
+      pendingEntry.dispose = dispose;
 
       try {
         try {
@@ -1630,8 +1684,10 @@ async function ensureSavedEnvironmentConnection(
             client,
             roleHint,
             initialServerConfig,
+            () => pendingEntry.cancelled,
           );
         } catch (error) {
+          assertCurrent();
           const isAuthError = isRemoteEnvironmentAuthHttpError(error) && error.status === 401;
           if (!isAuthError) {
             throw error;
@@ -1645,19 +1701,19 @@ async function ensureSavedEnvironmentConnection(
           pendingEntry.cancelled ||
           pendingSavedEnvironmentConnections.get(activeRecord.environmentId) !== pendingEntry
         ) {
-          await connection.dispose().catch(() => undefined);
           throw new SavedEnvironmentConnectionCancelledError(activeRecord.environmentId);
         }
         registerConnection(connection);
         return connection;
       } catch (error) {
-        if (error instanceof SavedEnvironmentConnectionCancelledError) {
-          throw error;
+        if (pendingEntry.cancelled || error instanceof SavedEnvironmentConnectionCancelledError) {
+          await dispose().catch(() => undefined);
+          throw new SavedEnvironmentConnectionCancelledError(activeRecord.environmentId);
         }
         setRuntimeError(activeRecord.environmentId, error);
         const removed = await removeConnection(activeRecord.environmentId).catch(() => false);
         if (!removed) {
-          await connection.dispose().catch(() => undefined);
+          await dispose().catch(() => undefined);
         }
         throw error;
       }
@@ -1792,6 +1848,7 @@ export async function disconnectSavedEnvironment(environmentId: EnvironmentId): 
   if (pendingConnection) {
     pendingConnection.cancelled = true;
     pendingSavedEnvironmentConnections.delete(environmentId);
+    await pendingConnection.dispose?.().catch(() => undefined);
   }
   const connection = environmentConnections.get(environmentId);
 
@@ -1831,6 +1888,49 @@ export async function reconnectSavedEnvironment(environmentId: EnvironmentId): P
   }
 }
 
+/** Trust changes are admitted only by this explicit user action, never by retrying. */
+export async function reviewSavedEnvironmentCertificate(
+  environmentId: EnvironmentId,
+): Promise<void> {
+  const record = getSavedEnvironmentRecord(environmentId);
+  const prepare = window.desktopBridge?.prepareRemoteCertificate;
+  if (!record || new URL(record.httpBaseUrl).protocol !== "https:" || !prepare) {
+    throw new RemoteCertificateReviewError(
+      uiText("Certificate review is available only for saved HTTPS servers in the desktop app."),
+    );
+  }
+  const assertCurrent = () => {
+    if (getSavedEnvironmentRecord(environmentId) !== record) {
+      throw new RemoteCertificateReviewError(
+        uiText(
+          "The saved server changed during certificate review. Review its current address before reconnecting.",
+        ),
+      );
+    }
+  };
+  const result = await prepare(record.httpBaseUrl);
+  assertCurrent();
+  if (result === "declined") return;
+  if (result !== "approved" && result !== "unchanged") {
+    throw new RemoteCertificateReviewError(remoteCertificatePreparationMessage(result));
+  }
+  // Check the public identity before allowing the saved bearer to be used again.
+  const descriptor = await fetchRemoteEnvironmentDescriptor({ httpBaseUrl: record.httpBaseUrl });
+  assertCurrent();
+  if (descriptor.environmentId !== environmentId) {
+    throw new RemoteCertificateReviewError(
+      uiText(
+        "This address now belongs to a different Cafe Code server. Add it separately to sign in.",
+      ),
+    );
+  }
+  // A failed first connection may still be awaiting its config snapshot. Retire
+  // that exact session so approval cannot rejoin the already failed attempt.
+  await disconnectSavedEnvironment(environmentId);
+  assertCurrent();
+  await reconnectSavedEnvironment(environmentId);
+}
+
 export async function removeSavedEnvironment(environmentId: EnvironmentId): Promise<void> {
   await disconnectSavedEnvironment(environmentId);
   disposeThreadDetailSubscriptionsForEnvironment(environmentId);
@@ -1838,6 +1938,26 @@ export async function removeSavedEnvironment(environmentId: EnvironmentId): Prom
   useSavedEnvironmentRuntimeStore.getState().clear(environmentId);
   useStore.getState().removeEnvironmentState(environmentId);
   await removeSavedEnvironmentBearerToken(environmentId);
+}
+
+export async function updateSavedEnvironment(
+  environmentId: EnvironmentId,
+  input: SavedEnvironmentEdit,
+): Promise<void> {
+  const record = getSavedEnvironmentRecord(environmentId);
+  if (!record) throw new Error(uiText("Saved environment not found."));
+  const updated = applySavedEnvironmentEdit(record, input);
+  const addressChanged =
+    updated.httpBaseUrl !== record.httpBaseUrl || updated.wsBaseUrl !== record.wsBaseUrl;
+  // Save locally without requiring the old or new server to be reachable.
+  await persistSavedEnvironmentRecord(updated);
+  if (addressChanged) {
+    await disconnectSavedEnvironment(environmentId);
+    useSavedEnvironmentRuntimeStore.getState().clear(environmentId);
+  }
+  // Publishing after retiring the old connection lets the service reconnect
+  // using the edited address and the existing credential for this environment.
+  useSavedEnvironmentRegistryStore.getState().upsert(updated);
 }
 
 export async function addSavedEnvironment(input: {
@@ -1957,12 +2077,24 @@ export function startEnvironmentConnectionService(queryClient: QueryClient): () 
 
   maybeCreatePrimaryEnvironmentConnection();
 
-  const unsubscribeSavedEnvironments = useSavedEnvironmentRegistryStore.subscribe(() => {
-    if (!hasSavedEnvironmentRegistryHydrated()) {
-      return;
-    }
-    void requestSavedEnvironmentSync();
-  });
+  const unsubscribeSavedEnvironments = useSavedEnvironmentRegistryStore.subscribe(
+    (state, previous) => {
+      if (!hasSavedEnvironmentRegistryHydrated()) {
+        return;
+      }
+      const records = Object.values(state.byId);
+      // Reordering or renaming must not reconnect a deliberately disconnected server.
+      if (
+        records.length === Object.keys(previous.byId).length &&
+        records.every((record) => {
+          const old = previous.byId[record.environmentId];
+          return old?.httpBaseUrl === record.httpBaseUrl && old.wsBaseUrl === record.wsBaseUrl;
+        })
+      )
+        return;
+      return requestSavedEnvironmentSync();
+    },
+  );
 
   void waitForSavedEnvironmentRegistryHydration()
     .then(() => requestSavedEnvironmentSync())

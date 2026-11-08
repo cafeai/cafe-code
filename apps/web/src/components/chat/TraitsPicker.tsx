@@ -198,9 +198,15 @@ function getTraitsSectionVisibility(input: {
     ) === true &&
     !selected.descriptors.some((descriptor) => descriptor.id === "cyberAccessProgram");
 
+  // A context window with a single size offers nothing to choose.
+  const offersChoice = (descriptor: Extract<ProviderOptionDescriptor, { type: "select" }>) =>
+    descriptor.id !== "contextWindow" || descriptor.options.length > 1;
+
   return {
     ...selected,
-    selectDescriptors: selected.selectDescriptors.filter(includesDescriptor),
+    selectDescriptors: selected.selectDescriptors.filter(
+      (descriptor) => includesDescriptor(descriptor) && offersChoice(descriptor),
+    ),
     booleanDescriptors: selected.booleanDescriptors.filter(includesDescriptor),
     showEffort,
     showThinking,
@@ -264,6 +270,39 @@ export function getTraitsTriggerLabel(
     })
     .filter((label): label is string => typeof label === "string" && label.length > 0)
     .join(" · ");
+}
+
+/** Select options that are never the thinking level, even when listed first. */
+const NON_EFFORT_SELECT_DESCRIPTOR_IDS = new Set([
+  "contextWindow",
+  "agent",
+  "outputStyle",
+  "cyberAccessProgram",
+]);
+
+/**
+ * The composer button names only the thinking level. Every other option
+ * (context size, speed, Ultracode, Daybreak and so on) stays inside its menu.
+ */
+export function getTraitsTriggerEffortLabel(
+  descriptors: ReadonlyArray<ProviderOptionDescriptor>,
+  ultrathinkPromptControlled: boolean,
+): string {
+  if (ultrathinkPromptControlled) return uiText("Ultrathink");
+  const effort = descriptors.find(
+    (descriptor): descriptor is Extract<ProviderOptionDescriptor, { type: "select" }> =>
+      descriptor.type === "select" && !NON_EFFORT_SELECT_DESCRIPTOR_IDS.has(descriptor.id),
+  );
+  if (effort) return getProviderOptionCurrentLabel(effort) ?? "";
+  const thinking = descriptors.find(
+    (descriptor) => descriptor.type === "boolean" && descriptor.id === "thinking",
+  );
+  return thinking
+    ? uiText("{label} {state, select, on {On} other {Off}}", {
+        label: thinking.label,
+        state: thinking.currentValue === true ? "on" : "off",
+      })
+    : "";
 }
 
 export interface TraitsMenuContentProps {
@@ -450,14 +489,14 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
         <div key={descriptor.id}>
           {index > 0 || selectDescriptors.length > 0 ? <MenuDivider /> : null}
           <MenuGroup>
-            <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">
+            {/* Just the option name; its explanation (for Ultracode, the
+                extra token/agent cost) is the hover tooltip. */}
+            <div
+              className="px-2 py-1.5 font-medium text-muted-foreground text-xs"
+              title={descriptor.description}
+            >
               {descriptor.label}
             </div>
-            {descriptor.description ? (
-              <p className="max-w-72 px-2 pb-1.5 text-muted-foreground text-xs">
-                {descriptor.description}
-              </p>
-            ) : null}
             <MenuRadioGroup
               value={
                 descriptor.id === "ultracode" && descriptor.currentValue === undefined
@@ -532,15 +571,14 @@ export const TraitsPicker = memo(function TraitsPicker({
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const { descriptors, primarySelectDescriptor, ultrathinkPromptControlled } =
-    getTraitsSectionVisibility({
-      provider,
-      models,
-      model,
-      prompt,
-      modelOptions,
-      allowPromptInjectedEffort,
-    });
+  const { descriptors, ultrathinkPromptControlled } = getTraitsSectionVisibility({
+    provider,
+    models,
+    model,
+    prompt,
+    modelOptions,
+    allowPromptInjectedEffort,
+  });
   if (
     !shouldRenderTraitsControls({
       provider,
@@ -555,11 +593,8 @@ export const TraitsPicker = memo(function TraitsPicker({
   }
 
   const triggerLabel =
-    uiPresentation.getTraitsTriggerLabel(
-      descriptors,
-      primarySelectDescriptor,
-      ultrathinkPromptControlled,
-    ) || uiText("Model settings", undefined, undefined, uiLocale);
+    uiPresentation.getTraitsTriggerEffortLabel(descriptors, ultrathinkPromptControlled) ||
+    uiText("Model settings", undefined, undefined, uiLocale);
 
   const isCodexStyle = provider === "codex";
 
@@ -613,4 +648,4 @@ export const TraitsPicker = memo(function TraitsPicker({
 });
 
 // Finite source-owned labels/helpers only; no received or user data.
-const UI_PRESENTATION_SOURCES = { getTraitsTriggerLabel };
+const UI_PRESENTATION_SOURCES = { getTraitsTriggerEffortLabel };

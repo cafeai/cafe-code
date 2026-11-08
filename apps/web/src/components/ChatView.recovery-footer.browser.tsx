@@ -1,6 +1,8 @@
 // This file owns only its feature journeys; the shared module owns fixture lifecycle.
 import {
   registerChatViewBrowserHooks,
+  chatViewFixture,
+  rpcHarness,
   THREAD_ID,
   THREAD_REF,
   wsRequests,
@@ -12,22 +14,194 @@ import {
   waitForSendButton,
   mountChatView,
   createSnapshotWithActiveSubagent,
+  toShellThread,
 } from "./ChatViewBrowser.shared";
 import {
   EventId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   type OrchestrationReadModel,
   ProviderInstanceId,
+  SubagentRuntimeId,
 } from "@cafecode/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { page } from "vitest/browser";
 import { type NormalizedWsRpcRequestBody } from "../../test/wsRpcHarness";
 import { useComposerDraftStore } from "../composerDraftStore";
-import { selectThreadByRef, useStore } from "../store";
+import { selectSidebarThreadSummaryByRef, selectThreadByRef, useStore } from "../store";
 import { toastManager } from "./ui/toast";
+import { createChatViewCallerOwner } from "./chatViewCallerOwner.test.fixture";
 
 describe("ChatView full app (recovery-footer)", () => {
   registerChatViewBrowserHooks();
+
+  it("keeps the native Tasks roster and warning aligned with exact-runtime source hints", async (context) => {
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "subagent-owner-release",
+    });
+    await owner.run(async () => {
+      const base = createSnapshotWithActiveSubagent();
+      const source = base.threads.find((thread) => thread.id === THREAD_ID)!;
+      const first = source.activities[0]!;
+      const firstPayload = first.payload as Record<string, unknown>;
+      const firstChild = firstPayload.subagent as Record<string, unknown>;
+      if (typeof firstPayload.taskId !== "string")
+        throw new Error("Synthetic native task identity missing");
+      const firstId = firstPayload.taskId;
+      const secondId = "provider-child-independent-audit";
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        threads: base.threads.map((thread) =>
+          thread.id !== THREAD_ID
+            ? thread
+            : {
+                ...thread,
+                activities: [
+                  ...thread.activities,
+                  {
+                    ...first,
+                    id: EventId.make("activity-independent-subagent"),
+                    sequence: 2,
+                    payload: {
+                      ...firstPayload,
+                      taskId: secondId,
+                      subagent: {
+                        ...firstChild,
+                        threadId: secondId,
+                        label: "Independent lifecycle audit",
+                      },
+                    },
+                  },
+                ],
+              },
+        ),
+      };
+      await owner.mount({ viewport: WIDE_FOOTER_VIEWPORT, snapshot });
+      await owner.own("editor", () => waitForComposerEditor());
+      let sequence = snapshot.snapshotSequence;
+      const publish = async (
+        runtimeId: string,
+        agentCount: number,
+        unconfirmedAgentIds: string[],
+      ) => {
+        owner.assertActive();
+        const liveWork = {
+          runtimeId: SubagentRuntimeId.make(runtimeId),
+          taskCount: agentCount,
+          agentCount,
+          unconfirmedAgentIds,
+          unconfirmedAgentIdsTruncated: false,
+        };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
+          kind: "thread-upserted",
+          sequence: ++sequence,
+          thread: { ...toShellThread(source), liveWork },
+        });
+        await owner.own("snapshot", () =>
+          vi.waitFor(() => {
+            owner.assertActive();
+            expect(
+              selectSidebarThreadSummaryByRef(useStore.getState(), THREAD_REF)?.liveWork,
+            ).toEqual(liveWork);
+          }),
+        );
+      };
+      const counter = (count: number) =>
+        page.getByRole("button", {
+          name: `${count} active subagent${count === 1 ? "" : "s"}. Show task list`,
+          exact: true,
+        });
+      const roster = page.getByRole("region", { name: "Active subagents" });
+      const firstRow = roster.getByRole("button", { name: /^Browser lifecycle audit, Working\./ });
+      const secondRow = roster.getByRole("button", {
+        name: /^Independent lifecycle audit, Working\./,
+      });
+      const warning = page.getByText("Some agent status information is unavailable.", {
+        exact: true,
+      });
+      await publish(SUBAGENT_RUNTIME_ID, 2, []);
+      await owner.own("controls", () => counter(2).click());
+      await owner.own("rail", () => expect.element(firstRow).toBeVisible());
+      await owner.own("rail", () => expect.element(secondRow).toBeVisible());
+
+      // A shell observation from another native runtime has no authority over
+      // the current worker roster or its uncertainty warning.
+      await publish("b73284bf-01be-4dbf-94c8-b54e54f17802", 1, [firstId]);
+      await owner.own("rail", () => expect.element(counter(2)).toBeVisible());
+      await owner.own("rail", () => expect.element(firstRow).toBeVisible());
+      await owner.own("prompt", () => expect.element(warning).not.toBeInTheDocument());
+
+      await publish(SUBAGENT_RUNTIME_ID, 1, [firstId]);
+      await owner.own("rail", () => expect.element(counter(1)).toBeVisible());
+      await owner.own("rail", () => expect.element(firstRow).not.toBeInTheDocument());
+      await owner.own("rail", () => expect.element(secondRow).toBeVisible());
+      await owner.own("prompt", () => expect.element(warning).toBeVisible());
+
+      await publish(SUBAGENT_RUNTIME_ID, 2, []);
+      await owner.own("rail", () => expect.element(counter(2)).toBeVisible());
+      await owner.own("rail", () => expect.element(firstRow).toBeVisible());
+      await owner.own("rail", () => expect.element(secondRow).toBeVisible());
+      await owner.own("prompt", () => expect.element(warning).not.toBeInTheDocument());
+    });
+  });
+
+  it("shows pending-request omission only while the authoritative detail remains incomplete", async (context) => {
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "composer-unanswered",
+    });
+    await owner.run(async () => {
+      const base = createSnapshotWithActiveSubagent();
+      await owner.mount({
+        viewport: WIDE_FOOTER_VIEWPORT,
+        snapshot: {
+          ...base,
+          threads: base.threads.map((thread) => ({
+            ...thread,
+            pendingRequestRetentionTruncated: false,
+          })),
+        },
+      });
+      await owner.own("editor", () => waitForComposerEditor());
+      const warning = page.getByText("Some pending requests are not shown.", { exact: true });
+      await owner.own("prompt", () => expect.element(warning).not.toBeInTheDocument());
+
+      for (const incomplete of [true, false]) {
+        owner.assertActive();
+        const current = chatViewFixture.fixture.snapshot;
+        const snapshotSequence = current.snapshotSequence + 1;
+        const thread = {
+          ...current.threads.find((candidate) => candidate.id === THREAD_ID)!,
+          pendingRequestRetentionTruncated: incomplete,
+        };
+        chatViewFixture.fixture.snapshot = {
+          ...current,
+          snapshotSequence,
+          threads: current.threads.map((candidate) =>
+            candidate.id === THREAD_ID ? thread : candidate,
+          ),
+        };
+        // Use the ordinary authoritative detail stream, rather than writing
+        // the store or component state that owns the warning directly.
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence, thread },
+        });
+        await owner.own("snapshot", () =>
+          vi.waitFor(() => {
+            owner.assertActive();
+            expect(
+              selectThreadByRef(useStore.getState(), THREAD_REF)?.pendingRequestRetentionTruncated,
+            ).toBe(incomplete);
+          }),
+        );
+        await owner.own("prompt", () =>
+          incomplete
+            ? expect.element(warning).toBeVisible()
+            : expect.element(warning).not.toBeInTheDocument(),
+        );
+      }
+    });
+  });
 
   const snapshotWithTerminalRoot = (
     mode: "retry" | "agents" | "uncertain" | "foreign" | "cancelled",
@@ -121,7 +295,12 @@ describe("ChatView full app (recovery-footer)", () => {
     };
   };
 
-  it("keeps a persisted provider failure discoverable in the Work Log without clearing canonical error state", async () => {
+  it("keeps a persisted provider failure discoverable in the Work Log without clearing canonical error state", async (context) => {
+    let restoreToastSpy: (() => void) | undefined;
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "recovery-diagnostic-visibility",
+      afterUnmount: () => restoreToastSpy?.(),
+    });
     const base = snapshotWithTerminalRoot("agents");
     const source = base.threads[0]!;
     const failure = source.session!.lastError!;
@@ -130,25 +309,41 @@ describe("ChatView full app (recovery-footer)", () => {
         new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))),
         (byte) => byte.toString(16).padStart(2, "0"),
       ).join("");
-    const providerErrorHash = await hash(failure);
-    const providerErrorOwnerHash = await hash(
-      JSON.stringify([
-        source.id,
-        source.latestTurn!.turnId,
-        source.session!.providerInstanceId,
-        source.session!.subagentRuntimeId,
-      ]),
+    const providerErrorHash = await owner.own("config", () => hash(failure));
+    const providerErrorOwnerHash = await owner.own("config", () =>
+      hash(
+        JSON.stringify([
+          source.id,
+          source.latestTurn!.turnId,
+          source.session!.providerInstanceId,
+          source.session!.subagentRuntimeId,
+        ]),
+      ),
     );
     const activityId = EventId.make("persisted-provider-error-exact-occurrence");
     const privateMessage = "Private synthetic received error details";
     const privateJson = JSON.stringify({
       error: { message: privateMessage, code: "synthetic_503" },
     });
+    const unstartedAt = isoAt(1_011);
+    const privateStartFailure = "Private synthetic legacy start failure";
     const snapshot: OrchestrationReadModel = {
       ...base,
       threads: [
         {
           ...source,
+          messages: [
+            ...source.messages,
+            {
+              id: MessageId.make("accepted-unstarted-recovery-message"),
+              role: "user",
+              text: "Keep this accepted message visible",
+              turnId: null,
+              streaming: false,
+              createdAt: unstartedAt,
+              updatedAt: unstartedAt,
+            },
+          ],
           activities: [
             ...source.activities,
             {
@@ -165,13 +360,24 @@ describe("ChatView full app (recovery-footer)", () => {
                 providerErrorOwnerHash,
               },
             },
+            {
+              id: EventId.make("legacy-unstarted-recovery-failure"),
+              kind: "provider.turn.start.failed",
+              tone: "error",
+              summary: "Provider turn start failed",
+              turnId: null,
+              sequence: 4,
+              createdAt: unstartedAt,
+              payload: { detail: privateStartFailure },
+            },
           ],
         },
       ],
     };
     const detailRequests: NormalizedWsRpcRequestBody[] = [];
     const toastSpy = vi.spyOn(toastManager, "add");
-    const mounted = await mountChatView({
+    restoreToastSpy = () => toastSpy.mockRestore();
+    await owner.mount({
       viewport: WIDE_FOOTER_VIEWPORT,
       snapshot,
       resolveRpc: (body) => {
@@ -200,13 +406,23 @@ describe("ChatView full app (recovery-footer)", () => {
         element.textContent?.includes(failure),
       ) ?? null;
     try {
-      await waitForComposerEditor();
-      await vi.waitFor(() => {
-        expect(errorBanner()).toBeNull();
-        expect(document.querySelector('[data-work-log-provider-errors="true"]')?.textContent).toBe(
-          "Provider error · 1",
-        );
-      });
+      await owner.own("editor", () => waitForComposerEditor());
+      await owner.own("work-log", () =>
+        vi.waitFor(() => {
+          expect(errorBanner()).toBeNull();
+          expect(
+            document.querySelector('[data-work-log-provider-errors="true"]')?.textContent,
+          ).toBe("Provider error · 1");
+        }),
+      );
+      // Exercise ChatView's real main-work-log memo and ordinary row renderer:
+      // the accepted message and its failed start have no provider TurnId.
+      await owner.own("work-log", () =>
+        expect
+          .element(page.getByRole("button", { name: "Provider turn start failed", exact: true }))
+          .toBeVisible(),
+      );
+      expect(document.body.textContent).not.toContain(privateStartFailure);
       expect(detailRequests).toHaveLength(0);
       expect(document.body.textContent).not.toContain(privateMessage);
       expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
@@ -219,9 +435,13 @@ describe("ChatView full app (recovery-footer)", () => {
         name: "Inspect provider diagnostic: Root · Provider error",
         exact: true,
       });
-      await expect.element(inspect).toHaveAttribute("aria-expanded", "false");
-      await inspect.click();
-      await expect.element(page.getByText(privateMessage, { exact: true })).toBeVisible();
+      await owner.own("work-log", () =>
+        expect.element(inspect).toHaveAttribute("aria-expanded", "false"),
+      );
+      await owner.own("controls", () => inspect.click());
+      await owner.own("receipt", () =>
+        expect.element(page.getByText(privateMessage, { exact: true })).toBeVisible(),
+      );
       expect(detailRequests).toHaveLength(1);
       expect(detailRequests[0]).toMatchObject({
         threadId: THREAD_ID,
@@ -230,13 +450,17 @@ describe("ChatView full app (recovery-footer)", () => {
       });
       // Raw JSON stays behind the explicit Technical details disclosure.
       expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
-      await page.getByRole("button", { name: "Technical details", exact: true }).click();
-      await vi.waitFor(() => {
-        expect(document.querySelector("[data-provider-diagnostic-json]")?.textContent).toBe(
-          privateJson,
-        );
-      });
-      await inspect.click();
+      await owner.own("controls", () =>
+        page.getByRole("button", { name: "Technical details", exact: true }).click(),
+      );
+      await owner.own("receipt", () =>
+        vi.waitFor(() => {
+          expect(document.querySelector("[data-provider-diagnostic-json]")?.textContent).toBe(
+            privateJson,
+          );
+        }),
+      );
+      await owner.own("controls", () => inspect.click());
       expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
       expect(document.body.textContent).not.toContain(privateMessage);
       expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.error).toBe(failure);
@@ -244,8 +468,7 @@ describe("ChatView full app (recovery-footer)", () => {
         source.latestTurn,
       );
     } finally {
-      await mounted.cleanup();
-      toastSpy.mockRestore();
+      await owner.cleanup();
     }
   });
 

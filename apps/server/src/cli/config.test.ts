@@ -93,7 +93,11 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       const desktopReadinessToken = "ab".repeat(32);
       for (const mode of ["desktop", "web"] as const) {
         const fd = yield* openBootstrapFd(
-          makeDesktopBootstrap({ cafeCodeHome: baseDir, desktopReadinessToken }),
+          makeDesktopBootstrap({
+            cafeCodeHome: baseDir,
+            desktopReadinessToken,
+            desktopPowerStateFd: 5,
+          }),
         );
         const resolved = yield* resolveServerConfig(
           { ...readinessServerFlags, mode: Option.some(mode) },
@@ -117,6 +121,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           mode === "desktop" ? desktopReadinessToken : undefined,
         );
         expect(resolved.desktopBootstrapToken).toBe("desktop-bootstrap-token");
+        expect(resolved.desktopPowerStateFd).toBe(mode === "desktop" ? 5 : undefined);
       }
     }),
   );
@@ -133,7 +138,10 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           Layer.mergeAll(
             ConfigProvider.layer(
               ConfigProvider.fromEnv({
-                env: { CAFE_CODE_DESKTOP_READINESS_TOKEN: "ab".repeat(32) },
+                env: {
+                  CAFE_CODE_DESKTOP_READINESS_TOKEN: "ab".repeat(32),
+                  CAFE_CODE_DESKTOP_POWER_STATE_FD: "5",
+                },
               }),
             ),
             NetService.layer,
@@ -141,6 +149,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         ),
       );
       expect(resolved.desktopReadinessToken).toBeUndefined();
+      expect(resolved.desktopPowerStateFd).toBeUndefined();
     }),
   );
 

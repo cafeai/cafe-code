@@ -28,7 +28,7 @@ import { isElectron } from "../../env";
 import { retainThreadDetailSubscription } from "../../environments/runtime/service";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { Skeleton } from "../ui/skeleton";
-import { ThreadStatusLabel } from "../ThreadStatusIndicators";
+import { ThreadStatusLabel } from "../ThreadStatusLabel";
 import {
   getThreadStatusPill,
   resolveThreadStatusPill,
@@ -228,15 +228,13 @@ function useAtriumTint(): string {
   const atriumColor = useSettings((settings) => settings.ambianceAtriumColor);
   const ambianceColor = useSettings((settings) => settings.ambianceColor);
   const appAccentColor = useSettings((settings) => settings.appAccentColor);
-  const themeAccentColor = useSettings((settings) => settings.themeAccentColor);
   return useMemo(
     () =>
       normalizeAccentColor(atriumColor) ??
       normalizeAccentColor(ambianceColor) ??
       normalizeAccentColor(appAccentColor) ??
-      normalizeAccentColor(themeAccentColor) ??
       FALLBACK_TINT,
-    [atriumColor, ambianceColor, appAccentColor, themeAccentColor],
+    [atriumColor, ambianceColor, appAccentColor],
   );
 }
 

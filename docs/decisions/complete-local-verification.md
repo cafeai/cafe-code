@@ -2,7 +2,7 @@
 
 Decision status: Accepted within the authorized local implementation scope
 Created: 2026-10-20 08:25:58 JST (UTC+0900)
-Last updated: 2026-10-20 14:15:56 JST (UTC+0900)
+Last updated: 2026-10-24 03:09:06 JST (UTC+0900)
 Decision authority: implementation discretion under the human's request to focus
 on local test-performance improvements; no hosted or publication-policy change.
 Implementation status: Implemented; the qualification procedure and evidence limits
@@ -10,7 +10,14 @@ below apply to each resulting source state. Acceptance alone does not attest a p
 Supersedes: None. Existing isolation, required coverage and final-build rules remain.
 Superseded in part by: [three-slot typechecking](three-slot-typechecking.md),
 only for typecheck default/allowed admission and its CI scope. The historical
-one/two-compiler rationale below is retained; all other decisions remain active.
+one/two-compiler rationale below is retained. Also superseded in part by
+[exact-input local result reuse](verified-local-result-cache.md), only for the
+prohibition on local test/typecheck success caching. Historical rationale below
+is preserved; CI/release, resource, coverage and final-build rules remain active.
+The default local Node admission portion is separately superseded by
+[CI-matched default local Node scheduling](ci-matched-local-node-scheduling.md).
+Explicit bounded overrides remain available; the historical decision below is
+retained rather than retroactively describing the new default as the old one.
 
 ## Context and alternatives
 

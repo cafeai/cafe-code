@@ -68,6 +68,46 @@ const decodeThreadTurnSubagentDetail = Schema.decodeUnknownEffect(
   OrchestrationThreadTurnSubagentDetail,
 );
 
+it.effect("keeps MCP question commands behind the internal orchestration boundary", () =>
+  Effect.gen(function* () {
+    const common = {
+      commandId: "mcp-command",
+      threadId: "mcp-thread",
+      noticeMessageId: "mcp-notice",
+      createdAt: "2026-11-05T00:00:00.000Z",
+    };
+    const commands = [
+      {
+        ...common,
+        type: "thread.mcp-user-input.respond",
+        requestId: "mcp-request",
+        expectedRequestCreatedAt: common.createdAt,
+        answers: { choice: "A" },
+        action: "answered",
+      },
+      {
+        ...common,
+        type: "thread.async-question.answer",
+        activityId: `codex-async-questions:${"a".repeat(64)}`,
+        questionIndex: 0,
+        answer: "A",
+        messageId: "mcp-answer",
+      },
+      {
+        ...common,
+        type: "thread.mcp-async-questions.resolve",
+        activityId: `codex-async-questions:${"a".repeat(64)}`,
+        questionIndexes: [0],
+        action: "skipped",
+      },
+    ];
+    for (const command of commands) {
+      assert.deepEqual(yield* decodeOrchestrationCommand(command), command);
+      assert.equal((yield* Effect.exit(decodeClientOrchestrationCommand(command)))._tag, "Failure");
+    }
+  }),
+);
+
 it("qualifies optional Cafe continuation ordinals independently from delay bookkeeping", () => {
   const decode = Schema.decodeUnknownSync(ThreadTurnRuntimeRecovery);
   const recovery = {

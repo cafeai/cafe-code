@@ -105,6 +105,15 @@ export interface ProviderRegistryShape {
   ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
 
   /**
+   * Forward a definitive authentication refusal observed by the native session
+   * owner to this registry's instance so the account presents as signed out.
+   * No-op for unknown instances or drivers without credential refusal state.
+   */
+  readonly observeInstanceAuthenticationRefusal?: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<void>;
+
+  /**
    * Refresh only one instance's provider-owned model catalogue. This is a
    * no-op for drivers that do not expose a bounded model-list path and never
    * falls back to a full installation/authentication/account probe.

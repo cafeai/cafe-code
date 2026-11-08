@@ -1,8 +1,10 @@
 import { uiText } from "@cafecode/shared/i18n";
+import { isLiveWorkRuntimeCurrent } from "@cafecode/shared/liveWork";
 import {
   MAX_TASK_ATRIUM_ERROR_DISMISSALS,
   type EnvironmentId,
   type OrchestrationLatestTurn,
+  type OrchestrationLiveWork,
   type OrchestrationSessionStatus,
   type OrchestrationThreadActivity,
   type ProviderTurnConfiguration,
@@ -14,6 +16,7 @@ import {
 import type { AppState } from "../../store";
 import type { ThreadSession } from "../../types";
 import { readTurnConfiguration } from "../../turnConfiguration";
+import { deriveActiveSubagentWorkEntries } from "../../session-logic";
 import {
   deriveSubagentActivities,
   subagentDisplayLabel,
@@ -130,6 +133,8 @@ type CachedSubagentRows = {
   cardTerminal: boolean;
   runtimeId: string | null | undefined;
   runtimeStatus: OrchestrationSessionStatus | null;
+  /** Shell-only ownership hints can change while every activity stays stable. */
+  liveWork: OrchestrationLiveWork | undefined;
   rows: AtriumSubagent[];
 };
 
@@ -183,27 +188,13 @@ function collectTurnConfiguration(
   return null;
 }
 
-function isSubagentActivity(activity: OrchestrationThreadActivity): boolean {
-  const payload = activity.payload;
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return false;
-  const fields = payload as Record<string, unknown>;
-  const structuredLifecycle =
-    (activity.kind === "task.started" ||
-      activity.kind === "task.progress" ||
-      activity.kind === "task.completed") &&
-    ((typeof fields.subagent === "object" &&
-      fields.subagent !== null &&
-      !Array.isArray(fields.subagent)) ||
-      (fields.visibility === "ambient" && typeof fields.taskId === "string"));
-  return structuredLifecycle || fields.itemType === "collab_agent_tool_call";
-}
-
 function collectSubagents(
   activityIds: readonly string[] | undefined,
   activityById: Record<string, OrchestrationThreadActivity> | undefined,
   latestTurnId: TurnId | null,
   cardTerminal: boolean,
   runtimeSession: SubagentRuntimeContext | null,
+  liveWork: OrchestrationLiveWork | undefined,
 ): AtriumSubagent[] {
   if (!activityIds || !activityById) return [];
   const cached = SUBAGENT_ROWS_BY_ACTIVITY_IDS.get(activityIds);
@@ -212,7 +203,8 @@ function collectSubagents(
     cached.latestTurnId === latestTurnId &&
     cached.cardTerminal === cardTerminal &&
     cached.runtimeId === runtimeSession?.subagentRuntimeId &&
-    cached.runtimeStatus === (runtimeSession?.orchestrationStatus ?? null)
+    cached.runtimeStatus === (runtimeSession?.orchestrationStatus ?? null) &&
+    cached.liveWork === liveWork
   ) {
     return cached.rows;
   }
@@ -221,7 +213,9 @@ function collectSubagents(
   const terminalTurnIds = new Set<TurnId>();
   for (const id of activityIds) {
     const activity = activityById[id];
-    if (!activity || !isSubagentActivity(activity)) continue;
+    if (!activity) continue;
+    // Keep the complete bounded projection. Native terminals/retractions may
+    // omit their earlier child descriptor and still retire that exact owner.
     activities.push(activity);
     // Structured lifecycle has explicit terminal truth. This set exists for
     // persisted legacy `Started /root/...` rows, whose tool completion only
@@ -235,6 +229,18 @@ function collectSubagents(
     }
   }
 
+  // History retains each per-turn row and its exact detail/control identity.
+  // Running membership separately follows the same current native owner and
+  // unconfirmed-source hints as the composer. Neither an obsolete start nor
+  // missing local terminal evidence can overrule an exact-runtime zero count.
+  const activeRowIds = new Set(
+    isLiveWorkRuntimeCurrent(liveWork?.runtimeId, runtimeSession) && liveWork?.agentCount === 0
+      ? []
+      : deriveActiveSubagentWorkEntries(activities, cardTerminal ? null : latestTurnId, {
+          runtimeSession,
+          liveWork,
+        }).map((entry) => entry.id),
+  );
   const rows = deriveSubagentActivities(activities, { terminalTurnIds, runtimeSession }).map(
     (subagent) => ({
       activity: subagent,
@@ -255,7 +261,7 @@ function collectSubagents(
               ? uiText("Status unavailable")
               : uiText("Done")),
       status: subagent.status,
-      running: subagent.status === "active" || subagent.status === "waiting",
+      running: activeRowIds.has(subagent.rowId),
       startedAt: toEpoch(subagent.startedAt),
       completedAt: toEpoch(subagent.completedAt),
     }),
@@ -266,6 +272,7 @@ function collectSubagents(
     cardTerminal,
     runtimeId: runtimeSession?.subagentRuntimeId,
     runtimeStatus: runtimeSession?.orchestrationStatus ?? null,
+    liveWork,
     rows,
   });
   return rows;
@@ -510,6 +517,7 @@ export function selectAtriumSnapshot(
         latestTurn?.turnId ?? null,
         cardState === "done" || cardState === "error",
         session,
+        summary.liveWork,
       );
       // Root failure and native context failure are independent. An exact
       // current-generation worker remains discoverable even if its failed

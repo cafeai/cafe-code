@@ -20,6 +20,7 @@ import * as Schema from "effect/Schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as environmentService from "./service";
+import type { SavedEnvironmentRecord } from "./catalog";
 
 // Collect the real service as a module dependency rather than spending a test
 // lifecycle hook on its import graph. Its mock factories run before ordinary
@@ -55,7 +56,9 @@ const {
   },
 }));
 const mockConnectionReconnects: Array<ReturnType<typeof vi.fn>> = [];
-let savedEnvironmentRegistryListener: (() => void) | null = null;
+type RegistrySnapshot = { byId: Record<EnvironmentId, SavedEnvironmentRecord> };
+type RegistryListener = (state: RegistrySnapshot, previous: RegistrySnapshot) => unknown;
+let savedEnvironmentRegistryListener: RegistryListener | null = null;
 
 const encodeThreadDetailSnapshotJson = Schema.encodeSync(
   Schema.fromJsonString(OrchestrationThreadDetailSnapshot),
@@ -357,7 +360,7 @@ describe("retainThreadDetailSubscription", () => {
       };
     });
     savedEnvironmentRegistryListener = null;
-    mockSavedEnvironmentRegistrySubscribe.mockImplementation((listener: () => void) => {
+    mockSavedEnvironmentRegistrySubscribe.mockImplementation((listener: RegistryListener) => {
       savedEnvironmentRegistryListener = listener;
       return () => {
         if (savedEnvironmentRegistryListener === listener) {
@@ -647,7 +650,7 @@ describe("retainThreadDetailSubscription", () => {
     } = await import("./service");
 
     const stop = startEnvironmentConnectionService(new QueryClient());
-    savedEnvironmentRegistryListener?.();
+    savedEnvironmentRegistryListener?.({ byId: { [environmentId]: record } }, { byId: {} });
     await vi.waitFor(() => {
       expect(mockCreateEnvironmentConnection).toHaveBeenCalledTimes(2);
       expect(

@@ -2,6 +2,24 @@ import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
 import {
+  closestCenter,
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { restrictToVerticalAxis, restrictToFirstScrollableAncestor } from "@dnd-kit/modifiers";
+import { CSS } from "@dnd-kit/utilities";
+import {
+  GripVerticalIcon,
+  PencilIcon,
   PlusIcon,
   RefreshCcwIcon,
   ServerIcon,
@@ -9,7 +27,7 @@ import {
   TriangleAlertIcon,
   UnplugIcon,
 } from "lucide-react";
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useId, useMemo, useState } from "react";
 import { SecondFactorInput } from "../auth/SecondFactorInput";
 
 import {
@@ -20,6 +38,11 @@ import {
 } from "~/environments/runtime/catalog";
 import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import { remoteEnvironmentErrorMessage } from "~/environments/remote/api";
+import {
+  applySavedEnvironmentEdit,
+  savedEnvironmentEditFields,
+  type SavedEnvironmentEdit,
+} from "~/environments/runtime/savedEnvironmentEdit";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -51,7 +74,9 @@ export interface SavedEnvironmentActions {
   readonly add: typeof import("~/environments/runtime/service").addSavedEnvironment;
   readonly disconnect: typeof import("~/environments/runtime/service").disconnectSavedEnvironment;
   readonly reconnect: typeof import("~/environments/runtime/service").reconnectSavedEnvironment;
+  readonly reviewCertificate: typeof import("~/environments/runtime/service").reviewSavedEnvironmentCertificate;
   readonly remove: typeof import("~/environments/runtime/service").removeSavedEnvironment;
+  readonly update: typeof import("~/environments/runtime/service").updateSavedEnvironment;
 }
 
 const DEFAULT_SAVED_ENVIRONMENT_ACTIONS: SavedEnvironmentActions = {
@@ -60,8 +85,14 @@ const DEFAULT_SAVED_ENVIRONMENT_ACTIONS: SavedEnvironmentActions = {
     (await import("~/environments/runtime/service")).disconnectSavedEnvironment(environmentId),
   reconnect: async (environmentId) =>
     (await import("~/environments/runtime/service")).reconnectSavedEnvironment(environmentId),
+  reviewCertificate: async (environmentId) =>
+    (await import("~/environments/runtime/service")).reviewSavedEnvironmentCertificate(
+      environmentId,
+    ),
   remove: async (environmentId) =>
     (await import("~/environments/runtime/service")).removeSavedEnvironment(environmentId),
+  update: async (environmentId, input) =>
+    (await import("~/environments/runtime/service")).updateSavedEnvironment(environmentId, input),
 };
 
 function safeSavedEnvironmentHost(httpBaseUrl: string): string {
@@ -119,26 +150,52 @@ function SavedEnvironmentRow({
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
-  const [pendingAction, setPendingAction] = useState<"reconnect" | "disconnect" | "remove" | null>(
-    null,
-  );
+  const [pendingAction, setPendingAction] = useState<
+    "reconnect" | "disconnect" | "remove" | "update" | "certificate" | null
+  >(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [isRemoveDialogOpen, setIsRemoveDialogOpen] = useState(false);
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+  const [edit, setEdit] = useState<SavedEnvironmentEdit>({ label: "", host: "", port: "" });
+  const editId = useId();
+  const {
+    attributes,
+    listeners,
+    setActivatorNodeRef,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
+    id: record.environmentId,
+    disabled: pendingAction !== null || isEditDialogOpen,
+  });
 
+  const certificateStatus = runtime?.certificateStatus;
   const isRetrying =
     runtime?.reconnectPhase === "attempting" || runtime?.reconnectPhase === "waiting";
-  const isConnecting = runtime?.connectionState === "connecting" || isRetrying;
-  const isConnected = runtime?.connectionState === "connected";
+  const isConnecting =
+    !certificateStatus && (runtime?.connectionState === "connecting" || isRetrying);
+  const isConnected = !certificateStatus && runtime?.connectionState === "connected";
   const isError = runtime?.connectionState === "error" || runtime?.reconnectPhase === "exhausted";
   const requiresAuth = runtime?.authState === "requires-auth";
   const versionMismatch = uiPresentation.resolveServerConfigVersionMismatch(runtime?.serverConfig);
-  const actionsDisabled = isConnecting || pendingAction !== null;
+  // Local editing and removal remain available during connection retries.
+  const actionsDisabled = pendingAction !== null;
   const displayLabel =
     record.label.trim() || uiText("Unnamed environment", undefined, undefined, uiLocale);
 
   let statusText = uiText("Disconnected", undefined, undefined, uiLocale);
   let dotColor = "bg-muted-foreground";
-  if (requiresAuth) {
+  if (certificateStatus) {
+    statusText =
+      certificateStatus === "changed"
+        ? uiText("Certificate changed", undefined, undefined, uiLocale)
+        : certificateStatus === "untrusted"
+          ? uiText("Certificate approval required", undefined, undefined, uiLocale)
+          : uiText("Invalid certificate", undefined, undefined, uiLocale);
+    dotColor = "bg-destructive";
+  } else if (requiresAuth) {
     statusText = uiText("Pairing required", undefined, undefined, uiLocale);
     dotColor = "bg-destructive";
   } else if (isConnecting) {
@@ -154,61 +211,123 @@ function SavedEnvironmentRow({
     dotColor = "bg-destructive";
   }
 
-  const runAction = async (action: "reconnect" | "disconnect" | "remove") => {
-    if (actionsDisabled) return;
+  const runAction = async (action: "reconnect" | "disconnect" | "remove" | "certificate") => {
+    if (actionsDisabled || (action !== "remove" && action !== "certificate" && isConnecting))
+      return;
 
     setPendingAction(action);
     setActionError(null);
     try {
-      if (action === "reconnect") {
+      if (action === "certificate") {
+        await actions.reviewCertificate(record.environmentId);
+      } else if (action === "reconnect") {
         await actions.reconnect(record.environmentId);
       } else if (action === "disconnect") {
         await actions.disconnect(record.environmentId);
       } else {
         await actions.remove(record.environmentId);
         setIsRemoveDialogOpen(false);
+        setIsEditDialogOpen(false);
       }
-    } catch {
+    } catch (error) {
       setActionError(
-        action === "remove"
-          ? uiText(
-              "Could not remove this saved environment. Try again.",
-              undefined,
-              undefined,
-              uiLocale,
+        action === "certificate"
+          ? uiPresentation.remoteEnvironmentErrorMessage(
+              error,
+              uiText(
+                "Could not review this certificate. Check the server and try again.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
             )
-          : uiText(
-              "Could not update this connection. Check that the server is reachable and try again.",
-              undefined,
-              undefined,
-              uiLocale,
-            ),
+          : action === "remove"
+            ? uiText(
+                "Could not remove this saved environment. Try again.",
+                undefined,
+                undefined,
+                uiLocale,
+              )
+            : uiText(
+                "Could not update this connection. Check that the server is reachable and try again.",
+                undefined,
+                undefined,
+                uiLocale,
+              ),
       );
     } finally {
       setPendingAction(null);
     }
   };
 
-  const runtimeError = requiresAuth
-    ? uiText(
-        "The saved credential is missing or expired. Pair this server again.",
-        undefined,
-        undefined,
-        uiLocale,
-      )
-    : isError
+  const saveEdit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (actionsDisabled) return;
+    setActionError(null);
+    try {
+      applySavedEnvironmentEdit(record, edit);
+    } catch {
+      setActionError(
+        uiText(
+          "Enter a name, a valid IP address or hostname, and a port between 1 and 65535.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
+      );
+      return;
+    }
+    setPendingAction("update");
+    try {
+      await actions.update(record.environmentId, edit);
+      setIsEditDialogOpen(false);
+    } catch {
+      setActionError(
+        uiText("Could not save this environment. Try again.", undefined, undefined, uiLocale),
+      );
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
+  const runtimeError = certificateStatus
+    ? null
+    : requiresAuth
       ? uiText(
-          "The server could not be reached or rejected the saved session.",
+          "The saved credential is missing or expired. Pair this server again.",
           undefined,
           undefined,
           uiLocale,
         )
-      : null;
+      : isError
+        ? uiText(
+            "The server could not be reached or rejected the saved session.",
+            undefined,
+            undefined,
+            uiLocale,
+          )
+        : null;
 
   return (
-    <div className={ITEM_ROW_CLASSNAME}>
+    <li
+      ref={setNodeRef}
+      className={`${ITEM_ROW_CLASSNAME} relative ${isDragging ? "z-10 bg-muted" : ""}`}
+      style={{ transform: CSS.Translate.toString(transform), transition }}
+    >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 flex-1 items-start gap-3">
+          <Button
+            ref={setActivatorNodeRef}
+            variant="ghost"
+            size="icon"
+            className="shrink-0 cursor-grab touch-none text-muted-foreground active:cursor-grabbing"
+            disabled={actionsDisabled || isEditDialogOpen}
+            {...attributes}
+            {...listeners}
+            aria-label={uiText("Reorder {value0}", { value0: displayLabel }, undefined, uiLocale)}
+          >
+            <GripVerticalIcon className="size-4" />
+          </Button>
           <div className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-muted text-muted-foreground">
             <ServerIcon className="size-4" />
           </div>
@@ -241,7 +360,7 @@ function SavedEnvironmentRow({
             {runtimeError ? (
               <span className="text-xs text-destructive-foreground">{runtimeError}</span>
             ) : null}
-            {actionError ? (
+            {actionError && !isEditDialogOpen ? (
               <span className="text-xs text-destructive-foreground">{actionError}</span>
             ) : null}
           </div>
@@ -254,7 +373,12 @@ function SavedEnvironmentRow({
                 <Button
                   variant="outline"
                   size="icon"
-                  disabled={actionsDisabled}
+                  disabled={
+                    actionsDisabled ||
+                    isConnecting ||
+                    certificateStatus === "changed" ||
+                    certificateStatus === "untrusted"
+                  }
                   aria-label={
                     isConnected
                       ? uiText("Disconnect {value0}", { value0: displayLabel }, undefined, uiLocale)
@@ -285,68 +409,251 @@ function SavedEnvironmentRow({
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="text-muted-foreground hover:text-destructive"
+                  className="text-muted-foreground"
                   disabled={actionsDisabled}
                   aria-label={uiText(
-                    "Remove {value0}",
+                    "Edit {value0}",
                     { value0: displayLabel },
                     undefined,
                     uiLocale,
                   )}
                   onClick={() => {
                     setActionError(null);
-                    setIsRemoveDialogOpen(true);
+                    try {
+                      setEdit(savedEnvironmentEditFields(record));
+                    } catch {
+                      setEdit({ label: record.label, host: "", port: "" });
+                    }
+                    setIsEditDialogOpen(true);
                   }}
                 />
               }
             >
-              <TrashIcon className="size-4" />
+              <PencilIcon className="size-4" />
             </TooltipTrigger>
             <TooltipPopup>
-              {uiText("Remove saved environment", undefined, undefined, uiLocale)}
+              {uiText("Edit saved environment", undefined, undefined, uiLocale)}
             </TooltipPopup>
           </Tooltip>
         </div>
       </div>
 
-      <AlertDialog
-        open={isRemoveDialogOpen}
+      {certificateStatus ? (
+        <div
+          role="alert"
+          className="mt-3 space-y-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive-foreground"
+        >
+          <p className="flex items-start gap-2 font-medium">
+            <TriangleAlertIcon className="mt-0.5 size-4 shrink-0" />
+            {certificateStatus === "changed"
+              ? uiText(
+                  "Security warning: this server's certificate has changed.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
+              : certificateStatus === "untrusted"
+                ? uiText(
+                    "Security warning: this server's certificate is not trusted.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "Connection blocked: the server's certificate is invalid.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
+          </p>
+          <p>
+            {certificateStatus === "invalid-certificate"
+              ? uiText(
+                  "The certificate is expired, invalid, or for another address. Fix the server certificate or edit this connection's address, then try reconnecting.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )
+              : uiText(
+                  "An unexpected certificate can mean a different computer is answering or someone is intercepting your connection. Continue only if you expected the change and can verify the new fingerprint directly on the server.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+          </p>
+          {certificateStatus !== "invalid-certificate" ? (
+            <>
+              <p>
+                {uiText(
+                  "Accepting the new certificate allows Cafe Code to send your saved sign-in credential to this server. Review both fingerprints carefully before trusting it.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+              </p>
+              <Button
+                variant="outline"
+                disabled={actionsDisabled}
+                aria-busy={pendingAction === "certificate" || undefined}
+                onClick={() => void runAction("certificate")}
+              >
+                <BusyButtonLabel busy={pendingAction === "certificate"}>
+                  {uiText("Review certificate", undefined, undefined, uiLocale)}
+                </BusyButtonLabel>
+              </Button>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+
+      <Dialog
+        open={isEditDialogOpen}
         onOpenChange={(open) => {
-          if (pendingAction !== "remove") setIsRemoveDialogOpen(open);
+          if (!actionsDisabled) setIsEditDialogOpen(open);
         }}
       >
-        <AlertDialogPopup>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {uiText("Remove saved environment?", undefined, undefined, uiLocale)}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              <UiMessage
-                message="This removes <slot1></slot1> and its saved credential from this client."
-                slots={{ slot1: displayLabel }}
-              />
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogClose
-              render={<Button variant="outline" disabled={pendingAction !== null} />}
-            >
-              {uiText("Cancel", undefined, undefined, uiLocale)}
-            </AlertDialogClose>
-            <Button
-              variant="destructive"
-              disabled={pendingAction !== null}
-              aria-busy={pendingAction === "remove" || undefined}
-              onClick={() => void runAction("remove")}
-            >
-              <BusyButtonLabel busy={pendingAction === "remove"}>
-                {uiText("Remove", undefined, undefined, uiLocale)}
-              </BusyButtonLabel>
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogPopup>
-      </AlertDialog>
-    </div>
+        <DialogPopup showCloseButton={!actionsDisabled}>
+          <form onSubmit={(event) => void saveEdit(event)} className="flex min-h-0 flex-col">
+            <DialogHeader>
+              <DialogTitle>
+                {uiText("Edit saved environment", undefined, undefined, uiLocale)}
+              </DialogTitle>
+              <DialogDescription>
+                {uiText(
+                  "Update this environment's name and server address on this device.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogPanel className="space-y-4">
+              <div className="space-y-1.5">
+                <label htmlFor={`${editId}-name`} className="text-xs font-medium">
+                  {uiText("Name", undefined, undefined, uiLocale)}
+                </label>
+                <Input
+                  id={`${editId}-name`}
+                  value={edit.label}
+                  onChange={(event) => setEdit({ ...edit, label: event.target.value })}
+                  required
+                  disabled={actionsDisabled}
+                />
+              </div>
+              <div className="flex gap-3">
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <label htmlFor={`${editId}-host`} className="text-xs font-medium">
+                    {uiText("IP address or hostname", undefined, undefined, uiLocale)}
+                  </label>
+                  <Input
+                    id={`${editId}-host`}
+                    value={edit.host}
+                    onChange={(event) => setEdit({ ...edit, host: event.target.value })}
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    required
+                    disabled={actionsDisabled}
+                  />
+                </div>
+                <div className="w-24 space-y-1.5">
+                  <label htmlFor={`${editId}-port`} className="text-xs font-medium">
+                    {uiText("Port", undefined, undefined, uiLocale)}
+                  </label>
+                  <Input
+                    id={`${editId}-port`}
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={65535}
+                    step={1}
+                    value={edit.port}
+                    onChange={(event) => setEdit({ ...edit, port: event.target.value })}
+                    required
+                    disabled={actionsDisabled}
+                  />
+                </div>
+              </div>
+              {actionError ? (
+                <p role="alert" className="text-xs text-destructive-foreground">
+                  {actionError}
+                </p>
+              ) : null}
+            </DialogPanel>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="destructive"
+                className="sm:mr-auto"
+                disabled={actionsDisabled}
+                onClick={() => setIsRemoveDialogOpen(true)}
+              >
+                <TrashIcon className="size-4" />
+                {uiText("Delete", undefined, undefined, uiLocale)}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={actionsDisabled}
+                onClick={() => setIsEditDialogOpen(false)}
+              >
+                {uiText("Cancel", undefined, undefined, uiLocale)}
+              </Button>
+              <Button
+                type="submit"
+                disabled={actionsDisabled}
+                aria-busy={pendingAction === "update" || undefined}
+              >
+                <BusyButtonLabel busy={pendingAction === "update"}>
+                  {uiText("Save", undefined, undefined, uiLocale)}
+                </BusyButtonLabel>
+              </Button>
+            </DialogFooter>
+          </form>
+          <AlertDialog
+            open={isRemoveDialogOpen}
+            onOpenChange={(open) => {
+              if (pendingAction !== "remove") setIsRemoveDialogOpen(open);
+            }}
+          >
+            <AlertDialogPopup>
+              <AlertDialogHeader>
+                <AlertDialogTitle>
+                  {uiText("Remove saved environment?", undefined, undefined, uiLocale)}
+                </AlertDialogTitle>
+                <AlertDialogDescription>
+                  <UiMessage
+                    message="This removes <slot1></slot1> and its saved credential from this client."
+                    slots={{ slot1: displayLabel }}
+                  />
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              {actionError ? (
+                <p role="alert" className="px-6 text-xs text-destructive-foreground">
+                  {actionError}
+                </p>
+              ) : null}
+              <AlertDialogFooter>
+                <AlertDialogClose
+                  render={<Button variant="outline" disabled={pendingAction !== null} />}
+                >
+                  {uiText("Cancel", undefined, undefined, uiLocale)}
+                </AlertDialogClose>
+                <Button
+                  variant="destructive"
+                  disabled={pendingAction !== null}
+                  aria-busy={pendingAction === "remove" || undefined}
+                  onClick={() => void runAction("remove")}
+                >
+                  <BusyButtonLabel busy={pendingAction === "remove"}>
+                    {uiText("Remove", undefined, undefined, uiLocale)}
+                  </BusyButtonLabel>
+                </Button>
+              </AlertDialogFooter>
+            </AlertDialogPopup>
+          </AlertDialog>
+        </DialogPopup>
+      </Dialog>
+    </li>
   );
 }
 
@@ -632,10 +939,12 @@ export function SavedEnvironmentsSettings({
 
   const registryById = useSavedEnvironmentRegistryStore((state) => state.byId);
   const runtimeById = useSavedEnvironmentRuntimeStore((state) => state.byId);
-  const records = useMemo(
-    () => Object.values(registryById).sort((left, right) => left.label.localeCompare(right.label)),
-    [registryById],
+  const reorder = useSavedEnvironmentRegistryStore((state) => state.reorder);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
+  const records = useMemo(() => Object.values(registryById), [registryById]);
 
   return (
     <SettingsSection
@@ -648,14 +957,32 @@ export function SavedEnvironmentsSettings({
           {uiText("No remote servers paired.", undefined, undefined, uiLocale)}
         </p>
       ) : (
-        records.map((record) => (
-          <SavedEnvironmentRow
-            key={record.environmentId}
-            record={record}
-            runtime={runtimeById[record.environmentId]}
-            actions={actions}
-          />
-        ))
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          modifiers={[restrictToVerticalAxis, restrictToFirstScrollableAncestor]}
+          onDragEnd={({ active, over }) => {
+            const from = records.find((record) => record.environmentId === active.id);
+            const to = records.find((record) => record.environmentId === over?.id);
+            if (from && to) reorder(from.environmentId, to.environmentId);
+          }}
+        >
+          <SortableContext
+            items={records.map((record) => record.environmentId)}
+            strategy={verticalListSortingStrategy}
+          >
+            <ol aria-label={uiText("Saved environment order", undefined, undefined, uiLocale)}>
+              {records.map((record) => (
+                <SavedEnvironmentRow
+                  key={record.environmentId}
+                  record={record}
+                  runtime={runtimeById[record.environmentId]}
+                  actions={actions}
+                />
+              ))}
+            </ol>
+          </SortableContext>
+        </DndContext>
       )}
     </SettingsSection>
   );

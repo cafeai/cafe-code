@@ -14,14 +14,15 @@
     "start:debug": "node scripts/start-electron.mjs --cafe-debug",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config ../../vitest.config.ts --passWithNoTests",
-    "smoke-test": "node scripts/smoke-test.mjs"
+    "smoke-test": "node scripts/smoke-test.mjs",
+    "test:mac-keep-awake": "node scripts/test-mac-keep-awake-native.mjs"
   },
   "dependencies": {
     "@cafecode/contracts": "workspace:*",
     "@cafecode/shared": "workspace:*",
     "@effect/platform-node": "catalog:",
     "effect": "catalog:",
-    "electron": "42.11.15",
+    "electron": "43.8.4",
     "electron-updater": "^6.6.2",
     "node-pty": "^1.1.0"
   },

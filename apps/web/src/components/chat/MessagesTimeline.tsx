@@ -1,10 +1,10 @@
 import { useUiLocale, useUiPresentation } from "~/i18n";
 import { flushSync } from "react-dom";
-import { uiText, type UiLocale } from "@cafecode/shared/i18n";
+import { uiFormatNumber, uiText, type UiLocale } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
 import { FileAttachmentPill } from "./FileAttachmentPill";
 import { TurnConfigurationWorkEntry } from "./TurnConfigurationWorkEntry";
-import { ClaudeCommandWorkEntry, ClaudeSummaryWorkEntry } from "./ProviderOperationWorkEntry";
+import { ClaudeCommandWorkEntry, ProviderSummaryWorkEntry } from "./ProviderOperationWorkEntry";
 import { ProviderDiagnosticWorkEntry } from "./ProviderDiagnosticWorkEntry";
 import type { ProviderDiagnosticAction } from "../../providerDiagnostic";
 import {
@@ -42,6 +42,7 @@ import {
   deriveTimelineEntries,
   deriveSubagentWorkEntries,
   deriveWorkLogEntries,
+  primaryClaudeSummaryKey,
   reconcileSubagentWorkEntryRuntime,
   formatElapsed,
   workLogDisplayLabel,
@@ -61,6 +62,7 @@ import {
   GlobeIcon,
   HammerIcon,
   ChevronRightIcon,
+  RotateCcwIcon,
   type LucideIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -178,7 +180,11 @@ interface TimelineRowSharedState {
   activeThreadId: ThreadId | null;
   activeThreadEnvironmentId: EnvironmentId;
   onHistoricalWorkLogPresenceResolved: (turnId: TurnId, hasWorkLog: boolean) => void;
+  /** Known primary prose only; older unloaded history remains independently readable. */
+  primarySummaryKeys: ReadonlySet<string>;
   onRevertUserMessage: (messageId: MessageId) => void;
+  failedUserMessageIds?: ReadonlySet<MessageId> | undefined;
+  onResendUserMessage?: ((messageId: MessageId) => void) | undefined;
   onForkMessage?: ((messageId: MessageId) => void) | undefined;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenSubagentDetail: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
@@ -256,6 +262,8 @@ function useTimelineRowEntrance(rowId: string): boolean {
 }
 
 interface TimelineRowActivityState {
+  messageResendDisabled: boolean;
+  resendingMessageId: MessageId | null;
   isWorking: boolean;
   messageForkDisabled: boolean;
   isRevertingCheckpoint: boolean;
@@ -324,6 +332,10 @@ interface MessagesTimelineProps {
   completionSummary: string | null;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
+  failedUserMessageIds?: ReadonlySet<MessageId> | undefined;
+  onResendUserMessage?: ((messageId: MessageId) => void) | undefined;
+  messageResendDisabled?: boolean;
+  resendingMessageId?: MessageId | null;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
@@ -385,6 +397,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   completionSummary,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
+  failedUserMessageIds,
+  onResendUserMessage,
+  messageResendDisabled = false,
+  resendingMessageId = null,
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
@@ -416,6 +432,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   const timelineElementRef = useRef<HTMLDivElement | null>(null);
   const activeThreadId = activeThreadIdProp ?? null;
+  const primarySummaryKeys = useMemo(
+    () =>
+      new Set(
+        timelineEntries.flatMap((entry) =>
+          entry.kind === "provider-summary" ? [entry.operationKey] : [],
+        ),
+      ),
+    [timelineEntries],
+  );
   const chatCopyFormat = useSettings((settings) => settings.chatCopyFormat);
   const {
     summaries: visibleHistoricalWorkLogSummariesByTurnId,
@@ -1405,9 +1430,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeThreadId,
       activeThreadEnvironmentId,
       onHistoricalWorkLogPresenceResolved: recordHistoricalWorkLogPresence,
+      primarySummaryKeys,
       activeProvider,
       subagentRuntimeSession,
       onRevertUserMessage,
+      failedUserMessageIds,
+      onResendUserMessage,
       onForkMessage,
       onImageExpand,
       onOpenSubagentDetail: openSubagentDetail,
@@ -1428,9 +1456,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeThreadId,
       activeThreadEnvironmentId,
       recordHistoricalWorkLogPresence,
+      primarySummaryKeys,
       activeProvider,
       subagentRuntimeSession,
       onRevertUserMessage,
+      failedUserMessageIds,
+      onResendUserMessage,
       onForkMessage,
       onImageExpand,
       openSubagentDetail,
@@ -1441,15 +1472,21 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const activityState = useMemo<TimelineRowActivityState>(
     () => ({
       isWorking,
+      messageResendDisabled:
+        messageResendDisabled || isWorking || (activeTurnInProgress && activeTurnId != null),
+      resendingMessageId,
       messageForkDisabled: messageForkDisabled || activeTurnInProgress,
       isRevertingCheckpoint,
       subagentDetailOpen: isSubagentDetailOpen,
     }),
     [
       activeTurnInProgress,
+      activeTurnId,
       isRevertingCheckpoint,
       isSubagentDetailOpen,
       isWorking,
+      messageResendDisabled,
+      resendingMessageId,
       messageForkDisabled,
     ],
   );
@@ -1707,7 +1744,8 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
   return (
     <div
       className={cn(
-        row.kind === "message" && row.message.role === "assistant"
+        row.kind === "provider-summary" ||
+          (row.kind === "message" && row.message.role === "assistant")
           ? "pb-4 [@media(hover:hover)]:pb-8"
           : row.kind === "message" && row.message.role === "user"
             ? "pb-4 [@media(hover:hover)]:pb-5"
@@ -1737,12 +1775,129 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
       ) : null}
+      {row.kind === "provider-summary" ? <ProviderSummaryTimelineRow row={row} /> : null}
+      {row.kind === "question-resolution" ? <QuestionResolutionTimelineRow row={row} /> : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "visualization" ? <VisualizationTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
     </div>
   );
 });
+
+/**
+ * MCP completion belongs in the primary conversation even while every Work
+ * Log stays collapsed. Fixed copy identifies the actor and disposition without
+ * impersonating the assistant. A v2 receipt shows the exact submitted question
+ * and response as inert React text, including whitespace and literal markup.
+ */
+function QuestionResolutionTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "question-resolution" }>;
+}) {
+  const uiLocale = useUiLocale();
+  const count = uiFormatNumber(row.questionCount, undefined, uiLocale);
+  let text: string;
+  switch (row.action) {
+    case "answered":
+      text =
+        row.questionCount === 1
+          ? uiText("Question answered via MCP.", undefined, undefined, uiLocale)
+          : uiText("{count} questions answered via MCP.", { count }, undefined, uiLocale);
+      break;
+    case "skipped":
+      text =
+        row.questionCount === 1
+          ? uiText("Question skipped via MCP.", undefined, undefined, uiLocale)
+          : uiText("{count} questions skipped via MCP.", { count }, undefined, uiLocale);
+      break;
+    case "cleared":
+      text =
+        row.questionCount === 1
+          ? uiText("Question cleared via MCP.", undefined, undefined, uiLocale)
+          : uiText("{count} questions cleared via MCP.", { count }, undefined, uiLocale);
+      break;
+  }
+  return (
+    <section className="space-y-3 px-1 py-1 text-sm" data-primary-question-resolution="true">
+      <p className="flex items-center gap-2 text-muted-foreground">
+        <CheckIcon className="size-4 shrink-0" aria-hidden="true" />
+        <span>{text}</span>
+      </p>
+      {row.items?.map((item) => (
+        <dl key={item.question.id} className="space-y-1 border-l-2 border-border pl-3">
+          <dt className="font-medium">
+            {item.question.header || uiText("Question", undefined, undefined, uiLocale)}
+          </dt>
+          <dd className="whitespace-pre-wrap break-words">{item.question.question}</dd>
+          <dt className="font-medium text-muted-foreground">
+            {uiText("Answer", undefined, undefined, uiLocale)}
+          </dt>
+          <dd className="whitespace-pre-wrap break-words">
+            {"answer" in item ? (
+              typeof item.answer === "string" ? (
+                item.answer
+              ) : (
+                <ul className="list-inside list-disc space-y-1">
+                  {item.answer.map((answer, index) => (
+                    <li key={index}>{answer}</li>
+                  ))}
+                </ul>
+              )
+            ) : item.disposition === "skipped" ? (
+              uiText("Skipped via MCP.", undefined, undefined, uiLocale)
+            ) : (
+              uiText("Cleared via MCP.", undefined, undefined, uiLocale)
+            )}
+          </dd>
+        </dl>
+      ))}
+    </section>
+  );
+}
+
+/**
+ * Explicitly public Claude text is ordinary conversation prose. It retains its
+ * own operation identity instead of borrowing a canonical message's fork,
+ * checkpoint, attachment or root-completion authority. The normal Markdown
+ * renderer still owns sanitization, links and streaming presentation.
+ */
+function ProviderSummaryTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "provider-summary" }>;
+}) {
+  const uiLocale = useUiLocale();
+  const ctx = use(TimelineRowCtx);
+  return (
+    <div
+      className="relative min-w-0 px-1 py-0.5"
+      data-provider-public-summary={row.summary.provider}
+      data-primary-provider-summary="true"
+    >
+      <ChatMarkdown
+        text={row.summary.text}
+        cwd={ctx.markdownCwd}
+        additionalWorkspaceRoots={ctx.additionalWorkspaceRoots}
+        isStreaming={row.summary.status === "inProgress"}
+        normalizeCodexCitations={false}
+        skills={ctx.skills}
+      />
+      {row.summary.status !== "completed" ? (
+        <p className="mt-1 text-2xs text-subtle-foreground">
+          {row.summary.status === "failed"
+            ? uiText("Partial", undefined, undefined, uiLocale)
+            : uiText("Updating…", undefined, undefined, uiLocale)}
+        </p>
+      ) : null}
+      {row.summary.truncated ? (
+        <p className="mt-1 text-2xs text-subtle-foreground">
+          {uiText("Summary truncated to the retained preview.", undefined, undefined, uiLocale)}
+        </p>
+      ) : null}
+    </div>
+  );
+}
 
 function VisualizationTimelineRow({
   row,
@@ -1769,6 +1924,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   const uiLocale = useUiLocale();
 
   const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
+  const failed = ctx.failedUserMessageIds?.has(row.message.id) === true;
+  const resending = activity.resendingMessageId === row.message.id;
+  const showResendingIndicator = useDelayedFlag(resending);
+  const resendLabel = uiText("Resend", undefined, undefined, uiLocale);
   const userImages =
     row.message.attachments?.filter((attachment) => attachment.type === "image") ?? [];
   const userFiles =
@@ -1778,7 +1938,13 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
 
   return (
     <div className="flex justify-end">
-      <div className="group relative max-w-[80%] rounded-2xl rounded-br-sm border border-border bg-secondary px-4 py-3">
+      <div
+        className={cn(
+          "group relative max-w-[80%] rounded-2xl rounded-br-sm border bg-secondary px-4 py-3",
+          failed ? "border-destructive" : "border-border",
+        )}
+        data-message-send-failed={failed || undefined}
+      >
         {userImages.length > 0 && (
           <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
             {userImages.map((image) => (
@@ -1846,6 +2012,45 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             </>
           }
         />
+        {failed ? (
+          <div className="mt-2 flex justify-end">
+            <span className="sr-only">
+              {uiText("Message failed", undefined, undefined, uiLocale)}
+            </span>
+            {ctx.onResendUserMessage ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="outline"
+                      className={cn(
+                        MESSAGE_ACTION_BUTTON_CLASS_NAME,
+                        "rounded-full text-status-error before:rounded-full hover:border-status-error hover:bg-status-error/10 hover:text-status-error",
+                      )}
+                      aria-label={resendLabel}
+                      aria-busy={resending}
+                      disabled={activity.messageResendDisabled || resending}
+                      onClick={() => ctx.onResendUserMessage?.(row.message.id)}
+                    />
+                  }
+                >
+                  <RotateCcwIcon
+                    aria-hidden="true"
+                    className={cn(
+                      "size-4",
+                      showResendingIndicator && "animate-spin motion-reduce:animate-none",
+                    )}
+                  />
+                </TooltipTrigger>
+                <TooltipPopup>
+                  {resending ? uiText("Resending…", undefined, undefined, uiLocale) : resendLabel}
+                </TooltipPopup>
+              </Tooltip>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -2440,6 +2645,19 @@ function emptyEarlierWorkLog(owner: string): EarlierWorkLogState {
   };
 }
 
+function withoutPrimarySummaries(
+  entries: ReadonlyArray<WorkLogEntry>,
+  primarySummaryKeys: ReadonlySet<string>,
+): WorkLogEntry[] {
+  // Only suppress the exact Claude turn/block already shown in primary prose.
+  // OpenCode thinking, reused ids in another turn and older unloaded history
+  // keep their existing bounded disclosure; text equality is never identity.
+  return entries.filter((entry) => {
+    const key = primaryClaudeSummaryKey(entry);
+    return key === undefined || !primarySummaryKeys.has(key);
+  });
+}
+
 /**
  * An explicit reader for work evicted from the bounded current-turn window.
  * Its immutable upper filter does not drift as tokens arrive. Every response
@@ -2563,12 +2781,21 @@ const EarlierWorkLogSection = memo(function EarlierWorkLogSection({
 
   const visibleEntries = useMemo(
     () =>
-      uiPresentation.deriveEarlierWorkLogEntries({
-        activities: current.activities,
-        liveActivities: row.summary.liveActivities ?? [],
-        turnId: row.turnId,
-      }),
-    [current.activities, row.summary.liveActivities, row.turnId, uiPresentation],
+      withoutPrimarySummaries(
+        uiPresentation.deriveEarlierWorkLogEntries({
+          activities: current.activities,
+          liveActivities: row.summary.liveActivities ?? [],
+          turnId: row.turnId,
+        }),
+        ctx.primarySummaryKeys,
+      ),
+    [
+      current.activities,
+      row.summary.liveActivities,
+      row.turnId,
+      uiPresentation,
+      ctx.primarySummaryKeys,
+    ],
   );
   const showLoading = useDelayedFlag(isExpanded && current.loading && visibleEntries.length === 0);
   const before = row.summary.before;
@@ -2973,17 +3200,25 @@ const HistoricalWorkLogReader = memo(function HistoricalWorkLogReader({
 
   const visibleEntries = useMemo(() => {
     if (activityRows.length > 0) {
-      return uiPresentation.deriveWorkLogEntries(activityRows, row.turnId, {
-        terminalTurnIds: row.summary.isHistoricalTurn === false ? undefined : new Set([row.turnId]),
-      });
+      return withoutPrimarySummaries(
+        uiPresentation.deriveWorkLogEntries(activityRows, row.turnId, {
+          terminalTurnIds:
+            row.summary.isHistoricalTurn === false ? undefined : new Set([row.turnId]),
+        }),
+        ctx.primarySummaryKeys,
+      );
     }
-    return row.summary.previewEntries.slice(-HISTORICAL_WORK_LOG_PREVIEW_LIMIT);
+    return withoutPrimarySummaries(
+      row.summary.previewEntries.slice(-HISTORICAL_WORK_LOG_PREVIEW_LIMIT),
+      ctx.primarySummaryKeys,
+    );
   }, [
     activityRows,
     row.summary.previewEntries,
     row.summary.isHistoricalTurn,
     row.turnId,
     uiPresentation,
+    ctx.primarySummaryKeys,
   ]);
   const subagentEntries = useMemo(() => {
     const hydratedEntries = uiPresentation.deriveSubagentWorkEntries(activityRows, row.turnId, {
@@ -3819,7 +4054,7 @@ const OrdinaryWorkEntryRow = memo(function OrdinaryWorkEntryRow(props: {
   if (props.workEntry.turnConfiguration)
     return <TurnConfigurationWorkEntry configuration={props.workEntry.turnConfiguration} />;
   if (props.workEntry.publicSummary)
-    return <ClaudeSummaryWorkEntry summary={props.workEntry.publicSummary} />;
+    return <ProviderSummaryWorkEntry summary={props.workEntry.publicSummary} />;
   return <OrdinaryWorkEntryContent {...props} />;
 });
 

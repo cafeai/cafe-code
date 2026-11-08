@@ -16,19 +16,52 @@ Explicit account homes, `CLAUDE_CONFIG_DIR`, secure-storage overrides (including
 
 Local `auth status` establishes that login material is available; it does not prove that a remote service will accept an expired or revoked credential. A real turn's authentication failure retains Cafe's existing error/session-retirement behavior. Cafe does not replay the prompt or automatically switch to another account after a model request fails.
 
+The SDK initialization handshake also succeeds when signed out. Its first-party
+account metadata must report login material before Settings can show
+"Authenticated"; an explicit `tokenSource: "none"` without an API key reports
+"Not signed in". Missing legacy account evidence remains unknown, and external
+backends such as Bedrock or Vertex retain their separate authentication. A
+primary assistant's typed `authentication_failed` error updates the provider
+status immediately. A subsequent failed result retains that evidence and
+retires the stale query even when it has no HTTP 401 status.
+
 The selected configuration scope also determines whether Claude reads `~/.claude/.claude.json` or `~/.claude.json`. Cafe's MCP installer retains both default targets. It does not merge unrelated user configuration between those files.
 
-## Passive quota diagnostics
+## Reported sign-in expiry
 
-Claude quota presentation does not add an authentication probe or choose a new
-credential store. It displays bounded structured reports received from an
-existing query after a user-requested native `/usage`, when supported by that
-runtime. Source-session/configuration binding is not a stable authenticated
-principal: the UI explicitly calls this a session-reported observation and shows
-receipt/freshness information. No independent Refresh, experimental usage getter,
-inspection query, credential read or billing change is introduced. See the
-[quota report decision](decisions/claude-account-quota-report.md) for privacy,
-ownership, compatibility and integration-policy limits.
+SDK318 can report an estimated claude.ai sign-in refresh-chain end on numbered
+results from a current primary native query. The date can be a server value or
+a 30-day estimate, and the real end can be up to three days earlier. A past date
+is not a conclusive remote authentication failure; early revocation is also
+possible. Cafe's ten-day advance warning is a nonblocking observation
+from active native sessions, not account-selection or login authority.
+
+The advisory must remain volatile and exact-owner bound. Missing/legacy data
+stays unknown; cache hydration or retained authenticated labels cannot revive
+a deadline after a runtime replacement. It does not add another status probe,
+read credential files, change account selection or block sends. See the
+[metadata advisory decision](decisions/claude-provider-metadata-advisories.md)
+and [current implementation/verification record](provider-updates-2026-11-04.md).
+
+The same update adds fixed diagnostic guidance for a genuine native
+`config_file_invalid` startup result. Correct the provider configuration;
+retries alone cannot repair invalid JSON. Cafe does not overwrite that file or
+replace the prior durable session cursor with the failed startup's identity.
+
+## Quota diagnostics
+
+Quota presentation uses the selected instance's control-only native `get_usage`
+reader without a model prompt, transcript scan or SDK query. It shares the
+instance-local authentication environment selection described above; Cafe does
+not read credentials or choose another login store during a quota read. Bounded
+single-flight caching and exact-instance checks prevent view refreshes from
+launching duplicate readers or publishing replaced instances' reports.
+
+Older runtimes retain the passive structured report from an existing query's
+user-requested `/usage`, when available. Missing, timed-out or unsupported quota
+metadata does not establish authentication failure or refill an allowance. See
+the [quota report decision](decisions/claude-account-quota-report.md) for the
+reader, compatibility, freshness and privacy boundaries.
 
 Default tests use synthetic status output and in-memory child handles. Focused qualification:
 

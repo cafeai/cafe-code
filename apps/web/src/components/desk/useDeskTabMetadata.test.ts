@@ -95,6 +95,24 @@ describe("Desk tab status parity with sidebar rows", () => {
       patch: { latestTurn: { ...completedTurn, state: "error" as const } },
     },
     {
+      state: "unread restart interruption",
+      expected: "Failed",
+      patch: {
+        latestTurn: { ...completedTurn, state: "interrupted" as const },
+        session: {
+          ...runningSession,
+          status: "ready" as const,
+          orchestrationStatus: "interrupted" as const,
+          lastError: "The provider process ended during an active turn.",
+        },
+      },
+    },
+    {
+      state: "ordinary interruption",
+      expected: "Completed",
+      patch: { latestTurn: { ...completedTurn, state: "interrupted" as const } },
+    },
+    {
       state: "viewed completion",
       expected: null,
       patch: { latestTurn: completedTurn },

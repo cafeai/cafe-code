@@ -28,6 +28,8 @@ function approvalTitle(approval: PendingApproval): string {
  * a provider's command or reason is the thing the user is deciding on. Network
  * approvals always keep their destination host and protocol visible next to
  * the requested command/rule context.
+ * A one-time-only flag explains the provider contract without guessing which
+ * permission mode, ask rule or native policy produced this particular prompt.
  */
 export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprovalPanel({
   approval,
@@ -48,6 +50,16 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
           </span>
         ) : null}
       </div>
+      {approval.suppressAlwaysAllowRule === true ? (
+        <p className="mt-2 text-ui text-muted-foreground">
+          {uiText(
+            "Your provider requested a one-time confirmation. This can still appear with automatic permissions enabled.",
+            undefined,
+            undefined,
+            uiLocale,
+          )}
+        </p>
+      ) : null}
       {approval.networkApproval ? (
         <dl
           className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-ui"

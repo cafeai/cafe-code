@@ -4,6 +4,7 @@ import {
   chatViewFixture,
   THREAD_ID,
   THREAD_TITLE,
+  LOCAL_ENVIRONMENT_ID,
   SECOND_PROJECT_ID,
   THREAD_KEY,
   UUID_ROUTE_RE,
@@ -46,6 +47,7 @@ import {
 import {
   MessageId,
   ORCHESTRATION_WS_METHODS,
+  ProjectId,
   ProviderInstanceId,
   SourceControlRepositoryError,
   ThreadId,
@@ -58,55 +60,87 @@ import { page } from "vitest/browser";
 import { failBrowserWsRpc } from "../../test/wsRpcHarness";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { isMacPlatform } from "../lib/utils";
+import { derivePhysicalProjectKeyFromPath } from "../logicalProject";
 import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
+import { createChatViewCallerOwner } from "./chatViewCallerOwner.test.fixture";
 import { toastManager } from "./ui/toast";
 
 describe("ChatView full app (navigation)", () => {
   registerChatViewBrowserHooks();
 
-  it("replaces an open subagent detail with Atrium and does not restore it on close", async () => {
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotWithActiveSubagent(),
-      configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          clientSettings: {
-            ...nextFixture.serverConfig.clientSettings,
-            ambianceAtriumEnabled: true,
-          },
-        };
-      },
+  it("replaces an open subagent detail with Atrium and does not restore it on close", async (context) => {
+    // Register this exact caller before mounting. A failed assertion or outer
+    // cancellation must join its native actions before shared fixture reset;
+    // closing the global store from an abandoned finally can affect a later case.
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "navigation-atrium",
+      afterUnmount: () => useTaskAtriumStore.getState().setOpen(false),
     });
-
-    try {
-      await page.getByRole("button", { name: /^1 active subagent\. Show task list$/i }).click();
+    await owner.run(async () => {
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithActiveSubagent(),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            clientSettings: {
+              ...nextFixture.serverConfig.clientSettings,
+              ambianceAtriumEnabled: true,
+            },
+          };
+        },
+      });
+      await owner.own("controls", () =>
+        page.getByRole("button", { name: /^1 active subagent\. Show task list$/i }).click(),
+      );
       const subagentRow = page
         .getByRole("region", { name: "Active subagents" })
         .getByRole("button", {
           name: /Browser lifecycle audit, Working\. Verify Atrium navigation\. Open details/i,
         });
-      await expect.element(subagentRow).toBeInTheDocument();
-      await subagentRow.click();
-      await vi.waitFor(() => {
-        expect(document.querySelector('[data-subagent-detail-view="true"]')).not.toBeNull();
-      });
+      await owner.own("first-row", () => expect.element(subagentRow).toBeInTheDocument());
+      await owner.own("request", () => subagentRow.click());
+      await owner.own("value", () =>
+        vi.waitFor(() => {
+          owner.assertActive();
+          expect(document.querySelector('[data-subagent-detail-view="true"]')).not.toBeNull();
+        }),
+      );
 
+      owner.assertActive();
+      owner.mark("overlay");
       useTaskAtriumStore.getState().setOpen(true);
-      await vi.waitFor(() => {
-        expect(document.querySelector('[data-cafe-task-atrium-overlay="true"]')).not.toBeNull();
-        expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
-      });
+      const openedAtrium = await owner.own("overlay", () =>
+        vi.waitFor(() => {
+          owner.assertActive();
+          const overlay = document.querySelector('[data-cafe-task-atrium-overlay="true"]');
+          expect(overlay).not.toBeNull();
+          expect(overlay).toHaveAttribute("data-open");
+          expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
+          return overlay;
+        }),
+      );
 
+      owner.assertActive();
+      owner.mark("close");
       useTaskAtriumStore.getState().setOpen(false);
-      await vi.waitFor(() => {
-        expect(document.querySelector('[data-cafe-task-atrium-overlay="true"]')).toBeNull();
-        expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
-      });
-    } finally {
-      useTaskAtriumStore.getState().setOpen(false);
-      await mounted.cleanup();
-    }
+      await owner.own("closed", () =>
+        vi.waitFor(() => {
+          owner.assertActive();
+          expect(useTaskAtriumStore.getState().open).toBe(false);
+          const overlay = document.querySelector('[data-cafe-task-atrium-overlay="true"]');
+          // This journey owns clearing the selected detail across controlled
+          // close. Base UI may retain this exact closed popup during its exit;
+          // TaskAtrium's native Escape/pointer cases separately own actual
+          // portal retirement, so this is not a second animation-time gate.
+          if (overlay !== null) {
+            expect(overlay).toBe(openedAtrium);
+            expect(overlay).toHaveAttribute("data-closed");
+          }
+          expect(document.querySelector('[data-subagent-detail-view="true"]')).toBeNull();
+        }),
+      );
+    });
   });
 
   it("keeps runtime access in the desktop options menu without a footer mode label", async () => {
@@ -214,6 +248,124 @@ describe("ChatView full app (navigation)", () => {
       await mounted.cleanup();
     }
   });
+
+  it("collapses the Projects section to the open chat's project", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithSecondaryProject(),
+    });
+    const secondaryRow = page.getByTestId("thread-row-thread-secondary-project");
+
+    try {
+      const toggle = page.getByTestId("sidebar-projects-section-toggle");
+      await expect.element(toggle).toHaveAttribute("aria-expanded", "true");
+      await expect.element(page.getByTestId(`thread-row-${THREAD_ID}`)).toBeVisible();
+      await expect.element(secondaryRow).toBeVisible();
+
+      await toggle.click();
+      await expect.element(toggle).toHaveAttribute("aria-expanded", "false");
+      // Like the collapsed Chats section, the chat being viewed stays reachable.
+      await expect.element(page.getByTestId(`thread-row-${THREAD_ID}`)).toBeVisible();
+      await expect.element(secondaryRow).not.toBeInTheDocument();
+      // Collapsing is presentation only, and the add-project action stays.
+      await expect.element(page.getByTestId("sidebar-add-project-trigger")).toBeVisible();
+
+      await toggle.click();
+      await expect.element(toggle).toHaveAttribute("aria-expanded", "true");
+      await expect.element(secondaryRow).toBeVisible();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  for (const sortOrder of ["manual", "updated_at"] as const) {
+    it(`nests the active hidden project in the bottom dropdown with ${sortOrder} sorting`, async (context) => {
+      const owner = createChatViewCallerOwner(context, mountChatView, {
+        label: "navigation-hidden-projects",
+      });
+      await owner.run(async () => {
+        const snapshot = createSnapshotWithSecondaryProject();
+        const extraHiddenProject = {
+          ...snapshot.projects[0]!,
+          id: ProjectId.make("hidden-tools"),
+          title: "Hidden tools",
+          workspaceRoot: "/repo/hidden-tools",
+        };
+        const mounted = await owner.mount({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: { ...snapshot, projects: [...snapshot.projects, extraHiddenProject] },
+          configureFixture: (nextFixture) => {
+            nextFixture.serverConfig = {
+              ...nextFixture.serverConfig,
+              clientSettings: {
+                ...nextFixture.serverConfig.clientSettings,
+                sidebarProjectSortOrder: sortOrder,
+                hiddenSidebarProjectKeys: [
+                  derivePhysicalProjectKeyFromPath(
+                    LOCAL_ENVIRONMENT_ID,
+                    snapshot.projects[0]!.workspaceRoot,
+                  ),
+                  derivePhysicalProjectKeyFromPath(
+                    LOCAL_ENVIRONMENT_ID,
+                    extraHiddenProject.workspaceRoot,
+                  ),
+                ],
+              },
+            };
+          },
+        });
+        const toggle = page.getByTestId("sidebar-hidden-projects-toggle");
+        const hiddenList = page.getByTestId("sidebar-hidden-projects-list");
+        const activeRow = page.getByTestId(`thread-row-${THREAD_ID}`);
+        const visibleRow = page.getByTestId("thread-row-thread-secondary-project");
+        const expectNestedProjects = async () => {
+          await expect.element(toggle).toHaveAttribute("aria-expanded", "true");
+          await expect.element(hiddenList.getByTestId(`thread-row-${THREAD_ID}`)).toBeVisible();
+          await expect.element(hiddenList.getByText("Hidden tools", { exact: true })).toBeVisible();
+          owner.assertActive();
+          expect(toggle.element().getAttribute("aria-controls")).toBe(hiddenList.element().id);
+          expect(toggle.element().closest("li")?.contains(hiddenList.element())).toBe(true);
+          expect(
+            visibleRow.element().compareDocumentPosition(toggle.element()) &
+              Node.DOCUMENT_POSITION_FOLLOWING,
+          ).toBeTruthy();
+          expect(document.querySelectorAll(`[data-testid="thread-row-${THREAD_ID}"]`)).toHaveLength(
+            1,
+          );
+        };
+
+        await owner.own("first-row", expectNestedProjects);
+        await owner.own("controls", () => toggle.click());
+        await owner.own("value", async () => {
+          await expect.element(toggle).toHaveAttribute("aria-expanded", "false");
+          await expect.element(hiddenList).not.toBeInTheDocument();
+          await expect.element(activeRow).not.toBeInTheDocument();
+          expect(mounted.router.state.location.pathname).toBe(serverThreadPath(THREAD_ID));
+        });
+
+        // Ordinary navigation outside Hidden preserves the explicit collapse.
+        await owner.own("route", () => visibleRow.click());
+        await owner.own("route", () =>
+          waitForURL(
+            mounted.router,
+            (path) => path === serverThreadPath(ThreadId.make("thread-secondary-project")),
+            "The visible project's chat should open before returning to Hidden.",
+          ),
+        );
+        await owner.own("value", () =>
+          expect.element(toggle).toHaveAttribute("aria-expanded", "false"),
+        );
+        // Opening a hidden chat through another navigation surface reopens it.
+        await owner.own("route", () =>
+          mounted.router.navigate({
+            to: "/$environmentId/$threadId",
+            params: { environmentId: LOCAL_ENVIRONMENT_ID, threadId: THREAD_ID },
+          }),
+        );
+        await owner.own("reopen", expectNestedProjects);
+      });
+    });
+  }
 
   it("exposes the full thread title on the sidebar row tooltip", async () => {
     const mounted = await mountChatView({
@@ -535,43 +687,165 @@ describe("ChatView full app (navigation)", () => {
     }
   });
 
-  it("hydrates the provider alongside a sticky claude model", async () => {
-    useComposerDraftStore.setState({
-      stickyModelSelectionByProvider: {
-        [ProviderInstanceId.make("claudeAgent")]: createModelSelection(
-          ProviderInstanceId.make("claudeAgent"),
-          "claude-opus-4-6",
-          [
-            { id: "effort", value: "max" },
-            { id: "fastMode", value: true },
-          ],
-        ),
-      },
-      stickyActiveProvider: ProviderInstanceId.make("claudeAgent"),
+  it("hydrates the provider alongside a sticky claude model", async ({
+    signal,
+    onTestFinished,
+    onTestFailed,
+  }) => {
+    type Step =
+      | "mount"
+      | "button-ready"
+      | "header-ready"
+      | "header-hover"
+      | "button-click"
+      | "route";
+    type Phase =
+      | `${Step}:${"start" | "complete"}`
+      | `mount:${"viewport" | "styles" | "render" | "websocket" | "bootstrap" | "layout"}`
+      | "sticky-assert:start"
+      | "sticky-assert:complete"
+      | "cleanup:start"
+      | "cleanup:complete";
+    const startedAt = performance.now();
+    const phases: { readonly phase: Phase; readonly elapsedMs: number }[] = [];
+    let recording = true;
+    let retired = false;
+    let mounting: ReturnType<typeof mountChatView> | undefined;
+    let mountCleanup: (() => Promise<void>) | undefined;
+    let cleanupPromise: Promise<void> | undefined;
+    const pendingOperations = new Set<Promise<unknown>>();
+    const recordPhase = (phase: Phase) => {
+      if (!recording || phases.length >= 32) return;
+      const elapsed = performance.now() - startedAt;
+      phases.push({
+        phase,
+        elapsedMs: Number.isFinite(elapsed)
+          ? Math.min(3_600_000, Math.max(0, Math.round(elapsed)))
+          : 0,
+      });
+    };
+    const assertActive = () => {
+      if (retired || signal.aborted)
+        throw new Error("The exact sticky-Claude navigation fixture was retired.");
+    };
+    const cleanup = () => {
+      // The public signal retires future actions synchronously, even when a
+      // native action or mount outlives the test body's unchanged deadline.
+      retired = true;
+      signal.removeEventListener("abort", onAbort);
+      return (cleanupPromise ??= (async () => {
+        recordPhase("cleanup:start");
+        try {
+          try {
+            await mounting;
+          } catch {
+            // The original mount await still owns its failure. Join it here
+            // without treating rejected rendering/bootstrap as readiness.
+          }
+          // Keep this exact fixture's controls alive until already-admitted
+          // native operations settle; a later fixture must not satisfy them.
+          await Promise.allSettled([...pendingOperations]);
+        } finally {
+          try {
+            await mountCleanup?.();
+          } finally {
+            recordPhase("cleanup:complete");
+            recording = false;
+          }
+        }
+      })());
+    };
+    const onAbort = () => {
+      // The registered finalizer joins and reports this same cleanup promise;
+      // the synchronous abort reaction must not create an unhandled tail.
+      void cleanup().catch(() => undefined);
+    };
+    const observe = async <T,>(step: Step, operation: () => PromiseLike<T>): Promise<T> => {
+      assertActive();
+      recordPhase(`${step}:start`);
+      const pending = Promise.resolve(operation());
+      pendingOperations.add(pending);
+      try {
+        const result = await pending;
+        assertActive();
+        recordPhase(`${step}:complete`);
+        return result;
+      } finally {
+        pendingOperations.delete(pending);
+      }
+    };
+    // Own retirement before the first mount/native await. Failure diagnostics
+    // contain only fixed phases and elapsed time, never DOM, URLs or errors.
+    onTestFinished(cleanup);
+    onTestFailed(() => {
+      console.error("Synthetic sticky-Claude navigation phases", { phases });
     });
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-user-sticky-claude-model-test" as MessageId,
-        targetText: "sticky claude model test",
-      }),
-    });
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
 
     try {
+      assertActive();
+      useComposerDraftStore.setState({
+        stickyModelSelectionByProvider: {
+          [ProviderInstanceId.make("claudeAgent")]: createModelSelection(
+            ProviderInstanceId.make("claudeAgent"),
+            "claude-opus-4-6",
+            [
+              { id: "effort", value: "max" },
+              { id: "fastMode", value: true },
+            ],
+          ),
+        },
+        stickyActiveProvider: ProviderInstanceId.make("claudeAgent"),
+      });
+
+      const mounted = await observe(
+        "mount",
+        () =>
+          (mounting = mountChatView({
+            viewport: DEFAULT_VIEWPORT,
+            snapshot: createSnapshotForTargetUser({
+              targetMessageId: "msg-user-sticky-claude-model-test" as MessageId,
+              targetText: "sticky claude model test",
+            }),
+            lifecycle: {
+              assertActive,
+              retire: cleanup,
+              ownCleanup: (cleanupMount) => {
+                mountCleanup = cleanupMount;
+              },
+              observePhase: (phase) => recordPhase(`mount:${phase}`),
+            },
+          })),
+      );
+
       const newThreadButton = page.getByTestId("new-thread-button");
-      await expect.element(newThreadButton).toBeInTheDocument();
+      await observe("button-ready", () => expect.element(newThreadButton).toBeInTheDocument());
 
-      await revealProjectThreadAction();
-      await newThreadButton.click();
+      // Preserve revealProjectThreadAction's exact original assertion and
+      // native hover locally so its intermediate await also has this case's
+      // retirement fence, without changing the helper's other consumers.
+      const hoverButton = page.getByTestId("new-thread-button");
+      await observe("header-ready", () => expect.element(hoverButton).toBeInTheDocument());
+      const header = hoverButton
+        .element()
+        .closest('[class~="group/project-header"]')
+        ?.querySelector('[data-sidebar="menu-button"]');
+      expect(header).not.toBeNull();
+      expect(header).not.toBeUndefined();
+      await observe("header-hover", () => page.elementLocator(header!).hover());
+      await observe("button-click", () => newThreadButton.click());
 
-      const newThreadPath = await waitForURL(
-        mounted.router,
-        (path) => UUID_ROUTE_RE.test(path),
-        "Route should have changed to a new sticky claude draft thread UUID.",
+      const newThreadPath = await observe("route", () =>
+        waitForURL(
+          mounted.router,
+          (path) => UUID_ROUTE_RE.test(path),
+          "Route should have changed to a new sticky claude draft thread UUID.",
+        ),
       );
       const newDraftId = draftIdFromPath(newThreadPath);
 
+      recordPhase("sticky-assert:start");
       expect(composerDraftFor(newDraftId)).toMatchObject({
         modelSelectionByProvider: {
           claudeAgent: createModelSelection(
@@ -585,8 +859,9 @@ describe("ChatView full app (navigation)", () => {
         },
         activeProvider: "claudeAgent",
       });
+      recordPhase("sticky-assert:complete");
     } finally {
-      await mounted.cleanup();
+      await cleanup();
     }
   });
 
@@ -1913,66 +2188,88 @@ describe("ChatView full app (navigation)", () => {
     }
   });
 
-  it("searches projects by path and opens the latest thread for that project", async () => {
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createSnapshotWithSecondaryProject(),
-      configureFixture: (nextFixture) => {
-        nextFixture.serverConfig = {
-          ...nextFixture.serverConfig,
-          settings: {
-            ...nextFixture.serverConfig.settings,
-            defaultThreadEnvMode: "worktree",
-          },
-          keybindings: [
-            {
-              command: "commandPalette.toggle",
-              shortcut: {
-                key: "k",
-                metaKey: false,
-                ctrlKey: false,
-                shiftKey: false,
-                altKey: false,
-                modKey: true,
-              },
-              whenAst: {
-                type: "not",
-                node: { type: "identifier", name: "modelPickerOpen" },
-              },
-            },
-          ],
-        };
-      },
+  it("searches projects by path and opens the latest thread for that project", async (context) => {
+    // Register before mounting; the shared afterEach joins this exact caller
+    // before resetting DOM/RPC state, including an unfinished native action.
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "navigation-project-search",
     });
+    await owner.run(async () => {
+      const mounted = await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotWithSecondaryProject(),
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            settings: {
+              ...nextFixture.serverConfig.settings,
+              defaultThreadEnvMode: "worktree",
+            },
+            keybindings: [
+              {
+                command: "commandPalette.toggle",
+                shortcut: {
+                  key: "k",
+                  metaKey: false,
+                  ctrlKey: false,
+                  shiftKey: false,
+                  altKey: false,
+                  modKey: true,
+                },
+                whenAst: {
+                  type: "not",
+                  node: { type: "identifier", name: "modelPickerOpen" },
+                },
+              },
+            ],
+          };
+        },
+      });
 
-    try {
-      await waitForServerConfigToApply();
-      await waitForCommandPaletteShortcutLabel();
+      await owner.own("config", () => waitForServerConfigToApply());
+      await owner.own("controls", () => waitForCommandPaletteShortcutLabel());
       const palette = page.getByTestId("command-palette");
-      await openCommandPaletteFromTrigger();
-
-      await expect.element(palette).toBeInTheDocument();
-      await page.getByPlaceholder("Search commands, projects and chats…").fill("clients/docs");
-      await expect.element(palette.getByText("Docs Portal", { exact: true })).toBeInTheDocument();
-      await expect
-        .element(palette.getByText("/repo/clients/docs-portal", { exact: true }))
-        .toBeInTheDocument();
-      await palette.getByText("Docs Portal", { exact: true }).click();
-
-      const nextPath = await waitForURL(
-        mounted.router,
-        (path) => path === serverThreadPath("thread-secondary-project" as ThreadId),
-        "Route should have changed to the latest thread for the selected project.",
+      // Preserve the helper's exact visibility/click/open sequence while
+      // fencing each new native step after the previous await.
+      const trigger = page.getByTestId("command-palette-trigger");
+      await owner.own("controls", () => expect.element(trigger).toBeInTheDocument());
+      await owner.own("input", () => trigger.click());
+      await owner.own("rail", () =>
+        waitForElement(
+          () => document.querySelector('[data-testid="command-palette"]'),
+          "Command palette should have opened from the sidebar trigger.",
+        ),
       );
+
+      await owner.own("rail", () => expect.element(palette).toBeInTheDocument());
+      await owner.own("input", () =>
+        page.getByPlaceholder("Search commands, projects and chats…").fill("clients/docs"),
+      );
+      await owner.own("first-row", () =>
+        expect.element(palette.getByText("Docs Portal", { exact: true })).toBeInTheDocument(),
+      );
+      await owner.own("value", () =>
+        expect
+          .element(palette.getByText("/repo/clients/docs-portal", { exact: true }))
+          .toBeInTheDocument(),
+      );
+      await owner.own("input", () => palette.getByText("Docs Portal", { exact: true }).click());
+
+      const nextPath = await owner.own("route", () =>
+        waitForURL(
+          mounted.router,
+          (path) => path === serverThreadPath("thread-secondary-project" as ThreadId),
+          "Route should have changed to the latest thread for the selected project.",
+        ),
+      );
+      owner.assertActive();
       expect(nextPath).toBe(serverThreadPath("thread-secondary-project" as ThreadId));
       expect(
         useComposerDraftStore
           .getState()
           .getDraftThread(threadRefFor("thread-secondary-project" as ThreadId)),
       ).toBeNull();
-    } finally {
-      await mounted.cleanup();
-    }
+    });
   });
 
   it("creates a new thread from project search when no active project thread exists", async () => {

@@ -37,6 +37,9 @@ export interface TokenCountsForCost {
   readonly inputTokens: number;
   readonly cachedInputTokens: number;
   readonly cacheWriteInputTokens: number;
+  /** Verified disjoint subsets; missing fields do not describe the remaining writes. */
+  readonly cacheWrite5mInputTokens?: number | undefined;
+  readonly cacheWrite1hInputTokens?: number | undefined;
   readonly outputTokens: number;
 }
 
@@ -48,11 +51,11 @@ export interface TokenCountsForCost {
  * expensive model's traffic.
  */
 const BUNDLED_RATES: ReadonlyArray<readonly [prefix: string, rate: ModelRate]> = [
-  // Anthropic standard global rates, verified 2026-09-23:
+  // Anthropic standard global rates, with TTL multipliers verified 2026-10-27:
   // https://platform.claude.com/docs/en/about-claude/pricing
-  // The ledger does not preserve cache TTL. These are 5-minute cache-write
-  // rates; one-hour writes, Fast mode and regional processing remain outside
-  // this standard-rate estimate, just like per-request context adjustments.
+  // These are 5-minute cache-write rates. Verified one-hour writes use the
+  // documented 2x base input rate; unclassified writes use this fallback rate.
+  // Fast mode and regional processing remain outside this estimate.
   ["claude-opus-5-5", { input: 4, cachedInput: 0.2, cacheWrite: 5, output: 20 }],
   ["claude-opus-5", { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 }],
   ["claude-opus-4-8", { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 }],
@@ -92,14 +95,33 @@ const BUNDLED_RATES: ReadonlyArray<readonly [prefix: string, rate: ModelRate]> =
   // Keep its exact family separate from older Sol and the generic GPT fallback;
   // service-tier and per-request long-context premiums remain excluded above.
   ["gpt-6.1-sol", { input: 2, cachedInput: 0.1, cacheWrite: 2.5, output: 10 }],
+  // Verified 2026-10-27: https://developers.openai.com/api/docs/models/gpt-6.1-terra
+  // This is the standard short-context rate with 30-minute cache writes.
+  // Individual long-context requests, service tiers and 12-hour cache writes
+  // cannot be reconstructed from aggregate usage and are not included here.
+  ["gpt-6.1-terra", { input: 1, cachedInput: 0.05, cacheWrite: 1.25, output: 5 }],
   // Released 2026-09-22; https://developers.openai.com/api/docs/pricing.
   // Keep distinct prefixes so new Sol/Luna usage cannot inherit GPT-5 rates.
   ["gpt-6-sol", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
   ["gpt-6-luna", { input: 0.1, cachedInput: 0.01, cacheWrite: 0.125, output: 0.5 }],
   // Verified 2026-09-23 against each model's official API page. GPT-5.6
-  // remains selectable during rollout and Luna is the metadata-helper default.
+  // remains selectable during rollout.
   // Sol's promotional pricing is promised through at least 2026-11-21.
   ["gpt-5.6-sol", { input: 4, cachedInput: 0.4, cacheWrite: 5, output: 20 }],
+
+  // Verified 2026-10-23: standard short-context rates use the 30m cache-write
+  // column, not the distinct 12h price. The API's deprecated Daybreak aliases
+  // currently map Blue to 5.6 Sol and Red to 5.6 Cyber; these pricing rows do
+  // not infer native availability/entitlement or change request routing.
+  // Keep only the known alias prefixes, not a generic Daybreak price. Alias
+  // targets can change, so re-audit their published mapping on provider updates.
+  // https://developers.openai.com/api/docs/pricing
+  // https://developers.openai.com/api/docs/models/gpt-daybreak-blue-latest
+  // https://developers.openai.com/api/docs/models/gpt-daybreak-red-latest
+  ["gpt-5.6-cyber", { input: 12.5, cachedInput: 1.25, cacheWrite: 15.625, output: 75 }],
+
+  ["gpt-daybreak-blue-latest", { input: 4, cachedInput: 0.4, cacheWrite: 5, output: 20 }],
+  ["gpt-daybreak-red-latest", { input: 12.5, cachedInput: 1.25, cacheWrite: 15.625, output: 75 }],
   ["gpt-5.6-terra", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 12 }],
   ["gpt-5.6-luna", { input: 0.2, cachedInput: 0.02, cacheWrite: 0.25, output: 1.2 }],
   ["gpt-5", { input: 1.25, cachedInput: 0.125, cacheWrite: 1.25, output: 10 }],
@@ -123,12 +145,22 @@ export function resolveModelRate(
   model: string,
   overrides?: Readonly<Record<string, ModelRate>>,
 ): ModelRate | undefined {
+  return resolveModelRateSelection(model, overrides)?.rate;
+}
+
+/** Preserve whether the matched rate is a user override: it applies to all writes. */
+function resolveModelRateSelection(
+  model: string,
+  overrides?: Readonly<Record<string, ModelRate>>,
+): { rate: ModelRate; overridden: boolean } | undefined {
   const id = normalizeModelId(model);
   if (id.length === 0) return undefined;
 
   if (overrides) {
-    const exact = overrides[id];
-    if (exact) return exact;
+    // Model names are provider-controlled; inherited object properties are
+    // never user-entered pricing overrides.
+    const exact = Object.hasOwn(overrides, id) ? overrides[id] : undefined;
+    if (exact) return { rate: exact, overridden: true };
     // Overrides match by prefix too, so one entry can cover a whole family.
     let best: { length: number; rate: ModelRate } | undefined;
     for (const [key, rate] of Object.entries(overrides)) {
@@ -139,7 +171,7 @@ export function resolveModelRate(
         }
       }
     }
-    if (best) return best.rate;
+    if (best) return { rate: best.rate, overridden: true };
   }
 
   let match: { length: number; rate: ModelRate } | undefined;
@@ -148,7 +180,7 @@ export function resolveModelRate(
       match = { length: prefix.length, rate };
     }
   }
-  return match?.rate;
+  return match ? { rate: match.rate, overridden: false } : undefined;
 }
 
 const PER_MILLION = 1_000_000;
@@ -162,17 +194,46 @@ const PER_MILLION = 1_000_000;
  * day recorded before the token-detail migration) from producing a negative
  * charge.
  */
-export function computeModelCost(counts: TokenCountsForCost, rate: ModelRate): number {
+export function computeModelCost(
+  counts: TokenCountsForCost,
+  rate: ModelRate,
+  cacheWrite1hRate?: number,
+): number {
   const cached = Math.max(0, counts.cachedInputTokens);
   const written = Math.max(0, counts.cacheWriteInputTokens);
   const fresh = Math.max(0, counts.inputTokens - cached - written);
   return (
     (fresh * rate.input +
       cached * rate.cachedInput +
-      written * rate.cacheWrite +
+      cacheWriteCost(counts, rate, cacheWrite1hRate) +
       Math.max(0, counts.outputTokens) * rate.output) /
     PER_MILLION
   );
+}
+
+/** Refuse malformed detail rather than moving an unknown token into a known TTL. */
+function knownCacheWrites(counts: TokenCountsForCost): { oneHour: number; unknown: number } {
+  const total = counts.cacheWriteInputTokens;
+  const fiveMinutes = counts.cacheWrite5mInputTokens ?? 0;
+  const oneHour = counts.cacheWrite1hInputTokens ?? 0;
+  if (
+    !Number.isSafeInteger(total) ||
+    total < 0 ||
+    !Number.isSafeInteger(fiveMinutes) ||
+    fiveMinutes < 0 ||
+    !Number.isSafeInteger(oneHour) ||
+    oneHour < 0 ||
+    fiveMinutes > total ||
+    oneHour > total - fiveMinutes
+  )
+    return { oneHour: 0, unknown: Math.max(0, total) };
+  return { oneHour, unknown: total - fiveMinutes - oneHour };
+}
+
+function cacheWriteCost(counts: TokenCountsForCost, rate: ModelRate, oneHourRate?: number): number {
+  const written = Math.max(0, counts.cacheWriteInputTokens);
+  const { oneHour } = knownCacheWrites(counts);
+  return (written - oneHour) * rate.cacheWrite + oneHour * (oneHourRate ?? rate.cacheWrite);
 }
 
 export interface CostRollup {
@@ -191,6 +252,8 @@ export interface CostRollup {
   readonly cacheSavings: number;
   /** Native settled costs included in `cost`; absent for estimate-only ledgers. */
   readonly reportedCost?: number;
+  /** Claude writes without a proven TTL, estimated at the ordinary write rate. */
+  readonly unknownCacheWriteTokens?: number;
 }
 
 const EMPTY_ROLLUP: CostRollup = {
@@ -218,6 +281,7 @@ export function rollUpCost(
   let unpricedTokens = 0;
   let cacheSavings = 0;
   let reportedCost: number | undefined;
+  let unknownCacheWriteTokens = 0;
 
   for (const entry of entries) {
     const tokens =
@@ -244,19 +308,28 @@ export function rollUpCost(
       } else unpricedTokens += tokens;
       continue;
     }
-    // A similarly named upstream model does not prove Axiom's billing rate.
+    // A similarly named upstream model does not prove an aggregator's billing rate.
     // Await native settlement instead of pricing it with another provider's table.
-    if (entry.provider === "axiom") {
+    if (entry.provider === "axiom" || entry.provider === "opencode") {
       unpricedTokens += tokens;
       continue;
     }
-    const rate = resolveModelRate(entry.model, overrides);
-    if (rate === undefined) {
+    const selection = resolveModelRateSelection(entry.model, overrides);
+    if (selection === undefined) {
       unpricedTokens += tokens;
       continue;
     }
+    const rate = selection.rate;
+    // Only a Claude-owned row with a bundled Claude rate can use the
+    // provider's published 1h multiplier. A custom rate governs all writes.
+    const isClaude = entry.provider === "claudeAgent";
+    const oneHourRate =
+      isClaude && !selection.overridden && normalizeModelId(entry.model).startsWith("claude")
+        ? 2 * rate.input
+        : undefined;
+    if (isClaude) unknownCacheWriteTokens += knownCacheWrites(entry).unknown;
     pricedTokens += tokens;
-    const actual = computeModelCost(entry, rate);
+    const actual = computeModelCost(entry, rate, oneHourRate);
     cost += actual;
 
     // Compare the same processed input with caching disabled: cache reads
@@ -266,7 +339,9 @@ export function rollUpCost(
     const cached = Math.max(0, entry.cachedInputTokens);
     const written = Math.max(0, entry.cacheWriteInputTokens);
     cacheSavings +=
-      (cached * (rate.input - rate.cachedInput) + written * (rate.input - rate.cacheWrite)) /
+      (cached * (rate.input - rate.cachedInput) +
+        written * rate.input -
+        cacheWriteCost(entry, rate, oneHourRate)) /
       PER_MILLION;
   }
 
@@ -276,6 +351,7 @@ export function rollUpCost(
     unpricedTokens,
     cacheSavings,
     ...(reportedCost !== undefined ? { reportedCost } : {}),
+    ...(unknownCacheWriteTokens > 0 ? { unknownCacheWriteTokens } : {}),
   };
 }
 

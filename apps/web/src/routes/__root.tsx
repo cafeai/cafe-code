@@ -42,6 +42,8 @@ import { TooltipProvider } from "../components/ui/tooltip";
 import { resolveAndPersistPreferredEditor } from "../editorPreferences";
 import { readLocalApi } from "../localApi";
 import { useSettings, useClientSettingsHydrated } from "../hooks/useSettings";
+import { resolveDeskOpenPolicy } from "../deskModel";
+import { useDeskStore } from "../deskStore";
 import {
   deriveLogicalProjectKeyFromSettings,
   derivePhysicalProjectKeyFromPath,
@@ -57,19 +59,22 @@ import {
 } from "../rpc/serverState";
 import { selectAnyThreadRunning, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
-import { syncBrowserChromeTheme } from "../hooks/useTheme";
+import { syncBrowserChromeTheme, useTheme } from "../hooks/useTheme";
 import {
   applyAppAccentColor,
   applySidebarAccentColor,
   applySidebarStarSpeed,
 } from "../themeAccent";
 import { applyInterfaceScalePercent } from "../interfaceScale";
+import { applyWebAppBranding } from "../webAppBranding";
+import { resolveWebAppBranding } from "@cafecode/shared/webAppBranding";
 import {
   ensureEnvironmentConnectionBootstrapped,
   getPrimaryEnvironmentConnection,
   startEnvironmentConnectionService,
 } from "../environments/runtime";
 import { configureClientTracing } from "../observability/clientTracing";
+import { GlideTrayNavigation } from "../components/GlideTrayNavigation";
 import {
   applyCafeBackgroundAnimations,
   clearCafeBackgroundAnimations,
@@ -177,11 +182,14 @@ function RootRouteView() {
   const appShell = (
     <WorkspaceEnvironmentProvider>
       <AppearanceSettingsSync />
+      <WebAppBrandingSync />
+      <DeskOpenPolicySync />
       <TaskAtriumOverlay />
       <AmbianceLayer />
       <PowerSaveBlockerSync />
       {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
       {primaryEnvironmentAuthenticated ? <DesktopNotificationWatcher /> : null}
+      {primaryEnvironmentAuthenticated ? <GlideTrayNavigation /> : null}
       <CommandPalette>
         <AppSidebarLayout>
           <Outlet />
@@ -399,21 +407,47 @@ function PowerSaveBlockerSync() {
   return null;
 }
 
+/** The Desk store stays free of settings/transport imports; this mirrors the
+ * selected workspace's Desk and chat-tab settings into its open policy. */
+function DeskOpenPolicySync() {
+  const deskEnabled = useSettings((settings) => settings.deskEnabled);
+  const showDeskTabs = useSettings((settings) => settings.showDeskTabs);
+  const policy = resolveDeskOpenPolicy({ deskEnabled, showDeskTabs });
+  useEffect(() => {
+    useDeskStore.getState().setOpenPolicy(policy);
+  }, [policy]);
+  return null;
+}
+
+function WebAppBrandingSync() {
+  // Only authoritative primary-origin settings may replace the server's boot
+  // token. A selected remote or the settings store's initial defaults cannot.
+  const settings = useServerConfig(null)?.clientSettings;
+  useEffect(() => {
+    if (settings) applyWebAppBranding(document, resolveWebAppBranding(settings));
+  }, [settings]);
+  return null;
+}
+
 function AppearanceSettingsSync() {
   const appAccentColor = useSettings((settings) => settings.appAccentColor);
-  const interfaceScalePercent = useSettings((settings) => settings.interfaceScalePercent);
-  const sidebarAccentColor = useSettings((settings) => settings.themeAccentColor);
+  const { resolvedTheme } = useTheme();
+  // Interface size belongs to this client across every selected server.
+  const interfaceScalePercent = useSettings((settings) => settings.interfaceScalePercent, {
+    environmentId: null,
+  });
   const continueBackgroundAnimations = useSettings(
     (settings) => settings.continueBackgroundAnimations,
   );
   const sidebarStarSpeed = useSettings((settings) => settings.sidebarStarSpeed);
 
+  // Drawn a little brighter in light mode and deeper in dark mode (themeAccent.ts).
   useEffect(() => {
-    applyAppAccentColor(appAccentColor);
+    applyAppAccentColor(appAccentColor, resolvedTheme);
     return () => {
-      applyAppAccentColor(undefined);
+      applyAppAccentColor(undefined, resolvedTheme);
     };
-  }, [appAccentColor]);
+  }, [appAccentColor, resolvedTheme]);
 
   useEffect(() => {
     applyInterfaceScalePercent(interfaceScalePercent);
@@ -422,12 +456,13 @@ function AppearanceSettingsSync() {
     };
   }, [interfaceScalePercent]);
 
+  // The sidebar's stars, glow and tint always follow the accent color.
   useEffect(() => {
-    applySidebarAccentColor(sidebarAccentColor);
+    applySidebarAccentColor(appAccentColor);
     return () => {
       applySidebarAccentColor(undefined);
     };
-  }, [sidebarAccentColor]);
+  }, [appAccentColor]);
 
   useEffect(() => {
     applyCafeBackgroundAnimations(continueBackgroundAnimations);

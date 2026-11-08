@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import * as Schema from "effect/Schema";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as Electron from "electron";
 import { requestVisualizationHost } from "@cafecode/shared/visualizationHostClient";
 import {
@@ -33,6 +34,9 @@ const owner: VisualizationHostOwner = {
 const consentId = randomUUID();
 const bounds = { x: 10, y: 30, width: 400, height: 200 };
 const hosts: DesktopVisualizationHost[] = [];
+let retireBrokerRequests: (() => Promise<void>) | undefined;
+let brokerFinalization: Promise<void> | undefined;
+const encodeBrokerPhases = Schema.encodeSync(Schema.UnknownFromJsonString);
 const nativeSnapshot = (
   phase: VisualizationSurfaceDiagnostics["phase"],
 ): VisualizationSurfaceDiagnostics => ({
@@ -67,9 +71,41 @@ const nativeSnapshot = (
   layoutRefusals: 0,
   layoutRefusal: "none",
 });
+beforeEach(() => {
+  // A timed-out cleanup may still own native requests. Never reset/create a
+  // successor fixture until that exact owner and its host have actually joined.
+  if (retireBrokerRequests) throw new Error("Previous broker request owner is still retiring");
+});
 afterEach(async () => {
-  for (const host of hosts.splice(0)) await host.close();
-  vi.useRealTimers();
+  const retirement = retireBrokerRequests;
+  const closeHosts = async () => {
+    try {
+      for (const host of hosts.splice(0)) await host.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  };
+  if (!retirement) {
+    await closeHosts();
+    return;
+  }
+  // If an earlier hook expired, every later hook joins this same completion;
+  // an empty second splice must not release admission while host.close awaits.
+  brokerFinalization ??= Promise.resolve().then(async () => {
+    try {
+      await retirement();
+    } finally {
+      await closeHosts();
+    }
+  });
+  const completion = brokerFinalization;
+  await completion;
+  // A rejected retirement/close is not proof that native ownership ended.
+  // Keep its exact failed completion and admission fence rather than retrying.
+  if (retireBrokerRequests === retirement && brokerFinalization === completion) {
+    retireBrokerRequests = undefined;
+    brokerFinalization = undefined;
+  }
 });
 
 function windowFixture() {
@@ -949,45 +985,221 @@ describe("main-owned visualization leases", () => {
     await f.host.revoke(owner);
     expect(f.host.inspect(f.ticket, state.leaseId)).toBeNull();
   });
-  it("authenticates broker generation and rejects source/selector extras without echoing private bytes", async () => {
-    const f = await fixture();
-    const denied = await fetch(f.connection.url, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${"b".repeat(64)}` },
-      body: JSON.stringify({ source: document.html }),
+  it("authenticates broker generation and rejects source/selector extras without echoing private bytes", async (context) => {
+    const started = performance.now();
+    type Phase =
+      | "fixture-entered"
+      | "fixture-ready"
+      | "invalid-token-entered"
+      | "invalid-token-complete"
+      | "extra-source-entered"
+      | "extra-source-complete"
+      | "wrong-generation-entered"
+      | "wrong-generation-complete"
+      | "non-ascii-entered"
+      | "non-ascii-complete"
+      | "nested-entered"
+      | "nested-complete"
+      | "inspect-entered"
+      | "inspect-complete"
+      | "retirement-entered"
+      | "retirement-complete";
+    const phases: { phase: Phase; elapsedMs: number }[] = [];
+    let retired = false;
+    let observationsRetired = false;
+    const mark = (phase: Phase) => {
+      if (observationsRetired || phases.length >= 16) return;
+      const elapsed = performance.now() - started;
+      phases.push({
+        phase,
+        elapsedMs: Number.isFinite(elapsed)
+          ? Math.max(0, Math.min(60_000, Math.round(elapsed)))
+          : 0,
+      });
+    };
+    context.onTestFailed(() => {
+      try {
+        process.stderr.write(`Synthetic broker request phases: ${encodeBrokerPhases(phases)}\n`);
+      } catch {
+        /* Preserve the original failure when diagnostic delivery is unavailable. */
+      }
     });
-    expect(denied.status).toBe(403);
-    expect(await denied.text()).not.toContain("private source sentinel");
-    expect(
-      await requestVisualizationHost(f.connection, "prepareViewer", {
-        ...f.input,
-        path: "/private/secret",
-      }),
-    ).toEqual({ status: "blocked", reason: "invalid" });
-    await expect(
-      requestVisualizationHost({ ...f.connection, generation: randomUUID() }, "inspectViewer", {
-        ticket: f.ticket,
-        leaseId: randomUUID(),
-      }),
-    ).rejects.toThrow("Visualization host request was refused.");
-    const nonAscii = await fetch(f.connection.url, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${"é".repeat(64)}` },
-      body: "{}",
+    const controller = new AbortController();
+    const signal = AbortSignal.any([context.signal, controller.signal]);
+    const pending = new Set<Promise<unknown>>();
+    const responses = new Set<Response>();
+    const track = <T>(operation: Promise<T>): Promise<T> => {
+      pending.add(operation);
+      void operation.then(
+        () => {
+          pending.delete(operation);
+        },
+        () => {
+          pending.delete(operation);
+        },
+      );
+      return operation;
+    };
+    const assertActive = () => {
+      if (retired || signal.aborted) throw new Error("Synthetic broker request owner retired");
+    };
+    const own = <T>(start: () => Promise<T>): Promise<T> => {
+      assertActive();
+      return track(
+        (async () => {
+          const result = await start();
+          assertActive();
+          return result;
+        })(),
+      );
+    };
+    const cancelResponses = async () => {
+      await Promise.allSettled(
+        [...responses].map(async (response) => {
+          // The real client owns locked readers and awaits their cancellation in
+          // its own finally. Unread refusal bodies otherwise need an exact owner.
+          if (response.body && !response.body.locked) await response.body.cancel();
+        }),
+      );
+    };
+    let restoreFetch: (() => void) | undefined;
+    let retirement: Promise<void> | undefined;
+    const cleanup = (): Promise<void> => {
+      if (retirement) return retirement;
+      // Store the shared completion before synchronous abort can wake another
+      // caller. The cleanup itself is never inserted into its pending set.
+      retirement = Promise.resolve().then(async () => {
+        try {
+          await cancelResponses();
+          await Promise.allSettled([...pending]);
+          // A previously admitted fetch may have delivered its exact response
+          // during the drain. No retired continuation can start another call.
+          await cancelResponses();
+          responses.clear();
+        } finally {
+          restoreFetch?.();
+          mark("retirement-complete");
+          observationsRetired = true;
+        }
+      });
+      retired = true;
+      mark("retirement-entered");
+      controller.abort();
+      return retirement;
+    };
+    retireBrokerRequests = cleanup;
+    context.onTestFinished(cleanup);
+    const nativeFetch = globalThis.fetch;
+    let expectedUrl: string | undefined;
+    const fetchObservation = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+      if (input !== expectedUrl) return nativeFetch(input, init);
+      assertActive();
+      const response = nativeFetch(input, init);
+      // Return the original native promise/result/error. This separate observed
+      // reaction only retains the response for exact refusal-body retirement.
+      track(
+        response.then(
+          (value) => {
+            responses.add(value);
+          },
+          () => undefined,
+        ),
+      );
+      return response;
     });
-    expect(nonAscii.status).toBe(403);
-    const nested = await fetch(f.connection.url, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${f.connection.token}` },
-      body: "[".repeat(17) + "0" + "]".repeat(17),
-    });
-    expect(nested.status).toBe(400);
-    expect(
-      await requestVisualizationHost(f.connection, "inspectViewer", {
-        ticket: f.ticket,
-        leaseId: randomUUID(),
-      }),
-    ).toBeNull();
+    restoreFetch = () => {
+      if (globalThis.fetch === fetchObservation) fetchObservation.mockRestore();
+    };
+    try {
+      mark("fixture-entered");
+      const f = await own(() => fixture());
+      expectedUrl = f.connection.url;
+      mark("fixture-ready");
+      mark("invalid-token-entered");
+      const denied = await own(() =>
+        fetch(f.connection.url, {
+          method: "POST",
+          signal,
+          headers: { Authorization: `Bearer ${"b".repeat(64)}` },
+          body: JSON.stringify({ source: document.html }),
+        }),
+      );
+      expect(denied.status).toBe(403);
+      expect(await own(() => denied.text())).not.toContain("private source sentinel");
+      mark("invalid-token-complete");
+      mark("extra-source-entered");
+      expect(
+        await own(() =>
+          requestVisualizationHost(
+            f.connection,
+            "prepareViewer",
+            {
+              ...f.input,
+              path: "/private/secret",
+            },
+            signal,
+          ),
+        ),
+      ).toEqual({ status: "blocked", reason: "invalid" });
+      mark("extra-source-complete");
+      mark("wrong-generation-entered");
+      await expect(
+        own(() =>
+          requestVisualizationHost(
+            { ...f.connection, generation: randomUUID() },
+            "inspectViewer",
+            {
+              ticket: f.ticket,
+              leaseId: randomUUID(),
+            },
+            signal,
+          ),
+        ),
+      ).rejects.toThrow("Visualization host request was refused.");
+      await own(cancelResponses);
+      mark("wrong-generation-complete");
+      mark("non-ascii-entered");
+      const nonAscii = await own(() =>
+        fetch(f.connection.url, {
+          method: "POST",
+          signal,
+          headers: { Authorization: `Bearer ${"é".repeat(64)}` },
+          body: "{}",
+        }),
+      );
+      expect(nonAscii.status).toBe(403);
+      await own(cancelResponses);
+      mark("non-ascii-complete");
+      mark("nested-entered");
+      const nested = await own(() =>
+        fetch(f.connection.url, {
+          method: "POST",
+          signal,
+          headers: { Authorization: `Bearer ${f.connection.token}` },
+          body: "[".repeat(17) + "0" + "]".repeat(17),
+        }),
+      );
+      expect(nested.status).toBe(400);
+      await own(cancelResponses);
+      mark("nested-complete");
+      mark("inspect-entered");
+      expect(
+        await own(() =>
+          requestVisualizationHost(
+            f.connection,
+            "inspectViewer",
+            {
+              ticket: f.ticket,
+              leaseId: randomUUID(),
+            },
+            signal,
+          ),
+        ),
+      ).toBeNull();
+      mark("inspect-complete");
+    } finally {
+      await cleanup();
+    }
   });
   it("publishes bounded counts without retaining private diagnostics", async () => {
     const f = await fixture();

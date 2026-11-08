@@ -11,9 +11,12 @@ import {
 } from "./providerTaskControls.ts";
 import { MaxConcurrentSubagents, SubagentLimits } from "./subagentLimits.ts";
 import { CodexContextWindowOverride } from "./codexContextWindow.ts";
+import { GlideStopRevision } from "./glide.ts";
 import { ProviderDiagnosticSnapshot } from "./providerDiagnostic.ts";
 import { RepositoryIdentity } from "./environment.ts";
 import { CodexReviewTarget } from "./codexReview.ts";
+import { ProviderUserInputUnanswered, hasDisjointUserInputAnswers } from "./providerUserInput.ts";
+import { UserInputQuestion } from "./providerRuntime.ts";
 import {
   ApprovalRequestId,
   CheckpointRef,
@@ -280,12 +283,19 @@ export type OrchestrationProject = typeof OrchestrationProject.Type;
 export const OrchestrationMessageRole = Schema.Literals(["user", "assistant", "system"]);
 export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
 
+/** Exact projected input owner for presentation; never native retry authority. */
+export const OrchestrationMessageOriginatingTurn = Schema.Struct({
+  turnId: TurnId,
+  state: Schema.Literals(["running", "interrupted", "completed", "error"]),
+});
+
 export const OrchestrationMessage = Schema.Struct({
   id: MessageId,
   role: OrchestrationMessageRole,
   text: Schema.String,
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   turnId: Schema.NullOr(TurnId),
+  originatingTurn: Schema.optional(OrchestrationMessageOriginatingTurn),
   streaming: Schema.Boolean,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -431,6 +441,10 @@ export const OrchestrationThread = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   activities: Schema.Array(OrchestrationThreadActivity),
+  // Presentation-only omission evidence. A bounded detail snapshot cannot
+  // silently imply that every pending interaction was delivered; omission
+  // never cancels a request or grants permission to answer a different owner.
+  pendingRequestRetentionTruncated: Schema.optional(Schema.Boolean),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
   session: Schema.NullOr(OrchestrationSession),
   // Older snapshots predate durable provider goals. Keep the field optional at
@@ -461,10 +475,21 @@ export const OrchestrationProjectShell = Schema.Struct({
 });
 export type OrchestrationProjectShell = typeof OrchestrationProjectShell.Type;
 
+// Keep this optional shell metadata small independently of historical roster
+// retention. Overflow remains explicit instead of emitting an oversized frame.
+export const MAX_UNCONFIRMED_NATIVE_AGENTS = 64;
 export const OrchestrationLiveWork = Schema.Struct({
   runtimeId: SubagentRuntimeId,
   taskCount: NonNegativeInt,
   agentCount: NonNegativeInt,
+  // Presentation-only source-retirement hints. They never end native work,
+  // grant a task control or erase historical lifecycle records.
+  unconfirmedAgentIds: Schema.optional(
+    Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(512))).check(
+      Schema.isMaxLength(MAX_UNCONFIRMED_NATIVE_AGENTS),
+    ),
+  ),
+  unconfirmedAgentIdsTruncated: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationLiveWork = typeof OrchestrationLiveWork.Type;
 
@@ -1162,6 +1187,7 @@ const ThreadInteractionModeSetCommand = Schema.Struct({
 
 const ThreadTurnStartBootstrapCreateThread = Schema.Struct({
   computerUseEnabled: Schema.optional(Schema.Boolean),
+  computerUseRevision: Schema.optional(GlideStopRevision),
   projectId: Schema.NullOr(ProjectId),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
@@ -1384,8 +1410,9 @@ const ThreadUserInputRespondCommand = Schema.Struct({
   threadId: ThreadId,
   requestId: ApprovalRequestId,
   answers: ProviderUserInputAnswers,
+  unanswered: Schema.optional(ProviderUserInputUnanswered),
   createdAt: IsoDateTime,
-});
+}).check(Schema.makeFilter(hasDisjointUserInputAnswers));
 
 const ThreadUserInputSnoozeCommand = Schema.Struct({
   type: Schema.Literal("thread.user-input.snooze"),
@@ -1404,6 +1431,54 @@ const ThreadAsyncQuestionsResolveCommand = Schema.Struct({
     Schema.isMinLength(1),
     Schema.isMaxLength(16),
   ),
+  createdAt: IsoDateTime,
+});
+
+/** Management-only operations retain an exact question incarnation and their
+ * own notice identity. They are deliberately excluded from the public client
+ * command union: provider payloads and ordinary renderer input cannot mint MCP
+ * provenance or turn an acknowledgement into a completed native response. */
+const ThreadMcpUserInputRespondCommand = Schema.Struct({
+  type: Schema.Literal("thread.mcp-user-input.respond"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  // An MCP target copies an existing opaque callback identity. Decoding must
+  // not normalize it into a different native owner's request.
+  requestId: Schema.toType(ApprovalRequestId),
+  expectedRequestCreatedAt: IsoDateTime,
+  answers: ProviderUserInputAnswers,
+  unanswered: Schema.optional(ProviderUserInputUnanswered),
+  noticeMessageId: MessageId,
+  action: Schema.Literals(["answered", "skipped", "cleared"]),
+  createdAt: IsoDateTime,
+}).check(Schema.makeFilter(hasDisjointUserInputAnswers));
+
+const ThreadAsyncQuestionAnswerCommand = Schema.Struct({
+  type: Schema.Literal("thread.async-question.answer"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  activityId: EventId,
+  questionIndex: NonNegativeInt.check(Schema.isLessThanOrEqualTo(15)),
+  answer: Schema.String.check(
+    Schema.isNonEmpty(),
+    Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS),
+  ),
+  messageId: MessageId,
+  noticeMessageId: MessageId,
+  createdAt: IsoDateTime,
+});
+
+const ThreadMcpAsyncQuestionsResolveCommand = Schema.Struct({
+  type: Schema.Literal("thread.mcp-async-questions.resolve"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  activityId: EventId,
+  questionIndexes: Schema.Array(NonNegativeInt).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(16),
+  ),
+  noticeMessageId: MessageId,
+  action: Schema.Literals(["skipped", "cleared"]),
   createdAt: IsoDateTime,
 });
 
@@ -1709,6 +1784,9 @@ const ThreadGoalSyncCommand = Schema.Struct({
 });
 
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadMcpUserInputRespondCommand,
+  ThreadAsyncQuestionAnswerCommand,
+  ThreadMcpAsyncQuestionsResolveCommand,
   ThreadForkCommitCommand,
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -1981,10 +2059,32 @@ export const ThreadApprovalResponseRequestedPayload = Schema.Struct({
 
 const ThreadUserInputResponseRequestedPayload = Schema.Struct({
   threadId: ThreadId,
-  requestId: ApprovalRequestId,
+  // The public renderer command retains its existing ingress normalization;
+  // persisted canonical/MCP identities must survive later decode unchanged.
+  requestId: Schema.toType(ApprovalRequestId),
   answers: ProviderUserInputAnswers,
+  unanswered: Schema.optional(ProviderUserInputUnanswered),
+  // Only the management-only command writes this intent. A later native
+  // resolution must independently join its exact request incarnation before
+  // publishing the primary-chat acknowledgement.
+  mcpResponse: Schema.optional(
+    Schema.Struct({
+      requestCreatedAt: IsoDateTime,
+      noticeMessageId: MessageId,
+      action: Schema.Literals(["answered", "skipped", "cleared"]),
+      // Exact canonical wording is captured before the callback is consumed;
+      // the successful reactor must never recover it from a later projection.
+      // Provider decoding trims fields at initial ingestion. This is a saved
+      // canonical snapshot: re-running those transformations here would change
+      // opaque IDs or exact wording after validation and before settlement.
+      questions: Schema.Array(Schema.toType(UserInputQuestion)).check(
+        Schema.isMinLength(1),
+        Schema.isMaxLength(64),
+      ),
+    }),
+  ),
   createdAt: IsoDateTime,
-});
+}).check(Schema.makeFilter(hasDisjointUserInputAnswers));
 
 const ThreadUserInputSnoozeRequestedPayload = Schema.Struct({
   threadId: ThreadId,

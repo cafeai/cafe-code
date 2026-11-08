@@ -5,17 +5,23 @@ import { nodeTestPlan, testRepositoryRoot, type TestStep } from "./test-run-plan
 
 export interface LocalVerificationOptions {
   readonly typecheckConcurrency: 1 | 2 | 3;
-  readonly testConcurrency: 1 | 2 | 3;
+  readonly testConcurrency: "ci" | 1 | 2 | 3;
+  readonly fresh?: boolean;
 }
 
-/** Keep the local opt-in separate from selection or skipping. In particular,
+/** Keep local scheduling separate from selection or skipping. In particular,
  * duplicate options cannot silently override a previously reviewed limit. */
 export function parseLocalVerificationArguments(args: readonly string[]): LocalVerificationOptions {
   let typecheckConcurrency: 1 | 2 | 3 = 3;
-  let testConcurrency: 1 | 2 | 3 = 2;
+  let testConcurrency: LocalVerificationOptions["testConcurrency"] = 2;
   let hasTypecheckOption = false;
   let hasTestOption = false;
+  let fresh = false;
   for (const arg of args) {
+    if (arg === "--fresh" && !fresh) {
+      fresh = true;
+      continue;
+    }
     if (
       !hasTypecheckOption &&
       (arg === "--typecheck-concurrency=1" ||
@@ -29,25 +35,36 @@ export function parseLocalVerificationArguments(args: readonly string[]): LocalV
     }
     if (
       !hasTestOption &&
-      (arg === "--test-concurrency=1" ||
+      (arg === "--test-concurrency=ci" ||
+        arg === "--test-concurrency=1" ||
         arg === "--test-concurrency=2" ||
         arg === "--test-concurrency=3")
     ) {
-      testConcurrency = arg === "--test-concurrency=1" ? 1 : arg === "--test-concurrency=2" ? 2 : 3;
+      testConcurrency =
+        arg === "--test-concurrency=ci"
+          ? "ci"
+          : arg === "--test-concurrency=1"
+            ? 1
+            : arg === "--test-concurrency=2"
+              ? 2
+              : 3;
       hasTestOption = true;
       continue;
     }
     throw new Error(
-      "Complete local verification accepts optional --typecheck-concurrency=1, =2 or =3 and --test-concurrency=1, =2 or =3 once each; selection and skip arguments are not supported.",
+      "Complete local verification accepts --fresh, --typecheck-concurrency=1, =2 or =3 and --test-concurrency=ci, =1, =2 or =3 once each; selection and skip arguments are not supported.",
     );
   }
-  return { typecheckConcurrency, testConcurrency };
+  return { typecheckConcurrency, testConcurrency, ...(fresh ? { fresh: true } : {}) };
 }
 
-/** Full local qualification, not an affected-file or cached-result lane.
- * Typechecking defaults to three workspaces, and the Node graph defaults to two.
- * Explicit local limits do not change each Vitest owner's worker policy or
- * server file isolation. Children inherit the caller's low priority.
+/** Complete local qualification: each required task is either freshly executed
+ * or reuses an authenticated prior success for its exact reviewed inputs.
+ * Typechecking defaults to three workspaces. The complete Node graph defaults
+ * to two admitted local workspaces with at most two workers each. Eligible
+ * exact-input results may be reused; --fresh bypasses reuse. Explicit CI mode
+ * executes the unchanged host-specific CI plan fresh, never a partial receipt.
+ * Children inherit the caller's low priority.
  * Native browser contexts retain their separate sequential owners.
  * The forced desktop build is deliberately last, even on a warm checkout. */
 export function localVerificationPlan(
@@ -58,8 +75,18 @@ export function localVerificationPlan(
   const testConcurrency = options.testConcurrency;
   if (typecheckConcurrency !== 1 && typecheckConcurrency !== 2 && typecheckConcurrency !== 3)
     throw new Error("Local typecheck concurrency must be exactly 1, 2 or 3.");
-  if (testConcurrency !== 1 && testConcurrency !== 2 && testConcurrency !== 3)
-    throw new Error("Local test concurrency must be exactly 1, 2 or 3.");
+  if (
+    testConcurrency !== "ci" &&
+    testConcurrency !== 1 &&
+    testConcurrency !== 2 &&
+    testConcurrency !== 3
+  )
+    throw new Error("Local test concurrency must be CI defaults or exactly 1, 2 or 3.");
+  const reuse = options.fresh ? [] : ["--reuse-local-results"];
+  const nodes =
+    testConcurrency === "ci"
+      ? nodeTestPlan(platform)
+      : nodeTestPlan(platform, { concurrency: testConcurrency });
   return [
     { name: "Formatting", args: ["fmt:check"] },
     { name: "Lint and interface-language validation", args: ["lint"] },
@@ -75,13 +102,26 @@ export function localVerificationPlan(
         "node",
         resolve(import.meta.dirname, "../typecheck-local.ts"),
         `--concurrency=${typecheckConcurrency}`,
+        ...reuse,
       ],
       // Use the already qualified compiler ceiling only for this step, never
       // leak it into tests, browser processes, build outputs or the shipped app.
       env: { NODE_OPTIONS: "--max-old-space-size=4096" },
     },
-    ...nodeTestPlan(platform, { concurrency: testConcurrency }),
-    { name: "Complete native browser qualification", args: ["test:browser:local"] },
+    ...(testConcurrency === "ci"
+      ? nodes
+      : nodes.map((step, index) => ({
+          name: step.name,
+          args: [
+            "exec",
+            "node",
+            resolve(import.meta.dirname, "../node-tests-local.ts"),
+            index === 0 ? "--phase=main" : "--phase=codex-tail",
+            `--concurrency=${index === 0 ? testConcurrency : 1}`,
+            ...reuse,
+          ],
+        }))),
+    { name: "Complete native browser qualification", args: ["test:browser:local", ...reuse] },
     {
       name: "Forced desktop build (last)",
       args: ["build:desktop", "--force", "--concurrency=1"],

@@ -56,6 +56,25 @@ function captureThreadActivityStatements(sql: SqlClient.SqlClient) {
   return { sql: observed, statements };
 }
 
+function captureCodexSteerEvidenceStatements(sql: SqlClient.SqlClient) {
+  const statements: Array<readonly [string, ReadonlyArray<unknown>]> = [];
+  const observed = new Proxy(sql, {
+    apply(target, thisArg, argumentsList) {
+      const statement = Reflect.apply(
+        target,
+        thisArg,
+        argumentsList,
+      ) as Statement.Statement<unknown>;
+      const compiled = statement.compile();
+      if (/WITH exact_accepted AS|AS "processingObserved"/u.test(compiled[0])) {
+        statements.push(compiled);
+      }
+      return statement;
+    },
+  });
+  return { sql: observed, statements };
+}
+
 const projectionSnapshotLayer = it.layer(
   OrchestrationProjectionSnapshotQueryLive.pipe(
     Layer.provideMerge(RepositoryIdentityResolverLive),
@@ -65,6 +84,99 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect(
+    "keeps desktop power intent on exact roots and current background work without history hydration",
+    () =>
+      Effect.gen(function* () {
+        const query = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const thread = "desktop-power-fixture";
+        const runtime = "00000000-0000-4000-8000-000000000051";
+        const foreign = "00000000-0000-4000-8000-000000000052";
+        const at = "2026-11-07T00:00:00.000Z";
+        assert.equal(yield* query.hasActiveDesktopWork(), false);
+        yield* sql`INSERT INTO projection_threads (thread_id,project_id,title,model_selection_json,runtime_mode,interaction_mode,created_at,updated_at,latest_turn_id)
+      VALUES (${thread},NULL,'Power fixture','{"instanceId":"codex","model":"gpt-5"}','full-access','default',${at},${at},'power-turn')`;
+        try {
+          yield* sql`INSERT INTO projection_thread_sessions (thread_id,status,provider_name,provider_instance_id,runtime_mode,active_turn_id,updated_at,subagent_runtime_id)
+        VALUES (${thread},'starting','codex','codex','full-access',NULL,${at},${runtime})`;
+          assert.equal(yield* query.hasActiveDesktopWork(), true);
+          yield* sql`UPDATE projection_thread_sessions SET status='ready' WHERE thread_id=${thread}`;
+          assert.equal(yield* query.hasActiveDesktopWork(), false);
+          yield* sql`INSERT INTO projection_turns (thread_id,turn_id,state,requested_at,started_at,completed_at,checkpoint_files_json)
+        VALUES (${thread},'power-turn','running',${at},${at},NULL,'[]')`;
+          yield* sql`UPDATE projection_thread_sessions SET active_turn_id='power-turn' WHERE thread_id=${thread}`;
+          assert.equal(yield* query.hasActiveDesktopWork(), true);
+          yield* sql`UPDATE projection_turns SET state='completed',completed_at=${at} WHERE thread_id=${thread}`;
+          yield* sql`UPDATE projection_thread_sessions SET status='running' WHERE thread_id=${thread}`;
+          assert.equal(yield* query.hasActiveDesktopWork(), false);
+          yield* sql`UPDATE projection_thread_sessions SET status='ready',active_turn_id=NULL WHERE thread_id=${thread}`;
+          // Generic tool/task work retains its own namespace and exact runtime.
+          yield* sql`INSERT INTO projection_live_work (thread_id,runtime_id,turn_id,lane,work_id,is_agent,active,sequence,created_at,activity_id)
+        VALUES (${thread},${foreign},'power-turn','tool','owned-tool',0,1,1,${at},'power-activity')`;
+          assert.equal(yield* query.hasActiveDesktopWork(), false);
+          yield* sql`UPDATE projection_live_work SET runtime_id=${runtime} WHERE thread_id=${thread}`;
+          assert.equal(yield* query.hasActiveDesktopWork(), true);
+          yield* sql`UPDATE projection_thread_sessions SET status='stopped' WHERE thread_id=${thread}`;
+          assert.equal(yield* query.hasActiveDesktopWork(), false);
+        } finally {
+          yield* sql`DELETE FROM projection_live_work WHERE thread_id=${thread}`;
+          yield* sql`DELETE FROM projection_thread_sessions WHERE thread_id=${thread}`;
+          yield* sql`DELETE FROM projection_turns WHERE thread_id=${thread}`;
+          yield* sql`DELETE FROM projection_threads WHERE thread_id=${thread}`;
+        }
+      }),
+  );
+  it.effect(
+    "projects exact input turn outcomes without rebinding canonical message routing or stale generations",
+    () =>
+      Effect.gen(function* () {
+        const query = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("input-outcome-thread");
+        const createdAt = "2026-11-06T00:00:00.000Z";
+        const laterAt = "2026-11-06T00:00:10.000Z";
+        yield* sql`INSERT INTO projection_threads (thread_id,project_id,title,model_selection_json,runtime_mode,interaction_mode,created_at,updated_at)
+        VALUES (${threadId},NULL,'Input outcomes','{"instanceId":"claudeAgent","model":"claude-opus-5-5"}','full-access','default',${createdAt},${createdAt})`;
+        try {
+          for (const [id, role, canonicalTurn, updatedAt] of [
+            ["exact-failed", "user", null, createdAt],
+            ["later-same-text", "user", null, laterAt],
+            ["new-generation", "user", null, laterAt],
+            ["contradictory-turn", "user", "different-turn", createdAt],
+            ["assistant-not-input", "assistant", null, createdAt],
+          ] as const) {
+            yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,turn_id,role,text,attachments_json,is_streaming,created_at,updated_at)
+            VALUES (${id},${threadId},${canonicalTurn},${role},'Same input',NULL,0,${createdAt},${updatedAt})`;
+            if (id !== "later-same-text")
+              yield* sql`INSERT INTO projection_turns (thread_id,turn_id,pending_message_id,state,requested_at,started_at,completed_at,checkpoint_files_json)
+            VALUES (${threadId},${`turn:${id}`},${id},'error',${createdAt},${createdAt},${laterAt},'[]')`;
+          }
+          const detail = yield* query.getThreadDetailById(threadId);
+          assert.equal(detail._tag, "Some");
+          if (detail._tag !== "Some") return;
+          const full = yield* query.getSnapshot();
+          for (const thread of [
+            detail.value,
+            full.threads.find((entry) => entry.id === threadId)!,
+          ]) {
+            const exact = thread.messages.find((message) => message.id === "exact-failed")!;
+            assert.equal(exact.turnId, null);
+            assert.deepEqual(exact.originatingTurn, {
+              turnId: "turn:exact-failed",
+              state: "error",
+            });
+            for (const message of thread.messages.filter((entry) => entry.id !== exact.id))
+              assert.isUndefined(message.originatingTurn);
+          }
+        } finally {
+          yield* sql`DELETE FROM projection_turns WHERE thread_id=${threadId}`;
+          yield* sql`DELETE FROM projection_thread_messages WHERE thread_id=${threadId}`;
+          yield* sql`DELETE FROM projection_threads WHERE thread_id=${threadId}`;
+        }
+      }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -368,6 +480,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
               updatedAt: "2026-02-24T00:00:05.500Z",
             },
           ],
+          pendingRequestRetentionTruncated: false,
           activities: [
             {
               id: asEventId("activity-1"),
@@ -2669,7 +2782,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
   );
 
   it.effect(
-    "keeps live and terminal exact Codex steer evidence bounded across a delayed-ACK Stop race",
+    "keeps live, terminal and legacy Codex steer evidence bounded across a delayed-ACK Stop race",
     () =>
       Effect.gen(function* () {
         const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -2944,6 +3057,160 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           WHERE thread_id = ${threadId}
             AND turn_id = ${turnId}
         `;
+
+        // Exercise the real startup prefilter, not a handwritten approximation
+        // of its evidence query. SQLite may otherwise choose the mature event
+        // stream as the outer relation for a correlated processing lookup and
+        // synchronously inspect every irrelevant event before finding no match.
+        // Keep the existing delayed-ACK/Stop facts unchanged: they remain an
+        // exact candidate for the later recovery owner to refuse or requeue.
+        const capturedAcceptedSteer = captureCodexSteerEvidenceStatements(sql);
+        const repositoryIdentityResolver = yield* RepositoryIdentityResolver;
+        const capturedAcceptedSteerLayer = Layer.fresh(
+          OrchestrationProjectionSnapshotQueryLive,
+        ).pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(SqlClient.SqlClient, capturedAcceptedSteer.sql),
+              Layer.succeed(RepositoryIdentityResolver, repositoryIdentityResolver),
+            ),
+          ),
+        );
+        const terminalCandidates = yield* Effect.gen(function* () {
+          const capturedSnapshotQuery = yield* ProjectionSnapshotQuery;
+          return yield* capturedSnapshotQuery.getPostTerminalStaleSteerCandidates([threadId]);
+        }).pipe(Effect.provide(capturedAcceptedSteerLayer));
+        assert.deepStrictEqual(terminalCandidates, [
+          {
+            _tag: "accepted",
+            threadId,
+            eventSequence: acceptedEvent.sequence,
+            intentSequence: intent.sequence,
+            intentCreatedAt,
+            activityId,
+            acceptedTurnId: turnId,
+            clientCorrelationId,
+            messageId,
+            acceptedAt,
+          },
+        ]);
+        assert.lengthOf(capturedAcceptedSteer.statements, 1);
+        const [candidateQuery, candidateParameters] = capturedAcceptedSteer.statements[0]!;
+        const candidatePlan = yield* sql.unsafe<{ readonly detail: string }>(
+          `EXPLAIN QUERY PLAN ${candidateQuery}`,
+          candidateParameters,
+        );
+        const candidatePlanText = candidatePlan.map((row) => row.detail).join("\n");
+        const processingRanges = candidatePlan.flatMap((row, index) =>
+          row.detail.includes(
+            "SEARCH processing USING INDEX idx_projection_thread_activities_thread_turn_kind_created_id",
+          )
+            ? [index]
+            : [],
+        );
+        const exactEventProbes = candidatePlan.flatMap((row, index) =>
+          row.detail.includes("SEARCH processing_event USING INDEX idx_orch_events_command_id")
+            ? [index]
+            : [],
+        );
+        assert.lengthOf(
+          processingRanges,
+          2,
+          `accepted recovery must first select each exact thread/turn activity range:\n${candidatePlanText}`,
+        );
+        assert.lengthOf(
+          exactEventProbes,
+          2,
+          `accepted recovery must authenticate each activity through its command identity:\n${candidatePlanText}`,
+        );
+        for (let index = 0; index < processingRanges.length; index += 1) {
+          assert.isAbove(
+            exactEventProbes[index]!,
+            processingRanges[index]!,
+            `accepted recovery scanned events before selecting the processing activity:\n${candidatePlanText}`,
+          );
+        }
+        assert.notInclude(candidatePlanText, "idx_orch_events_stream_sequence");
+        assert.isFalse(
+          candidatePlan.some((row) => /^SCAN processing_event(?:\s|$)/u.test(row.detail)),
+          `accepted recovery must not scan the orchestration event journal:\n${candidatePlanText}`,
+        );
+
+        // A new turn also revalidates this precise historical acceptance via
+        // the legacy API, without possessing its immutable compact barrier.
+        // Exercise that actual statement against the same mature journal:
+        // formerly its optional filter ORs and unfenced processing join let
+        // the journal drive a repeated correlated search. Keep the complete
+        // historical result, rather than hiding the work behind a row limit.
+        const legacyEvidence = yield* Effect.gen(function* () {
+          const capturedSnapshotQuery = yield* ProjectionSnapshotQuery;
+          return yield* capturedSnapshotQuery.getCodexSteerAcceptanceEvidence({
+            threadId,
+            acceptedTurnId: turnId,
+            messageId,
+          });
+        }).pipe(Effect.provide(capturedAcceptedSteerLayer));
+        assert.deepStrictEqual(legacyEvidence, [
+          {
+            threadId,
+            acceptedTurnId: turnId,
+            intentSequence: intent.sequence,
+            clientCorrelationId,
+            messageId,
+            messageTurnId: turnId,
+            messageText: "private mature prompt",
+            messageAttachments: [],
+            acceptedAt,
+            turnState: "interrupted",
+            turnCompletedAt: interruptedAt,
+            processingObserved: false,
+            recoveryObserved: false,
+            // Preserve the legacy API's acceptance-time control boundary.
+            // The exact barrier path below separately authenticates Stop
+            // against the earlier intent, including this delayed-ACK race.
+            interruptRequested: false,
+            sessionStopRequested: false,
+          },
+        ]);
+        assert.lengthOf(capturedAcceptedSteer.statements, 2);
+        const [legacyQuery, legacyParameters] = capturedAcceptedSteer.statements[1]!;
+        const legacyPlan = yield* sql.unsafe<{ readonly detail: string }>(
+          `EXPLAIN QUERY PLAN ${legacyQuery}`,
+          legacyParameters,
+        );
+        const legacyPlanText = legacyPlan.map((row) => row.detail).join("\n");
+        assert.match(
+          legacyPlanText,
+          /SEARCH accepted USING INDEX .*\(thread_id=\? AND turn_id=\? AND kind=\?\)/u,
+          `legacy recovery must select its supplied thread/turn acceptance range:\n${legacyPlanText}`,
+        );
+        const legacyProcessingRange = legacyPlan.findIndex((row) =>
+          row.detail.includes(
+            "SEARCH processing USING INDEX idx_projection_thread_activities_thread_turn_kind_created_id",
+          ),
+        );
+        const legacyProcessingEventProbe = legacyPlan.findIndex((row) =>
+          row.detail.includes("SEARCH processing_event USING INDEX idx_orch_events_command_id"),
+        );
+        assert.isAtLeast(
+          legacyProcessingRange,
+          0,
+          `legacy recovery must first select its processing activity range:\n${legacyPlanText}`,
+        );
+        assert.isAbove(
+          legacyProcessingEventProbe,
+          legacyProcessingRange,
+          `legacy recovery must authenticate processing with an exact command probe:\n${legacyPlanText}`,
+        );
+        assert.isFalse(
+          legacyPlan.some((row) =>
+            /(?:SCAN|SEARCH) processing_event .*idx_orch_events_stream_sequence|^SCAN processing_event(?:\s|$)/u.test(
+              row.detail,
+            ),
+          ),
+          `legacy recovery must not search the mature event stream for processing:\n${legacyPlanText}`,
+        );
+
         const terminalLookupStartedAt = performance.now();
         const terminalEvidence = yield* snapshotQuery.getCodexSteerAcceptanceEvidence({
           exactAcceptedBarrier: {
@@ -5111,6 +5378,19 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
       const sql = yield* SqlClient.SqlClient;
       const threadId = ThreadId.make("thread-all-turn-subagent-retention");
+      const processingReceiptPayload = {
+        taskId: `claude-turn-steer-processing:${"a".repeat(64)}`,
+        visibility: "ambient",
+        nativeWorkRuntimeId: "16f7d05e-709c-4b84-9638-7f9a0484729b",
+        detail: "Claude began processing the submitted follow-up.",
+        usage: {
+          provider: "claudeAgent",
+          messageId: "hydrated-claude-message",
+          intentSequence: 31,
+          providerInstanceId: "claude-retention-account",
+          subagentRuntimeId: "16f7d05e-709c-4b84-9638-7f9a0484729b",
+        },
+      };
 
       yield* sql`
         INSERT INTO projection_projects(
@@ -5234,6 +5514,18 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             1001, '2026-10-04T00:02:02.000Z'
           )
       `;
+      // This consumption receipt has no subagent presentation or task control.
+      // Its ambient identity must retain the complete input/attempt/owner
+      // metadata through both the legacy lane and real sidecar hydration.
+      yield* sql`
+        INSERT INTO projection_thread_activities(
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at
+        ) VALUES (
+          'claude-consumption-before-tail', ${threadId}, 'turn-current', 'info', 'task.progress',
+          'Reasoning update', ${encodeJsonString(processingReceiptPayload)},
+          1002, '2026-10-04T00:02:03.000Z'
+        )
+      `;
       yield* sql`
         WITH RECURSIVE tail(index_value) AS (
           SELECT 1 UNION ALL SELECT index_value + 1 FROM tail
@@ -5289,6 +5581,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             (activity) => activity.id === asEventId("fallback-utf16-rejected"),
           ),
         );
+        assert.deepStrictEqual(
+          partialDetail.value.activities.find(
+            (activity) => activity.id === asEventId("claude-consumption-before-tail"),
+          )?.payload,
+          processingReceiptPayload,
+        );
       }
 
       yield* hydrateSubagentLifecycleForThread(sql, threadId);
@@ -5299,6 +5597,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           hydratedDetail.value.activities.some(
             (activity) => activity.id === asEventId("older-turn-child-start"),
           ),
+        );
+        assert.deepStrictEqual(
+          hydratedDetail.value.activities.find(
+            (activity) => activity.id === asEventId("claude-consumption-before-tail"),
+          )?.payload,
+          processingReceiptPayload,
         );
       }
 
@@ -5328,6 +5632,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const terminalDetail = yield* snapshotQuery.getThreadDetailById(threadId);
       assert.equal(terminalDetail._tag, "Some");
       if (terminalDetail._tag === "Some") {
+        const processingReceipt = terminalDetail.value.activities.find(
+          (activity) => activity.id === asEventId("claude-consumption-before-tail"),
+        );
+        assert.equal(processingReceipt?.turnId, asTurnId("turn-current"));
+        assert.deepStrictEqual(processingReceipt?.payload, processingReceiptPayload);
         assert.deepStrictEqual(
           terminalDetail.value.activities
             .filter(
@@ -6562,6 +6871,34 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             },
           },
           {
+            id: "opencode-thinking",
+            turn: "turn-opencode-thinking",
+            kind: "reasoning.summary",
+            payload: {
+              summaryVersion: 1,
+              provider: "opencode",
+              itemId: "prt_reasoning",
+              streamKind: "reasoning_summary_text",
+              detail: "Comparing fixtures",
+              truncated: false,
+              status: "completed",
+            },
+          },
+          {
+            id: "unadmitted-provider-summary",
+            turn: "turn-hidden",
+            kind: "reasoning.summary",
+            payload: {
+              summaryVersion: 1,
+              provider: "codex",
+              itemId: "codex-reasoning",
+              streamKind: "reasoning_summary_text",
+              detail: "Not an admitted provider",
+              truncated: false,
+              status: "completed",
+            },
+          },
+          {
             id: "malformed-summary",
             turn: "turn-hidden",
             kind: "reasoning.summary",
@@ -6706,6 +7043,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           turnIds: [
             "turn-bash-only",
             "turn-summary-only",
+            "turn-opencode-thinking",
             "turn-completed",
             "turn-astral",
             "turn-hidden",
@@ -6715,11 +7053,13 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           "turn-astral",
           "turn-bash-only",
           "turn-completed",
+          "turn-opencode-thinking",
           "turn-summary-only",
         ]);
         for (const turn of [
           "turn-bash-only",
           "turn-summary-only",
+          "turn-opencode-thinking",
           "turn-completed",
           "turn-astral",
           "turn-hidden",

@@ -7,9 +7,33 @@ import {
   normalizeAccentColor,
   normalizeSidebarStarSpeed,
   sidebarStarDriftDurationSeconds,
+  themedAccentColor,
 } from "./themeAccent";
+import { hexToOklch } from "./lib/oklab";
 
 describe("themeAccent", () => {
+  it("draws a chosen accent brighter in light mode and deeper in dark mode", () => {
+    const chosen = hexToOklch("#0eacb7")!;
+    const light = hexToOklch(themedAccentColor("#0eacb7", "light"))!;
+    const dark = hexToOklch(themedAccentColor("#0eacb7", "dark"))!;
+    expect(light.l).toBeGreaterThan(chosen.l);
+    expect(dark.l).toBeLessThan(chosen.l);
+    expect(Math.abs(dark.h - chosen.h)).toBeLessThan(3);
+  });
+
+  it("draws an accent more colourfully where sRGB has room", () => {
+    // Violet has headroom; a teal already at the sRGB edge can only shift lightness.
+    const chosen = hexToOklch("#9d84ec")!;
+    const dark = hexToOklch(themedAccentColor("#9d84ec", "dark"))!;
+    expect(dark.c).toBeGreaterThan(chosen.c * 1.1);
+    expect(Math.abs(dark.h - chosen.h)).toBeLessThan(3);
+  });
+
+  it("uses grey accents exactly as chosen", () => {
+    expect(themedAccentColor("#808080", "light")).toBe("#808080");
+    expect(themedAccentColor("#808080", "dark")).toBe("#808080");
+  });
+
   it("normalizes six-digit hex colors", () => {
     expect(normalizeAccentColor("  #16a34a  ")).toBe("#16a34a");
     expect(normalizeAccentColor("#abc")).toBeUndefined();
@@ -59,13 +83,14 @@ describe("themeAccent", () => {
     };
     vi.stubGlobal("document", { documentElement: element });
 
-    applyAppAccentColor("#dc2626");
+    applyAppAccentColor("#dc2626", "dark");
 
-    expect(element.style.getPropertyValue("--primary")).toBe("#dc2626");
-    expect(element.style.getPropertyValue("--ring")).toBe("#dc2626");
+    const drawn = themedAccentColor("#dc2626", "dark");
+    expect(element.style.getPropertyValue("--primary")).toBe(drawn);
+    expect(element.style.getPropertyValue("--ring")).toBe(drawn);
     expect(element.style.getPropertyValue("--cafe-sidebar-accent")).toBe("");
 
-    applyAppAccentColor("");
+    applyAppAccentColor("", "dark");
 
     expect(element.style.getPropertyValue("--primary")).toBe("");
     expect(element.style.getPropertyValue("--ring")).toBe("");

@@ -1,7 +1,7 @@
 # Steer delivery status
 
 Created: 2026-10-14 01:33:41 JST (UTC+0900)
-Last updated: 2026-10-14 02:27:29 JST (UTC+0900)
+Last updated: 2026-10-27 02:29:57 JST (UTC+0900)
 
 Live follow-ups keep their delivery status beside the saved message above the
 composer. Sending means the provider has not yet confirmed acceptance. Accepted
@@ -44,6 +44,24 @@ notification. No latest-intent proof is fabricated from that message token.
 Collapsed work-log rows show fixed public status; private input, raw JSON and
 identifiers remain behind explicit inspection. No additional provider calls,
 permissions, process restarts, subscriptions or history expansion are introduced.
+
+## Startup recovery read bounds
+
+The accepted-steer startup prefilter selects processing observations through the
+exact thread/turn/kind activity index before checking their command identities in
+the orchestration event journal. Its explicit join order and command-ID index
+are a liveness boundary: a reordered stream-range lookup can synchronously walk
+a mature chat's entire event history, preventing the backend from answering
+readiness probes and heartbeats. The reader uses existing indexes; no history
+deletion, schema rebuild or larger startup timeout is required.
+
+Index selection does not grant recovery authority. Every existing actor,
+sequence, thread, turn, message, correlation and payload predicate still applies.
+Processing that suppresses a retry is deliberately distinct from the stronger
+evidence required to prune a durable acceptance. Command IDs are not treated as
+unique: the original filtered witness lookup must still find a qualifying event.
+The regression qualifies the actual compiled startup query against unrelated
+same-thread history, alongside the existing delayed-ACK/Stop and provenance cases.
 
 Credential-free unit, real SQLite and browser fixtures cover visible receipt
 history, message/generation isolation, pending command ACK, compaction and

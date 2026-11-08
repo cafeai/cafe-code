@@ -74,7 +74,6 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   makePackageManagedProviderMaintenanceResolver,
   resolveProviderMaintenanceCapabilitiesEffect,
-  makeManualOnlyProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
 import { resolveProviderRuntimeEnvironment } from "../managedProviderRuntime.ts";
 import {
@@ -276,17 +275,12 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // helpers must agree on the SQLite index for their shared rollouts.
       const effectiveEnvironment = withCodexHomeLayoutEnvironment(homeLayout, runtime.env);
       const maintenanceCapabilities =
-        serverConfig.dataProfile === "debug"
-          ? makeManualOnlyProviderMaintenanceCapabilities({
-              provider: DRIVER_KIND,
-              packageName: UPDATE_DEFINITION.npmPackageName,
-            })
-          : effectiveConfig.runtimeSource === "bundled"
-            ? runtime.maintenanceCapabilities
-            : yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-                binaryPath: effectiveConfig.binaryPath,
-                env: effectiveEnvironment,
-              });
+        effectiveConfig.runtimeSource === "bundled"
+          ? runtime.maintenanceCapabilities
+          : yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+              binaryPath: effectiveConfig.binaryPath,
+              env: effectiveEnvironment,
+            });
       const refreshCodexShadowHome = materializeCodexShadowHome(homeLayout, { authSource }).pipe(
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),
@@ -297,12 +291,14 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // per-operation closures they return. No `mapError` wrapper is needed
       // here; the registry only has to worry about snapshot-build and
       // spawner-availability failures surfaced from the status probe below.
-      const authentication = makeCodexAuthenticationState(
-        readCodexCredentialIdentity(effectiveConfig, effectiveEnvironment).pipe(
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
-          Effect.provideService(Path.Path, path),
-        ),
+      const readCredentialIdentity = readCodexCredentialIdentity(
+        effectiveConfig,
+        effectiveEnvironment,
+      ).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
       );
+      const authentication = makeCodexAuthenticationState(readCredentialIdentity);
       const snapshotRefreshRef = yield* Ref.make<Effect.Effect<unknown> | undefined>(undefined);
       const instanceScope = yield* Effect.scope;
       const refreshAfterAuthChange = Effect.gen(function* () {
@@ -324,6 +320,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
           ),
         ),
         getModels: () => snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
+        refreshModels: () =>
+          (snapshot.refreshModels ?? snapshot.getSnapshot).pipe(
+            Effect.map((value) => value.models),
+          ),
         getSubagentConcurrencySupport: () =>
           supportsSubagentConcurrency("codex", observedCliVersion),
         getCodexContextWindowSupport: () => supportsCodexContextWindow(observedCliVersion),
@@ -579,6 +579,15 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         adapter: { ...adapter, ...login },
         textGeneration,
         discoverSkills,
+        // The provider daemon owns live sessions and detects native refusals in
+        // its own driver instance, but Settings reads this (backend) instance.
+        // Bind the forwarded refusal to the credentials present right now; a
+        // later login writes different bytes and therefore a new revision.
+        observeAuthenticationRefusal: readCredentialIdentity.pipe(
+          Effect.flatMap((identity) =>
+            identity === undefined ? Effect.void : observeUsageAuthentication(identity),
+          ),
+        ),
         usageReset: {
           run: (operation: ProviderUsageResetOperation) =>
             refreshCodexShadowHome.pipe(

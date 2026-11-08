@@ -45,7 +45,10 @@ export interface ProviderQuotaAuthority {
   }>;
 }
 
-function sameAuthority(left: ProviderQuotaAuthority, right: ProviderQuotaAuthority): boolean {
+export function sameProviderQuotaAuthority(
+  left: ProviderQuotaAuthority,
+  right: ProviderQuotaAuthority,
+): boolean {
   return (
     left.configuration === right.configuration &&
     // The global projection may advance because an unrelated chat streams.
@@ -88,12 +91,12 @@ export const readBoundProviderQuota = (
     if (readAccountQuota) {
       const report = yield* readAccountQuota;
       const after = yield* resolveAuthority;
-      if (!after || !sameAuthority(before, after)) return UNAVAILABLE_SESSION_QUOTA;
+      if (!after || !sameProviderQuotaAuthority(before, after)) return UNAVAILABLE_SESSION_QUOTA;
       if (report) return { report };
     }
     const sessions = yield* readSessions;
     const after = yield* resolveAuthority;
-    if (!after || !sameAuthority(before, after)) return UNAVAILABLE_SESSION_QUOTA;
+    if (!after || !sameProviderQuotaAuthority(before, after)) return UNAVAILABLE_SESSION_QUOTA;
 
     let newest: ProviderSession["quotaReport"];
     for (const admitted of after.sessions) {

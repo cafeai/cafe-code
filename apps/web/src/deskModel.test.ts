@@ -10,6 +10,8 @@ import {
   deskTabKey,
   hydrateDesk,
   reduceDesk,
+  reduceDeskWithPolicy,
+  resolveDeskOpenPolicy,
   serializeDesk,
   type DeskAction,
   type DeskLayout,
@@ -88,6 +90,71 @@ function step(state: DeskState, action: DeskAction): DeskState {
   assertInvariants(next);
   return next;
 }
+
+// Previews are deliberately not saved, so `assertInvariants` (which requires an
+// exact save/restore round trip) applies only to preview-free states.
+function single(state: DeskState, action: DeskAction): DeskState {
+  return reduceDeskWithPolicy(freeze(state), action, "single");
+}
+
+describe("Desk single-view open policy", () => {
+  it("applies only when Desk and chat tabs are both off", () => {
+    expect(resolveDeskOpenPolicy({ deskEnabled: true, showDeskTabs: true })).toBe("tabs");
+    expect(resolveDeskOpenPolicy({ deskEnabled: false, showDeskTabs: true })).toBe("tabs");
+    expect(resolveDeskOpenPolicy({ deskEnabled: true, showDeskTabs: false })).toBe("tabs");
+    expect(resolveDeskOpenPolicy({ deskEnabled: false, showDeskTabs: false })).toBe("single");
+  });
+
+  it("never makes an opened chat permanent, so nothing is saved or reopenable", () => {
+    let state = createDeskState(environmentId);
+    // Double-click and Open mode request a kept tab; single view ignores that.
+    state = single(state, { type: "open", target: server("a") });
+    state = single(state, { type: "keepOpen", tabKey: key("a") });
+    expect(state.groups.g1?.previewTabKey).toBe(key("a"));
+    state = single(state, { type: "open", target: server("b") });
+    expect(state.groups.g1?.tabs).toEqual([key("b")]);
+    expect(state.closed).toEqual([]);
+    expect(hydrateDesk(serializeDesk(state), environmentId).groups.g1?.tabs).toEqual([]);
+  });
+
+  it("leaves tabs the user already kept and background opens unchanged", () => {
+    let state = populated(2);
+    state = single(state, { type: "open", target: server("t0") });
+    expect(state.groups.g1?.tabs).toEqual([key("t0"), key("t1")]);
+    expect(state.groups.g1?.previewTabKey).toBeUndefined();
+    state = single(state, { type: "open", target: server("bg"), activate: false });
+    expect(state.groups.g1?.tabs).toContain(key("bg"));
+    expect(state.groups.g1?.previewTabKey).toBeUndefined();
+    expect(
+      reduceDeskWithPolicy(state, { type: "open", target: server("x") }, "tabs").groups.g1
+        ?.previewTabKey,
+    ).toBeUndefined();
+    assertInvariants(state);
+  });
+
+  it("turns a selected first-send result into the preview slot without moving ownership", () => {
+    const draftId = "first-send" as DraftId;
+    const threadRef = { environmentId, threadId: ThreadId.make("promoted") };
+    let state = single(createDeskState(environmentId), {
+      type: "open",
+      target: draft(draftId),
+    });
+    expect(state.groups.g1?.previewTabKey).toBeUndefined();
+    state = single(state, { type: "promoteDraft", draftId, threadRef });
+    const serverKey = deskTabKey({ kind: "server", threadRef });
+    expect(state.groups.g1?.tabs).toEqual([serverKey]);
+    expect(state.groups.g1?.previewTabKey).toBe(serverKey);
+    expect(state.targets[deskTabKey(draft(draftId))]).toBeUndefined();
+  });
+
+  it("keeps an identity that was already open when a draft is promoted onto it", () => {
+    const draftId = "aliased" as DraftId;
+    const threadRef = { environmentId, threadId: ThreadId.make("t0") };
+    let state = reduceDesk(populated(1), { type: "open", target: draft(draftId) });
+    state = single(state, { type: "promoteDraft", draftId, threadRef });
+    expect(state.groups.g1?.previewTabKey).toBeUndefined();
+  });
+});
 
 describe("Desk navigation model", () => {
   it("replaces a preview in place and dismisses it when a kept tab is selected", () => {

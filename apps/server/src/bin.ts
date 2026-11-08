@@ -44,7 +44,7 @@ export const cli = Command.make("cafe-code", { ...sharedServerCommandFlags }).pi
   ]),
 );
 
-if (import.meta.main) {
+export function runCli() {
   // Lets provider exit observers distinguish a planned stop from a crash. It
   // is installed beside runMain, which still owns signal-driven termination.
   installProcessShutdownObservation();
@@ -53,4 +53,17 @@ if (import.meta.main) {
     Effect.provide(CliRuntimeLayer),
     NodeRuntime.runMain({ teardown: backendStartupTeardown }),
   );
+}
+
+if (import.meta.main) {
+  const command = process.argv[2];
+  if (
+    import.meta.url.endsWith(".ts") &&
+    !["killall", "--version", "--help", "-h"].includes(command ?? "")
+  ) {
+    throw new Error(
+      "Run yarn dev:server or the built server entrypoint so application dependencies match the shipped runtime.",
+    );
+  }
+  runCli();
 }

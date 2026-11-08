@@ -35,7 +35,7 @@ const installerTracePoints = [
   ['Write-JsonFile -Path (Join-Path $cafeRoot "installer-options.json")', "options-start"],
   ["if (-not $Enabled) {", "options-complete"],
   ["  Assert-ManagedDirectory -Path $managedRoot", "managed-directory"],
-  ["  $nodeSource = Resolve-ManagedNodeSource", "node-source"],
+  ["  $bundleSource = Resolve-ManagedBundleSource", "node-source"],
   ["  $guard = [IO.File]::Open($guardPath", "guard-open"],
   ['    [Environment]::SetEnvironmentVariable("NODE_OPTIONS"', "guard-held"],
   ["    $prepared = @(& $nodePath", "prepare-start"],
@@ -119,7 +119,13 @@ async function run() {
   const managed = join(local, "CafeCode", "managed");
   const settings = join(profile, ".cafe-code", "userdata", "settings.json");
   const resource = join(installDir, "resources", "managed-runtime");
-  const nativeNode = join(resource, "node", process.arch === "arm64" ? "win-arm64" : "win-x64");
+  const nativeNode = join(
+    resource,
+    "providers",
+    process.arch === "arm64" ? "win-arm64" : "win-x64",
+    "content",
+    "node",
+  );
   const script = join(resource, "install-managed-provider-runtime.ps1");
   const powershell = join(
     process.env.SystemRoot!,

@@ -2,10 +2,24 @@
 
 The command-backed typed client, ordinary session startup, picker model discovery
 CLI health probes and one-shot text-generation helpers use
-`effect-codex-app-server/command`. This policy selects
-the command's shell option; it does not resolve an alternative executable, grant
-filesystem admission, change authentication or alter provider permissions. Platform
+`effect-codex-app-server/command`. Its `makeCodexCommand` builder preserves
+literal argv for native executables and escapes Windows batch arguments through
+both cmd.exe parsing and the shim's `%*` forwarding. Extensionless Windows commands
+are resolved against the child's cwd, PATH and PATHEXT to select the corresponding
+native or batch policy. Supported explicit native/batch paths remain authoritative. It does not
+grant filesystem admission, change authentication or alter provider permissions. Platform
 rules and compatibility boundaries live in **AGENTS.md → Windows-Specific Notes**.
+
+An unavailable or unsupported Windows command fails with fixed opaque text;
+it never falls back to raw shell argv. PATH parsing keeps semicolons inside
+matching double quotes. Drive-relative extensionless spellings such as `C:codex`
+and `C:` refuse before lookup rather than selecting a different PATH executable;
+explicit native/batch spellings retain their existing behavior.
+Non-native command spellings and search values are
+limited to 32,767 characters each and
+the complete ordered search to 4,096 candidate probes. Over-budget or malformed
+input refuses the whole operation, without truncating or reordering executable
+selection. Supported explicit native/batch paths do not consult PATH.
 
 Keep each caller's existing structured arguments, environment, working directory
 and lifecycle options. In particular, disposable probe process-group/SIGKILL
@@ -30,6 +44,18 @@ ownership must not replace the long-running session's existing cleanup policy.
   cover the same complete task graph once, without changing Vitest workers,
   case selection, timeouts or failure handling. A timeout seen under the combined
   graph alone does not identify copy, launch, protocol or cleanup as its cause.
+- Windows-only batch fixtures create a synthetic `%*` forwarding launcher and
+  initialize the real command-backed client. Absolute `.cmd`, PATH `.cmd`, and
+  PATH native `.exe` cases retain the exact scheduling TOML, spaces, embedded
+  quotes, percent/bang expressions, shell metacharacters, trailing backslashes,
+  and empty arguments. Quoted PATH directories containing a literal semicolon
+  retain their native or batch selection and exact native argv. Test subprocesses
+  receive only isolated synthetic homes
+  and environment values; every acquired process is retired before fixture cleanup.
+- An unavailable or unsupported Windows command refuses construction with a
+  fixed opaque error. The all-host policy regression includes a separate shell
+  operator argument and admits no current-directory/PATH candidate; no shell or
+  synthetic side-effect process is launched to prove this refusal.
 - The separate typed initialization/account/skills test launches the current
   pinned Node executable directly with a scoped synthetic peer and the same
   isolated home/environment. It exercises real subprocess protocol I/O without
@@ -57,7 +83,7 @@ Use the exact repository-pinned Node LTS from `.node-version` and Corepack Yarn 
 install. Run these focused tests on the host being qualified:
 
 ```sh
-corepack yarn workspace effect-codex-app-server test src/client.test.ts
+corepack yarn workspace effect-codex-app-server test src/command.test.ts src/client.test.ts
 corepack yarn workspace @cafeai/cafe-code test src/provider/Layers/CodexProvider.test.ts src/provider/Layers/CodexSessionRuntime.exit.test.ts src/provider/Layers/ProviderRegistry.test.ts src/launcher.test.ts src/sourceControl/AzureDevOpsCli.test.ts
 corepack yarn workspace @cafeai/cafe-code test src/textGeneration/CodexTextGeneration.test.ts
 ```

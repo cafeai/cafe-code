@@ -12,6 +12,16 @@ const changed = {
   mcpEnabled: false,
 };
 describe("page-owned settings reset", () => {
+  it("resets closed-lid work only when the native macOS capability is present", () => {
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS, keepAwakeWithLidClosed: true };
+    expect(getSettingsPageReset("/settings/general", settings, { desktop: true }).patch).toEqual(
+      {},
+    );
+    expect(
+      getSettingsPageReset("/settings/general", settings, { desktop: true, macKeepAwake: true })
+        .patch,
+    ).toEqual({ keepAwakeWithLidClosed: false });
+  });
   it("resets every visual control without resetting the Atrium feature or other pages", () => {
     expect(getSettingsPageReset("/settings/appearance", changed, { desktop: true }).patch).toEqual({
       ambianceOpacity: DEFAULT_UNIFIED_SETTINGS.ambianceOpacity,

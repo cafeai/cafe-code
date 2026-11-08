@@ -78,6 +78,7 @@ const decodeInstanceRoutingInfo = Schema.decodeUnknownSync(ProviderDaemonInstanc
 const encodeRpcRequestJson = Schema.encodeSync(Schema.fromJsonString(ProviderDaemonRpcRequest));
 const validateRpcRequest = Schema.encodeSync(ProviderDaemonRpcRequest);
 const VOID_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
+  "cancelFailedRootRecovery",
   "respondToInteraction",
   "discardSessionFork",
   "interruptTurn",
@@ -98,6 +99,8 @@ const MUTATING_RPC_METHODS = new Set<ProviderDaemonRpcRequest["method"]>([
   "forkSession",
   "discardSessionFork",
   "sendTurn",
+  "prepareFailedRootRecovery",
+  "cancelFailedRootRecovery",
   "steerTurn",
   "interruptTurn",
   "respondToRequest",
@@ -392,6 +395,12 @@ export function isRetryableProviderDaemonControlError(cause: unknown): boolean {
  * performing the mutation twice. Never move command-id attachment into the
  * attempt loop or wrap the outer `rpc` Effect in a generic retry policy.
  */
+const isPrivateFailedRootRecoveryRequest = (request: ProviderDaemonRpcRequest): boolean =>
+  request.method === "prepareFailedRootRecovery" ||
+  request.method === "readFailedRootRecovery" ||
+  request.method === "cancelFailedRootRecovery" ||
+  (request.method === "sendTurn" && request.payload.preparedFailedRootRecovery !== undefined);
+
 export async function requestProviderDaemonRpcJsonWithStableRetry<
   M extends ProviderDaemonRpcRequest["method"],
 >(
@@ -419,6 +428,7 @@ export async function requestProviderDaemonRpcJsonWithStableRetry<
       request.method === "loginProvider" ||
       request.method === "refreshSecurity" ||
       request.method === "manageMcp" ||
+      isPrivateFailedRootRecoveryRequest(request) ||
       !isRetryableProviderDaemonControlError(cause)
     ) {
       throw cause;
@@ -555,11 +565,17 @@ const rpc = <M extends ProviderDaemonRpcRequest["method"]>(
       >;
     },
     catch: (cause) =>
-      isConversationRollbackRequest(request) &&
-      (cause instanceof ProviderAdapterRewindOutcomeUnknownError ||
-        cause instanceof ProviderAdapterRequestError)
-        ? cause
-        : toRemoteRequestError(request.method, cause, request),
+      isPrivateFailedRootRecoveryRequest(request)
+        ? new ProviderAdapterRequestError({
+            provider: "codex",
+            method: request.method,
+            detail: "Private recovery is unavailable or uncertain.",
+          })
+        : isConversationRollbackRequest(request) &&
+            (cause instanceof ProviderAdapterRewindOutcomeUnknownError ||
+              cause instanceof ProviderAdapterRequestError)
+          ? cause
+          : toRemoteRequestError(request.method, cause, request),
   });
 
 /**
@@ -637,6 +653,35 @@ export const guardRemoteCodexFailedRootRestart = <A, E, R, E2, R2>(input: {
       return yield* new ProviderValidationError({
         operation: "ProviderDaemonRemoteProviderService.sendTurn",
         issue: "This Codex owner does not support guarded failed-root session restart.",
+      });
+    return yield* input.effect;
+  });
+
+/** Refuse before private opening/paid RPC unless the exact account advertises
+ * this separate phased capability. Legacy owners may silently drop fields. */
+export const guardRemoteCodexPhasedRecovery = <A, E, R, E2, R2>(input: {
+  readonly request: ProviderSendTurnInput;
+  readonly readCapabilities: (
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<ProviderAdapterCapabilities, E, R>;
+  readonly effect: Effect.Effect<A, E2, R2>;
+}): Effect.Effect<A, E | E2 | ProviderValidationError, R | R2> =>
+  Effect.gen(function* () {
+    const expected = input.request.expectedFailedRoot;
+    if (
+      expected?.restartSession !== true ||
+      expected.providerInstanceId === undefined ||
+      expected.observedAt === undefined
+    )
+      return yield* new ProviderValidationError({
+        operation: "ProviderDaemonRemoteProviderService.phasedRecovery",
+        issue: "Private recovery is unavailable.",
+      });
+    const capabilities = yield* input.readCapabilities(expected.providerInstanceId);
+    if (capabilities.codexPhasedFailedRootRecovery !== true)
+      return yield* new ProviderValidationError({
+        operation: "ProviderDaemonRemoteProviderService.phasedRecovery",
+        issue: "Private recovery is unavailable.",
       });
     return yield* input.effect;
   });
@@ -989,12 +1034,30 @@ const makeRemoteProviderService = Effect.gen(function* () {
     forkSession: (input) => guardedRpc({ method: "forkSession", payload: input }),
     discardSessionFork: (input) => guardedRpc({ method: "discardSessionFork", payload: input }),
     sendTurn: (input) =>
-      guardRemoteCodexFailedRootRestart({
-        request: input,
+      input.preparedFailedRootRecovery !== undefined
+        ? guardRemoteCodexPhasedRecovery({
+            request: input,
+            readCapabilities: (instanceId) =>
+              requestProviderDaemonCapabilities(daemonConfig, instanceId),
+            effect: guardedRpc({ method: "sendTurn", payload: input }),
+          })
+        : guardRemoteCodexFailedRootRestart({
+            request: input,
+            readCapabilities: (instanceId) =>
+              requestProviderDaemonCapabilities(daemonConfig, instanceId),
+            effect: guardedRpc({ method: "sendTurn", payload: input }),
+          }),
+    prepareFailedRootRecovery: (input) =>
+      guardRemoteCodexPhasedRecovery({
+        request: input.request,
         readCapabilities: (instanceId) =>
           requestProviderDaemonCapabilities(daemonConfig, instanceId),
-        effect: guardedRpc({ method: "sendTurn", payload: input }),
+        effect: guardedRpc({ method: "prepareFailedRootRecovery", payload: input }),
       }),
+    readFailedRootRecovery: (input) =>
+      guardedRpc({ method: "readFailedRootRecovery", payload: input }),
+    cancelFailedRootRecovery: (input) =>
+      guardedRpc({ method: "cancelFailedRootRecovery", payload: input }),
     steerTurn: (input) => guardedRpc({ method: "steerTurn", payload: input }),
     loginProvider: (input) => guardedRpc({ method: "loginProvider", payload: input }),
     manageMcp: (input) => guardedRpc({ method: "manageMcp", payload: input }),

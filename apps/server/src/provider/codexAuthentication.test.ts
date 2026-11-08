@@ -4,12 +4,14 @@ import {
   EventId,
   ThreadId,
   type ProviderEvent,
+  type ProviderRuntimeEvent,
   type ServerProvider,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import { describe, it } from "vitest";
 import {
   codexAuthenticationObservation,
+  codexRuntimeEventAuthenticationObservation,
   makeCodexAuthenticationState,
   withCodexSignInRequired,
 } from "./codexAuthentication.ts";
@@ -29,6 +31,119 @@ function native(message: string, method = "process/stderr"): ProviderEvent {
 }
 
 describe("Codex authentication observations", () => {
+  it("treats every permanent native refresh-token failure as a refusal", () => {
+    for (const reason of ["was revoked", "was already used", "has expired"]) {
+      assert.equal(
+        codexAuthenticationObservation(native(revoked.replace("was revoked", reason))),
+        false,
+      );
+    }
+    assert.equal(
+      codexAuthenticationObservation(native(revoked.replace("was revoked", "is pending"))),
+      undefined,
+    );
+  });
+
+  it("never treats a resume/reconciliation snapshot replay as a fresh refusal", () => {
+    const failedTurn = {
+      turn: {
+        status: "failed",
+        error: { message: "rejected", codexErrorInfo: "unauthorized" },
+      },
+    };
+    const replayed: ProviderEvent = {
+      ...native("", "turn/completed"),
+      id: EventId.make("codex-snapshot:session-resume:native-thread:native-turn:turn-completed"),
+      payload: failedTurn,
+    };
+    const live: ProviderEvent = { ...native("", "turn/completed"), payload: failedTurn };
+    assert.equal(codexAuthenticationObservation(replayed), undefined);
+    assert.equal(codexAuthenticationObservation(live), false);
+    assert.equal(
+      codexRuntimeEventAuthenticationObservation({
+        type: "turn.completed",
+        eventId: replayed.id,
+        provider: ProviderDriverKind.make("codex"),
+        threadId: ThreadId.make("auth-fixture"),
+        createdAt: "2026-11-05T01:14:06.000Z",
+        payload: { state: "failed" },
+        raw: {
+          source: "codex.app-server.notification",
+          method: "turn/completed",
+          payload: failedTurn,
+        },
+      } as ProviderRuntimeEvent),
+      undefined,
+    );
+  });
+
+  it("classifies forwarded canonical events only from the retained native copy", () => {
+    const canonical = (raw: unknown, payload: unknown = {}): ProviderRuntimeEvent =>
+      ({
+        type: "runtime.error",
+        eventId: EventId.make("canonical-auth"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: ThreadId.make("auth-fixture"),
+        createdAt: "2026-11-05T01:14:06.406Z",
+        payload,
+        raw,
+      }) as ProviderRuntimeEvent;
+    const unauthorized = {
+      willRetry: false,
+      error: { message: "rejected", codexErrorInfo: "unauthorized" },
+    };
+    assert.equal(
+      codexRuntimeEventAuthenticationObservation(
+        canonical({
+          source: "codex.app-server.notification",
+          method: "error",
+          payload: unauthorized,
+        }),
+      ),
+      false,
+    );
+    assert.equal(
+      codexRuntimeEventAuthenticationObservation(
+        canonical({
+          source: "codex.app-server.notification",
+          method: "turn/completed",
+          payload: { turn: { status: "failed", error: unauthorized.error } },
+        }),
+      ),
+      false,
+    );
+    assert.equal(
+      codexRuntimeEventAuthenticationObservation(
+        canonical(
+          { source: "codex.app-server.notification", method: "process/stderr", payload: {} },
+          { message: revoked.replace("was revoked", "was already used") },
+        ),
+      ),
+      false,
+    );
+    // Retryable, non-native and prose-only copies are never refusals.
+    assert.equal(
+      codexRuntimeEventAuthenticationObservation(
+        canonical({
+          source: "codex.app-server.notification",
+          method: "error",
+          payload: { ...unauthorized, willRetry: true },
+        }),
+      ),
+      undefined,
+    );
+    assert.equal(
+      codexRuntimeEventAuthenticationObservation(
+        canonical({ source: "claude.sdk.message", method: "error", payload: unauthorized }),
+      ),
+      undefined,
+    );
+    assert.equal(
+      codexRuntimeEventAuthenticationObservation(canonical(undefined, { message: revoked })),
+      undefined,
+    );
+  });
+
   it("uses terminal structured 401s and native success, not retries or 403 policy failures", () => {
     const error = (status: number, willRetry: boolean): ProviderEvent => ({
       ...native("", "error"),

@@ -12,6 +12,7 @@
     "scripts",
     "integration",
     "../../scripts/lib",
+    "../../packages/shared/src/runtimeDependencies.ts",
     "../../packages/shared/src/sourceDebugBuild.ts",
     "../../packages/shared/src/applicationBuildVersion.ts"
   ]

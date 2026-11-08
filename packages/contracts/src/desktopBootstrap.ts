@@ -24,6 +24,8 @@ export const DesktopBackendBootstrap = Schema.Struct({
   // The desktop alone opts into its exact child's private progress pipe.
   // Never infer this descriptor from ambient process state or an environment.
   startupProgressFd: Schema.optional(Schema.Literal(4)),
+  // Mac desktop only: the actual child's content-free power-state lease pipe.
+  desktopPowerStateFd: Schema.optional(Schema.Literal(5)),
   otlpTracesUrl: Schema.optional(Schema.String),
   otlpMetricsUrl: Schema.optional(Schema.String),
   providerDaemon: Schema.optional(ProviderDaemonClientConfig),

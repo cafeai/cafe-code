@@ -3,7 +3,7 @@ import {
   compactCommandPreview,
   mergeClaudeCommandInspections,
   readClaudeCommandInspection,
-  readClaudePublicSummary,
+  readProviderPublicSummary,
 } from "./providerOperationVisibility";
 
 function readCommandFields(data: Record<string, unknown>) {
@@ -24,12 +24,12 @@ function readCommandOutput(output: unknown) {
 
 describe("admitted Claude operation presentation", () => {
   it("reads only the disclosed summary contract and bounds inert text", () => {
-    expect(readClaudePublicSummary({ detail: "hidden", signature: "private" })).toBeUndefined();
+    expect(readProviderPublicSummary({ detail: "hidden", signature: "private" })).toBeUndefined();
     expect(
-      readClaudePublicSummary({ streamKind: "reasoning_text", detail: "private" }),
+      readProviderPublicSummary({ streamKind: "reasoning_text", detail: "private" }),
     ).toBeUndefined();
     expect(
-      readClaudePublicSummary({
+      readProviderPublicSummary({
         streamKind: "reasoning_summary_text",
         summaryVersion: 1,
         provider: "claudeAgent",
@@ -39,7 +39,7 @@ describe("admitted Claude operation presentation", () => {
         detail: "\n ",
       }),
     ).toBeUndefined();
-    const summary = readClaudePublicSummary({
+    const summary = readProviderPublicSummary({
       streamKind: "reasoning_summary_text",
       summaryVersion: 1,
       provider: "claudeAgent",
@@ -57,7 +57,7 @@ describe("admitted Claude operation presentation", () => {
     expect(summary).not.toHaveProperty("future");
     for (const summaryVersion of [undefined, 0, 2, "1", true])
       expect(
-        readClaudePublicSummary({
+        readProviderPublicSummary({
           streamKind: "reasoning_summary_text",
           summaryVersion,
           provider: "claudeAgent",
@@ -68,7 +68,7 @@ describe("admitted Claude operation presentation", () => {
         }),
       ).toBeUndefined();
     expect(
-      readClaudePublicSummary({
+      readProviderPublicSummary({
         streamKind: "reasoning_summary_text",
         summaryVersion: 1,
         provider: "codex",
@@ -78,6 +78,26 @@ describe("admitted Claude operation presentation", () => {
         detail: "Other provider text",
       }),
     ).toBeUndefined();
+    expect(summary?.provider).toBe("claudeAgent");
+    // OpenCode reasoning parts use the same admitted contract and keep their
+    // provenance so the row can be labelled as thinking, not a Claude summary.
+    expect(
+      readProviderPublicSummary({
+        streamKind: "reasoning_summary_text",
+        summaryVersion: 1,
+        provider: "opencode",
+        itemId: "prt_reasoning",
+        status: "inProgress",
+        truncated: false,
+        detail: "Tracing the failing import.",
+        metadata: { encrypted: "never exposed" },
+      }),
+    ).toEqual({
+      provider: "opencode",
+      text: "Tracing the failing import.",
+      truncated: false,
+      status: "inProgress",
+    });
     const valid = {
       itemId: "block-0",
       summaryVersion: 1,
@@ -99,7 +119,7 @@ describe("admitted Claude operation presentation", () => {
       { detail: "Checking\u001B files" },
       { detail: "\u0000" },
     ])
-      expect(readClaudePublicSummary({ ...valid, ...malformed })).toBeUndefined();
+      expect(readProviderPublicSummary({ ...valid, ...malformed })).toBeUndefined();
   });
 
   it("inspects only Bash command data without resurrecting omitted/raw results", () => {

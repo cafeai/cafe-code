@@ -94,7 +94,7 @@ const MAX_QUESTION_ACTIVITY_BYTES = 1_048_576;
 /** The command cache starts empty and its live activity tail is bounded. */
 function readPersistedQuestionActivity(
   sql: SqlClient.SqlClient,
-  command: Extract<OrchestrationCommand, { readonly type: "thread.async-questions.resolve" }>,
+  command: { readonly threadId: ThreadId; readonly activityId: string },
 ) {
   return Effect.gen(function* () {
     if (!/^codex-async-questions:[a-f0-9]{64}$/u.test(command.activityId)) return Option.none();
@@ -120,6 +120,59 @@ function readPersistedQuestionActivity(
     const payload = parseRecordJson(row.payloadJson);
     if (!payload) return Option.none();
     // Decode without attaching private question content to an error/diagnostic.
+    return decodeQuestionActivity({
+      id: row.id,
+      turnId: row.turnId,
+      tone: row.tone,
+      kind: row.kind,
+      summary: row.summary,
+      payload,
+      ...(row.sequence !== null ? { sequence: row.sequence } : {}),
+      createdAt: row.createdAt,
+    });
+  });
+}
+
+/** Recheck only the exact native questionnaire's durable lifecycle after
+ * taking the writer. An ordinary response failure is not a resolution and
+ * must not replace its original request. A canonical terminal record retires
+ * it even when the command cache still contains an earlier pending card. */
+function readPersistedUserInputActivity(
+  sql: SqlClient.SqlClient,
+  command: Extract<OrchestrationCommand, { readonly type: "thread.mcp-user-input.respond" }>,
+) {
+  return Effect.gen(function* () {
+    const [row] = yield* sql<{
+      readonly id: string;
+      readonly turnId: string | null;
+      readonly tone: string;
+      readonly kind: string;
+      readonly summary: string;
+      readonly payloadJson: string | null;
+      readonly sequence: number | null;
+      readonly createdAt: string;
+    }>`
+      SELECT activity_id AS id, turn_id AS "turnId", tone, kind, summary,
+        CASE WHEN length(CAST(payload_json AS BLOB)) <= ${MAX_QUESTION_ACTIVITY_BYTES}
+          THEN payload_json ELSE NULL END AS "payloadJson",
+        sequence, created_at AS "createdAt"
+      FROM projection_thread_activities
+        INDEXED BY idx_projection_thread_activities_thread_kind_created_id
+      WHERE thread_id = ${command.threadId}
+        AND kind IN ('user-input.requested', 'user-input.resolved')
+        AND CASE WHEN json_valid(payload_json) THEN
+          json_type(payload_json, '$.requestId') = 'text'
+          AND json_extract(payload_json, '$.requestId') = ${command.requestId}
+        ELSE 0 END
+      ORDER BY CASE WHEN sequence IS NULL THEN 0 ELSE 1 END DESC,
+        sequence DESC, created_at DESC,
+        CASE WHEN kind = 'user-input.resolved' THEN 2 ELSE 1 END DESC,
+        activity_id DESC
+      LIMIT 1
+    `;
+    if (!row || row.payloadJson === null) return Option.none();
+    const payload = parseRecordJson(row.payloadJson);
+    if (!payload) return Option.none();
     return decodeQuestionActivity({
       id: row.id,
       turnId: row.turnId,
@@ -720,7 +773,13 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         const guardedForkCommand =
           envelope.command.type === "thread.fork.commit" ? envelope.command : undefined;
         const questionResolutionCommand =
-          envelope.command.type === "thread.async-questions.resolve" ? envelope.command : undefined;
+          envelope.command.type === "thread.async-questions.resolve" ||
+          envelope.command.type === "thread.async-question.answer" ||
+          envelope.command.type === "thread.mcp-async-questions.resolve"
+            ? envelope.command
+            : undefined;
+        const nativeQuestionResponseCommand =
+          envelope.command.type === "thread.mcp-user-input.respond" ? envelope.command : undefined;
         const decide = (scheduledFollowUpVerified = false, readModel = commandReadModel) =>
           decideOrchestrationCommand({
             command: envelope.command,
@@ -744,7 +803,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           scheduledCommand === undefined &&
           guardedRevertCommand === undefined &&
           guardedForkCommand === undefined &&
-          questionResolutionCommand === undefined
+          questionResolutionCommand === undefined &&
+          nativeQuestionResponseCommand === undefined
             ? yield* decide()
             : undefined;
         const committedCommand = yield* sql
@@ -757,6 +817,19 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 // a cache miss or stale cache is never question availability.
                 yield* sql`UPDATE projection_threads SET updated_at = updated_at
                   WHERE thread_id = ${questionResolutionCommand.threadId}`;
+                // Another backend connection may have changed the mode,
+                // model or availability after this engine populated its
+                // command cache. Reuse the existing bounded projection query
+                // under the writer rather than turning cached intent into
+                // present send authority.
+                const persistedThread = yield* projectionSnapshotQuery.getThreadShellById(
+                  questionResolutionCommand.threadId,
+                );
+                if (Option.isNone(persistedThread))
+                  return yield* new OrchestrationCommandInvariantError({
+                    commandType: questionResolutionCommand.type,
+                    detail: "This chat is no longer available for a question response.",
+                  });
                 const activity = yield* readPersistedQuestionActivity(
                   sql,
                   questionResolutionCommand,
@@ -767,9 +840,49 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                     thread.id === questionResolutionCommand.threadId
                       ? {
                           ...thread,
+                          ...persistedThread.value,
                           activities: [
                             ...thread.activities.filter(
                               (entry) => entry.id !== questionResolutionCommand.activityId,
+                            ),
+                            ...(Option.isSome(activity) ? [activity.value] : []),
+                          ],
+                        }
+                      : thread,
+                  ),
+                };
+              }
+              if (nativeQuestionResponseCommand !== undefined) {
+                yield* sql`UPDATE projection_threads SET updated_at = updated_at
+                  WHERE thread_id = ${nativeQuestionResponseCommand.threadId}`;
+                const persistedThread = yield* projectionSnapshotQuery.getThreadShellById(
+                  nativeQuestionResponseCommand.threadId,
+                );
+                if (Option.isNone(persistedThread))
+                  return yield* new OrchestrationCommandInvariantError({
+                    commandType: nativeQuestionResponseCommand.type,
+                    detail: "This chat is no longer available for a question response.",
+                  });
+                const activity = yield* readPersistedUserInputActivity(
+                  sql,
+                  nativeQuestionResponseCommand,
+                );
+                decisionReadModel = {
+                  ...decisionReadModel,
+                  threads: decisionReadModel.threads.map((thread) =>
+                    thread.id === nativeQuestionResponseCommand.threadId
+                      ? {
+                          ...thread,
+                          ...persistedThread.value,
+                          activities: [
+                            ...thread.activities.filter(
+                              (entry) =>
+                                !(
+                                  (entry.kind === "user-input.requested" ||
+                                    entry.kind === "user-input.resolved") &&
+                                  readRecord(entry.payload)?.requestId ===
+                                    nativeQuestionResponseCommand.requestId
+                                ),
                             ),
                             ...(Option.isSome(activity) ? [activity.value] : []),
                           ],
@@ -856,6 +969,49 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                   decisionReadModel,
                 ));
               const eventBases = Array.isArray(eventBase) ? eventBase : [eventBase];
+              if (envelope.command.type === "thread.async-question.answer") {
+                const answerCommand = envelope.command;
+                // The management command expands into an ordinary message
+                // only after its exact saved question was re-read. Apply the
+                // same durable message identity/attachment/retry admission
+                // used by a direct user submission before appending any part
+                // of its atomic answer/handled/notice transaction.
+                const message = eventBases.find(
+                  (
+                    event,
+                  ): event is Omit<
+                    Extract<OrchestrationEvent, { type: "thread.message-sent" }>,
+                    "sequence"
+                  > => event.type === "thread.message-sent",
+                );
+                const target = decisionReadModel.threads.find(
+                  (thread) => thread.id === answerCommand.threadId,
+                );
+                if (
+                  !message ||
+                  message.type !== "thread.message-sent" ||
+                  message.payload.role !== "user" ||
+                  !target
+                )
+                  return yield* new OrchestrationCommandInvariantError({
+                    commandType: answerCommand.type,
+                    detail: "The question answer has no canonical user message.",
+                  });
+                yield* assertUserMessageIdentityAvailable({
+                  type: "thread.turn.start",
+                  commandId: answerCommand.commandId,
+                  threadId: answerCommand.threadId,
+                  message: {
+                    messageId: message.payload.messageId,
+                    role: "user",
+                    text: message.payload.text,
+                    attachments: message.payload.attachments ?? [],
+                  },
+                  runtimeMode: target.runtimeMode,
+                  interactionMode: target.interactionMode,
+                  createdAt: answerCommand.createdAt,
+                });
+              }
               const committedEvents: OrchestrationEvent[] = [];
               let nextCommandReadModel = decisionReadModel;
 

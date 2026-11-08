@@ -18,6 +18,15 @@ import {
  * @module ClaudeAdapterLive
  */
 import { createHash, randomUUID } from "node:crypto";
+// Native received-value boundary: Proxy detection must precede descriptor inspection.
+import { types as nodeUtilTypes } from "node:util";
+import { isClaudeStoppedExecutionResult } from "../claudeTurnInterruption.ts";
+import {
+  CLAUDE_UNANSWERED_QUESTION_CAPABILITY,
+  prepareClaudeUnansweredQuestionResponse,
+  supportsClaudeUnansweredQuestions,
+  type ClaudeUnansweredQuestionResponse,
+} from "../claudeUnansweredQuestions.ts";
 // Native provider filesystem boundary: retain no-follow descriptors, bigint identity and exact namespace ownership.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { constants as fsConstants, lstatSync, realpathSync, unlinkSync } from "node:fs";
@@ -26,7 +35,7 @@ import { constants as fsConstants, lstatSync, realpathSync, unlinkSync } from "n
 import { lstat, open, opendir } from "node:fs/promises";
 
 import {
-  VisualizationNativePrivacy,
+  redactVisualizationReceiptProofs,
   ClaudeVisualizationCompletionObserver,
 } from "../../visualizations/nativePrivacy.ts";
 import {
@@ -81,6 +90,10 @@ import {
 } from "../claudePublicSummary.ts";
 import { publicClaudeCommands, UNAVAILABLE_COMMAND_CATALOG } from "../claudeCommands.ts";
 import { mapClaudeSessionQuotaReport, stripClaudeUsageReport } from "../claudeSessionQuota.ts";
+import {
+  parseClaudeCredentialExpiry,
+  type ClaudeCredentialExpiryLease,
+} from "../claudeCredentialExpiry.ts";
 import { resolveConfiguredSubagentLimit } from "../Drivers/SubagentConcurrency.ts";
 import { observeClaudeResponseGeneration } from "../claudeResponseGeneration.ts";
 import { ResponseGenerationClock } from "../responseGenerationClock.ts";
@@ -247,6 +260,8 @@ const PROVIDER = ProviderDriverKind.make("claudeAgent");
 // SDK 0.3.259 caps merged first-reply/result correlation at 64 prompt UUIDs.
 // Bound inspection as well as retention even if a newer/untrusted CLI sends more.
 const CLAUDE_PROMPT_CORRELATION_LIMIT = 64;
+const CLAUDE_STEER_PROCESSING_PREFIX = "claude-turn-steer-processing:";
+const CLAUDE_STEER_PROCESSING_DESCRIPTION = "Claude began processing the submitted follow-up.";
 const CLAUDE_TASK_BINDING_LIMIT = 4_096;
 const CLAUDE_HIDDEN_TRANSCRIPT_TASK_LIMIT = 4_096;
 const CLAUDE_SUBAGENT_MESSAGE_DEDUPE_LIMIT = 4_096;
@@ -323,6 +338,105 @@ function resolveClaudePermissionMode(input: {
     return input.interactionMode;
   }
   return input.basePermissionMode;
+}
+
+interface ClaudePermissionModeOwner {
+  readonly nativeSessionId: string;
+  readonly runtimeId: string;
+}
+
+/** Advisory ownership is independent of permission mode and mutable history. */
+interface ClaudeCredentialExpiryOwner {
+  readonly nativeSessionId: string;
+  readonly runtimeId: string;
+  readonly query: ClaudeQueryRuntime;
+  lease: ClaudeCredentialExpiryLease | undefined;
+}
+
+interface ClaudeConfigurationFailureObservation {
+  readonly turn: ClaudeTurnState;
+  readonly runtimeId: string;
+  readonly query: ClaudeQueryRuntime;
+}
+
+const CLAUDE_INVALID_CONFIGURATION_MESSAGE =
+  "Claude could not start because a configuration file is invalid. Correct the Claude configuration before sending your message again.";
+
+interface ClaudePermissionModeObservation {
+  readonly mode: PermissionMode;
+  readonly nativeSessionId: string;
+  readonly runtimeId: string;
+  readonly owner: ClaudePermissionModeOwner | undefined;
+}
+
+/** Admit only the public SDK modes, never provider prose or inherited flags. */
+function readClaudePermissionMode(value: unknown): PermissionMode | undefined {
+  switch (value) {
+    case "default":
+    case "acceptEdits":
+    case "bypassPermissions":
+    case "plan":
+    case "dontAsk":
+    case "auto":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Capture authority before ordinary message normalization may adopt a legacy
+ * conversation id. A primary init seeds one independent owner per query; a
+ * status, child, malformed or foreign frame cannot manufacture that owner by
+ * first changing the mutable history cursor. The caller separately verifies
+ * the live context map both before capture and after its awaited processing.
+ */
+function captureClaudePermissionModeObservation(
+  context: ClaudeSessionContext,
+  message: SDKMessage,
+): ClaudePermissionModeObservation | undefined {
+  const ownValue = (key: string): unknown => {
+    const descriptor = Object.getOwnPropertyDescriptor(message, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  };
+  const subtype = ownValue("subtype");
+  if (
+    context.stopped ||
+    context.authFailureSeen ||
+    ownValue("type") !== "system" ||
+    (subtype !== "init" && subtype !== "status") ||
+    !hasExactPrimaryClaudeParent(message)
+  )
+    return undefined;
+  // Public init/status permission modes describe the query, never a scoped
+  // task. Missing or own undefined scope is legacy-compatible; inherited,
+  // accessor, malformed and concrete task identities cannot mint query proof.
+  // Keep this stricter boundary local rather than changing task event routing.
+  for (const key of ["task_id", "parent_task_id"] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(message, key);
+    if (descriptor ? !("value" in descriptor) || descriptor.value !== undefined : key in message)
+      return undefined;
+  }
+  const mode = readClaudePermissionMode(ownValue("permissionMode"));
+  const sessionId = ownValue("session_id");
+  if (
+    !mode ||
+    typeof sessionId !== "string" ||
+    exactClaudeProviderIdentity(sessionId) !== sessionId
+  )
+    return undefined;
+
+  const owner = context.permissionModeOwner;
+  if (owner === undefined) {
+    if (
+      subtype !== "init" ||
+      (context.permissionModeInitialResumeSessionId !== undefined &&
+        sessionId !== context.permissionModeInitialResumeSessionId)
+    )
+      return undefined;
+  } else if (owner.nativeSessionId !== sessionId || owner.runtimeId !== context.subagentRuntimeId)
+    return undefined;
+  return { mode, nativeSessionId: sessionId, runtimeId: context.subagentRuntimeId, owner };
 }
 
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
@@ -491,6 +605,7 @@ interface ClaudeFailureDiagnostic {
     readonly message: string;
     readonly errorType?: ClaudeTypedAssistantError;
     readonly apiErrorStatus?: number;
+    readonly startupFailureReason?: "config_file_invalid";
   };
 }
 
@@ -499,12 +614,14 @@ function makeClaudeFailureDiagnostic(
   method: ClaudeFailureDiagnostic["method"],
   message: string,
   displayMessage: string = message,
+  startupFailureReason?: "config_file_invalid",
 ): ClaudeFailureDiagnostic {
   return {
     method,
     lifecycleMessage: message,
     body: {
       message: displayMessage,
+      ...(startupFailureReason ? { startupFailureReason } : {}),
       ...(turnState?.primaryAssistantError !== undefined
         ? { errorType: turnState.primaryAssistantError }
         : {}),
@@ -564,6 +681,10 @@ interface ClaudeTurnState {
    * into one Work Log row instead of showing the same failure twice.
    */
   failureDiagnostic?: ClaudeFailureDiagnostic | undefined;
+  /** Accepted Stop belongs only to this native response and its submitted inputs. */
+  acceptedInterrupt?:
+    | { readonly sessionId: string; readonly promptUuids: ReadonlySet<string> }
+    | undefined;
   readonly pendingAssistantSnapshots: Array<AssistantTextBlockState>;
   readonly reportedAssistantSnapshotKeys: Set<string>;
   readonly capturedProposedPlanKeys: Set<string>;
@@ -619,7 +740,6 @@ interface ClaudePublicSummaryBlock {
   publishedTruncated?: boolean;
   closed: boolean;
   completed: boolean;
-  intermediatePublications: number;
   terminalPublications: number;
   snapshotSeen: boolean;
   flushFiber?: Fiber.Fiber<void, never> | undefined;
@@ -639,6 +759,13 @@ interface PendingUserInput {
   readonly interaction?: ProviderElicitation;
   /** Authorization URLs are live capabilities, never durable event fields. */
   readonly interactionUrl?: string;
+  /** Exact init/query/turn witness, never reconstructed from renderer metadata. */
+  readonly unansweredOwner?: {
+    readonly capability: { readonly nativeSessionId: string };
+    readonly turnId: TurnId;
+    readonly signal: AbortSignal;
+  };
+  unansweredResponse?: ClaudeUnansweredQuestionResponse;
 }
 
 interface ToolInFlight {
@@ -748,6 +875,21 @@ interface ClaudeTaskBinding {
 
 type RuntimeFork = <A, E>(effect: Effect.Effect<A, E, never>) => Fiber.Fiber<A, E>;
 
+/** Fresh, non-persisted primary-init authority for one query/conversation. */
+interface ClaudeSteerReceiptOwner {
+  readonly query: ClaudeQueryRuntime;
+  readonly runtimeId: string;
+  readonly expectedNativeSessionId: string | undefined;
+  nativeSessionId: string | undefined;
+}
+
+interface ClaudeSteerReceipt {
+  readonly owner: ClaudeSteerReceiptOwner;
+  readonly turn: ClaudeTurnState;
+  readonly messageId: string;
+  readonly intentSequence: number | undefined;
+}
+
 interface ClaudeSessionContext {
   /** Small independent budget; ordinary task bindings cannot multiply snapshots. */
   readonly workflowSnapshots: Map<
@@ -771,7 +913,9 @@ interface ClaudeSessionContext {
   sdkStreamEnded: boolean;
   /** Changes at iterator ingress, before asynchronous normalization. */
   sdkMessageRevision: number;
-  /** Native close threw; never admit another owner until explicit recovery. */
+  /** Received-result fence: a late interrupt receipt cannot qualify another response. */
+  sdkResultRevision: number;
+  /** Query close or reader retirement is uncertain; never admit a competing owner. */
   queryClosureUncertain: boolean;
   /** A rewind's exact-exit requirement survives later explicit stop attempts. */
   rewindRetirementUncertain: boolean;
@@ -791,12 +935,21 @@ interface ClaudeSessionContext {
   readonly visualizationBinding: VisualizationSessionBinding | undefined;
   readonly glideBinding?: GlideSessionBinding | undefined;
   readonly archivedToolPrivacy?: ArchivedToolPayloadRedactor | undefined;
-  readonly visualizationPrivacy?: VisualizationNativePrivacy | undefined;
   readonly visualizationCompletion?: ClaudeVisualizationCompletionObserver | undefined;
   readonly runFork: RuntimeFork;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
   readonly basePermissionMode: PermissionMode | undefined;
+  /** Frozen opening identity, independent of later legacy cursor adoption. */
+  readonly permissionModeInitialResumeSessionId: string | undefined;
+  /** Seeded once by a qualified primary SDK init; never a permission grant. */
+  permissionModeOwner: ClaudePermissionModeOwner | undefined;
+  /** Only a qualified primary init can establish this advisory owner. */
+  credentialExpiryOwner: ClaudeCredentialExpiryOwner | undefined;
+  /** Immutable opening resume, then an exact qualified reset's next init. */
+  credentialExpiryExpectedInitSessionId: string | undefined;
+  /** Native result_index belongs to the run, including conversation resets. */
+  credentialExpiryLastResultIndex: number;
   currentPermissionMode: PermissionMode;
   currentApiModelId: string | undefined;
   /** Requested flag state only; native eligibility and managed policy remain authoritative. */
@@ -851,7 +1004,12 @@ interface ClaudeSessionContext {
   /** Once fallback identities overflow, unknown task visibility fails closed. */
   failClosedTaskVisibilityOverflow: boolean;
   readonly promptLifecycleByUuid: Map<string, ClaudePromptLifecycleState>;
+  /** At most the existing 64-input correlation window; never a native-input queue. */
+  readonly steerReceiptsByUuid: Map<string, ClaudeSteerReceipt>;
+  steerReceiptOwner: ClaudeSteerReceiptOwner;
   readonly capabilities: Set<string>;
+  /** A replacement init invalidates all prior unanswered-callback witnesses. */
+  unansweredCapability?: { readonly nativeSessionId: string } | undefined;
   readonly fastModeRequested: boolean;
   turnState: ClaudeTurnState | undefined;
   deferredTurnResult: ClaudeDeferredTurnResult | undefined;
@@ -959,6 +1117,10 @@ export interface ClaudeAdapterLiveOptions {
    * never performs an authenticated API request.
    */
   readonly onAuthStatusChanged?: (failed: boolean) => Effect.Effect<void>;
+  /** Inert in-memory acquisition; the lease never grants authentication. */
+  readonly onCredentialExpiryOwner?: (
+    isCurrent: () => boolean,
+  ) => Effect.Effect<ClaudeCredentialExpiryLease>;
 }
 
 function isUuid(value: string): boolean {
@@ -1044,7 +1206,13 @@ function canonicalClaudeTaskId(value: unknown): RuntimeTaskId | undefined {
     digestDomain: CLAUDE_TASK_ID_HASH_DOMAIN,
     digestPrefix: CLAUDE_TASK_ID_HASH_PREFIX,
   });
-  return taskId ? RuntimeTaskId.make(taskId) : undefined;
+  // This application-owned namespace carries exact submitted-input evidence.
+  // Provider-authored tasks/progress cannot manufacture it with a lookalike
+  // task id and arbitrary usage fields. Actual receipt emission bypasses this
+  // native-identity normalizer and constructs its own bounded digest below.
+  return taskId && !taskId.startsWith(CLAUDE_STEER_PROCESSING_PREFIX)
+    ? RuntimeTaskId.make(taskId)
+    : undefined;
 }
 
 function canonicalClaudeToolUseBindingKey(value: unknown): string | undefined {
@@ -1133,6 +1301,111 @@ function hasCurrentClaudeTaskSession(context: ClaudeSessionContext, message: SDK
     context.lastThreadStartedId === context.resumeSessionId &&
     message.session_id === context.resumeSessionId
   );
+}
+
+/** SDK 0.3.317 reports failed persistence after its last result. These facts
+ * describe lost writes, not a new turn, a failed result or resume authority.
+ * Only finite categories/counts leave this boundary; transcript IDs, native
+ * error text, paths and future provider fields never become warning copy. */
+function readClaudeSessionWriteLoss(message: SDKMessage) {
+  const own = (key: string): unknown => {
+    const field = Object.getOwnPropertyDescriptor(message, key);
+    return field && "value" in field ? field.value : undefined;
+  };
+  if (own("type") !== "system" || own("subtype") !== "session_writes_lost") return undefined;
+  const sessionId = own("session_id"),
+    errorCode = own("error_code"),
+    lost = own("lost");
+  if (
+    typeof sessionId !== "string" ||
+    exactClaudeProviderIdentity(sessionId) !== sessionId ||
+    typeof errorCode !== "string" ||
+    errorCode.length === 0 ||
+    errorCode.length > 128 ||
+    !Array.isArray(lost) ||
+    Object.getPrototypeOf(lost) !== Array.prototype ||
+    lost.length === 0 ||
+    lost.length > 64
+  )
+    return undefined;
+  let transcriptLost = false,
+    globalConfigLost = false,
+    otherLossKindCount = 0;
+  for (let index = 0; index < lost.length; index++) {
+    const field = Object.getOwnPropertyDescriptor(lost, String(index));
+    if (
+      !field ||
+      !("value" in field) ||
+      typeof field.value !== "string" ||
+      field.value.length === 0 ||
+      field.value.length > 128
+    )
+      return undefined;
+    if (field.value === "transcript") transcriptLost = true;
+    else if (field.value === "global_config") globalConfigLost = true;
+    else otherLossKindCount++;
+  }
+  const transcriptSessions = own("transcript_session_ids");
+  if (
+    transcriptLost
+      ? !Array.isArray(transcriptSessions) ||
+        Object.getPrototypeOf(transcriptSessions) !== Array.prototype ||
+        transcriptSessions.length === 0 ||
+        transcriptSessions.length > 64
+      : transcriptSessions !== undefined
+  )
+    return undefined;
+  // Validate a finite list of own string slots without invoking accessors.
+  // Earlier /clear sessions are legitimate: validate their identity shape,
+  // never equate them with the current owner or publish the private values.
+  if (Array.isArray(transcriptSessions)) {
+    for (let index = 0; index < transcriptSessions.length; index++) {
+      const field = Object.getOwnPropertyDescriptor(transcriptSessions, String(index));
+      if (
+        !field ||
+        !("value" in field) ||
+        typeof field.value !== "string" ||
+        exactClaudeProviderIdentity(field.value) !== field.value
+      )
+        return undefined;
+    }
+  }
+  return {
+    sessionId,
+    detail: {
+      transcriptLost,
+      globalConfigLost,
+      otherLossKindCount,
+      transcriptSessionCount: Array.isArray(transcriptSessions) ? transcriptSessions.length : 0,
+      diskFull: errorCode === "ENOSPC",
+      quotaExceeded: errorCode === "EDQUOT",
+      otherErrorCode: errorCode !== "ENOSPC" && errorCode !== "EDQUOT",
+    },
+  };
+}
+
+function isCurrentClaudeSessionWriteLoss(
+  context: ClaudeSessionContext,
+  message: SDKMessage,
+): boolean {
+  const session = Object.getOwnPropertyDescriptor(message, "session_id");
+  if (
+    context.stopped ||
+    context.authFailureSeen ||
+    !session ||
+    !("value" in session) ||
+    context.resumeSessionId === undefined ||
+    context.lastThreadStartedId !== context.resumeSessionId ||
+    session.value !== context.resumeSessionId ||
+    !hasExactPrimaryClaudeParent(message)
+  )
+    return false;
+  // A query-level persistence notice cannot borrow task-scoped authority.
+  for (const key of ["task_id", "parent_task_id", "run_id", "agent_id", "subagent_id"] as const) {
+    const field = Object.getOwnPropertyDescriptor(message, key);
+    if (field ? !("value" in field) || field.value !== undefined : key in message) return false;
+  }
+  return true;
 }
 
 function claudeStreamBlockKey(parentToolUseId: string | undefined, blockIndex: number): string {
@@ -2151,6 +2424,11 @@ function boundedClaudeNativeMessagePayload(message: SDKMessage): unknown {
   if (source.type !== "system") return source;
 
   switch (source.subtype) {
+    case "session_writes_lost":
+      return {
+        ...boundedClaudeNativeSystemEnvelope(source, "session_writes_lost"),
+        ...readClaudeSessionWriteLoss(message)?.detail,
+      };
     case "init":
       return boundedClaudeInitPluginDiagnostics(source);
     case "hook_started": {
@@ -2620,8 +2898,8 @@ function knownClaudePromptUuids(
   }
 
   const known = new Set<string>();
-  // The response-limit path may qualify a result against its exact admitted
-  // witnesses after a terminal command lifecycle already retired the input.
+  // Response-limit and accepted-Stop paths may qualify a result against their
+  // exact witnesses after a terminal command lifecycle retired the input.
   // Ordinary prompt bookkeeping always consults only the live ownership map.
   const admittedUuids = responseLimitPromptUuids ?? context.promptLifecycleByUuid;
   const admit = (value: unknown) => {
@@ -2813,6 +3091,254 @@ function hasExactPrimaryClaudeParent(message: SDKMessage): boolean {
   return descriptor
     ? "value" in descriptor && (descriptor.value === null || descriptor.value === undefined)
     : !("parent_tool_use_id" in message);
+}
+
+function ownClaudeData(message: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(message, key);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
+}
+
+/** Copy only inert SDK envelope slots needed by new steer presentation proof. */
+function readClaudeSteerFrame(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || nodeUtilTypes.isProxy(value) || Array.isArray(value))
+    return undefined;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return undefined;
+  const fields: Record<string, unknown> = {};
+  for (const key of [
+    "type",
+    "subtype",
+    "session_id",
+    "new_conversation_id",
+    "parent_tool_use_id",
+    "task_id",
+    "parent_task_id",
+    "run_id",
+    "agent_id",
+    "subagent_id",
+    "command_uuid",
+    "state",
+    "user_message_uuid",
+    "user_message_uuids",
+    "error",
+    "event",
+    "is_error",
+  ]) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor) {
+      if (!("value" in descriptor)) return undefined;
+      fields[key] = descriptor.value;
+    } else if (key in value) return undefined;
+  }
+  // A primary result/reply has no task-scoped owner. Null parent_tool_use_id
+  // is the public SDK root form; task/agent aliases must be entirely absent.
+  if (fields.parent_tool_use_id !== null && fields.parent_tool_use_id !== undefined)
+    return undefined;
+  for (const key of ["task_id", "parent_task_id", "run_id", "agent_id", "subagent_id"])
+    if (fields[key] !== undefined) return undefined;
+  return fields;
+}
+
+function readClaudeSteerCorrelationUuids(
+  frame: Readonly<Record<string, unknown>>,
+): ReadonlyArray<string> | undefined {
+  if (frame.user_message_uuid === undefined && frame.user_message_uuids === undefined)
+    return undefined;
+  const uuids = new Set<string>();
+  if (frame.user_message_uuid !== undefined) {
+    if (typeof frame.user_message_uuid !== "string" || frame.user_message_uuid.length > 1_024)
+      return undefined;
+    if (isUuid(frame.user_message_uuid)) uuids.add(frame.user_message_uuid);
+  }
+  if (frame.user_message_uuids !== undefined) {
+    const values = frame.user_message_uuids;
+    if (
+      nodeUtilTypes.isProxy(values) ||
+      !Array.isArray(values) ||
+      Object.getPrototypeOf(values) !== Array.prototype ||
+      Object.hasOwn(values, "constructor")
+    )
+      return undefined;
+    const length = Object.getOwnPropertyDescriptor(values, "length")?.value;
+    if (!Number.isSafeInteger(length) || length < 0 || length > CLAUDE_PROMPT_CORRELATION_LIMIT)
+      return undefined;
+    for (let index = 0; index < length; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(values, String(index));
+      if (
+        !descriptor ||
+        !("value" in descriptor) ||
+        typeof descriptor.value !== "string" ||
+        descriptor.value.length > 1_024
+      )
+        return undefined;
+      // Native batches may contain provider-owned, non-UUID identities beside
+      // Cafe inputs. They neither authorize a receipt nor invalidate an exact
+      // independently matched Cafe UUID elsewhere in this bounded batch.
+      if (isUuid(descriptor.value)) uuids.add(descriptor.value);
+    }
+  }
+  return [...uuids];
+}
+
+/** New account/startup presentation never borrows a task-scoped identity. */
+function hasExactPrimaryClaudeAdvisoryScope(message: SDKMessage): boolean {
+  if (!hasExactPrimaryClaudeParent(message)) return false;
+  for (const key of ["task_id", "parent_task_id", "run_id", "subagent_id"] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(message, key);
+    if (descriptor ? !("value" in descriptor) || descriptor.value !== undefined : key in message)
+      return false;
+  }
+  return true;
+}
+
+/** Strip observational slots before generic redaction/logging can read them.
+ * Inherited/accessor slots are not native JSON. Neither can invoke code or
+ * leak an unbounded timestamp into ordinary result/accounting snapshots. */
+function stripClaudeCredentialExpiry(message: SDKMessage): SDKMessage {
+  const index = Object.getOwnPropertyDescriptor(message, "result_index");
+  const validIndex =
+    index &&
+    "value" in index &&
+    typeof index.value === "number" &&
+    Number.isSafeInteger(index.value) &&
+    index.value >= 0;
+  if (!("credential_expires_at" in message) && (!("result_index" in message) || validIndex))
+    return message;
+  const descriptors = Object.getOwnPropertyDescriptors(message);
+  delete descriptors.credential_expires_at;
+  // Valid delivery sequence metadata was already part of the public result
+  // contract. Preserve it in native diagnostics; only unsafe slots are removed.
+  if (!validIndex) delete descriptors.result_index;
+  return Object.defineProperties({}, descriptors) as SDKMessage;
+}
+
+function captureClaudeCredentialInit(context: ClaudeSessionContext, message: SDKMessage) {
+  if (
+    context.stopped ||
+    context.authFailureSeen ||
+    ownClaudeData(message, "type") !== "system" ||
+    ownClaudeData(message, "subtype") !== "init" ||
+    !hasExactPrimaryClaudeAdvisoryScope(message)
+  )
+    return undefined;
+  const nativeSessionId = ownClaudeData(message, "session_id");
+  if (
+    typeof nativeSessionId !== "string" ||
+    nativeSessionId.length > 1_024 ||
+    exactClaudeProviderIdentity(nativeSessionId) !== nativeSessionId
+  )
+    return undefined;
+  const owner = context.credentialExpiryOwner;
+  if (
+    owner
+      ? owner.nativeSessionId !== nativeSessionId
+      : context.credentialExpiryExpectedInitSessionId !== undefined &&
+        context.credentialExpiryExpectedInitSessionId !== nativeSessionId
+  )
+    return undefined;
+  return { nativeSessionId, owner, runtimeId: context.subagentRuntimeId, query: context.query };
+}
+
+function captureClaudeCredentialResult(context: ClaudeSessionContext, message: SDKMessage) {
+  const owner = context.credentialExpiryOwner;
+  const subtype = ownClaudeData(message, "subtype");
+  if (
+    !owner ||
+    context.stopped ||
+    context.authFailureSeen ||
+    ownClaudeData(message, "type") !== "result" ||
+    typeof subtype !== "string" ||
+    ![
+      "success",
+      "error_during_execution",
+      "error_max_turns",
+      "error_max_budget_usd",
+      "error_max_structured_output_retries",
+    ].includes(subtype) ||
+    typeof ownClaudeData(message, "is_error") !== "boolean" ||
+    ownClaudeData(message, "session_id") !== owner.nativeSessionId ||
+    !hasExactPrimaryClaudeAdvisoryScope(message)
+  )
+    return undefined;
+  const resultIndex = ownClaudeData(message, "result_index");
+  if (typeof resultIndex !== "number" || !Number.isSafeInteger(resultIndex) || resultIndex < 0)
+    return undefined;
+  const descriptor = Object.getOwnPropertyDescriptor(message, "credential_expires_at");
+  const absent = descriptor
+    ? "value" in descriptor && descriptor.value === undefined
+    : !("credential_expires_at" in message);
+  const expiresAt =
+    descriptor && "value" in descriptor ? parseClaudeCredentialExpiry(descriptor.value) : undefined;
+  return { owner, resultIndex, valid: absent || expiresAt !== undefined, expiresAt };
+}
+
+/** Stronger primary authentication evidence keeps its existing presentation. */
+function hasClaudePrimaryAuthenticationFailure(turn: ClaudeTurnState | undefined): boolean {
+  return (
+    turn?.primaryAssistantError === "authentication_failed" ||
+    turn?.primaryAssistantError === "oauth_org_not_allowed" ||
+    turn?.primaryAssistantError === "cloud_credential_error"
+  );
+}
+
+/** A startup result may precede init and name a newly allocated failed
+ * session. Its held query/active Cafe turn, not that failed id, owns copy. */
+function captureClaudeConfigurationFailure(
+  context: ClaudeSessionContext,
+  message: SDKMessage,
+): ClaudeConfigurationFailureObservation | undefined {
+  if (
+    context.stopped ||
+    context.authFailureSeen ||
+    !context.turnState ||
+    hasClaudePrimaryAuthenticationFailure(context.turnState) ||
+    ownClaudeData(message, "api_error_status") === 401 ||
+    ownClaudeData(message, "api_error_status") === 403 ||
+    context.session.activeTurnId !== context.turnState.turnId ||
+    ownClaudeData(message, "type") !== "result" ||
+    ownClaudeData(message, "subtype") !== "error_during_execution" ||
+    ownClaudeData(message, "is_error") !== true ||
+    ownClaudeData(message, "num_turns") !== 0 ||
+    ownClaudeData(message, "startup_failure_reason") !== "config_file_invalid" ||
+    !hasExactPrimaryClaudeAdvisoryScope(message)
+  )
+    return undefined;
+  const failedSessionId = ownClaudeData(message, "session_id");
+  if (
+    typeof failedSessionId !== "string" ||
+    failedSessionId.length > 1_024 ||
+    exactClaudeProviderIdentity(failedSessionId) !== failedSessionId
+  )
+    return undefined;
+  // Copy only inert bounded prompt stamps before using the legacy correlation
+  // reader. An explicit foreign stamp cannot borrow its absent-stamp fallback.
+  const correlation: { user_message_uuid?: unknown; user_message_uuids?: unknown } = {};
+  for (const key of ["user_message_uuid", "user_message_uuids"] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(message, key);
+    if (!descriptor) {
+      if (key in message) return undefined;
+      continue;
+    }
+    if (!("value" in descriptor)) return undefined;
+    if (key === "user_message_uuid" || descriptor.value === undefined) {
+      correlation[key] = descriptor.value;
+      continue;
+    }
+    if (!Array.isArray(descriptor.value)) return undefined;
+    const length = Object.getOwnPropertyDescriptor(descriptor.value, "length")?.value;
+    if (!Number.isSafeInteger(length) || length < 0 || length > CLAUDE_PROMPT_CORRELATION_LIMIT)
+      return undefined;
+    const values: unknown[] = [];
+    for (let index = 0; index < length; index++) {
+      const value = Object.getOwnPropertyDescriptor(descriptor.value, String(index));
+      if (!value || !("value" in value)) return undefined;
+      values.push(value.value);
+    }
+    correlation.user_message_uuids = values;
+  }
+  const prompts = knownClaudePromptUuids(context, correlation);
+  if (prompts !== undefined && prompts.length === 0) return undefined;
+  return { turn: context.turnState, runtimeId: context.subagentRuntimeId, query: context.query };
 }
 
 /** New presentation witnesses need an actual bounded opaque API identity. */
@@ -4593,16 +5119,148 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const getNativeSubagentMessages = options?.getNativeSubagentMessages ?? getSubagentMessages;
 
   const sessions = new Map<ThreadId, ClaudeSessionContext>();
+  const hasCurrentCredentialExpiryOwner = (
+    context: ClaudeSessionContext,
+    owner: ClaudeCredentialExpiryOwner,
+  ) =>
+    !context.stopped &&
+    !context.authFailureSeen &&
+    !context.sdkStreamEnded &&
+    !context.queryClosureUncertain &&
+    sessions.get(context.session.threadId) === context &&
+    context.credentialExpiryOwner === owner &&
+    context.query === owner.query &&
+    context.subagentRuntimeId === owner.runtimeId;
+
+  const retireCredentialExpiryOwner = Effect.fn("retireClaudeCredentialExpiryOwner")(function* (
+    context: ClaudeSessionContext,
+    owner: ClaudeCredentialExpiryOwner | undefined = context.credentialExpiryOwner,
+  ) {
+    if (!owner) return;
+    // Invalidate before any publication await, including uncertain native
+    // closure. The driver's pure predicate cannot reproject this old lease.
+    if (context.credentialExpiryOwner === owner) context.credentialExpiryOwner = undefined;
+    const lease = owner.lease;
+    owner.lease = undefined;
+    if (lease)
+      yield* lease.retire.pipe(
+        Effect.catchCause(() =>
+          Effect.logWarning("Claude credential expiry retirement remains unavailable."),
+        ),
+      );
+  });
+
+  const admitCredentialExpiryInit = Effect.fn("admitClaudeCredentialExpiryInit")(function* (
+    context: ClaudeSessionContext,
+    initialization: NonNullable<ReturnType<typeof captureClaudeCredentialInit>>,
+  ) {
+    if (
+      context.stopped ||
+      context.authFailureSeen ||
+      sessions.get(context.session.threadId) !== context ||
+      context.query !== initialization.query ||
+      context.subagentRuntimeId !== initialization.runtimeId ||
+      context.credentialExpiryOwner !== initialization.owner ||
+      initialization.owner
+    )
+      return;
+    const owner: ClaudeCredentialExpiryOwner = {
+      nativeSessionId: initialization.nativeSessionId,
+      runtimeId: initialization.runtimeId,
+      query: initialization.query,
+      lease: undefined,
+    };
+    context.credentialExpiryOwner = owner;
+    if (!options?.onCredentialExpiryOwner) return;
+    // The production factory is inert, bounded in-memory allocation. Admit
+    // its returned resource atomically so cancellation cannot lose a lease
+    // between creation and assignment. It performs no IO or publication.
+    yield* Effect.uninterruptible(
+      Effect.gen(function* () {
+        const lease = yield* options.onCredentialExpiryOwner!(() =>
+          hasCurrentCredentialExpiryOwner(context, owner),
+        ).pipe(
+          Effect.catchCause(() =>
+            Effect.logWarning("Claude credential expiry remains unavailable.").pipe(
+              Effect.as(undefined),
+            ),
+          ),
+        );
+        if (!lease) return;
+        if (!hasCurrentCredentialExpiryOwner(context, owner)) {
+          yield* lease.retire.pipe(
+            Effect.catchCause(() =>
+              Effect.logWarning("Claude credential expiry retirement remains unavailable."),
+            ),
+          );
+          return;
+        }
+        owner.lease = lease;
+      }),
+    );
+  });
+
+  const observeCredentialExpiryResult = Effect.fn("observeClaudeCredentialExpiryResult")(function* (
+    context: ClaudeSessionContext,
+    observation: NonNullable<ReturnType<typeof captureClaudeCredentialResult>>,
+  ) {
+    const { owner, resultIndex } = observation;
+    if (
+      !hasCurrentCredentialExpiryOwner(context, owner) ||
+      resultIndex <= context.credentialExpiryLastResultIndex
+    )
+      return;
+    // A malformed newer date cannot publish/retimestamp the previous date,
+    // but it still fences older result replays. Absence is a valid unknown.
+    context.credentialExpiryLastResultIndex = resultIndex;
+    if (!observation.valid || !owner.lease) return;
+    const lease = owner.lease;
+    const observedAt = yield* nowIso;
+    if (!hasCurrentCredentialExpiryOwner(context, owner) || owner.lease !== lease) return;
+    yield* lease
+      .observe({ resultIndex, expiresAt: observation.expiresAt, observedAt })
+      .pipe(
+        Effect.catchCause(() =>
+          Effect.logWarning("Claude credential expiry observation remains unavailable."),
+        ),
+      );
+    if (!hasCurrentCredentialExpiryOwner(context, owner))
+      yield* retireCredentialExpiryOwner(context, owner);
+  });
+  /** A request snapshot is not enduring native authority. Both response
+   * consumption and final callback settlement consult the same live witness. */
+  const hasCurrentUnansweredOwner = (context: ClaudeSessionContext, pending: PendingUserInput) => {
+    const owner = pending.unansweredOwner;
+    return (
+      owner !== undefined &&
+      !pending.interaction &&
+      !context.stopped &&
+      !context.authFailureSeen &&
+      !context.queryClosureUncertain &&
+      !context.sdkStreamEnded &&
+      context.inFlightSdkTurnBoundaryCount === 0 &&
+      !owner.signal.aborted &&
+      context.session.providerInstanceId === boundInstanceId &&
+      sessions.get(context.session.threadId) === context &&
+      context.unansweredCapability === owner.capability &&
+      context.resumeSessionId === owner.capability.nativeSessionId &&
+      context.lastThreadStartedId === owner.capability.nativeSessionId &&
+      context.session.activeTurnId === owner.turnId &&
+      context.turnState?.turnId === owner.turnId &&
+      context.capabilities.has(CLAUDE_UNANSWERED_QUESTION_CAPABILITY)
+    );
+  };
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const nextEventId = Effect.map(Random.nextUUIDv4, (id) => EventId.make(id));
   const makeEventStamp = () => Effect.all({ eventId: nextEventId, createdAt: nowIso });
 
-  const offerRuntimeEvent = (
+  const decorateRuntimeEvent = (
     context: ClaudeSessionContext,
     event: ProviderRuntimeEvent,
-  ): Effect.Effect<void> => {
+  ): ProviderRuntimeEvent => {
+    context.glideBinding?.observeTurn?.(event);
     const binding =
       event.type === "task.started" ||
       event.type === "task.progress" ||
@@ -4707,48 +5365,266 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }
         : undefined;
     if ((event.type === "item.started" || event.type === "item.updated") && toolControl) {
-      return Queue.offer(runtimeEventQueue, {
+      return {
         ...stamped,
         payload: { ...event.payload, individualTaskControl: toolControl },
-      } as ProviderRuntimeEvent).pipe(Effect.asVoid);
+      } as ProviderRuntimeEvent;
     }
-    return Queue.offer(
-      runtimeEventQueue,
-      (event.type === "task.started" ||
-        event.type === "task.progress" ||
-        event.type === "task.completed") &&
-        (event.payload.subagent || taskControl || workflow)
-        ? ({
-            ...stamped,
-            payload: {
-              ...event.payload,
-              ...(binding?.taskOwner && !binding.isSubagent
-                ? { taskOwner: binding.taskOwner }
-                : {}),
-              ...(workflow ? { workflow } : {}),
-              ...(taskControl
-                ? {
-                    individualTaskControl: {
-                      taskId: String(binding!.taskId),
-                      runtimeId: context.subagentRuntimeId,
-                      capability: taskControl,
-                    },
-                  }
-                : {}),
-              ...(event.payload.subagent
-                ? {
-                    subagent: {
-                      ...event.payload.subagent,
-                      runtimeId: context.subagentRuntimeId,
-                      ...(taskControl ? { taskControl } : {}),
-                    },
-                  }
-                : {}),
-            },
-          } as ProviderRuntimeEvent)
-        : stamped,
-    ).pipe(Effect.asVoid);
+    return (event.type === "task.started" ||
+      event.type === "task.progress" ||
+      event.type === "task.completed") &&
+      (event.payload.subagent || taskControl || workflow)
+      ? ({
+          ...stamped,
+          payload: {
+            ...event.payload,
+            ...(binding?.taskOwner && !binding.isSubagent ? { taskOwner: binding.taskOwner } : {}),
+            ...(workflow ? { workflow } : {}),
+            ...(taskControl
+              ? {
+                  individualTaskControl: {
+                    taskId: String(binding!.taskId),
+                    runtimeId: context.subagentRuntimeId,
+                    capability: taskControl,
+                  },
+                }
+              : {}),
+            ...(event.payload.subagent
+              ? {
+                  subagent: {
+                    ...event.payload.subagent,
+                    runtimeId: context.subagentRuntimeId,
+                    ...(taskControl ? { taskControl } : {}),
+                  },
+                }
+              : {}),
+          },
+        } as ProviderRuntimeEvent)
+      : stamped;
   };
+
+  // Keep ordinary event delivery unchanged. The question callback below uses
+  // the same synchronous decoration inside its exact-owner settlement fence.
+  const offerRuntimeEvent = (context: ClaudeSessionContext, event: ProviderRuntimeEvent) =>
+    Queue.offer(runtimeEventQueue, decorateRuntimeEvent(context, event)).pipe(Effect.asVoid);
+
+  const hasCurrentSteerReceiptOwner = (
+    context: ClaudeSessionContext,
+    owner: ClaudeSteerReceiptOwner,
+  ): boolean =>
+    sessions.get(context.session.threadId) === context &&
+    !context.stopped &&
+    !context.authFailureSeen &&
+    !context.queryClosureUncertain &&
+    context.steerReceiptOwner === owner &&
+    context.query === owner.query &&
+    context.subagentRuntimeId === owner.runtimeId;
+
+  const hasCurrentSteerReceipt = (
+    context: ClaudeSessionContext,
+    messageUuid: string,
+    receipt: ClaudeSteerReceipt,
+  ): boolean =>
+    hasCurrentSteerReceiptOwner(context, receipt.owner) &&
+    receipt.owner.nativeSessionId !== undefined &&
+    context.resumeSessionId === receipt.owner.nativeSessionId &&
+    context.lastThreadStartedId === receipt.owner.nativeSessionId &&
+    context.steerReceiptsByUuid.get(messageUuid) === receipt &&
+    context.turnState === receipt.turn &&
+    context.session.activeTurnId === receipt.turn.turnId;
+
+  const rememberClaudeSteerReceipt = (
+    context: ClaudeSessionContext,
+    messageUuid: string,
+    input: ProviderSteerTurnInput,
+    turn: ClaudeTurnState,
+  ): void => {
+    const owner = context.steerReceiptOwner;
+    const sequence = input.intentSequence;
+    if (
+      !hasCurrentSteerReceiptOwner(context, owner) ||
+      context.turnState !== turn ||
+      context.session.activeTurnId !== turn.turnId ||
+      typeof input.messageId !== "string" ||
+      input.messageId.length === 0 ||
+      input.messageId.length > 1_024 ||
+      (sequence !== undefined && (!Number.isSafeInteger(sequence) || sequence < 0)) ||
+      context.steerReceiptsByUuid.size >= CLAUDE_PROMPT_CORRELATION_LIMIT
+    )
+      return;
+    // This is a bounded presentation lease, not the native input queue. At
+    // capacity, keep submitting every original input without eviction/replay;
+    // absence of a lease cannot be upgraded into consumption evidence later.
+    context.steerReceiptsByUuid.set(messageUuid, {
+      owner,
+      turn,
+      messageId: input.messageId,
+      intentSequence: sequence,
+    });
+  };
+
+  const retireClaudeSteerTurn = (context: ClaudeSessionContext, turn: ClaudeTurnState): void => {
+    for (const [uuid, receipt] of context.steerReceiptsByUuid)
+      if (receipt.turn === turn) context.steerReceiptsByUuid.delete(uuid);
+  };
+
+  const captureClaudeSteerEvidence = (context: ClaudeSessionContext, message: SDKMessage) => {
+    const frame = readClaudeSteerFrame(message);
+    const owner = context.steerReceiptOwner;
+    if (!frame || !hasCurrentSteerReceiptOwner(context, owner)) return undefined;
+    const sessionId = frame.session_id;
+    if (
+      typeof sessionId !== "string" ||
+      sessionId.length > 1_024 ||
+      exactClaudeProviderIdentity(sessionId) !== sessionId
+    )
+      return undefined;
+    if (frame.type === "system" && frame.subtype === "init") {
+      if (
+        (owner.expectedNativeSessionId !== undefined &&
+          owner.expectedNativeSessionId !== sessionId) ||
+        (owner.nativeSessionId !== undefined && owner.nativeSessionId !== sessionId)
+      )
+        return undefined;
+      return {
+        owner,
+        initialization: sessionId,
+        receipts: [] as Array<readonly [string, ClaudeSteerReceipt]>,
+      };
+    }
+    if (
+      owner.nativeSessionId !== sessionId ||
+      context.resumeSessionId !== sessionId ||
+      context.lastThreadStartedId !== sessionId
+    )
+      return undefined;
+    if (frame.type === "conversation_reset") {
+      const nextId = frame.new_conversation_id;
+      if (typeof nextId !== "string" || !isUuid(nextId)) return undefined;
+      // Revoke old conversation authority synchronously before native logging
+      // or any other await. A later init must independently bind the new root.
+      context.steerReceiptsByUuid.clear();
+      context.steerReceiptOwner = {
+        query: context.query,
+        runtimeId: context.subagentRuntimeId,
+        expectedNativeSessionId: nextId,
+        nativeSessionId: undefined,
+      };
+      return undefined;
+    }
+    let uuids: ReadonlyArray<string> | undefined;
+    if (frame.type === "command_lifecycle") {
+      const uuid = frame.command_uuid;
+      if (typeof uuid !== "string" || !isUuid(uuid)) return undefined;
+      if (frame.state === "cancelled" || frame.state === "discarded") {
+        // Cancellation/discard is not processing. Retire only this exact live lease; the
+        // existing native failure/recovery path retains its original policy.
+        context.steerReceiptsByUuid.delete(uuid);
+        return undefined;
+      }
+      if (frame.state !== "started" && frame.state !== "completed") return undefined;
+      uuids = [uuid];
+    } else if (
+      (frame.type === "assistant" && frame.error === undefined) ||
+      frame.type === "stream_event" ||
+      (frame.type === "system" && frame.subtype === "thinking_tokens") ||
+      (frame.type === "result" &&
+        typeof frame.is_error === "boolean" &&
+        typeof frame.subtype === "string" &&
+        [
+          "success",
+          "error_during_execution",
+          "error_max_turns",
+          "error_max_budget_usd",
+          "error_max_structured_output_retries",
+        ].includes(frame.subtype))
+    ) {
+      if (frame.type === "stream_event") {
+        const event = frame.event;
+        if (
+          !event ||
+          typeof event !== "object" ||
+          nodeUtilTypes.isProxy(event) ||
+          Array.isArray(event)
+        )
+          return undefined;
+        const type = Object.getOwnPropertyDescriptor(event, "type");
+        if (
+          !type ||
+          !("value" in type) ||
+          ![
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+          ].includes(type.value)
+        )
+          return undefined;
+      }
+      // Explicit correlation only: the ordinary legacy result fallback never
+      // proves which submitted follow-up the provider actually consumed.
+      uuids = readClaudeSteerCorrelationUuids(frame);
+    }
+    if (!uuids) return undefined;
+    const receipts: Array<readonly [string, ClaudeSteerReceipt]> = [];
+    for (const uuid of uuids) {
+      const receipt = context.steerReceiptsByUuid.get(uuid);
+      if (!receipt || !hasCurrentSteerReceipt(context, uuid, receipt)) continue;
+      receipts.push([uuid, receipt]);
+    }
+    return { owner, initialization: undefined, receipts };
+  };
+
+  const emitClaudeSteerEvidence = Effect.fn("emitClaudeSteerEvidence")(function* (
+    context: ClaudeSessionContext,
+    evidence: NonNullable<ReturnType<typeof captureClaudeSteerEvidence>>,
+  ) {
+    if (!hasCurrentSteerReceiptOwner(context, evidence.owner)) return;
+    if (evidence.initialization !== undefined) {
+      evidence.owner.nativeSessionId = evidence.initialization;
+      return;
+    }
+    for (const [messageUuid, receipt] of evidence.receipts) {
+      if (!hasCurrentSteerReceipt(context, messageUuid, receipt)) continue;
+      const stamp = yield* makeEventStamp();
+      // The stamp yields. Recheck and consume the exact object immediately
+      // beside the unbounded event queue's synchronous one-shot publication.
+      // Cancel/reset/replacement cannot lend its authority across that await.
+      if (!hasCurrentSteerReceipt(context, messageUuid, receipt)) continue;
+      context.steerReceiptsByUuid.delete(messageUuid);
+      const digest = createHash("sha256")
+        .update("cafecode/claude-steer-processing/v1\0")
+        .update(messageUuid)
+        .digest("hex");
+      Queue.offerUnsafe(
+        runtimeEventQueue,
+        decorateRuntimeEvent(context, {
+          ...stamp,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          turnId: receipt.turn.turnId,
+          type: "task.progress",
+          payload: {
+            taskId: RuntimeTaskId.make(`${CLAUDE_STEER_PROCESSING_PREFIX}${digest}`),
+            description: CLAUDE_STEER_PROCESSING_DESCRIPTION,
+            visibility: "ambient",
+            usage: {
+              provider: "claudeAgent",
+              messageId: receipt.messageId,
+              ...(receipt.intentSequence !== undefined
+                ? { intentSequence: receipt.intentSequence }
+                : {}),
+              providerInstanceId: boundInstanceId,
+              subagentRuntimeId: context.subagentRuntimeId,
+            },
+          },
+          providerRefs: nativeProviderRefs(context),
+        }),
+      );
+    }
+  });
 
   const emitClaudeProvisionalTaskRetraction = Effect.fn("emitClaudeProvisionalTaskRetraction")(
     function* (
@@ -4946,7 +5822,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         (block.publishedText === displayText && block.publishedTruncated === block.text.truncated))
     )
       return;
-    if (!terminalStatus && block.intermediatePublications >= 16) return;
     if (terminalStatus && block.terminalPublications >= 2) return;
     if (
       !terminalStatus &&
@@ -4959,7 +5834,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (terminalStatus) {
       block.completed = true;
       block.terminalPublications += 1;
-    } else block.intermediatePublications += 1;
+    }
     const stamp = yield* makeEventStamp();
     yield* offerRuntimeEvent(context, {
       ...stamp,
@@ -5033,7 +5908,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         text: makeClaudePublicSummaryText(),
         closed: false,
         completed: false,
-        intermediatePublications: 0,
         terminalPublications: 0,
         snapshotSeen: false,
       };
@@ -5045,7 +5919,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* publishPublicSummary(context, block);
     } else if (
       !block.flushFiber &&
-      block.intermediatePublications < 16 &&
       (block.publishedText !== claudePublicSummaryDisplayText(block.text.text) ||
         block.publishedTruncated !== block.text.truncated)
     ) {
@@ -6013,6 +6886,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
 
     const updatedAt = yield* nowIso;
+    retireClaudeSteerTurn(context, turnState);
     context.deferredTurnResult = undefined;
     context.turnState = undefined;
     context.session = {
@@ -6537,6 +7411,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             status: "inProgress",
             title: tool.title,
             detail: "Continuing in the background",
+            ...(tool.inspectionNativeSessionId ? { data: claudeToolPresentationData(tool) } : {}),
           },
         });
         continue;
@@ -6836,11 +7711,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         context.turnState.primaryAssistantError ??= "authentication_failed";
       }
       context.authFailureSeen = true;
+      yield* notifyAuthStatusChanged(true);
       yield* emitRuntimeWarning(
         context,
         "Claude authentication failed; suppressing Claude Code's synthetic assistant error and retiring this stale session.",
         {
-          apiErrorStatus: 401,
           error: "authentication_failed",
           sessionId: typeof message.session_id === "string" ? message.session_id : undefined,
         },
@@ -7069,16 +7944,41 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const handleResultMessage = Effect.fn("handleResultMessage")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
+    configurationFailure?: ClaudeConfigurationFailureObservation,
   ) {
     if (message.type !== "result") {
       return;
     }
 
+    const acceptedInterrupt = context.turnState?.acceptedInterrupt;
+    if (context.turnState) {
+      context.turnState.acceptedInterrupt = undefined;
+    }
     yield* reportClaudeFastModeStatus(context, message);
 
-    const status = turnStatusFromResult(message);
+    const interruptedPromptUuids = knownClaudePromptUuids(
+      context,
+      message,
+      acceptedInterrupt?.promptUuids,
+    );
+    const stoppedExecution = isClaudeStoppedExecutionResult(
+      message,
+      acceptedInterrupt !== undefined &&
+        acceptedInterrupt.sessionId === message.session_id &&
+        (interruptedPromptUuids === undefined || interruptedPromptUuids.length > 0),
+      context.turnState?.primaryAssistantError !== undefined || context.authFailureSeen,
+    );
+    // A Cafe turn can contain several native response segments. Never let an
+    // earlier Stop reclassify a queued follow-up's result on the same query.
+    const status = stoppedExecution ? "interrupted" : turnStatusFromResult(message);
     const resultErrors = "errors" in message && Array.isArray(message.errors) ? message.errors : [];
-    const authFailure = isClaudeAuthFailureResult(message);
+    // A local sign-out can emit a typed primary assistant error followed by
+    // a generic failed result with no HTTP status. Preserve that observation
+    // through completion and retire the stale query just as for a direct 401.
+    const authFailure =
+      status === "failed" &&
+      (isClaudeAuthFailureResult(message) ||
+        (context.authFailureSeen && hasExactPrimaryClaudeParent(message)));
     if (status === "failed" && context.turnState) {
       // Structured result evidence for diagnostic copy only.
       const apiErrorStatus = (message as Record<string, unknown>).api_error_status;
@@ -7101,11 +8001,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       (resultPromptUuids === undefined || resultPromptUuids.length > 0) &&
       !authFailure;
     const errorMessage =
-      status !== "completed"
+      status !== "completed" && !stoppedExecution
         ? responseLimitFailure
           ? CLAUDE_RESPONSE_LIMIT_MESSAGE
           : (resultPrimaryError(message) ?? resultErrors[0] ?? "Claude turn failed.")
         : undefined;
+    if (
+      configurationFailure &&
+      errorMessage &&
+      !authFailure &&
+      !context.authFailureSeen &&
+      !hasClaudePrimaryAuthenticationFailure(context.turnState) &&
+      !context.stopped &&
+      sessions.get(context.session.threadId) === context &&
+      context.turnState === configurationFailure.turn &&
+      context.session.activeTurnId === configurationFailure.turn.turnId &&
+      context.subagentRuntimeId === configurationFailure.runtimeId &&
+      context.query === configurationFailure.query
+    ) {
+      // Preserve lifecycle/recovery text and the result's native status. Only
+      // the closed diagnostic body receives safe fixed configuration guidance.
+      configurationFailure.turn.failureDiagnostic = makeClaudeFailureDiagnostic(
+        configurationFailure.turn,
+        "claude/result/error",
+        errorMessage,
+        CLAUDE_INVALID_CONFIGURATION_MESSAGE,
+        "config_file_invalid",
+      );
+    }
     const completedPromptCount = consumeClaudeResultPrompt(context, message);
     // Claude Code 2.1.245 / Agent SDK 0.3.245 adds queued_turn_count to the
     // result boundary. Local UUID lifecycle remains the strongest attribution
@@ -7135,13 +8058,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         );
       } else if (authFailure) {
+        const alreadyObserved = context.authFailureSeen;
         context.authFailureSeen = true;
-        yield* notifyAuthStatusChanged(true);
+        if (!alreadyObserved) yield* notifyAuthStatusChanged(true);
         yield* emitRuntimeWarning(
           context,
           "Claude authentication failed; retiring this stale Claude session so the next turn starts with current login material.",
           {
-            apiErrorStatus: 401,
+            ...(ownClaudeData(message, "api_error_status") === 401 ? { apiErrorStatus: 401 } : {}),
             error: "authentication_failed",
             sessionId: typeof message.session_id === "string" ? message.session_id : undefined,
           },
@@ -7169,10 +8093,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     }
 
-    if (status === "completed") {
+    if (status === "completed" && hasExactPrimaryClaudeParent(message)) {
       // A successful turn proves the stored credentials work again (e.g.
       // after the user re-ran /login), so clear any needs-login provider
       // state derived from an earlier 401.
+      context.authFailureSeen = false;
       yield* notifyAuthStatusChanged(false);
     }
 
@@ -7432,6 +8357,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             context.capabilities.add(capability);
           }
         }
+        context.unansweredCapability =
+          !context.stopped &&
+          !context.authFailureSeen &&
+          sessions.get(context.session.threadId) === context &&
+          hasExactPrimaryClaudeParent(message) &&
+          context.resumeSessionId !== undefined &&
+          context.lastThreadStartedId === context.resumeSessionId &&
+          message.session_id === context.resumeSessionId &&
+          context.capabilities.has(CLAUDE_UNANSWERED_QUESTION_CAPABILITY)
+            ? { nativeSessionId: context.resumeSessionId }
+            : undefined;
         yield* reportClaudeFastModeStatus(context, message);
         yield* offerRuntimeEvent(context, {
           ...base,
@@ -8133,12 +9069,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               ...(spawningTool.taskOwner ? { taskOwner: spawningTool.taskOwner } : {}),
               status: "inProgress",
               title: spawningTool.title,
+              ...(spawningTool.inspectionNativeSessionId
+                ? { data: claudeToolPresentationData(spawningTool) }
+                : {}),
             },
           });
         }
         yield* offerRuntimeEvent(context, {
           ...base,
           turnId: startedBinding.turnId ?? undefined,
+          providerRefs: nativeProviderRefs(context, { providerItemId: startedBinding.toolUseId }),
           type: "task.started",
           payload: {
             taskId: startedBinding.taskId,
@@ -8229,6 +9169,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         yield* offerRuntimeEvent(context, {
           ...base,
           turnId: progressBinding.turnId ?? undefined,
+          providerRefs: nativeProviderRefs(context, { providerItemId: progressBinding.toolUseId }),
           type: "task.progress",
           payload: {
             taskId: progressBinding.taskId,
@@ -8360,6 +9301,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 status: terminalStatus === "completed" ? "completed" : "failed",
                 title: tool.title,
                 ...(patchedSummary ? { detail: patchedSummary } : {}),
+                ...(tool.inspectionNativeSessionId
+                  ? { data: claudeToolPresentationData(tool) }
+                  : {}),
               },
             });
           }
@@ -8370,6 +9314,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           yield* offerRuntimeEvent(context, {
             ...base,
             turnId: updatedBinding.turnId ?? undefined,
+            providerRefs: nativeProviderRefs(context, { providerItemId: updatedBinding.toolUseId }),
             type: "task.completed",
             payload: {
               taskId: updatedBinding.taskId,
@@ -8393,6 +9338,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         yield* offerRuntimeEvent(context, {
           ...base,
           turnId: updatedBinding.turnId ?? undefined,
+          providerRefs: nativeProviderRefs(context, { providerItemId: updatedBinding.toolUseId }),
           type: "task.progress",
           payload: {
             taskId: updatedBinding.taskId,
@@ -8527,12 +9473,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               status: message.status === "completed" ? "completed" : "failed",
               title: tool.title,
               ...(summary ? { detail: summary } : {}),
+              ...(tool.inspectionNativeSessionId ? { data: claudeToolPresentationData(tool) } : {}),
             },
           });
         }
         yield* offerRuntimeEvent(context, {
           ...base,
           turnId: notificationBinding.turnId ?? undefined,
+          providerRefs: nativeProviderRefs(context, {
+            providerItemId: notificationBinding.toolUseId,
+          }),
           type: "task.completed",
           payload: {
             taskId: notificationBinding.taskId,
@@ -8797,6 +9747,51 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     incomingMessage: SDKMessage,
   ) {
+    // Snapshot new observational authority before logger/normalizer awaits or
+    // ensureThreadId's legacy mutable cursor adoption. Never infer init from
+    // a result, status, permission mode or saved native history coordinate.
+    const currentQuery = sessions.get(context.session.threadId) === context;
+    const steerEvidence = currentQuery
+      ? captureClaudeSteerEvidence(context, incomingMessage)
+      : undefined;
+    const credentialInitialization = currentQuery
+      ? captureClaudeCredentialInit(context, incomingMessage)
+      : undefined;
+    const credentialResult = currentQuery
+      ? captureClaudeCredentialResult(context, incomingMessage)
+      : undefined;
+    const configurationFailure = currentQuery
+      ? captureClaudeConfigurationFailure(context, incomingMessage)
+      : undefined;
+    const resetOwner = context.credentialExpiryOwner;
+    const resetSessionId = ownClaudeData(incomingMessage, "new_conversation_id");
+    const credentialReset =
+      currentQuery &&
+      resetOwner &&
+      hasCurrentCredentialExpiryOwner(context, resetOwner) &&
+      ownClaudeData(incomingMessage, "type") === "conversation_reset" &&
+      ownClaudeData(incomingMessage, "session_id") === resetOwner.nativeSessionId &&
+      typeof resetSessionId === "string" &&
+      isUuid(resetSessionId) &&
+      hasExactPrimaryClaudeAdvisoryScope(incomingMessage)
+        ? { owner: resetOwner, nextSessionId: resetSessionId }
+        : undefined;
+    const sessionWriteLossFrame =
+      sdkMessageType(incomingMessage) === "system" &&
+      sdkMessageSubtype(incomingMessage) === "session_writes_lost";
+    // Capture before logging/normalization awaits and before the legacy path
+    // may adopt a received session ID. An observation never establishes one.
+    const sessionWriteLoss =
+      sessionWriteLossFrame &&
+      sessions.get(context.session.threadId) === context &&
+      isCurrentClaudeSessionWriteLoss(context, incomingMessage)
+        ? readClaudeSessionWriteLoss(incomingMessage)
+        : undefined;
+    const writeLossRuntimeId = context.subagentRuntimeId;
+    const permissionModeObservation =
+      sessions.get(context.session.threadId) === context
+        ? captureClaudePermissionModeObservation(context, incomingMessage)
+        : undefined;
     const identityFrame = incomingMessage as unknown as Record<string, unknown>;
     const extensionRecords = [identityFrame];
     if (
@@ -8928,7 +9923,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // Redaction is deliberately before every logger, accounting mapper, raw
     // event and transcript projection. Even rejected/foreign/subagent reports
     // must not bypass privacy simply because they cannot update the metadata.
-    const stripped = stripClaudeUsageReport(incomingMessage);
+    const stripped = stripClaudeUsageReport(stripClaudeCredentialExpiry(incomingMessage));
     if (
       context.visualizationBinding &&
       context.visualizationCompletion &&
@@ -8992,8 +9987,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         );
       }
     }
-    const privateMessage =
-      context.visualizationPrivacy?.redact(stripped.message) ?? stripped.message;
+    const privateMessage = redactVisualizationReceiptProofs(stripped.message);
     const message = context.archivedToolPrivacy?.redact(privateMessage) ?? privateMessage;
     // Capture before the legacy ordinary-message path may adopt a session id.
     // A foreign or pre-init tool cannot turn that later adoption into evidence
@@ -9046,6 +10040,47 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       if (!primary || !sameNativeSession || !context.turnState || context.stopped) return;
     } else {
       yield* logNativeSdkMessage(context, message);
+    }
+    if (steerEvidence) yield* emitClaudeSteerEvidence(context, steerEvidence);
+    if (credentialReset && hasCurrentCredentialExpiryOwner(context, credentialReset.owner)) {
+      context.credentialExpiryExpectedInitSessionId = credentialReset.nextSessionId;
+      yield* retireCredentialExpiryOwner(context, credentialReset.owner);
+    }
+    if (credentialInitialization)
+      yield* admitCredentialExpiryInit(context, credentialInitialization);
+    if (credentialResult) yield* observeCredentialExpiryResult(context, credentialResult);
+    if (sessionWriteLossFrame) {
+      const stamp = yield* makeEventStamp();
+      if (
+        sessionWriteLoss &&
+        sessions.get(context.session.threadId) === context &&
+        context.subagentRuntimeId === writeLossRuntimeId &&
+        isCurrentClaudeSessionWriteLoss(context, incomingMessage) &&
+        context.resumeSessionId === sessionWriteLoss.sessionId
+      ) {
+        // Results already received stand. Publish a session-level notice even
+        // with no active turn; do not rewrite completion, accounting, pending
+        // callbacks or the saved cursor, and never retry paid input here.
+        yield* offerRuntimeEvent(context, {
+          ...stamp,
+          type: "runtime.warning",
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          providerRefs: nativeProviderRefs(context),
+          payload: {
+            message:
+              "Some Claude session data could not be saved. Recent conversation or settings changes may be missing after reconnecting.",
+            detail: sessionWriteLoss.detail,
+          },
+          raw: {
+            source: "claude.sdk.message",
+            method: "claude/system/session_writes_lost",
+            messageType: "system:session_writes_lost",
+            payload: { type: "system", subtype: "session_writes_lost", ...sessionWriteLoss.detail },
+          },
+        });
+      }
+      return;
     }
     if (message.type === "system") {
       const frame = message as unknown as Record<string, unknown>;
@@ -9151,6 +10186,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     ) {
       yield* ensureThreadId(context, message);
     }
+    if (
+      permissionModeObservation &&
+      !context.stopped &&
+      !context.authFailureSeen &&
+      sessions.get(context.session.threadId) === context &&
+      context.subagentRuntimeId === permissionModeObservation.runtimeId &&
+      context.permissionModeOwner === permissionModeObservation.owner &&
+      context.resumeSessionId === permissionModeObservation.nativeSessionId &&
+      context.lastThreadStartedId === permissionModeObservation.nativeSessionId
+    ) {
+      context.permissionModeOwner ??= Object.freeze({
+        nativeSessionId: permissionModeObservation.nativeSessionId,
+        runtimeId: permissionModeObservation.runtimeId,
+      });
+      // This updates the next-turn setter's observed state only. Native
+      // callback decisions remain authoritative even when the mode is bypass.
+      context.currentPermissionMode = permissionModeObservation.mode;
+    }
     yield* recordTurnSdkMessage(context, message);
 
     const rawMessageType = sdkMessageType(message);
@@ -9159,6 +10212,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // until completeTurn would lose the last good totals if a later segment
     // crashes. Only bounded numeric/model metadata enters this new event.
     if (rawMessageType === "conversation_reset") {
+      context.unansweredCapability = undefined;
       context.workflowSnapshots.clear();
       if (context.turnState) context.turnState.responseLimitError = undefined;
       yield* flushPublicSummaries(context, "failed");
@@ -9246,7 +10300,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         yield* handleAssistantMessage(context, message, publicSummaryAdmitted);
         return;
       case "result":
-        yield* handleResultMessage(context, message);
+        yield* handleResultMessage(context, message, configurationFailure);
         return;
       case "system":
         yield* handleSystemMessage(context, message);
@@ -9294,6 +10348,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 } else {
                   context.inFlightSdkMessageCount += 1;
                   context.sdkMessageRevision += 1;
+                  if (message.value.type === "result") context.sdkResultRevision += 1;
                   if (isClaudePriorityTurnBoundaryMessage(message.value)) {
                     context.inFlightSdkTurnBoundaryCount += 1;
                   }
@@ -9400,10 +10455,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const { quotaReport: _stoppedQuota, ...stoppedSession } = context.session;
     context.session = stoppedSession;
     context.stopped = true;
+    context.steerReceiptsByUuid.clear();
+    const credentialExpiryOwner = context.credentialExpiryOwner;
+    context.credentialExpiryOwner = undefined;
     if (context.turnState) context.turnState.responseLimitError = undefined;
-    // Any cleanup failure before query.close is also inconclusive teardown.
-    // Keep the ownership fence until that exact query is proven closed.
-    context.queryClosureUncertain = options?.queryAlreadyClosed !== true;
+    // A caller may already have requested native closure, but the exact
+    // reader is still owned until its required join completes. Keep the fence
+    // through cleanup and cancellation as well as a thrown close; otherwise a
+    // cancelled already-closed replacement could admit a competing query.
+    context.queryClosureUncertain = true;
 
     // Revoke before any asynchronous provider teardown. Even an uncertain
     // native close must not leave a stopped query able to schedule new work.
@@ -9417,6 +10477,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         Effect.logWarning("Private visualization session cleanup remains incomplete."),
       ),
     );
+    // All advisory reads were already fenced synchronously above. Keep the
+    // original native capability-revocation order ahead of this publication.
+    yield* retireCredentialExpiryOwner(context, credentialExpiryOwner);
     if (hadQuotaReport) {
       // The coalesced publisher is stopped-fenced; explicitly invalidate this
       // revoked level without waiting for provider close/exit acknowledgement.
@@ -9463,32 +10526,42 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* Queue.shutdown(context.promptQueue);
 
     const streamFiber = context.streamFiber;
-    context.streamFiber = undefined;
-    if (
-      options?.interruptStreamFiber !== false &&
-      streamFiber &&
-      streamFiber.pollUnsafe() === undefined
-    ) {
-      yield* Fiber.interrupt(streamFiber);
-    }
-
-    yield* Effect.tryPromise({
-      try: async () => {
-        if (!options?.queryAlreadyClosed) context.query.close();
-        if (context.rewindRetirementUncertain && !options?.queryAlreadyClosed) {
-          if (!context.query.waitForExit) throw new Error("Claude rewind has no exit observation.");
-          await context.query.waitForExit();
-        }
-        context.queryClosureUncertain = false;
-        context.rewindRetirementUncertain = false;
-      },
-      catch: (cause) =>
-        new ProviderAdapterProcessError({
-          provider: PROVIDER,
-          threadId: context.session.threadId,
-          detail: toMessage(cause, "Failed to close Claude runtime query."),
-          cause,
-        }),
+    yield* Effect.gen(function* () {
+      // The SDK exposes its message async generator directly. Returning that
+      // generator while next() is waiting queues return() behind the pending
+      // read; only Query.close() starts the cleanup that releases that read.
+      // Request exact-query closure before joining the reader, otherwise Stop
+      // and cold replacement can wait forever before reaching close().
+      yield* Effect.tryPromise({
+        try: async () => {
+          if (!options?.queryAlreadyClosed) context.query.close();
+          if (context.rewindRetirementUncertain && !options?.queryAlreadyClosed) {
+            if (!context.query.waitForExit)
+              throw new Error("Claude rewind has no exit observation.");
+            await context.query.waitForExit();
+          }
+        },
+        catch: (cause) =>
+          new ProviderAdapterProcessError({
+            provider: PROVIDER,
+            threadId: context.session.threadId,
+            detail: toMessage(cause, "Failed to close Claude runtime query."),
+            cause,
+          }),
+      });
+      if (
+        options?.interruptStreamFiber !== false &&
+        streamFiber &&
+        streamFiber.pollUnsafe() === undefined
+      ) {
+        // The exact reader remains owned by this context if its finalizer is
+        // still pending at the existing deadline. Timeout retires this wait,
+        // not the ownership fence or a claim about the native process's exit.
+        yield* Fiber.interrupt(streamFiber).pipe(Effect.interruptible);
+      }
+      if (context.streamFiber === streamFiber) context.streamFiber = undefined;
+      context.queryClosureUncertain = false;
+      context.rewindRetirementUncertain = false;
     }).pipe(
       Effect.timeoutOrElse({
         duration: 10_000,
@@ -9520,7 +10593,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       updatedAt,
     };
 
-    if (options?.emitExitEvent !== false) {
+    if (options?.emitExitEvent !== false && !context.queryClosureUncertain) {
       const stamp = yield* makeEventStamp();
       yield* offerRuntimeEvent(context, {
         type: "session.exited",
@@ -9859,9 +10932,25 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
         const answersDeferred = yield* Deferred.make<ProviderUserInputAnswers>();
         let aborted = false;
+        const unansweredCapability = context.unansweredCapability;
         const pendingInput: PendingUserInput = {
           questions,
           answers: answersDeferred,
+          ...(unansweredCapability &&
+          !context.authFailureSeen &&
+          context.turnState &&
+          context.session.activeTurnId === context.turnState.turnId &&
+          context.resumeSessionId === unansweredCapability.nativeSessionId &&
+          context.lastThreadStartedId === unansweredCapability.nativeSessionId &&
+          supportsClaudeUnansweredQuestions(questions)
+            ? {
+                unansweredOwner: {
+                  capability: unansweredCapability,
+                  turnId: context.turnState.turnId,
+                  signal: callbackOptions.signal,
+                },
+              }
+            : {}),
         };
 
         // Emit user-input.requested so the UI can present the questions.
@@ -9878,7 +10967,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               }
             : {}),
           requestId: asRuntimeRequestId(requestId),
-          payload: { questions },
+          payload: {
+            questions,
+            ...(hasCurrentUnansweredOwner(context, pendingInput)
+              ? { supportsUnanswered: true }
+              : {}),
+          },
           providerRefs: nativeProviderRefs(context, {
             providerItemId: callbackOptions.toolUseID,
           }),
@@ -9906,47 +11000,70 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         });
 
-        // Emit user-input.resolved so the UI knows the interaction completed.
+        // Stamp before entering the synchronous settlement fence. A scheduler
+        // boundary between an ownership check, resolution publication and the
+        // returned permission could otherwise claim submission after revocation.
         const resolvedStamp = yield* makeEventStamp();
-        yield* offerRuntimeEvent(context, {
-          type: "user-input.resolved",
-          eventId: resolvedStamp.eventId,
-          provider: PROVIDER,
-          createdAt: resolvedStamp.createdAt,
-          threadId: context.session.threadId,
-          ...(context.turnState
-            ? {
-                turnId: asCanonicalTurnId(context.turnState.turnId),
-              }
-            : {}),
-          requestId: asRuntimeRequestId(requestId),
-          payload: { answers },
-          providerRefs: nativeProviderRefs(context, {
-            providerItemId: callbackOptions.toolUseID,
-          }),
-          raw: {
-            source: "claude.sdk.permission",
-            method: "canUseTool/AskUserQuestion/resolved",
-            payload: { answers },
-          },
-        });
-
-        if (aborted || context.stopped || callbackOptions.signal.aborted) {
+        return yield* Effect.sync(() => {
+          const owner = pendingInput.unansweredOwner;
+          const cancelled =
+            aborted ||
+            context.stopped ||
+            callbackOptions.signal.aborted ||
+            (pendingInput.unansweredResponse !== undefined &&
+              !hasCurrentUnansweredOwner(context, pendingInput));
+          const payload = cancelled
+            ? { answers: {}, cancelled: true }
+            : {
+                answers,
+                ...(pendingInput.unansweredResponse
+                  ? { unanswered: pendingInput.unansweredResponse.unanswered }
+                  : {}),
+              };
+          const admitted = Queue.offerUnsafe(
+            runtimeEventQueue,
+            decorateRuntimeEvent(context, {
+              type: "user-input.resolved",
+              ...resolvedStamp,
+              provider: PROVIDER,
+              threadId: context.session.threadId,
+              ...(owner
+                ? { turnId: owner.turnId }
+                : context.turnState
+                  ? { turnId: asCanonicalTurnId(context.turnState.turnId) }
+                  : {}),
+              requestId: asRuntimeRequestId(requestId),
+              payload,
+              providerRefs: nativeProviderRefs(context, {
+                providerItemId: callbackOptions.toolUseID,
+              }),
+              raw: {
+                source: "claude.sdk.permission",
+                method: "canUseTool/AskUserQuestion/resolved",
+                payload,
+              },
+            }),
+          );
+          if (cancelled || !admitted) {
+            return {
+              behavior: "deny",
+              message: "User cancelled tool execution.",
+            } satisfies PermissionResult;
+          }
+          // Strict legacy hosts receive no annotations field at all. For a
+          // capable callback, only native metadata describes unanswered keys;
+          // no fabricated answer or implicit chat message is submitted.
           return {
-            behavior: "deny",
-            message: "User cancelled tool execution.",
+            behavior: "allow",
+            updatedInput: {
+              questions: toolInput.questions,
+              answers,
+              ...(pendingInput.unansweredResponse
+                ? { annotations: pendingInput.unansweredResponse.annotations }
+                : {}),
+            },
           } satisfies PermissionResult;
-        }
-
-        // Return the answers to the SDK in the expected format:
-        // { questions: [...], answers: { questionText: selectedLabel } }
-        return {
-          behavior: "allow",
-          updatedInput: {
-            questions: toolInput.questions,
-            answers,
-          },
-        } satisfies PermissionResult;
+        });
       });
 
       const canUseToolEffect = Effect.fn("canUseTool")(function* (
@@ -10003,21 +11120,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // of being silently auto-approved. Do not persist ruleContent here: it
         // can contain sensitive project policy and is not needed to honor the
         // upstream decision.
-        // Only true bypass mode may skip Cafe's callback. Auto mode can be
-        // layered over a historical full-access runtime policy, but upstream's
-        // classifier must remain authoritative. If Auto falls back to a human
-        // prompt, silently allowing it here would defeat the safety model.
-        if (
-          context.currentPermissionMode === "bypassPermissions" &&
-          !matchedAskRule &&
-          callbackOptions.defaultToNo !== true &&
-          callbackOptions.suppressAlwaysAllowRule !== true
-        ) {
-          return {
-            behavior: "allow",
-            updatedInput: toolInput,
-          } satisfies PermissionResult;
-        }
+        // Ordinary bypass approvals are resolved inside the native CLI before
+        // canUseTool is consulted. Reaching this callback is therefore an
+        // unresolved native decision, even when Cafe requested bypass and the
+        // older optional safety flags are absent. Organization/MCP policies,
+        // hooks and native critical-path checks must not be silently approved
+        // by a second host-side bypass. Keep AskUserQuestion/ExitPlanMode's
+        // distinct routes above and return only the user's exact decision.
+        // https://code.claude.com/docs/en/agent-sdk/permissions
 
         if (pendingApprovals.size >= 64)
           return {
@@ -10555,6 +11665,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         inFlightSdkTurnBoundaryCount: 0,
         sdkStreamEnded: false,
         sdkMessageRevision: 0,
+        sdkResultRevision: 0,
         queryClosureUncertain: false,
         rewindRetirementUncertain: false,
         promptQueue,
@@ -10568,12 +11679,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         visualizationBinding,
         archivedToolPrivacy: new ArchivedToolPayloadRedactor(),
         glideBinding,
-        visualizationPrivacy: new VisualizationNativePrivacy(),
         visualizationCompletion: new ClaudeVisualizationCompletionObserver(),
         runFork,
         streamFiber: undefined,
         startedAt,
         basePermissionMode: permissionMode,
+        permissionModeInitialResumeSessionId: existingResumeSessionId,
+        permissionModeOwner: undefined,
+        credentialExpiryOwner: undefined,
+        credentialExpiryExpectedInitSessionId: existingResumeSessionId,
+        credentialExpiryLastResultIndex: -1,
         currentPermissionMode: initialPermissionMode ?? "default",
         currentApiModelId: apiModelId,
         currentEffort: effectiveEffort,
@@ -10597,6 +11712,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         terminalTaskIds: new Set(),
         failClosedTaskVisibilityOverflow: false,
         promptLifecycleByUuid: new Map(),
+        steerReceiptsByUuid: new Map(),
+        steerReceiptOwner: {
+          query: queryRuntime,
+          runtimeId: subagentRuntimeId,
+          expectedNativeSessionId: existingResumeSessionId,
+          nativeSessionId: undefined,
+        },
         capabilities: new Set(),
         fastModeRequested: fastMode,
         turnState: undefined,
@@ -11243,12 +12365,38 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
     function* (threadId, _turnId) {
       const context = yield* requireSession(threadId);
+      if (context.turnState && (_turnId === undefined || context.turnState.turnId === _turnId))
+        retireClaudeSteerTurn(context, context.turnState);
       if (_turnId === undefined || context.turnState?.turnId === _turnId)
         yield* cancelGlideSession(context.glideBinding);
+      const interruptedTurn =
+        _turnId === undefined || context.turnState?.turnId === _turnId
+          ? context.turnState
+          : undefined;
+      const interruptedSessionId = context.resumeSessionId;
+      const interruptedPromptUuids = new Set(context.promptLifecycleByUuid.keys());
+      const interruptedResultRevision = context.sdkResultRevision;
       const receipt = yield* Effect.tryPromise({
         try: () => context.query.interrupt(),
         catch: (cause) => toRequestError(threadId, "turn/interrupt", cause),
       });
+      // SDK 0.3.295 documents that a clean interrupt receipt precedes its
+      // result; crash results may arrive first and remain failures. A failed
+      // request, stale turn or replaced query cannot mint accepted Stop proof.
+      if (
+        interruptedTurn !== undefined &&
+        interruptedSessionId !== undefined &&
+        !context.stopped &&
+        sessions.get(threadId) === context &&
+        context.turnState === interruptedTurn &&
+        context.sdkResultRevision === interruptedResultRevision &&
+        context.resumeSessionId === interruptedSessionId
+      ) {
+        interruptedTurn.acceptedInterrupt = {
+          sessionId: interruptedSessionId,
+          promptUuids: interruptedPromptUuids,
+        };
+      }
 
       // Claude Code 2.1.205+ returns UUIDs for queued inputs that survive an
       // interrupt. Cancel only UUIDs Cafe submitted: the receipt can include
@@ -11284,6 +12432,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           if (Exit.isSuccess(cancellation) && cancellation.value === true) {
             confirmedCancellationCount += 1;
             context.promptLifecycleByUuid.delete(messageUuid);
+            context.steerReceiptsByUuid.delete(messageUuid);
           } else {
             unconfirmedCancellationCount += 1;
           }
@@ -11812,7 +12961,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const respondToUserInput: ClaudeAdapterShape["respondToUserInput"] = Effect.fn(
     "respondToUserInput",
-  )(function* (threadId, requestId, answers) {
+  )(function* (threadId, requestId, answers, unanswered) {
     const context = yield* requireSession(threadId);
     const pending = context.pendingUserInputs.get(requestId);
     if (!pending) {
@@ -11829,6 +12978,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         method: "item/tool/respondToUserInput",
         detail: "The response does not match the pending provider interaction.",
       });
+    }
+    if (unanswered !== undefined) {
+      const response = hasCurrentUnansweredOwner(context, pending)
+        ? prepareClaudeUnansweredQuestionResponse(pending.questions, answers, unanswered)
+        : undefined;
+      if (!response) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "item/tool/respondToUserInput",
+          detail: "Explicitly unanswered questions are unsupported or invalid for this request.",
+        });
+      }
+      // No async work may separate this exact-owner check from consuming its
+      // pending callback. The callback rechecks the same witness before wire IO.
+      pending.unansweredResponse = response;
+      answers = response.answers;
     }
     context.pendingUserInputs.delete(requestId);
     yield* Deferred.succeed(pending.answers, answers);
@@ -11956,8 +13121,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // Keep accounting in the same critical section so completion cannot
         // clear/replace turnState before the accepted prompt is attributed.
         context.promptLifecycleByUuid.set(messageUuid, "submitted");
+        rememberClaudeSteerReceipt(context, messageUuid, input, admittedTurnState);
         if (!Queue.offerUnsafe(context.promptQueue, { type: "message", message })) {
           context.promptLifecycleByUuid.delete(messageUuid);
+          context.steerReceiptsByUuid.delete(messageUuid);
           return Effect.fail(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
@@ -11997,6 +13164,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // steer to its own active turn id before queueing exactly one SDK user
     // message into the already-running prompt stream.
     context.promptLifecycleByUuid.set(messageUuid, "submitted");
+    rememberClaudeSteerReceipt(context, messageUuid, input, admittedTurnState);
     yield* Queue.offer(context.promptQueue, {
       type: "message",
       message,
@@ -12005,6 +13173,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       Effect.tapError(() =>
         Effect.sync(() => {
           context.promptLifecycleByUuid.delete(messageUuid);
+          context.steerReceiptsByUuid.delete(messageUuid);
         }),
       ),
     );
@@ -12158,6 +13327,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     controlTask,
     provider: PROVIDER,
     capabilities: {
+      userInputUnanswered: true,
       get subagentConcurrency() {
         return options?.getSubagentConcurrencySupport?.() ?? false;
       },

@@ -53,6 +53,7 @@ async function harness() {
   cleanups.push(async () => uninstall());
   const calls: Array<{ threadId: ThreadId; account: ProviderInstanceId }> = [];
   const service: ScheduledFollowupsShape = {
+    summary: () => Effect.die(new Error("Scheduling MCP must not read navigation summaries.")),
     list: (input, authority) =>
       sql
         .withTransaction(

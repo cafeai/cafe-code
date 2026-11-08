@@ -102,7 +102,9 @@ beforeEach(() => {
 });
 
 const testLayer = Layer.succeed(OpenCodeRuntime, OpenCodeRuntimeTestDouble).pipe(
-  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+  // Provider probes retain their workspace cwd, but derived data directories
+  // belong to this fixture layer and retire with its existing scope.
+  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "cafe-opencode-provider-" })),
   Layer.provideMerge(NodeServices.layer),
 );
 

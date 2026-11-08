@@ -20,6 +20,8 @@ interface ComposerPrimaryActionsProps {
   isRunning: boolean;
   /** Recovery owns a stoppable context without making a failed root running. */
   recoveryStopAvailable?: boolean | undefined;
+  connectingStopAvailable?: boolean | undefined;
+  stopInFlight?: boolean | undefined;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
   isSendBusy: boolean;
@@ -69,11 +71,39 @@ const SEND_BUTTON_CLASS_NAME = cn(
   "enabled:cursor-pointer bg-primary/90 text-primary-foreground hover:bg-primary",
 );
 
+/** Stop for an explicit recovery/start remains accessible even with a draft.
+ * Ordinary running turns retain their established send-before-stop behavior. */
+export function primaryStopState(input: {
+  readonly isRunning: boolean;
+  readonly isQueueEditing: boolean;
+  readonly recoveryStopAvailable: boolean;
+  readonly connectingStopAvailable: boolean;
+  readonly hasSendableContent: boolean;
+  readonly postSubmitInterruptGuardActive: boolean;
+  readonly isEnvironmentUnavailable: boolean;
+  readonly stopInFlight: boolean;
+}): { readonly visible: boolean; readonly disabled: boolean; readonly showSend: boolean } {
+  const contextStop = input.recoveryStopAvailable || input.connectingStopAvailable;
+  return {
+    visible:
+      contextStop ||
+      (input.isRunning && !input.hasSendableContent && !input.postSubmitInterruptGuardActive),
+    disabled: input.stopInFlight || (contextStop && input.isEnvironmentUnavailable),
+    showSend:
+      !input.isQueueEditing &&
+      !input.connectingStopAvailable &&
+      (input.isRunning || input.recoveryStopAvailable) &&
+      (input.hasSendableContent || input.postSubmitInterruptGuardActive),
+  };
+}
+
 export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   compact,
   pendingAction,
   isRunning,
   recoveryStopAvailable = false,
+  connectingStopAvailable = false,
+  stopInFlight = false,
   showPlanFollowUpPrompt,
   promptHasText,
   isSendBusy,
@@ -92,14 +122,51 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
-  if (isQueueEditing) return null;
+  if (isQueueEditing && !recoveryStopAvailable && !connectingStopAvailable) return null;
   const pointerFocusProps = preserveComposerFocusOnPointerDown
     ? { onPointerDown: preventPointerFocus }
     : undefined;
 
+  const stop = primaryStopState({
+    isRunning,
+    isQueueEditing,
+    recoveryStopAvailable,
+    connectingStopAvailable,
+    hasSendableContent,
+    postSubmitInterruptGuardActive,
+    isEnvironmentUnavailable,
+    stopInFlight,
+  });
+  const stopAction = stop.visible ? (
+    <button
+      type="button"
+      className={cn(
+        ROUND_PRIMARY_BUTTON_CLASS_NAME,
+        "cursor-pointer bg-destructive/90 text-white hover:bg-destructive",
+      )}
+      {...pointerFocusProps}
+      onClick={onInterrupt}
+      disabled={stop.disabled}
+      aria-label={
+        recoveryStopAvailable
+          ? uiText("Stop recovery", undefined, undefined, uiLocale)
+          : connectingStopAvailable
+            ? uiText("Stop", undefined, undefined, uiLocale)
+            : uiText("Stop generation", undefined, undefined, uiLocale)
+      }
+    >
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+        <rect x="2" y="2" width="8" height="8" rx="1.5" />
+      </svg>
+    </button>
+  ) : null;
+
   if (pendingAction) {
     return (
       <div className={cn("flex items-center justify-end", compact ? "gap-1.5" : "gap-2")}>
+        {/* Pending questions retain their existing navigation/submit policy.
+            Context cancellation is independent from answering that request. */}
+        {recoveryStopAvailable || connectingStopAvailable ? stopAction : null}
         {pendingAction.questionIndex > 0 ? (
           compact ? (
             <Button
@@ -148,59 +215,34 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     );
   }
 
-  if (isRunning || recoveryStopAvailable) {
-    // A sendable draft always wins the shared primary-action slot. Aside from
-    // preventing accidental interruption, this mirrors the established
-    // keyboard path: a normal submit during a running turn queues a follow-up;
-    // explicit steering and interruption remain separate user intents. A
-    // failed-root recovery does not change that form's native phase: its draft
-    // sends a new manual turn rather than being mislabeled a running-turn queue.
-    if (hasSendableContent || postSubmitInterruptGuardActive) {
-      // Do not disable the button merely because the click armed the guard:
-      // disabling a submit button during its click dispatch can suppress the
-      // browser's subsequent form-submit default action. Once submission
-      // clears the draft, the same guarded button becomes inert.
-      const sendTemporarilyGuarded = postSubmitInterruptGuardActive && !hasSendableContent;
-      return (
-        <button
-          type="submit"
-          className={SEND_BUTTON_CLASS_NAME}
-          {...pointerFocusProps}
-          onClick={onArmPostSubmitInterruptGuard}
-          disabled={
-            isSendBusy || isConnecting || isEnvironmentUnavailable || sendTemporarilyGuarded
-          }
-          aria-label={
-            isRunning
-              ? uiText("Queue message", undefined, undefined, uiLocale)
-              : uiText("Send message", undefined, undefined, uiLocale)
-          }
-        >
-          <ArrowUpIcon aria-hidden="true" className="size-4" strokeWidth={2.25} />
-        </button>
-      );
-    }
-
-    return (
+  if (isRunning || recoveryStopAvailable || connectingStopAvailable) {
+    // Recovery keeps both actions when the draft can be sent. Starting a
+    // provider instead keeps Stop in the formerly disabled connecting slot.
+    const sendTemporarilyGuarded = postSubmitInterruptGuardActive && !hasSendableContent;
+    const sendAction = stop.showSend ? (
       <button
-        type="button"
-        className={cn(
-          ROUND_PRIMARY_BUTTON_CLASS_NAME,
-          "cursor-pointer bg-destructive/90 text-white hover:bg-destructive",
-        )}
+        type="submit"
+        className={SEND_BUTTON_CLASS_NAME}
         {...pointerFocusProps}
-        onClick={onInterrupt}
-        disabled={recoveryStopAvailable && (isSendBusy || isConnecting || isEnvironmentUnavailable)}
+        onClick={onArmPostSubmitInterruptGuard}
+        disabled={isSendBusy || isConnecting || isEnvironmentUnavailable || sendTemporarilyGuarded}
         aria-label={
-          recoveryStopAvailable
-            ? uiText("Stop recovery", undefined, undefined, uiLocale)
-            : uiText("Stop generation", undefined, undefined, uiLocale)
+          isRunning
+            ? uiText("Queue message", undefined, undefined, uiLocale)
+            : uiText("Send message", undefined, undefined, uiLocale)
         }
       >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
-          <rect x="2" y="2" width="8" height="8" rx="1.5" />
-        </svg>
+        <ArrowUpIcon aria-hidden="true" className="size-4" strokeWidth={2.25} />
       </button>
+    ) : null;
+
+    return stopAction && sendAction ? (
+      <div className="flex items-center gap-2">
+        {stopAction}
+        {sendAction}
+      </div>
+    ) : (
+      (stopAction ?? sendAction)
     );
   }
 

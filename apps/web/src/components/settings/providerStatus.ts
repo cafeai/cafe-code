@@ -1,4 +1,4 @@
-import { uiText } from "@cafecode/shared/i18n";
+import { uiFormatDateTime, uiText, type UiLocale } from "@cafecode/shared/i18n";
 import type { ServerProvider, ServerProviderVersionAdvisory } from "@cafecode/contracts";
 
 /**
@@ -26,6 +26,57 @@ export const PROVIDER_STATUS_STYLES = {
 
 export type ProviderStatusKey = keyof typeof PROVIDER_STATUS_STYLES;
 
+const CLAUDE_SIGN_IN_WARNING_MS = 10 * 24 * 60 * 60 * 1_000;
+
+/** Present an explicitly native, current-runtime estimate without declaring
+ * the account authenticated, revoked or unusable. The SDK says the stored
+ * refresh-chain deadline may itself be a30-day estimate, up to3 days late. */
+export function getProviderCredentialExpiryPresentation(
+  provider: ServerProvider | undefined,
+  nowMs = Date.now(),
+  locale?: UiLocale,
+): { readonly headline: string; readonly detail: string; readonly expiresAt: string } | null {
+  const expiry = provider?.auth.credentialExpiry;
+  if (
+    !provider ||
+    provider.driver !== "claudeAgent" ||
+    !provider.enabled ||
+    !provider.installed ||
+    provider.auth.status !== "authenticated" ||
+    !expiry ||
+    expiry.source !== "native-result" ||
+    !Number.isFinite(nowMs)
+  )
+    return null;
+  const expiresMs = Date.parse(expiry.expiresAt);
+  const observedMs = Date.parse(expiry.observedAt);
+  if (
+    !Number.isFinite(expiresMs) ||
+    !Number.isFinite(observedMs) ||
+    expiresMs - nowMs > CLAUDE_SIGN_IN_WARNING_MS
+  )
+    return null;
+  const headline =
+    expiresMs <= nowMs
+      ? uiText("Claude sign-in may have expired.", undefined, undefined, locale)
+      : uiText("Claude sign-in may expire soon.", undefined, undefined, locale);
+  const expiresAt = uiFormatDateTime(
+    expiresMs,
+    { dateStyle: "medium", timeStyle: "short" },
+    locale,
+  );
+  return {
+    headline,
+    expiresAt: expiry.expiresAt,
+    detail: uiText(
+      "{headline} An active Claude session reported this estimated sign-in expiry: {expiresAt}. This is an estimate; sign-in may end up to 3 days earlier or be revoked sooner.",
+      { headline, expiresAt },
+      undefined,
+      locale,
+    ),
+  };
+}
+
 /**
  * Derive the headline + detail copy shown under a provider's name in the
  * settings page. Prefers `provider.message` for server-supplied detail and
@@ -33,7 +84,11 @@ export type ProviderStatusKey = keyof typeof PROVIDER_STATUS_STYLES;
  * state — which happens before the first probe or when an instance names a
  * driver this build does not ship.
  */
-export function getProviderSummary(provider: ServerProvider | undefined) {
+export function getProviderSummary(
+  provider: ServerProvider | undefined,
+  nowMs = Date.now(),
+  locale?: UiLocale,
+) {
   if (!provider) {
     return { headline: uiText("Checking…"), detail: null };
   }
@@ -59,11 +114,12 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
   }
   if (provider.auth.status === "authenticated") {
     const authLabel = provider.auth.label ?? provider.auth.type;
+    const expiry = getProviderCredentialExpiryPresentation(provider, nowMs, locale);
     return {
       headline: authLabel
         ? uiText("Authenticated · {authLabel}", { authLabel: authLabel })
         : uiText("Authenticated"),
-      detail: provider.message ?? null,
+      detail: [provider.message, expiry?.detail].filter(Boolean).join(" ") || null,
     };
   }
   if (provider.auth.status === "unauthenticated") {
@@ -100,10 +156,14 @@ export function getProviderVersionLabel(version: string | null | undefined) {
 
 export function getProviderVersionAdvisoryPresentation(
   advisory: ServerProviderVersionAdvisory | undefined,
+  options: {
+    readonly oneClickAvailable?: boolean;
+  } = {},
 ): {
   readonly detail: string;
   readonly updateCommand: string | null;
   readonly emphasis: "normal" | "strong";
+  readonly canUpdate: boolean;
 } | null {
   if (!advisory || advisory.status === "current" || advisory.status === "unknown") {
     return null;
@@ -111,15 +171,19 @@ export function getProviderVersionAdvisoryPresentation(
 
   const version = advisory.latestVersion;
   const versionLabel = getProviderVersionLabel(version);
+  const canUpdate =
+    advisory.canUpdate && advisory.updateCommand !== null && options.oneClickAvailable !== false;
 
   return {
     // The popover title already says "Update available"; don't repeat it.
-    detail:
-      advisory.message ??
-      (versionLabel
-        ? uiText("Install {versionLabel}.", { versionLabel: versionLabel })
-        : uiText("Install the latest version.")),
+    detail: !canUpdate
+      ? uiText("Update this installation outside Cafe Code.")
+      : (advisory.message ??
+        (versionLabel
+          ? uiText("Install {versionLabel}.", { versionLabel: versionLabel })
+          : uiText("Install the latest version."))),
     updateCommand: advisory.updateCommand,
     emphasis: "normal" as const,
+    canUpdate,
   };
 }

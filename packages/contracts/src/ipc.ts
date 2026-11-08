@@ -29,6 +29,11 @@ import type {
 } from "./git.ts";
 import type { FilesystemBrowseInput, FilesystemBrowseResult } from "./filesystem.ts";
 import type { SavePngInput, SavePngResult } from "./imageExport.ts";
+import type { DesktopAppIconState, SetDesktopAppIconInput } from "./appIcon.ts";
+import type {
+  DesktopNotificationInput,
+  DesktopNotificationResult,
+} from "./desktopNotifications.ts";
 import type { VisualizationDesktopBridge } from "./visualizationHost.ts";
 import type {
   VisualizationListInput,
@@ -370,6 +375,32 @@ export const DesktopPowerSaveBlockerStateSchema = Schema.Struct({
 });
 export type DesktopPowerSaveBlockerState = typeof DesktopPowerSaveBlockerStateSchema.Type;
 
+export const MacKeepAwakeStateSchema = Schema.Struct({
+  phase: Schema.Literals([
+    "off",
+    "idle",
+    "starting",
+    "active",
+    "stopping",
+    "paused",
+    "unavailable",
+  ]),
+  reason: Schema.NullOr(
+    Schema.Literals([
+      "backend-unavailable",
+      "native-unavailable",
+      "native-protocol",
+      "lease-busy",
+      "battery-low",
+      "unknown-power",
+      "thermal-limit",
+      "native-refused",
+      "cleanup-failed",
+    ]),
+  ),
+});
+export type MacKeepAwakeState = typeof MacKeepAwakeStateSchema.Type;
+
 export const PersistedSavedEnvironmentRecordSchema = Schema.Struct({
   environmentId: EnvironmentId,
   label: Schema.String,
@@ -389,6 +420,15 @@ export const RemoteCertificatePreparationSchema = Schema.Literals([
   "storage-error",
 ]);
 export type RemoteCertificatePreparation = typeof RemoteCertificatePreparationSchema.Type;
+
+export const RemoteCertificateInspectionSchema = Schema.Literals([
+  "unchanged",
+  "changed",
+  "untrusted",
+  "invalid-certificate",
+  "unreachable",
+]);
+export type RemoteCertificateInspection = typeof RemoteCertificateInspectionSchema.Type;
 
 export const DesktopDebugEndpointStateSchema = Schema.Struct({
   enabled: Schema.Boolean,
@@ -444,6 +484,9 @@ export interface DesktopBridge extends VisualizationDesktopBridge {
   readonly systemUiLocale?: "en" | "ja" | "ko";
   readonly initialUiLocale?: "en" | "ja" | "ko";
   readonly onUiLocaleChanged?: (listener: (locale: "en" | "ja" | "ko") => void) => () => void;
+  /** Read-only native window presentation; independent of HTML fullscreen. */
+  getWindowFullScreen?: () => boolean;
+  onWindowFullScreenChanged?: (listener: (fullScreen: boolean) => void) => () => void;
   getAppBranding: () => DesktopAppBranding | null;
   getLocalEnvironmentBootstrap: () => DesktopEnvironmentBootstrap | null;
   getDebugEndpointState: () => Promise<DesktopDebugEndpointState>;
@@ -451,6 +494,10 @@ export interface DesktopBridge extends VisualizationDesktopBridge {
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
   setPowerSaveBlockerState: (state: DesktopPowerSaveBlockerState) => Promise<void>;
+  /** Exposed only by the native macOS preload. Read-only current adoption. */
+  getMacKeepAwakeState?: () => Promise<MacKeepAwakeState>;
+  /** Revocation is immediate; enabling still requires fresh primary backend intent. */
+  setMacKeepAwakeIntent?: (enabled: boolean) => Promise<void>;
   getSavedEnvironmentRegistry: () => Promise<readonly PersistedSavedEnvironmentRecord[]>;
   setSavedEnvironmentRegistry: (
     records: readonly PersistedSavedEnvironmentRecord[],
@@ -458,7 +505,9 @@ export interface DesktopBridge extends VisualizationDesktopBridge {
   getSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<string | null>;
   setSavedEnvironmentSecret: (environmentId: EnvironmentId, secret: string) => Promise<boolean>;
   removeSavedEnvironmentSecret: (environmentId: EnvironmentId) => Promise<void>;
-  /** Explicit saved-server enrollment only; never called by background reconnects. */
+  /** Read-only TLS inspection. Never grants trust or displays a dialog. */
+  inspectRemoteCertificate?: (httpBaseUrl: string) => Promise<RemoteCertificateInspection>;
+  /** Explicit enrollment or user-requested certificate recovery; never prompts in the background. */
   prepareRemoteCertificate?: (httpBaseUrl: string) => Promise<RemoteCertificatePreparation>;
   getServerExposureState: () => Promise<DesktopServerExposureState>;
   setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;
@@ -487,6 +536,13 @@ export interface DesktopBridge extends VisualizationDesktopBridge {
   copyPng: (png: Uint8Array) => Promise<void>;
   /** The renderer supplies bytes and a basename, never a filesystem destination. */
   savePng: (input: SavePngInput) => Promise<SavePngResult>;
+  /** This computer's app icon. Optional for older desktop shells. */
+  getAppIconState?: () => Promise<DesktopAppIconState>;
+  /** Built-in choices or renderer-rendered PNG bytes only; never a filesystem path. */
+  setAppIcon?: (input: SetDesktopAppIconInput) => Promise<DesktopAppIconState>;
+  /** Optional for older desktop shells; never fall back to browser permission defaults. */
+  showNotification?: (input: DesktopNotificationInput) => Promise<DesktopNotificationResult>;
+  onNotificationClick?: (listener: (tag: string) => void) => () => void;
   onMenuAction: (listener: (action: string) => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
   setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
@@ -624,6 +680,10 @@ export interface EnvironmentApi {
     list: (
       input: import("./scheduledFollowups.ts").ScheduledFollowupListInput,
     ) => Promise<import("./scheduledFollowups.ts").ScheduledFollowupListResult>;
+    /** Navigation presence only; absent on older backends and fixtures. */
+    summary?: (
+      input: import("./scheduledFollowups.ts").ScheduledFollowupSummaryInput,
+    ) => Promise<import("./scheduledFollowups.ts").ScheduledFollowupSummaryResult>;
     save: (
       input: import("./scheduledFollowups.ts").ScheduledFollowupSaveInput,
     ) => Promise<import("./scheduledFollowups.ts").ScheduledFollowupRecord>;

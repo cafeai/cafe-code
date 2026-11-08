@@ -1,4 +1,6 @@
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
+import * as Option from "effect/Option";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
@@ -7,9 +9,11 @@ import * as Semaphore from "effect/Semaphore";
 
 import {
   TextGenerationError,
+  ProviderDriverKind,
   type ChatAttachment,
   type ModelSelection,
   type OpenCodeSettings,
+  type UsageAccountingSnapshot,
 } from "@cafecode/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@cafecode/shared/git";
 import { getModelSelectionStringOptionValue } from "@cafecode/shared/model";
@@ -38,6 +42,8 @@ import {
   parseOpenCodeModelSlug,
   toOpenCodeFileParts,
 } from "../provider/opencodeRuntime.ts";
+import { makeOpenCodeUsage } from "../provider/opencodeUsage.ts";
+import { AuxiliaryUsage } from "../usageStats/Services/AuxiliaryUsage.ts";
 
 const OPENCODE_TEXT_GENERATION_IDLE_TTL = "30 seconds";
 
@@ -104,6 +110,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
 ) {
   const serverConfig = yield* ServerConfig;
   const openCodeRuntime = yield* OpenCodeRuntime;
+  const auxiliaryUsage = yield* Effect.serviceOption(AuxiliaryUsage);
   const idleFiberScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
     Scope.close(scope, Exit.void),
   );
@@ -298,6 +305,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
         resolveAttachmentPath({ attachmentsDir: serverConfig.attachmentsDir, attachment }),
     });
 
+    const observations: UsageAccountingSnapshot[] = [];
     const runAgainstServer = (server: Pick<OpenCodeServerConnection, "url">) =>
       Effect.tryPromise({
         try: async () => {
@@ -329,6 +337,18 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
             parts: [{ type: "text", text: input.prompt }, ...fileParts],
           });
           const info = result.data?.info;
+          const usage = makeOpenCodeUsage({
+            instanceId: input.modelSelection.instanceId,
+            threadId: "metadata-helper",
+            directory: input.cwd,
+            serverUrl: openCodeSettings.serverUrl.trim() || null,
+            sessionId: session.data.id,
+          });
+          usage.observeMessage(info);
+          for (const part of (result.data?.parts ?? []).slice(0, 256)) {
+            const snapshot = usage.observeStep(part);
+            if (snapshot) observations.push(snapshot);
+          }
           const errorMessage = getOpenCodePromptErrorMessage(info?.error);
           if (errorMessage) {
             throw new Error(errorMessage);
@@ -347,10 +367,10 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
           }),
       });
 
-    const rawOutput =
+    const execution =
       openCodeSettings.serverUrl.length > 0
-        ? yield* runAgainstServer({ url: openCodeSettings.serverUrl })
-        : yield* Effect.acquireUseRelease(
+        ? runAgainstServer({ url: openCodeSettings.serverUrl })
+        : Effect.acquireUseRelease(
             acquireSharedServer({
               binaryPath: openCodeSettings.binaryPath,
               operation: input.operation,
@@ -358,6 +378,27 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
             runAgainstServer,
             releaseSharedServer,
           );
+    const rawOutput = yield* execution.pipe(
+      Effect.onExit(() =>
+        Effect.gen(function* () {
+          if (Option.isNone(auxiliaryUsage)) return;
+          const observedAtMs = yield* Clock.currentTimeMillis;
+          // Record numeric settlements even when returned text/error validation
+          // fails, after releasing the paid provider operation. A ledger problem
+          // must never retry an already completed generation.
+          yield* Effect.forEach(
+            observations,
+            (snapshot) =>
+              auxiliaryUsage.value.record(
+                ProviderDriverKind.make("opencode"),
+                snapshot,
+                observedAtMs,
+              ),
+            { discard: true },
+          );
+        }),
+      ),
+    );
 
     const decodeOutput = Schema.decodeEffect(Schema.fromJsonString(input.outputSchemaJson));
     return yield* decodeOutput(extractJsonObject(rawOutput)).pipe(

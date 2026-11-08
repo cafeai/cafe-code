@@ -83,6 +83,7 @@ import {
 } from "./provider/providerCommandsSubscription.ts";
 import {
   readBoundProviderQuota,
+  sameProviderQuotaAuthority,
   subscribeProviderQuota,
   unavailableProviderQuotaStream,
   type ProviderQuotaAuthority,
@@ -751,7 +752,13 @@ const makeWsRpcLayer = (
               yield* requireComputerUseOwner();
               yield* Effect.tryPromise({
                 try: () =>
-                  glideOperation({ kind: "initialize-thread", threadId: command.threadId }),
+                  glideOperation({
+                    kind: "initialize-thread",
+                    threadId: command.threadId,
+                    ...(bootstrap.createThread?.computerUseRevision !== undefined
+                      ? { stopRevision: bootstrap.createThread.computerUseRevision }
+                      : {}),
+                  }),
                 catch: (cause) =>
                   toDispatchCommandError(cause, "Could not enable computer use for the new chat."),
               });
@@ -1682,35 +1689,37 @@ const makeWsRpcLayer = (
         [WS_METHODS.serverSubscribeProviderQuota]: (input) => {
           if (currentSession.role !== "owner") return unavailableProviderQuotaStream();
           const resolveAuthority = Effect.gen(function* () {
-            yield* sessions.validateActiveSession(currentSession);
-            const settings = yield* serverSettings.getSettings;
-            const explicit = settings.providerInstances[input.instanceId];
-            const legacy =
-              !explicit && input.instanceId === "claudeAgent"
-                ? settings.providers.claudeAgent
-                : undefined;
-            if (
-              (!explicit && !legacy) ||
-              explicit?.enabled === false ||
-              legacy?.enabled === false ||
-              (explicit && explicit.driver !== "claudeAgent")
-            )
-              return undefined;
-            // Instance envelopes can inherit enabled from their decoded
-            // driver config; an omitted envelope flag is not automatic consent.
-            const config = decodeQuotaClaudeSettings(explicit ? (explicit.config ?? {}) : legacy);
-            const enabled = explicit?.enabled ?? config.enabled;
-            if (!enabled) return undefined;
-            const configuration = claudeCommandsConfigurationKey({
-              config,
-              enabled,
-              ...(explicit?.environment ? { environment: explicit.environment } : {}),
-            });
-            // Lightweight saved shells establish current runtime/workspace
-            // authority without hydrating message bodies or archived chats.
+            let previous: ProviderQuotaAuthority | undefined;
+            // Observe the selected authority twice, including qualified standalone
+            // cwd resolution. An unrelated chat need not stop streaming for these
+            // exact configuration/runtime/workspace witnesses to agree.
             for (let observation = 0; observation < 2; observation++) {
+              yield* sessions.validateActiveSession(currentSession);
+              const settings = yield* serverSettings.getSettings;
+              const explicit = settings.providerInstances[input.instanceId];
+              const legacy =
+                !explicit && input.instanceId === "claudeAgent"
+                  ? settings.providers.claudeAgent
+                  : undefined;
+              if (
+                (!explicit && !legacy) ||
+                explicit?.enabled === false ||
+                legacy?.enabled === false ||
+                (explicit && explicit.driver !== "claudeAgent")
+              )
+                return undefined;
+              // Instance envelopes can inherit enabled from their decoded
+              // driver config; an omitted envelope flag is not automatic consent.
+              const config = decodeQuotaClaudeSettings(explicit ? (explicit.config ?? {}) : legacy);
+              const enabled = explicit?.enabled ?? config.enabled;
+              if (!enabled) return undefined;
+              const configuration = claudeCommandsConfigurationKey({
+                config,
+                enabled,
+                ...(explicit?.environment ? { environment: explicit.environment } : {}),
+              });
               const snapshot = yield* projectionSnapshotQuery.getShellSnapshot();
-              const sessions: ProviderQuotaAuthority["sessions"][number][] = [];
+              const admittedSessions: ProviderQuotaAuthority["sessions"][number][] = [];
               for (const thread of snapshot.threads) {
                 const runtimeId = thread.session?.subagentRuntimeId;
                 if (
@@ -1733,17 +1742,17 @@ const makeWsRpcLayer = (
                     : project
                       ? (thread.worktreePath ?? project.workspaceRoot)
                       : undefined;
-                if (cwd) sessions.push({ threadId: thread.id, runtimeId, cwd });
+                if (cwd) admittedSessions.push({ threadId: thread.id, runtimeId, cwd });
               }
-              // A sequence is only an assembly-coherence fence: an unrelated
-              // chat advancing the projection is not a new quota authority.
-              // Reobserve this metadata once if asynchronous cwd resolution
-              // crossed a revision. Relevant ABA is fenced by the subscribed
-              // invalidation generation, not global sequence equality.
-              const current = yield* projectionSnapshotQuery.getSnapshotSequence();
-              if (current.snapshotSequence !== snapshot.snapshotSequence) continue;
-              sessions.sort((left, right) => left.threadId.localeCompare(right.threadId));
-              return { configuration, snapshotSequence: snapshot.snapshotSequence, sessions };
+              admittedSessions.sort((left, right) => left.threadId.localeCompare(right.threadId));
+              const current: ProviderQuotaAuthority = {
+                configuration,
+                snapshotSequence: snapshot.snapshotSequence,
+                sessions: admittedSessions,
+              };
+              if (previous)
+                return sameProviderQuotaAuthority(previous, current) ? current : undefined;
+              previous = current;
             }
             return undefined;
           }).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
@@ -2120,6 +2129,7 @@ const makeWsRpcLayer = (
             "rpc.aggregate": "server",
           }),
         [WS_METHODS.scheduledFollowupsList]: (input) => scheduledFollowups.list(input),
+        [WS_METHODS.scheduledFollowupsSummary]: (_input) => scheduledFollowups.summary(),
         [WS_METHODS.scheduledFollowupsSave]: (input) =>
           ownerScheduleMutation(scheduledFollowups.save(input)),
         [WS_METHODS.scheduledFollowupsSetStatus]: (input) =>

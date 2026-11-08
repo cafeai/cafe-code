@@ -1,6 +1,6 @@
 import { defineRule } from "@oxlint/plugins";
 import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
+import type * as Schema from "effect/Schema";
 
 import { getPropertyName, isIdentifier, unwrapExpression } from "../utils.ts";
 

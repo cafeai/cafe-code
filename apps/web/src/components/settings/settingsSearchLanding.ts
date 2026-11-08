@@ -76,10 +76,6 @@ function focusTargetFor(anchor: HTMLElement): HTMLElement | null {
   return null;
 }
 
-function prefersReducedMotion(): boolean {
-  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-}
-
 let activeHighlight: { element: HTMLElement; cleanup: () => void } | null = null;
 
 export function clearSettingsSearchHighlight(): void {
@@ -126,7 +122,10 @@ export async function revealSettingsSearchTarget(input: {
   readonly id: string;
   readonly kind: "page" | "setting";
   readonly root: HTMLElement;
+  /** Optional caller ownership fence across the existing asynchronous reveal. */
+  readonly isCurrent?: () => boolean;
 }): Promise<boolean> {
+  if (input.isCurrent?.() === false) return false;
   activeReveal?.abort();
   const controller = new AbortController();
   activeReveal = controller;
@@ -134,13 +133,17 @@ export async function revealSettingsSearchTarget(input: {
   clearSettingsSearchHighlight();
   if (input.kind === "page") return true;
   const anchor = await waitForAnchor(input.root, input.id, signal);
-  if (!anchor || signal.aborted) return false;
+  if (!anchor || signal.aborted || input.isCurrent?.() === false) return false;
   // One frame lets the page's entrance layout settle before measuring.
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  if (signal.aborted || !anchor.isConnected) return false;
+  if (signal.aborted || !anchor.isConnected || input.isCurrent?.() === false) return false;
+  // Navigation must reveal the target before focus moves and this operation
+  // reports success. A scheduled smooth scroll can leave that focused control
+  // offscreen while native animation is still pending. Position immediately
+  // for both motion preferences; the existing tint remains the visual cue.
   anchor.scrollIntoView({
     block: "center",
-    behavior: prefersReducedMotion() ? "auto" : "smooth",
+    behavior: "instant",
   });
   highlight(anchor);
   if (anchor.dataset.settingsSearchTarget === "row") {

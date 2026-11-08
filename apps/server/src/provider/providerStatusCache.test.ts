@@ -77,6 +77,59 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
     }),
   );
 
+  it.effect("never persists or hydrates a current-runtime Claude credential expiry", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-expiry-cache-" });
+      const auth = {
+        status: "authenticated" as const,
+        type: "claude.ai",
+        email: "owned@example.invalid",
+        credentialExpiry: {
+          source: "native-result" as const,
+          expiresAt: "2026-11-10T00:00:00.000Z",
+          observedAt: "2026-11-04T00:00:00.000Z",
+        },
+      };
+      const live = makeProvider(CLAUDE_AGENT_DRIVER, { auth });
+      // Preserve an independent raw record before exercising the writer. It
+      // represents an older/manual on-disk advisory, not the writer's output.
+      const olderRecord = Schema.encodeSync(Schema.UnknownFromJsonString)(live);
+      const filePath = yield* resolveProviderStatusCachePath({
+        cacheDir: tempDir,
+        instanceId: live.instanceId,
+      });
+      yield* writeProviderStatusCache({ filePath, provider: live });
+      assert.notInclude(yield* fs.readFileString(filePath), '"credentialExpiry"');
+      const expectedAuth = {
+        status: "authenticated" as const,
+        type: "claude.ai",
+        email: "owned@example.invalid",
+      };
+      assert.deepStrictEqual((yield* readProviderStatusCache(filePath))?.auth, expectedAuth);
+      yield* fs.writeFileString(filePath, olderRecord);
+      assert.deepStrictEqual((yield* readProviderStatusCache(filePath))?.auth, expectedAuth);
+      // Even a manually supplied/older cache record cannot mint current native
+      // evidence merely because the reusable instance id and driver match.
+      const hydrated = hydrateCachedProvider({
+        cachedProvider: live,
+        fallbackProvider: makeProvider(CLAUDE_AGENT_DRIVER, { auth: { status: "unknown" } }),
+      });
+      assert.deepStrictEqual(hydrated.auth, expectedAuth);
+      assert.strictEqual(hydrated.status, "ready");
+      assert.deepStrictEqual(live.auth, {
+        status: "authenticated",
+        type: "claude.ai",
+        email: "owned@example.invalid",
+        credentialExpiry: {
+          source: "native-result",
+          expiresAt: "2026-11-10T00:00:00.000Z",
+          observedAt: "2026-11-04T00:00:00.000Z",
+        },
+      });
+    }),
+  );
+
   it("hydrates cached provider status while preserving current settings-derived models", () => {
     const cachedCodex = makeProvider(CODEX_DRIVER, {
       checkedAt: "2026-04-10T12:00:00.000Z",

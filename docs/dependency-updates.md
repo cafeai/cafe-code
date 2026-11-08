@@ -1,7 +1,7 @@
 # Dependency maintenance with Renovate
 
 Created: 2026-10-03 01:30:40 JST (UTC+0900)
-Last updated: 2026-10-20 05:31:30 JST (UTC+0900)
+Last updated: 2026-11-04 11:22:32 JST (UTC+0900)
 
 Cafe is configured to use the Mend-hosted [Renovate GitHub App](https://github.com/apps/renovate)
 to propose dependency updates once activated. The checked-in repository policy is
@@ -12,6 +12,15 @@ The [initial decision](decisions/renovate-dependency-maintenance.md) explains th
 trust boundary and why Yarn catalogs require this approach. The
 [LTS successor decision](decisions/latest-node-lts-toolchain.md) replaces its
 manual-only Node exclusion without changing the other safety boundaries.
+The [qualified October provider update](provider-updates-2026-10-22.md) records
+the separately coordinated Claude/Codex pins, protocol review and replay limits.
+The [November 3 provider review](provider-updates-2026-11-03.md) records the
+coordinated Claude 317 package admission and exact user-approved age exception,
+unchanged Codex stable 166 target, and separate integration/adoption gates. The
+historical October 30 exception for 314 does not authorize this or later pairs.
+The [November4 provider review](provider-updates-2026-11-04.md) records the
+separate exact human waiver and coordinated318 admission; earlier exceptions
+are not reused. The persistent age policy remains unchanged.
 
 ## Activation
 
@@ -131,8 +140,8 @@ qualification. Before merging a `Node.js LTS` proposal:
    arbitrary post-upgrade commands stay disabled. Coordinate major proposals
    with the declaration group and keep pending/incomplete updates unmerged.
 
-As of 2026-10-03, the standalone development pin is Node **24.21.0** (Krypton);
-Node 26.10.0 is still Current. Future LTS promotions remain eligible without
+As of 2026-10-23, the standalone development pin is Node **24.22.1** (Krypton),
+the October security release; Node 26 remains Current. Future LTS promotions remain eligible without
 editing a fixed major constraint. This is an update policy and review gate, not
 a guarantee that every release is installed instantly or that the bot has
 processed a hosted job. Both default-branch config and dev changes must be
@@ -147,6 +156,146 @@ not silently upgraded by this repository policy.
 Official references: [Node LTS-aware versioning](https://docs.renovatebot.com/modules/versioning/node/),
 [supported Node pin files](https://docs.renovatebot.com/node/),
 [Node declaration workaround](https://docs.renovatebot.com/presets-workarounds/#workaroundstypesnodeversioning).
+
+## Node2Shell review and standalone remediation
+
+The 2026-10-23 source review identifies **CVE-2026-111497** (Node2Shell), the
+native Brotli decoder memory-corruption issue described in the
+[Node security advisory](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases)
+and [upstream Brotli fix](https://github.com/google/brotli/commit/0ed4268a4401abcb44720963).
+Node **24.22.1** is the fixed release on the current LTS line. Synchronize the
+canonical pin, mise, package engines, development container, managed-provider
+manifest and Arch minimum; use the reviewed Windows archive hashes from its
+[official checksums](https://nodejs.org/dist/v24.22.1/SHASUMS256.txt). The clean-room
+image retains Bookworm and its registry-verified immutable multi-platform digest.
+Node's backport still reports Brotli 1.2.0; that string alone cannot distinguish
+fixed from vulnerable runtimes. The existing toolchain suite also checks the
+fixed standalone runtime's new block-switch error constant without decoding
+malformed input.
+
+The relevant Cafe boundaries are:
+
+- `apps/server/src/provider/opencodeRuntime.ts` accepts an explicitly configured
+  external OpenCode server and creates the SDK client. Both provider inventory
+  discovery in `provider/Layers/OpenCodeProvider.ts` and ordinary session opening
+  in `provider/Layers/OpenCodeAdapter.ts` use that client. Its Node `fetch`
+  transport automatically decompresses Brotli responses before SDK JSON validation.
+  A malicious or compromised configured server can supply those bytes; cleartext
+  HTTP additionally permits an attacker on that connection to replace them.
+  The default empty server URL instead starts a local provider process.
+- The backend's `FetchHttpClient.layer` in `apps/server/src/server.ts` uses the
+  same Node response decoder. Relevant consumers include Bitbucket API calls
+  (an optional configured base URL), provider quota endpoints, provider update
+  registry checks and dictation HTTP calls. Most destinations are fixed trusted
+  HTTPS origins, so this is a conditional response-control boundary, not proof
+  that arbitrary unauthenticated Cafe clients can select a destination.
+- `packages/shared/src/applicationBuildVersion.ts` validates local compressed
+  build sidecars, and `apps/web/scripts/static-compression-cache.mjs` validates
+  private cached compression input. Both call the native Brotli decoder. An
+  attacker would need to supply an admitted local build/cache input. Output
+  limits and post-decode content checks remain required but do not repair a
+  memory-safety flaw inside the decoder.
+- The primary Node HTTP server and bounded readers in
+  `apps/server/src/httpBody.ts` consume raw request bytes. The HTTPS sibling
+  pipes those bytes without decoding, and MCP receives bounded request bytes.
+  This review found no automatic incoming Brotli-body decompressor on these
+  paths. WebSocket per-message compression is DEFLATE. Serving precompressed
+  `.br` assets sends existing bytes and does not invoke Node's Brotli decoder.
+
+**The October 23 standalone update left desktop unresolved.** Its repository-installed
+Electron 42.11.15 runtime reports Node 24.19.0 and uses that runtime for the backend
+and provider daemon in `ELECTRON_RUN_AS_NODE` mode. The published stable releases
+checked on 2026-10-23 are
+[42.11.18](https://github.com/electron/electron/releases/tag/v42.11.18),
+[43.8.3](https://github.com/electron/electron/releases/tag/v43.8.3),
+[44.9.3](https://github.com/electron/electron/releases/tag/v44.9.3) and
+[45.0.0](https://github.com/electron/electron/releases/tag/v45.0.0).
+Their official release metadata still names affected Node 24.19.0/24.22.0, and
+the reviewed tagged Node patch lists contain no Brotli fix backport. A newer
+Electron label alone therefore cannot close this issue. Keep the existing
+Electron pins until a fixed release can be independently reviewed and qualified;
+the existing Electron version/ABI qualification is not a Node2Shell security
+clearance. This update does not replace an installed app or its existing processes.
+
+This is a source and runtime-metadata review, not a memory-corruption or RCE
+reproduction. No exploit or malformed Brotli fixture is part of this change.
+Repository checks, native-host qualification and any later desktop release must
+be recorded as separate observed results.
+
+## October 29 security maintenance
+
+Review updated: 2026-10-29 14:54:26 JST (UTC+0900).
+
+The reviewed security update pins Electron **43.8.4**, a supported release whose
+tagged source embeds Node **24.22.1**, Undici **7.30.1**, Chromium
+**150.0.7871.250** and native addon ABI **148**. This addresses the earlier desktop
+Brotli gap and includes Electron's certificate-distrust mitigation. The actual
+installed-runtime qualifier checks that tuple and the fixed Brotli block-switch
+constant in an isolated Node-mode child. A version string or marker alone is not
+a proof of every native byte; archive integrity, runtime observation and native
+packaging checks remain separate gates. See the
+[Electron release](https://github.com/electron/electron/releases/tag/v43.8.4) and
+[Node security advisory](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases).
+
+Electron 43's retained native preview path uses an explicit offscreen raster
+scale of one; ordinary viewers continue to use the native display scale. Both
+paths retain the original display admission, display/zoom/bounds drift checks
+and bounded actual-raster validation before encoding a semantic-size PNG.
+This handles the new offscreen view-scale capture API without treating a valid
+1x preview as a display-DPR-sized image. It does not promise pixel-identical
+antialiasing between Electron releases.
+
+The package fixes below apply throughout the resolved dependency graph. Existing
+security resolutions remain in place; these reviewed exact resolutions prevent
+an unchanged transitive consumer range from keeping a vulnerable second copy.
+The complete lockfile, including body-parser's required content-type 2.1.0
+dependency, is reviewed rather than refreshed indiscriminately.
+
+| Package           | Reviewed fixed version | Security boundary                                                 |
+| ----------------- | ---------------------- | ----------------------------------------------------------------- |
+| hono              | 4.13.11                | Static-prefix middleware bypass                                   |
+| @hono/node-server | 2.1.3                  | Independent copy of the static-prefix bypass                      |
+| dompurify         | 3.4.17                 | Conditional template/hook sanitization and XML attribute guards   |
+| body-parser       | 2.4.0                  | Compressed-body trailing-byte denial of service                   |
+| fast-uri          | 3.1.9                  | URI scheme, host and relative-path interpretation                 |
+| ip-address        | 10.7.4                 | IPv6 zone parsing resource bounds                                 |
+| qs                | 6.16.1                 | Comma-array stringification failure                               |
+| seroval           | 1.6.11                 | Serialization injection and deserializer resource/callable guards |
+| toml              | 5.0.1                  | Scalar, table and dotted-key parsing resource bounds              |
+| undici            | 8.12.2                 | TLS, redirect/cache and response-processing fixes                 |
+| zod               | 4.6.6                  | Constrained-collection validation resource bounds                 |
+
+The [Hono](https://github.com/honojs/hono/security/advisories/GHSA-5r4p-p66f-jhc7)
+and [Node adapter](https://github.com/honojs/node-server/security/advisories/GHSA-rmxm-3fg6-px4f)
+issues can bypass middleware on a prefix within the configured static root;
+they are not outside-root traversal. Cafe's own static/MCP routing uses Effect
+and the SDK's WebStandard transport, rather than those static helpers. The
+dependency regressions still exercise both real helpers with the upstream path,
+protected/public controls and the SDK's no-global-override behavior.
+
+Installed affected versions do not establish every advisory's exploitability.
+For example, Cafe's bounded SVG sanitizer does not enable DOMPurify's reported
+template/DOM-return/hook modes and independently excludes active SVG elements.
+Its existing native security tests remain required. Updating npm Undici does
+not update Node's or Electron's separate embedded HTTP implementation: their
+reviewed Node 24.22.1 source instead contains fixed Undici 7.30.1.
+
+No fixed TOML 4.x release is available, so the security resolution also moves
+Effect's CLI parser from 4.x to 5.0.1. Regression tests exercise safe numbers,
+dates, tables and arrays through both actual consumers and Effect's public file parser. One
+intentional compatibility change remains: default parsing rejects integers
+outside JavaScript's safe-integer range rather than silently rounding them.
+Cafe's own legacy MCP configuration retains its explicit `bigint: true` and
+`maxDepth: 80` options and preserves full signed 64-bit integers. This is not a
+claim of complete 4.x/5.x behavioral equivalence.
+
+This manual security response follows the exception to the routine seven-day
+settling window; it retains archive identity, registry-signature, compatibility
+and native checks. It does not waive provider-family quarantine. Standalone
+Node 24.22.1 already contains the reviewed October security fixes; Node 26's new
+LTS promotion requires a separate coordinated toolchain qualification rather
+than a security-only version relabel. A dev push updates source only: main,
+release artifacts, installed applications and running processes remain separate.
 
 ## Security fixes and main/dev coverage
 

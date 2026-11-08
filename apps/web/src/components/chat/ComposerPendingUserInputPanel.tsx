@@ -17,11 +17,13 @@ import {
 
 interface PendingUserInputPanelProps extends ComposerInteractionCallbacks {
   pendingUserInputs: PendingUserInput[];
-  respondingRequestIds: ApprovalRequestId[];
+  isResponding: boolean;
   answers: Record<string, PendingUserInputDraftAnswer>;
   questionIndex: number;
   onToggleOption: (questionId: string, optionLabel: string) => void;
   onAdvance: () => void;
+  onSkipQuestion: (requestId: ApprovalRequestId, questionId: string) => void;
+  onDismiss: (requestId: ApprovalRequestId) => void;
   autoResolutionSnoozed: boolean;
   onSnoozeAutoResolution: () => void;
 }
@@ -31,11 +33,13 @@ const CODEX_USER_INPUT_AUTO_RESOLUTION_MS = 120_000;
 
 export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserInputPanel({
   pendingUserInputs,
-  respondingRequestIds,
+  isResponding,
   answers,
   questionIndex,
   onToggleOption,
   onAdvance,
+  onSkipQuestion,
+  onDismiss,
   autoResolutionSnoozed,
   onSnoozeAutoResolution,
   onRespondToInteraction,
@@ -59,11 +63,13 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
     <ComposerPendingUserInputCard
       key={activePrompt.requestId}
       prompt={activePrompt}
-      isResponding={respondingRequestIds.includes(activePrompt.requestId)}
+      isResponding={isResponding}
       answers={answers}
       questionIndex={questionIndex}
       onToggleOption={onToggleOption}
       onAdvance={onAdvance}
+      onSkipQuestion={onSkipQuestion}
+      onDismiss={onDismiss}
       autoResolutionSnoozed={autoResolutionSnoozed}
       onSnoozeAutoResolution={onSnoozeAutoResolution}
     />
@@ -77,6 +83,8 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   questionIndex,
   onToggleOption,
   onAdvance,
+  onSkipQuestion,
+  onDismiss,
   autoResolutionSnoozed,
   onSnoozeAutoResolution,
 }: {
@@ -86,13 +94,20 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   questionIndex: number;
   onToggleOption: (questionId: string, optionLabel: string) => void;
   onAdvance: () => void;
+  onSkipQuestion: (requestId: ApprovalRequestId, questionId: string) => void;
+  onDismiss: (requestId: ApprovalRequestId) => void;
   autoResolutionSnoozed: boolean;
   onSnoozeAutoResolution: () => void;
 }) {
   const uiLocale = useUiLocale();
 
   const pane = useChatPane();
-  const progress = derivePendingUserInputProgress(prompt.questions, answers, questionIndex);
+  const progress = derivePendingUserInputProgress(
+    prompt.questions,
+    answers,
+    questionIndex,
+    prompt.supportsUnanswered === true,
+  );
   const activeQuestion = progress.activeQuestion;
   const autoAdvanceTimerRef = useRef<number | null>(null);
   const onAdvanceRef = useRef(onAdvance);
@@ -286,6 +301,43 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
           );
         })}
       </div>
+      {prompt.supportsUnanswered === true ? (
+        <div className="mt-3 flex items-center justify-end gap-3">
+          <button
+            type="button"
+            className="focus-ring rounded-sm px-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+            disabled={isResponding || progress.activeDraft?.unanswered === "skipped"}
+            onClick={() => {
+              // Retire the exact card's queued option advance before an
+              // explicit disposition. It must not submit a different choice
+              // after the user has skipped or dismissed this request.
+              if (autoAdvanceTimerRef.current !== null) {
+                window.clearTimeout(autoAdvanceTimerRef.current);
+                autoAdvanceTimerRef.current = null;
+              }
+              onSkipQuestion(prompt.requestId, activeQuestion.id);
+            }}
+          >
+            {progress.activeDraft?.unanswered === "skipped"
+              ? uiText("Skipped", undefined, undefined, uiLocale)
+              : uiText("Skip", undefined, undefined, uiLocale)}
+          </button>
+          <button
+            type="button"
+            className="focus-ring rounded-sm px-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+            disabled={isResponding}
+            onClick={() => {
+              if (autoAdvanceTimerRef.current !== null) {
+                window.clearTimeout(autoAdvanceTimerRef.current);
+                autoAdvanceTimerRef.current = null;
+              }
+              onDismiss(prompt.requestId);
+            }}
+          >
+            {uiText("Dismiss", undefined, undefined, uiLocale)}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 });

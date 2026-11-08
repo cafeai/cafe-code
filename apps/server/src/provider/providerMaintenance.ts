@@ -33,6 +33,7 @@ export interface ProviderMaintenanceCapabilityResolutionOptions {
   readonly binaryPath?: string | null;
   readonly env?: NodeJS.ProcessEnv;
   readonly platform?: NodeJS.Platform;
+  /** Only a successful native realPath observation; null/absence is unknown. */
   readonly realCommandPath?: string | null;
 }
 
@@ -46,6 +47,11 @@ export interface PackageManagedProviderMaintenanceDefinition {
   readonly provider: ProviderDriverKind;
   readonly npmPackageName: string;
   readonly homebrewFormula: string | null;
+  /** Source-owned cask allowlist, never provider settings or received argv. */
+  readonly homebrewCasks?: {
+    readonly binaryName: string;
+    readonly names: ReadonlyArray<string>;
+  };
   readonly nativeUpdate: {
     readonly executable: string;
     readonly args: ReadonlyArray<string>;
@@ -149,10 +155,52 @@ function makeVitePlusGlobalProviderMaintenanceCapabilities(
   });
 }
 
+function hasObservedKnownHomebrewCaskroom(
+  options?: ProviderMaintenanceCapabilityResolutionOptions,
+): boolean {
+  const observed = options?.realCommandPath;
+  return (
+    typeof observed === "string" &&
+    (observed === "/opt/homebrew/Caskroom" ||
+      observed.startsWith("/opt/homebrew/Caskroom/") ||
+      observed === "/usr/local/Caskroom" ||
+      observed.startsWith("/usr/local/Caskroom/"))
+  );
+}
+
+function observedHomebrewTarget(
+  definition: PackageManagedProviderMaintenanceDefinition,
+  options?: ProviderMaintenanceCapabilityResolutionOptions,
+): string | null {
+  const casks = definition.homebrewCasks;
+  // Other source-owned definitions retain their existing fixed formula policy.
+  if (casks === undefined) return definition.homebrewFormula;
+  const observed = options?.realCommandPath;
+  if (
+    (options?.platform ?? process.platform) !== "darwin" ||
+    typeof observed !== "string" ||
+    observed.length === 0 ||
+    observed.length > 4096 ||
+    /[\\\u0000-\u001f\u007f]/u.test(observed)
+  )
+    return null;
+  // Require the actual canonical Caskroom target, one finite version component
+  // and exact executable. Missing/unknown/custom-prefix paths never guess a
+  // stable/latest channel. Path text is evidence only, never a command argument.
+  const match =
+    /^\/(?:opt\/homebrew|usr\/local)\/Caskroom\/([a-z0-9][a-z0-9@._-]{0,127})\/([A-Za-z0-9][A-Za-z0-9.+_-]{0,127})\/([a-z0-9][a-z0-9._-]{0,127})$/u.exec(
+      observed,
+    );
+  if (!match || match[3] !== casks.binaryName) return null;
+  return casks.names.find((allowed) => allowed === match[1]) ?? null;
+}
+
 function makeHomebrewProviderMaintenanceCapabilities(
   definition: PackageManagedProviderMaintenanceDefinition,
+  options?: ProviderMaintenanceCapabilityResolutionOptions,
 ): ProviderMaintenanceCapabilities {
-  if (!definition.homebrewFormula) {
+  const target = observedHomebrewTarget(definition, options);
+  if (!target) {
     return makeManualOnlyProviderMaintenanceCapabilities({
       provider: definition.provider,
       packageName: definition.npmPackageName,
@@ -163,7 +211,7 @@ function makeHomebrewProviderMaintenanceCapabilities(
     provider: definition.provider,
     packageName: definition.npmPackageName,
     updateExecutable: "brew",
-    updateArgs: ["upgrade", definition.homebrewFormula],
+    updateArgs: ["upgrade", target],
     updateLockKey: "homebrew",
   });
 }
@@ -262,6 +310,14 @@ export function resolvePackageManagedProviderMaintenance(
       ...(options?.realCommandPath ? [options.realCommandPath] : []),
     ];
 
+    // A successful canonical Caskroom observation owns this installation even
+    // when the configured alias looks native or package-manager-owned. Process
+    // this namespace before lexical heuristics; malformed/unknown known casks
+    // must remain manual rather than falling through to another updater.
+    if (definition.homebrewCasks !== undefined && hasObservedKnownHomebrewCaskroom(options)) {
+      return makeHomebrewProviderMaintenanceCapabilities(definition, options);
+    }
+
     const nativeUpdate = definition.nativeUpdate;
     if (
       nativeUpdate &&
@@ -282,7 +338,7 @@ export function resolvePackageManagedProviderMaintenance(
       return makeNpmGlobalProviderMaintenanceCapabilities(definition, options);
     }
     if (commandPaths.some(isHomebrewCommandPath)) {
-      return makeHomebrewProviderMaintenanceCapabilities(definition);
+      return makeHomebrewProviderMaintenanceCapabilities(definition, options);
     }
   }
 
@@ -347,7 +403,11 @@ export const resolveProviderMaintenanceCapabilitiesEffect = Effect.fn(
   const fileSystem = yield* FileSystem.FileSystem;
   const realCommandPath = yield* fileSystem
     .realPath(resolvedCommandPath)
-    .pipe(Effect.catch(() => Effect.succeed(resolvedCommandPath)));
+    // A lexical fallback is useful for legacy manager classification, but is
+    // not a successful observation of an installed cask/channel. Keep failure
+    // explicitly unknown; the lexical resolved path is already considered by
+    // the generic resolver and all of its existing manager precedence remains.
+    .pipe(Effect.catch(() => Effect.succeed(null)));
   return resolver.resolve({
     ...options,
     realCommandPath,

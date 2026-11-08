@@ -585,7 +585,8 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
   return (
     <section
       aria-label={uiText("Scheduled follow-ups", undefined, undefined, uiLocale)}
-      className="mt-4 min-w-0 border-t border-border-subtle pt-3"
+      // No divider when this is the first section under the panel header.
+      className="mt-4 min-w-0 border-t border-border-subtle pt-3 first:mt-0 first:border-t-0 first:pt-0"
       data-scheduled-followups="true"
     >
       <div className="mb-3 flex min-w-0 flex-wrap items-center justify-between gap-2">
@@ -599,9 +600,11 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
               message={"<slot1></slot1>Scheduled <slot3></slot3>"}
               slots={{
                 slot1: <Clock3Icon className="size-3.5" />,
-                slot3: (
-                  <span className="tabular-nums text-subtle-foreground">{current.length}</span>
-                ),
+                // An empty list shows no "0"; the count appears once something is scheduled.
+                slot3:
+                  current.length > 0 ? (
+                    <span className="tabular-nums text-subtle-foreground">{current.length}</span>
+                  ) : null,
               }}
             />
           </h3>
@@ -619,6 +622,12 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
             ref={createRef}
             size="xs"
             variant="ghost"
+            title={uiText(
+              "Schedule a check-in or a repeating task for this chat.",
+              undefined,
+              undefined,
+              uiLocale,
+            )}
             disabled={pending || context.unavailable || reviewReadUnavailable}
             onClick={() => {
               setMutationFailed(false);
@@ -681,16 +690,13 @@ export const ScheduledFollowups = memo(function ScheduledFollowups({
               {uiText("Loading schedules…", undefined, undefined, uiLocale)}
             </p>
           ) : rows.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              {showHistory
-                ? uiText("No finished schedules.", undefined, undefined, uiLocale)
-                : uiText(
-                    "Schedule a check-in or a repeating task for this chat.",
-                    undefined,
-                    undefined,
-                    uiLocale,
-                  )}
-            </p>
+            // An empty list needs no filler line: the New follow-up button's
+            // tooltip explains what scheduling does.
+            showHistory ? (
+              <p className="text-xs text-muted-foreground">
+                {uiText("No finished schedules.", undefined, undefined, uiLocale)}
+              </p>
+            ) : null
           ) : (
             <div className="space-y-2">
               {rows.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE).map((record) => (

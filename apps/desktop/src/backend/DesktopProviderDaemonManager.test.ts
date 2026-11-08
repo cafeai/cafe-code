@@ -35,6 +35,11 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as NetService from "@cafecode/shared/Net";
 import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
+import {
+  publishSourceDebugBuildManifest,
+  sourceDebugBuildFingerprint,
+  sourceDebugBuildManifestPath,
+} from "@cafecode/shared/sourceDebugBuild";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
@@ -74,7 +79,7 @@ interface FakeProviderDaemon {
   readonly close: Effect.Effect<void>;
 }
 
-function makeRuntimeBuildId(input: {
+function makeLegacyRuntimeBuildId(input: {
   readonly appVersion: string;
   readonly backendEntryPath: string;
   readonly backendBundle: string;
@@ -87,6 +92,36 @@ function makeRuntimeBuildId(input: {
     .update(input.backendEntryPath)
     .update("\0")
     .update(input.backendBundle)
+    .digest("hex");
+}
+
+// Matching native health is fixture setup, not proof of the digest formula.
+// Publish genuine inert receipts so every manager uses the production source
+// admission boundary rather than a fixture-only legacy escape path.
+const writeSyntheticBackend = Effect.fn(function* (
+  fileSystem: FileSystem.FileSystem,
+  backendEntryPath: string,
+  backendBundle: string,
+) {
+  yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
+  yield* Effect.sync(() =>
+    publishSourceDebugBuildManifest(backendEntryPath, "server", [backendEntryPath]),
+  );
+});
+
+function makeRuntimeBuildId(input: {
+  readonly appVersion: string;
+  readonly backendEntryPath: string;
+  readonly backendBundle: string;
+}): string {
+  return crypto
+    .createHash("sha256")
+    .update("cafecode-provider-source-runtime-v2\0")
+    .update(input.appVersion)
+    .update("\0")
+    .update(input.backendEntryPath)
+    .update("\0")
+    .update(sourceDebugBuildFingerprint(input.backendEntryPath, "server"))
     .digest("hex");
 }
 
@@ -244,6 +279,132 @@ describe("DesktopProviderDaemonManager", () => {
     vi.restoreAllMocks();
   });
 
+  it.effect(
+    "binds source compatibility to the qualified code and dependency-pointer closure before control IO",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "cafe-runtime-closure-",
+        });
+        const markerPath = `${baseDir}/provider-daemon.json`;
+        const credentialPath = `${baseDir}/provider-daemon-token.bin`;
+        const backendEntryPath = `${baseDir}/bin.mjs`;
+        const backendPath = `${baseDir}/backend.mjs`;
+        const pointerPath = `${baseDir}/.source-runtime-dependencies.json`;
+        const entryBytes = "// unchanged thin source loader\nawait import('./backend.mjs');\n";
+        yield* fileSystem.writeFileString(backendEntryPath, entryBytes);
+        yield* fileSystem.writeFileString(backendPath, "export const generation = 'first';\n");
+        yield* fileSystem.writeFileString(
+          pointerPath,
+          encodeDiagnosticJson({
+            version: 1,
+            generation: `${baseDir}/runtime-first`,
+            digest: "a".repeat(64),
+          }),
+        );
+        const publish = Effect.sync(() =>
+          publishSourceDebugBuildManifest(backendEntryPath, "server", [
+            backendEntryPath,
+            backendPath,
+            pointerPath,
+          ]),
+        );
+        yield* publish;
+        let controlReads = 0;
+        let decryptions = 0;
+        let spawns = 0;
+        const isControlPath = (file: string) => file === markerPath || file === credentialPath;
+        const guardedFileSystem: FileSystem.FileSystem = {
+          ...fileSystem,
+          exists: (file) => {
+            if (isControlPath(file)) controlReads += 1;
+            return fileSystem.exists(file);
+          },
+          readFile: (file) => {
+            if (isControlPath(file)) controlReads += 1;
+            return fileSystem.readFile(file);
+          },
+          readFileString: (file, encoding) => {
+            if (isControlPath(file)) controlReads += 1;
+            return fileSystem.readFileString(file, encoding);
+          },
+        };
+        const guardedSpawner: TestProcessSpawner = {
+          ...spawner,
+          spawn: () =>
+            Effect.sync(() => {
+              spawns += 1;
+            }).pipe(
+              Effect.andThen(Effect.die(new Error("No native child is admitted by this fixture"))),
+            ),
+        };
+        const safeStorage: ElectronSafeStorage.ElectronSafeStorageShape = {
+          isEncryptionAvailable: Effect.succeed(true),
+          encryptString: (value) => Effect.succeed(new TextEncoder().encode(value)),
+          decryptString: () =>
+            Effect.sync(() => {
+              decryptions += 1;
+              return TEST_TOKEN;
+            }),
+        };
+        const managerLayer = () =>
+          makeManagerLayer(baseDir, markerPath, backendEntryPath, safeStorage, {
+            fileSystem: guardedFileSystem,
+            spawner: guardedSpawner,
+          });
+        const readBuildId = () =>
+          Effect.gen(function* () {
+            const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
+            return (yield* manager.snapshot).runtimeBuildId;
+          }).pipe(Effect.provide(managerLayer()), Effect.scoped);
+
+        // The old entry-only digest would remain identical through both rebuilds.
+        // Observe the real public manager snapshot instead of exporting its hash
+        // implementation or manufacturing an asserted digest from test inputs.
+        const initial = yield* readBuildId();
+        assert.equal(yield* readBuildId(), initial);
+        yield* fileSystem.writeFileString(backendPath, "export const generation = 'second';\n");
+        yield* publish;
+        const changedBackend = yield* readBuildId();
+        assert.notEqual(changedBackend, initial);
+        yield* fileSystem.writeFileString(
+          pointerPath,
+          encodeDiagnosticJson({
+            version: 1,
+            generation: `${baseDir}/runtime-second`,
+            digest: "b".repeat(64),
+          }),
+        );
+        yield* publish;
+        const changedPointer = yield* readBuildId();
+        assert.notEqual(changedPointer, changedBackend);
+        assert.equal(yield* readBuildId(), changedPointer);
+        assert.equal(yield* fileSystem.readFileString(backendEntryPath), entryBytes);
+
+        for (const refusal of ["stale", "missing"] as const) {
+          if (refusal === "stale") {
+            yield* fileSystem.writeFileString(
+              backendPath,
+              "// changed without a matching receipt\n",
+            );
+          } else {
+            yield* publish;
+            yield* fileSystem.remove(sourceDebugBuildManifestPath(backendEntryPath));
+          }
+          const result = yield* Effect.gen(function* () {
+            const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
+            yield* manager.ensureRunning;
+          }).pipe(Effect.provide(managerLayer()), Effect.scoped, Effect.exit);
+          assert.isTrue(Exit.isFailure(result));
+          assert.equal(controlReads, 0);
+          assert.equal(decryptions, 0);
+          assert.equal(spawns, 0);
+        }
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   for (const phase of [
     "foreign-socket",
     "foreign-credential",
@@ -262,7 +423,11 @@ describe("DesktopProviderDaemonManager", () => {
         const backendEntryPath = `${baseDir}/backend.mjs`;
         const socketPath = `${baseDir}/provider-daemon-ipc/provider-daemon.sock`;
         const foreignCredentialPath = `${baseDir}/foreign-token.bin`;
-        yield* fileSystem.writeFileString(backendEntryPath, "// synthetic profile boundary\n");
+        yield* writeSyntheticBackend(
+          fileSystem,
+          backendEntryPath,
+          "// synthetic profile boundary\n",
+        );
         yield* fileSystem.writeFileString(credentialPath, TEST_TOKEN);
         yield* fileSystem.writeFileString(foreignCredentialPath, TEST_TOKEN);
         yield* fileSystem.makeDirectory(`${baseDir}/provider-daemon-ipc`);
@@ -358,7 +523,7 @@ describe("DesktopProviderDaemonManager", () => {
           const credentialPath = `${baseDir}/provider-daemon-token.bin`;
           const backendEntryPath = `${baseDir}/backend.mjs`;
           const backendBundle = "// synthetic native receipt\n";
-          yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
+          yield* writeSyntheticBackend(fileSystem, backendEntryPath, backendBundle);
           yield* fileSystem.writeFileString(credentialPath, TEST_TOKEN);
           const runtimeBuildId = makeRuntimeBuildId({
             appVersion: "0.0.0-test",
@@ -444,6 +609,7 @@ describe("DesktopProviderDaemonManager", () => {
   for (const scenario of [
     { reason: "application-version", label: "application version" },
     { reason: "runtime-build", label: "runtime build" },
+    { reason: "legacy-runtime-build", label: "runtime build" },
     { reason: "protocol-version", label: "provider protocol" },
     { reason: "cafe-mcp-port", label: "backend MCP port" },
     { reason: "process-id", label: "process identity" },
@@ -461,7 +627,7 @@ describe("DesktopProviderDaemonManager", () => {
           const socketPath = `${baseDir}/provider-daemon-ipc/provider-daemon.sock`;
           const backendEntryPath = `${baseDir}/backend.mjs`;
           const backendBundle = "// new synthetic installed bundle\n";
-          yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
+          yield* writeSyntheticBackend(fileSystem, backendEntryPath, backendBundle);
           yield* fileSystem.writeFileString(credentialPath, TEST_TOKEN);
           yield* fileSystem.makeDirectory(`${baseDir}/provider-daemon-ipc`);
           yield* fileSystem.writeFileString(socketPath, "preserved old socket entry");
@@ -472,13 +638,19 @@ describe("DesktopProviderDaemonManager", () => {
           });
           const oldVersion = scenario.reason === "application-version" ? "0.0.0-old" : "0.0.0-test";
           const observedBuild =
-            scenario.reason === "application-version" || scenario.reason === "runtime-build"
-              ? makeRuntimeBuildId({
+            scenario.reason === "legacy-runtime-build"
+              ? makeLegacyRuntimeBuildId({
                   appVersion: oldVersion,
                   backendEntryPath,
-                  backendBundle: "// old installed bundle\n",
+                  backendBundle,
                 })
-              : currentBuild;
+              : scenario.reason === "application-version" || scenario.reason === "runtime-build"
+                ? makeLegacyRuntimeBuildId({
+                    appVersion: oldVersion,
+                    backendEntryPath,
+                    backendBundle: "// old installed bundle\n",
+                  })
+                : currentBuild;
           const protocol = scenario.reason === "protocol-version" ? 2 : 1;
           let requests = 0;
           let leases = 0;
@@ -591,7 +763,11 @@ describe("DesktopProviderDaemonManager", () => {
           const markerPath = `${baseDir}/provider-daemon.json`;
           const credentialPath = `${baseDir}/provider-daemon-token.bin`;
           const backendEntryPath = `${baseDir}/backend.mjs`;
-          yield* fileSystem.writeFileString(backendEntryPath, "// inert owned update fixture\n");
+          yield* writeSyntheticBackend(
+            fileSystem,
+            backendEntryPath,
+            "// inert owned update fixture\n",
+          );
           let healthPatch: Partial<ProviderDaemonHealth> = {};
           let running = true;
           let preparing = false;
@@ -788,7 +964,7 @@ describe("DesktopProviderDaemonManager", () => {
           const markerPath = `${baseDir}/provider-daemon.json`;
           const credentialPath = `${baseDir}/provider-daemon-token.bin`;
           const backendEntryPath = `${baseDir}/backend.mjs`;
-          yield* fileSystem.writeFileString(backendEntryPath, "// inert quit fixture\n");
+          yield* writeSyntheticBackend(fileSystem, backendEntryPath, "// inert quit fixture\n");
           const entered = yield* Deferred.make<void>();
           const release = yield* Deferred.make<void>();
           const gated = Deferred.succeed(entered, undefined).pipe(
@@ -871,7 +1047,11 @@ describe("DesktopProviderDaemonManager", () => {
           const markerPath = `${baseDir}/provider-daemon.json`;
           const credentialPath = `${baseDir}/provider-daemon-token.bin`;
           const backendEntryPath = `${baseDir}/backend.mjs`;
-          yield* fileSystem.writeFileString(backendEntryPath, "// inert owned-child fixture\n");
+          yield* writeSyntheticBackend(
+            fileSystem,
+            backendEntryPath,
+            "// inert owned-child fixture\n",
+          );
           // An inert directory makes only the credential's atomic publication
           // fail. No real profile, injected process or private token is observed.
           if (phase === "publication") yield* fileSystem.makeDirectory(credentialPath);
@@ -962,7 +1142,7 @@ describe("DesktopProviderDaemonManager", () => {
         const backendEntryPath = `${baseDir}/backend.mjs`;
         const socketPath = `${baseDir}/provider-daemon-ipc/provider-daemon.sock`;
         const backendBundle = "throw new Error('unexpected spawn');\n";
-        yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
+        yield* writeSyntheticBackend(fileSystem, backendEntryPath, backendBundle);
         const runtimeBuildId = makeRuntimeBuildId({
           appVersion: "0.0.0-test",
           backendEntryPath,
@@ -1080,7 +1260,7 @@ describe("DesktopProviderDaemonManager", () => {
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cafe-marker-missing-" });
       const markerPath = `${baseDir}/provider-daemon.json`;
       const backendEntryPath = `${baseDir}/backend.mjs`;
-      yield* fileSystem.writeFileString(backendEntryPath, "// no process is launched\n");
+      yield* writeSyntheticBackend(fileSystem, backendEntryPath, "// no process is launched\n");
       let spawnCalls = 0;
       const guardedSpawner: TestProcessSpawner = {
         ...spawner,
@@ -1121,12 +1301,12 @@ describe("DesktopProviderDaemonManager", () => {
             // A spawn would fail rather than launch a provider. The test only
             // serves an authenticated fake daemon in this test process.
             const backendBundle = "throw new Error('unexpected spawn');\n";
+            yield* writeSyntheticBackend(fileSystem, backendEntryPath, backendBundle);
             const runtimeBuildId = makeRuntimeBuildId({
               appVersion: "0.0.0-test",
               backendEntryPath,
               backendBundle,
             });
-            yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
             let failuresRemaining = initialFailures;
             let observedRequests = 0;
             const fakeDaemon = yield* startFakeProviderDaemon(
@@ -1199,12 +1379,12 @@ describe("DesktopProviderDaemonManager", () => {
       const credentialPath = `${baseDir}/provider-daemon-token.bin`;
       const backendEntryPath = `${baseDir}/backend.mjs`;
       const backendBundle = "console.log('provider daemon test backend');\n";
+      yield* writeSyntheticBackend(fileSystem, backendEntryPath, backendBundle);
       const runtimeBuildId = makeRuntimeBuildId({
         appVersion: "0.0.0-test",
         backendEntryPath,
         backendBundle,
       });
-      yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
       let failHealth = false;
       const fakeDaemon = yield* startFakeProviderDaemon(
         baseDir,
@@ -1289,12 +1469,12 @@ describe("DesktopProviderDaemonManager", () => {
       const credentialPath = `${baseDir}/provider-daemon-token.bin`;
       const backendEntryPath = `${baseDir}/backend.mjs`;
       const backendBundle = "console.log('provider daemon test backend');\n";
+      yield* writeSyntheticBackend(fileSystem, backendEntryPath, backendBundle);
       const runtimeBuildId = makeRuntimeBuildId({
         appVersion: "0.0.0-test",
         backendEntryPath,
         backendBundle,
       });
-      yield* fileSystem.writeFileString(backendEntryPath, backendBundle);
       const fakeDaemon = yield* startFakeProviderDaemon(baseDir, runtimeBuildId);
       yield* Effect.addFinalizer(() => fakeDaemon.close);
       const httpBaseUrl = `http://127.0.0.1:${fakeDaemon.port}`;

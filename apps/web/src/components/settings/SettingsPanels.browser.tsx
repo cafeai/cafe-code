@@ -6,6 +6,7 @@ import {
   DEFAULT_CLIENT_SETTINGS,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  type DesktopAppIconState,
   type DesktopBridge,
   type DesktopSourceUpdateState,
   type DesktopUpdateChannel,
@@ -18,16 +19,18 @@ import {
   type ServerProvider,
   type ServerProviderDeviceLoginEvent,
   type ServerRuntimeLayerDiagnosticsResult,
+  type SetDesktopAppIconInput,
   type SourceControlDiscoveryResult,
 } from "@cafecode/contracts";
 import { MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES } from "@cafecode/contracts/settings";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
-import { page, userEvent } from "vitest/browser";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { page } from "vitest/browser";
+import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { render } from "vitest-browser-react";
 import type { ReactNode } from "react";
 import { getUiLocale, resolveUiLocale, setUiLocale } from "@cafecode/shared/i18n";
+import { applyClientSettingsPatch } from "@cafecode/shared/clientSettings";
 import { useEffect } from "react";
 import { useSettings } from "../../hooks/useSettings";
 import { useUiLocale } from "../../i18n";
@@ -69,7 +72,9 @@ import {
   ProviderSettingsPanel,
   SystemSettingsPanel,
   TextGenerationModelSettingsRow,
+  useSettingsRestore,
 } from "./SettingsPanels";
+import { MacKeepAwakeSettings } from "./MacKeepAwakeSettings";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
 import { CodexDeviceLoginDialog } from "./CodexDeviceLoginDialog";
 
@@ -736,7 +741,22 @@ function installFileSettingsNativeApi(config: ServerConfig) {
   return { getConfig, openSystemPromptFile, openPath, openInEditor, confirm };
 }
 
-function installProviderAccountSettings(config: ServerConfig) {
+function createClientSettingsUpdater(initial: ServerConfig["clientSettings"]) {
+  let currentPrivateClientSettings = initial;
+  // Account reset/deletion replaces these client-owned preference fields too.
+  // Return the complete private document using the same field-level contract.
+  return vi.fn<LocalApi["server"]["updateClientSettings"]>().mockImplementation(async (patch) => {
+    currentPrivateClientSettings = applyClientSettingsPatch(currentPrivateClientSettings, patch);
+    return currentPrivateClientSettings;
+  });
+}
+
+function installProviderAccountSettings(
+  config: ServerConfig,
+  updateClientSettings: LocalApi["server"]["updateClientSettings"] = createClientSettingsUpdater(
+    config.clientSettings,
+  ),
+) {
   const updateSettings = vi
     .fn<LocalApi["server"]["updateSettings"]>()
     .mockResolvedValue(config.settings);
@@ -745,7 +765,7 @@ function installProviderAccountSettings(config: ServerConfig) {
       getClientSettings: vi.fn().mockResolvedValue(null),
       setClientSettings: vi.fn().mockResolvedValue(undefined),
     },
-    server: { updateSettings },
+    server: { updateSettings, updateClientSettings },
   } as unknown as LocalApi;
   setServerConfigSnapshot(config);
   return updateSettings;
@@ -812,6 +832,43 @@ function createCodexLoginSettings(deviceCodeLogin: boolean): ServerConfig {
 }
 
 describe("settings panels", () => {
+  let closePowerFixture: (() => Promise<void>) | null = null;
+  // New power fixtures retain their exact pending render across hard timeout.
+  // Shared afterEach joins this same owner before resetting DOM/native mocks.
+  function powerFixture(context: Pick<TestContext, "signal" | "onTestFinished">) {
+    let retired = false;
+    let pending: ReturnType<typeof renderWithTestRouter> | null = null;
+    let closing: Promise<void> | null = null;
+    const close = () => {
+      retired = true;
+      return (closing ??= (async () => {
+        const view = pending ? await pending.catch(() => null) : null;
+        if (view) await view.unmount();
+        if (mounted === view) mounted = null;
+      })());
+    };
+    context.signal.addEventListener(
+      "abort",
+      () => {
+        retired = true;
+        void close();
+      },
+      { once: true },
+    );
+    context.onTestFinished(close);
+    closePowerFixture = close;
+    return async (children: ReactNode) => {
+      if (retired) throw new Error("Power settings fixture retired");
+      pending = renderWithTestRouter(children);
+      const view = await pending;
+      if (retired) {
+        await close();
+        throw new Error("Power settings fixture retired");
+      }
+      mounted = view;
+      return view;
+    };
+  }
   let mounted:
     | (Awaited<ReturnType<typeof render>> & {
         cleanup?: () => Promise<void>;
@@ -834,6 +891,8 @@ describe("settings panels", () => {
   });
 
   afterEach(async () => {
+    await closePowerFixture?.();
+    closePowerFixture = null;
     if (mounted) {
       const teardown = mounted.cleanup ?? mounted.unmount;
       await teardown?.call(mounted).catch(() => {});
@@ -960,9 +1019,7 @@ describe("settings panels", () => {
 
     await expect.element(page.getByText("Writes chat titles and branch names.")).toBeVisible();
     await expect.element(page.getByRole("button", { name: /GPT-5.6 Luna/ })).toBeVisible();
-    await expect
-      .element(page.getByRole("button", { name: "High · Fast", exact: true }))
-      .toBeVisible();
+    await expect.element(page.getByRole("button", { name: "High", exact: true })).toBeVisible();
     expect(updateSettings).not.toHaveBeenCalled();
 
     await page.getByRole("button", { name: "Reset automatic naming model to default" }).click();
@@ -975,9 +1032,7 @@ describe("settings panels", () => {
       },
     });
     await expect.element(page.getByRole("button", { name: /GPT-6.1 Sol/ })).toBeVisible();
-    await expect
-      .element(page.getByRole("button", { name: "Medium · Normal", exact: true }))
-      .toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Medium", exact: true })).toBeVisible();
     await expect
       .element(page.getByRole("button", { name: "Reset automatic naming model to default" }))
       .not.toBeInTheDocument();
@@ -1728,6 +1783,111 @@ describe("settings panels", () => {
       expect(updateClientSettings).toHaveBeenCalledWith({ powerSaveBlockerMode: "during-chats" });
     });
   });
+  it("keeps closed-lid work off by default and persists the native Mac toggle", async (context) => {
+    const renderPower = powerFixture(context);
+    const desktopBridge = createDesktopBridgeStub();
+    desktopBridge.getMacKeepAwakeState = vi.fn().mockResolvedValue({ phase: "idle", reason: null });
+    desktopBridge.setMacKeepAwakeIntent = vi.fn().mockResolvedValue(undefined);
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot(createBaseServerConfig());
+    mounted = await renderPower(
+      <AppAtomRegistryProvider>
+        <SystemSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    const toggle = page.getByRole("switch", { name: "Work with the lid closed" });
+    await expect.element(toggle).not.toBeChecked();
+    await toggle.click();
+    await vi.waitFor(() =>
+      expect(updateClientSettings).toHaveBeenCalledWith({ keepAwakeWithLidClosed: true }),
+    );
+    await expect.element(toggle).toBeChecked();
+    await expect
+      .element(page.getByText("Waiting for local work.", { exact: false }))
+      .toBeInTheDocument();
+    await toggle.click();
+    await vi.waitFor(() =>
+      expect(updateClientSettings).toHaveBeenCalledWith({ keepAwakeWithLidClosed: false }),
+    );
+    await expect.element(toggle).not.toBeChecked();
+    expect(desktopBridge.setMacKeepAwakeIntent).toHaveBeenLastCalledWith(false);
+  });
+  it("hides closed-lid work when the desktop has no native Mac capability", async (context) => {
+    const renderPower = powerFixture(context);
+    window.desktopBridge = createDesktopBridgeStub();
+    setServerConfigSnapshot(createBaseServerConfig());
+    mounted = await renderPower(
+      <AppAtomRegistryProvider>
+        <SystemSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    await expect
+      .element(page.getByRole("switch", { name: "Work with the lid closed" }))
+      .not.toBeInTheDocument();
+  });
+  it("keeps the closed-lid preference on the primary Mac while a remote workspace is selected", async (context) => {
+    const renderPower = powerFixture(context);
+    const desktopBridge = createDesktopBridgeStub();
+    desktopBridge.getMacKeepAwakeState = vi.fn().mockResolvedValue({ phase: "idle", reason: null });
+    desktopBridge.setMacKeepAwakeIntent = vi.fn().mockResolvedValue(undefined);
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot(createBaseServerConfig());
+    selectWorkspaceEnvironment(EnvironmentId.make("power-remote-fixture"));
+    mounted = await renderPower(
+      <AppAtomRegistryProvider>
+        <MacKeepAwakeSettings />
+      </AppAtomRegistryProvider>,
+    );
+    await page.getByRole("switch", { name: "Work with the lid closed" }).click();
+    await vi.waitFor(() =>
+      expect(updateClientSettings).toHaveBeenCalledWith({ keepAwakeWithLidClosed: true }),
+    );
+    expect(desktopBridge.setMacKeepAwakeIntent).toHaveBeenCalledWith(true);
+    expect(getServerConfig()?.clientSettings.keepAwakeWithLidClosed).toBe(true);
+  });
+  it("revokes native lid intent before whole-page reset persists the default", async (context) => {
+    const renderPower = powerFixture(context);
+    const desktopBridge = createDesktopBridgeStub();
+    desktopBridge.getMacKeepAwakeState = vi
+      .fn()
+      .mockResolvedValue({ phase: "active", reason: null });
+    const actions: string[] = [];
+    desktopBridge.setMacKeepAwakeIntent = vi.fn(async (value) => {
+      actions.push(`intent:${value}`);
+    });
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    updateClientSettings.mockImplementation(async (patch) => {
+      if (patch.keepAwakeWithLidClosed !== undefined)
+        actions.push(`persist:${patch.keepAwakeWithLidClosed}`);
+      return { ...DEFAULT_CLIENT_SETTINGS, ...patch };
+    });
+    window.nativeApi = {
+      ...window.nativeApi!,
+      dialogs: { confirm: vi.fn().mockResolvedValue(true) },
+    } as unknown as LocalApi;
+    const config = createBaseServerConfig();
+    setServerConfigSnapshot({
+      ...config,
+      clientSettings: { ...config.clientSettings, keepAwakeWithLidClosed: true },
+    });
+    function ResetGeneral() {
+      const { restoreDefaults } = useSettingsRestore(undefined, "/settings/general");
+      return <button onClick={() => void restoreDefaults()}>Reset power fixture</button>;
+    }
+    mounted = await renderPower(
+      <AppAtomRegistryProvider>
+        <ResetGeneral />
+      </AppAtomRegistryProvider>,
+    );
+    await page.getByRole("button", { name: "Reset power fixture" }).click();
+    await vi.waitFor(() =>
+      expect(updateClientSettings).toHaveBeenCalledWith({ keepAwakeWithLidClosed: false }),
+    );
+    expect(actions).toEqual(["intent:false", "persist:false"]);
+  });
 
   it("preserves primary settings optimistic behavior and failure feedback", async () => {
     const desktopBridge = createDesktopBridgeStub();
@@ -1887,8 +2047,7 @@ describe("settings panels", () => {
       .element(page.getByRole("heading", { name: "Accent color", exact: true }))
       .toBeInTheDocument();
     await expect.element(page.getByText("Interface size")).toBeInTheDocument();
-    page.getByRole("slider", { name: "Interface size" }).element().focus();
-    await userEvent.keyboard("{ArrowRight}");
+    await page.getByRole("button", { name: "Larger interface" }).click();
 
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ interfaceScalePercent: 105 });
@@ -1899,6 +2058,8 @@ describe("settings panels", () => {
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ brandWordmarkPrefix: "Acme" });
     });
+    // The live wordmark preview under the field shows the new prefix.
+    await expect.element(page.getByText("Acme", { exact: true })).toBeInTheDocument();
 
     const uploadFetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
       const url = String(input);
@@ -1927,27 +2088,33 @@ describe("settings panels", () => {
     });
     vi.stubGlobal("fetch", uploadFetch);
 
+    const imageModes = page.getByRole("group", { name: "Sidebar image" });
     await expect
-      .element(page.getByRole("heading", { name: "Sidebar image", exact: true }))
-      .toBeInTheDocument();
+      .element(imageModes.getByRole("button", { name: "Off", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
     await expect
-      .element(page.getByRole("switch", { name: "Enable sidebar image" }))
-      .not.toBeChecked();
-    await expect.element(page.getByRole("button", { name: "Choose image" })).toBeDisabled();
-    const imageRow = page
-      .getByRole("heading", { name: "Sidebar image", exact: true })
-      .element()
-      .closest("div.border-t");
-    expect(imageRow?.classList.contains("opacity-50")).toBe(true);
+      .element(page.getByRole("button", { name: "Choose image" }))
+      .not.toBeInTheDocument();
     await page.screenshot({
-      element: page
-        .getByRole("switch", { name: "Enable sidebar image" })
-        .element()
-        .closest("section")!,
+      element: imageModes.element().closest("section")!,
       path: "../../../../../.explorations/settings-reorganization/sidebar-image-disabled.png",
     });
-    await page.getByRole("switch", { name: "Enable sidebar image" }).click();
+    await imageModes.getByRole("button", { name: "Match color" }).click();
+    await vi.waitFor(() => {
+      expect(updateClientSettings).toHaveBeenCalledWith({
+        showSidebarMascot: true,
+        sidebarImageSource: "match",
+      });
+    });
+    await imageModes.getByRole("button", { name: "Custom", exact: true }).click();
+    await vi.waitFor(() => {
+      expect(updateClientSettings).toHaveBeenCalledWith({
+        showSidebarMascot: true,
+        sidebarImageSource: "custom",
+      });
+    });
     await expect.element(page.getByRole("button", { name: "Choose image" })).toBeEnabled();
+    await expect.element(page.getByText("No image", { exact: true })).toBeInTheDocument();
     await page.screenshot({
       path: "../../../../../.explorations/settings-reorganization/appearance.png",
     });
@@ -1973,6 +2140,8 @@ describe("settings panels", () => {
             sizeBytes: 1234,
           },
           sidebarBrandImageDataUrl: "",
+          showSidebarMascot: true,
+          sidebarImageSource: "custom",
         }),
       );
     });
@@ -2013,11 +2182,23 @@ describe("settings panels", () => {
       expect(updateClientSettings).toHaveBeenCalledWith({ appAccentColor: "#dc2626" });
     });
 
-    await expect.element(page.getByText("Sidebar effects color")).toBeInTheDocument();
-    setColorInput("Animated sidebar color", "#16a34a");
+    // The sidebar has no separate color: each accent swatch is exactly one
+    // built-in sidebar scene's color.
+    await expect
+      .element(page.getByRole("heading", { name: "Sidebar color", exact: true }))
+      .not.toBeInTheDocument();
+    await page.getByRole("button", { name: "Violet", exact: true }).click();
+    await vi.waitFor(() => {
+      expect(updateClientSettings).toHaveBeenCalledWith({ appAccentColor: "#9d84ec" });
+    });
+    await expect
+      .element(page.getByRole("button", { name: "Violet", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
+
+    await page.getByLabelText("Enable Desk").click();
 
     await vi.waitFor(() => {
-      expect(updateClientSettings).toHaveBeenCalledWith({ themeAccentColor: "#16a34a" });
+      expect(updateClientSettings).toHaveBeenCalledWith({ deskEnabled: false });
     });
 
     await expect.element(page.getByText("Sidebar search")).toBeInTheDocument();
@@ -2027,10 +2208,7 @@ describe("settings panels", () => {
       expect(updateClientSettings).toHaveBeenCalledWith({ showSidebarSearch: false });
     });
 
-    await expect
-      .element(page.getByRole("heading", { name: "Enable sidebar image", exact: true }))
-      .toBeInTheDocument();
-    await page.getByLabelText("Enable sidebar image").click();
+    await imageModes.getByRole("button", { name: "Off", exact: true }).click();
 
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ showSidebarMascot: false });
@@ -2056,6 +2234,82 @@ describe("settings panels", () => {
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith({ sidebarStarSpeed: 1.25 });
     });
+  });
+
+  it("unlocks the Dekai icon after ten clicks on the Icon title and restores it the same way", async () => {
+    await page.viewport(1100, 900);
+    let iconState: DesktopAppIconState = {
+      variant: "standard",
+      source: "default",
+      themedIconKey: null,
+      customIconPreviewPng: null,
+    };
+    const setAppIcon = vi.fn(async (input: SetDesktopAppIconInput) => {
+      iconState = {
+        ...iconState,
+        variant: input.variant,
+        source: input.source,
+        themedIconKey: input.themedIcon?.key ?? iconState.themedIconKey,
+      };
+      return iconState;
+    });
+    const desktopBridge: DesktopBridge = {
+      ...createDesktopBridgeStub(),
+      getAppIconState: async () => iconState,
+      setAppIcon,
+    };
+    window.desktopBridge = desktopBridge;
+    installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <AppearanceSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    const iconTitle = page.getByRole("button", { name: "Icon", exact: true });
+    await expect
+      .element(page.getByRole("button", { name: "Default", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
+    for (let tap = 1; tap <= 4; tap += 1) await iconTitle.click();
+    expect(document.body.textContent).not.toContain("away from unlocking");
+    await iconTitle.click();
+    await expect
+      .element(page.getByText("You're 5 clicks away from unlocking a secret icon."))
+      .toBeInTheDocument();
+    for (let tap = 6; tap <= 9; tap += 1) await iconTitle.click();
+    await expect
+      .element(page.getByText("You're 1 click away from unlocking a secret icon."))
+      .toBeInTheDocument();
+    expect(setAppIcon).not.toHaveBeenCalled();
+
+    await iconTitle.click();
+    await vi.waitFor(() => {
+      expect(setAppIcon).toHaveBeenCalledWith(
+        expect.objectContaining({ variant: "dekai", source: "default" }),
+      );
+    });
+    // The unlocked icon arrives already colored for the current accent color and theme.
+    await vi.waitFor(() => {
+      expect(setAppIcon.mock.calls[0]?.[0].themedIcon?.key).toMatch(/^dekai-[a-z]+-(dark|light)$/);
+    });
+    await expect.element(page.getByText("Secret icon unlocked.")).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Dekai", exact: true }))
+      .toHaveAttribute("aria-pressed", "true");
+
+    for (let tap = 1; tap <= 10; tap += 1) await iconTitle.click();
+    await vi.waitFor(() => {
+      expect(setAppIcon).toHaveBeenLastCalledWith(
+        expect.objectContaining({ variant: "standard", source: "default" }),
+      );
+    });
+    await expect.element(page.getByText("Default icon restored.")).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Default", exact: true }))
+      .toBeInTheDocument();
+    expect(setAppIcon).toHaveBeenCalledTimes(2);
   });
 
   it("shows detected editor icons in the Files default editor selector", async () => {
@@ -3181,7 +3435,15 @@ describe("settings panels", () => {
 
   it("shows the default Axiom account and preserves other accounts through disabling and reset", async () => {
     const base = createBaseServerConfig();
+    const targetId = ProviderInstanceId.make("axiom");
     const customId = ProviderInstanceId.make("axiom_custom");
+    const targetModelPreferences = {
+      hiddenModels: ["target-hidden"],
+      modelOrder: ["target-first"],
+    };
+    const otherModelPreferences = { hiddenModels: ["other-hidden"], modelOrder: ["other-first"] };
+    const targetFavorite = { provider: targetId, model: "target-favorite" };
+    const otherFavorite = { provider: customId, model: "other-favorite" };
     const custom = {
       driver: ProviderDriverKind.make("axiom"),
       enabled: false,
@@ -3193,8 +3455,17 @@ describe("settings panels", () => {
         ...base.settings,
         providerInstances: { ...base.settings.providerInstances, [customId]: custom },
       },
+      clientSettings: {
+        ...base.clientSettings,
+        providerModelPreferences: {
+          [targetId]: targetModelPreferences,
+          [customId]: otherModelPreferences,
+        },
+        favorites: [targetFavorite, otherFavorite],
+      },
     };
-    const updateSettings = installProviderAccountSettings(config);
+    const updateClientSettings = createClientSettingsUpdater(config.clientSettings);
+    const updateSettings = installProviderAccountSettings(config, updateClientSettings);
     mounted = await render(
       <AppAtomRegistryProvider>
         <ProviderSettingsPanel />
@@ -3214,6 +3485,7 @@ describe("settings panels", () => {
     await expect
       .element(page.getByRole("switch", { name: "Enable Axiom", exact: true }))
       .not.toBeChecked();
+    expect(updateClientSettings).not.toHaveBeenCalled();
     await page
       .getByRole("button", { name: "Reset Axiom provider settings to default", exact: true })
       .click();
@@ -3224,13 +3496,44 @@ describe("settings panels", () => {
     expect(updateSettings.mock.calls[1]?.[0].providerInstances).toEqual({ [customId]: custom });
     expect(updateSettings.mock.calls.every(([patch]) => !("providers" in patch))).toBe(true);
     expect(getServerConfig()?.settings.providerInstances[customId]).toEqual(custom);
+    const expectedClientPatch = {
+      providerModelPreferences: { [customId]: otherModelPreferences },
+      favorites: [otherFavorite],
+    };
+    const expectedFullClientSettings = { ...config.clientSettings, ...expectedClientPatch };
+    expect(updateClientSettings).toHaveBeenCalledExactlyOnceWith(expectedClientPatch);
+    await expect(updateClientSettings.mock.results[0]!.value).resolves.toEqual(
+      expectedFullClientSettings,
+    );
+    expect(getServerConfig()?.clientSettings).toEqual(expectedFullClientSettings);
   });
 
   it.each(["axiom_2", "axiom_personal"])(
     "adds and manages an Axiom account %s without legacy provider defaults",
     async (instanceId) => {
-      const config = createBaseServerConfig();
+      const base = createBaseServerConfig();
+      const targetId = ProviderInstanceId.make(instanceId);
+      const otherId = ProviderInstanceId.make("codex");
+      const targetModelPreferences = {
+        hiddenModels: ["target-hidden"],
+        modelOrder: ["target-first"],
+      };
+      const otherModelPreferences = { hiddenModels: ["other-hidden"], modelOrder: ["other-first"] };
+      const targetFavorite = { provider: targetId, model: "target-favorite" };
+      const otherFavorite = { provider: otherId, model: "other-favorite" };
+      const config = {
+        ...base,
+        clientSettings: {
+          ...base.clientSettings,
+          providerModelPreferences: {
+            [targetId]: targetModelPreferences,
+            [otherId]: otherModelPreferences,
+          },
+          favorites: [targetFavorite, otherFavorite],
+        },
+      };
       const codexInstance = { driver: ProviderDriverKind.make("codex"), enabled: true };
+      const updateClientSettings = createClientSettingsUpdater(config.clientSettings);
       const updateSettings = vi.fn<LocalApi["server"]["updateSettings"]>().mockResolvedValue({
         ...config.settings,
         providerInstances: config.settings.providerInstances,
@@ -3240,7 +3543,7 @@ describe("settings panels", () => {
           getClientSettings: vi.fn().mockResolvedValue(null),
           setClientSettings: vi.fn().mockResolvedValue(undefined),
         },
-        server: { updateSettings },
+        server: { updateSettings, updateClientSettings },
       } as unknown as LocalApi;
       setServerConfigSnapshot({
         ...config,
@@ -3303,6 +3606,7 @@ describe("settings panels", () => {
           [instanceId]: { ...axiomInstance, enabled: false },
         },
       });
+      expect(updateClientSettings).not.toHaveBeenCalled();
       await page
         .getByRole("button", { name: `Delete provider instance ${instanceId}`, exact: true })
         .click();
@@ -3316,6 +3620,16 @@ describe("settings panels", () => {
       });
       expect(updateSettings.mock.calls.every(([patch]) => !("providers" in patch))).toBe(true);
       expect(getServerConfig()?.settings.providers).toEqual(config.settings.providers);
+      const expectedClientPatch = {
+        providerModelPreferences: { [otherId]: otherModelPreferences },
+        favorites: [otherFavorite],
+      };
+      const expectedFullClientSettings = { ...config.clientSettings, ...expectedClientPatch };
+      expect(updateClientSettings).toHaveBeenCalledExactlyOnceWith(expectedClientPatch);
+      await expect(updateClientSettings.mock.results[0]!.value).resolves.toEqual(
+        expectedFullClientSettings,
+      );
+      expect(getServerConfig()?.clientSettings).toEqual(expectedFullClientSettings);
     },
   );
 

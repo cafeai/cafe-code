@@ -191,6 +191,7 @@ describe("ProviderSessionReaper", () => {
       ),
       Layer.provideMerge(
         Layer.succeed(ProjectionSnapshotQuery, {
+          hasActiveDesktopWork: () => Effect.succeed(false),
           getCommandReadModel: () => Effect.die("unused"),
           getSnapshot: () => Effect.die("unused"),
           getShellSnapshot: () => Effect.die("unused"),
@@ -219,6 +220,10 @@ describe("ProviderSessionReaper", () => {
           getCodexSteerIntentRecoveryBarriers: () => Effect.die("unused"),
           getThreadTurnActivityPage: () => Effect.die("unused"),
           getThreadActivityDiagnostic: () => Effect.die("unused"),
+          getThreadContextWindowActivity: () => Effect.die("unused"),
+          getThreadAsyncQuestionActivitiesPage: () => Effect.die("unused"),
+          getThreadAsyncQuestionActivity: () => Effect.die("unused"),
+          getThreadQuestionContextById: () => Effect.die("unused"),
           getThreadTurnWorkLogPresence: () => Effect.die("unused"),
           hasThreadTurnSubagentActivity: () => Effect.die("unused"),
           getThreadDetailById: () => Effect.die("unused"),

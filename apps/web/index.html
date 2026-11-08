@@ -9,8 +9,19 @@
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#161616" media="(prefers-color-scheme: dark)" />
     <meta name="theme-color" content="#161616" />
-    <link rel="icon" href="/favicon.ico" sizes="48x48" />
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="cafe-code-web-branding" content="neutral" />
+    <link
+      rel="icon"
+      href="/app-branding/neutral-v1/favicon-32.png"
+      sizes="32x32"
+      type="image/png"
+      data-cafe-web-icon="favicon"
+    />
+    <link
+      rel="apple-touch-icon"
+      href="/app-branding/neutral-v1/touch-180.png"
+      data-cafe-web-icon="touch"
+    />
     <!-- Auth-protected manifests need cookies even on the same origin. -->
     <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
     <meta name="mobile-web-app-capable" content="yes" />
@@ -98,10 +109,20 @@
     <div id="root">
       <div id="boot-shell">
         <div id="boot-shell-card" aria-label="Cafe Code splash screen">
-          <img id="boot-shell-logo" src="/apple-touch-icon.png" alt="Cafe Code" />
+          <img id="boot-shell-logo" src="/app-branding/neutral-v1/touch-180.png" alt="Cafe Code" />
         </div>
       </div>
     </div>
+    <script>
+      (() => {
+        const logo = document.getElementById("boot-shell-logo");
+        const fallback = "/app-branding/neutral-v1/touch-180.png";
+        logo?.addEventListener("error", () => {
+          if (logo.getAttribute("src") === fallback) logo.hidden = true;
+          else logo.setAttribute("src", fallback);
+        });
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

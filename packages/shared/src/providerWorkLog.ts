@@ -35,6 +35,16 @@ export function readWorkLogOperationIdentity(activity: {
     return id ? { kind: "summary", id } : undefined;
   }
   if (
+    activity.kind === "task.started" ||
+    activity.kind === "task.progress" ||
+    activity.kind === "task.completed"
+  ) {
+    // Explicit native task/tool correlation from trusted ingestion, never a
+    // task id, description or control target guessed to be a tool identity.
+    const id = readWorkLogOperationId(ownValue(activity.payload, "workLogToolCallId"));
+    return id ? { kind: "tool", id } : undefined;
+  }
+  if (
     activity.kind !== "tool.started" &&
     activity.kind !== "tool.updated" &&
     activity.kind !== "tool.completed"
@@ -59,11 +69,35 @@ export function isExcludedWorkLogOperation(
   );
 }
 
+/**
+ * Providers whose adapters emit the version-1 public reasoning summary contract
+ * from their own primary conversation (Claude public summaries and OpenCode
+ * reasoning parts). Server ingestion, the historical work-log SQL predicate and
+ * the renderer admit exactly this list; any other provider's reasoning item is
+ * never promoted to a visible row by shape alone.
+ */
+export const PUBLIC_REASONING_SUMMARY_PROVIDERS = ["claudeAgent", "opencode"] as const;
+export type PublicReasoningSummaryProvider = (typeof PUBLIC_REASONING_SUMMARY_PROVIDERS)[number];
+
+export function isPublicReasoningSummaryProvider(
+  value: unknown,
+): value is PublicReasoningSummaryProvider {
+  return (
+    typeof value === "string" &&
+    (PUBLIC_REASONING_SUMMARY_PROVIDERS as ReadonlyArray<string>).includes(value)
+  );
+}
+
 /** Duplicate/polling observations stay in diagnostics; canonical receipts stay visible. */
 export const CODEX_STEER_PROGRESS_TASK_PREFIXES = [
   "codex-turn-steer:",
   "codex-turn-steer-processing:",
 ] as const;
+
+// Claude's receipt is internal input-consumption metadata, not another model
+// reasoning update or an independently running provider task. Its producer
+// reserves this namespace; presentation classification grants no authority.
+export const CLAUDE_STEER_PROCESSING_TASK_PREFIX = "claude-turn-steer-processing:";
 
 export const CODEX_STEER_PROGRESS_MESSAGES = [
   "Codex app-server accepted turn/steer.",
@@ -152,7 +186,8 @@ export function isRoutineProviderWorkLogActivity(activity: {
   const taskId = payload?.taskId;
   return (
     (typeof taskId === "string" &&
-      CODEX_STEER_PROGRESS_TASK_PREFIXES.some((prefix) => taskId.startsWith(prefix))) ||
+      (CODEX_STEER_PROGRESS_TASK_PREFIXES.some((prefix) => taskId.startsWith(prefix)) ||
+        taskId.startsWith(CLAUDE_STEER_PROCESSING_TASK_PREFIX))) ||
     CODEX_STEER_PROGRESS_MESSAGES.some(
       (message) => payload?.detail === message || payload?.description === message,
     )

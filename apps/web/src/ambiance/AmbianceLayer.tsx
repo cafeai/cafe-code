@@ -126,20 +126,14 @@ function readCssVariable(name: string): string {
 
 /**
  * Weather tint resolution. An explicit ambiance color wins; otherwise follow
- * the Appearance tab's accent color, then the sidebar color, then the
+ * the Appearance tab's accent color (which also colors the sidebar), then the
  * theme-provided sidebar accent variable.
  */
-function resolveAmbianceTint(
-  ambianceColor: string,
-  appAccentColor: string,
-  themeAccentColor: string,
-): string {
+function resolveAmbianceTint(ambianceColor: string, appAccentColor: string): string {
   const custom = normalizeAccentColor(ambianceColor);
   if (custom) return custom;
   const appAccent = normalizeAccentColor(appAccentColor);
   if (appAccent) return appAccent;
-  const sidebarAccent = normalizeAccentColor(themeAccentColor);
-  if (sidebarAccent) return sidebarAccent;
   return normalizeAmbianceTint(readCssVariable("--cafe-sidebar-accent"));
 }
 
@@ -155,7 +149,6 @@ type AmbianceConfigInputs = {
   reactMode: AmbianceReactMode;
   ambianceColor: string;
   appAccentColor: string;
-  themeAccentColor: string;
   surfaceSidebar: boolean;
   surfaceThread: boolean;
   reducedMotion: boolean;
@@ -167,7 +160,7 @@ function buildEngineConfig(inputs: AmbianceConfigInputs) {
     effect: inputs.effect,
     intensity: inputs.intensity,
     reactMode: inputs.reactMode,
-    tint: resolveAmbianceTint(inputs.ambianceColor, inputs.appAccentColor, inputs.themeAccentColor),
+    tint: resolveAmbianceTint(inputs.ambianceColor, inputs.appAccentColor),
     surfaces: { sidebar: inputs.surfaceSidebar, thread: inputs.surfaceThread },
     reducedMotion: inputs.reducedMotion,
     dark: inputs.dark,
@@ -203,7 +196,6 @@ function AmbianceCanvas() {
   const surfaceComposer = useSettings((settings) => settings.ambianceSurfaceComposer);
   const ambianceColor = useSettings((settings) => settings.ambianceColor);
   const appAccentColor = useSettings((settings) => settings.appAccentColor);
-  const themeAccentColor = useSettings((settings) => settings.themeAccentColor);
   const continueBackgroundAnimations = useSettings(
     (settings) => settings.continueBackgroundAnimations,
   );
@@ -260,7 +252,6 @@ function AmbianceCanvas() {
     reactMode,
     ambianceColor,
     appAccentColor,
-    themeAccentColor,
     surfaceSidebar,
     surfaceThread,
     reducedMotion,
@@ -272,7 +263,6 @@ function AmbianceCanvas() {
     reactMode,
     ambianceColor,
     appAccentColor,
-    themeAccentColor,
     surfaceSidebar,
     surfaceThread,
     reducedMotion,
@@ -293,7 +283,6 @@ function AmbianceCanvas() {
     surfaceSidebar,
     surfaceThread,
     theme,
-    themeAccentColor,
     dark,
   ]);
 
@@ -383,7 +372,9 @@ function AmbianceCanvas() {
 
   // Focused-thread signals → engine. Pulses fire only on observed
   // transitions, never on initial subscription, so opening an old thread
-  // does not replay its history as weather.
+  // does not replay its history as weather. Engine replacement must acquire
+  // the current levels even when the projection has not changed; keep the
+  // prior observation across that replacement so it does not replay pulses.
   const previousSignalsRef = useRef<{ threadId: string | null; signals: FocusedThreadSignals }>({
     threadId: null,
     signals: EMPTY_SIGNALS,
@@ -443,7 +434,7 @@ function AmbianceCanvas() {
     }
 
     previousSignalsRef.current = { threadId: focusedKey, signals };
-  }, [focusedThreadId, reactMode, signals]);
+  }, [engineKey, focusedThreadId, reactMode, signals]);
 
   // Background fallback when no thread is focused (dashboard, settings):
   // a slow bounded poll keeps the sky honest about running work elsewhere.
@@ -465,7 +456,7 @@ function AmbianceCanvas() {
     syncAggregate();
     const interval = window.setInterval(syncAggregate, AGGREGATE_POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [focusedThreadId, reactMode, workspaceEnvironmentId]);
+  }, [engineKey, focusedThreadId, reactMode, workspaceEnvironmentId]);
 
   // State color + composer ring CSS variables. Written at a slow cadence and
   // only on change; the CSS side owns the smoothing transition.
@@ -510,7 +501,7 @@ function AmbianceCanvas() {
       window.clearInterval(interval);
       clearAmbianceCssVariables();
     };
-  }, [surfaceComposer]);
+  }, [engineKey, surfaceComposer]);
 
   // Canvas is a replaced element, and `contain: strict` includes size
   // containment. Chromium therefore cannot derive a used size from `inset: 0`

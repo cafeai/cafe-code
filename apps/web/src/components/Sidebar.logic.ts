@@ -24,6 +24,14 @@ export function shouldInsetContentSidebarTrigger(input: {
   return input.isElectronHost && !input.isMobile && isMacPlatform(input.platform);
 }
 
+/** With Desk turned off the sidebar is always Projects; the saved choice is kept. */
+export function resolveEffectiveSidebarMode(
+  deskEnabled: boolean,
+  savedMode: "desk" | "projects",
+): "desk" | "projects" {
+  return deskEnabled ? savedMode : "projects";
+}
+
 export type SidebarNewThreadEnvMode = "local" | "worktree";
 type SidebarProject = {
   id: string;
@@ -91,20 +99,24 @@ export interface ThreadStatusPill {
     | "Failed"
     | "Pending Approval"
     | "Awaiting Input"
-    | "Plan Ready";
+    | "Plan Ready"
+    | "Scheduled";
   colorClass: string;
   dotClass: string;
   pulse: boolean;
+  /** Draws the animated clock instead of a dot or spinner. */
+  clock?: true;
 }
 
 const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
-  "Pending Approval": 6,
-  "Awaiting Input": 5,
-  Failed: 4,
-  Working: 3,
-  "Background work": 3,
-  Connecting: 3,
-  "Plan Ready": 2,
+  "Pending Approval": 7,
+  "Awaiting Input": 6,
+  Failed: 5,
+  Working: 4,
+  "Background work": 4,
+  Connecting: 4,
+  "Plan Ready": 3,
+  Scheduled: 2,
   Completed: 1,
 };
 
@@ -129,6 +141,15 @@ const THREAD_STATUS_PILLS: Record<ThreadStatusPill["label"], ThreadStatusPill> =
   "Pending Approval": { label: "Pending Approval", ...ATTENTION_STATUS_CLASSES, pulse: false },
   "Awaiting Input": { label: "Awaiting Input", ...ATTENTION_STATUS_CLASSES, pulse: false },
   "Plan Ready": { label: "Plan Ready", ...ATTENTION_STATUS_CLASSES, pulse: false },
+  // Waiting for the backend scheduler, not running: a muted animated clock so
+  // it never reads as active work beside the accent-coloured spinner.
+  Scheduled: {
+    label: "Scheduled",
+    colorClass: "text-muted-foreground",
+    dotClass: "bg-muted-foreground",
+    pulse: false,
+    clock: true,
+  },
   Completed: {
     label: "Completed",
     colorClass: "text-status-done-foreground",
@@ -167,6 +188,8 @@ export function threadStatusDisplayLabel(label: ThreadStatusPill["label"]): stri
       return uiText("Awaiting Input");
     case "Plan Ready":
       return uiText("Plan Ready");
+    case "Scheduled":
+      return uiText("Follow-up scheduled");
   }
 }
 
@@ -181,6 +204,8 @@ type ThreadStatusInput = Pick<
   | "liveWork"
 > & {
   lastVisitedAt?: string | undefined;
+  /** Earliest upcoming enabled scheduled follow-up (navigation presence only). */
+  scheduledFollowUpAt?: string | undefined;
 };
 
 export interface ThreadJumpHintVisibilityController {
@@ -503,13 +528,25 @@ export function resolveThreadStatusPill(input: {
     return getThreadStatusPill("Plan Ready");
   }
 
-  if (hasUnseenCompletion(thread)) {
-    // An unseen turn that ended in error is surfaced as a failure rather than
-    // an ordinary unread completion; both clear once the chat is viewed.
-    if (thread.latestTurn?.state === "error") {
-      return getThreadStatusPill("Failed");
-    }
-    return getThreadStatusPill("Completed");
+  // Restart reconciliation closes an orphaned turn as interrupted and retains
+  // its failure in lastError. It still needs the unread failure indicator; an
+  // ordinary interruption without an error keeps its existing presentation.
+  // Only inspect error presence, never diagnostic prose.
+  const unseenCompletion = hasUnseenCompletion(thread);
+  const unseenFailure =
+    unseenCompletion &&
+    (thread.latestTurn?.state === "error" ||
+      (thread.latestTurn?.state === "interrupted" && Boolean(thread.session?.lastError)));
+
+  // A chat waiting for its next scheduled follow-up is not finished: show the
+  // clock instead of the completed/idle state. An unseen failure still wins so
+  // the error is not hidden behind the schedule.
+  if (thread.scheduledFollowUpAt !== undefined && !unseenFailure) {
+    return getThreadStatusPill("Scheduled");
+  }
+
+  if (unseenCompletion) {
+    return getThreadStatusPill(unseenFailure ? "Failed" : "Completed");
   }
 
   return null;
@@ -553,6 +590,8 @@ function hiddenThreadStatusCountLabel(status: ThreadStatusPill["label"], count: 
       return uiText("{count, plural, one {# plan ready} other {# plans ready}}", { count });
     case "Failed":
       return uiText("{count} failed", { count });
+    case "Scheduled":
+      return uiText("{count} scheduled", { count });
     case "Completed":
       return uiText("{count} unread", { count });
   }

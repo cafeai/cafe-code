@@ -68,14 +68,23 @@ catalogues do not imply access.
 **Off** explicitly requests Standard and remains the default on models that
 support Standard. **Blue** and **Red** submit that exact level; selecting Blue
 does not upgrade to Red when both are available. Switching models preserves the
-saved level. If the new account/model does not accept it, Cafe retains the choice
-for correction and refuses submission rather than silently changing levels.
-Existing saved Blue/Red options retain their recorded program identity.
+saved level when the destination accepts it. If the destination cannot accept
+that level and supports Standard, Cafe saves **Off** before sending. Returning to
+a Daybreak-capable model keeps it Off until a level is selected again. Other
+model options are retained. Existing saved Blue/Red options retain their recorded
+program identity.
 
 A model that accepts only Daybreak offers only its advertised levels and has no
 implicit selection; select a Standard-capable model to turn Daybreak off. Opening
 the menu never enables Daybreak. If access disappears entirely, the menu offers
 **Turn unavailable Daybreak off** without offering unavailable levels.
+
+The picker and provider daemon own separate model catalogues. An explicit Blue
+or Red selection missing from the daemon's catalogue triggers one bounded
+model-list refresh for that exact account before validation. The refreshed
+catalogue must advertise the exact requested level before a session opens or a
+turn is submitted. A removed level still refuses submission; other accounts,
+model names and saved settings cannot supply access.
 
 The standalone Daybreak Blue/Red aliases are no longer selectable, including in
 cached and custom model lists. Saved chats retain their existing model identity;

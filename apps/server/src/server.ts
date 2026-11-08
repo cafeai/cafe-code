@@ -22,6 +22,7 @@ import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "./config.ts";
+import { startDesktopPowerState } from "./desktopPowerState.ts";
 import { fileAttachmentRouteLayer } from "./fileAttachmentHttp.ts";
 import { ChatImagesLive } from "./chatImages/service.ts";
 import { ChatImagePublicationLive } from "./chatImages/reactor.ts";
@@ -29,6 +30,7 @@ import { chatImageRouteLayer } from "./chatImages/http.ts";
 import {
   attachmentsRouteLayer,
   brandingSidebarImageServeRouteLayer,
+  brandingAppIconRouteLayer,
   brandingSidebarImageUploadRouteLayer,
   clientDebugLogRouteLayer,
   httpsCertificateRouteLayer,
@@ -383,6 +385,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   chatImageRouteLayer,
   visualizationPosterRouteLayer,
   brandingSidebarImageServeRouteLayer,
+  brandingAppIconRouteLayer,
   brandingSidebarImageUploadRouteLayer,
   clientDebugLogRouteLayer,
   cafeMcpRouteLayer,
@@ -444,6 +447,7 @@ export const makeServerLayer = Layer.unwrap(
     );
     const httpsSiblingLayer = Layer.effectDiscard(startHttpsSiblingServer);
     const serverApplicationLayer = Layer.mergeAll(
+      Layer.effectDiscard(startDesktopPowerState),
       HttpRouter.serve(makeRoutesLayer, {
         disableLogger: !config.logWebSocketEvents,
       }),

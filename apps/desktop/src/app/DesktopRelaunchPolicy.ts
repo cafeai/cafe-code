@@ -8,6 +8,8 @@ export function usesDesktopRestartSupervisor(input: {
 }): boolean {
   return (
     input.isDevelopment ||
-    (!input.isPackaged && input.platform === "darwin" && input.nativeHostVersion === "1")
+    (!input.isPackaged &&
+      input.platform === "darwin" &&
+      (input.nativeHostVersion === "1" || input.nativeHostVersion === "2"))
   );
 }

@@ -22,9 +22,12 @@ const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const unused = () =>
   Effect.die(new Error("The unauthenticated listener must not call a scheduling service."));
 const testServices = Layer.mergeAll(
-  ServerConfig.layerTest(process.cwd(), process.cwd()),
+  // Keep derived state, cache and worktree directories inside the layer's
+  // temporary scope while preserving the original workspace cwd.
+  ServerConfig.layerTest(process.cwd(), { prefix: "cafe-scheduling-loopback-" }),
   Layer.succeed(ScheduledFollowups, {
     list: unused,
+    summary: unused,
     save: unused,
     setStatus: unused,
     runNow: unused,

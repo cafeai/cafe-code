@@ -6,11 +6,21 @@ import type {
   ExecutionEnvironmentDescriptor,
 } from "@cafecode/contracts";
 import { ENVIRONMENT_ENDPOINT_PATHS } from "@cafecode/shared/environmentEndpoint";
+import {
+  RemoteEnvironmentCertificateError,
+  RemoteCertificateReviewError,
+  remoteCertificatePreparationMessage,
+} from "./certificate";
 
 class RemoteEnvironmentConnectionError extends Error {}
 class RemoteEnvironmentNetworkError extends RemoteEnvironmentConnectionError {}
 
 export function remoteEnvironmentErrorMessage(error: unknown, fallback: string): string {
+  if (
+    error instanceof RemoteEnvironmentCertificateError ||
+    error instanceof RemoteCertificateReviewError
+  )
+    return error.message;
   if (error instanceof RemoteEnvironmentConnectionError) return error.message;
   if (isRemoteEnvironmentAuthHttpError(error)) {
     if (error.reason === "two-factor-locked")
@@ -96,6 +106,23 @@ export async function fetchRemoteJson<T>(input: {
       ...(input.body !== undefined ? { body: JSON.stringify(input.body) } : {}),
     });
   } catch {
+    // The native probe sends no HTTP/auth data and never opens a trust dialog.
+    // Browser clients and older desktop bridges retain ordinary network handling.
+    if (
+      new URL(input.httpBaseUrl).protocol === "https:" &&
+      window.desktopBridge?.inspectRemoteCertificate
+    ) {
+      const inspection = await window.desktopBridge
+        .inspectRemoteCertificate(input.httpBaseUrl)
+        .catch(() => "unreachable" as const);
+      if (
+        inspection === "changed" ||
+        inspection === "untrusted" ||
+        inspection === "invalid-certificate"
+      ) {
+        throw new RemoteEnvironmentCertificateError(inspection);
+      }
+    }
     throw new RemoteEnvironmentNetworkError(
       uiText(
         "Could not reach the remote Cafe Code server. Check the address, network access, and HTTPS certificate trust.",
@@ -181,13 +208,14 @@ export async function fetchRemoteEnvironmentDescriptor(input: {
         pathname,
       });
     } catch (error) {
-      // Only enrollment may ask for native trust, before sending any credential.
+      // Only explicit enrollment may ask for native trust here, before sending credentials.
       // Retry the public GET once; bootstrap POSTs are never replayed.
       const prepare = window.desktopBridge?.prepareRemoteCertificate;
       if (
         input.approveCertificate &&
         prepare &&
-        error instanceof RemoteEnvironmentNetworkError &&
+        (error instanceof RemoteEnvironmentNetworkError ||
+          error instanceof RemoteEnvironmentCertificateError) &&
         new URL(input.httpBaseUrl).protocol === "https:"
       ) {
         const result = await prepare(input.httpBaseUrl);
@@ -197,22 +225,7 @@ export async function fetchRemoteEnvironmentDescriptor(input: {
             pathname,
           });
         }
-        const messages = {
-          declined: uiText("Certificate approval was cancelled. No sign-in credential was sent."),
-          "invalid-certificate": uiText(
-            "The server’s HTTPS certificate is expired, does not match its address, or cannot be trusted. Update and restart Cafe Code on the server, then try again.",
-          ),
-          unreachable: uiText(
-            "Could not reach the remote Cafe Code server. Check the address and network access.",
-          ),
-          "storage-error": uiText(
-            "Could not save certificate approval. Check that Cafe Code can write its local app data, then try again.",
-          ),
-          unchanged: uiText(
-            "The server’s HTTPS certificate is valid, but the request failed. Check the server’s network access and cross-origin configuration.",
-          ),
-        };
-        throw new RemoteEnvironmentConnectionError(messages[result]);
+        throw new RemoteEnvironmentConnectionError(remoteCertificatePreparationMessage(result));
       }
       lastError = error;
     }

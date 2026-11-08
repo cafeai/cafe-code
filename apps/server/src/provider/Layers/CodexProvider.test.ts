@@ -122,6 +122,7 @@ describe("Codex account-scoped fallback catalogue", () => {
     { status: "unauthenticated", type: "chatgpt" },
     { status: "authenticated", type: "apiKey" },
     { status: "authenticated", type: "amazonBedrock" },
+    { status: "authenticated", type: "gcp" },
     { status: "authenticated" },
     { type: "chatgpt" },
     { status: "authenticated", type: "CHATGPT" },
@@ -215,7 +216,7 @@ describe("Codex account-scoped fallback catalogue", () => {
       const spawner = ChildProcessSpawner.make((command) => {
         if (!ChildProcess.isStandardCommand(command)) return Effect.die("Unexpected pipeline");
         commands.push(command.args);
-        expect(command.command).toBe("synthetic-codex");
+        expect(command.command).toBe("/test-only/synthetic-codex.exe");
         expect(command.options.env).toEqual({ CAFE_TEST_ONLY: "catalogue" });
         const stdout =
           command.args.length === 1 && command.args[0] === "--version"
@@ -244,7 +245,7 @@ describe("Codex account-scoped fallback catalogue", () => {
       });
       const snapshot = await Effect.runPromise(
         checkCodexCliProviderStatus(
-          decodeCodexSettings({ binaryPath: "synthetic-codex", homePath: "" }),
+          decodeCodexSettings({ binaryPath: "/test-only/synthetic-codex.exe", homePath: "" }),
           { CAFE_TEST_ONLY: "catalogue" },
         ).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -367,6 +368,7 @@ describe("Codex catalogue producer provenance", () => {
   it.each([
     { label: "ChatGPT native", type: "chatgpt", requiresAuth: true, empty: false, failed: false },
     { label: "API native", type: "apiKey", requiresAuth: true, empty: false, failed: false },
+    { label: "GCP native", type: "gcp", requiresAuth: false, empty: false, failed: false },
     { label: "unknown native", type: "unknown", requiresAuth: false, empty: false, failed: false },
     { label: "native empty", type: "chatgpt", requiresAuth: true, empty: true, failed: false },
     {
@@ -393,7 +395,9 @@ describe("Codex catalogue producer provenance", () => {
           ? { type: "chatgpt", email: "synthetic@example.invalid", planType: "plus" }
           : type === "apiKey"
             ? { type: "apiKey" }
-            : null;
+            : type === "gcp"
+              ? { type: "gcp" }
+              : null;
       const earlyReturn = account === null && requiresAuth;
       const snapshot = await Effect.runPromise(
         Effect.gen(function* () {
@@ -413,7 +417,7 @@ describe("Codex catalogue producer provenance", () => {
           let pending = "";
           const spawner = ChildProcessSpawner.make((command) => {
             if (!ChildProcess.isStandardCommand(command)) return Effect.die("Unexpected pipeline");
-            expect(command.command).toBe("synthetic-codex");
+            expect(command.command).toBe("/test-only/synthetic-codex.exe");
             commands.push(command.args);
             return Effect.succeed(
               ChildProcessSpawner.makeHandle({
@@ -491,7 +495,7 @@ describe("Codex catalogue producer provenance", () => {
           });
           return yield* checkCodexProviderStatus(
             decodeCodexSettings({
-              binaryPath: "synthetic-codex",
+              binaryPath: "/test-only/synthetic-codex.exe",
               homePath: "",
               customModels: ["custom-model"],
             }),
@@ -512,6 +516,14 @@ describe("Codex catalogue producer provenance", () => {
         earlyReturn || failed || empty ? ["custom-model"] : ["gpt-5.5", "custom-model"],
       );
       expect(snapshot.models.find((row) => row.slug === "custom-model")?.isCustom).toBe(true);
+      if (type === "gcp") {
+        expect(snapshot.auth).toEqual({
+          status: "authenticated",
+          type: "gcp",
+          label: "Google Cloud",
+        });
+        expect(snapshot.auth).not.toHaveProperty("email");
+      }
       if (!earlyReturn && !failed && !empty) {
         expect(snapshot.models[0]).toMatchObject({
           slug: "gpt-5.5",
@@ -550,9 +562,32 @@ describe("Codex CLI health probe command", () => {
     { binaryPath: "codex", windowsShell: true },
     { binaryPath: "/test-only/codex", windowsShell: true },
   ])("preserves probe ownership and argv for $binaryPath", ({ binaryPath, windowsShell }) => {
-    const environment = { CAFE_TEST_ONLY: "literal & | %fixture%", CODEX_HOME: "overridden" };
+    const environment = {
+      CAFE_TEST_ONLY: "literal & | %fixture%",
+      CODEX_HOME: "overridden",
+      PATH: "",
+      NoDefaultCurrentDirectoryInExePath: "1",
+    };
     const homePath = "isolated-codex-home";
     const args = ["", "two words", 'embedded"quote', "a&b|c", "%CAFE_TEST_ONLY%"];
+    if (process.platform === "win32" && windowsShell && !/\.(?:cmd|bat)$/iu.test(binaryPath)) {
+      expect(() =>
+        makeCodexHealthProbeCommand(
+          decodeCodexSettings({ binaryPath, homePath }),
+          args,
+          environment,
+        ),
+      ).toThrowError("Unsupported or unavailable Windows Codex command.");
+      expect(() =>
+        makeCodexModelListCommand({
+          binaryPath,
+          homePath,
+          cwd: "backend-owned-cwd",
+          environment,
+        }),
+      ).toThrowError("Unsupported or unavailable Windows Codex command.");
+      return;
+    }
     const health = makeCodexHealthProbeCommand(
       decodeCodexSettings({ binaryPath, homePath }),
       args,
@@ -566,28 +601,71 @@ describe("Codex CLI health probe command", () => {
     });
 
     for (const command of [health, models]) {
-      expect(command.command).toBe(binaryPath);
+      const batch = process.platform === "win32" && windowsShell;
+      expect(batch ? command.command.replace(/\^(.)/gu, "$1") : command.command).toBe(binaryPath);
       expect(command.options.shell).toBe(process.platform === "win32" && windowsShell);
       expect(command.options.env).toEqual({ ...environment, CODEX_HOME: homePath });
       expect(command.options.detached).toBe(process.platform !== "win32");
       expect(command.options.killSignal).toBe("SIGKILL");
     }
-    expect(health.args).toEqual(args);
-    expect(models.args).toEqual(["app-server"]);
+    // This inert transport decoder only preserves caller-input assertions;
+    // the real Windows client peer owns independent batch-escaping proof.
+    const received = (values: ReadonlyArray<string>) =>
+      process.platform === "win32" && windowsShell
+        ? values.map((value) =>
+            value
+              .replace(/\^(.)/gu, "$1")
+              .replace(/\^(.)/gu, "$1")
+              .slice(1, -1)
+              .replace(/(\\+)(?="|$)/gu, (slashes) => "\\".repeat(Math.floor(slashes.length / 2))),
+          )
+        : values;
+    expect(received(health.args)).toEqual(args);
+    expect(received(models.args)).toEqual(["app-server"]);
     expect(models.options.cwd).toBe("backend-owned-cwd");
   });
+
+  it.skipIf(process.platform !== "win32")(
+    "keeps refused command availability and authentication unknown without spawning",
+    async () => {
+      let spawns = 0;
+      const snapshot = await Effect.runPromise(
+        checkCodexCliProviderStatus(
+          decodeCodexSettings({ binaryPath: "missing-cafe-fixture-codex" }),
+          { PATH: "", NoDefaultCurrentDirectoryInExePath: "1" },
+        ).pipe(
+          Effect.provideService(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() => {
+              spawns += 1;
+              return Effect.die(new Error("A refused command must not reach process admission."));
+            }),
+          ),
+          Effect.provideService(FileSystem.FileSystem, FileSystem.makeNoop({})),
+          Effect.provide(Path.layer),
+        ),
+      );
+      expect(spawns).toBe(0);
+      expect(snapshot.installed).toBe(false);
+      expect(snapshot.status).toBe("error");
+      expect(snapshot.auth.status).toBe("unknown");
+      expect(snapshot.message).toBe(
+        "Codex command availability could not be verified. Check the executable selected in provider settings.",
+      );
+    },
+  );
 
   it("isolates POSIX descendants and gives scope cleanup a SIGKILL backstop", () => {
     const command = makeCodexHealthProbeCommand(
       decodeCodexSettings({
-        binaryPath: "/opt/codex/bin/codex",
+        binaryPath: "/opt/codex/bin/codex.exe",
         homePath: "/private/codex-home",
       }),
       ["--version"],
       { PATH: "/usr/bin" },
     );
 
-    expect(command.command).toBe("/opt/codex/bin/codex");
+    expect(command.command).toBe("/opt/codex/bin/codex.exe");
     expect(command.args).toEqual(["--version"]);
     expect(command.options.detached).toBe(process.platform !== "win32");
     expect(command.options.killSignal).toBe("SIGKILL");
@@ -599,13 +677,13 @@ describe("Codex CLI health probe command", () => {
 
   it("uses the same isolated child-tree ownership for picker model/list", () => {
     const command = makeCodexModelListCommand({
-      binaryPath: "/opt/codex/bin/codex",
+      binaryPath: "/opt/codex/bin/codex.exe",
       homePath: "/private/codex-home",
       cwd: "/private/cafe-state",
       environment: { PATH: "/usr/bin" },
     });
 
-    expect(command.command).toBe("/opt/codex/bin/codex");
+    expect(command.command).toBe("/opt/codex/bin/codex.exe");
     expect(command.args).toEqual(["app-server"]);
     expect(command.options.cwd).toBe("/private/cafe-state");
     expect(command.options.detached).toBe(process.platform !== "win32");
@@ -770,6 +848,99 @@ describe("Codex picker model/list refresh", () => {
       });
     },
   );
+
+  it("offers Terra without inventing a default effort or paid tier", () => {
+    const slug = "gpt-6.1-terra";
+    const models = fallbackCodexModelsFromSettings(decodeCodexSettings({ customModels: [slug] }));
+    const matching = models.filter((model) => model.slug === slug);
+    expect(matching).toHaveLength(1);
+    const row = matching[0]!;
+    expect(row).toMatchObject({ slug, name: "GPT-6.1-Terra", isCustom: false });
+    const descriptors = row.capabilities?.optionDescriptors ?? [];
+    expect(descriptors).toMatchObject([
+      {
+        id: "reasoningEffort",
+        options: ["low", "medium", "high", "xhigh", "max", "ultra"].map((id) => ({ id })),
+      },
+      {
+        id: "serviceTier",
+        currentValue: "default",
+        options: [{ id: "default", isDefault: true }],
+      },
+    ]);
+    const reasoning = descriptors.find((option) => option.id === "reasoningEffort");
+    expect(reasoning?.currentValue).toBeUndefined();
+    expect(
+      reasoning?.type === "select" && reasoning.options.some((option) => option.isDefault),
+    ).toBe(false);
+    expect(
+      buildProviderOptionSelectionsFromDescriptors(
+        getProviderOptionDescriptors({
+          caps: row.capabilities!,
+        }),
+      ),
+    ).toEqual([{ id: "serviceTier", value: "default" }]);
+    const retained = getProviderOptionDescriptors({
+      caps: row.capabilities!,
+      selections: [{ id: "serviceTier", value: "priority" }],
+    });
+    expect(retained.find((option) => option.id === "serviceTier")).toMatchObject({
+      currentValue: "priority",
+      options: [{ id: "default" }],
+    });
+    expect(buildProviderOptionSelectionsFromDescriptors(retained)).toContainEqual({
+      id: "serviceTier",
+      value: "priority",
+    });
+
+    // Account-native rows, including their own narrower options and tiers,
+    // replace the static fallback; an explicit custom row remains conservative.
+    const live = { slug, name: "Account Terra", isCustom: false, capabilities: null };
+    expect(finalizeCodexModelListRefresh([live], [slug])).toEqual([live]);
+    const other = { ...live, slug: "other" };
+    expect(finalizeCodexModelListRefresh([other], [])).toEqual([other]);
+    expect(finalizeCodexModelListRefresh([other], [slug])?.[1]).toEqual({
+      ...row,
+      isCustom: true,
+    });
+  });
+
+  it("preserves Terra's account-native options when they differ from fallback", async () => {
+    const client = makeModelListClient(() =>
+      Effect.succeed({
+        data: [
+          {
+            ...makeModel("gpt-6.1-terra"),
+            displayName: "GPT-6.1-Terra",
+            inputModalities: ["text"],
+            supportedReasoningEfforts: (["medium", "high"] as const).map((reasoningEffort) => ({
+              reasoningEffort,
+              description: reasoningEffort,
+            })),
+            serviceTiers: [{ id: "priority", name: "Fast", description: "Priority" }],
+          },
+        ],
+      }),
+    );
+    const discovered = await Effect.runPromise(requestAllCodexModelsWithClient(client));
+    const models = finalizeCodexModelListRefresh(discovered, ["gpt-6.1-terra"]);
+    expect(models).toEqual(discovered);
+    expect(models?.[0]?.capabilities).toMatchObject({
+      inputModalities: ["text"],
+      optionDescriptors: [
+        {
+          id: "reasoningEffort",
+          currentValue: "medium",
+          options: [{ id: "medium", isDefault: true }, { id: "high" }],
+        },
+        {
+          id: "serviceTier",
+          currentValue: "default",
+          options: [{ id: "default" }, { id: "priority" }],
+        },
+      ],
+    });
+  });
 
   it("keeps live Sol 6.1 defaults and narrower backend controls authoritative", async () => {
     const efforts = ["low", "medium", "high", "xhigh", "max"];

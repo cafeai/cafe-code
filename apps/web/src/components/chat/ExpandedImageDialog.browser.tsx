@@ -230,6 +230,10 @@ describe("expanded chat images", () => {
     const onClose = vi.fn();
     let observedViewport: HTMLElement | null = null;
     let retired = false;
+    const originalKeys: { keydown: KeyboardEvent | undefined; keyup: KeyboardEvent | undefined } = {
+      keydown: undefined,
+      keyup: undefined,
+    };
     let sequence = 0;
     const observations: Record<string, string | number | boolean | null>[] = [];
     const observe = (phase: string, event?: Event) => {
@@ -259,9 +263,11 @@ describe("expanded chat images", () => {
       if (observations.length > 16) observations.shift();
     };
     const observeKeyState = (event: KeyboardEvent) => {
-      if (event.key !== "ArrowRight") return;
-      // Read final dispatch state without consuming native scrolling. Retired
-      // continuations cannot append after the one-shot completion receipt.
+      if (retired || event.key !== "ArrowRight") return;
+      if (event.type === "keyup" && originalKeys.keyup === undefined) originalKeys.keyup = event;
+      // Capture-listener microtasks may run before later dispatch listeners.
+      // Keep these passive observations, but qualify the retained original
+      // events only after the existing native keyboard promise has returned.
       queueMicrotask(() => observe(event.type, event));
     };
     const observeFocus = (event: FocusEvent) => {
@@ -274,6 +280,8 @@ describe("expanded chat images", () => {
       if (retired) return;
       observe("final");
       retired = true;
+      originalKeys.keydown = undefined;
+      originalKeys.keyup = undefined;
       window.removeEventListener("keydown", observeKeyState, true);
       window.removeEventListener("keyup", observeKeyState, true);
       window.removeEventListener("focus", observeFocus, true);
@@ -331,26 +339,31 @@ describe("expanded chat images", () => {
       let keyReceipt: { trusted: boolean; exactTarget: boolean; defaultPrevented: boolean } | null =
         null;
       const observeKey = (event: KeyboardEvent) => {
-        if (event.key !== "ArrowRight") return;
+        if (retired || event.key !== "ArrowRight") return;
         retireKeyReceipt();
-        // Observe final dispatch state without consuming or preventing native
-        // scrolling, which remains the behavior under test.
-        queueMicrotask(() => {
-          keyReceipt = {
-            trusted: event.isTrusted,
-            exactTarget: event.target === viewport,
-            defaultPrevented: event.defaultPrevented,
-          };
-        });
+        originalKeys.keydown = event;
       };
       const retireKeyReceipt = () => window.removeEventListener("keydown", observeKey, true);
       onTestFinished(retireKeyReceipt);
       window.addEventListener("keydown", observeKey, true);
       try {
         await userEvent.keyboard("{ArrowRight}");
+        if (retired) throw new Error("Image keyboard fixture already retired");
+        // These are the exact original events, not a replacement key or an
+        // earlier capture microtask. The native action has now completed, so
+        // later React/window prevention is included in the existing receipt.
+        if (originalKeys.keydown) {
+          observe("after-keydown", originalKeys.keydown);
+          keyReceipt = {
+            trusted: originalKeys.keydown.isTrusted,
+            exactTarget: originalKeys.keydown.target === viewport,
+            defaultPrevented: originalKeys.keydown.defaultPrevented,
+          };
+        }
+        if (originalKeys.keyup) observe("after-keyup", originalKeys.keyup);
         observe("after-key");
         await vi.waitFor(() =>
-          expect(keyReceipt).toEqual({ trusted: true, exactTarget: true, defaultPrevented: false }),
+          expect(keyReceipt).toEqual({ trusted: true, exactTarget: true, defaultPrevented: true }),
         );
         await vi.waitFor(() => expect(viewport.scrollLeft).toBeGreaterThan(beforeKey));
       } finally {
@@ -555,6 +568,104 @@ describe("expanded chat images", () => {
       expect(onClose).toHaveBeenCalledOnce();
     } finally {
       await view.unmount();
+    }
+  });
+
+  it("preserves a modified overflow arrow without navigating the image gallery", async ({
+    onTestFinished,
+    signal,
+  }) => {
+    let retired = false;
+    let view: Awaited<ReturnType<typeof render>> | undefined;
+    let pendingRender: ReturnType<typeof render> | undefined;
+    let arrow: KeyboardEvent | undefined;
+    const readArrow = (): KeyboardEvent | undefined => arrow;
+    let cleanupPromise: Promise<void> | undefined;
+    const pending = new Set<Promise<unknown>>();
+    const requireActive = () => {
+      if (retired) throw new Error("Image modified-arrow fixture retired");
+    };
+    const own = <T,>(operation: () => Promise<T>): Promise<T> => {
+      requireActive();
+      const result = operation();
+      pending.add(result);
+      void result.then(
+        () => pending.delete(result),
+        () => pending.delete(result),
+      );
+      return result;
+    };
+    const observe = (event: KeyboardEvent) => {
+      if (!retired && event.key === "ArrowRight") arrow = event;
+    };
+    const retire = () => {
+      retired = true;
+      arrow = undefined;
+      window.removeEventListener("keydown", observe, true);
+    };
+    const cleanup = () => {
+      if (cleanupPromise) return cleanupPromise;
+      retire();
+      cleanupPromise = (async () => {
+        try {
+          await Promise.allSettled([...pending]);
+          const mounted = view ?? (await pendingRender);
+          await mounted?.unmount();
+        } finally {
+          signal?.removeEventListener("abort", retire);
+        }
+      })();
+      return cleanupPromise;
+    };
+    onTestFinished(cleanup);
+    signal?.addEventListener("abort", retire, { once: true });
+    if (signal?.aborted) retire();
+    const onClose = vi.fn();
+    try {
+      await own(() => page.viewport(1100, 800));
+      requireActive();
+      pendingRender = own(() => render(<PreviewInPane onClose={onClose} />));
+      view = await pendingRender;
+      requireActive();
+      await own(() => expectFitted(landscape.name));
+      requireActive();
+      await own(() => page.getByRole("button", { name: "Original size", exact: true }).click());
+      requireActive();
+      const viewport = imageViewport();
+      await own(() =>
+        page
+          .getByRole("region", {
+            name: "Expanded image; scroll to zoom or drag to pan",
+            exact: true,
+          })
+          .click(),
+      );
+      requireActive();
+      await own(() =>
+        vi.waitFor(() => {
+          expect(document.activeElement).toBe(viewport);
+          expect(viewport.scrollWidth).toBeGreaterThan(viewport.clientWidth);
+        }),
+      );
+      requireActive();
+      const originalImage = page.getByRole("img", { name: landscape.name, exact: true }).element();
+      window.addEventListener("keydown", observe, true);
+      await own(() => userEvent.keyboard("{Shift>}{ArrowRight}{/Shift}"));
+      requireActive();
+      const receivedArrow = readArrow();
+      expect(receivedArrow?.isTrusted).toBe(true);
+      expect(receivedArrow?.target).toBe(viewport);
+      expect(receivedArrow?.shiftKey).toBe(true);
+      expect(receivedArrow?.defaultPrevented).toBe(false);
+      expect(page.getByRole("img", { name: landscape.name, exact: true }).element()).toBe(
+        originalImage,
+      );
+      expect(
+        page.getByRole("status", { name: "Zoom level", exact: true }).element().textContent,
+      ).toBe("100%");
+      expect(onClose).not.toHaveBeenCalled();
+    } finally {
+      await cleanup();
     }
   });
 

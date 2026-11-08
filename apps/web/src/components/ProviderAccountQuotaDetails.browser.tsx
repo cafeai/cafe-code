@@ -16,7 +16,8 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     mounted = undefined;
   });
 
-  it("swaps the weekly allowance with the selected model and keeps extra usage inline", async () => {
+  it("keeps each settings allowance and reset together while switching the selected model", async () => {
+    await page.viewport(1100, 800);
     const report: ProviderSessionQuotaReport = {
       source: "claude-cli",
       observedAt: new Date().toISOString(),
@@ -57,6 +58,7 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     };
     mounted = await render(
       <ProviderAccountQuotaDetails
+        layout="settings"
         selectedModel="claude-sonnet-5-5"
         sessionQuota={{ status: "available", report }}
       />,
@@ -64,6 +66,12 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     await expect.element(page.getByText("43% left", { exact: true })).toBeVisible();
     await expect.element(page.getByText("82% left", { exact: true })).toBeVisible();
     await expect.element(page.getByText("Weekly", { exact: true })).toBeVisible();
+    const session = page.getByRole("region", { name: "Session window quota", exact: true });
+    const weekly = page.getByRole("region", { name: "Weekly quota", exact: true });
+    await expect.element(session.getByText("43% left", { exact: true })).toBeVisible();
+    await expect.element(session.getByText("Resets:", { exact: false })).toBeVisible();
+    await expect.element(weekly.getByText("82% left", { exact: true })).toBeVisible();
+    await expect.element(weekly.getByText("Resets:", { exact: false })).toBeVisible();
     await expect.element(page.getByText("Weekly · Fable", { exact: true })).not.toBeInTheDocument();
     await expect.element(page.getByText("25% of extra usage used", { exact: true })).toBeVisible();
     const text = document.querySelector("[data-claude-session-quota]")!.textContent!;
@@ -80,8 +88,21 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     await expect
       .element(page.getByRole("button", { name: "Details", exact: true }))
       .not.toBeInTheDocument();
+    if (import.meta.env.VITE_PROVIDER_SCREENSHOTS === "1") {
+      const wasDark = document.documentElement.classList.contains("dark");
+      document.documentElement.classList.add("dark");
+      try {
+        await page.screenshot({
+          element: document.querySelector<HTMLElement>("[data-claude-session-quota]")!,
+          path: "../../../../.explorations/claude-provider-minimal/usage-settings.png",
+        });
+      } finally {
+        if (!wasDark) document.documentElement.classList.remove("dark");
+      }
+    }
     await mounted.rerender(
       <ProviderAccountQuotaDetails
+        layout="settings"
         selectedModel="claude-fable-5-1"
         sessionQuota={{ status: "available", report }}
       />,
@@ -92,6 +113,7 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     await expect.element(page.getByText("Weekly", { exact: true })).not.toBeInTheDocument();
     await mounted.rerender(
       <ProviderAccountQuotaDetails
+        layout="settings"
         selectedModel="claude-opus-5-5"
         sessionQuota={{ status: "available", report }}
       />,
@@ -168,8 +190,19 @@ describe("ProviderAccountQuotaDetails bounds", () => {
       let screen: Awaited<ReturnType<typeof render>> | undefined;
       let published = false;
       const observation = observeNativeInput("quota-panel", () => observedScroll);
+      let end: KeyboardEvent | undefined;
+      const readEnd = (): KeyboardEvent | undefined => end;
+      const observeEnd = (event: KeyboardEvent) => {
+        if (event.key === "End" && event.target === observedScroll) end = event;
+      };
+      const retireEnd = () => {
+        window.removeEventListener("keydown", observeEnd, true);
+        end = undefined;
+      };
       // Retire passive listeners even when the hard deadline bypasses finally.
       onTestFinished(observation.retire);
+      onTestFinished(retireEnd);
+      window.addEventListener("keydown", observeEnd, true);
       try {
         await page.viewport(700, 650);
         observation.assertActive();
@@ -220,6 +253,13 @@ describe("ProviderAccountQuotaDetails bounds", () => {
         await userEvent.keyboard("{End}");
         observation.assertActive();
         observation.mark("after-input");
+        // Inspect the original event only after its native command completes.
+        // Intentional interception must still deliver the original bottom/extra
+        // usage behavior below; this receipt is not a substitute for movement.
+        const receivedEnd = readEnd();
+        expect(receivedEnd?.isTrusted).toBe(true);
+        expect(receivedEnd?.target).toBe(scroll);
+        expect(receivedEnd?.defaultPrevented).toBe(true);
         await expect
           .poll(() => scroll.scrollTop + scroll.clientHeight)
           .toBeGreaterThanOrEqual(scroll.scrollHeight - 1);
@@ -237,6 +277,7 @@ describe("ProviderAccountQuotaDetails bounds", () => {
         observation.fail();
         throw error;
       } finally {
+        retireEnd();
         observation.retire();
         // The late continuation can retire only its own render. If afterEach
         // already unmounted a published screen, never touch a later case's root.
@@ -247,6 +288,103 @@ describe("ProviderAccountQuotaDetails bounds", () => {
       }
     },
   );
+
+  it("leaves modified End on the quota region to native selection behavior", async ({
+    onTestFinished,
+    signal,
+  }) => {
+    let retired = false;
+    let view: Awaited<ReturnType<typeof render>> | undefined;
+    let pendingRender: ReturnType<typeof render> | undefined;
+    let end: KeyboardEvent | undefined;
+    const readEnd = (): KeyboardEvent | undefined => end;
+    const pending = new Set<Promise<unknown>>();
+    let cleanupPromise: Promise<void> | undefined;
+    const requireActive = () => {
+      if (retired) throw new Error("Quota modified-End fixture retired");
+    };
+    const own = <T,>(operation: () => Promise<T>): Promise<T> => {
+      requireActive();
+      const result = operation();
+      pending.add(result);
+      void result.then(
+        () => pending.delete(result),
+        () => pending.delete(result),
+      );
+      return result;
+    };
+    const observe = (event: KeyboardEvent) => {
+      if (!retired && event.key === "End") end = event;
+    };
+    const retire = () => {
+      retired = true;
+      end = undefined;
+      window.removeEventListener("keydown", observe, true);
+    };
+    const cleanup = () => {
+      if (cleanupPromise) return cleanupPromise;
+      retire();
+      cleanupPromise = (async () => {
+        try {
+          // Retire admission first, join exact admitted native/render work, and
+          // only then unmount this fixture's own root. Never destroy a later test.
+          await Promise.allSettled([...pending]);
+          const mounted = view ?? (await pendingRender);
+          await mounted?.unmount();
+        } finally {
+          signal?.removeEventListener("abort", retire);
+        }
+      })();
+      return cleanupPromise;
+    };
+    onTestFinished(cleanup);
+    signal?.addEventListener("abort", retire, { once: true });
+    if (signal?.aborted) retire();
+    try {
+      await own(() => page.viewport(700, 650));
+      requireActive();
+      const report: ProviderSessionQuotaReport = {
+        source: "claude-session",
+        observedAt: new Date().toISOString(),
+        meters: Array.from({ length: 24 }, () => ({
+          kind: "future_meter",
+          group: "weekly",
+          usedPercent: 25,
+          resetsAt: null,
+          severity: "normal",
+          isActive: false,
+        })),
+      };
+      pendingRender = own(() =>
+        render(
+          <div style={{ width: 270 }}>
+            <ProviderAccountQuotaDetails
+              layout="panel"
+              sessionQuota={{ status: "available", report }}
+            />
+          </div>,
+        ),
+      );
+      view = await pendingRender;
+      requireActive();
+      const scroll = document.querySelector<HTMLElement>("[data-account-quota-scroll]")!;
+      expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
+      scroll.focus();
+      expect(document.activeElement).toBe(scroll);
+      window.addEventListener("keydown", observe, true);
+      await own(() => userEvent.keyboard("{Shift>}{End}{/Shift}"));
+      requireActive();
+      const receivedEnd = readEnd();
+      expect(receivedEnd?.isTrusted).toBe(true);
+      expect(receivedEnd?.target).toBe(scroll);
+      expect(receivedEnd?.shiftKey).toBe(true);
+      expect(receivedEnd?.defaultPrevented).toBe(false);
+      // This deliberately unhandled native selection command may move or select
+      // text. Its UA effect is not the quota controller's non-interception proof.
+    } finally {
+      await cleanup();
+    }
+  });
 
   it("distinguishes missing, empty and offline reports without reviving unbound sparse quota", async () => {
     mounted = await render(

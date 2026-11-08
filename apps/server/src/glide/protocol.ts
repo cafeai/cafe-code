@@ -290,6 +290,16 @@ export const observationSchema = z
     screenshotWidth: z.number().int().positive(),
     screenshotHeight: z.number().int().positive(),
     capturedAt: z.string(),
+    windowTitle: z.string().max(4096).optional(),
+    processBirth: z
+      .string()
+      .regex(/^[0-9]{1,20}:[0-9]{1,20}$/)
+      .optional(),
+    screenshotPreview: z
+      .string()
+      .max(96 * 1024)
+      .regex(/^data:image\/jpeg;base64,[A-Za-z0-9+/]+=*$/)
+      .optional(),
   })
   .strict();
 export type GlideObservation = z.infer<typeof observationSchema>;

@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
@@ -51,11 +52,33 @@ export const ServerProviderAuthStatus = Schema.Literals([
 ]);
 export type ServerProviderAuthStatus = typeof ServerProviderAuthStatus.Type;
 
+// The native result supplies a finite estimate of the stored login refresh
+// chain's end. It is current-runtime advisory metadata, never auth evidence.
+const CredentialExpiryInstant = Schema.String.check(
+  Schema.isMaxLength(24),
+  Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/),
+  Schema.makeFilter((value) => {
+    const milliseconds = Date.parse(value);
+    return (
+      Number.isFinite(milliseconds) &&
+      DateTime.formatIso(DateTime.makeUnsafe(milliseconds)) === value
+    );
+  }),
+);
+
+export const ServerProviderCredentialExpiry = Schema.Struct({
+  expiresAt: CredentialExpiryInstant,
+  observedAt: CredentialExpiryInstant,
+  source: Schema.Literal("native-result"),
+});
+export type ServerProviderCredentialExpiry = typeof ServerProviderCredentialExpiry.Type;
+
 export const ServerProviderAuth = Schema.Struct({
   status: ServerProviderAuthStatus,
   type: Schema.optional(TrimmedNonEmptyString),
   label: Schema.optional(TrimmedNonEmptyString),
   email: Schema.optional(TrimmedNonEmptyString),
+  credentialExpiry: Schema.optional(ServerProviderCredentialExpiry),
 });
 export type ServerProviderAuth = typeof ServerProviderAuth.Type;
 
@@ -286,12 +309,39 @@ export const ServerProviderUpdateStatus = Schema.Literals([
 ]);
 export type ServerProviderUpdateStatus = typeof ServerProviderUpdateStatus.Type;
 
+// Operational metadata only. Raw command output remains a separately bounded,
+// authenticated details field; never add command lines, paths or error prose here.
+export const ServerProviderUpdateDiagnostics = Schema.Struct({
+  phase: Schema.Literals(["preflight", "command", "verification", "lifecycle"]),
+  category: Schema.Literals([
+    "preflight_failed",
+    "command_failed",
+    "command_timed_out",
+    "runtime_check_failed",
+    "version_unverified",
+    "unexpected_failure",
+    "interrupted",
+  ]),
+  // Native Windows statuses may use a signed or unsigned32-bit representation.
+  exitCode: Schema.NullOr(
+    Schema.Int.check(Schema.isBetween({ minimum: -2147483648, maximum: 4294967295 })),
+  ),
+  timedOut: Schema.Boolean,
+  // These flags describe only the returned retained capture. Timeout currently
+  // discards partial streams, so false flags cannot attest original completeness.
+  stdoutTruncated: Schema.Boolean,
+  stderrTruncated: Schema.Boolean,
+  outputTruncated: Schema.Boolean,
+});
+export type ServerProviderUpdateDiagnostics = typeof ServerProviderUpdateDiagnostics.Type;
+
 export const ServerProviderUpdateState = Schema.Struct({
   status: ServerProviderUpdateStatus,
   startedAt: Schema.NullOr(IsoDateTime),
   finishedAt: Schema.NullOr(IsoDateTime),
   message: Schema.NullOr(TrimmedNonEmptyString),
   output: Schema.NullOr(Schema.String.check(Schema.isMaxLength(10_000))),
+  diagnostics: Schema.optionalKey(ServerProviderUpdateDiagnostics),
 });
 export type ServerProviderUpdateState = typeof ServerProviderUpdateState.Type;
 

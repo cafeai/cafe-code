@@ -15,6 +15,7 @@ import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
 
 import { withSessionAdmission } from "../sessionAdmission.ts";
+import { ManagementLaunchContext } from "../managementLaunchContext.ts";
 import { ServerConfig } from "../../config.ts";
 import { AuthSessionRepositoryLive } from "../../persistence/Layers/AuthSessions.ts";
 import { AuthSessionRepository } from "../../persistence/Services/AuthSessions.ts";
@@ -50,6 +51,7 @@ const SessionClaims = Schema.Struct({
   method: Schema.Literals(["browser-session-cookie", "bearer-session-token"]),
   iat: Schema.Number,
   exp: Schema.Number,
+  managementLaunchContext: Schema.optional(ManagementLaunchContext),
 });
 type SessionClaims = typeof SessionClaims.Type;
 
@@ -64,6 +66,7 @@ type WebSocketClaims = typeof WebSocketClaims.Type;
 
 const decodeSessionClaims = Schema.decodeUnknownEffect(Schema.fromJsonString(SessionClaims));
 const decodeWebSocketClaims = Schema.decodeUnknownEffect(Schema.fromJsonString(WebSocketClaims));
+const decodeManagementLaunchContext = Schema.decodeUnknownEffect(ManagementLaunchContext);
 
 function createDefaultClientMetadata(): AuthClientMetadata {
   return {
@@ -218,6 +221,26 @@ export const makeSessionCredentialService = Effect.gen(function* () {
   const encodeClaims = Schema.encodeEffect(Schema.fromJsonString(SessionClaims));
   const issue: SessionCredentialServiceShape["issue"] = (input) =>
     Effect.gen(function* () {
+      // Only internally issued owner bearers can carry a launch default.
+      // Browser cookies and public CLI issuance must not manufacture it from a
+      // client label, subject, current selection, or remembered account.
+      const managementLaunchContext = input?.managementLaunchContext;
+      if (
+        managementLaunchContext !== undefined &&
+        (input?.role !== "owner" || input?.method !== "bearer-session-token")
+      ) {
+        return yield* new SessionCredentialError({
+          message: "Management launch context requires an owner bearer session.",
+        });
+      }
+      const boundedLaunchContext =
+        managementLaunchContext === undefined
+          ? undefined
+          : yield* decodeManagementLaunchContext(managementLaunchContext).pipe(
+              Effect.mapError(
+                () => new SessionCredentialError({ message: "Invalid management launch context." }),
+              ),
+            );
       const sessionId = AuthSessionId.make(crypto.randomUUID());
       const issuedAt = yield* DateTime.now;
       const expiresAt = DateTime.add(issuedAt, {
@@ -232,6 +255,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         method: input?.method ?? "browser-session-cookie",
         iat: issuedAt.epochMilliseconds,
         exp: expiresAt.epochMilliseconds,
+        ...(boundedLaunchContext ? { managementLaunchContext: boundedLaunchContext } : {}),
       };
 
       const encodedPayload = yield* encodeClaims(claims).pipe(
@@ -307,6 +331,14 @@ export const makeSessionCredentialService = Effect.gen(function* () {
             }),
         ),
       );
+      if (
+        claims.managementLaunchContext !== undefined &&
+        (claims.role !== "owner" || claims.method !== "bearer-session-token")
+      ) {
+        return yield* new SessionCredentialError({
+          message: "Invalid management launch credential.",
+        });
+      }
 
       const now = yield* Clock.currentTimeMillis;
       if (claims.exp <= now) {
@@ -342,6 +374,9 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         expiresAt: expiresAt.value,
         subject: claims.sub,
         role: claims.role,
+        ...(claims.managementLaunchContext
+          ? { managementLaunchContext: claims.managementLaunchContext }
+          : {}),
       } satisfies VerifiedSession;
     }).pipe(
       Effect.mapError((cause) =>

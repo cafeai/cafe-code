@@ -1,5 +1,8 @@
 import { uiText } from "@cafecode/shared/i18n";
-import type { RemoteCertificatePreparation } from "@cafecode/contracts";
+import type {
+  RemoteCertificateInspection,
+  RemoteCertificatePreparation,
+} from "@cafecode/contracts";
 import type * as Electron from "electron";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -22,6 +25,7 @@ import {
 } from "./remoteCertificatePolicy.ts";
 
 export interface DesktopRemoteCertificatesShape {
+  readonly inspect: (httpBaseUrl: string) => Effect.Effect<RemoteCertificateInspection>;
   readonly prepare: (httpBaseUrl: string) => Effect.Effect<RemoteCertificatePreparation>;
 }
 
@@ -117,6 +121,16 @@ export const layer = Layer.effect(
       });
 
     return DesktopRemoteCertificates.of({
+      inspect: (httpBaseUrl) =>
+        Effect.gen(function* () {
+          const origin = remoteCertificateOrigin(httpBaseUrl);
+          if (!origin || !httpBaseUrl.startsWith("https:")) return "invalid-certificate" as const;
+          const probe = yield* Effect.promise(() => probeRemoteCertificate(origin));
+          if (probe.status !== "self-signed") return probe.status;
+          const previous = pins.get(origin);
+          if (previous === probe.certificate.fingerprint256) return "unchanged" as const;
+          return previous ? ("changed" as const) : ("untrusted" as const);
+        }),
       prepare: (httpBaseUrl) =>
         mutex.withPermits(1)(
           Effect.gen(function* () {
@@ -126,22 +140,36 @@ export const layer = Layer.effect(
             if (probe.status !== "self-signed") return probe.status;
             const certificate = probe.certificate;
             if (pins.get(origin) === certificate.fingerprint256) return "approved" as const;
-            const previousPin = pins.has(origin);
+            const previousFingerprint = pins.get(origin);
+            const previousPin = previousFingerprint !== undefined;
             const result = yield* dialog.showMessageBox({
               type: "warning",
               title: uiText("Trust remote Cafe Code server"),
               message: previousPin
                 ? uiText("This server’s certificate has changed.")
                 : uiText("This server uses a self-signed HTTPS certificate."),
-              detail: uiText(
-                "{origin}\n\nApprove only if this is your server. Compare this SHA-256 fingerprint with the certificate on the server:\n\n{fingerprint}\n\nValid until {validUntil}. Approval is saved only in Cafe Code for this address, port, and certificate. No sign-in credential has been sent.",
-                {
-                  origin,
-                  fingerprint: certificate.fingerprint256,
-                  validUntil: certificate.validToDate.toISOString(),
-                },
-              ),
-              buttons: [uiText("Cancel"), uiText("Trust server")],
+              detail: previousPin
+                ? uiText(
+                    "SECURITY WARNING: An unexpected certificate change can mean a different computer is answering or someone is intercepting your connection.\n\nCancel unless you expected this change, such as after reinstalling the server or regenerating its certificate, AND verified the new fingerprint directly on that computer.\n\nServer: {origin}\n\nPreviously trusted SHA-256 fingerprint:\n{previousFingerprint}\n\nNew SHA-256 fingerprint:\n{fingerprint}\n\nValid until {validUntil}.\n\nTrusting this certificate allows Cafe Code to send your saved sign-in credential and reconnect to this server. Approval applies only to this address, port, and certificate.",
+                    {
+                      origin,
+                      previousFingerprint,
+                      fingerprint: certificate.fingerprint256,
+                      validUntil: certificate.validToDate.toISOString(),
+                    },
+                  )
+                : uiText(
+                    "{origin}\n\nApprove only if this is your server. Compare this SHA-256 fingerprint with the certificate on the server:\n\n{fingerprint}\n\nValid until {validUntil}. Approval is saved only in Cafe Code for this address, port, and certificate. No sign-in credential has been sent.",
+                    {
+                      origin,
+                      fingerprint: certificate.fingerprint256,
+                      validUntil: certificate.validToDate.toISOString(),
+                    },
+                  ),
+              buttons: [
+                uiText("Cancel"),
+                previousPin ? uiText("Trust new certificate") : uiText("Trust server"),
+              ],
               defaultId: 0,
               cancelId: 0,
               noLink: true,

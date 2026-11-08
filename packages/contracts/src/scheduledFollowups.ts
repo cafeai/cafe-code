@@ -229,6 +229,25 @@ export const ScheduledFollowupListResult = Schema.Struct({
 }).annotate(strict);
 export type ScheduledFollowupListResult = typeof ScheduledFollowupListResult.Type;
 
+/** Navigation surfaces show at most this many scheduled chats per server. */
+export const SCHEDULED_FOLLOWUP_SUMMARY_MAX_THREADS = 1_000;
+/**
+ * Environment-wide, instruction-free presence summary for chat navigation.
+ * Lists only enabled schedules with an upcoming occurrence; it never carries
+ * prompts, names, accounts or run output and grants no review or execution.
+ */
+export const ScheduledFollowupSummaryInput = Schema.Struct({}).annotate(strict);
+export type ScheduledFollowupSummaryInput = typeof ScheduledFollowupSummaryInput.Type;
+export const ScheduledFollowupSummaryResult = Schema.Struct({
+  threads: Schema.Array(
+    Schema.Struct({
+      threadId: ThreadId.check(Schema.isMaxLength(200)),
+      nextRunAt: ScheduledFollowupTimestamp,
+    }).annotate(strict),
+  ).check(Schema.isMaxLength(SCHEDULED_FOLLOWUP_SUMMARY_MAX_THREADS)),
+}).annotate(strict);
+export type ScheduledFollowupSummaryResult = typeof ScheduledFollowupSummaryResult.Type;
+
 export const ScheduledFollowupSaveInput = Schema.Struct({
   ...threadField,
   // Owner UI binds the reviewed paying profile; optional for older owner

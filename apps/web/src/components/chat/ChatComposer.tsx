@@ -27,6 +27,7 @@ import type {
   ProviderDeliveryPriority,
   ResolvedKeybindingsConfig,
   RuntimeMode,
+  GlideThreadActivity,
   ScopedThreadRef,
   ServerProvider,
   SubagentLimits,
@@ -104,7 +105,11 @@ import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
 import { ComposerTaskProgress } from "./ComposerTaskProgress";
 import { resolveComposerMenuActiveItemId } from "./composerMenuHighlight";
 import { searchSlashCommandItems } from "./composerSlashCommandSearch";
-import { getComposerProviderState, renderProviderTraitsMenuContent } from "./composerProviderState";
+import {
+  getComposerProviderState,
+  getModelOptionsForModelChange,
+  renderProviderTraitsMenuContent,
+} from "./composerProviderState";
 import { ContextWindowMeter } from "./ContextWindowMeter";
 import { SubagentConcurrencyControl } from "./SubagentConcurrencyControl";
 import { CodexContextWindowControl } from "./CodexContextWindowControl";
@@ -275,6 +280,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   } | null;
   isRunning: boolean;
   recoveryStopAvailable?: boolean | undefined;
+  connectingStopAvailable?: boolean | undefined;
+  stopInFlight?: boolean | undefined;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
   isSendBusy: boolean;
@@ -313,6 +320,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         pendingAction={props.pendingAction}
         isRunning={props.isRunning}
         recoveryStopAvailable={props.recoveryStopAvailable}
+        connectingStopAvailable={props.connectingStopAvailable}
+        stopInFlight={props.stopInFlight}
         showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
         promptHasText={props.promptHasText}
         isSendBusy={props.isSendBusy}
@@ -386,6 +395,7 @@ export interface ChatComposerHandle {
     deliveryPriority?: ProviderDeliveryPriority;
     axiomWebEnabled?: boolean;
     computerUseEnabled?: boolean;
+    computerUseRevision?: string;
     axiomMcpRevision?: number | undefined;
   };
 }
@@ -856,6 +866,8 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   phase: SessionPhase;
   /** Exact owned recovery/context only; never substitutes for the root phase. */
   recoveryStopAvailable?: boolean | undefined;
+  connectingStopAvailable?: boolean | undefined;
+  stopInFlight?: boolean | undefined;
   isConnecting: boolean;
   isSendBusy: boolean;
   isPreparingWorktree: boolean;
@@ -951,6 +963,8 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   ) => Promise<void>;
   onSelectActivePendingUserInputOption: (questionId: string, optionLabel: string) => void;
   onAdvanceActivePendingUserInput: () => void;
+  onSkipActivePendingUserInputQuestion: (requestId: ApprovalRequestId, questionId: string) => void;
+  onDismissActivePendingUserInput: (requestId: ApprovalRequestId) => void;
   onPreviousActivePendingUserInputQuestion: () => void;
   onChangeActivePendingUserInputCustomAnswer: (
     questionId: string,
@@ -961,7 +975,11 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   ) => void;
   onSnoozeActivePendingUserInput: () => void;
 
-  onProviderModelSelect: (instanceId: ProviderInstanceId, model: string) => void;
+  onProviderModelSelect: (
+    instanceId: ProviderInstanceId,
+    model: string,
+    options?: ModelSelection["options"],
+  ) => void;
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
@@ -998,6 +1016,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isLocalDraftThread: _isLocalDraftThread,
     phase,
     recoveryStopAvailable = false,
+    connectingStopAvailable = false,
+    stopInFlight = false,
     isConnecting,
     isSendBusy,
     isPreparingWorktree,
@@ -1023,7 +1043,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onShowSessionRail,
     scheduledFollowups,
     providerTasks,
-    activity,
+    activity: providerActivity,
     activityStartedAt,
     onFocusSessionRail,
     goalControlsSupported,
@@ -1061,6 +1081,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onResolveInteractionUrl,
     onSelectActivePendingUserInputOption,
     onAdvanceActivePendingUserInput,
+    onSkipActivePendingUserInputQuestion,
+    onDismissActivePendingUserInput,
     onPreviousActivePendingUserInputQuestion,
     onChangeActivePendingUserInputCustomAnswer,
     onSnoozeActivePendingUserInput,
@@ -1204,6 +1226,29 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Ultra while dispatching that account's default Low effort after a refresh.
   // Exact lookup keeps display and outbound `ModelSelection` aligned.
   const selectedComposerModelOptions = composerModelOptions?.[selectedInstanceId];
+
+  const handleProviderModelSelect = useCallback(
+    (instanceId: ProviderInstanceId, model: string) => {
+      const entry = providerInstanceEntries.find(
+        (candidate) => candidate.instanceId === instanceId,
+      );
+      const currentOptions = composerModelOptions?.[instanceId];
+      const nextOptions = entry
+        ? getModelOptionsForModelChange({
+            provider: entry.driverKind,
+            model,
+            models: entry.snapshot.models,
+            modelOptions: currentOptions,
+          })
+        : currentOptions;
+      onProviderModelSelect(
+        instanceId,
+        model,
+        nextOptions !== currentOptions ? nextOptions : undefined,
+      );
+    },
+    [composerModelOptions, onProviderModelSelect, providerInstanceEntries],
+  );
 
   // Resolve the active instance's snapshot by `instanceId` so a custom
   // instance gets its own slash commands, skills, and model list — not
@@ -1733,6 +1778,39 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         : null,
     [activeThreadActivities, activityStartedAt],
   );
+  const [computerUseActivity, setComputerUseActivity] = useState<GlideThreadActivity>();
+  useEffect(() => {
+    setComputerUseActivity(undefined);
+  }, [environmentId, activeThreadId]);
+  const computerUseLabel =
+    computerUseActivity?.state === "capturing"
+      ? uiText("Taking screenshot", undefined, undefined, uiLocale)
+      : computerUseActivity?.state === "reading"
+        ? uiText("Reading text", undefined, undefined, uiLocale)
+        : computerUseActivity?.state === "acting"
+          ? uiText("Controlling window", undefined, undefined, uiLocale)
+          : computerUseActivity?.state === "stopping"
+            ? uiText("Stopping computer use…", undefined, undefined, uiLocale)
+            : computerUseActivity?.state === "unavailable"
+              ? uiText("Computer use status unavailable", undefined, undefined, uiLocale)
+              : null;
+  // A removed control or an unavailable status cannot own the chat's live
+  // activity line. Connection/refresh errors remain on the Computer use button.
+  const activity =
+    environmentUnavailable === null &&
+    supportsGlide &&
+    computerUseActivity?.state !== "unavailable" &&
+    computerUseLabel
+      ? {
+          ...(providerActivity ?? { taskCount: 0, agentCount: 0, canInspect: false }),
+          attention: false,
+          label:
+            computerUseLabel +
+            (computerUseActivity?.appName
+              ? ` · ${computerUseActivity.appName}${computerUseActivity.windowTitle ? ` — ${computerUseActivity.windowTitle}` : ""}`
+              : ""),
+        }
+      : providerActivity;
 
   // ------------------------------------------------------------------
   // Composer-local state
@@ -2192,8 +2270,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (activePendingProgress) {
       return `pending:${activePendingProgress.questionIndex}:${activePendingProgress.isLastQuestion}:${activePendingIsResponding}:dictation:${showComposerDictation}`;
     }
-    if (phase === "running" || recoveryStopAvailable) {
-      return `running:${phase}:${recoveryStopAvailable}:${composerSendState.hasSendableContent}:${postSubmitInterruptGuardActive}:dictation:${showComposerDictation}`;
+    if (phase === "running" || recoveryStopAvailable || connectingStopAvailable) {
+      return `running:${phase}:${recoveryStopAvailable}:${connectingStopAvailable}:${composerSendState.hasSendableContent}:${postSubmitInterruptGuardActive}:dictation:${showComposerDictation}`;
     }
     if (showPlanFollowUpPrompt) {
       return `${prompt.trim().length > 0 ? "plan:refine" : "plan:implement"}:dictation:${showComposerDictation}`;
@@ -2208,6 +2286,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isSendBusy,
     phase,
     recoveryStopAvailable,
+    connectingStopAvailable,
     postSubmitInterruptGuardActive,
     prompt,
     showComposerDictation,
@@ -3528,6 +3607,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               computerUseEnabled:
                 useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
                   ?.computerUseEnabled === true,
+              ...(useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
+                ?.computerUseRevision !== undefined
+                ? {
+                    computerUseRevision: useComposerDraftStore
+                      .getState()
+                      .getComposerDraft(composerDraftTarget)!.computerUseRevision!,
+                  }
+                : {}),
             }
           : {}),
         ...(selectedProvider === "axiom"
@@ -3822,11 +3909,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               >
                 <ComposerPendingUserInputPanel
                   pendingUserInputs={pendingUserInputs}
-                  respondingRequestIds={respondingRequestIds}
+                  isResponding={activePendingIsResponding}
                   answers={activePendingDraftAnswers}
                   questionIndex={activePendingQuestionIndex}
                   onToggleOption={onSelectActivePendingUserInputOption}
                   onAdvance={onAdvanceActivePendingUserInput}
+                  onSkipQuestion={onSkipActivePendingUserInputQuestion}
+                  onDismiss={onDismissActivePendingUserInput}
                   autoResolutionSnoozed={activePendingAutoResolutionSnoozed}
                   onSnoozeAutoResolution={onSnoozeActivePendingUserInput}
                   {...(onRespondToInteraction ? { onRespondToInteraction } : {})}
@@ -3871,11 +3960,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             >
               <ComposerPendingUserInputPanel
                 pendingUserInputs={pendingUserInputs}
-                respondingRequestIds={respondingRequestIds}
+                isResponding={activePendingIsResponding}
                 answers={activePendingDraftAnswers}
                 questionIndex={activePendingQuestionIndex}
                 onToggleOption={onSelectActivePendingUserInputOption}
                 onAdvance={onAdvanceActivePendingUserInput}
+                onSkipQuestion={onSkipActivePendingUserInputQuestion}
+                onDismiss={onDismissActivePendingUserInput}
                 autoResolutionSnoozed={activePendingAutoResolutionSnoozed}
                 onSnoozeAutoResolution={onSnoozeActivePendingUserInput}
                 {...(onRespondToInteraction ? { onRespondToInteraction } : {})}
@@ -3913,6 +4004,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       compact
                       pendingAction={pendingPrimaryAction}
                       isRunning={false}
+                      recoveryStopAvailable={recoveryStopAvailable}
+                      connectingStopAvailable={connectingStopAvailable}
+                      stopInFlight={stopInFlight}
                       showPlanFollowUpPrompt={false}
                       promptHasText={false}
                       isSendBusy={isComposerPrimaryActionBusy}
@@ -4300,6 +4394,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     pendingAction={pendingPrimaryAction}
                     isRunning={phase === "running"}
                     recoveryStopAvailable={recoveryStopAvailable}
+                    connectingStopAvailable={connectingStopAvailable}
+                    stopInFlight={stopInFlight}
                     showPlanFollowUpPrompt={
                       pendingUserInputs.length === 0 && showPlanFollowUpPrompt
                     }
@@ -4390,7 +4486,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     setIsComposerModelPickerOpen(open);
                   }}
                   onRequestModelsRefresh={requestProviderModelsRefresh}
-                  onInstanceModelChange={onProviderModelSelect}
+                  onInstanceModelChange={handleProviderModelSelect}
                 />
 
                 <CompactComposerControlsMenu
@@ -4431,12 +4527,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     threadId={isServerThread ? activeThreadId : null}
                     runtimeMode={runtimeMode}
                     draftEnabled={composerDraft.computerUseEnabled === true}
-                    onDraftEnabledChange={(enabled) =>
+                    draftRevision={composerDraft.computerUseRevision}
+                    onActivityChange={setComputerUseActivity}
+                    onDraftEnabledChange={(enabled, revision) =>
                       useComposerDraftStore
                         .getState()
-                        .setComputerUseEnabled(composerDraftTarget, enabled)
+                        .setComputerUseEnabled(composerDraftTarget, enabled, revision)
                     }
-                    refreshKey={`${isSendBusy}:${activeThread?.session?.createdAt ?? ""}`}
+                    refreshKey={`${isSendBusy}:${activeThread?.session?.createdAt ?? ""}:${environmentUnavailable === null}`}
                     disabled={
                       environmentUnavailable !== null ||
                       (!isServerThread && (isSendBusy || isConnecting || isPreparingWorktree))
@@ -4508,6 +4606,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   pendingAction={pendingPrimaryAction}
                   isRunning={phase === "running"}
                   recoveryStopAvailable={recoveryStopAvailable}
+                  connectingStopAvailable={connectingStopAvailable}
+                  stopInFlight={stopInFlight}
                   showPlanFollowUpPrompt={pendingUserInputs.length === 0 && showPlanFollowUpPrompt}
                   promptHasText={prompt.trim().length > 0}
                   isSendBusy={isComposerPrimaryActionBusy}

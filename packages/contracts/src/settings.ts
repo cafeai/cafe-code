@@ -52,6 +52,14 @@ export const DEFAULT_CONTINUE_BACKGROUND_ANIMATIONS = false;
 export const DEFAULT_SHOW_SIDEBAR_SEARCH = true;
 export const DEFAULT_SHOW_SIDEBAR_MASCOT = false;
 export const DEFAULT_SHOW_SIDEBAR_ATTRIBUTION = true;
+export const DEFAULT_DESK_ENABLED = true;
+// Hidden sidebar projects are identified by the same physical key as manual
+// order and grouping overrides (`<environmentId>:<normalized cwd>`). Keys are
+// opaque presentation references, never paths the server acts on. Both bounds
+// keep a corrupt or hostile settings file from growing renderer work; writers
+// prune stale keys and drop the oldest entries before reaching the limit.
+export const MAX_HIDDEN_SIDEBAR_PROJECT_KEYS = 512;
+export const MAX_HIDDEN_SIDEBAR_PROJECT_KEY_LENGTH = 4096;
 export const DEFAULT_BRAND_WORDMARK_PREFIX = "Cafe";
 export const DEFAULT_SIDEBAR_BRAND_IMAGE_DATA_URL = "";
 export const DEFAULT_SIDEBAR_BRAND_IMAGE = null;
@@ -103,6 +111,16 @@ export const SidebarBrandImageAsset = Schema.Struct({
   ),
 });
 export type SidebarBrandImageAsset = typeof SidebarBrandImageAsset.Type;
+/**
+ * Which picture the sidebar shows while `showSidebarMascot` is on.
+ * - `match`: the built-in mascot scene closest to the sidebar color.
+ * - `custom`: the uploaded `sidebarBrandImage` (falls back to `match` until one exists).
+ * - `auto`: settings saved before this choice existed; `custom` when an image
+ *   was uploaded, otherwise `match`. New writes always store `match` or `custom`.
+ */
+export const SidebarImageSource = Schema.Literals(["auto", "match", "custom"]);
+export type SidebarImageSource = typeof SidebarImageSource.Type;
+export const DEFAULT_SIDEBAR_IMAGE_SOURCE: SidebarImageSource = "auto";
 export const SidebarStarSpeed = Schema.Number.check(
   Schema.isBetween({
     minimum: MIN_SIDEBAR_STAR_SPEED,
@@ -255,6 +273,16 @@ const TaskAtriumErrorDismissals = Schema.Array(TaskAtriumErrorDismissal).check(
   Schema.isMaxLength(MAX_TASK_ATRIUM_ERROR_DISMISSALS),
 );
 
+// Not trimmed: the key embeds a normalized path, and trimming could make it
+// stop matching a project whose folder name ends in whitespace.
+export const HiddenSidebarProjectKeys = Schema.Array(
+  Schema.String.check(
+    Schema.isNonEmpty(),
+    Schema.isMaxLength(MAX_HIDDEN_SIDEBAR_PROJECT_KEY_LENGTH),
+  ),
+).check(Schema.isMaxLength(MAX_HIDDEN_SIDEBAR_PROJECT_KEYS));
+export type HiddenSidebarProjectKeys = typeof HiddenSidebarProjectKeys.Type;
+
 export const SidebarProjectSortOrder = Schema.Literals(["updated_at", "created_at", "manual"]);
 export type SidebarProjectSortOrder = typeof SidebarProjectSortOrder.Type;
 export const DEFAULT_SIDEBAR_PROJECT_SORT_ORDER: SidebarProjectSortOrder = "updated_at";
@@ -297,6 +325,17 @@ export const ClientSettingsSchema = Schema.Struct({
   // chat's full header instead of the tab strip, so its name stays visible.
   // Presentation only: saved tabs, previews and splits are unchanged.
   showDeskTabs: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Desk is the sidebar's open-chats view. When off, the sidebar always shows
+  // Projects and hides the Desk/Projects switch. Presentation only: the saved
+  // Desk layout and sidebar choice are kept, so turning it back on restores them.
+  deskEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_DESK_ENABLED)),
+  ),
+  // Projects the user moved into the sidebar's Hidden group. View-only: hiding
+  // never changes, stops or deletes the project or its chats.
+  hiddenSidebarProjectKeys: HiddenSidebarProjectKeys.pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   // The persisted key predates the composer task-progress control. It now
   // applies only to completed authored-plan documents. Runtime checklists
   // stay in the composer popover unless the user docks the separate session
@@ -317,11 +356,16 @@ export const ClientSettingsSchema = Schema.Struct({
   // (native notifications in the desktop app, Web Push in browsers). Off by
   // default; enabling may prompt for OS-level notification permission.
   notificationsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // Independent opt-in for questions awaiting a response from this device.
+  userInputNotificationsEnabled: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  // Client-wide across visited servers; remote workspace settings never choose its size.
   interfaceScalePercent: InterfaceScalePercent.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_INTERFACE_SCALE_PERCENT)),
   ),
@@ -342,6 +386,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ).pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_BRAND_WORDMARK_PREFIX))),
   sidebarBrandImage: Schema.NullOr(SidebarBrandImageAsset).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_BRAND_IMAGE)),
+  ),
+  sidebarImageSource: SidebarImageSource.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_IMAGE_SOURCE)),
   ),
   // Legacy migration input only. New upload flows store `sidebarBrandImage`
   // metadata while image bytes live in the authenticated server asset store.
@@ -427,6 +474,7 @@ export const ClientSettingsSchema = Schema.Struct({
   powerSaveBlockerMode: PowerSaveBlockerMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_POWER_SAVE_BLOCKER_MODE)),
   ),
+  keepAwakeWithLidClosed: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   sidebarProjectGroupingMode: SidebarProjectGroupingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_PROJECT_GROUPING_MODE)),
   ),
@@ -463,6 +511,7 @@ export const CLIENT_SETTINGS_KEYS = Object.keys(
 export const CLIENT_SETTINGS_CAPABILITY_DEPENDENT_KEYS = [
   "defaultEditor",
   "powerSaveBlockerMode",
+  "keepAwakeWithLidClosed",
 ] as const satisfies ReadonlyArray<ClientSettingsKey>;
 
 const CLIENT_SETTINGS_CAPABILITY_DEPENDENT_KEY_SET = new Set<ClientSettingsKey>(
@@ -1129,10 +1178,13 @@ export const ClientSettingsPatch = Schema.Struct({
   languagePreference: Schema.optionalKey(UiLanguagePreference),
   chatClickBehavior: Schema.optionalKey(ChatClickBehavior),
   showDeskTabs: Schema.optionalKey(Schema.Boolean),
+  deskEnabled: Schema.optionalKey(Schema.Boolean),
+  hiddenSidebarProjectKeys: Schema.optionalKey(HiddenSidebarProjectKeys),
   autoOpenPlanSidebar: Schema.optionalKey(Schema.Boolean),
   onboardingCompleted: Schema.optionalKey(Schema.Boolean),
   dismissedFirstRunHints: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
   notificationsEnabled: Schema.optionalKey(Schema.Boolean),
+  userInputNotificationsEnabled: Schema.optionalKey(Schema.Boolean),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   interfaceScalePercent: Schema.optionalKey(InterfaceScalePercent),
@@ -1147,6 +1199,7 @@ export const ClientSettingsPatch = Schema.Struct({
     TrimmedString.check(Schema.isMaxLength(MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH)),
   ),
   sidebarBrandImage: Schema.optionalKey(Schema.NullOr(SidebarBrandImageAsset)),
+  sidebarImageSource: Schema.optionalKey(SidebarImageSource),
   sidebarStarSpeed: Schema.optionalKey(SidebarStarSpeed),
   ambianceEnabled: Schema.optionalKey(Schema.Boolean),
   ambianceEffect: Schema.optionalKey(AmbianceEffect),
@@ -1186,6 +1239,7 @@ export const ClientSettingsPatch = Schema.Struct({
     ),
   ),
   powerSaveBlockerMode: Schema.optionalKey(PowerSaveBlockerMode),
+  keepAwakeWithLidClosed: Schema.optionalKey(Schema.Boolean),
   sidebarProjectGroupingMode: Schema.optionalKey(SidebarProjectGroupingMode),
   sidebarProjectGroupingOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, SidebarProjectGroupingMode),

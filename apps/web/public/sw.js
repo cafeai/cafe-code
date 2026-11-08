@@ -5,7 +5,7 @@
  * WebPushNotifications.ts) as system notifications and routes notification
  * clicks back into the app.
  *
- * Payload shape: { title, body, tag, threadPath }
+ * Payload shape: { title, body, tag, threadPath, icon, badge }
  */
 
 self.addEventListener("install", () => {
@@ -24,6 +24,21 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(fetch(event.request));
 });
 
+// Keep uploaded artwork authenticated and same-origin. Old/malformed payloads
+// use the neutral mark rather than flashing the bundled mascot or fetching an
+// arbitrary URL. Only the current server can select a private icon's bytes.
+function notificationIcon(value, kind) {
+  const variant = kind === "icon" ? "app-192" : "badge-96";
+  const neutral = `/app-branding/neutral-v1/${variant}.png`;
+  const bundled = kind === "icon" ? "/icon-192.png" : "/favicon-32x32.png";
+  if (value === neutral || value === bundled) return value;
+  const custom =
+    /^\/api\/branding\/app-icon\/v1\/sha256-[a-f0-9]{64}\.(?:gif|jpe?g|png|webp)\/(app-192|badge-96)\.png$/;
+  return typeof value === "string" && custom.test(value) && value.endsWith(`/${variant}.png`)
+    ? value
+    : neutral;
+}
+
 self.addEventListener("push", (event) => {
   let payload = {};
   try {
@@ -31,6 +46,7 @@ self.addEventListener("push", (event) => {
   } catch {
     payload = {};
   }
+  if (payload === null || typeof payload !== "object") payload = {};
   const title = typeof payload.title === "string" && payload.title ? payload.title : "Cafe Code";
   const body = typeof payload.body === "string" ? payload.body : "";
   const tag = typeof payload.tag === "string" && payload.tag ? payload.tag : "cafe-code";
@@ -58,8 +74,8 @@ self.addEventListener("push", (event) => {
         body,
         tag,
         data: { threadPath },
-        icon: "/apple-touch-icon.png",
-        badge: "/favicon-32x32.png",
+        icon: notificationIcon(payload.icon, "icon"),
+        badge: notificationIcon(payload.badge, "badge"),
       });
     })(),
   );

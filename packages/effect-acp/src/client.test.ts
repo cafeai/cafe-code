@@ -68,6 +68,46 @@ const mockPeerArgs = (path: string) => [path];
 // Windows receives extra headroom for its consistently slower process startup.
 const CHILD_PROCESS_TEST_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 15_000;
 
+type NativeAcpFixturePhase =
+  | "spawn"
+  | "build-client"
+  | "register-handlers"
+  | "initialize"
+  | "authenticate"
+  | "create-session"
+  | "prompt"
+  | "collect-two-notifications"
+  | "echo"
+  | "close-client-scope"
+  | "assert-echo"
+  | "body-complete";
+
+interface NativeAcpFixtureObservation {
+  readonly event: "abort" | "failure";
+  readonly observedPhase: NativeAcpFixturePhase;
+  readonly firstFailurePhase: NativeAcpFixturePhase;
+  readonly observationCount: number;
+  readonly elapsedMs: number;
+}
+
+function logNativeAcpFixtureObservation(observation: NativeAcpFixtureObservation): void {
+  // Public Vitest/AbortSignal callbacks are imperative native callbacks.
+  // This synchronous boundary starts no asynchronous or scoped work.
+  // Diagnostic defects are ignored without logging their opaque causes.
+  Effect.runSync(
+    Effect.logError("ACP native fixture diagnostic").pipe(
+      Effect.annotateLogs({
+        event: observation.event,
+        observedPhase: observation.observedPhase,
+        firstFailurePhase: observation.firstFailurePhase,
+        observationCount: observation.observationCount,
+        elapsedMs: observation.elapsedMs,
+      }),
+      Effect.catchCause(() => Effect.void),
+    ),
+  );
+}
+
 function concatBytes(chunks: ReadonlyArray<Uint8Array>): Uint8Array {
   const batch = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
   let offset = 0;
@@ -93,109 +133,167 @@ it.layer(NodeServices.layer)("effect-acp client", (it) => {
       return yield* spawner.spawn(command);
     });
 
-  childProcessTest("initializes, prompts, receives updates, and handles permission requests", () =>
-    Effect.gen(function* () {
-      const updates = yield* Ref.make<Array<unknown>>([]);
-      const elicitationCompletions = yield* Ref.make<Array<unknown>>([]);
-      const typedRequests = yield* Ref.make<Array<unknown>>([]);
-      const typedNotifications = yield* Ref.make<Array<unknown>>([]);
-      const handle = yield* makeHandle();
-      const scope = yield* Scope.make();
-      const acpLayer = AcpClient.layerChildProcess(handle);
-      const context = yield* Layer.buildWithScope(acpLayer, scope);
+  childProcessTest(
+    "initializes, prompts, receives updates, and handles permission requests",
+    (ctx) =>
+      Effect.gen(function* () {
+        // Passive failure-only observations cannot establish a timeout's cause.
+        // These fixed fields never include protocol text, native output, process
+        // identity, paths, environment, payloads, or the original exception.
+        let phase: NativeAcpFixturePhase = "spawn";
+        let firstFailurePhase: NativeAcpFixturePhase | undefined;
+        let emitted = 0;
+        const startedAt = performance.now();
+        const freezeFirstFailurePhase = (): void => {
+          firstFailurePhase ??= phase;
+        };
+        const report = (event: "abort" | "failure"): void => {
+          if (emitted >= 2) return;
+          freezeFirstFailurePhase();
+          emitted += 1;
+          logNativeAcpFixtureObservation({
+            event,
+            observedPhase: phase,
+            firstFailurePhase: firstFailurePhase ?? phase,
+            observationCount: emitted,
+            elapsedMs: Math.min(60_000, Math.max(0, Math.floor(performance.now() - startedAt))),
+          });
+        };
+        const onAbort = (): void => report("abort");
+        // The pinned adapter already joins Effect's exact cancellation promise
+        // and native child finalizers. This listener starts and owns no work.
+        ctx.onTestFailed(() => report("failure"));
+        ctx.onTestFinished(() => ctx.signal.removeEventListener("abort", onAbort));
+        ctx.signal.addEventListener("abort", onAbort, { once: true });
+        if (ctx.signal.aborted) onAbort();
+        const updates = yield* Ref.make<Array<unknown>>([]);
+        const elicitationCompletions = yield* Ref.make<Array<unknown>>([]);
+        const typedRequests = yield* Ref.make<Array<unknown>>([]);
+        const typedNotifications = yield* Ref.make<Array<unknown>>([]);
+        const handle = yield* makeHandle();
+        const scope = yield* Scope.make();
+        const acpLayer = AcpClient.layerChildProcess(handle);
+        phase = "build-client";
+        const context = yield* Layer.buildWithScope(acpLayer, scope);
 
-      const ext = yield* Effect.gen(function* () {
-        const acp = yield* AcpClient.AcpClient;
+        const ext = yield* Effect.gen(function* () {
+          const acp = yield* AcpClient.AcpClient;
 
-        yield* acp.handleRequestPermission(() =>
-          Effect.succeed({
-            outcome: {
-              outcome: "selected",
-              optionId: "allow",
-            },
-          }),
-        );
-        yield* acp.handleElicitation(() =>
-          Effect.succeed({
-            action: {
-              action: "accept",
-              content: {
-                approved: true,
+          phase = "register-handlers";
+          yield* acp.handleRequestPermission(() =>
+            Effect.succeed({
+              outcome: {
+                outcome: "selected",
+                optionId: "allow",
               },
+            }),
+          );
+          yield* acp.handleElicitation(() =>
+            Effect.succeed({
+              action: {
+                action: "accept",
+                content: {
+                  approved: true,
+                },
+              },
+            }),
+          );
+          yield* acp.handleSessionUpdate((notification) =>
+            Ref.update(updates, (current) => [...current, notification]),
+          );
+          yield* acp.handleElicitationComplete((notification) =>
+            Ref.update(elicitationCompletions, (current) => [...current, notification]),
+          );
+          yield* acp.handleExtRequest(
+            "x/typed_request",
+            Schema.Struct({ message: Schema.String }),
+            (payload) =>
+              Ref.update(typedRequests, (current) => [...current, payload]).pipe(
+                Effect.as({
+                  ok: true,
+                  echoedMessage: payload.message,
+                }),
+              ),
+          );
+          yield* acp.handleExtNotification(
+            "x/typed_notification",
+            Schema.Struct({ count: Schema.Number }),
+            (payload) => Ref.update(typedNotifications, (current) => [...current, payload]),
+          );
+
+          phase = "initialize";
+          const init = yield* acp.agent.initialize({
+            protocolVersion: 1,
+            clientCapabilities: {
+              fs: { readTextFile: false, writeTextFile: false },
+              terminal: false,
             },
-          }),
-        );
-        yield* acp.handleSessionUpdate((notification) =>
-          Ref.update(updates, (current) => [...current, notification]),
-        );
-        yield* acp.handleElicitationComplete((notification) =>
-          Ref.update(elicitationCompletions, (current) => [...current, notification]),
-        );
-        yield* acp.handleExtRequest(
-          "x/typed_request",
-          Schema.Struct({ message: Schema.String }),
-          (payload) =>
-            Ref.update(typedRequests, (current) => [...current, payload]).pipe(
-              Effect.as({
-                ok: true,
-                echoedMessage: payload.message,
-              }),
-            ),
-        );
-        yield* acp.handleExtNotification(
-          "x/typed_notification",
-          Schema.Struct({ count: Schema.Number }),
-          (payload) => Ref.update(typedNotifications, (current) => [...current, payload]),
+            clientInfo: {
+              name: "effect-acp-test",
+              version: "0.0.0",
+            },
+          });
+          assert.equal(init.protocolVersion, 1);
+
+          phase = "authenticate";
+          yield* acp.agent.authenticate({ methodId: "cursor_login" });
+
+          phase = "create-session";
+          const session = yield* acp.agent.createSession({
+            cwd: process.cwd(),
+            mcpServers: [],
+          });
+          assert.equal(session.sessionId, "mock-session-1");
+
+          phase = "prompt";
+          const prompt = yield* acp.agent.prompt({
+            sessionId: session.sessionId,
+            prompt: [{ type: "text", text: "hello" }],
+          });
+          assert.equal(prompt.stopReason, "end_turn");
+
+          phase = "collect-two-notifications";
+          const streamed = yield* Stream.runCollect(Stream.take(acp.raw.notifications, 2));
+          assert.equal(streamed.length, 2);
+          assert.equal(streamed[0]?._tag, "SessionUpdate");
+          assert.equal(streamed[1]?._tag, "ElicitationComplete");
+          assert.equal((yield* Ref.get(updates)).length, 1);
+          assert.equal((yield* Ref.get(elicitationCompletions)).length, 1);
+          assert.deepEqual(yield* Ref.get(typedRequests), [
+            { message: "hello from typed request" },
+          ]);
+          assert.deepEqual(yield* Ref.get(typedNotifications), [{ count: 2 }]);
+
+          phase = "echo";
+          return yield* acp.raw.request("x/echo", {
+            hello: "world",
+          });
+        }).pipe(
+          // Capture the original failed phase before the existing ensuring close
+          // runs. Later observations report cleanup separately and cannot rewrite
+          // this first failure's phase. Abort snapshots use the same one-use slot.
+          Effect.onExit((exit) =>
+            Effect.sync(() => {
+              if (Exit.isFailure(exit)) freezeFirstFailurePhase();
+            }),
+          ),
+          Effect.provide(context),
+          Effect.ensuring(
+            Effect.sync(() => {
+              phase = "close-client-scope";
+            }).pipe(Effect.andThen(Scope.close(scope, Exit.void))),
+          ),
         );
 
-        const init = yield* acp.agent.initialize({
-          protocolVersion: 1,
-          clientCapabilities: {
-            fs: { readTextFile: false, writeTextFile: false },
-            terminal: false,
+        phase = "assert-echo";
+        assert.deepEqual(ext, {
+          echoedMethod: "x/echo",
+          echoedParams: {
+            hello: "world",
           },
-          clientInfo: {
-            name: "effect-acp-test",
-            version: "0.0.0",
-          },
         });
-        assert.equal(init.protocolVersion, 1);
-
-        yield* acp.agent.authenticate({ methodId: "cursor_login" });
-
-        const session = yield* acp.agent.createSession({
-          cwd: process.cwd(),
-          mcpServers: [],
-        });
-        assert.equal(session.sessionId, "mock-session-1");
-
-        const prompt = yield* acp.agent.prompt({
-          sessionId: session.sessionId,
-          prompt: [{ type: "text", text: "hello" }],
-        });
-        assert.equal(prompt.stopReason, "end_turn");
-
-        const streamed = yield* Stream.runCollect(Stream.take(acp.raw.notifications, 2));
-        assert.equal(streamed.length, 2);
-        assert.equal(streamed[0]?._tag, "SessionUpdate");
-        assert.equal(streamed[1]?._tag, "ElicitationComplete");
-        assert.equal((yield* Ref.get(updates)).length, 1);
-        assert.equal((yield* Ref.get(elicitationCompletions)).length, 1);
-        assert.deepEqual(yield* Ref.get(typedRequests), [{ message: "hello from typed request" }]);
-        assert.deepEqual(yield* Ref.get(typedNotifications), [{ count: 2 }]);
-
-        return yield* acp.raw.request("x/echo", {
-          hello: "world",
-        });
-      }).pipe(Effect.provide(context), Effect.ensuring(Scope.close(scope, Exit.void)));
-
-      assert.deepEqual(ext, {
-        echoedMethod: "x/echo",
-        echoedParams: {
-          hello: "world",
-        },
-      });
-    }),
+        phase = "body-complete";
+      }),
   );
 
   childProcessTest(

@@ -9,6 +9,7 @@ import * as Ref from "effect/Ref";
 import type * as Electron from "electron";
 
 import { stopStartupCpuProfiler } from "@cafecode/shared/startupProfiler";
+import * as DesktopAppIcon from "../app/DesktopAppIcon.ts";
 import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
@@ -163,6 +164,7 @@ function bindFirstRevealTrigger(
 const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const assets = yield* DesktopAssets.DesktopAssets;
+  const appIcon = yield* Effect.serviceOption(DesktopAppIcon.DesktopAppIcon);
   const electronMenu = yield* ElectronMenu.ElectronMenu;
   const electronShell = yield* ElectronShell.ElectronShell;
   const electronTheme = yield* ElectronTheme.ElectronTheme;
@@ -186,7 +188,13 @@ const make = Effect.gen(function* () {
     backendHttpUrl: URL,
   ): Effect.fn.Return<Electron.BrowserWindow, DesktopWindowError> {
     const iconPaths = yield* assets.iconPaths;
-    const iconOption = getIconOption(iconPaths);
+    const chosenIcon = Option.isSome(appIcon)
+      ? yield* appIcon.value.effectiveIconPath
+      : Option.none<string>();
+    const iconOption =
+      process.platform !== "darwin" && Option.isSome(chosenIcon)
+        ? { icon: chosenIcon.value }
+        : getIconOption(iconPaths);
     const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
     const systemLocale = Option.isSome(locale) ? yield* locale.value.systemLocale : "en";
     const window = yield* electronWindow.create({
@@ -234,6 +242,22 @@ const make = Effect.gen(function* () {
       if (isMainFrame) guardNavigation(event, destination);
     });
     trustAudioWebContents(window.webContents, rendererUrl);
+
+    // Native macOS fullscreen is distinct from document.fullscreenElement.
+    // Electron 43 does not reliably expose it through display-mode media
+    // queries (electron/electron#51396). Notify only this window's renderer
+    // after the asynchronous native transition finishes; reloads read the
+    // current state through the separately trusted read-only IPC method.
+    const publishFullScreen = () => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(
+          IpcChannels.WINDOW_FULL_SCREEN_CHANGED_CHANNEL,
+          window.isFullScreen(),
+        );
+      }
+    };
+    window.on("enter-full-screen", publishFullScreen);
+    window.on("leave-full-screen", publishFullScreen);
 
     window.webContents.on("context-menu", (event, params) => {
       event.preventDefault();

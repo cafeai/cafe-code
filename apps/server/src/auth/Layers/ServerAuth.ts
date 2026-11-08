@@ -192,6 +192,9 @@ export const makeServerAuth = Effect.gen(function* () {
         method: session.method,
         role: session.role,
         ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
+        ...(session.managementLaunchContext
+          ? { managementLaunchContext: session.managementLaunchContext }
+          : {}),
       })),
       Effect.mapError(
         (cause) =>
@@ -203,12 +206,15 @@ export const makeServerAuth = Effect.gen(function* () {
       ),
     );
 
-  const authenticateRequest = (request: HttpServerRequest.HttpServerRequest) => {
+  const authenticateRequest: ServerAuthShape["authenticateHttpRequest"] = (request, options) => {
     const cookieToken =
       request.cookies[sessions.cookieName] ??
       (sessions.httpsCookieName ? request.cookies[sessions.httpsCookieName] : undefined);
     const bearerToken = parseBearerToken(request);
-    const credential = cookieToken ?? bearerToken;
+    // Management MCP authenticates the actual supplied bearer. A valid browser
+    // cookie must neither rescue an invalid bearer nor substitute its identity.
+    // Every ordinary HTTP/WebSocket caller retains cookie-first behavior.
+    const credential = options?.bearerOnly ? bearerToken : (cookieToken ?? bearerToken);
     if (!credential) {
       return Effect.fail(
         new AuthError({

@@ -8,6 +8,7 @@ import { useGitStatus } from "../lib/gitStatusState";
 import { type AppState, selectProjectByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { resolveChangeRequestPresentation } from "../sourceControlPresentation";
+import { useScheduledFollowUpAt } from "./chat/scheduledFollowupPresence";
 import { resolveThreadStatusPill } from "./Sidebar.logic";
 import type { SidebarThreadSummary } from "../types";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
@@ -118,10 +119,12 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
   });
   const pr = resolveThreadPr(thread.branch, gitStatus.data);
   const prStatus = uiPresentation.prStatusIndicator(pr, gitStatus.data?.sourceControlProvider);
+  const scheduledFollowUpAt = useScheduledFollowUpAt(thread.environmentId, thread.id);
   const threadStatus = resolveThreadStatusPill({
     thread: {
       ...thread,
       lastVisitedAt,
+      scheduledFollowUpAt,
     },
   });
 

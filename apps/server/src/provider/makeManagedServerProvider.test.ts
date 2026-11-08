@@ -16,7 +16,10 @@ import {
   makeManagedServerProvider,
   retainNativeCodexModelCatalog,
 } from "./makeManagedServerProvider.ts";
-import { deterministicProviderProbePhaseOffsetMs } from "./providerProbePolicy.ts";
+import {
+  deterministicProviderProbePhaseOffsetMs,
+  retainConclusiveProviderState,
+} from "./providerProbePolicy.ts";
 
 const emptyCapabilities = createModelCapabilities({ optionDescriptors: [] });
 const fastModeCapabilities = createModelCapabilities({
@@ -123,6 +126,50 @@ const enrichedSnapshotSecond: ServerProvider = {
     },
   ],
 };
+
+it("retains conclusive authentication without reviving a runtime-owned Claude expiry", () => {
+  const auth = {
+    status: "authenticated" as const,
+    type: "claude.ai",
+    email: "owned@example.invalid",
+    credentialExpiry: {
+      source: "native-result" as const,
+      expiresAt: "2026-11-10T00:00:00.000Z",
+      observedAt: "2026-11-04T00:00:00.000Z",
+    },
+  };
+  const previous = {
+    ...refreshedSnapshot,
+    driver: ProviderDriverKind.make("claudeAgent"),
+    auth,
+  };
+  const inconclusive = {
+    ...previous,
+    status: "warning" as const,
+    auth: { status: "unknown" as const },
+    checkedAt: "2026-11-04T00:01:00.000Z",
+    message: "probe timed out",
+  };
+  const retained = retainConclusiveProviderState(previous, inconclusive);
+  assert.deepStrictEqual(retained.auth, {
+    status: "authenticated",
+    type: "claude.ai",
+    email: "owned@example.invalid",
+  });
+  assert.strictEqual(retained.status, "ready");
+  assert.strictEqual(retained.checkedAt, previous.checkedAt);
+  assert.isUndefined(retained.message);
+  assert.deepStrictEqual(previous.auth, {
+    status: "authenticated",
+    type: "claude.ai",
+    email: "owned@example.invalid",
+    credentialExpiry: {
+      source: "native-result",
+      expiresAt: "2026-11-10T00:00:00.000Z",
+      observedAt: "2026-11-04T00:00:00.000Z",
+    },
+  });
+});
 
 describe("makeManagedServerProvider", () => {
   it.effect("observes credentials afresh after an older probe that overlaps native login", () =>

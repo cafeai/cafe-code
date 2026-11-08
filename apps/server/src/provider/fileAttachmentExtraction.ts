@@ -2,6 +2,7 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
+import { runtimeDependencyChildBootstrapSource } from "@cafecode/shared/runtimeDependencies";
 
 /** All parsing budgets are independent of provider/model context limits. */
 export const FILE_EXTRACTION_MAX_TEXT_BYTES = 1024 * 1024;
@@ -31,6 +32,7 @@ export interface FileAttachmentExtraction {
  * and https://github.com/thejoshwolfe/yauzl#security-and-stability.
  */
 const EXTRACTION_PROGRAM = String.raw`
+${runtimeDependencyChildBootstrapSource()}
 import { crc32 } from "node:zlib";
 const MAX_INPUT = 25 * 1024 * 1024;
 const MAX_TEXT = 1024 * 1024;

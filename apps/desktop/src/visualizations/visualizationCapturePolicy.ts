@@ -4,6 +4,11 @@
  * are conservative image-work envelopes, never total-process-memory claims. */
 export const MAX_VISUALIZATION_PHYSICAL_CAPTURE_PIXELS = 12_800_000;
 
+/** Electron 43 captures an offscreen view at its own configured scale rather
+ * than its hidden owner's display scale. Use the same explicit native setting
+ * and capture expectation; the separate owner-display admission stays intact. */
+export const PREVIEW_DEVICE_SCALE_FACTOR = 1;
+
 export interface VisualizationCaptureTuple {
   readonly width: number;
   readonly height: number;

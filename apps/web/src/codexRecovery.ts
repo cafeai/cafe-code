@@ -115,6 +115,249 @@ export function isCurrentCodexRecoveryMarker(
   );
 }
 
+/** A rendered cancel-start affordance binds the current chat and known owner.
+ * This is user cancellation intent, never evidence that a retry is permitted. */
+type StopThread = Pick<Thread, "id" | "environmentId" | "session" | "archivedAt">;
+export function connectingStopOwner(thread: StopThread | undefined) {
+  const session = thread?.session;
+  if (
+    !thread ||
+    thread.archivedAt !== null ||
+    session?.status !== "connecting" ||
+    session.activeTurnId !== undefined ||
+    !session.providerInstanceId
+  )
+    return null;
+  return {
+    threadId: thread.id,
+    environmentId: thread.environmentId,
+    provider: session.provider,
+    providerInstanceId: session.providerInstanceId,
+    runtimeId: session.subagentRuntimeId,
+    updatedAt: session.updatedAt,
+  };
+}
+
+/** Recheck the displayed owner at the human click boundary. A missing runtime
+ * does not prove identity across a later session update. The server's durable
+ * Stop is a whole-chat control, not a generation compare-and-swap. */
+export function connectingStopCommand(
+  owner: NonNullable<ReturnType<typeof connectingStopOwner>>,
+  thread: StopThread | undefined,
+): "session-stop" | "turn-interrupt" | null {
+  const session = thread?.session;
+  if (
+    !thread ||
+    thread.archivedAt !== null ||
+    thread.id !== owner.threadId ||
+    thread.environmentId !== owner.environmentId ||
+    !session ||
+    session.provider !== owner.provider ||
+    session.providerInstanceId !== owner.providerInstanceId ||
+    session.subagentRuntimeId !== owner.runtimeId ||
+    (owner.runtimeId === undefined && session.updatedAt !== owner.updatedAt)
+  )
+    return null;
+  if (session.status === "running" && session.activeTurnId !== undefined) return "turn-interrupt";
+  if (session.status === "connecting" && session.activeTurnId === undefined) return "session-stop";
+  return null;
+}
+
+/** Clear only the exact Stop reservation; a late acknowledgement cannot
+ * release another chat or a newer request for the same chat. */
+export function finishStopReservation(
+  pending: Readonly<Record<string, string>>,
+  key: string,
+  commandId: string,
+): Readonly<Record<string, string>> {
+  if (pending[key] !== commandId) return pending;
+  const next = { ...pending };
+  delete next[key];
+  return next;
+}
+
+/** Content-free preparation marker used only to offer an explicit human Stop.
+ * Projected activity does not attest its actor or grant retry/native authority. */
+export function readCodexPreparationMarker(
+  activity: OrchestrationThreadActivity,
+  failedTurnId: string | null,
+) {
+  const payload = ownRecord(activity.payload);
+  const intent = payload?.recoveryIntentSequence;
+  const source = payload?.sourceEventSequence;
+  const sequence = payload?.preparationSequence;
+  const phase = payload?.phase;
+  if (
+    activity.kind !== "runtime.warning" ||
+    !failedTurnId ||
+    activity.turnId !== failedTurnId ||
+    payload?.recovery !== "codex-transient-preparation" ||
+    !Number.isSafeInteger(intent) ||
+    (intent as number) <= 0 ||
+    !Number.isSafeInteger(source) ||
+    (source as number) <= 0 ||
+    (source as number) >= (intent as number) ||
+    !Number.isSafeInteger(sequence) ||
+    (sequence as number) < 0 ||
+    !Number.isSafeInteger(payload?.observedWaits) ||
+    (payload!.observedWaits as number) < 0 ||
+    (payload!.observedWaits as number) > 30 ||
+    (phase !== "preparing" &&
+      phase !== "uncertain" &&
+      phase !== "retryable" &&
+      phase !== "retired") ||
+    activity.id !== `server:codex-preparation:${intent}:${sequence}:${phase}`
+  )
+    return null;
+  return {
+    activity,
+    intent: intent as number,
+    source: source as number,
+    sequence: sequence as number,
+    phase,
+  };
+}
+
+/** Highest-intent preparation wins; terminal wins over delayed same-sequence
+ * progress. Input is the already bounded activity projection, not chat history. */
+export function latestCodexPreparationMarker(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  failedTurnId: string | null,
+) {
+  let latest: ReturnType<typeof readCodexPreparationMarker> = null;
+  let conflictingSource = false;
+  for (const activity of activities) {
+    const next = readCodexPreparationMarker(activity, failedTurnId);
+    if (!next) continue;
+    if (!latest || next.intent > latest.intent) {
+      latest = next;
+      conflictingSource = false;
+      continue;
+    }
+    if (next.intent !== latest.intent) continue;
+    if (next.source !== latest.source) {
+      conflictingSource = true;
+      continue;
+    }
+    // An exact terminal wins over every delayed progress phase of its intent,
+    // including a falsely newer preparation sequence.
+    if (latest.phase === "retired") continue;
+    if (
+      next.phase === "retired" ||
+      next.sequence > latest.sequence ||
+      (next.sequence === latest.sequence &&
+        (next.activity.sequence ?? 0) > (latest.activity.sequence ?? 0))
+    )
+      latest = next;
+  }
+  return conflictingSource ? null : latest;
+}
+
+/** Capture only the exact current view. The durable server Stop remains the
+ * authority; marker receipt itself is never proof of a live native owner. */
+export function preparationStopOwner(thread: Thread | null | undefined) {
+  if (
+    !thread ||
+    thread.archivedAt !== null ||
+    thread.latestTurn?.state !== "error" ||
+    thread.session?.activeTurnId !== undefined ||
+    thread.session?.status === "running"
+  )
+    return null;
+  const marker = latestCodexPreparationMarker(thread.activities, thread.latestTurn.turnId);
+  if (!marker || marker.phase === "retired") return null;
+  return {
+    threadId: thread.id,
+    environmentId: thread.environmentId,
+    failedTurnId: thread.latestTurn.turnId,
+    markerId: marker.activity.id,
+    intent: marker.intent,
+    source: marker.source,
+    sequence: marker.sequence,
+    configuration: JSON.stringify([
+      thread.modelSelection,
+      thread.runtimeMode,
+      thread.interactionMode,
+      thread.subagentLimits,
+      thread.codexContextWindowOverride,
+      thread.projectId,
+      thread.branch,
+      thread.worktreePath,
+    ]),
+    session: JSON.stringify(
+      thread.session === null
+        ? null
+        : [
+            thread.session.provider,
+            thread.session.providerInstanceId,
+            thread.session.subagentRuntimeId,
+            thread.session.status,
+            thread.session.orchestrationStatus,
+            thread.session.updatedAt,
+          ],
+    ),
+    sessionIdentity: JSON.stringify(
+      thread.session === null
+        ? null
+        : [
+            thread.session.provider,
+            thread.session.providerInstanceId,
+            thread.session.subagentRuntimeId,
+          ],
+    ),
+  };
+}
+
+export type PreparationStopOwner = NonNullable<ReturnType<typeof preparationStopOwner>>;
+
+/** Exact marker required for a stale rendered click; a newer UI projection may
+ * supply a new control, but an old event cannot adopt it. */
+export function preparationStopCommand(
+  owner: PreparationStopOwner,
+  thread: Thread | null | undefined,
+): "session-stop" | null {
+  const current = preparationStopOwner(thread);
+  return current &&
+    samePreparationStopIntent(owner, thread) &&
+    current.markerId === owner.markerId &&
+    current.sequence === owner.sequence &&
+    current.session === owner.session
+    ? "session-stop"
+    : null;
+}
+
+/** Accepted Stop is attached to this current intent, not to a single progress
+ * phase. It never establishes native closure or permission to submit again. */
+export function samePreparationStopIntent(
+  owner: PreparationStopOwner,
+  thread: Thread | null | undefined,
+): boolean {
+  const current = preparationStopOwner(thread);
+  return (
+    current !== null &&
+    current.threadId === owner.threadId &&
+    current.environmentId === owner.environmentId &&
+    current.failedTurnId === owner.failedTurnId &&
+    current.intent === owner.intent &&
+    current.source === owner.source &&
+    current.configuration === owner.configuration &&
+    current.sessionIdentity === owner.sessionIdentity
+  );
+}
+
+/** A late ACK may fence only the exact intent that remains current. */
+export function acceptPreparationStop(
+  reservations: ReadonlyMap<string, PreparationStopOwner>,
+  key: string,
+  owner: PreparationStopOwner,
+  current: Thread | null | undefined,
+): ReadonlyMap<string, PreparationStopOwner> {
+  if (!samePreparationStopIntent(owner, current)) return reservations;
+  const next = new Map(reservations);
+  next.set(key, owner);
+  return next;
+}
+
 /** Finite native observations have no received backoff timing or total ceiling. */
 export function nativeRetryWorkLogLabel(payloadValue: unknown): string | null {
   const payload = ownRecord(payloadValue);
