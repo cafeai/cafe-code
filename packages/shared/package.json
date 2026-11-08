@@ -4,6 +4,10 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./webAppBranding": {
+      "types": "./src/webAppBranding.ts",
+      "import": "./src/webAppBranding.ts"
+    },
     "./runtimeDependencies": {
       "types": "./src/runtimeDependencies.ts",
       "import": "./src/runtimeDependencies.ts"
@@ -67,6 +71,10 @@
     "./desktopStartupDocument": {
       "types": "./src/desktopStartupDocument.ts",
       "import": "./src/desktopStartupDocument.ts"
+    },
+    "./desktopPowerState": {
+      "types": "./src/desktopPowerState.ts",
+      "import": "./src/desktopPowerState.ts"
     },
     "./backendStartupProgress": {
       "types": "./src/backendStartupProgress.ts",

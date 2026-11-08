@@ -1,4 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import type { AccountInfo } from "@anthropic-ai/claude-agent-sdk";
 import { describe, it, assert } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
@@ -166,6 +167,8 @@ type TestClaudeCapabilities = {
   readonly email: string | undefined;
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
+  readonly apiKeySource?: string;
+  readonly apiProvider?: AccountInfo["apiProvider"];
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
 };
 
@@ -174,7 +177,7 @@ function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
     Effect.succeed({
       email: undefined,
       subscriptionType: undefined,
-      tokenSource: undefined,
+      tokenSource: "claude.ai",
       slashCommands: [],
       ...overrides,
     });
@@ -4390,6 +4393,95 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         ),
       );
 
+      for (const testCase of [
+        {
+          name: "reports signed out from a first-party initialization with no token",
+          capabilities: { tokenSource: "none", apiProvider: "firstParty" as const },
+          status: "error",
+          auth: "unauthenticated",
+        },
+        {
+          name: "does not let cached account labels override an explicit missing token",
+          capabilities: {
+            tokenSource: "none",
+            apiProvider: "firstParty" as const,
+            email: "old-account@example.com",
+            subscriptionType: "maxplan",
+          },
+          status: "error",
+          auth: "unauthenticated",
+        },
+        {
+          name: "leaves authentication unknown when initialization has no account evidence",
+          capabilities: { tokenSource: undefined },
+          status: "warning",
+          auth: "unknown",
+        },
+        {
+          name: "leaves legacy missing-token metadata inconclusive without a backend identity",
+          capabilities: { tokenSource: "none" },
+          status: "warning",
+          auth: "unknown",
+        },
+        {
+          name: "retains legacy account evidence when the native token source is absent",
+          capabilities: { tokenSource: undefined, email: "legacy-account@example.com" },
+          status: "ready",
+          auth: "authenticated",
+        },
+        {
+          name: "accepts a reported API key without an OAuth token",
+          capabilities: {
+            tokenSource: "none",
+            apiKeySource: "user",
+            apiProvider: "firstParty" as const,
+          },
+          status: "ready",
+          auth: "authenticated",
+        },
+        ...(
+          [
+            "bedrock",
+            "vertex",
+            "foundry",
+            "anthropicAws",
+            "anthropicGoogleCloud",
+            "mantle",
+            "gateway",
+          ] as const
+        ).map((apiProvider) => ({
+          name: `does not classify external ${apiProvider} authentication as a missing Claude login`,
+          capabilities: { tokenSource: "none", apiProvider },
+          status: "ready",
+          auth: "unknown",
+        })),
+      ]) {
+        it.effect(testCase.name, () =>
+          Effect.gen(function* () {
+            const status = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities(testCase.capabilities),
+            );
+            assert.strictEqual(status.status, testCase.status);
+            assert.strictEqual(status.auth.status, testCase.auth);
+            if (testCase.auth !== "authenticated") {
+              assert.isUndefined(status.auth.email);
+              assert.isUndefined(status.auth.label);
+            }
+            if (testCase.auth === "unauthenticated") assert.include(status.message, "/login");
+          }).pipe(
+            Effect.provide(
+              mockSpawnerLayer((args) => {
+                // Reuse the existing initialization evidence; no additional
+                // status command or model request belongs to this check.
+                assert.deepEqual(args, ["--version"]);
+                return { stdout: "2.1.318\n", stderr: "", code: 0 };
+              }),
+            ),
+          ),
+        );
+      }
+
       it.effect("reports needs-login when the adapter has observed a Claude auth failure", () =>
         Effect.gen(function* () {
           const status = yield* checkClaudeProviderStatus(
@@ -4412,6 +4504,37 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               const joined = args.join(" ");
               if (joined === "--version") return { stdout: "2.1.288\n", stderr: "", code: 0 };
               throw new Error(`Unexpected args: ${joined}`);
+            }),
+          ),
+        ),
+      );
+
+      it.effect("retains a turn auth failure received while initialization is pending", () =>
+        Effect.gen(function* () {
+          const initializing = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const authFailure = yield* Ref.make(false);
+          const pending = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            () =>
+              Deferred.succeed(initializing, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(claudeCapabilities()()),
+              ),
+            undefined,
+            Ref.get(authFailure),
+          ).pipe(Effect.forkChild);
+          yield* Deferred.await(initializing);
+          yield* Ref.set(authFailure, true);
+          yield* Deferred.succeed(release, undefined);
+          const status = yield* Fiber.join(pending);
+          assert.strictEqual(status.status, "error");
+          assert.strictEqual(status.auth.status, "unauthenticated");
+        }).pipe(
+          Effect.provide(
+            mockSpawnerLayer((args) => {
+              assert.deepEqual(args, ["--version"]);
+              return { stdout: "2.1.318\n", stderr: "", code: 0 };
             }),
           ),
         ),

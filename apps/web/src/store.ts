@@ -243,6 +243,7 @@ function mapMessage(environmentId: EnvironmentId, message: OrchestrationMessage)
     role: message.role,
     text: message.text,
     turnId: message.turnId,
+    ...(message.originatingTurn ? { originatingTurn: message.originatingTurn } : {}),
     createdAt: message.createdAt,
     streaming: message.streaming,
     ...(message.streaming ? {} : { completedAt: message.updatedAt }),
@@ -487,6 +488,14 @@ function cloneThreadContextForDuplicate(input: {
       ...message,
       id: copiedThreadScopedId(targetThread.id, message.id) as MessageId,
       turnId: copiedTurnId(targetThread.id, message.turnId),
+      ...(message.originatingTurn
+        ? {
+            originatingTurn: {
+              ...message.originatingTurn,
+              turnId: copiedTurnId(targetThread.id, message.originatingTurn.turnId)!,
+            },
+          }
+        : {}),
       streaming: false,
     })),
     proposedPlans: sourceThread.proposedPlans.map((plan) => ({

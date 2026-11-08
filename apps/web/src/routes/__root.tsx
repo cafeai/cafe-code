@@ -42,6 +42,8 @@ import { TooltipProvider } from "../components/ui/tooltip";
 import { resolveAndPersistPreferredEditor } from "../editorPreferences";
 import { readLocalApi } from "../localApi";
 import { useSettings, useClientSettingsHydrated } from "../hooks/useSettings";
+import { resolveDeskOpenPolicy } from "../deskModel";
+import { useDeskStore } from "../deskStore";
 import {
   deriveLogicalProjectKeyFromSettings,
   derivePhysicalProjectKeyFromPath,
@@ -64,6 +66,8 @@ import {
   applySidebarStarSpeed,
 } from "../themeAccent";
 import { applyInterfaceScalePercent } from "../interfaceScale";
+import { applyWebAppBranding } from "../webAppBranding";
+import { resolveWebAppBranding } from "@cafecode/shared/webAppBranding";
 import {
   ensureEnvironmentConnectionBootstrapped,
   getPrimaryEnvironmentConnection,
@@ -178,6 +182,8 @@ function RootRouteView() {
   const appShell = (
     <WorkspaceEnvironmentProvider>
       <AppearanceSettingsSync />
+      <WebAppBrandingSync />
+      <DeskOpenPolicySync />
       <TaskAtriumOverlay />
       <AmbianceLayer />
       <PowerSaveBlockerSync />
@@ -401,10 +407,35 @@ function PowerSaveBlockerSync() {
   return null;
 }
 
+/** The Desk store stays free of settings/transport imports; this mirrors the
+ * selected workspace's Desk and chat-tab settings into its open policy. */
+function DeskOpenPolicySync() {
+  const deskEnabled = useSettings((settings) => settings.deskEnabled);
+  const showDeskTabs = useSettings((settings) => settings.showDeskTabs);
+  const policy = resolveDeskOpenPolicy({ deskEnabled, showDeskTabs });
+  useEffect(() => {
+    useDeskStore.getState().setOpenPolicy(policy);
+  }, [policy]);
+  return null;
+}
+
+function WebAppBrandingSync() {
+  // Only authoritative primary-origin settings may replace the server's boot
+  // token. A selected remote or the settings store's initial defaults cannot.
+  const settings = useServerConfig(null)?.clientSettings;
+  useEffect(() => {
+    if (settings) applyWebAppBranding(document, resolveWebAppBranding(settings));
+  }, [settings]);
+  return null;
+}
+
 function AppearanceSettingsSync() {
   const appAccentColor = useSettings((settings) => settings.appAccentColor);
   const { resolvedTheme } = useTheme();
-  const interfaceScalePercent = useSettings((settings) => settings.interfaceScalePercent);
+  // Interface size belongs to this client across every selected server.
+  const interfaceScalePercent = useSettings((settings) => settings.interfaceScalePercent, {
+    environmentId: null,
+  });
   const continueBackgroundAnimations = useSettings(
     (settings) => settings.continueBackgroundAnimations,
   );

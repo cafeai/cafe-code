@@ -168,8 +168,10 @@ export async function auditPackagedDesktopArtifact(
   const resourceEntries = await readdir(resourcesPath, { withFileTypes: true });
   if (
     platform === "darwin" &&
-    !resourceEntries.some(
-      (entry) => entry.name === "mac-glide" && entry.isFile() && !entry.isSymbolicLink(),
+    !["mac-glide", "mac-keep-awake"].every((name) =>
+      resourceEntries.some(
+        (entry) => entry.name === name && entry.isFile() && !entry.isSymbolicLink(),
+      ),
     )
   )
     return false;
@@ -178,7 +180,15 @@ export async function auditPackagedDesktopArtifact(
     "app.asar.unpacked",
     "app-update.yml",
     ...(platform === "darwin"
-      ? ["icon.icns", "mac-dictation-target", "mac-glide", "en.lproj", "ja.lproj", "ko.lproj"]
+      ? [
+          "icon.icns",
+          "mac-dictation-target",
+          "mac-glide",
+          "mac-keep-awake",
+          "en.lproj",
+          "ja.lproj",
+          "ko.lproj",
+        ]
       : []),
     ...(platform === "win32" ? ["elevate.exe", "managed-runtime"] : []),
   ]);

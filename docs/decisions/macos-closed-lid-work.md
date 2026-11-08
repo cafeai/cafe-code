@@ -1,0 +1,42 @@
+# macOS closed-lid work
+
+General → Desktop exposes **Work with the lid closed** only through the macOS desktop preload. `ClientSettings.keepAwakeWithLidClosed` defaults to `false`, including decoding older preferences. It is a primary-machine preference even when the renderer selects a remote environment. Linux, Windows and browser clients have no native capability. The existing **Keep awake** control retains its independent display-sleep behavior.
+
+The new toggle prevents idle system sleep while the primary local backend has starting/running root work or current active background work. It does not request a display assertion. The screen may turn off, and a long healthy chat may renew its request without an arbitrary job deadline. Battery at or below 20%, unknown battery/power state and serious/critical thermal pressure release the native request; current fresh intent may resume after those conditions clear. Normal macOS explicit Sleep, restart and shutdown are not converted into application jobs. This is not a thermal or battery-management substitute.
+
+## Intent and ownership
+
+The exact spawned desktop backend inherits a dedicated output pipe on fd 5, admitted only by its private bootstrap. The server publishes one bounded, content-free record per second: version, safe monotonic sequence, enabled and work-active booleans. Nothing is exposed through a public environment descriptor, HTTP endpoint or provider session. Standalone servers and provider daemons cannot acquire this capability. The disabled path does not query work or spawn a native helper.
+
+The work query reuses the projection's canonical session/turn reconciliation and its exact current background-work binding CTE, including the provider-runtime, explicit-start and child-task owner. It does not hydrate transcripts, ordinary activity history, titles or provider credentials, probe providers, or use the selected renderer workspace. Terminal/stopped or foreign-runtime work cannot grant intent. Root lifecycle rows are bounded at 4096 candidates; overflow conservatively indicates possible work rather than loading unbounded history or claiming it is idle. Current exact background work remains eligible after the root turn completes.
+
+The desktop binds one owner per actual backend incarnation, before spawn. A malformed, oversized, replayed or ended stream retires that owner. A five-second lease uses both monotonic and wall-clock age so stale observations cannot be revived across a clock change or machine sleep. Old owner callbacks, late startup results and previous native status cannot refresh the next incarnation. Native close must complete before replacement admission.
+
+Turning the toggle off also revokes input synchronously through trusted main-frame IPC before attempting preference persistence. A failed disk write or old enabled heartbeat cannot undo that choice during this desktop lifetime. Turning it on only clears this revocation; it still needs fresh authoritative backend preference and work. Individual reset and whole-page reset use the same revocation. Native errors become fixed status categories, never native error objects or output text. Unexpected native failures latch until intent is deliberately rearmed or current work transitions to idle and starts again; ordinary refreshes do not create a restart loop. A refused reset retains the unavailable status and exact native reservation even after Off. It cannot admit a competing helper or silently claim recovery; checking physical sleep behavior remains necessary.
+
+## Native lease and recovery
+
+The bundled Swift helper owns a supervisor and a worker in independent process groups. The worker holds an eight-second `PreventUserIdleSystemSleep` assertion, renews its timeout only after fresh private input, and uses `IOPMrootDomain` selector `kPMSetClamshellSleepState` to disable lid-triggered sleep. Neither process makes a persistent `pmset` change. No administrator password, privileged helper, sudoers rule, login item, provider command or PID catalogue is involved.
+
+The parent and worker exchange bounded private messages. Each has a four-second continuous-clock heartbeat, including machine sleep in elapsed age. Queued input cannot revive an expired owner. The supervisor waits for worker readiness before permitting its first lid change and observes actual worker renewals. On cancellation it closes that exact worker's input, joins its native exit, then resets the raw switch. A frozen worker gets one second of close grace before only that unreaped child is killed. An exited/frozen supervisor loses its worker heartbeat, and the surviving worker resets the switch itself. Loss of the desktop closes the supervisor's pipe. The OS assertion timeout separately bounds a frozen worker's idle-sleep assertion.
+
+Both native processes retain the same open-file-description `flock` through reset and native exit. Its per-UID `/private/tmp` directory is private and opened without following a symlink; its descriptor-relative lock is a private, regular, single-link, no-follow file. A second Cafe instance is refused rather than controlling another instance's PID or racing a late reset. It may retry when its work restarts or the user toggles off/on. Source launches compile the fixed helper before launch; artifact staging builds the selected architecture and includes it as a normal signed resource.
+
+The raw lid switch is shared system state, **not a process-scoped assertion or a public macOS power API**. Amphetamine Enhancer's published implementation uses this selector, and Apple's XNU source defines its clamshell notification behavior. Reset success means the kernel accepted Cafe's reset request. `AppleClamshellCausesSleep` can remain stale when resetting with the lid open, so it is not reset-failure authority. See [Amphetamine Enhancer](https://github.com/x74353/Amphetamine-Enhancer/blob/master/Xcode%20Project/CDMManager/CDMManager/AppDelegate.m) and [IOPMrootDomain](https://github.com/apple-oss-distributions/xnu/blob/main/iokit/Kernel/IOPMrootDomain.cpp).
+
+Recovery covers loss or suspension of one native process while the other can execute. Simultaneously killing both native processes, kernel refusal, or another app manipulating the same shared switch cannot be made crash-proof by this unprivileged helper. Competing sleep utilities are not coordinated. The assertion times out even if both helpers disappear, but the raw lid bit itself has no OS lease. Do not claim universal hardware/macOS compatibility or guaranteed normal sleep from an ACK. This implementation remains an opt-in native path, and a release still needs its normal signing and native artifact qualification.
+
+## Verification
+
+Pure tests cover strict frame parsing and bounds, default-off settings, stale/replayed owners, wall-clock changes, synchronous revocation, native startup/close handoff and failure latching. Projection tests cover reconciled root and exact current background work. Native browser tests exercise the real switch, primary settings updates and capability gating. They do not grant native power authority.
+
+Run the opt-in native qualifier on macOS:
+
+```sh
+nice -n 10 corepack yarn workspace @cafecode/desktop test:mac-keep-awake
+nice -n 10 corepack yarn workspace @cafecode/desktop test:mac-keep-awake --live
+```
+
+The ordinary qualifier compiles a separate test-only helper into a private temporary directory. It uses fake power state to exercise heartbeat expiry, malformed input, individual supervisor/worker crashes and suspension, exclusive ownership, and unsafe lock refusal. Its test-only fault/observation commands are absent from the production build. Completion and timeout retirement are registered before native acquisition; cleanup joins the exact held children before removing their private files.
+
+`--live` makes a real temporary power request while the lid is open. It checks that the idle assertion renews beyond its eight-second OS timeout, creates no display assertion, receives reset acknowledgement and leaves no Cafe work assertion after shutdown. This does not prove physical lid or sleep behavior. The earlier standalone prototype was separately tested by the owner with the lid closed, and the owner confirmed normal sleep afterward. Integrated physical testing across battery/AC changes, suspend/resume, thermal transitions and other macOS versions remains separate native-host qualification. Normal tests do not open providers or use real credentials.

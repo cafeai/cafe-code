@@ -1,12 +1,12 @@
 import "../../index.css";
 
 import { EnvironmentId, ThreadId } from "@cafecode/contracts";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { render } from "vitest-browser-react";
 import { page, userEvent } from "vitest/browser";
 
 import type { DraftId } from "../../composerDraftStore";
-import { createDeskState, deskTabKey } from "../../deskModel";
+import { createDeskState, deskTabKey, hydrateDesk } from "../../deskModel";
 import { useDeskStore } from "../../deskStore";
 import type { ThreadRouteTarget } from "../../threadRoutes";
 import { DeskSidebar } from "./DeskSidebar";
@@ -85,6 +85,62 @@ const chat: ThreadRouteTarget = {
 };
 const draft: ThreadRouteTarget = { kind: "draft", draftId: "draft-1" as DraftId };
 let diagnosticPointer: ReturnType<typeof trackDeskDiagnosticPointer> | null = null;
+let clearActionCleanup: (() => Promise<void>) | null = null;
+
+/** Join the exact render and native input before shared store/DOM cleanup,
+ * including when the public test signal retires an in-flight operation. */
+function createClearActionFixture(context: TestContext) {
+  let retired = false;
+  let rendering: ReturnType<typeof render> | undefined;
+  let completion: Promise<void> | undefined;
+  const pending = new Set<Promise<unknown>>();
+  const assertActive = () => {
+    if (retired) throw new Error("Clear desk fixture has retired.");
+  };
+  const cleanup = () => {
+    retired = true;
+    return (completion ??= Promise.resolve().then(async () => {
+      await Promise.allSettled([...pending]);
+      const screen = await rendering?.catch(() => null);
+      await screen?.unmount();
+      context.signal.removeEventListener("abort", retire);
+    }));
+  };
+  const retire = () => {
+    void cleanup().catch(() => {});
+  };
+  context.signal.addEventListener("abort", retire, { once: true });
+  context.onTestFinished(cleanup);
+  clearActionCleanup = cleanup;
+  return {
+    async mount() {
+      assertActive();
+      const onNavigate = vi.fn();
+      const onNewChat = vi.fn();
+      rendering = render(
+        <>
+          <button type="button">Before Desk</button>
+          <DeskSidebar onNavigate={onNavigate} onNewChat={onNewChat} newChatDisabled />
+        </>,
+      );
+      const screen = await rendering;
+      assertActive();
+      return { screen, onNavigate, onNewChat };
+    },
+    async input(operation: () => Promise<unknown>) {
+      assertActive();
+      const admitted = operation();
+      pending.add(admitted);
+      try {
+        await admitted;
+        assertActive();
+      } finally {
+        pending.delete(admitted);
+      }
+    },
+    cleanup,
+  };
+}
 
 function rethrowDeskHoverFailure(error: unknown): never {
   // Capture synchronously before the fixture's finally unmounts. Vitest's
@@ -125,7 +181,9 @@ beforeEach(async () => {
   mocks.working = false;
   mocks.duplicateSupported = true;
 });
-afterEach(() => {
+afterEach(async () => {
+  await clearActionCleanup?.();
+  clearActionCleanup = null;
   diagnosticPointer?.stop();
   diagnosticPointer = null;
   useDeskStore.setState({ desk: createDeskState(), draftEditors: {}, activeDraftId: null });
@@ -163,6 +221,87 @@ function openRowMenu(element: Element) {
 }
 
 describe("Desk sidebar", () => {
+  it("clears every split group's kept and preview views without mutating chats", async (context) => {
+    const fixture = createClearActionFixture(context);
+    const dispatch = useDeskStore.getState().dispatch;
+    dispatch({ type: "open", target: chat });
+    dispatch({ type: "open", target: draft });
+    dispatch({ type: "split", tabKey: deskTabKey(draft), targetGroupId: "g1", edge: "right" });
+    const preview: ThreadRouteTarget = {
+      kind: "server",
+      threadRef: { environmentId, threadId: ThreadId.make("preview") },
+    };
+    dispatch({ type: "open", target: preview, preview: true, groupId: "g1" });
+    const { screen, onNavigate, onNewChat } = await fixture.mount();
+    const action = screen.getByRole("button", { name: "Clear desk", exact: true });
+    try {
+      await expect.element(action).not.toBeDisabled();
+      await fixture.input(() => action.click());
+      const cleared = useDeskStore.getState().desk;
+      expect(Object.values(cleared.groups)).toHaveLength(1);
+      expect(cleared.groups[cleared.activeGroupId]?.tabs).toEqual([]);
+      expect(cleared.closed.map((entry) => entry.tabKey)).toEqual([
+        deskTabKey(chat),
+        deskTabKey(draft),
+      ]);
+      expect(cleared.targets[deskTabKey(preview)]).toBeUndefined();
+      await expect.element(screen.getByText("No open chats", { exact: true })).toBeVisible();
+      await expect.element(action).toBeDisabled();
+      const restored = hydrateDesk(
+        localStorage.getItem(`cafe-code:desk:v1:${environmentId}`),
+        environmentId,
+      );
+      expect(restored.groups[restored.activeGroupId]?.tabs).toEqual([]);
+      expect(restored.closed).toEqual(cleared.closed);
+      expect(onNavigate).not.toHaveBeenCalled();
+      expect(onNewChat).not.toHaveBeenCalled();
+      for (const mutation of [
+        mocks.rename,
+        mocks.archive,
+        mocks.recycle,
+        mocks.delete,
+        mocks.hardDelete,
+        mocks.duplicate,
+      ])
+        expect(mutation).not.toHaveBeenCalled();
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("clears an unsent editor through native keyboard input and disables the empty desk action", async (context) => {
+    const fixture = createClearActionFixture(context);
+    const draftId = "pending-editor" as DraftId;
+    useDeskStore.getState().showDraftEditor(draftId);
+    const editors = useDeskStore.getState().draftEditors;
+    const { screen, onNavigate, onNewChat } = await fixture.mount();
+    const action = screen.getByRole("button", { name: "Clear desk", exact: true });
+    try {
+      await expect.element(action).not.toBeDisabled();
+      await fixture.input(() =>
+        screen.getByRole("button", { name: "Before Desk", exact: true }).click(),
+      );
+      await fixture.input(() => userEvent.keyboard("{Tab}"));
+      await expect.element(action).toHaveFocus();
+      await fixture.input(() => userEvent.keyboard("{Enter}"));
+      expect(useDeskStore.getState().activeDraftId).toBeNull();
+      // Closing the editor must retain its independent draft/send ownership.
+      expect(useDeskStore.getState().draftEditors).toBe(editors);
+      await expect.element(action).toBeDisabled();
+      await fixture.input(() =>
+        screen.getByRole("button", { name: "Before Desk", exact: true }).click(),
+      );
+      await fixture.input(() => userEvent.keyboard("{Tab}"));
+      await expect
+        .element(screen.getByRole("button", { name: "Activate group Main", exact: true }))
+        .toHaveFocus();
+      expect(onNavigate).not.toHaveBeenCalled();
+      expect(onNewChat).not.toHaveBeenCalled();
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("delegates native pointer and focused keyboard creation without mutating open views", async () => {
     const { screen, onNavigate, onNewChat } = await setup();
     const before = useDeskStore.getState().desk;

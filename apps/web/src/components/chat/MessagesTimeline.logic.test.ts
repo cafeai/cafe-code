@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EventId,
+  type MessageId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type OrchestrationThreadActivity,
   type TurnId,
@@ -982,6 +983,65 @@ describe("deriveMessagesTimelineRows", () => {
       createdAt: "2026-01-01T00:00:01Z",
       summary: { text: "Received corrected public text" },
     });
+  });
+
+  it("keeps a failed turn's log immediately after its exact input when a later message arrives", () => {
+    const turnId = "failed-turn" as TurnId;
+    const messages = [
+      {
+        id: "failed-input" as MessageId,
+        role: "user" as const,
+        text: "Same prompt",
+        turnId: null,
+        originatingTurn: { turnId, state: "error" as const },
+        createdAt: "2026-01-01T00:00:00Z",
+        streaming: false,
+      },
+      {
+        id: "later-input" as MessageId,
+        role: "user" as const,
+        text: "Same prompt",
+        turnId: null,
+        createdAt: "2026-01-01T00:00:10Z",
+        streaming: false,
+      },
+    ];
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: messages.map((message) => ({
+        kind: "message" as const,
+        id: message.id,
+        createdAt: message.createdAt,
+        message,
+      })),
+      historicalWorkLogSummariesByTurnId: new Map([
+        [
+          turnId,
+          {
+            turnId,
+            snapshotEntryCount: 1,
+            previewEntries: [
+              {
+                id: "failure",
+                turnId,
+                createdAt: "2026-01-01T00:00:11Z",
+                label: "Provider error",
+                tone: "error" as const,
+              },
+            ],
+          },
+        ],
+      ]),
+      completionDividerAfterEntryId: null,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      revertTurnCountByUserMessageId: new Map(),
+    });
+    expect(rows.map((row) => row.id)).toEqual([
+      "failed-input",
+      "historical-work:failed-turn",
+      "later-input",
+    ]);
+    expect(messages[0]?.turnId).toBeNull();
   });
 
   it("inserts collapsed historical work logs between a turn's user and assistant messages", () => {

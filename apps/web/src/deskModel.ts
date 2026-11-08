@@ -708,6 +708,72 @@ export function reduceDesk(state: DeskState, action: DeskAction): DeskState {
   }
 }
 
+/**
+ * How opened chats join the Desk.
+ *
+ * - `tabs`: the normal model described above.
+ * - `single`: Desk and chat tabs are both off. With no visible tab strip or
+ *   open-chat list there is nowhere to see or close accumulated tabs, so a chat
+ *   is never made permanent: ordinary opens reuse the group's temporary preview
+ *   slot (excluded from saved layouts and reopen history), Keep open is a
+ *   no-op, and a selected first-send result becomes that slot once promotion
+ *   has moved it to its server identity.
+ *
+ * Only permanence changes. Draft ownership, draft editors, draft tabs and tabs
+ * the user already kept are untouched, and nothing here stops, archives,
+ * deletes or submits anything.
+ */
+export type DeskOpenPolicy = "tabs" | "single";
+
+export function resolveDeskOpenPolicy(settings: {
+  readonly deskEnabled: boolean;
+  readonly showDeskTabs: boolean;
+}): DeskOpenPolicy {
+  return settings.deskEnabled || settings.showDeskTabs ? "tabs" : "single";
+}
+
+export function reduceDeskWithPolicy(
+  state: DeskState,
+  action: DeskAction,
+  policy: DeskOpenPolicy,
+): DeskState {
+  if (policy === "tabs") return reduceDesk(state, action);
+  switch (action.type) {
+    case "keepOpen":
+      return state;
+    case "open":
+      // Background (activate: false) opens cannot be previews; they keep the
+      // ordinary rule so an off-screen first send still has a pane to land in.
+      return reduceDesk(
+        state,
+        action.target.kind === "server" && action.activate !== false
+          ? { ...action, preview: true }
+          : action,
+      );
+    case "promoteDraft": {
+      const serverKey = deskTabKey({ kind: "server", threadRef: action.threadRef });
+      // An identity that was already open (a deep link exposing both names)
+      // keeps whatever permanence the user gave it.
+      if (deskGroupForTab(state, serverKey)) return reduceDesk(state, action);
+      const next = reduceDesk(state, action);
+      const group = deskGroupForTab(next, serverKey);
+      if (
+        !group ||
+        group.previewTabKey ||
+        group.activeTabKey !== serverKey ||
+        next.activeGroupId !== group.id
+      )
+        return next;
+      return {
+        ...next,
+        groups: { ...next.groups, [group.id]: { ...group, previewTabKey: serverKey } },
+      };
+    }
+    default:
+      return reduceDesk(state, action);
+  }
+}
+
 /** Versioned, bounded parser. A malformed layout is rejected as a whole: partial
  * graph repair can move a chat into the wrong pane or accidentally duplicate its
  * mounted runtime. A cold/invalid profile safely starts with an empty Desk. */

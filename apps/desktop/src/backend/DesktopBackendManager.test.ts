@@ -6,6 +6,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -28,6 +29,7 @@ import * as DesktopBackendManager from "./DesktopBackendManager.ts";
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
+import { DesktopMacKeepAwake } from "../app/DesktopMacKeepAwake.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 // Native fixture boundary: exercise actual filesystem and host-path identity semantics.
@@ -78,6 +80,7 @@ function makeProcess(options?: {
   readonly kill?: ChildProcessSpawner.ChildProcessHandle["kill"];
   readonly isRunning?: Effect.Effect<boolean>;
   readonly progress?: Stream.Stream<Uint8Array>;
+  readonly power?: Stream.Stream<Uint8Array>;
 }): ChildProcessSpawner.ChildProcessHandle {
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(123),
@@ -89,7 +92,12 @@ function makeProcess(options?: {
     kill: options?.kill ?? (() => Effect.void),
     stdin: Sink.drain,
     getInputFd: () => Sink.drain,
-    getOutputFd: (fd) => (fd === 4 ? (options?.progress ?? Stream.empty) : Stream.empty),
+    getOutputFd: (fd) =>
+      fd === 4
+        ? (options?.progress ?? Stream.empty)
+        : fd === 5
+          ? (options?.power ?? Stream.empty)
+          : Stream.empty,
     unref: Effect.succeed(Effect.void),
   });
 }
@@ -131,6 +139,7 @@ function makeManagerLayer(input: {
   readonly config?: DesktopBackendManager.DesktopBackendStartConfig;
   readonly readinessProof?: (token: string, challenge: string) => string | undefined;
   readonly onBootstrap?: (bootstrap: DesktopBackendBootstrapValue) => void;
+  readonly macPower?: Context.Service.Shape<typeof DesktopMacKeepAwake>;
 }) {
   // Each layer owns the exact private fd3 opening token of its synthetic child.
   // No module-global secret or mock-only manager input can qualify readiness.
@@ -201,6 +210,7 @@ function makeManagerLayer(input: {
       return DesktopBackendManager.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
+            input.macPower ? Layer.succeed(DesktopMacKeepAwake, input.macPower) : Layer.empty,
             FileSystem.layerNoop({
               exists: () => Effect.succeed(true),
             }),
@@ -243,6 +253,73 @@ function makeManagerLayer(input: {
 }
 
 describe("DesktopBackendManager", () => {
+  it.effect.skipIf(process.platform !== "darwin")(
+    "binds private power input to the actual child and retires it on malformed stream input",
+    () =>
+      Effect.gen(function* () {
+        const observed = yield* Queue.unbounded<unknown>();
+        const retired = yield* Deferred.make<void>();
+        const ready = yield* Deferred.make<void>();
+        const exit = yield* Deferred.make<void>();
+        const powerInput = yield* Queue.unbounded<Uint8Array>();
+        let bootstrap: DesktopBackendBootstrapValue | undefined;
+        let command: ChildProcess.Command | undefined;
+        const managerLayer = makeManagerLayer({
+          onBootstrap: (value) => {
+            bootstrap = value;
+          },
+          macPower: {
+            bindBackend: Effect.succeed({
+              observe: (value) => {
+                Queue.offerUnsafe(observed, value);
+              },
+              retire: () => {
+                Deferred.doneUnsafe(retired, Exit.succeed(undefined));
+              },
+            }),
+            snapshot: Effect.succeed({ phase: "off", reason: null }),
+            setIntent: () => Effect.void,
+          },
+          desktopWindow: {
+            handleBackendReady: Deferred.succeed(ready, undefined).pipe(Effect.asVoid),
+          },
+          spawnerLayer: Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make((value) =>
+              Effect.sync(() => {
+                command = value;
+                return makeProcess({
+                  power: Stream.fromQueue(powerInput),
+                  exitCode: Deferred.await(exit).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
+                  kill: () => Deferred.succeed(exit, undefined).pipe(Effect.asVoid),
+                });
+              }),
+            ),
+          ),
+        });
+        yield* Effect.gen(function* () {
+          const manager = yield* DesktopBackendManager.DesktopBackendManager;
+          yield* manager.start;
+          yield* Deferred.await(ready);
+          assert.equal(bootstrap?.desktopPowerStateFd, 5);
+          assert.equal(command?._tag, "StandardCommand");
+          if (command?._tag === "StandardCommand")
+            assert.deepEqual(command.options.additionalFds?.fd5, { type: "output" });
+          const frame = { version: 1, sequence: 0, enabled: true, workActive: true };
+          const encoder = new TextEncoder();
+          yield* Queue.offer(powerInput, encoder.encode(encodeDiagnosticJson(frame) + "\n"));
+          assert.deepEqual(yield* Queue.take(observed), frame);
+          yield* Queue.offer(powerInput, encoder.encode("malformed\n"));
+          yield* Deferred.await(retired);
+          yield* Queue.offer(
+            powerInput,
+            encoder.encode(encodeDiagnosticJson({ ...frame, sequence: 1 }) + "\n"),
+          );
+          yield* manager.stop();
+          assert.equal(yield* Queue.size(observed), 0);
+        }).pipe(Effect.ensuring(Deferred.succeed(exit, undefined)), Effect.provide(managerLayer));
+      }),
+  );
   const profiledConfig = (
     profile: "production" | "debug",
   ): DesktopBackendManager.DesktopBackendStartConfig => {

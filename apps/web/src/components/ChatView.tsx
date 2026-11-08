@@ -100,6 +100,7 @@ import {
   derivePendingUserInputs,
   derivePhase,
   deriveTimelineEntries,
+  deriveFailedUserMessageIds,
   deriveHistoricalWorkLogSummaries,
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
@@ -155,6 +156,7 @@ import { shouldSurfaceProviderAccountRateLimits } from "../lib/codexRateLimits";
 import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand } from "../keybindings";
 import PlanSidebar from "./PlanSidebar";
+import { ResizableRightPanel } from "./ResizableRightPanel";
 import { deriveChatActivityPresentation } from "./chat/chatActivity";
 import { deriveTurnCompletionSummary } from "./chat/turnCompletion";
 import { isLiveWorkRuntimeCurrent } from "@cafecode/shared/liveWork";
@@ -1678,6 +1680,8 @@ export default function ChatView(props: ChatViewProps) {
     [queuedFollowUpPendingDispatchByThreadIdRef, setQueuedFollowUpPendingDispatchByThreadId],
   );
   const activeLatestTurn = activeThread?.latestTurn ?? null;
+  const resendInFlightRef = useRef<{ threadKey: string; messageId: MessageId } | null>(null);
+  const [resendingMessageId, setResendingMessageId] = useState<MessageId | null>(null);
   const recordTimelineScrollDebugEvent = useCallback((input: TimelineScrollDebugEventInput) => {
     if (!desktopDebugEnabledRef.current) {
       return;
@@ -2873,6 +2877,10 @@ export default function ChatView(props: ChatViewProps) {
     }
     return [...serverMessagesWithPreviewHandoff, ...pendingMessages];
   }, [serverMessages, attachmentPreviewHandoffByMessageId, optimisticUserMessages, routeThreadKey]);
+  const failedUserMessageIds = useMemo(
+    () => deriveFailedUserMessageIds({ messages: timelineMessages, activities: threadActivities }),
+    [timelineMessages, threadActivities],
+  );
   const historicalWorkLogSummariesByTurnId = useMemo(
     () =>
       uiPresentation.deriveHistoricalWorkLogSummaries({
@@ -6087,7 +6095,10 @@ export default function ChatView(props: ChatViewProps) {
     manualStopBarrierByThreadIdRef,
   ]);
 
-  const onSend = async (e?: { preventDefault: () => void }) => {
+  const onSend = async (
+    e?: { preventDefault: () => void },
+    resend?: { snapshot: ComposerSendSnapshot; isCurrent: () => boolean; onAdmitted: () => void },
+  ) => {
     e?.preventDefault();
     if (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.queueEditingItemId)
       return;
@@ -6110,7 +6121,7 @@ export default function ChatView(props: ChatViewProps) {
     // Control-only commands do not request a new numeric process policy. Keep
     // /compact and goal inspection/editing available while a pending override
     // needs Reset; ordinary sends are admitted below before any dispatch.
-    const snapshot = readComposerSnapshotForDispatch(false);
+    const snapshot = resend?.snapshot ?? readComposerSnapshotForDispatch(false);
     if (!snapshot) return;
     const {
       images: composerImages,
@@ -6124,7 +6135,9 @@ export default function ChatView(props: ChatViewProps) {
       imageCount: composerImages.length,
       fileCount: snapshot.files.length,
     });
-    const compactionCommand = parseComposerCompactionCommand(ctxSelectedProvider, trimmed);
+    const compactionCommand = resend
+      ? null
+      : parseComposerCompactionCommand(ctxSelectedProvider, trimmed);
     if (compactionCommand !== null) {
       const issue =
         compactionCommand === "invalid-arguments"
@@ -6200,7 +6213,7 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const standaloneGoalCommand =
-      composerImages.length === 0 && snapshot.files.length === 0 && goalControlsSupported
+      !resend && composerImages.length === 0 && snapshot.files.length === 0 && goalControlsSupported
         ? parseStandaloneComposerGoalCommand(trimmed)
         : null;
     if (standaloneGoalCommand !== null) {
@@ -6283,6 +6296,7 @@ export default function ChatView(props: ChatViewProps) {
         activeProviderLiveSteerAvailable &&
         canSteerPriorityToSession(snapshot, activeThread.session),
     });
+    if (resend && delivery !== "send") return;
     if (delivery === "queue") {
       if (!hasSendableContent) return;
       keepSendingTabOpen();
@@ -6322,7 +6336,7 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const standaloneSlashCommand =
-      composerImages.length === 0 && snapshot.files.length === 0
+      !resend && composerImages.length === 0 && snapshot.files.length === 0
         ? parseStandaloneComposerSlashCommand(trimmed)
         : null;
     if (standaloneSlashCommand) {
@@ -6417,11 +6431,14 @@ export default function ChatView(props: ChatViewProps) {
       ];
     });
 
+    resend?.onAdmitted();
     setThreadError(threadIdForSend, null);
-    promptRef.current = "";
-    clearComposerDraftContent(sendAttemptComposerDraftTarget);
-    composerRef.current?.resetCursorState();
-    scheduleComposerFocus();
+    if (!resend) {
+      promptRef.current = "";
+      clearComposerDraftContent(sendAttemptComposerDraftTarget);
+      composerRef.current?.resetCursorState();
+      scheduleComposerFocus();
+    }
 
     let turnStartSucceeded = false;
     await (async () => {
@@ -6529,6 +6546,15 @@ export default function ChatView(props: ChatViewProps) {
         continuation: { threadId: threadIdForSend, runtimeMode },
       });
       if (finalConcurrencyIssue) throw new LocalChatActionError(finalConcurrencyIssue);
+      if (resend && !resend.isCurrent())
+        throw new LocalChatActionError(
+          uiText(
+            "The chat changed before the message could be resent.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
+        );
       beginLocalDispatch({ preparingWorktree: false });
       await api.orchestration.dispatchCommand({
         type: "thread.turn.start",
@@ -6582,6 +6608,7 @@ export default function ChatView(props: ChatViewProps) {
     })().catch((err: unknown) => {
       const retryComposerImages = composerImagesSnapshot.map(cloneComposerImageForRetry);
       const draftRestored =
+        !resend &&
         !turnStartSucceeded &&
         restoreComposerDraftContentIfEmpty(sendAttemptComposerDraftTarget, {
           ...(snapshot.axiomWebEnabled !== undefined
@@ -6603,10 +6630,18 @@ export default function ChatView(props: ChatViewProps) {
         draftRestored ? retryComposerImages.map((image) => image.previewUrl) : [],
       );
 
-      // Rejection is conclusive: the optimistic row must always disappear,
-      // even when newer content prevents the original draft from being put
-      // back. Preview ownership transfers to the restored draft only when the
-      // compare-and-swap above succeeds.
+      // A conclusive rejection keeps an explicit failed row. Its previews
+      // have separate ownership from any restored draft. Unknown delivery
+      // retains the existing conservative transport recovery instead.
+      const failureIsCurrent =
+        chatViewMountedRef.current &&
+        currentRouteThreadKeyRef.current === sendAttemptThreadKey &&
+        optimisticUserMessagesOwnerThreadKeyRef.current === sendAttemptThreadKey;
+      const failedImages =
+        failureIsCurrent && !isIndeterminateTransportError(err)
+          ? composerImagesSnapshot.map(cloneComposerImageForRetry)
+          : [];
+      const keepFailedRow = failureIsCurrent && !isIndeterminateTransportError(err);
       setOptimisticUserMessages((existing) => {
         const removed = existing.filter((message) => message.id === messageIdForSend);
         for (const message of removed) {
@@ -6616,8 +6651,21 @@ export default function ChatView(props: ChatViewProps) {
             }
           }
         }
-        const next = existing.filter((message) => message.id !== messageIdForSend);
-        return next.length === existing.length ? existing : next;
+        const next = keepFailedRow
+          ? existing.map((message) =>
+              message.id === messageIdForSend
+                ? {
+                    ...message,
+                    sendFailed: true,
+                    attachments: optimisticAttachmentsForSnapshot({
+                      ...snapshot,
+                      images: failedImages,
+                    }),
+                  }
+                : message,
+            )
+          : existing.filter((message) => message.id !== messageIdForSend);
+        return keepFailedRow ? next : next.length === existing.length ? existing : next;
       });
       if (!draftRestored) {
         for (const image of retryComposerImages) {
@@ -6686,6 +6734,121 @@ export default function ChatView(props: ChatViewProps) {
     setSendInFlight(false);
     if (!turnStartSucceeded) {
       resetLocalDispatch();
+    }
+  };
+
+  const onResendUserMessage = async (messageId: MessageId) => {
+    const prior = resendInFlightRef.current;
+    if (
+      prior?.threadKey === routeThreadKey ||
+      !activeThread ||
+      isWorking ||
+      isSendBusy ||
+      isComposerConnecting ||
+      activeEnvironmentUnavailable ||
+      activePendingApproval ||
+      activePendingUserInput ||
+      sendInFlightRef.current ||
+      queueDispatchInFlightRef.current
+    )
+      return;
+    const attempt = { threadKey: routeThreadKey, messageId };
+    const readSource = () => {
+      if (!chatViewMountedRef.current || currentRouteThreadKeyRef.current !== attempt.threadKey)
+        return null;
+      const thread =
+        selectThreadByRef(useStore.getState(), routeThreadRef) ??
+        (!isServerThread ? activeThread : undefined);
+      if (
+        !thread ||
+        isThreadEnvironmentUnavailable(thread) ||
+        thread.latestTurn?.state === "running" ||
+        thread.session?.status === "connecting" ||
+        thread.session?.status === "running"
+      )
+        return null;
+      const message =
+        thread.messages.find((candidate) => candidate.id === messageId) ??
+        (optimisticUserMessagesOwnerThreadKeyRef.current === attempt.threadKey
+          ? optimisticUserMessages.find((candidate) => candidate.id === messageId)
+          : undefined);
+      if (
+        !message ||
+        !deriveFailedUserMessageIds({ messages: [message], activities: thread.activities }).has(
+          messageId,
+        )
+      )
+        return null;
+      return { thread, message };
+    };
+    const source = readSource();
+    const controls = readComposerSnapshotForDispatch(false);
+    if (!source || !controls) return;
+    const stopGeneration = manualStopGenerationByThreadIdRef.current[source.thread.id] ?? 0;
+    const isCurrent = () => {
+      const current = readSource();
+      return (
+        resendInFlightRef.current === attempt &&
+        current !== null &&
+        (manualStopGenerationByThreadIdRef.current[source.thread.id] ?? 0) === stopGeneration &&
+        current.thread.latestTurn?.turnId === source.thread.latestTurn?.turnId &&
+        current.thread.session?.subagentRuntimeId === source.thread.session?.subagentRuntimeId &&
+        current.thread.session?.providerInstanceId === source.thread.session?.providerInstanceId &&
+        current.message.text === source.message.text &&
+        current.message.createdAt === source.message.createdAt &&
+        current.message.completedAt === source.message.completedAt &&
+        JSON.stringify(current.message.attachments ?? []) ===
+          JSON.stringify(source.message.attachments ?? [])
+      );
+    };
+    resendInFlightRef.current = attempt;
+    setResendingMessageId(messageId);
+    let images: ComposerImageAttachment[] = [];
+    let transferred = false;
+    try {
+      const restored = await restoreCanonicalRetryImages(source.message.attachments);
+      if (!isCurrent() || sendInFlightRef.current || queueDispatchInFlightRef.current) return;
+      if (restored.unavailableCount > 0)
+        throw new LocalChatActionError(
+          uiText(
+            "Attachments could not be restored. Try again when they are available.",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
+        );
+      images = restored.images.map(cloneComposerImageForRetry);
+      await onSend(undefined, {
+        snapshot: {
+          ...controls,
+          promptText: source.message.text,
+          images,
+          files: restored.files,
+          // Stored messages already contain any provider prompt formatting.
+          providerModels: [],
+          promptEffort: null,
+        },
+        isCurrent,
+        onAdmitted: () => {
+          transferred = true;
+        },
+      });
+    } catch (error) {
+      if (isCurrent())
+        setThreadError(
+          source.thread.id,
+          uiPresentation.describeSendFailureMessage(
+            error,
+            uiText("Failed to resend message.", undefined, undefined, uiLocale),
+          ),
+          routeThreadRef,
+        );
+    } finally {
+      if (!transferred) for (const image of images) revokeBlobPreviewUrl(image.previewUrl);
+      if (resendInFlightRef.current === attempt) {
+        resendInFlightRef.current = null;
+        if (chatViewMountedRef.current) setResendingMessageId(null);
+      }
     }
   };
 
@@ -8848,6 +9011,20 @@ export default function ChatView(props: ChatViewProps) {
               activeThreadEnvironmentId={activeThread.environmentId}
               revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
               onRevertUserMessage={onRevertUserMessage}
+              failedUserMessageIds={failedUserMessageIds}
+              onResendUserMessage={(messageId) => void onResendUserMessage(messageId)}
+              resendingMessageId={
+                resendInFlightRef.current?.threadKey === routeThreadKey ? resendingMessageId : null
+              }
+              messageResendDisabled={
+                isSendBusy ||
+                isComposerConnecting ||
+                activeEnvironmentUnavailable ||
+                isRevertingCheckpoint ||
+                activePendingApproval !== null ||
+                activePendingUserInput !== null ||
+                resendingMessageId !== null
+              }
               onForkMessage={
                 isServerThread && activeThread.session?.provider === "claudeAgent"
                   ? onSelectForkMessage
@@ -9090,16 +9267,11 @@ export default function ChatView(props: ChatViewProps) {
         {/* end chat column */}
 
         {shouldRenderRightColumn ? (
-          <div
-            className="flex min-h-0 w-[340px] shrink-0 flex-col border-l border-border-subtle bg-card animate-enter-from-end"
-            style={
-              sharedChatRuntime
-                ? { width: Math.min(340, Math.max(220, (paneWidth ?? 660) / 3)) }
-                : undefined
+          <ResizableRightPanel
+            defaultWidth={
+              sharedChatRuntime ? Math.min(340, Math.max(220, (paneWidth ?? 660) / 3)) : undefined
             }
-            data-chat-right-column="true"
             ref={sessionRailFocusRef}
-            tabIndex={-1}
           >
             {shouldRenderPlanSidebar ? (
               <PlanSidebar
@@ -9144,7 +9316,7 @@ export default function ChatView(props: ChatViewProps) {
                 className="min-h-0 flex-1"
               />
             ) : null}
-          </div>
+          </ResizableRightPanel>
         ) : null}
       </div>
       {/* end horizontal flex container */}

@@ -38,6 +38,7 @@ import {
 import * as DesktopLifecycle from "./app/DesktopLifecycle.ts";
 import * as DesktopObservability from "./app/DesktopObservability.ts";
 import * as DesktopPowerSaveBlocker from "./app/DesktopPowerSaveBlocker.ts";
+import * as DesktopMacKeepAwake from "./app/DesktopMacKeepAwake.ts";
 import * as DesktopServerExposure from "./backend/DesktopServerExposure.ts";
 import * as DesktopClientSettings from "./settings/DesktopClientSettings.ts";
 import * as DesktopUiLocale from "./settings/DesktopUiLocale.ts";
@@ -191,6 +192,7 @@ const desktopFoundationLayer = Layer.mergeAll(
   DesktopAssets.layer,
   DesktopObservability.layer,
   DesktopPowerSaveBlocker.layer,
+  DesktopMacKeepAwake.layer,
 ).pipe(Layer.provideMerge(desktopEnvironmentLayer));
 
 const desktopLocalizedFoundationLayer = Layer.mergeAll(

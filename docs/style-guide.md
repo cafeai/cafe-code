@@ -87,6 +87,8 @@ from the accent and sidebar colour settings and always sit behind content.
 
 DM Sans ships with the app (`font-sans`); code, paths and key hints use
 `font-mono`. Every size is rem-based so the Interface size setting scales it.
+Interface size belongs to the current client and stays the same across selected
+servers, including when changing or resetting it from a remote workspace.
 Don't use pixel sizes (`text-[11px]`) and don't go below 11px.
 
 Main-renderer text includes the offline `Cafe Emoji` fallback after its normal

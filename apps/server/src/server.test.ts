@@ -4,6 +4,10 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { webAppIconUrl, webAppManifestHref } from "@cafecode/shared/webAppBranding";
+import type { ClientSettings, SidebarBrandImageAsset } from "@cafecode/contracts/settings";
+import { parseImageHeader } from "./rasterImageHeader.ts";
 import {
   BACKEND_READINESS_CHALLENGE_HEADER,
   BACKEND_READINESS_PROOF_HEADER,
@@ -1979,6 +1983,136 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(manifestResponse.headers.get("cache-control"), "no-cache");
       assert.include(manifestResponse.headers.get("content-type") ?? "", "manifest+json");
     }).pipe(Effect.provide(makeHttpServerTestLayer())),
+  );
+
+  it.effect(
+    "uses private custom artwork from the first shell through Android install metadata",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const staticDir = yield* fs.makeTempDirectoryScoped({
+          prefix: "cafe-custom-web-branding-",
+        });
+        const sourceHtml = yield* fs.readFileString(
+          fileURLToPath(new URL("../../web/index.html", import.meta.url)),
+        );
+        yield* fs.writeFileString(path.join(staticDir, "index.html"), sourceHtml);
+        yield* fs.writeFile(
+          path.join(staticDir, "index.html.br"),
+          brotliCompressSync(Buffer.from("stale bundled artwork")),
+        );
+        for (const locale of ["en", "ja", "ko"] as const) {
+          const basename =
+            locale === "en" ? "manifest.webmanifest" : `manifest.${locale}.webmanifest`;
+          const source = yield* fs.readFileString(
+            fileURLToPath(new URL(`../../web/public/${basename}`, import.meta.url)),
+          );
+          yield* fs.writeFileString(path.join(staticDir, basename), source);
+          yield* fs.writeFile(
+            path.join(staticDir, `${basename}.br`),
+            brotliCompressSync(Buffer.from("stale manifest")),
+          );
+        }
+        let settings: ClientSettings = DEFAULT_CLIENT_SETTINGS;
+        yield* buildAppUnderTest({
+          config: { staticDir },
+          layers: { clientSettings: { getSettings: Effect.sync(() => settings) } },
+        });
+        const cookie = yield* getAuthenticatedSessionCookieHeader();
+        const imageBytes = yield* fs.readFile(
+          fileURLToPath(
+            new URL("../../web/public/app-branding/neutral-v1/favicon-32.png", import.meta.url),
+          ),
+        );
+        const upload = yield* HttpClient.post("/api/branding/sidebar-image", {
+          headers: { cookie, "content-type": "image/png" },
+          body: HttpBody.uint8Array(imageBytes, "image/png"),
+        });
+        assert.equal(upload.status, 200);
+        const asset = ((yield* upload.json) as { sidebarBrandImage: SidebarBrandImageAsset })
+          .sidebarBrandImage;
+        settings = {
+          ...settings,
+          showSidebarMascot: true,
+          sidebarImageSource: "custom",
+          sidebarBrandImage: asset,
+        };
+        const branding = `custom:${asset.id}` as const;
+
+        const anonymous = yield* HttpClient.get("/");
+        const anonymousHtml = yield* anonymous.text;
+        assert.include(anonymousHtml, 'content="neutral"');
+        assert.isFalse(anonymousHtml.includes(asset.id));
+        const shell = yield* HttpClient.get("/deep/link", {
+          headers: { cookie, "accept-encoding": "br" },
+        });
+        const html = yield* shell.text;
+        assert.equal(shell.status, 200);
+        assert.equal(getHeader(shell.headers, "cache-control"), "no-store");
+        assert.equal(getHeader(shell.headers, "content-encoding"), undefined);
+        assert.equal(getHeader(shell.headers, "vary"), "Cookie, Authorization, Accept-Encoding");
+        assert.include(html, `content="${branding}"`);
+        assert.include(html, `src="${webAppIconUrl(branding, "touch-180")}"`);
+        assert.include(html, `href="${webAppManifestHref("en", branding)}"`);
+
+        for (const locale of ["en", "ja", "ko"] as const) {
+          const response = yield* HttpClient.get(webAppManifestHref(locale, branding), {
+            headers: { cookie, "accept-encoding": "br" },
+          });
+          const body = (yield* response.json) as {
+            id: string;
+            start_url: string;
+            scope: string;
+            lang: string;
+            icons: Array<{ src: string; sizes: string; purpose: string }>;
+          };
+          assert.equal(response.status, 200);
+          assert.equal(body.id, "/");
+          assert.equal(body.start_url, "/");
+          assert.equal(body.scope, "/");
+          assert.equal(body.lang, locale);
+          assert.equal(getHeader(response.headers, "cache-control"), "private, no-cache");
+          assert.equal(getHeader(response.headers, "content-encoding"), undefined);
+          assert.equal(body.icons.length, 3);
+          for (const icon of body.icons) {
+            assert.isTrue(icon.src.startsWith("data:image/png;base64,"));
+            const pixels = parseImageHeader(
+              Buffer.from(icon.src.slice("data:image/png;base64,".length), "base64"),
+            );
+            assert.equal(`${pixels?.width}x${pixels?.height}`, icon.sizes);
+          }
+          assert.equal(body.icons[2]?.purpose, "maskable");
+        }
+        const anonymousManifest = yield* HttpClient.get(webAppManifestHref("en", branding));
+        const anonymousManifestText = yield* anonymousManifest.text;
+        assert.include(anonymousManifestText, "/app-branding/neutral-v1/app-192.png");
+        assert.isFalse(anonymousManifestText.includes("data:image"));
+        assert.isFalse(anonymousManifestText.includes(asset.id));
+
+        const iconPath = webAppIconUrl(branding, "app-192");
+        const unauthorized = yield* HttpClient.get(iconPath);
+        assert.equal(unauthorized.status, 401);
+        const icon = yield* HttpClient.get(iconPath, { headers: { cookie } });
+        assert.equal(icon.status, 200);
+        assert.equal(
+          getHeader(icon.headers, "cache-control"),
+          "private, max-age=31536000, immutable",
+        );
+        assert.equal(getHeader(icon.headers, "vary"), "Cookie, Authorization");
+        assert.deepEqual(parseImageHeader(new Uint8Array(yield* icon.arrayBuffer)), {
+          mimeType: "image/png",
+          width: 192,
+          height: 192,
+        });
+        settings = { ...settings, showSidebarMascot: false };
+        const retired = yield* HttpClient.get(iconPath, { headers: { cookie } });
+        assert.equal(retired.status, 404);
+        const hidden = yield* HttpClient.get("/", { headers: { cookie } });
+        const hiddenHtml = yield* hidden.text;
+        assert.include(hiddenHtml, 'content="neutral"');
+        assert.isFalse(hiddenHtml.includes(asset.id));
+      }).pipe(Effect.provide(makeHttpServerTestLayer())),
   );
 
   it.effect("redirects to dev URL when configured", () =>

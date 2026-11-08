@@ -209,6 +209,9 @@ export interface ProjectionCodexSteerIntentRecoveryBarriers {
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
 export interface ProjectionSnapshotQueryShape {
+  /** Local desktop power intent, using current root/native-child ownership only.
+   * No transcripts, provider probes, permission decisions, or renderer selection. */
+  readonly hasActiveDesktopWork: () => Effect.Effect<boolean, ProjectionRepositoryError>;
   /**
    * Read the lightweight command snapshot used to bootstrap the in-memory
    * orchestration engine without hydrating message/activity/checkpoint bodies.

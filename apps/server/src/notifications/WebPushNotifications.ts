@@ -1,5 +1,7 @@
 import { withSessionAdmission } from "../auth/sessionAdmission.ts";
 import { uiText } from "@cafecode/shared/i18n";
+import { resolveWebAppBranding, webAppIconUrl } from "@cafecode/shared/webAppBranding";
+import { ServerClientSettingsService } from "../serverClientSettings.ts";
 
 /**
  * WebPushNotifications - Web Push subscription store + turn-completion pusher.
@@ -142,6 +144,8 @@ const WebPushPayload = Schema.Struct({
   body: Schema.String,
   tag: Schema.String,
   threadPath: Schema.String,
+  icon: Schema.String,
+  badge: Schema.String,
 });
 const WebPushPayloadJson = Schema.fromJsonString(WebPushPayload);
 
@@ -199,6 +203,7 @@ const initializeWebPushNotifications = Effect.gen(function* () {
   const scheduledFollowups = yield* ScheduledFollowups;
   const snapshotQuery = yield* ProjectionSnapshotQuery;
   const serverEnvironment = yield* ServerEnvironment;
+  const clientSettings = yield* ServerClientSettingsService;
   const pathService = yield* Path.Path;
 
   const statePath = pathService.join(config.stateDir, "web-push.json");
@@ -475,6 +480,10 @@ const initializeWebPushNotifications = Effect.gen(function* () {
       return;
     }
     const descriptor = yield* serverEnvironment.getDescriptor;
+    const branding = yield* clientSettings.getSettings.pipe(
+      Effect.map(resolveWebAppBranding),
+      Effect.catch(() => Effect.succeed("neutral" as const)),
+    );
     const staleSubscriptions = new Set<StoredWebPushSubscription>();
     yield* Effect.forEach(
       state.subscriptions.filter((subscription) =>
@@ -494,6 +503,8 @@ const initializeWebPushNotifications = Effect.gen(function* () {
                 : webPushCompletionBody(subscription.uiLocale),
             tag: `cafe-code-thread-${threadId}`,
             threadPath: `/${descriptor.environmentId}/${threadId}`,
+            icon: webAppIconUrl(branding, "app-192"),
+            badge: webAppIconUrl(branding, "badge-96"),
           }).pipe(
             Effect.mapError(
               (cause) =>

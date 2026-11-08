@@ -691,9 +691,8 @@ function GroupTabs({
         </>
       ) : (
         // Hidden tabs keep this bar's native window geometry, drag area and
-        // group actions; ChatView supplies its full header, so the visible
-        // title (and project/Open-in controls) replaces the tab strip. Group
-        // rename/swap stay available from the actions menu and Desk sidebar.
+        // focus control. ChatView supplies its full header, so the visible
+        // title (and project/Open-in controls) replaces the tab strip.
         <div className="desk-title-header" data-preview={preview}>
           {controls}
         </div>
@@ -719,30 +718,32 @@ function GroupTabs({
           {restoreGroups ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
         </button>
       )}
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <button
-              className="desk-icon"
-              aria-label={uiText(
-                "{value0} tab actions",
-                { value0: group.name },
-                undefined,
-                uiLocale,
-              )}
-              onClick={(e) => {
-                const r = e.currentTarget.getBoundingClientRect();
-                onMenu(null, { x: r.left, y: r.bottom });
-              }}
-            >
-              <MoreHorizontal size={15} />
-            </button>
-          }
-        />
-        <TooltipPopup side="bottom">
-          {uiText("Tab actions", undefined, undefined, uiLocale)}
-        </TooltipPopup>
-      </Tooltip>
+      {showTabs && (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                className="desk-icon"
+                aria-label={uiText(
+                  "{value0} tab actions",
+                  { value0: group.name },
+                  undefined,
+                  uiLocale,
+                )}
+                onClick={(e) => {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  onMenu(null, { x: r.left, y: r.bottom });
+                }}
+              >
+                <MoreHorizontal size={15} />
+              </button>
+            }
+          />
+          <TooltipPopup side="bottom">
+            {uiText("Tab actions", undefined, undefined, uiLocale)}
+          </TooltipPopup>
+        </Tooltip>
+      )}
     </div>
   );
 }

@@ -20,6 +20,7 @@ import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopIpc from "../ipc/DesktopIpc.ts";
+import { WINDOW_FULL_SCREEN_CHANGED_CHANNEL } from "../ipc/channels.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 import * as DesktopStartupWindow from "./DesktopStartupWindow.ts";
 
@@ -57,6 +58,7 @@ function makeFakeBrowserWindow() {
   const window = {
     focus: vi.fn(),
     isDestroyed: vi.fn(() => false),
+    isFullScreen: vi.fn(() => false),
     isMinimized: vi.fn(() => false),
     isVisible: vi.fn(() => true),
     loadURL: vi.fn(() => Promise.resolve()),
@@ -189,6 +191,40 @@ function makeTestLayer(input: {
 }
 
 describe("DesktopWindow", () => {
+  it.effect("publishes native fullscreen changes only from its live window", () =>
+    Effect.gen(function* () {
+      const fixture = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      yield* Effect.gen(function* () {
+        const windows = yield* DesktopWindow.DesktopWindow;
+        yield* windows.handleBackendReady;
+        const on = fixture.window.on as ReturnType<typeof vi.fn>;
+        const enter = on.mock.calls.find(([name]) => name === "enter-full-screen")?.[1];
+        const leave = on.mock.calls.find(([name]) => name === "leave-full-screen")?.[1];
+        assert.isFunction(enter);
+        assert.isFunction(leave);
+        const fullScreen = fixture.window.isFullScreen as ReturnType<typeof vi.fn>;
+        const send = fixture.window.webContents.send as ReturnType<typeof vi.fn>;
+        fullScreen.mockReturnValue(true);
+        enter!();
+        assert.deepEqual(send.mock.calls.at(-1), [WINDOW_FULL_SCREEN_CHANGED_CHANNEL, true]);
+        fullScreen.mockReturnValue(false);
+        leave!();
+        assert.deepEqual(send.mock.calls.at(-1), [WINDOW_FULL_SCREEN_CHANGED_CHANNEL, false]);
+        const calls = send.mock.calls.length;
+        (fixture.window.webContents.isDestroyed as ReturnType<typeof vi.fn>).mockReturnValue(true);
+        enter!();
+        assert.equal(send.mock.calls.length, calls);
+        (fixture.window.webContents.isDestroyed as ReturnType<typeof vi.fn>).mockReturnValue(false);
+        (fixture.window.isDestroyed as ReturnType<typeof vi.fn>).mockReturnValue(true);
+        leave!();
+        assert.equal(send.mock.calls.length, calls);
+        assert.equal(yield* Ref.get(createCount), 1);
+      }).pipe(Effect.provide(makeTestLayer({ window: fixture.window, createCount, mainWindow })));
+    }),
+  );
+
   it.effect(
     "reconciles the selected locale after document load and retires its exact-window observer",
     () =>

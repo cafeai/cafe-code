@@ -373,6 +373,17 @@ describe("thread context override copying", () => {
       for (const value of [500_000, null]) {
         const source = makeThread({
           codexContextWindowOverride: value,
+          messages: [
+            {
+              id: MessageId.make("source-failed-input"),
+              role: "user",
+              text: "Exact source input",
+              turnId: null,
+              originatingTurn: { turnId: TurnId.make("source-failed-turn"), state: "error" },
+              createdAt: "2026-02-13T00:00:00.000Z",
+              streaming: false,
+            },
+          ],
           session: {
             provider: ProviderDriverKind.make("codex"),
             providerInstanceId: ProviderInstanceId.make("codex"),
@@ -413,6 +424,10 @@ describe("thread context override copying", () => {
         );
         expect(copied?.codexContextWindowOverride).toBe(value);
         expect(copied?.session).toBeNull();
+        expect(copied?.messages[0]?.originatingTurn).toEqual({
+          turnId: `copy:${targetId}:source-failed-turn`,
+          state: "error",
+        });
         // A newer target choice is not undone by history-copy delivery, even
         // when source history still carries the original context preference.
         const newer = applyShellEvent(

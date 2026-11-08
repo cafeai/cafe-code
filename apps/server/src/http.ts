@@ -56,6 +56,20 @@ import { ProjectFaviconResolver } from "./project/Services/ProjectFaviconResolve
 import { ServerAuth } from "./auth/Services/ServerAuth.ts";
 import { respondToAuthError } from "./auth/http.ts";
 import { BrandingImageError, BrandingImageStore } from "./branding/BrandingImageStore.ts";
+import {
+  AppIconRenderError,
+  appIconRenderer,
+  renderWebAppManifestIcons,
+} from "./branding/AppIconRenderer.ts";
+import { brandWebAppHtml, brandWebAppManifest } from "./branding/webAppBranding.ts";
+import { ServerClientSettingsService } from "./serverClientSettings.ts";
+import {
+  WEB_APP_ICON_PREFIX,
+  parseWebAppIconPath,
+  resolveWebAppBranding,
+  webAppIconUrl,
+  type WebAppBranding,
+} from "@cafecode/shared/webAppBranding";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment.ts";
 import {
   browserApiCorsAllowedHeaders,
@@ -380,6 +394,138 @@ const requireAuthenticatedRequest = Effect.gen(function* () {
   const serverAuth = yield* ServerAuth;
   return yield* serverAuth.authenticateHttpRequest(request);
 });
+
+/** Custom artwork is private. Anonymous or unavailable settings use only the
+ * public neutral mark; reading this presentation never admits an API operation. */
+const readRequestWebBranding = Effect.gen(function* () {
+  const authenticated = yield* requireAuthenticatedRequest.pipe(
+    Effect.as(true),
+    Effect.catchTag("AuthError", () => Effect.succeed(false)),
+  );
+  if (!authenticated) return "neutral" as WebAppBranding;
+  const settings = yield* Effect.serviceOption(ServerClientSettingsService);
+  if (Option.isNone(settings)) return "neutral" as WebAppBranding;
+  return yield* settings.value.getSettings.pipe(
+    Effect.map(resolveWebAppBranding),
+    Effect.catch(() => Effect.succeed("neutral" as WebAppBranding)),
+  );
+});
+
+/** Personalized shell/manifest bytes cannot borrow static compressed sidecars.
+ * Other files keep their existing compression/cache policy. */
+const serveBrandedWebAppFile = (filePath: string, requestPath: string) =>
+  Effect.gen(function* () {
+    const html = filePath.toLowerCase().endsWith(".html");
+    const manifest = /^\/manifest(?:\.(?:ja|ko))?\.webmanifest$/.test(requestPath);
+    if (!html && !manifest) return null;
+    const fs = yield* FileSystem.FileSystem;
+    const info = yield* fs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(null)));
+    if (!info || info.type !== "File" || info.size > 64 * 1024) return null;
+    const contents = yield* fs
+      .readFileString(filePath)
+      .pipe(Effect.catch(() => Effect.succeed(null)));
+    if (contents === null || contents.length > 64 * 1024) return null;
+    // Recognize the code-owned document before consulting session/settings state.
+    if (
+      (html ? brandWebAppHtml(contents, "neutral") : brandWebAppManifest(contents, "neutral")) ===
+      null
+    )
+      return null;
+    let branding = yield* readRequestWebBranding;
+    let manifestIcons: Parameters<typeof brandWebAppManifest>[2];
+    if (manifest && branding.startsWith("custom:")) {
+      const images = yield* BrandingImageStore;
+      const imageId = branding.slice(7);
+      const stored = yield* images
+        .resolveStoredImage(imageId)
+        .pipe(Effect.catchTag("BrandingImageError", () => Effect.succeed(null)));
+      const rendered =
+        stored === null
+          ? null
+          : yield* Effect.tryPromise({
+              try: () => renderWebAppManifestIcons(images, imageId, stored.filePath),
+              catch: (error) =>
+                error instanceof AppIconRenderError ? error : new AppIconRenderError("unavailable"),
+            }).pipe(Effect.catch((error) => Effect.succeed(error)));
+      if (rendered instanceof AppIconRenderError && rendered.reason === "busy") {
+        return HttpServerResponse.empty({
+          status: 503,
+          headers: { "Cache-Control": "no-store", "Retry-After": "2" },
+        });
+      }
+      if (rendered === null || rendered instanceof AppIconRenderError) branding = "neutral";
+      else manifestIcons = rendered;
+    }
+    const branded = html
+      ? brandWebAppHtml(contents, branding)
+      : brandWebAppManifest(contents, branding, manifestIcons);
+    if (branded === null) return null;
+    return HttpServerResponse.text(branded, {
+      status: 200,
+      contentType: html ? "text/html; charset=utf-8" : "application/manifest+json; charset=utf-8",
+      headers: {
+        "Cache-Control": html ? "no-store" : "private, no-cache",
+        Vary: "Cookie, Authorization, Accept-Encoding",
+      },
+    });
+  });
+
+export const brandingAppIconRouteLayer = HttpRouter.add(
+  "GET",
+  `${WEB_APP_ICON_PREFIX}*`,
+  Effect.gen(function* () {
+    yield* requireAuthenticatedRequest;
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const url = HttpServerRequest.toURL(request);
+    const parsed = Option.isSome(url) ? parseWebAppIconPath(url.value.pathname) : null;
+    if (!parsed)
+      return HttpServerResponse.empty({ status: 404, headers: { "Cache-Control": "no-store" } });
+    const settings = yield* ServerClientSettingsService;
+    const branding = resolveWebAppBranding(yield* settings.getSettings);
+    if (branding !== `custom:${parsed.imageId}`)
+      return HttpServerResponse.empty({ status: 404, headers: { "Cache-Control": "no-store" } });
+    const images = yield* BrandingImageStore;
+    const stored = yield* images
+      .resolveStoredImage(parsed.imageId)
+      .pipe(Effect.catchTag("BrandingImageError", () => Effect.succeed(null)));
+    if (stored === null)
+      return HttpServerResponse.redirect(webAppIconUrl("neutral", parsed.variant), {
+        status: 302,
+        headers: { "Cache-Control": "no-store" },
+      });
+    const bytes = yield* Effect.tryPromise({
+      try: () => appIconRenderer(images).render(parsed.imageId, stored.filePath, parsed.variant),
+      catch: (error) =>
+        error instanceof AppIconRenderError ? error : new AppIconRenderError("unavailable"),
+    }).pipe(Effect.catch((error) => Effect.succeed(error)));
+    if (bytes instanceof AppIconRenderError) {
+      if (bytes.reason === "busy")
+        return HttpServerResponse.empty({
+          status: 503,
+          headers: { "Cache-Control": "no-store", "Retry-After": "2" },
+        });
+      return HttpServerResponse.redirect(webAppIconUrl("neutral", parsed.variant), {
+        status: 302,
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+    return HttpServerResponse.uint8Array(bytes, {
+      contentType: "image/png",
+      headers: {
+        "Cache-Control": PRIVATE_HASHED_ASSET_CACHE_CONTROL,
+        Vary: "Cookie, Authorization",
+        ...browserApiCorsHeaders,
+      },
+    });
+  }).pipe(
+    Effect.catchTag("AuthError", respondToAuthError),
+    Effect.catchTag("ClientSettingsError", () =>
+      Effect.succeed(
+        HttpServerResponse.empty({ status: 503, headers: { "Cache-Control": "no-store" } }),
+      ),
+    ),
+  ),
+);
 
 const serverEnvironmentRouteHandler = Effect.gen(function* () {
   const config = yield* ServerConfig;
@@ -975,6 +1121,8 @@ export const staticAndDevRouteLayer = HttpRouter.add(
       if (!indexInfo || indexInfo.type !== "File") {
         return HttpServerResponse.text("Not Found", { status: 404 });
       }
+      const branded = yield* serveBrandedWebAppFile(indexPath, url.value.pathname);
+      if (branded) return branded;
       return yield* serveStaticFile({
         filePath: indexPath,
         requestPath: url.value.pathname,
@@ -983,6 +1131,8 @@ export const staticAndDevRouteLayer = HttpRouter.add(
       });
     }
 
+    const branded = yield* serveBrandedWebAppFile(filePath, url.value.pathname);
+    if (branded) return branded;
     return yield* serveStaticFile({
       filePath,
       requestPath: url.value.pathname,

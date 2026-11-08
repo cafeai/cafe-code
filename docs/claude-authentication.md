@@ -16,6 +16,15 @@ Explicit account homes, `CLAUDE_CONFIG_DIR`, secure-storage overrides (including
 
 Local `auth status` establishes that login material is available; it does not prove that a remote service will accept an expired or revoked credential. A real turn's authentication failure retains Cafe's existing error/session-retirement behavior. Cafe does not replay the prompt or automatically switch to another account after a model request fails.
 
+The SDK initialization handshake also succeeds when signed out. Its first-party
+account metadata must report login material before Settings can show
+"Authenticated"; an explicit `tokenSource: "none"` without an API key reports
+"Not signed in". Missing legacy account evidence remains unknown, and external
+backends such as Bedrock or Vertex retain their separate authentication. A
+primary assistant's typed `authentication_failed` error updates the provider
+status immediately. A subsequent failed result retains that evidence and
+retires the stale query even when it has no HTTP 401 status.
+
 The selected configuration scope also determines whether Claude reads `~/.claude/.claude.json` or `~/.claude.json`. Cafe's MCP installer retains both default targets. It does not merge unrelated user configuration between those files.
 
 ## Reported sign-in expiry

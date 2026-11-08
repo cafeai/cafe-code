@@ -23,7 +23,11 @@ import {
   setUpdateChannel,
 } from "./methods/updates.ts";
 import { checkSourceUpdate, getSourceUpdateState } from "./methods/sourceUpdates.ts";
-import { setPowerSaveBlockerState } from "./methods/powerSaveBlocker.ts";
+import {
+  getMacKeepAwakeState,
+  setMacKeepAwakeIntent,
+  setPowerSaveBlockerState,
+} from "./methods/powerSaveBlocker.ts";
 import {
   inspectRemoteCertificate,
   prepareRemoteCertificate,
@@ -36,6 +40,7 @@ import {
   copyText,
   confirm,
   getAppBranding,
+  getWindowFullScreen,
   getLocalEnvironmentBootstrap,
   openExternal,
   openPath,
@@ -49,6 +54,7 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   const ipc = yield* DesktopIpc.DesktopIpc;
 
   yield* ipc.handleSync(getAppBranding);
+  yield* ipc.handleSync(getWindowFullScreen);
   yield* ipc.handleSync(getLocalEnvironmentBootstrap);
 
   yield* ipc.handle(getDebugEndpointState);
@@ -57,6 +63,8 @@ export const installDesktopIpcHandlers = Effect.gen(function* () {
   yield* ipc.handle(getClientSettings);
   yield* ipc.handle(setClientSettings);
   yield* ipc.handle(setPowerSaveBlockerState);
+  yield* ipc.handle(getMacKeepAwakeState);
+  yield* ipc.handle(setMacKeepAwakeIntent);
   yield* ipc.handle(getSavedEnvironmentRegistry);
   yield* ipc.handle(setSavedEnvironmentRegistry);
   yield* ipc.handle(getSavedEnvironmentSecret);

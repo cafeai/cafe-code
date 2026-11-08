@@ -55,11 +55,15 @@ export function WorkspaceEnvironmentSelector() {
           <SelectTrigger
             id="workspace-server"
             aria-label={uiText("Workspace server", undefined, undefined, uiLocale)}
-            className="min-w-0 flex-1 rounded-md border-border px-2 py-1.5 [&_[data-slot=select-icon]]:flex [&_[data-slot=select-icon]]:shrink-0"
+            className="min-w-0 flex-1 rounded-md border-border bg-transparent px-2 py-1.5 dark:bg-transparent [&_[data-slot=select-icon]]:flex [&_[data-slot=select-icon]]:shrink-0"
           >
             <SelectValue />
           </SelectTrigger>
-          <SelectPopup alignItemWithTrigger={false} popupClassName="no-drag w-(--anchor-width)">
+          <SelectPopup
+            variant="sidebar"
+            alignItemWithTrigger={false}
+            popupClassName="no-drag w-(--anchor-width)"
+          >
             {serverItems.map((item) => (
               <SelectItem
                 key={item.value}

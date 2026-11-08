@@ -16,6 +16,7 @@ import {
   derivePendingApprovals,
   derivePendingUserInputs,
   deriveTimelineEntries,
+  deriveFailedUserMessageIds,
   deriveSubagentWorkEntries,
   deriveWorkLogEntries,
   findLatestProposedPlan,
@@ -3882,6 +3883,74 @@ describe("deriveTimelineEntries", () => {
         completedAt: "2026-02-23T00:00:04.000Z",
       }),
     ).toBe("work-after-assistant");
+  });
+});
+
+describe("failed user message presentation", () => {
+  const message = {
+    id: MessageId.make("failed-input"),
+    role: "user" as const,
+    text: "Exact input",
+    turnId: null,
+    createdAt: "2026-11-06T00:00:00.000Z",
+    completedAt: "2026-11-06T00:00:00.000Z",
+    streaming: false,
+  };
+  it("uses an exact projected failed input owner and leaves other terminal outcomes alone", () => {
+    for (const state of ["running", "completed", "interrupted", "error"] as const) {
+      const ids = deriveFailedUserMessageIds({
+        messages: [{ ...message, originatingTurn: { turnId: TurnId.make("failed-turn"), state } }],
+        activities: [],
+      });
+      expect(ids.has(message.id)).toBe(state === "error");
+    }
+    expect(
+      deriveFailedUserMessageIds({
+        messages: [{ ...message, sendFailed: true }],
+        activities: [],
+      }).has(message.id),
+    ).toBe(true);
+  });
+  it("requires exact, current structured start-failure evidence rather than error prose or timestamps alone", () => {
+    const failure = {
+      ...makeActivity({
+        kind: "provider.turn.start.failed",
+        tone: "error",
+        createdAt: "2026-11-06T00:00:01.000Z",
+        payload: { messageId: message.id, intentSequence: 2 },
+      }),
+      turnId: null,
+    };
+    expect([...deriveFailedUserMessageIds({ messages: [message], activities: [failure] })]).toEqual(
+      [message.id],
+    );
+    for (const payload of [
+      { detail: "failed" },
+      { messageId: "other-input", intentSequence: 2 },
+      { messageId: message.id, intentSequence: -1 },
+      { messageId: message.id, intentSequence: "2" },
+    ]) {
+      expect([
+        ...deriveFailedUserMessageIds({
+          messages: [message],
+          activities: [{ ...failure, payload }],
+        }),
+      ]).toEqual([]);
+    }
+    expect([
+      ...deriveFailedUserMessageIds({
+        messages: [{ ...message, completedAt: "2026-11-06T00:00:02.000Z" }],
+        activities: [failure],
+      }),
+    ]).toEqual([]);
+    expect([
+      ...deriveFailedUserMessageIds({
+        messages: [
+          { ...message, originatingTurn: { turnId: TurnId.make("new-turn"), state: "completed" } },
+        ],
+        activities: [failure],
+      }),
+    ]).toEqual([]);
   });
 });
 

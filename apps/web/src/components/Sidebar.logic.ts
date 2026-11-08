@@ -24,6 +24,14 @@ export function shouldInsetContentSidebarTrigger(input: {
   return input.isElectronHost && !input.isMobile && isMacPlatform(input.platform);
 }
 
+/** With Desk turned off the sidebar is always Projects; the saved choice is kept. */
+export function resolveEffectiveSidebarMode(
+  deskEnabled: boolean,
+  savedMode: "desk" | "projects",
+): "desk" | "projects" {
+  return deskEnabled ? savedMode : "projects";
+}
+
 export type SidebarNewThreadEnvMode = "local" | "worktree";
 type SidebarProject = {
   id: string;

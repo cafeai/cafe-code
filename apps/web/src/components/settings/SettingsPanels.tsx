@@ -105,6 +105,7 @@ import { Spinner } from "../ui/spinner";
 import { InfoTip } from "../ui/info-tip";
 import { useDelayedFlag } from "../../hooks/useDelayedFlag";
 import { Switch } from "../ui/switch";
+import { MacKeepAwakeSettings } from "./MacKeepAwakeSettings";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
@@ -549,15 +550,27 @@ export function useSettingsRestore(onRestored?: () => void, pathname = "/setting
   const { theme, setTheme } = useTheme();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
-  const languagePreference = useSettings((current) => current.languagePreference, {
-    environmentId: null,
-  });
-  const { updateSettings: updateLanguageSettings } = useUpdateSettings({ environmentId: null });
+  const clientPreferences = useSettings(
+    (current) => ({
+      languagePreference: current.languagePreference,
+      interfaceScalePercent: current.interfaceScalePercent,
+      keepAwakeWithLidClosed: current.keepAwakeWithLidClosed,
+    }),
+    { environmentId: null },
+  );
+  const { updateSettings: updateClientPreferences } = useUpdateSettings({ environmentId: null });
   const reset = getSettingsPageReset(
     pathname,
-    settings,
+    {
+      ...settings,
+      interfaceScalePercent: clientPreferences.interfaceScalePercent,
+      keepAwakeWithLidClosed: clientPreferences.keepAwakeWithLidClosed,
+    },
     {
       desktop: typeof window.desktopBridge?.setPowerSaveBlockerState === "function",
+      macKeepAwake:
+        typeof window.desktopBridge?.getMacKeepAwakeState === "function" &&
+        typeof window.desktopBridge?.setMacKeepAwakeIntent === "function",
     },
     uiLocale,
   );
@@ -565,7 +578,7 @@ export function useSettingsRestore(onRestored?: () => void, pathname = "/setting
   const appearance = pathname === "/settings/appearance";
   const changedSettingLabels = [
     ...(appearance && theme !== "system" ? [uiText("Theme", undefined, undefined, uiLocale)] : []),
-    ...(general && languagePreference !== "system"
+    ...(general && clientPreferences.languagePreference !== "system"
       ? [uiText("Language", undefined, undefined, uiLocale)]
       : []),
     ...reset.labels,
@@ -583,8 +596,14 @@ export function useSettingsRestore(onRestored?: () => void, pathname = "/setting
     if (!confirmed) return;
     if (appearance) setTheme("system");
     if (general)
-      updateLanguageSettings({ languagePreference: DEFAULT_UNIFIED_SETTINGS.languagePreference });
-    updateSettings(reset.patch);
+      updateClientPreferences({ languagePreference: DEFAULT_UNIFIED_SETTINGS.languagePreference });
+    const { interfaceScalePercent, keepAwakeWithLidClosed, ...workspacePatch } = reset.patch;
+    if (interfaceScalePercent !== undefined) updateClientPreferences({ interfaceScalePercent });
+    if (keepAwakeWithLidClosed !== undefined) {
+      await window.desktopBridge?.setMacKeepAwakeIntent?.(keepAwakeWithLidClosed);
+      updateClientPreferences({ keepAwakeWithLidClosed });
+    }
+    if (Object.keys(workspacePatch).length > 0) updateSettings(workspacePatch);
     onRestored?.();
   };
   return { changedSettingLabels, restoreDefaults };
@@ -917,6 +936,10 @@ export function AppearanceSettingsPanel() {
   const { theme, setTheme } = useTheme();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
+  const interfaceScalePercent = useSettings((current) => current.interfaceScalePercent, {
+    environmentId: null,
+  });
+  const { updateSettings: updateClientPreferences } = useUpdateSettings({ environmentId: null });
 
   return (
     <SettingsPageContainer title={uiText("Appearance", undefined, undefined, uiLocale)}>
@@ -965,11 +988,13 @@ export function AppearanceSettingsPanel() {
           searchId="appearance.interfaceSize"
           title={uiText("Interface size", undefined, undefined, uiLocale)}
           resetAction={
-            settings.interfaceScalePercent !== DEFAULT_INTERFACE_SCALE_PERCENT ? (
+            interfaceScalePercent !== DEFAULT_INTERFACE_SCALE_PERCENT ? (
               <SettingResetButton
                 label={uiText("interface size", undefined, undefined, uiLocale)}
                 onClick={() =>
-                  updateSettings({ interfaceScalePercent: DEFAULT_INTERFACE_SCALE_PERCENT })
+                  updateClientPreferences({
+                    interfaceScalePercent: DEFAULT_INTERFACE_SCALE_PERCENT,
+                  })
                 }
               />
             ) : null
@@ -982,13 +1007,10 @@ export function AppearanceSettingsPanel() {
                 size="icon-sm"
                 variant="outline"
                 aria-label={uiText("Smaller interface", undefined, undefined, uiLocale)}
-                disabled={settings.interfaceScalePercent <= MIN_INTERFACE_SCALE_PERCENT}
+                disabled={interfaceScalePercent <= MIN_INTERFACE_SCALE_PERCENT}
                 onClick={() =>
-                  updateSettings({
-                    interfaceScalePercent: stepInterfaceScalePercent(
-                      settings.interfaceScalePercent,
-                      -1,
-                    ),
+                  updateClientPreferences({
+                    interfaceScalePercent: stepInterfaceScalePercent(interfaceScalePercent, -1),
                   })
                 }
               >
@@ -998,19 +1020,16 @@ export function AppearanceSettingsPanel() {
                 aria-live="polite"
                 className="w-12 text-center font-mono text-xs tabular-nums text-muted-foreground"
               >
-                {settings.interfaceScalePercent}%
+                {interfaceScalePercent}%
               </span>
               <Button
                 size="icon-sm"
                 variant="outline"
                 aria-label={uiText("Larger interface", undefined, undefined, uiLocale)}
-                disabled={settings.interfaceScalePercent >= MAX_INTERFACE_SCALE_PERCENT}
+                disabled={interfaceScalePercent >= MAX_INTERFACE_SCALE_PERCENT}
                 onClick={() =>
-                  updateSettings({
-                    interfaceScalePercent: stepInterfaceScalePercent(
-                      settings.interfaceScalePercent,
-                      1,
-                    ),
+                  updateClientPreferences({
+                    interfaceScalePercent: stepInterfaceScalePercent(interfaceScalePercent, 1),
                   })
                 }
               >
@@ -1701,6 +1720,7 @@ function SystemSettingsSections() {
               </Select>
             }
           />
+          <MacKeepAwakeSettings />
         </SettingsSection>
       ) : null}
 

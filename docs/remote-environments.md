@@ -206,6 +206,16 @@ the host's firewall. The Mac desktop app continues to run its local Cafe helper
 for its own UI, storage and native integrations; project execution can stay on
 the PC.
 
+## Custom artwork and installed web apps
+
+The primary server's custom sidebar image also supplies its WebUI loading
+screens, favicon, PWA home-screen/launch icon and notification artwork. Signed-out
+startup uses a neutral coffee mark. Existing Android installs may retain their
+old icon; after updating the server, sign in with the custom image selected and
+install the web app again. The image does not need to be uploaded again. See
+[web application artwork](web-app-branding.md) for private delivery, Android
+installer handling and qualification limits.
+
 ## LAN access and firewall ports
 
 Enable network/LAN access in Cafe before connecting from another device, then

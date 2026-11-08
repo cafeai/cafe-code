@@ -26,7 +26,7 @@ import { MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES } from "@cafecode/contracts/settings
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { page } from "vitest/browser";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { render } from "vitest-browser-react";
 import type { ReactNode } from "react";
 import { getUiLocale, resolveUiLocale, setUiLocale } from "@cafecode/shared/i18n";
@@ -72,7 +72,9 @@ import {
   ProviderSettingsPanel,
   SystemSettingsPanel,
   TextGenerationModelSettingsRow,
+  useSettingsRestore,
 } from "./SettingsPanels";
+import { MacKeepAwakeSettings } from "./MacKeepAwakeSettings";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
 import { CodexDeviceLoginDialog } from "./CodexDeviceLoginDialog";
 
@@ -830,6 +832,43 @@ function createCodexLoginSettings(deviceCodeLogin: boolean): ServerConfig {
 }
 
 describe("settings panels", () => {
+  let closePowerFixture: (() => Promise<void>) | null = null;
+  // New power fixtures retain their exact pending render across hard timeout.
+  // Shared afterEach joins this same owner before resetting DOM/native mocks.
+  function powerFixture(context: Pick<TestContext, "signal" | "onTestFinished">) {
+    let retired = false;
+    let pending: ReturnType<typeof renderWithTestRouter> | null = null;
+    let closing: Promise<void> | null = null;
+    const close = () => {
+      retired = true;
+      return (closing ??= (async () => {
+        const view = pending ? await pending.catch(() => null) : null;
+        if (view) await view.unmount();
+        if (mounted === view) mounted = null;
+      })());
+    };
+    context.signal.addEventListener(
+      "abort",
+      () => {
+        retired = true;
+        void close();
+      },
+      { once: true },
+    );
+    context.onTestFinished(close);
+    closePowerFixture = close;
+    return async (children: ReactNode) => {
+      if (retired) throw new Error("Power settings fixture retired");
+      pending = renderWithTestRouter(children);
+      const view = await pending;
+      if (retired) {
+        await close();
+        throw new Error("Power settings fixture retired");
+      }
+      mounted = view;
+      return view;
+    };
+  }
   let mounted:
     | (Awaited<ReturnType<typeof render>> & {
         cleanup?: () => Promise<void>;
@@ -852,6 +891,8 @@ describe("settings panels", () => {
   });
 
   afterEach(async () => {
+    await closePowerFixture?.();
+    closePowerFixture = null;
     if (mounted) {
       const teardown = mounted.cleanup ?? mounted.unmount;
       await teardown?.call(mounted).catch(() => {});
@@ -1742,6 +1783,111 @@ describe("settings panels", () => {
       expect(updateClientSettings).toHaveBeenCalledWith({ powerSaveBlockerMode: "during-chats" });
     });
   });
+  it("keeps closed-lid work off by default and persists the native Mac toggle", async (context) => {
+    const renderPower = powerFixture(context);
+    const desktopBridge = createDesktopBridgeStub();
+    desktopBridge.getMacKeepAwakeState = vi.fn().mockResolvedValue({ phase: "idle", reason: null });
+    desktopBridge.setMacKeepAwakeIntent = vi.fn().mockResolvedValue(undefined);
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot(createBaseServerConfig());
+    mounted = await renderPower(
+      <AppAtomRegistryProvider>
+        <SystemSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    const toggle = page.getByRole("switch", { name: "Work with the lid closed" });
+    await expect.element(toggle).not.toBeChecked();
+    await toggle.click();
+    await vi.waitFor(() =>
+      expect(updateClientSettings).toHaveBeenCalledWith({ keepAwakeWithLidClosed: true }),
+    );
+    await expect.element(toggle).toBeChecked();
+    await expect
+      .element(page.getByText("Waiting for local work.", { exact: false }))
+      .toBeInTheDocument();
+    await toggle.click();
+    await vi.waitFor(() =>
+      expect(updateClientSettings).toHaveBeenCalledWith({ keepAwakeWithLidClosed: false }),
+    );
+    await expect.element(toggle).not.toBeChecked();
+    expect(desktopBridge.setMacKeepAwakeIntent).toHaveBeenLastCalledWith(false);
+  });
+  it("hides closed-lid work when the desktop has no native Mac capability", async (context) => {
+    const renderPower = powerFixture(context);
+    window.desktopBridge = createDesktopBridgeStub();
+    setServerConfigSnapshot(createBaseServerConfig());
+    mounted = await renderPower(
+      <AppAtomRegistryProvider>
+        <SystemSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+    await expect
+      .element(page.getByRole("switch", { name: "Work with the lid closed" }))
+      .not.toBeInTheDocument();
+  });
+  it("keeps the closed-lid preference on the primary Mac while a remote workspace is selected", async (context) => {
+    const renderPower = powerFixture(context);
+    const desktopBridge = createDesktopBridgeStub();
+    desktopBridge.getMacKeepAwakeState = vi.fn().mockResolvedValue({ phase: "idle", reason: null });
+    desktopBridge.setMacKeepAwakeIntent = vi.fn().mockResolvedValue(undefined);
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    setServerConfigSnapshot(createBaseServerConfig());
+    selectWorkspaceEnvironment(EnvironmentId.make("power-remote-fixture"));
+    mounted = await renderPower(
+      <AppAtomRegistryProvider>
+        <MacKeepAwakeSettings />
+      </AppAtomRegistryProvider>,
+    );
+    await page.getByRole("switch", { name: "Work with the lid closed" }).click();
+    await vi.waitFor(() =>
+      expect(updateClientSettings).toHaveBeenCalledWith({ keepAwakeWithLidClosed: true }),
+    );
+    expect(desktopBridge.setMacKeepAwakeIntent).toHaveBeenCalledWith(true);
+    expect(getServerConfig()?.clientSettings.keepAwakeWithLidClosed).toBe(true);
+  });
+  it("revokes native lid intent before whole-page reset persists the default", async (context) => {
+    const renderPower = powerFixture(context);
+    const desktopBridge = createDesktopBridgeStub();
+    desktopBridge.getMacKeepAwakeState = vi
+      .fn()
+      .mockResolvedValue({ phase: "active", reason: null });
+    const actions: string[] = [];
+    desktopBridge.setMacKeepAwakeIntent = vi.fn(async (value) => {
+      actions.push(`intent:${value}`);
+    });
+    window.desktopBridge = desktopBridge;
+    const { updateClientSettings } = installClientSettingsNativeApi(desktopBridge);
+    updateClientSettings.mockImplementation(async (patch) => {
+      if (patch.keepAwakeWithLidClosed !== undefined)
+        actions.push(`persist:${patch.keepAwakeWithLidClosed}`);
+      return { ...DEFAULT_CLIENT_SETTINGS, ...patch };
+    });
+    window.nativeApi = {
+      ...window.nativeApi!,
+      dialogs: { confirm: vi.fn().mockResolvedValue(true) },
+    } as unknown as LocalApi;
+    const config = createBaseServerConfig();
+    setServerConfigSnapshot({
+      ...config,
+      clientSettings: { ...config.clientSettings, keepAwakeWithLidClosed: true },
+    });
+    function ResetGeneral() {
+      const { restoreDefaults } = useSettingsRestore(undefined, "/settings/general");
+      return <button onClick={() => void restoreDefaults()}>Reset power fixture</button>;
+    }
+    mounted = await renderPower(
+      <AppAtomRegistryProvider>
+        <ResetGeneral />
+      </AppAtomRegistryProvider>,
+    );
+    await page.getByRole("button", { name: "Reset power fixture" }).click();
+    await vi.waitFor(() =>
+      expect(updateClientSettings).toHaveBeenCalledWith({ keepAwakeWithLidClosed: false }),
+    );
+    expect(actions).toEqual(["intent:false", "persist:false"]);
+  });
 
   it("preserves primary settings optimistic behavior and failure feedback", async () => {
     const desktopBridge = createDesktopBridgeStub();
@@ -2048,6 +2194,12 @@ describe("settings panels", () => {
     await expect
       .element(page.getByRole("button", { name: "Violet", exact: true }))
       .toHaveAttribute("aria-pressed", "true");
+
+    await page.getByLabelText("Enable Desk").click();
+
+    await vi.waitFor(() => {
+      expect(updateClientSettings).toHaveBeenCalledWith({ deskEnabled: false });
+    });
 
     await expect.element(page.getByText("Sidebar search")).toBeInTheDocument();
     await page.getByLabelText("Show sidebar search").click();

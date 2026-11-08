@@ -1,11 +1,23 @@
 # Desk and chat tabs
 
-Last updated: 2026-10-16 00:40:48 JST (UTC+0900)
+Last updated: 2026-11-06 03:37:30 PST (UTC-0800)
 
 Use **Projects** to browse the saved project/chat catalog, including the separate
 **Chats** section for conversations without a project. Use **Desk** to
 show only your open chats, grouped the way you are working. Atrium, Settings,
 project actions and the chat composer stay in their usual places.
+
+In Projects, click the **Chats** heading to collapse that section; the chat you
+are viewing stays visible, and a status dot on the heading shows if a hidden chat
+is working or needs you. To declutter the project list without deleting
+anything, right-click a project and choose **Hide project**. Hidden projects move
+into a collapsed **Hidden** group at the bottom of Projects, which shows the most
+urgent state of their chats. Open the group and choose **Show project** to bring
+one back. Hiding never changes, stops or deletes a project or its chats: they
+keep running, stay in search, and a hidden project appears while one of its chats
+is open. A grouped project returns on its own if a new folder (such as a new
+worktree) joins it. The Hidden list is saved with your Cafe settings, so it
+follows you between the desktop app and the browser.
 
 While reviewing earlier messages, hover or focus **Scroll to bottom** to reveal
 its compact options popout. Choose **Hide until bottom** to dismiss the button
@@ -23,15 +35,27 @@ context remains in each tab's hover title and the sidebar. Source-build badges
 such as **Newer dev** sit beside **Settings** at the bottom of the sidebar.
 
 To hide the tabs, turn off **Settings → Chats → Chat tabs**. The top bar stays
-(with the same window-control space, focus and `…` actions), but it shows each
+(with the same window-control space and focus control), but it shows each
 pane's chat name, project and Open-in controls instead of tabs. The chat name
-drags the window, so the Open-in controls sit directly beside the `…` actions
-without the extra drag strip used next to tabs.
+drags the window, without the extra drag strip used next to tabs. The tab/group
+`…` menu is hidden with the tab bar.
 Previews keep their italic title. Splits, saved tabs and previews are unchanged;
-switch chats from the Desk sidebar, Projects or search, and use the `…` menu for
-close, reopen, split, move, merge and rename actions. Dragging tabs and the
+switch chats from the Desk sidebar, Projects or search. Dragging tabs and the
 group grip are unavailable while tabs are hidden. Turning tabs back on restores
-the strip exactly as it was.
+the strip and its actions menu exactly as they were.
+
+To use only the project catalog, turn off **Settings → Appearance → Sidebar →
+Desk**. The sidebar then always shows Projects, without the Desk/Projects
+switch. Your saved Desk layout and last sidebar choice are kept, so turning Desk
+back on restores them.
+
+When **Desk** and **Chat tabs** are both off, there is nowhere to see or close
+open tabs, so chats stop collecting in the Desk. Each pane keeps only its one
+temporary preview: opening another chat replaces it, and double-clicking,
+choosing Open in **Clicking a chat**, or sending a message no longer keeps a chat
+open. A new chat becomes that preview after its first message. Tabs you kept
+before turning both off stay as they were, and turning either setting back on
+restores the normal behavior.
 
 Web clients narrower than 768px show one chat with its normal title and sidebar
 button, without a tab strip or group controls. Open the sidebar to switch chats
@@ -72,6 +96,10 @@ remains a separate desktop smoke check.
   to that group. Escape or dropping outside the workspace cancels the move.
 - Use a tab's right-click menu or the group's `…` button for close, close others,
   close right, close all, reopen, split, move, merge and focus actions.
+- Choose **Clear** at the top of the Desk sidebar (beside the open-chats icon) to close every
+  group's open chats and the active unsent draft editor. Chats and agents keep
+  running, and draft input and queued messages are retained. The button is
+  disabled when the desk is empty; **Reopen closed tab** restores recent kept tabs.
 - Choose **Open** in that menu to open the clicked chat's project/worktree in
   an installed editor, the file manager, or a terminal. The existing favorite-editor
   keyboard shortcut still acts on the focused chat pane. These actions are

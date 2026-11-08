@@ -84,7 +84,7 @@ import {
 import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
 import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
-import { page, userEvent } from "vitest/browser";
+import { cdp, page, userEvent } from "vitest/browser";
 import { failBrowserWsRpc } from "../../test/wsRpcHarness";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { deskTabKey } from "../deskModel";
@@ -100,6 +100,7 @@ import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
 import { createChatViewCallerOwner } from "./chatViewCallerOwner.test.fixture";
 import { createFollowUpQueuePersistence } from "./chat/followUpQueuePersistence";
 import { toastManager } from "./ui/toast";
+import { browserInputPoint } from "./nativeInput.browser.fixture";
 
 const attachmentUploadObservation = vi.hoisted(() => ({
   capture: undefined as
@@ -135,6 +136,195 @@ vi.mock("../attachments/fileAttachments", async (importOriginal) => {
 
 describe("ChatView full app (composer)", () => {
   registerChatViewBrowserHooks();
+
+  for (const busy of [false, true]) {
+    it(`keeps a failed input's work log anchored and resends exact content only on request (busy=${busy})`, async (context) => {
+      let release!: () => void;
+      const ack = new Promise<{ sequence: number }>((resolve) => {
+        release = () => resolve({ sequence: 20 });
+      });
+      let restoreDispatch: (() => void) | undefined;
+      let acknowledged = false;
+      const owner = createChatViewCallerOwner(context, mountChatView, {
+        label: "failed-message-resend",
+        beforeDrain: () => release(),
+        afterUnmount: () => restoreDispatch?.(),
+      });
+      await owner.run(async () => {
+        const failedId = MessageId.make("failed-message-to-resend");
+        const failedTurn = TurnId.make("failed-message-turn");
+        const laterTurn = TurnId.make("later-message-turn");
+        const sourceText = "Review this exact prompt.\nKeep the original content.";
+        const imageBase64 =
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6dAAAAABJRU5ErkJggg==";
+        worker.use(
+          http.get(
+            "*/attachments/retry-source-image",
+            () =>
+              new HttpResponse(
+                Uint8Array.from(atob(imageBase64), (c) => c.charCodeAt(0)),
+                { headers: { "Content-Type": "image/png" } },
+              ),
+          ),
+        );
+        const file = {
+          type: "file" as const,
+          id: "retry-source-file",
+          name: "source.txt",
+          mimeType: "text/plain",
+          sizeBytes: 12,
+        };
+        const original = createUserMessage({ id: failedId, text: sourceText, offsetSeconds: 1 });
+        const later = createUserMessage({
+          id: MessageId.make("later-message"),
+          text: "A later message",
+          offsetSeconds: 10,
+        });
+        const base = createSnapshotForTargetUser({
+          targetMessageId: failedId,
+          targetText: sourceText,
+          provider: "claudeAgent",
+          history: "essential",
+        });
+        const snapshot: OrchestrationReadModel = {
+          ...base,
+          threads: base.threads.map((thread) => ({
+            ...thread,
+            messages: [
+              {
+                ...original,
+                originatingTurn: { turnId: failedTurn, state: "error" },
+                attachments: [
+                  {
+                    type: "image",
+                    id: "retry-source-image",
+                    name: "source.png",
+                    mimeType: "image/png",
+                    sizeBytes: 67,
+                  },
+                  file,
+                ],
+              },
+              later,
+            ],
+            latestTurn: {
+              turnId: laterTurn,
+              state: busy ? "running" : "completed",
+              requestedAt: isoAt(10),
+              startedAt: isoAt(10),
+              completedAt: busy ? null : isoAt(12),
+              assistantMessageId: null,
+            },
+            session: {
+              ...thread.session!,
+              status: busy ? "running" : "ready",
+              activeTurnId: busy ? laterTurn : null,
+            },
+            activities: [
+              {
+                id: EventId.make("failed-message-error"),
+                turnId: failedTurn,
+                kind: "runtime.error",
+                tone: "error",
+                summary: "Provider error",
+                payload: { detail: "Synthetic provider failure" },
+                createdAt: isoAt(2),
+              },
+            ],
+          })),
+        };
+        await owner.mount({
+          viewport: WIDE_FOOTER_VIEWPORT,
+          snapshot,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? body.type === "thread.turn.start"
+                ? ack
+                : { sequence: 19 }
+              : undefined,
+        });
+        const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+        const dispatch = api.orchestration.dispatchCommand;
+        const spy = vi.spyOn(api.orchestration, "dispatchCommand").mockImplementation(function (
+          this: typeof api.orchestration,
+          ...args
+        ) {
+          return owner.own("ack", async () => {
+            const result = await dispatch.apply(this, args);
+            if (args[0].type === "thread.turn.start") acknowledged = true;
+            return result;
+          });
+        });
+        restoreDispatch = () => spy.mockRestore();
+        await owner.own("editor", () => waitForComposerEditor());
+        await owner.own("draft", () =>
+          page.getByTestId("composer-editor").fill("Keep my unsent draft"),
+        );
+        const resend = page.getByRole("button", { name: "Resend", exact: true });
+        await owner.own("controls", () => expect.element(resend).toBeVisible());
+        expect(resend.element().checkVisibility({ checkOpacity: true })).toBe(true);
+        expect(resend.element().textContent).toBe("");
+        const failedBubble = document.querySelector<HTMLElement>(
+          `[data-message-id="${failedId}"] [data-message-send-failed="true"]`,
+        );
+        expect(failedBubble).not.toBeNull();
+        const ids = Array.from(
+          document.querySelectorAll<HTMLElement>("[data-timeline-row-id]"),
+        ).map((row) => row.dataset.timelineRowId);
+        expect(ids.indexOf(`historical-work:${failedTurn}`)).toBeGreaterThan(ids.indexOf(failedId));
+        expect(ids.indexOf(`historical-work:${failedTurn}`)).toBeLessThan(ids.indexOf(later.id));
+        const sends = () =>
+          wsRequests.filter(
+            (request) =>
+              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              request.type === "thread.turn.start",
+          );
+        expect(sends()).toHaveLength(0);
+        if (busy) {
+          await owner.own("controls", () => expect.element(resend).toBeDisabled());
+          return;
+        }
+        await owner.own("controls", () => expect.element(resend).toBeEnabled());
+        await owner.own("preview", () =>
+          page.screenshot({ path: "../../../../.logs/failed-message-resend.png" }),
+        );
+        await owner.own("send", () => resend.click());
+        await owner.own("request", () => vi.waitFor(() => expect(sends()).toHaveLength(1)));
+        expect(sends()[0]).toMatchObject({
+          type: "thread.turn.start",
+          threadId: THREAD_ID,
+          message: {
+            role: "user",
+            text: sourceText,
+            attachments: [
+              {
+                type: "image",
+                name: "source.png",
+                mimeType: "image/png",
+                dataUrl: `data:image/png;base64,${imageBase64}`,
+              },
+              file,
+            ],
+          },
+        });
+        expect(sends()[0]).not.toMatchObject({ message: { messageId: failedId } });
+        expect(acknowledged).toBe(false);
+        await owner.own("controls", () => expect.element(resend).toBeDisabled());
+        await owner.own("controls", () =>
+          expect.element(resend).toHaveAttribute("aria-busy", "true"),
+        );
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "Keep my unsent draft",
+        );
+        expect(page.getByTestId("composer-editor").element().textContent).toBe(
+          "Keep my unsent draft",
+        );
+        release();
+        await owner.own("receipt", () => vi.waitFor(() => expect(acknowledged).toBe(true)));
+        expect(sends()).toHaveLength(1);
+      });
+    });
+  }
 
   const createCodexRecoverySnapshot = (uncertain = false): OrchestrationReadModel => {
     const base = createSnapshotWithActiveSubagent();
@@ -2553,6 +2743,73 @@ describe("ChatView full app (composer)", () => {
       expect(document.querySelector('button[aria-label^="Context window"]')).toBeNull();
       expect(findComposerTaskProgressTrigger()).toBeNull();
 
+      const column = rail.closest<HTMLElement>('[data-chat-right-column="true"]')!;
+      const initialWidth = column.getBoundingClientRect().width;
+      const separator = page.getByRole("separator", { name: "Resize Sidebar", exact: true });
+      await expect.element(separator).toBeVisible();
+      await owner.own("controls", () => separator.click());
+      await expect.element(separator).toHaveFocus();
+      await owner.own("input", async () => {
+        const bounds = separator.element().getBoundingClientRect();
+        const start = browserInputPoint({
+          x: bounds.left + bounds.width / 2,
+          y: bounds.top + bounds.height / 2,
+        });
+        const end = browserInputPoint({
+          x: bounds.left + bounds.width / 2 - 80,
+          y: bounds.top + bounds.height / 2,
+        });
+        const input = cdp();
+        let releaseRequired = false;
+        await input.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...start });
+        try {
+          // Own release before native press admission; a rejected response
+          // cannot prove Chromium did not receive that exact press.
+          releaseRequired = true;
+          await input.send("Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            ...start,
+            button: "left",
+            buttons: 1,
+            clickCount: 1,
+          });
+          await input.send("Input.dispatchMouseEvent", {
+            type: "mouseMoved",
+            ...end,
+            button: "left",
+            buttons: 1,
+          });
+        } finally {
+          if (releaseRequired) {
+            await input.send("Input.dispatchMouseEvent", {
+              type: "mouseReleased",
+              ...end,
+              button: "left",
+              buttons: 0,
+              clickCount: 1,
+            });
+          }
+        }
+      });
+      await owner.own("rail", () =>
+        vi.waitFor(() => {
+          expect(column.getBoundingClientRect().width).toBeCloseTo(initialWidth + 80, 0);
+          expect(useUiStateStore.getState().chatRightPanelWidth).toBe(
+            Math.round(initialWidth + 80),
+          );
+          expect(findSessionRail()).toBe(rail);
+        }),
+      );
+      await owner.own("input", () => userEvent.keyboard("{ArrowRight}"));
+      await owner.own("rail", () =>
+        vi.waitFor(() => {
+          expect(column.getBoundingClientRect().width).toBeCloseTo(initialWidth + 70, 0);
+          expect(useUiStateStore.getState().chatRightPanelWidth).toBe(
+            Math.round(initialWidth + 70),
+          );
+        }),
+      );
+
       await owner.own("controls", () =>
         page.getByRole("button", { name: "Show in composer" }).click(),
       );
@@ -3871,7 +4128,8 @@ describe("ChatView full app (composer)", () => {
       await vi.waitFor(
         () => {
           expect(turnStartAttempts).toBe(1);
-          expect(findOptimisticMessage()).toHaveLength(0);
+          expect(findOptimisticMessage()).toHaveLength(1);
+          expect(document.querySelectorAll('[data-message-send-failed="true"]')).toHaveLength(1);
           expect(
             document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent,
           ).toBe(messageText);
@@ -3913,7 +4171,8 @@ describe("ChatView full app (composer)", () => {
           // The dismissed banner remains suppressed, proving the new toast
           // is what makes an identical second rejection visible.
           expect(document.querySelector('button[aria-label="Dismiss error"]')).toBeNull();
-          expect(findOptimisticMessage()).toHaveLength(0);
+          expect(findOptimisticMessage()).toHaveLength(2);
+          expect(document.querySelectorAll('[data-message-send-failed="true"]')).toHaveLength(2);
           expect(
             document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent,
           ).toBe(messageText);
@@ -3924,21 +4183,27 @@ describe("ChatView full app (composer)", () => {
         { timeout: 8_000, interval: 16 },
       );
 
-      // A third press succeeds. The restored draft is consumed exactly once
-      // and its optimistic row remains until the canonical snapshot arrives.
+      // Resend is explicit new input. It preserves a different draft while
+      // retaining both failed attempts and submitting one fresh message.
+      await page.getByTestId("composer-editor").fill("Keep my new draft");
+      await vi.waitFor(() =>
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "Keep my new draft",
+        ),
+      );
       const closeCountBeforeSuccessfulRetry = closeToastSpy.mock.calls.length;
-      (await waitForSendButton()).click();
+      await page.getByRole("button", { name: "Resend", exact: true }).first().click();
       await vi.waitFor(
         () => {
           expect(turnStartAttempts).toBe(3);
           expect(closeToastSpy.mock.calls).toHaveLength(closeCountBeforeSuccessfulRetry + 1);
-          expect(findOptimisticMessage()).toHaveLength(1);
+          expect(findOptimisticMessage()).toHaveLength(3);
           expect(
             document.querySelector<HTMLElement>('[data-testid="composer-editor"]')?.textContent ??
               "",
-          ).toBe("");
+          ).toBe("Keep my new draft");
           expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt ?? "").toBe(
-            "",
+            "Keep my new draft",
           );
           expect(dispatchedMessageTexts).toEqual([messageText, messageText, messageText]);
           expect(findSendFailureToastTitle()).toBeNull();

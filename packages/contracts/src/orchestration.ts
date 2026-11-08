@@ -283,12 +283,19 @@ export type OrchestrationProject = typeof OrchestrationProject.Type;
 export const OrchestrationMessageRole = Schema.Literals(["user", "assistant", "system"]);
 export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
 
+/** Exact projected input owner for presentation; never native retry authority. */
+export const OrchestrationMessageOriginatingTurn = Schema.Struct({
+  turnId: TurnId,
+  state: Schema.Literals(["running", "interrupted", "completed", "error"]),
+});
+
 export const OrchestrationMessage = Schema.Struct({
   id: MessageId,
   role: OrchestrationMessageRole,
   text: Schema.String,
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   turnId: Schema.NullOr(TurnId),
+  originatingTurn: Schema.optional(OrchestrationMessageOriginatingTurn),
   streaming: Schema.Boolean,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,

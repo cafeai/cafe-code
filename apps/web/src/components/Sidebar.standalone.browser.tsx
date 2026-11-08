@@ -3,6 +3,7 @@ import { EnvironmentId, ProviderDriverKind, ThreadId, TurnId } from "@cafecode/c
 import { scopeThreadRef, scopedThreadKey } from "@cafecode/client-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
+import { useState } from "react";
 import { render } from "vitest-browser-react";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
@@ -474,6 +475,67 @@ describe("standalone Chats catalog", () => {
       expect(mocks.archive).toHaveBeenCalledExactlyOnceWith(
         scopeThreadRef(environmentId, saved.id),
       );
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("collapses the Chats section, keeping the open chat and surfacing hidden work", async () => {
+    const open = standaloneFixture("open-chat", "Chat being viewed", "2026-09-04T00:00:00Z");
+    const working = standaloneFixture("working-chat", "Busy chat", "2026-09-03T00:00:00Z", {
+      session: {
+        provider: ProviderDriverKind.make("codex"),
+        status: "running",
+        orchestrationStatus: "running",
+        createdAt: saved.createdAt,
+        updatedAt: saved.updatedAt!,
+      },
+    });
+    const threads = [open, working, saved];
+    const onSectionExpandedChange = vi.fn();
+    function Harness() {
+      const [sectionExpanded, setSectionExpanded] = useState(true);
+      return (
+        <div className="w-72">
+          <SidebarStandaloneChats
+            onNewChat={vi.fn()}
+            entries={buildStandaloneCatalog({ threads, sortOrder: "updated_at" })}
+            previewCount={8}
+            expanded={false}
+            sectionExpanded={sectionExpanded}
+            onSectionExpandedChange={(next) => {
+              onSectionExpandedChange(next);
+              setSectionExpanded(next);
+            }}
+            activeTarget={{ kind: "server", threadRef: scopeThreadRef(environmentId, open.id) }}
+            jumpLabelByKey={new Map()}
+            onOpen={vi.fn()}
+            onExpansionChange={vi.fn()}
+          />
+        </div>
+      );
+    }
+    const screen = await render(<Harness />);
+    try {
+      const toggle = screen.getByTestId("sidebar-chats-section-toggle");
+      await expect.element(toggle).toHaveAttribute("aria-expanded", "true");
+      await expect.element(screen.getByTestId(`thread-row-${working.id}`)).toBeVisible();
+      await toggle.click();
+      expect(onSectionExpandedChange).toHaveBeenLastCalledWith(false);
+      await expect.element(toggle).toHaveAttribute("aria-expanded", "false");
+      // Like a collapsed project, the chat being viewed stays reachable.
+      await expect.element(screen.getByTestId(`thread-row-${open.id}`)).toBeVisible();
+      await expect.element(screen.getByTestId(`thread-row-${working.id}`)).not.toBeInTheDocument();
+      await expect.element(screen.getByTestId(`thread-row-${saved.id}`)).not.toBeInTheDocument();
+      await expect
+        .element(screen.getByTestId("sidebar-chats-section-status"))
+        .toHaveAttribute("data-status", "Working");
+      await toggle.click();
+      expect(onSectionExpandedChange).toHaveBeenLastCalledWith(true);
+      await expect.element(screen.getByTestId(`thread-row-${working.id}`)).toBeVisible();
+      await expect
+        .element(screen.getByTestId("sidebar-chats-section-status"))
+        .not.toBeInTheDocument();
     } finally {
       await screen.unmount();
     }

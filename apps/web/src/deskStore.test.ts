@@ -38,6 +38,29 @@ function resizableStore() {
 }
 
 describe("Desk store", () => {
+  it("keeps nothing open in single view, including a promoted first-send editor", () => {
+    const storage = createMemoryStorage();
+    const store = createDeskStore(() => storage);
+    store.getState().bindEnvironment(environmentId);
+    store.getState().dispatch({ type: "open", target: target() });
+    store.getState().setOpenPolicy("single");
+    const kept = store.getState().desk;
+    // Changing the policy never rewrites tabs that are already open.
+    expect(kept.groups.g1?.tabs).toEqual([deskTabKey(target())]);
+    store.getState().dispatch({ type: "closeAll" });
+    const draftId = DraftId.make("single-view-editor");
+    store.getState().showDraftEditor(draftId);
+    const threadRef = { environmentId, threadId: ThreadId.make("single-view-promoted") };
+    expect(store.getState().promoteDraftEditor(draftId, threadRef)).toBe(true);
+    const promoted = deskTabKey({ kind: "server", threadRef });
+    expect(store.getState().desk.groups.g1?.previewTabKey).toBe(promoted);
+    store.getState().dispatch({ type: "keepOpen", tabKey: promoted });
+    expect(store.getState().desk.groups.g1?.previewTabKey).toBe(promoted);
+    const reopened = createDeskStore(() => storage);
+    reopened.getState().bindEnvironment(environmentId);
+    expect(reopened.getState().desk.groups.g1?.tabs).toEqual([]);
+  });
+
   it("persists kept tabs but drops temporary previews across restart and environment changes", () => {
     const storage = createMemoryStorage();
     const store = createDeskStore(() => storage);

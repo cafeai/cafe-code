@@ -132,9 +132,6 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
             </Button>
           )}
         </div>
-        <span className="shrink-0 text-center text-xs text-muted-foreground">
-          {uiText("Scroll to zoom. Drag to pan.", undefined, undefined, uiLocale)}
-        </span>
       </div>
     </div>,
     document.body,

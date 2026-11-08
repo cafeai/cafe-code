@@ -50,6 +50,10 @@ async function stageLaunchFixture() {
       "export function ensureMacDictationHelper() {}",
     ],
     [
+      "apps/desktop/scripts/build-mac-keep-awake-helper.mjs",
+      "export function ensureMacKeepAwakeHelper() {}",
+    ],
+    [
       "packages/shared/src/sourceDebugBuild.ts",
       "export function assertSourceDebugDesktopBuilds() {}",
     ],

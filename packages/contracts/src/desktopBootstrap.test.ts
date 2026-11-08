@@ -14,6 +14,12 @@ const legacyEnvelope = {
 };
 
 describe("desktop private readiness bootstrap", () => {
+  it("admits only the dedicated private power-state descriptor and preserves omission", () => {
+    expect(isDesktopBackendBootstrap({ ...legacyEnvelope, desktopPowerStateFd: 5 })).toBe(true);
+    for (const desktopPowerStateFd of [0, 3, 4, 6, "5", null]) {
+      expect(isDesktopBackendBootstrap({ ...legacyEnvelope, desktopPowerStateFd })).toBe(false);
+    }
+  });
   it("retains legacy omission and admits only exact 32-byte lowercase hex keys", () => {
     expect(isDesktopBackendBootstrap(legacyEnvelope)).toBe(true);
     expect(

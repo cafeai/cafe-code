@@ -23,6 +23,16 @@ if (process.isMainFrame === true) {
       ipcRenderer.on(DESKTOP_UI_LOCALE_CHANGED_CHANNEL, wrapped);
       return () => ipcRenderer.removeListener(DESKTOP_UI_LOCALE_CHANGED_CHANNEL, wrapped);
     },
+    getWindowFullScreen: () =>
+      ipcRenderer.sendSync(IpcChannels.GET_WINDOW_FULL_SCREEN_CHANNEL) === true,
+    onWindowFullScreenChanged: (listener) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, value: unknown) => {
+        if (typeof value === "boolean") listener(value);
+      };
+      ipcRenderer.on(IpcChannels.WINDOW_FULL_SCREEN_CHANGED_CHANNEL, wrapped);
+      return () =>
+        ipcRenderer.removeListener(IpcChannels.WINDOW_FULL_SCREEN_CHANGED_CHANNEL, wrapped);
+    },
     getAppBranding: () => {
       const result = ipcRenderer.sendSync(IpcChannels.GET_APP_BRANDING_CHANNEL);
       if (typeof result !== "object" || result === null) {
@@ -45,6 +55,14 @@ if (process.isMainFrame === true) {
       ipcRenderer.invoke(IpcChannels.SET_CLIENT_SETTINGS_CHANNEL, settings),
     setPowerSaveBlockerState: (state) =>
       ipcRenderer.invoke(IpcChannels.SET_POWER_SAVE_BLOCKER_STATE_CHANNEL, state),
+    ...(process.platform === "darwin"
+      ? {
+          getMacKeepAwakeState: () =>
+            ipcRenderer.invoke(IpcChannels.GET_MAC_KEEP_AWAKE_STATE_CHANNEL),
+          setMacKeepAwakeIntent: (enabled: boolean) =>
+            ipcRenderer.invoke(IpcChannels.SET_MAC_KEEP_AWAKE_INTENT_CHANNEL, enabled),
+        }
+      : {}),
     getSavedEnvironmentRegistry: () =>
       ipcRenderer.invoke(IpcChannels.GET_SAVED_ENVIRONMENT_REGISTRY_CHANNEL),
     setSavedEnvironmentRegistry: (records) =>

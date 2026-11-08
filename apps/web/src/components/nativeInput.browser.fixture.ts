@@ -1,3 +1,23 @@
+/** Map fixture CSS coordinates to native CDP coordinates without moving or focusing anything. */
+export function browserInputPoint(point: { x: number; y: number }) {
+  let { x, y } = point;
+  let frame = window.frameElement;
+  while (frame) {
+    // The containing element belongs to another window's realm, so its
+    // HTMLElement constructor is intentionally not this iframe's constructor.
+    const frameElement = frame as HTMLElement;
+    const rect = frameElement.getBoundingClientRect();
+    // Vitest scales its test iframe to fit the runner's viewport. CDP uses
+    // top-level coordinates, while DOM rectangles below use iframe CSS pixels.
+    // Carry both offset and scale through every frame rather than landing a
+    // nominal pane-center drag on a pane edge at a reduced runner scale.
+    x = rect.left + (x + frameElement.clientLeft) * (rect.width / frameElement.offsetWidth);
+    y = rect.top + (y + frameElement.clientTop) * (rect.height / frameElement.offsetHeight);
+    frame = frame.ownerDocument.defaultView?.frameElement ?? null;
+  }
+  return { x, y };
+}
+
 /** Passive, bounded evidence for synthetic native-browser fixtures. Nothing in
  * this observer grants focus, changes selection, scrolls, prevents input, or
  * changes animation/media policy. A failed observation is not a cause claim.

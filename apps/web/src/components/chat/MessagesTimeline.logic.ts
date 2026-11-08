@@ -2,6 +2,7 @@ import * as Equal from "effect/Equal";
 import { uiText } from "@cafecode/shared/i18n";
 import {
   primaryClaudeSummaryKey,
+  messageTimelineTurnId,
   type HistoricalWorkLogSummary,
   type TimelineEntry,
   type WorkLogEntry,
@@ -403,7 +404,7 @@ export function deriveMessagesTimelineRows(input: {
     input.timelineEntries.flatMap((entry) => {
       const turnId =
         entry.kind === "message"
-          ? entry.message.turnId
+          ? messageTimelineTurnId(entry.message)
           : entry.kind === "work"
             ? entry.entry.turnId
             : entry.kind === "provider-summary"
@@ -528,7 +529,7 @@ export function deriveMessagesTimelineRows(input: {
     }
     const message = timelineEntry.message;
     if (message.role !== "user") {
-      pushHistoricalWorkRow(message.turnId, message.createdAt);
+      pushHistoricalWorkRow(messageTimelineTurnId(message), message.createdAt);
     }
 
     const assistantTurnStillInProgress =
@@ -551,7 +552,7 @@ export function deriveMessagesTimelineRows(input: {
         message.role === "user" ? input.revertTurnCountByUserMessageId.get(message.id) : undefined,
     });
     if (message.role === "user") {
-      pushHistoricalWorkRow(message.turnId, message.createdAt);
+      pushHistoricalWorkRow(messageTimelineTurnId(message), message.createdAt);
     }
     if (input.completionDividerAfterEntryId === timelineEntry.id) {
       nextRows.push({

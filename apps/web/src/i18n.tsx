@@ -7,6 +7,7 @@ import {
   uiText,
   type UiLocale,
 } from "@cafecode/shared/i18n";
+import { localizeWebAppManifestHref } from "@cafecode/shared/webAppBranding";
 
 /** The snapshot is a finite presentation enum, not chat/session state. Every
  * translated render subscribes independently, including React.memo children. */
@@ -118,15 +119,6 @@ export function initializeUiLocale(document: Document): void {
     uiText("Cafe Code splash screen", undefined, undefined, getUiLocale()),
   );
   const manifest = document.querySelector('link[rel="manifest"]');
-  if (
-    ["/manifest.webmanifest", "/manifest.ja.webmanifest", "/manifest.ko.webmanifest"].includes(
-      manifest?.getAttribute("href") ?? "",
-    )
-  ) {
-    const locale = getUiLocale();
-    manifest?.setAttribute(
-      "href",
-      locale === "en" ? "/manifest.webmanifest" : `/manifest.${locale}.webmanifest`,
-    );
-  }
+  const localized = localizeWebAppManifestHref(manifest?.getAttribute("href") ?? "", getUiLocale());
+  if (localized !== null) manifest?.setAttribute("href", localized);
 }

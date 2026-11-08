@@ -82,6 +82,99 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect(
+    "keeps desktop power intent on exact roots and current background work without history hydration",
+    () =>
+      Effect.gen(function* () {
+        const query = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const thread = "desktop-power-fixture";
+        const runtime = "00000000-0000-4000-8000-000000000051";
+        const foreign = "00000000-0000-4000-8000-000000000052";
+        const at = "2026-11-07T00:00:00.000Z";
+        assert.equal(yield* query.hasActiveDesktopWork(), false);
+        yield* sql`INSERT INTO projection_threads (thread_id,project_id,title,model_selection_json,runtime_mode,interaction_mode,created_at,updated_at,latest_turn_id)
+      VALUES (${thread},NULL,'Power fixture','{"instanceId":"codex","model":"gpt-5"}','full-access','default',${at},${at},'power-turn')`;
+        try {
+          yield* sql`INSERT INTO projection_thread_sessions (thread_id,status,provider_name,provider_instance_id,runtime_mode,active_turn_id,updated_at,subagent_runtime_id)
+        VALUES (${thread},'starting','codex','codex','full-access',NULL,${at},${runtime})`;
+          assert.equal(yield* query.hasActiveDesktopWork(), true);
+          yield* sql`UPDATE projection_thread_sessions SET status='ready' WHERE thread_id=${thread}`;
+          assert.equal(yield* query.hasActiveDesktopWork(), false);
+          yield* sql`INSERT INTO projection_turns (thread_id,turn_id,state,requested_at,started_at,completed_at,checkpoint_files_json)
+        VALUES (${thread},'power-turn','running',${at},${at},NULL,'[]')`;
+          yield* sql`UPDATE projection_thread_sessions SET active_turn_id='power-turn' WHERE thread_id=${thread}`;
+          assert.equal(yield* query.hasActiveDesktopWork(), true);
+          yield* sql`UPDATE projection_turns SET state='completed',completed_at=${at} WHERE thread_id=${thread}`;
+          yield* sql`UPDATE projection_thread_sessions SET status='running' WHERE thread_id=${thread}`;
+          assert.equal(yield* query.hasActiveDesktopWork(), false);
+          yield* sql`UPDATE projection_thread_sessions SET status='ready',active_turn_id=NULL WHERE thread_id=${thread}`;
+          // Generic tool/task work retains its own namespace and exact runtime.
+          yield* sql`INSERT INTO projection_live_work (thread_id,runtime_id,turn_id,lane,work_id,is_agent,active,sequence,created_at,activity_id)
+        VALUES (${thread},${foreign},'power-turn','tool','owned-tool',0,1,1,${at},'power-activity')`;
+          assert.equal(yield* query.hasActiveDesktopWork(), false);
+          yield* sql`UPDATE projection_live_work SET runtime_id=${runtime} WHERE thread_id=${thread}`;
+          assert.equal(yield* query.hasActiveDesktopWork(), true);
+          yield* sql`UPDATE projection_thread_sessions SET status='stopped' WHERE thread_id=${thread}`;
+          assert.equal(yield* query.hasActiveDesktopWork(), false);
+        } finally {
+          yield* sql`DELETE FROM projection_live_work WHERE thread_id=${thread}`;
+          yield* sql`DELETE FROM projection_thread_sessions WHERE thread_id=${thread}`;
+          yield* sql`DELETE FROM projection_turns WHERE thread_id=${thread}`;
+          yield* sql`DELETE FROM projection_threads WHERE thread_id=${thread}`;
+        }
+      }),
+  );
+  it.effect(
+    "projects exact input turn outcomes without rebinding canonical message routing or stale generations",
+    () =>
+      Effect.gen(function* () {
+        const query = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("input-outcome-thread");
+        const createdAt = "2026-11-06T00:00:00.000Z";
+        const laterAt = "2026-11-06T00:00:10.000Z";
+        yield* sql`INSERT INTO projection_threads (thread_id,project_id,title,model_selection_json,runtime_mode,interaction_mode,created_at,updated_at)
+        VALUES (${threadId},NULL,'Input outcomes','{"instanceId":"claudeAgent","model":"claude-opus-5-5"}','full-access','default',${createdAt},${createdAt})`;
+        try {
+          for (const [id, role, canonicalTurn, updatedAt] of [
+            ["exact-failed", "user", null, createdAt],
+            ["later-same-text", "user", null, laterAt],
+            ["new-generation", "user", null, laterAt],
+            ["contradictory-turn", "user", "different-turn", createdAt],
+            ["assistant-not-input", "assistant", null, createdAt],
+          ] as const) {
+            yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,turn_id,role,text,attachments_json,is_streaming,created_at,updated_at)
+            VALUES (${id},${threadId},${canonicalTurn},${role},'Same input',NULL,0,${createdAt},${updatedAt})`;
+            if (id !== "later-same-text")
+              yield* sql`INSERT INTO projection_turns (thread_id,turn_id,pending_message_id,state,requested_at,started_at,completed_at,checkpoint_files_json)
+            VALUES (${threadId},${`turn:${id}`},${id},'error',${createdAt},${createdAt},${laterAt},'[]')`;
+          }
+          const detail = yield* query.getThreadDetailById(threadId);
+          assert.equal(detail._tag, "Some");
+          if (detail._tag !== "Some") return;
+          const full = yield* query.getSnapshot();
+          for (const thread of [
+            detail.value,
+            full.threads.find((entry) => entry.id === threadId)!,
+          ]) {
+            const exact = thread.messages.find((message) => message.id === "exact-failed")!;
+            assert.equal(exact.turnId, null);
+            assert.deepEqual(exact.originatingTurn, {
+              turnId: "turn:exact-failed",
+              state: "error",
+            });
+            for (const message of thread.messages.filter((entry) => entry.id !== exact.id))
+              assert.isUndefined(message.originatingTurn);
+          }
+        } finally {
+          yield* sql`DELETE FROM projection_turns WHERE thread_id=${threadId}`;
+          yield* sql`DELETE FROM projection_thread_messages WHERE thread_id=${threadId}`;
+          yield* sql`DELETE FROM projection_threads WHERE thread_id=${threadId}`;
+        }
+      }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

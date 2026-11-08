@@ -15,8 +15,10 @@ import {
   setNavigationSidebarOpen,
   setProjectExpanded,
   setSessionRailDocked,
+  setChatRightPanelWidth,
   setThreadPlanSidebarOpen,
   setComposerTabCollapsed,
+  setStandaloneChatsExpanded,
   syncProjects,
   syncThreads,
   type UiState,
@@ -26,12 +28,14 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
   return {
     projectExpandedById: {},
     projectOrder: [],
+    standaloneChatsExpanded: true,
     threadLastVisitedAtById: {},
     threadPlanSidebarOpenById: {},
     composerTabCollapsed: false,
     defaultAdvertisedEndpointKey: null,
     navigationSidebarOpen: true,
     sessionRailDocked: false,
+    chatRightPanelWidth: null,
     ...overrides,
   };
 }
@@ -147,6 +151,17 @@ describe("uiStateStore pure functions", () => {
     expect(docked.sessionRailDocked).toBe(true);
     expect(undocked.sessionRailDocked).toBe(false);
     expect(setSessionRailDocked(docked, true)).toBe(docked);
+  });
+
+  it("retains only bounded client-wide right-column width choices", () => {
+    const initial = makeUiState();
+    const resized = setChatRightPanelWidth(initial, 480);
+    expect(resized.chatRightPanelWidth).toBe(480);
+    expect(setChatRightPanelWidth(resized, 480)).toBe(resized);
+    for (const invalid of [Number.NaN, Infinity, 0, -1, 641]) {
+      expect(setChatRightPanelWidth(resized, invalid)).toBe(resized);
+    }
+    expect(setChatRightPanelWidth(resized, null).chatRightPanelWidth).toBeNull();
   });
 
   it("reorderProjects moves all member keys of a multi-member group together", () => {
@@ -692,6 +707,20 @@ describe("uiStateStore persistence round-trip", () => {
     expect(persisted.navigationSidebarOpen).toBe(false);
   });
 
+  it("persists the Chats section collapse and defaults it open", () => {
+    const state = setStandaloneChatsExpanded(makeUiState(), false);
+    expect(setStandaloneChatsExpanded(state, false)).toBe(state);
+
+    persistState(state);
+
+    const persisted = JSON.parse(
+      localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
+    ) as PersistedUiState;
+    expect(persisted.standaloneChatsExpanded).toBe(false);
+    expect(hydratePersistedUiState(persisted).standaloneChatsExpanded).toBe(false);
+    expect(hydratePersistedUiState({}).standaloneChatsExpanded).toBe(true);
+  });
+
   it("persists the global session-rail placement", () => {
     const state = setSessionRailDocked(makeUiState(), true);
 
@@ -705,6 +734,22 @@ describe("uiStateStore persistence round-trip", () => {
     expect(persisted.sessionRailDocked).toBe(true);
     expect(rehydrated.sessionRailDocked).toBe(true);
     expect(hydratePersistedUiState({}).sessionRailDocked).toBe(false);
+  });
+
+  it("restores the preferred right-column width without trusting malformed storage", () => {
+    persistState(setChatRightPanelWidth(makeUiState(), 480));
+    const persisted = JSON.parse(
+      localStorageStub.getItem(PERSISTED_STATE_KEY) ?? "{}",
+    ) as PersistedUiState;
+    expect(hydratePersistedUiState(persisted).chatRightPanelWidth).toBe(480);
+    expect(hydratePersistedUiState({}).chatRightPanelWidth).toBeNull();
+    for (const invalid of ["480", Number.NaN, Infinity, -1, 641, {}, []]) {
+      expect(
+        hydratePersistedUiState({
+          chatRightPanelWidth: invalid,
+        } as unknown as PersistedUiState).chatRightPanelWidth,
+      ).toBeNull();
+    }
   });
 
   it("persists explicit per-thread plan sidebar choices", () => {

@@ -13,6 +13,7 @@ import { syncDocumentMacTrafficLightsClass } from "./lib/macTrafficLights";
 import { installMobileDebugLogging } from "./lib/mobileDebugLog";
 import { initializeApplicationLanguage } from "./uiLocaleStartup";
 import { installWebPushLocaleSynchronization } from "./lib/webPushNotifications";
+import { initializeWebAppBranding } from "./webAppBranding";
 
 // Mobile DOM debugging — no-op unless enabled; see lib/mobileDebugLog.ts.
 installMobileDebugLogging();
@@ -37,6 +38,7 @@ if (
 
 const recordingOverlay =
   isElectron && new URLSearchParams(window.location.search).get("cafeDictationOverlay") === "1";
+if (!recordingOverlay) initializeWebAppBranding(document);
 const languageReady = initializeApplicationLanguage(document, recordingOverlay);
 if (!isElectron) {
   void languageReady.then(() => {

@@ -375,6 +375,32 @@ export const DesktopPowerSaveBlockerStateSchema = Schema.Struct({
 });
 export type DesktopPowerSaveBlockerState = typeof DesktopPowerSaveBlockerStateSchema.Type;
 
+export const MacKeepAwakeStateSchema = Schema.Struct({
+  phase: Schema.Literals([
+    "off",
+    "idle",
+    "starting",
+    "active",
+    "stopping",
+    "paused",
+    "unavailable",
+  ]),
+  reason: Schema.NullOr(
+    Schema.Literals([
+      "backend-unavailable",
+      "native-unavailable",
+      "native-protocol",
+      "lease-busy",
+      "battery-low",
+      "unknown-power",
+      "thermal-limit",
+      "native-refused",
+      "cleanup-failed",
+    ]),
+  ),
+});
+export type MacKeepAwakeState = typeof MacKeepAwakeStateSchema.Type;
+
 export const PersistedSavedEnvironmentRecordSchema = Schema.Struct({
   environmentId: EnvironmentId,
   label: Schema.String,
@@ -458,6 +484,9 @@ export interface DesktopBridge extends VisualizationDesktopBridge {
   readonly systemUiLocale?: "en" | "ja" | "ko";
   readonly initialUiLocale?: "en" | "ja" | "ko";
   readonly onUiLocaleChanged?: (listener: (locale: "en" | "ja" | "ko") => void) => () => void;
+  /** Read-only native window presentation; independent of HTML fullscreen. */
+  getWindowFullScreen?: () => boolean;
+  onWindowFullScreenChanged?: (listener: (fullScreen: boolean) => void) => () => void;
   getAppBranding: () => DesktopAppBranding | null;
   getLocalEnvironmentBootstrap: () => DesktopEnvironmentBootstrap | null;
   getDebugEndpointState: () => Promise<DesktopDebugEndpointState>;
@@ -465,6 +494,10 @@ export interface DesktopBridge extends VisualizationDesktopBridge {
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;
   setPowerSaveBlockerState: (state: DesktopPowerSaveBlockerState) => Promise<void>;
+  /** Exposed only by the native macOS preload. Read-only current adoption. */
+  getMacKeepAwakeState?: () => Promise<MacKeepAwakeState>;
+  /** Revocation is immediate; enabling still requires fresh primary backend intent. */
+  setMacKeepAwakeIntent?: (enabled: boolean) => Promise<void>;
   getSavedEnvironmentRegistry: () => Promise<readonly PersistedSavedEnvironmentRecord[]>;
   setSavedEnvironmentRegistry: (
     records: readonly PersistedSavedEnvironmentRecord[],

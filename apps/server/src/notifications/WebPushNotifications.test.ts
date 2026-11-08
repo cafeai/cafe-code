@@ -8,6 +8,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Logger from "effect/Logger";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Stream from "effect/Stream";
@@ -26,6 +27,11 @@ import { ProviderService } from "../provider/Services/ProviderService.ts";
 import { ScheduledFollowups } from "../scheduledFollowups/service.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
+import {
+  ServerClientSettingsService,
+  type ServerClientSettingsShape,
+} from "../serverClientSettings.ts";
+import { webAppIconUrl } from "@cafecode/shared/webAppBranding";
 import {
   makeWebPushNotifications,
   type WebPushNotificationsShape,
@@ -47,7 +53,14 @@ const decodeJsonText = Schema.decodeUnknownSync(
 );
 const encodeJsonText = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const decodePushPayload = Schema.decodeUnknownSync(
-  Schema.fromJsonString(Schema.Struct({ body: Schema.String, threadPath: Schema.String })),
+  Schema.fromJsonString(
+    Schema.Struct({
+      body: Schema.String,
+      threadPath: Schema.String,
+      icon: Schema.String,
+      badge: Schema.String,
+    }),
+  ),
 );
 
 const send = vi.hoisted(() =>
@@ -87,6 +100,7 @@ async function fixture<E>(
     askForInput: (eventId?: string) => Effect.Effect<void>;
     revoke: () => Effect.Effect<void>;
     reactorStarts: () => { sessions: number; provider: number };
+    updateSettings: ServerClientSettingsShape["updateSettings"];
   }) => Effect.Effect<void, E, Scope.Scope>,
 ) {
   send.mockClear();
@@ -96,6 +110,7 @@ async function fixture<E>(
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
+          const settings = yield* ServerClientSettingsService;
           const changes = yield* PubSub.unbounded<SessionCredentialChange>();
           const completions = yield* PubSub.unbounded<{
             type: "turn.completed" | "user-input.requested";
@@ -106,6 +121,7 @@ async function fixture<E>(
           const reactorStarts = { sessions: 0, provider: 0 };
           const serviceEffect = (stateDir = root) =>
             makeWebPushNotifications.pipe(
+              Effect.provideService(ServerClientSettingsService, settings),
               Effect.provideService(ServerConfig, { stateDir } as never),
               Effect.provideService(SessionCredentialService, {
                 validateActiveSession: (identity: typeof owner) =>
@@ -147,6 +163,7 @@ async function fixture<E>(
             service,
             restart: serviceEffect,
             reactorStarts: () => ({ ...reactorStarts }),
+            updateSettings: settings.updateSettings,
             complete: () =>
               PubSub.publish(completions, {
                 type: "turn.completed" as const,
@@ -167,7 +184,11 @@ async function fixture<E>(
               ),
           });
         }),
-      ).pipe(Effect.provide(NodeServices.layer)),
+      ).pipe(
+        Effect.provide(
+          ServerClientSettingsService.layerTest().pipe(Layer.provideMerge(NodeServices.layer)),
+        ),
+      ),
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -226,6 +247,53 @@ const assertUnavailable = (
   );
 
 describe("session-owned Web Push", () => {
+  it("uses the current custom artwork for both notification kinds and follows later preference changes", async () => {
+    await fixture(({ service, complete, askForInput, updateSettings }) =>
+      Effect.gen(function* () {
+        const id = `sha256-${"a".repeat(64)}.png`;
+        const custom = `custom:${id}` as const;
+        yield* updateSettings({
+          showSidebarMascot: true,
+          sidebarImageSource: "custom",
+          sidebarBrandImage: {
+            id,
+            url: `/api/branding/sidebar-image/${id}`,
+            mimeType: "image/png",
+            width: 100,
+            height: 50,
+            sizeBytes: 1000,
+          },
+        });
+        yield* service.getPublicKey();
+        yield* service.saveSubscription({
+          owner,
+          subscription: { ...subscription, notifyOnUserInput: true },
+        });
+        yield* service.start();
+        yield* Effect.yieldNow;
+        yield* complete();
+        yield* Effect.promise(() => vi.waitFor(() => expect(send).toHaveBeenCalledOnce()));
+        expect(decodePushPayload(send.mock.calls[0]?.[1])).toMatchObject({
+          icon: webAppIconUrl(custom, "app-192"),
+          badge: webAppIconUrl(custom, "badge-96"),
+        });
+        yield* askForInput();
+        yield* Effect.promise(() => vi.waitFor(() => expect(send).toHaveBeenCalledTimes(2)));
+        expect(decodePushPayload(send.mock.calls[1]?.[1])).toMatchObject({
+          icon: webAppIconUrl(custom, "app-192"),
+          badge: webAppIconUrl(custom, "badge-96"),
+        });
+        yield* updateSettings({ showSidebarMascot: false });
+        yield* complete();
+        yield* Effect.promise(() => vi.waitFor(() => expect(send).toHaveBeenCalledTimes(3)));
+        expect(decodePushPayload(send.mock.calls[2]?.[1])).toMatchObject({
+          icon: webAppIconUrl("neutral", "app-192"),
+          badge: webAppIconUrl("neutral", "badge-96"),
+        });
+      }),
+    );
+  });
+
   it("persists independent input opt-in and suppresses replay without changing legacy completion delivery", async () => {
     await fixture(({ service, restart, complete, askForInput }) =>
       Effect.gen(function* () {

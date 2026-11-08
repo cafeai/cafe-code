@@ -191,6 +191,7 @@ describe("ProviderSessionReaper", () => {
       ),
       Layer.provideMerge(
         Layer.succeed(ProjectionSnapshotQuery, {
+          hasActiveDesktopWork: () => Effect.succeed(false),
           getCommandReadModel: () => Effect.die("unused"),
           getSnapshot: () => Effect.die("unused"),
           getShellSnapshot: () => Effect.die("unused"),

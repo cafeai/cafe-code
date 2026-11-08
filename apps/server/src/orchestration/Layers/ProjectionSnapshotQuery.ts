@@ -10,6 +10,7 @@ import {
   OrchestrationCheckpointFile,
   OrchestrationProposedPlanId,
   OrchestrationReadModel,
+  OrchestrationMessageOriginatingTurn,
   OrchestrationShellSnapshot,
   OrchestrationThread,
   OrchestrationThreadActivity,
@@ -157,6 +158,7 @@ const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
   Struct.assign({
     isStreaming: Schema.Number,
     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
+    originatingTurn: Schema.NullOr(Schema.fromJsonString(OrchestrationMessageOriginatingTurn)),
   }),
 );
 type ProjectionThreadMessageDbRow = Schema.Schema.Type<typeof ProjectionThreadMessageDbRowSchema>;
@@ -476,10 +478,16 @@ function mapSessionRow(
   };
 }
 
-function reconcileSessionWithLatestTurn(
-  session: OrchestrationSession,
-  latestTurn: OrchestrationLatestTurn | null | undefined,
-): OrchestrationSession {
+type SessionLifecycle = Pick<
+  OrchestrationSession,
+  "status" | "activeTurnId" | "lastError" | "updatedAt"
+>;
+type LatestTurnLifecycle = Pick<OrchestrationLatestTurn, "turnId" | "state" | "completedAt">;
+
+function reconcileSessionLifecycle(
+  session: SessionLifecycle,
+  latestTurn: LatestTurnLifecycle | null | undefined,
+): SessionLifecycle {
   if (session.activeTurnId === null) {
     return session;
   }
@@ -547,7 +555,8 @@ function mapSessionRowForThread(
   row: Schema.Schema.Type<typeof ProjectionThreadSessionDbRowSchema>,
   latestTurn: OrchestrationLatestTurn | null | undefined,
 ): OrchestrationSession {
-  return reconcileSessionWithLatestTurn(mapSessionRow(row), latestTurn);
+  const session = mapSessionRow(row);
+  return { ...session, ...reconcileSessionLifecycle(session, latestTurn) };
 }
 
 function codexSnapshotAssistantMessageKey(row: ProjectionThreadMessageDbRow): string | undefined {
@@ -678,12 +687,17 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
    * unconfirmed agent heads until qualified evidence renews it. That is unknown
    * presentation, never provider termination or native-control permission.
    */
-  const liveWorkBindingCtes = (threadId: typeof ThreadId.Encoded | null, detail = false) => sql`
+  const liveWorkBindingCtes = (
+    threadId: typeof ThreadId.Encoded | null,
+    detail = false,
+    activeOnly = false,
+  ) => sql`
     current_live_work AS MATERIALIZED (
       SELECT work.* FROM projection_thread_sessions AS sessions
       JOIN projection_live_work AS work
         ON work.thread_id = sessions.thread_id AND work.runtime_id = sessions.subagent_runtime_id
       WHERE sessions.status NOT IN ('stopped', 'error')
+        AND ${activeOnly ? sql`work.active = 1` : sql`1 = 1`}
         AND ${threadId === null ? sql`1 = 1` : sql`sessions.thread_id = ${threadId}`}
     ),
     known_native_agent_bindings AS MATERIALIZED (
@@ -1131,6 +1145,22 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  // Reuse the indexed durable input association without rewriting canonical
+  // message.turnId or deriving ownership from chronology. A same-ID newer
+  // submission cannot borrow an earlier turn's outcome.
+  const originatingTurnSql = sql`
+    (SELECT json_object('turnId', owner.turn_id, 'state', owner.state)
+     FROM projection_turns owner
+     WHERE messages.role = 'user'
+       AND owner.thread_id = messages.thread_id
+       AND owner.pending_message_id = messages.message_id
+       AND owner.turn_id IS NOT NULL
+       AND (messages.turn_id IS NULL OR messages.turn_id = owner.turn_id)
+       AND owner.requested_at >= messages.updated_at
+       AND owner.state IN ('running', 'interrupted', 'completed', 'error')
+     ORDER BY owner.requested_at DESC, owner.turn_id DESC LIMIT 1)
+  `;
+
   const listThreadMessageRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: ProjectionThreadMessageDbRowSchema,
@@ -1145,8 +1175,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           attachments_json AS "attachments",
           is_streaming AS "isStreaming",
           created_at AS "createdAt",
-          updated_at AS "updatedAt"
-        FROM projection_thread_messages
+          updated_at AS "updatedAt",
+          ${originatingTurnSql} AS "originatingTurn"
+        FROM projection_thread_messages messages
         ORDER BY thread_id ASC, created_at ASC, message_id ASC
       `,
   });
@@ -2639,8 +2670,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             attachments_json AS "attachments",
             is_streaming AS "isStreaming",
             created_at AS "createdAt",
-            updated_at AS "updatedAt"
-          FROM projection_thread_messages
+            updated_at AS "updatedAt",
+            ${originatingTurnSql} AS "originatingTurn"
+          FROM projection_thread_messages messages
           WHERE thread_id = ${threadId}
           ORDER BY created_at DESC, message_id DESC
           LIMIT ${THREAD_DETAIL_MESSAGE_LIMIT}
@@ -3714,6 +3746,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   text: row.text,
                   ...(row.attachments !== null ? { attachments: row.attachments } : {}),
                   turnId: row.turnId,
+                  ...(row.originatingTurn ? { originatingTurn: row.originatingTurn } : {}),
                   streaming: row.isStreaming === 1,
                   createdAt: row.createdAt,
                   updatedAt: row.updatedAt,
@@ -5372,6 +5405,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             role: row.role,
             text: row.text,
             turnId: row.turnId,
+            ...(row.originatingTurn ? { originatingTurn: row.originatingTurn } : {}),
             streaming: row.isStreaming === 1,
             createdAt: row.createdAt,
             updatedAt: row.updatedAt,
@@ -5667,6 +5701,56 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       });
 
   return {
+    hasActiveDesktopWork: () =>
+      Effect.gen(function* () {
+        // Reuse the shell's canonical lifecycle reconciliation, including ready
+        // rows with a still-running exact turn and terminalized stale sessions.
+        // Read only finite lifecycle columns, never titles/transcripts/history.
+        const roots = yield* sql<
+          SessionLifecycle & {
+            latestTurnId: TurnId | null;
+            latestState: OrchestrationLatestTurn["state"] | null;
+            latestCompletedAt: string | null;
+          }
+        >`
+        SELECT sessions.status, sessions.active_turn_id AS "activeTurnId",
+          NULL AS "lastError", sessions.updated_at AS "updatedAt",
+          turns.turn_id AS "latestTurnId", turns.state AS "latestState",
+          turns.completed_at AS "latestCompletedAt"
+        FROM projection_thread_sessions AS sessions
+        LEFT JOIN projection_threads AS threads ON threads.thread_id = sessions.thread_id
+        LEFT JOIN projection_turns AS turns ON turns.thread_id = threads.thread_id
+          AND turns.turn_id = threads.latest_turn_id
+        WHERE sessions.status IN ('starting', 'running')
+          OR (sessions.status = 'ready' AND sessions.active_turn_id IS NOT NULL)
+        LIMIT 4097
+      `.pipe(Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.desktopRoots")));
+        // More than 4096 candidate roots is explicit conservative power intent,
+        // not permission to load an unbounded model or claim all work is idle.
+        if (
+          roots.length > 4096 ||
+          roots.some((row) => {
+            const latest =
+              row.latestTurnId !== null && row.latestState !== null
+                ? {
+                    turnId: row.latestTurnId,
+                    state: row.latestState,
+                    completedAt: row.latestCompletedAt,
+                  }
+                : null;
+            const session = reconcileSessionLifecycle(row, latest);
+            return session.status === "starting" || session.status === "running";
+          })
+        )
+          return true;
+        return yield* sql<{ active: number }>`
+        WITH ${liveWorkBindingCtes(null, false, true)}
+        SELECT EXISTS (SELECT 1 FROM current_live_work_heads WHERE active = 1) AS active
+      `.pipe(
+          Effect.map((rows) => rows[0]?.active === 1),
+          Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.desktopChildren")),
+        );
+      }),
     getCommandReadModel,
     hasPendingContextBootstrap: (threadId) =>
       getContextBootstrapRow(threadId).pipe(

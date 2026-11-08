@@ -7382,11 +7382,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         context.turnState.primaryAssistantError ??= "authentication_failed";
       }
       context.authFailureSeen = true;
+      yield* notifyAuthStatusChanged(true);
       yield* emitRuntimeWarning(
         context,
         "Claude authentication failed; suppressing Claude Code's synthetic assistant error and retiring this stale session.",
         {
-          apiErrorStatus: 401,
           error: "authentication_failed",
           sessionId: typeof message.session_id === "string" ? message.session_id : undefined,
         },
@@ -7643,7 +7643,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // earlier Stop reclassify a queued follow-up's result on the same query.
     const status = stoppedExecution ? "interrupted" : turnStatusFromResult(message);
     const resultErrors = "errors" in message && Array.isArray(message.errors) ? message.errors : [];
-    const authFailure = isClaudeAuthFailureResult(message);
+    // A local sign-out can emit a typed primary assistant error followed by
+    // a generic failed result with no HTTP status. Preserve that observation
+    // through completion and retire the stale query just as for a direct 401.
+    const authFailure =
+      status === "failed" &&
+      (isClaudeAuthFailureResult(message) ||
+        (context.authFailureSeen && hasExactPrimaryClaudeParent(message)));
     if (status === "failed" && context.turnState) {
       // Structured result evidence for diagnostic copy only.
       const apiErrorStatus = (message as Record<string, unknown>).api_error_status;
@@ -7723,13 +7729,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         );
       } else if (authFailure) {
+        const alreadyObserved = context.authFailureSeen;
         context.authFailureSeen = true;
-        yield* notifyAuthStatusChanged(true);
+        if (!alreadyObserved) yield* notifyAuthStatusChanged(true);
         yield* emitRuntimeWarning(
           context,
           "Claude authentication failed; retiring this stale Claude session so the next turn starts with current login material.",
           {
-            apiErrorStatus: 401,
+            ...(ownClaudeData(message, "api_error_status") === 401 ? { apiErrorStatus: 401 } : {}),
             error: "authentication_failed",
             sessionId: typeof message.session_id === "string" ? message.session_id : undefined,
           },
@@ -7757,10 +7764,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     }
 
-    if (status === "completed") {
+    if (status === "completed" && hasExactPrimaryClaudeParent(message)) {
       // A successful turn proves the stored credentials work again (e.g.
       // after the user re-ran /login), so clear any needs-login provider
       // state derived from an earlier 401.
+      context.authFailureSeen = false;
       yield* notifyAuthStatusChanged(false);
     }
 

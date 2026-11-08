@@ -47,6 +47,8 @@ import {
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
+import { DesktopMacKeepAwake } from "../app/DesktopMacKeepAwake.ts";
+import { makeDesktopPowerStateDecoder } from "@cafecode/shared/desktopPowerState";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 
@@ -128,6 +130,7 @@ class BackendHealthCheckFailedError extends Data.TaggedError("BackendHealthCheck
 type BackendProcessError = BackendProcessBootstrapEncodeError | BackendProcessSpawnError;
 
 interface RunBackendProcessOptions extends DesktopBackendStartConfig {
+  readonly macPower?: Context.Service.Shape<typeof DesktopMacKeepAwake>;
   readonly onStarted?: (
     pid: number,
     terminate: (grace?: Duration.Duration) => Effect.Effect<void>,
@@ -436,6 +439,11 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
 ): Effect.fn.Return<BackendProcessExit, BackendProcessError, BackendProcessRunRequirements> {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const processScope = yield* Scope.Scope;
+  const powerOwner =
+    process.platform === "darwin" && options.macPower
+      ? yield* options.macPower.bindBackend
+      : undefined;
+  if (powerOwner) yield* Effect.addFinalizer(() => Effect.sync(() => powerOwner.retire()));
   // Mint for the actual spawn, never for saved manager configuration. Retries
   // using the same bootstrap intent must not accept a previous child's proof.
   const readinessToken = mintBackendReadinessToken();
@@ -443,6 +451,7 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     ...options.bootstrap,
     desktopReadinessToken: readinessToken,
     startupProgressFd: BACKEND_STARTUP_PROGRESS_FD,
+    ...(powerOwner ? { desktopPowerStateFd: 5 as const } : {}),
   }).pipe(Effect.mapError(() => new BackendProcessBootstrapEncodeError()));
   const onOutput = options.onOutput ?? (() => Effect.void);
   const command = ChildProcess.make(
@@ -468,6 +477,7 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
         // log capture is disabled. Provider stdout/stderr never grants a longer
         // startup window, and unrelated/adopted processes cannot write here.
         fd4: { type: "output" },
+        ...(powerOwner ? { fd5: { type: "output" as const } } : {}),
       },
     },
   );
@@ -489,6 +499,29 @@ const runBackendProcess = Effect.fn("runBackendProcess")(function* (
   // exit after that event, not an inconclusive observer. Preserve that actual
   // exit evidence for strict update shutdown, including SIGTERM/SIGKILL exits.
   const nativeExit = Effect.result(handle.exitCode).pipe(Effect.asVoid);
+  if (powerOwner) {
+    const decoder = makeDesktopPowerStateDecoder();
+    yield* handle.getOutputFd(5).pipe(
+      Stream.runForEach((bytes) =>
+        Effect.sync(() => {
+          const result = decoder.push(bytes);
+          if (result.invalid) {
+            powerOwner.retire();
+            return;
+          }
+          for (const record of result.records) powerOwner.observe(record);
+        }),
+      ),
+      Effect.catchCause(() => Effect.sync(() => powerOwner.retire())),
+      Effect.ensuring(
+        Effect.sync(() => {
+          decoder.end();
+          powerOwner.retire();
+        }),
+      ),
+      Effect.forkIn(processScope),
+    );
+  }
   const terminationStarted = yield* Ref.make(false);
   const terminate = (grace: Duration.Duration = DEFAULT_BACKEND_TERMINATE_GRACE) =>
     Effect.gen(function* () {
@@ -617,6 +650,9 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
   const electronDialog = yield* ElectronDialog.ElectronDialog;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
+  // Capture at layer construction just like the retained spawner/client. The
+  // manager's public methods execute after their acquisition context is gone.
+  const macPower = yield* Effect.serviceOption(DesktopMacKeepAwake);
   const state = yield* Ref.make(initialState);
   const mutex = yield* Semaphore.make(1);
 
@@ -799,6 +835,7 @@ const makeDesktopBackendManager = Effect.fn("makeDesktopBackendManager")(functio
 
         const program = runBackendProcess({
           ...config,
+          ...(Option.isSome(macPower) ? { macPower: macPower.value } : {}),
           onStarted: Effect.fn("desktop.backendManager.onStarted")(function* (pid, terminate) {
             yield* updateActiveRun(runId, (run) => ({
               ...run,

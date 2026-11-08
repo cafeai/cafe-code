@@ -689,7 +689,6 @@ function UsageCostMetrics({
       return {
         labels,
         series,
-        hasUnpriced: false,
         format: (value: number) =>
           `${formatFullTokenCount(value)} tokens (${uiPresentation.formatCompactTokenCount(value)})`,
       };
@@ -710,7 +709,6 @@ function UsageCostMetrics({
     return {
       labels,
       series,
-      hasUnpriced: days.some((day) => (dailyCosts.get(day.day)?.unpricedTokens ?? 0) > 0),
       format: (value: number) => formatUsd(value),
     };
   }, [usage, mode, overrides, uiLocale, uiPresentation]);
@@ -849,27 +847,6 @@ function UsageCostMetrics({
               suffix=" tokens in range"
               valueClassName="text-xs font-normal text-muted-foreground"
             />
-            {chart.hasUnpriced ? (
-              <span className="flex items-center gap-1 text-xs text-subtle-foreground">
-                <UiMessage
-                  message={"Partial estimate<slot1></slot1>"}
-                  slots={{
-                    slot1: (
-                      <InfoTip
-                        label={uiText("About partial estimate", undefined, undefined, uiLocale)}
-                      >
-                        {uiText(
-                          "Usage without a daily model rate is left out of the daily cost.",
-                          undefined,
-                          undefined,
-                          uiLocale,
-                        )}
-                      </InfoTip>
-                    ),
-                  }}
-                />
-              </span>
-            ) : null}
           </div>
           <UsageAreaChart
             labels={chart.labels}

@@ -956,6 +956,7 @@ export function resolveMacDesktopBuildConfig(
         to: "mac-dictation-target",
       },
       { from: "apps/desktop/resources/mac-glide", to: "mac-glide" },
+      { from: "apps/desktop/resources/mac-keep-awake", to: "mac-keep-awake" },
       ...(["en", "ja", "ko"] as const).map((locale) => ({
         from: `apps/desktop/resources/ui-locales/${locale}.lproj`,
         to: `${locale}.lproj`,
@@ -1272,6 +1273,20 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
           options.arch,
           "--output",
           path.join(stageResourcesDir, "mac-glide"),
+          "--force",
+        ],
+        { cwd: repoRoot, ...commandOutputOptions(options.verbose), shell: false },
+      ),
+    );
+    yield* runCommand(
+      ChildProcess.make(
+        process.execPath,
+        [
+          path.join(repoRoot, "apps/desktop/scripts/build-mac-keep-awake-helper.mjs"),
+          "--arch",
+          options.arch,
+          "--output",
+          path.join(stageResourcesDir, "mac-keep-awake"),
           "--force",
         ],
         { cwd: repoRoot, ...commandOutputOptions(options.verbose), shell: false },

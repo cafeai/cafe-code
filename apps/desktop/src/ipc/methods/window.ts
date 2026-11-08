@@ -45,6 +45,16 @@ export const getAppBranding = makeSyncIpcMethod({
   }),
 });
 
+export const getWindowFullScreen = makeSyncIpcMethod({
+  channel: IpcChannels.GET_WINDOW_FULL_SCREEN_CHANNEL,
+  result: Schema.Boolean,
+  handler: Effect.fn("desktop.ipc.window.getWindowFullScreen")(function* () {
+    const electronWindow = yield* ElectronWindow.ElectronWindow;
+    const window = yield* electronWindow.currentMainOrFirst;
+    return Option.isSome(window) && window.value.isFullScreen();
+  }),
+});
+
 export const getLocalEnvironmentBootstrap = makeSyncIpcMethod({
   channel: IpcChannels.GET_LOCAL_ENVIRONMENT_BOOTSTRAP_CHANNEL,
   result: Schema.NullOr(DesktopEnvironmentBootstrapSchema),

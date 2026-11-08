@@ -24,6 +24,7 @@ export interface SettingsSearchAvailability {
   readonly macDesktop: boolean;
   /** Desktop shell that can change this computer's app icon. */
   readonly appIcon?: boolean;
+  readonly macKeepAwake?: boolean;
 }
 
 interface IndexedEntry extends SettingsSearchEntry {
@@ -141,6 +142,16 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
     available: (availability) => availability.keepAwake,
   },
   {
+    id: "general.closedLid",
+    path: "/settings/general",
+    kind: "setting",
+    title: (locale) => uiText("Work with the lid closed", undefined, undefined, locale),
+    section: section.desktop,
+    keywords: (locale) =>
+      uiText("lid, sleep, Mac, background, awake", undefined, "settings search keywords", locale),
+    available: (availability) => availability.macKeepAwake === true,
+  },
+  {
     id: "general.version",
     path: "/settings/general",
     kind: "setting",
@@ -202,6 +213,20 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
     section: section.sidebar,
     keywords: (locale) =>
       uiText("name, wordmark, logo", undefined, "settings search keywords", locale),
+  },
+  {
+    id: "appearance.desk",
+    path: "/settings/appearance",
+    kind: "setting",
+    title: (locale) => uiText("Desk", undefined, undefined, locale),
+    section: section.sidebar,
+    keywords: (locale) =>
+      uiText(
+        "open chats, tabs, sidebar view, projects",
+        undefined,
+        "settings search keywords",
+        locale,
+      ),
   },
   {
     id: "appearance.sidebarSearch",

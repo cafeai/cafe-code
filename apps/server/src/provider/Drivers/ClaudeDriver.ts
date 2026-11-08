@@ -193,7 +193,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       // credentials are invisible to the local probes (`--version`, the
       // capabilities init probe, `claude auth status` — all read local
       // credential material without an authenticated request), so the adapter
-      // reports 401s here and the status probe consults this flag. On a state
+      // reports typed primary auth failures here and the status probe consults
+      // this flag. Local sign-out need not carry an HTTP status. On a state
       // flip, re-run the snapshot check immediately so the provider tile
       // shows needs-login (or recovers) without waiting for the periodic
       // refresh.
@@ -316,7 +317,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       );
 
       const snapshot = credentialExpiry.decorate(baseSnapshot);
-      yield* Ref.set(snapshotRefreshRef, snapshot.refresh);
+      // An observed auth transition must not reuse an initialization cached
+      // before sign-out or recovery. The same existing refresh owns the probe.
+      yield* Ref.set(
+        snapshotRefreshRef,
+        Cache.invalidateAll(capabilitiesProbeCache).pipe(Effect.andThen(snapshot.refresh)),
+      );
 
       return {
         instanceId,

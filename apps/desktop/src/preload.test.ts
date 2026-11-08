@@ -46,6 +46,47 @@ function setMainFrameIdentity(value: boolean | undefined): void {
 }
 
 describe("desktop preload capability boundary", () => {
+  it("offers closed-lid status and explicit intent only on the native macOS path", async () => {
+    setMainFrameIdentity(true);
+    await import("./preload.ts");
+    const [, bridge] = electron.exposeInMainWorld.mock.calls[0] as [string, DesktopBridge];
+    if (process.platform === "darwin") {
+      electron.invoke.mockResolvedValueOnce({ phase: "off", reason: null });
+      expect(await bridge.getMacKeepAwakeState?.()).toEqual({ phase: "off", reason: null });
+      expect(electron.invoke).toHaveBeenCalledWith(IpcChannels.GET_MAC_KEEP_AWAKE_STATE_CHANNEL);
+      await bridge.setMacKeepAwakeIntent?.(false);
+      expect(electron.invoke).toHaveBeenCalledWith(
+        IpcChannels.SET_MAC_KEEP_AWAKE_INTENT_CHANNEL,
+        false,
+      );
+    } else {
+      expect(bridge.getMacKeepAwakeState).toBeUndefined();
+      expect(bridge.setMacKeepAwakeIntent).toBeUndefined();
+      expect(electron.invoke).not.toHaveBeenCalled();
+    }
+  });
+  it("reads native fullscreen and filters its read-only transition subscription", async () => {
+    setMainFrameIdentity(true);
+    await import("./preload.ts");
+    const [, bridge] = electron.exposeInMainWorld.mock.calls[0] as [string, DesktopBridge];
+    for (const value of [false, true, null, "true", {}]) {
+      electron.sendSync.mockReturnValueOnce(value);
+      expect(bridge.getWindowFullScreen!()).toBe(value === true);
+      expect(electron.sendSync).toHaveBeenLastCalledWith(
+        IpcChannels.GET_WINDOW_FULL_SCREEN_CHANNEL,
+      );
+    }
+    const listener = vi.fn();
+    const unsubscribe = bridge.onWindowFullScreenChanged!(listener);
+    const [channel, wrapped] = electron.on.mock.calls.at(-1)!;
+    expect(channel).toBe(IpcChannels.WINDOW_FULL_SCREEN_CHANGED_CHANNEL);
+    for (const value of [true, {}, "false", false, null]) wrapped({}, value);
+    expect(listener.mock.calls).toEqual([[true], [false]]);
+    unsubscribe();
+    expect(electron.removeListener).toHaveBeenCalledWith(channel, wrapped);
+    expect(electron.invoke).not.toHaveBeenCalled();
+  });
+
   it("does not expose the retired native visualization execution surface", async () => {
     setMainFrameIdentity(true);
     await import("./preload.ts");

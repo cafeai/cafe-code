@@ -1,5 +1,6 @@
 import {
   DEFAULT_BRAND_WORDMARK_PREFIX,
+  DEFAULT_DESK_ENABLED,
   DEFAULT_SHOW_SIDEBAR_ATTRIBUTION,
   DEFAULT_SHOW_SIDEBAR_MASCOT,
   DEFAULT_SHOW_SIDEBAR_SEARCH,
@@ -317,6 +318,32 @@ export function SidebarSettingsSection() {
               <span className={SIDEBAR_STAGE_BADGE_CLASS_NAME}>{APP_STAGE_LABEL}</span>
             </div>
           </div>
+        }
+      />
+
+      <SettingsRow
+        searchId="appearance.desk"
+        title={uiText("Desk", undefined, undefined, uiLocale)}
+        description={uiText(
+          "Off shows only Projects, without the Desk/Projects switch.",
+          undefined,
+          undefined,
+          uiLocale,
+        )}
+        resetAction={
+          settings.deskEnabled !== DEFAULT_UNIFIED_SETTINGS.deskEnabled ? (
+            <SettingResetButton
+              label={uiText("Desk", undefined, undefined, uiLocale)}
+              onClick={() => updateSettings({ deskEnabled: DEFAULT_DESK_ENABLED })}
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={settings.deskEnabled}
+            onCheckedChange={(checked) => updateSettings({ deskEnabled: Boolean(checked) })}
+            aria-label={uiText("Enable Desk", undefined, undefined, uiLocale)}
+          />
         }
       />
 

@@ -2,7 +2,7 @@ import { useUiLocale } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import type { EnvironmentId, ScopedThreadRef } from "@cafecode/contracts";
 import { autoAnimate } from "@formkit/auto-animate";
-import { PencilIcon, XIcon } from "lucide-react";
+import { PanelsTopLeftIcon, PencilIcon, XIcon } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { DESK_LIMITS, deskGroupIds, type DeskGroup, type DeskState } from "../../deskModel";
@@ -14,6 +14,7 @@ import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { resolveThreadRowClassName } from "../Sidebar.logic";
 import { ThreadStatusLabel } from "../ThreadStatusLabel";
 import { SidebarNewChatButton } from "../sidebar/SidebarNewChatButton";
+import { Button } from "../ui/button";
 import { SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useDeskTabMetadata } from "./useDeskTabMetadata";
@@ -528,7 +529,10 @@ export function DeskSidebar({
   const uiLocale = useUiLocale();
 
   const desk = useDeskStore((state) => state.desk);
+  const activeDraftId = useDeskStore((state) => state.activeDraftId);
   const dispatch = useDeskStore((state) => state.dispatch);
+  const hasOpenViews =
+    activeDraftId !== null || Object.values(desk.groups).some((group) => group.tabs.length > 0);
   const chatActions = useDeskChatActions();
   const menuOwner = useRef<symbol | null>(null);
   // The sidebar owns the shared token. Rows receive stable operations rather
@@ -565,10 +569,26 @@ export function DeskSidebar({
       aria-label={uiText("Desk open chats", undefined, undefined, uiLocale)}
       className="px-2 py-2"
     >
-      <div className="mb-1 flex items-center gap-1.5 pl-2 pr-1.5">
-        <span className="label-overline">
-          {uiText("Open chats", undefined, undefined, uiLocale)}
-        </span>
+      <div className="mb-1 flex min-w-0 items-center gap-1 pl-2 pr-1.5">
+        {/* An icon keeps the heading compact; the section's accessible name
+            and this tooltip still say what the list is. */}
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span
+                role="img"
+                aria-label={uiText("Open chats", undefined, undefined, uiLocale)}
+                data-testid="desk-open-chats-icon"
+                className="inline-flex h-7 shrink-0 items-center text-subtle-foreground max-md:h-8"
+              >
+                <PanelsTopLeftIcon aria-hidden="true" className="size-3.5" />
+              </span>
+            }
+          />
+          <TooltipPopup side="right">
+            {uiText("Open chats", undefined, undefined, uiLocale)}
+          </TooltipPopup>
+        </Tooltip>
         {/* Reuse Projects' pending-editor entrypoint. This heading owns no
             environment, draft, provider or first-send lifecycle of its own. */}
         <SidebarNewChatButton
@@ -576,6 +596,25 @@ export function DeskSidebar({
           disabled={newChatDisabled}
           onClick={onNewChat}
         />
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant="outline"
+                size="xs"
+                className="ml-auto"
+                aria-label={uiText("Clear desk", undefined, undefined, uiLocale)}
+                disabled={!hasOpenViews}
+                onClick={() => dispatch({ type: "closeAll" })}
+              >
+                {uiText("Clear", undefined, undefined, uiLocale)}
+              </Button>
+            }
+          />
+          <TooltipPopup side="bottom">
+            {uiText("Close all open chats (chats keep running)", undefined, undefined, uiLocale)}
+          </TooltipPopup>
+        </Tooltip>
       </div>
       {deskGroupIds(desk.layout).map((groupId) => {
         const group = desk.groups[groupId];

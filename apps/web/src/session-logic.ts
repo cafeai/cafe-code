@@ -1151,6 +1151,53 @@ export function reconcileSubagentWorkEntryRuntime<T extends WorkLogEntry>(
   };
 }
 
+/** Canonical routing is unchanged; the input owner is a timeline anchor only. */
+export function messageTimelineTurnId(message: ChatMessage): TurnId | null | undefined {
+  return message.turnId ?? message.originatingTurn?.turnId;
+}
+
+export function deriveFailedUserMessageIds(input: {
+  messages: ReadonlyArray<ChatMessage>;
+  activities: ReadonlyArray<OrchestrationThreadActivity>;
+}): ReadonlySet<ChatMessage["id"]> {
+  const failed = new Set<ChatMessage["id"]>();
+  const messages = new Map(
+    input.messages
+      .filter((message) => message.role === "user")
+      .map((message) => [message.id, message]),
+  );
+  for (const message of messages.values()) {
+    if (message.sendFailed || message.originatingTurn?.state === "error") failed.add(message.id);
+  }
+  for (const activity of input.activities) {
+    if (activity.kind !== "provider.turn.start.failed" || activity.tone !== "error") continue;
+    const payload = asRecord(activity.payload);
+    if (
+      typeof payload?.messageId !== "string" ||
+      !Number.isSafeInteger(payload.intentSequence) ||
+      Number(payload.intentSequence) <= 0
+    )
+      continue;
+    const message = messages.get(payload.messageId as ChatMessage["id"]);
+    if (
+      !message ||
+      message.originatingTurn ||
+      (activity.turnId !== null && activity.turnId !== message.turnId)
+    )
+      continue;
+    const generation = Date.parse(message.completedAt ?? message.createdAt);
+    const failedAt = Date.parse(activity.createdAt);
+    if (
+      Number.isFinite(generation) &&
+      Number.isFinite(failedAt) &&
+      failedAt >= generation &&
+      (activity.sequence === undefined || activity.sequence > Number(payload.intentSequence))
+    )
+      failed.add(message.id);
+  }
+  return failed;
+}
+
 export function deriveHistoricalWorkLogSummaries(input: {
   messages: ReadonlyArray<ChatMessage>;
   activities: ReadonlyArray<OrchestrationThreadActivity>;
@@ -1160,12 +1207,9 @@ export function deriveHistoricalWorkLogSummaries(input: {
   const latestTurnId = input.latestTurnId ?? null;
   const historicalTurnIds = new Set<TurnId>();
   for (const message of input.messages) {
-    if (
-      message.turnId !== null &&
-      message.turnId !== undefined &&
-      message.turnId !== latestTurnId
-    ) {
-      historicalTurnIds.add(message.turnId);
+    const turnId = messageTimelineTurnId(message);
+    if (turnId !== null && turnId !== undefined && turnId !== latestTurnId) {
+      historicalTurnIds.add(turnId);
     }
   }
   for (const activity of input.activities) {

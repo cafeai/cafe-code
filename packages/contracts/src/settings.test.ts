@@ -33,6 +33,8 @@ import {
   DEFAULT_SHOW_SIDEBAR_SEARCH,
   DEFAULT_THEME_ACCENT_COLOR,
   MAX_BRAND_WORDMARK_PREFIX_LENGTH,
+  MAX_HIDDEN_SIDEBAR_PROJECT_KEY_LENGTH,
+  MAX_HIDDEN_SIDEBAR_PROJECT_KEYS,
   MAX_INTERFACE_SCALE_PERCENT,
   MAX_SIDEBAR_BRAND_IMAGE_DATA_URL_LENGTH,
   MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
@@ -125,6 +127,40 @@ describe("client settings", () => {
     }
     expect(() => decodeClientSettingsPatch({ showDeskTabs: "hidden" })).toThrow();
   });
+  it("enables Desk by default and accepts only booleans", () => {
+    expect(decodeClientSettings({}).deskEnabled).toBe(true);
+    expect(DEFAULT_CLIENT_SETTINGS.deskEnabled).toBe(true);
+    for (const deskEnabled of [true, false]) {
+      expect(decodeClientSettingsPatch({ deskEnabled })).toEqual({ deskEnabled });
+      expect(decodeClientSettings({ deskEnabled }).deskEnabled).toBe(deskEnabled);
+    }
+    expect(() => decodeClientSettingsPatch({ deskEnabled: "off" })).toThrow();
+  });
+  it("keeps hidden sidebar projects bounded and preserves exact keys", () => {
+    expect(decodeClientSettings({}).hiddenSidebarProjectKeys).toEqual([]);
+    // A path key with surrounding whitespace must survive unchanged.
+    const keys = ["env:/work/app", "env:/work/trailing "];
+    expect(decodeClientSettingsPatch({ hiddenSidebarProjectKeys: keys })).toEqual({
+      hiddenSidebarProjectKeys: keys,
+    });
+    expect(
+      decodeClientSettings({ hiddenSidebarProjectKeys: keys }).hiddenSidebarProjectKeys,
+    ).toEqual(keys);
+    expect(() => decodeClientSettingsPatch({ hiddenSidebarProjectKeys: [""] })).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({
+        hiddenSidebarProjectKeys: ["x".repeat(MAX_HIDDEN_SIDEBAR_PROJECT_KEY_LENGTH + 1)],
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({
+        hiddenSidebarProjectKeys: Array.from(
+          { length: MAX_HIDDEN_SIDEBAR_PROJECT_KEYS + 1 },
+          (_, index) => `env:/p${index}`,
+        ),
+      }),
+    ).toThrow();
+  });
 
   it("keeps input notifications opt-in and independent of completion notifications", () => {
     expect(decodeClientSettings({ notificationsEnabled: true }).userInputNotificationsEnabled).toBe(
@@ -142,6 +178,14 @@ describe("client settings", () => {
   it("defaults power-save blocking to off", () => {
     expect(DEFAULT_CLIENT_SETTINGS.powerSaveBlockerMode).toBe(DEFAULT_POWER_SAVE_BLOCKER_MODE);
     expect(decodeClientSettings({}).powerSaveBlockerMode).toBe("off");
+  });
+  it("keeps closed-lid work opt-in and accepts only boolean preference patches", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.keepAwakeWithLidClosed).toBe(false);
+    expect(decodeClientSettings({}).keepAwakeWithLidClosed).toBe(false);
+    expect(decodeClientSettingsPatch({ keepAwakeWithLidClosed: true })).toEqual({
+      keepAwakeWithLidClosed: true,
+    });
+    expect(() => decodeClientSettingsPatch({ keepAwakeWithLidClosed: "true" })).toThrow();
   });
 
   it("defaults chat selection copy to Markdown", () => {

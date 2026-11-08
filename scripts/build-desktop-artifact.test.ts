@@ -331,6 +331,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           to: "mac-dictation-target",
         },
         { from: "apps/desktop/resources/mac-glide", to: "mac-glide" },
+        { from: "apps/desktop/resources/mac-keep-awake", to: "mac-keep-awake" },
         ...(["en", "ja", "ko"] as const).map((locale) => ({
           from: `apps/desktop/resources/ui-locales/${locale}.lproj`,
           to: `${locale}.lproj`,

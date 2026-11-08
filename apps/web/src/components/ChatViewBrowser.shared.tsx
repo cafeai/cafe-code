@@ -1809,6 +1809,7 @@ export function registerChatViewBrowserHooks(): void {
       composerTabCollapsed: false,
       threadLastVisitedAtById: {},
       sessionRailDocked: false,
+      chatRightPanelWidth: null,
     });
     useTaskAtriumStore.getState().setOpen(false);
   });

@@ -274,6 +274,7 @@
   --cafe-sidebar-accent: #1b4ed8;
   /* The sidebar picture's colour (sidebarGlow.ts); the accent until set. */
   --cafe-sidebar-glow: var(--cafe-sidebar-accent);
+  --cafe-sidebar-surface: color-mix(in oklab, #f3f4f6, var(--cafe-sidebar-accent) 4%);
   --sunken: color-mix(
     in oklab,
     color-mix(in srgb, var(--color-neutral-100) 80%, var(--color-white)),
@@ -339,6 +340,7 @@
     --warning: var(--color-amber-500);
     --warning-foreground: var(--color-amber-400);
     --cafe-sidebar-accent: #366ffb;
+    --cafe-sidebar-surface: color-mix(in oklab, #101011, var(--cafe-sidebar-accent) 4.4%);
     --sunken: color-mix(in oklab, #101011, var(--cafe-surface-tint) 2.2%);
     --raised: var(--popover);
     --subtle-foreground: color-mix(
@@ -440,15 +442,17 @@ body::after {
   }
 }
 
-/* The sidebar takes a little more of the accent than the rest of the app, so
+/* The sidebar and its portalled server menu share the same surface and stars.
+   The sidebar takes a little more of the accent than the rest of the app, so
    it reads as part of the same coloured surface rather than a separate strip.
    While a picture is shown, a soft glow in the picture's colour rises behind
    it. Declared before the dark rules so the dark versions win in dark mode. */
-.cafe-thread-sidebar [data-slot="sidebar-inner"] {
+.cafe-thread-sidebar [data-slot="sidebar-inner"],
+.cafe-sidebar-surface {
   position: relative;
   isolation: isolate;
   overflow: hidden;
-  background: color-mix(in oklab, #f3f4f6, var(--cafe-sidebar-accent) 4%);
+  background: var(--cafe-sidebar-surface);
 }
 
 .cafe-thread-sidebar.cafe-thread-sidebar--image [data-slot="sidebar-inner"] {
@@ -458,18 +462,21 @@ body::after {
       color-mix(in oklab, transparent, var(--cafe-sidebar-glow) 8.6%),
       transparent 66%
     ),
-    color-mix(in oklab, #f3f4f6, var(--cafe-sidebar-accent) 4%);
+    var(--cafe-sidebar-surface);
 }
 
 .cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
-.cafe-thread-sidebar [data-slot="sidebar-inner"]::after {
+.cafe-thread-sidebar [data-slot="sidebar-inner"]::after,
+.cafe-sidebar-surface::before,
+.cafe-sidebar-surface::after {
   content: "";
   position: absolute;
   pointer-events: none;
   z-index: 0;
 }
 
-.cafe-thread-sidebar [data-slot="sidebar-inner"]::before {
+.cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
+.cafe-sidebar-surface::before {
   --cafe-sidebar-star-opacity: 0.86;
 
   inset: -34% -48%;
@@ -504,7 +511,8 @@ body::after {
   will-change: transform, opacity;
 }
 
-.cafe-thread-sidebar [data-slot="sidebar-inner"]::after {
+.cafe-thread-sidebar [data-slot="sidebar-inner"]::after,
+.cafe-sidebar-surface::after {
   inset: -18% -28%;
   background:
     radial-gradient(
@@ -530,7 +538,7 @@ body::after {
 }
 
 .dark .cafe-thread-sidebar [data-slot="sidebar-inner"] {
-  background: color-mix(in oklab, #101011, var(--cafe-sidebar-accent) 4.4%);
+  background: var(--cafe-sidebar-surface);
 }
 
 .dark .cafe-thread-sidebar.cafe-thread-sidebar--image [data-slot="sidebar-inner"] {
@@ -540,10 +548,11 @@ body::after {
       color-mix(in oklab, transparent, var(--cafe-sidebar-glow) 8.6%),
       transparent 66%
     ),
-    color-mix(in oklab, #101011, var(--cafe-sidebar-accent) 4.4%);
+    var(--cafe-sidebar-surface);
 }
 
-.dark .cafe-thread-sidebar [data-slot="sidebar-inner"]::before {
+.dark .cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
+.dark .cafe-sidebar-surface::before {
   --cafe-sidebar-star-opacity: 0.44;
 
   background-image:
@@ -562,7 +571,8 @@ body::after {
     radial-gradient(circle at 304px 42px, rgba(214, 221, 230, 0.48) 0 0.7px, transparent 1.25px);
 }
 
-.dark .cafe-thread-sidebar [data-slot="sidebar-inner"]::after {
+.dark .cafe-thread-sidebar [data-slot="sidebar-inner"]::after,
+.dark .cafe-sidebar-surface::after {
   background:
     radial-gradient(
       ellipse at 16% 24%,
@@ -583,6 +593,12 @@ body::after {
     );
   opacity: 0.46;
   mix-blend-mode: screen;
+}
+
+/* Scroll affordances inherit this too, so a long server list keeps the same
+   surface instead of revealing the generic popover colour at either edge. */
+.cafe-sidebar-select {
+  --popover: var(--cafe-sidebar-surface);
 }
 
 .cafe-thread-sidebar [data-slot="sidebar-header"],
@@ -614,6 +630,13 @@ body::after {
      leading clearance; neither dimension scales with interface typography. */
   --app-mac-titlebar-height: 50px;
   --app-mac-titlebar-leading-space: 90px;
+}
+
+/* The native fullscreen transition hides the traffic lights. Retain the Mac
+   header band and trailing toggle while returning the brand and collapsed
+   navigation controls to the ordinary, interface-scaled sidebar inset. */
+:root.mac-fullscreen {
+  --app-mac-titlebar-leading-space: 1rem;
 }
 
 /* These attributes are admitted only by macOS Electron desktop headers.
@@ -769,14 +792,15 @@ body::after {
    buttons, so their parent row is treated as the hover surface too. */
 .cafe-thread-sidebar [data-slot="sidebar-menu-button"]:hover,
 .cafe-thread-sidebar [data-desk-chat-row]:hover > :where([data-slot="sidebar-menu-sub-button"]),
-.cafe-thread-sidebar
-  [data-slot="sidebar-menu-sub-button"]:not([data-thread-selected="true"]):hover {
+.cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"]:not([data-thread-selected="true"]):hover,
+.cafe-sidebar-surface [data-slot="select-item"][data-highlighted] {
   background-color: var(--sidebar-accent-surface);
 }
 
 .cafe-thread-sidebar [data-slot="sidebar-menu-button"][data-active="true"],
 .cafe-thread-sidebar
-  [data-slot="sidebar-menu-sub-button"][data-active="true"]:not([data-thread-selected="true"]) {
+  [data-slot="sidebar-menu-sub-button"][data-active="true"]:not([data-thread-selected="true"]),
+.cafe-sidebar-surface [data-slot="select-item"][data-selected] {
   background:
     linear-gradient(
       90deg,
@@ -795,7 +819,8 @@ body::after {
 .cafe-thread-sidebar
   [data-slot="sidebar-menu-sub-button"][data-active="true"]:not(
     [data-thread-selected="true"]
-  ):hover {
+  ):hover,
+.cafe-sidebar-surface [data-slot="select-item"][data-selected][data-highlighted] {
   background:
     linear-gradient(
       90deg,
@@ -920,6 +945,16 @@ html[data-cafe-background-animations="paused"]:is(
     [data-cafe-visibility="hidden"],
     [data-cafe-window-focus="blurred"]
   )
+  .cafe-sidebar-surface::before,
+html[data-cafe-background-animations="paused"]:is(
+    [data-cafe-visibility="hidden"],
+    [data-cafe-window-focus="blurred"]
+  )
+  .cafe-sidebar-surface::after,
+html[data-cafe-background-animations="paused"]:is(
+    [data-cafe-visibility="hidden"],
+    [data-cafe-window-focus="blurred"]
+  )
   :is(.ultrathink-frame, .ultrathink-chroma, .ultrathink-pill, .ultrathink-word) {
   animation-play-state: paused;
 }
@@ -936,6 +971,8 @@ html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"] {
 @media (prefers-reduced-motion: reduce) {
   .cafe-thread-sidebar [data-slot="sidebar-inner"]::before,
   .cafe-thread-sidebar [data-slot="sidebar-inner"]::after,
+  .cafe-sidebar-surface::before,
+  .cafe-sidebar-surface::after,
   .cafe-followup-queue::before,
   .cafe-followup-queue::after {
     animation: none;

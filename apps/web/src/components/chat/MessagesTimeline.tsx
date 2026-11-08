@@ -62,6 +62,7 @@ import {
   GlobeIcon,
   HammerIcon,
   ChevronRightIcon,
+  RotateCcwIcon,
   type LucideIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -182,6 +183,8 @@ interface TimelineRowSharedState {
   /** Known primary prose only; older unloaded history remains independently readable. */
   primarySummaryKeys: ReadonlySet<string>;
   onRevertUserMessage: (messageId: MessageId) => void;
+  failedUserMessageIds?: ReadonlySet<MessageId> | undefined;
+  onResendUserMessage?: ((messageId: MessageId) => void) | undefined;
   onForkMessage?: ((messageId: MessageId) => void) | undefined;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenSubagentDetail: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
@@ -259,6 +262,8 @@ function useTimelineRowEntrance(rowId: string): boolean {
 }
 
 interface TimelineRowActivityState {
+  messageResendDisabled: boolean;
+  resendingMessageId: MessageId | null;
   isWorking: boolean;
   messageForkDisabled: boolean;
   isRevertingCheckpoint: boolean;
@@ -327,6 +332,10 @@ interface MessagesTimelineProps {
   completionSummary: string | null;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
+  failedUserMessageIds?: ReadonlySet<MessageId> | undefined;
+  onResendUserMessage?: ((messageId: MessageId) => void) | undefined;
+  messageResendDisabled?: boolean;
+  resendingMessageId?: MessageId | null;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
@@ -388,6 +397,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   completionSummary,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
+  failedUserMessageIds,
+  onResendUserMessage,
+  messageResendDisabled = false,
+  resendingMessageId = null,
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
@@ -1421,6 +1434,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeProvider,
       subagentRuntimeSession,
       onRevertUserMessage,
+      failedUserMessageIds,
+      onResendUserMessage,
       onForkMessage,
       onImageExpand,
       onOpenSubagentDetail: openSubagentDetail,
@@ -1445,6 +1460,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeProvider,
       subagentRuntimeSession,
       onRevertUserMessage,
+      failedUserMessageIds,
+      onResendUserMessage,
       onForkMessage,
       onImageExpand,
       openSubagentDetail,
@@ -1455,15 +1472,21 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   const activityState = useMemo<TimelineRowActivityState>(
     () => ({
       isWorking,
+      messageResendDisabled:
+        messageResendDisabled || isWorking || (activeTurnInProgress && activeTurnId != null),
+      resendingMessageId,
       messageForkDisabled: messageForkDisabled || activeTurnInProgress,
       isRevertingCheckpoint,
       subagentDetailOpen: isSubagentDetailOpen,
     }),
     [
       activeTurnInProgress,
+      activeTurnId,
       isRevertingCheckpoint,
       isSubagentDetailOpen,
       isWorking,
+      messageResendDisabled,
+      resendingMessageId,
       messageForkDisabled,
     ],
   );
@@ -1901,6 +1924,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   const uiLocale = useUiLocale();
 
   const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
+  const failed = ctx.failedUserMessageIds?.has(row.message.id) === true;
+  const resending = activity.resendingMessageId === row.message.id;
+  const showResendingIndicator = useDelayedFlag(resending);
+  const resendLabel = uiText("Resend", undefined, undefined, uiLocale);
   const userImages =
     row.message.attachments?.filter((attachment) => attachment.type === "image") ?? [];
   const userFiles =
@@ -1910,7 +1938,13 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
 
   return (
     <div className="flex justify-end">
-      <div className="group relative max-w-[80%] rounded-2xl rounded-br-sm border border-border bg-secondary px-4 py-3">
+      <div
+        className={cn(
+          "group relative max-w-[80%] rounded-2xl rounded-br-sm border bg-secondary px-4 py-3",
+          failed ? "border-destructive" : "border-border",
+        )}
+        data-message-send-failed={failed || undefined}
+      >
         {userImages.length > 0 && (
           <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
             {userImages.map((image) => (
@@ -1978,6 +2012,45 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             </>
           }
         />
+        {failed ? (
+          <div className="mt-2 flex justify-end">
+            <span className="sr-only">
+              {uiText("Message failed", undefined, undefined, uiLocale)}
+            </span>
+            {ctx.onResendUserMessage ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="outline"
+                      className={cn(
+                        MESSAGE_ACTION_BUTTON_CLASS_NAME,
+                        "rounded-full text-status-error before:rounded-full hover:border-status-error hover:bg-status-error/10 hover:text-status-error",
+                      )}
+                      aria-label={resendLabel}
+                      aria-busy={resending}
+                      disabled={activity.messageResendDisabled || resending}
+                      onClick={() => ctx.onResendUserMessage?.(row.message.id)}
+                    />
+                  }
+                >
+                  <RotateCcwIcon
+                    aria-hidden="true"
+                    className={cn(
+                      "size-4",
+                      showResendingIndicator && "animate-spin motion-reduce:animate-none",
+                    )}
+                  />
+                </TooltipTrigger>
+                <TooltipPopup>
+                  {resending ? uiText("Resending…", undefined, undefined, uiLocale) : resendLabel}
+                </TooltipPopup>
+              </Tooltip>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   );

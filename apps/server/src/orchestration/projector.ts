@@ -82,6 +82,14 @@ function cloneThreadContextForDuplicate(input: {
     ...message,
     id: copiedMessageId(targetThread.id, message.id),
     turnId: copiedTurnId(targetThread.id, message.turnId),
+    ...(message.originatingTurn
+      ? {
+          originatingTurn: {
+            ...message.originatingTurn,
+            turnId: copiedRequiredTurnId(targetThread.id, message.originatingTurn.turnId),
+          },
+        }
+      : {}),
     streaming: false,
   }));
   const copiedPlans = sourceThread.proposedPlans.map((plan) => ({

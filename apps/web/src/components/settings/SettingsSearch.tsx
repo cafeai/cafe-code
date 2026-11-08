@@ -72,6 +72,9 @@ function searchAvailability(): SettingsSearchAvailability {
     desktop,
     macDesktop: desktop && isMacPlatform(navigator.platform),
     appIcon: typeof bridge?.setAppIcon === "function",
+    macKeepAwake:
+      typeof bridge?.getMacKeepAwakeState === "function" &&
+      typeof bridge?.setMacKeepAwakeIntent === "function",
   };
 }
 

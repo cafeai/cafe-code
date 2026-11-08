@@ -243,6 +243,22 @@ const make = Effect.gen(function* () {
     });
     trustAudioWebContents(window.webContents, rendererUrl);
 
+    // Native macOS fullscreen is distinct from document.fullscreenElement.
+    // Electron 43 does not reliably expose it through display-mode media
+    // queries (electron/electron#51396). Notify only this window's renderer
+    // after the asynchronous native transition finishes; reloads read the
+    // current state through the separately trusted read-only IPC method.
+    const publishFullScreen = () => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(
+          IpcChannels.WINDOW_FULL_SCREEN_CHANGED_CHANNEL,
+          window.isFullScreen(),
+        );
+      }
+    };
+    window.on("enter-full-screen", publishFullScreen);
+    window.on("leave-full-screen", publishFullScreen);
+
     window.webContents.on("context-menu", (event, params) => {
       event.preventDefault();
 

@@ -6,7 +6,7 @@ Cafe chats can exist without a project or repository. **Desk** organizes open
 tabs; **Projects** contains the saved project/chat catalog. A tab's group does
 not determine its project association.
 
-- Click the New chat pencil immediately beside **Open chats** in Desk or beside
+- Click the New chat pencil immediately beside the open-chats icon in Desk or beside
   **Chats** in Projects, use the pencil beside the sidebar reopen button when
   navigation is closed, or use the global New chat shortcut, to open a standalone
   editor in the active group. These entrypoints use the same action.

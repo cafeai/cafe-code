@@ -6196,11 +6196,17 @@ describe("ClaudeAdapterLive", () => {
   it.effect(
     "gives a CLI-worded auth failure and its terminal echo one identical root diagnostic",
     () => {
-      const harness = makeHarness();
+      const authChanges: boolean[] = [];
+      const harness = makeHarness({
+        onAuthStatusChanged: (failed) =>
+          Effect.sync(() => {
+            authChanges.push(failed);
+          }),
+      });
       return Effect.gen(function* () {
         const adapter = yield* ClaudeAdapter;
         const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
-          Stream.takeUntil((event) => event.type === "turn.completed"),
+          Stream.takeUntil((event) => event.type === "session.exited"),
           Stream.runCollect,
           Effect.forkChild,
         );
@@ -6228,6 +6234,7 @@ describe("ClaudeAdapterLive", () => {
           type: "result",
           subtype: "success",
           is_error: true,
+          api_error_status: null,
           result: "Not logged in · Please run /login",
           errors: [],
           session_id: "signed-out-session",
@@ -6241,6 +6248,13 @@ describe("ClaudeAdapterLive", () => {
         assert.isDefined(failure);
         assert.equal(failure!.summary.subject.kind, "root");
         assert.equal(deriveProviderDiagnosticCategory(failure!.snapshot), "sign-in-required");
+        assert.deepEqual(authChanges, [true]);
+        assert.equal(harness.query.closeCalls, 1);
+        assert.deepEqual(yield* adapter.listSessions(), []);
+        assert.equal(
+          runtimeEvents.some((event) => event.type === "content.delta"),
+          false,
+        );
         const runtimeError = runtimeEvents.find((event) => event.type === "runtime.error");
         if (runtimeError?.diagnostic) {
           // Same body, runtime generation and turn: ingestion folds the echo.
@@ -6287,6 +6301,125 @@ describe("ClaudeAdapterLive", () => {
         uuid: "result-auth-failure",
       } as unknown as SDKMessage);
       assert.equal(yield* Deferred.await(authStatusChanged), true);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps child auth errors from changing the instance login state", () => {
+    const authChanges: boolean[] = [];
+    const harness = makeHarness({
+      onAuthStatusChanged: (failed) =>
+        Effect.sync(() => {
+          authChanges.push(failed);
+        }),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const events = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+      harness.query.emit({
+        type: "assistant",
+        session_id: "root-session",
+        uuid: "child-auth-error",
+        parent_tool_use_id: "child-tool",
+        error: "authentication_failed",
+        message: {
+          id: "child-message",
+          model: "<synthetic>",
+          role: "assistant",
+          content: [{ type: "text", text: "Not logged in · Please run /login" }],
+        },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "Root completed successfully.",
+        session_id: "root-session",
+        uuid: "root-success",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(events);
+      assert.deepEqual(authChanges, [false]);
+      assert.equal(harness.query.closeCalls, 0);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("clears recovered auth evidence before a later unrelated failure", () => {
+    const authChanges: boolean[] = [];
+    const harness = makeHarness({
+      onAuthStatusChanged: (failed) =>
+        Effect.sync(() => {
+          authChanges.push(failed);
+        }),
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const recovered = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+      harness.query.emit({
+        type: "system",
+        subtype: "api_retry",
+        error: "authentication_failed",
+        error_status: 401,
+        session_id: "recovering-session",
+        uuid: "auth-retry",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "Recovered.",
+        session_id: "recovering-session",
+        uuid: "recovered-result",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(recovered);
+      assert.deepEqual(authChanges, [true, false]);
+
+      const failed = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "next", attachments: [] });
+      harness.query.emit({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        num_turns: 1,
+        errors: ["Unrelated execution failure."],
+        session_id: "recovering-session",
+        uuid: "unrelated-failure",
+      } as unknown as SDKMessage);
+      const events = Array.from(yield* Fiber.join(failed));
+      const completed = events.find((event) => event.type === "turn.completed");
+      assert.equal(completed?.type, "turn.completed");
+      if (completed?.type === "turn.completed") assert.equal(completed.payload.state, "failed");
+      assert.deepEqual(authChanges, [true, false]);
+      assert.equal(harness.query.closeCalls, 0);
+      assert.lengthOf(yield* adapter.listSessions(), 1);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
