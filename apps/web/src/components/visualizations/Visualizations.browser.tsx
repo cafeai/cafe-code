@@ -23,7 +23,7 @@ import { GENERATED_VISUALIZATION_FONT_APPENDIX } from "@cafecode/shared/visualiz
 import type { LegendListRef } from "@legendapp/list/react";
 import * as Schema from "effect/Schema";
 import { StrictMode, useLayoutEffect, useRef, useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { render } from "vitest-browser-react";
 import { cdp, page, userEvent } from "vitest/browser";
 import { fileRequest } from "../../attachments/fileAttachments";
@@ -312,10 +312,11 @@ function ClippedFrameFixture({ axis }: { axis: "horizontal" | "vertical" }) {
 function frameElement() {
   return document.querySelector<HTMLIFrameElement>("[data-visualization-card] iframe");
 }
-async function loadedFrame() {
+async function loadedFrame(assertActive?: () => void) {
   // The counter precedes the output and authored handlers in the real parser.
   // Replacement documents must finish loading before their state is inspected.
   await vi.waitFor(() => {
+    assertActive?.();
     const child = frameElement()?.contentDocument;
     expect(child?.getElementById("counter")).toBeTruthy();
     expect(child?.readyState).toBe("complete");
@@ -348,6 +349,130 @@ interface PoolInlineImage {
   width: number;
   height: number;
 }
+type MixedTimelinePhase =
+  | "png"
+  | "viewport"
+  | "render"
+  | "initial-list"
+  | "held-loading"
+  | "initial-frame"
+  | "tail-growth"
+  | "tail-image"
+  | "tail-ready"
+  | "review-frame"
+  | "pointer"
+  | "wheel"
+  | "review-growth"
+  | "review-image"
+  | "review-anchor"
+  | "close";
+let activeMixedTimelineOwner: { readonly cleanup: () => Promise<void> } | undefined;
+
+/** Own the real fixture operations before PNG creation or native acquisition.
+ * This mirrors the image-only timeline's established public-signal boundary;
+ * a hard timeout cannot leave a late render or held transfer using reset mocks.
+ */
+function createMixedTimelineOwner(context: TestContext) {
+  if (activeMixedTimelineOwner) throw new Error("The prior mixed timeline fixture is retiring.");
+  const signal = context.signal;
+  const originalViewport = { width: window.innerWidth, height: window.innerHeight };
+  const pending = new Set<Promise<unknown>>();
+  let retired = false;
+  let phase: MixedTimelinePhase = "png";
+  let failureReported = false;
+  let viewportAdmitted = false;
+  let rendering: ReturnType<typeof render> | undefined;
+  let retireTransfers: (() => Promise<void>) | undefined;
+  let removeReviewListeners: (() => void) | undefined;
+  let completion: Promise<void> | undefined;
+  const assertActive = () => {
+    if (retired || signal.aborted) throw new Error("The exact mixed timeline fixture was retired.");
+  };
+  const track = <Value,>(original: Promise<Value>) => {
+    pending.add(original);
+    void original.then(
+      () => pending.delete(original),
+      () => pending.delete(original),
+    );
+    return original;
+  };
+  const own = async <Value,>(next: MixedTimelinePhase, start: () => PromiseLike<Value>) => {
+    assertActive();
+    phase = next;
+    const value = await track(Promise.resolve(start()));
+    assertActive();
+    return value;
+  };
+  const reportFailure = () => {
+    if (failureReported) return;
+    failureReported = true;
+    // Fixed phase only: no source, paths, native errors or provider content.
+    console.error(`[Cafe Code mixed timeline fixture] phase=${phase}`);
+  };
+  const drain = async () => {
+    while (pending.size) await Promise.allSettled([...pending]);
+  };
+  const cleanup = () => {
+    if (completion) return completion;
+    retired = true;
+    signal.removeEventListener("abort", onAbort);
+    completion = Promise.resolve().then(async () => {
+      // The original native actions and every admitted PNG/render settle
+      // before their DOM target or viewport is removed. Held image responses
+      // instead retire after unmount, whose native abort normally owns them.
+      await drain();
+      removeReviewListeners?.();
+      const view = await rendering?.catch(() => undefined);
+      await view?.unmount();
+      await retireTransfers?.();
+      await drain();
+      if (viewportAdmitted) await page.viewport(originalViewport.width, originalViewport.height);
+      if (activeMixedTimelineOwner?.cleanup === cleanup) activeMixedTimelineOwner = undefined;
+    });
+    return completion;
+  };
+  const onAbort = () => {
+    reportFailure();
+    void cleanup().catch(() => undefined);
+  };
+  activeMixedTimelineOwner = { cleanup };
+  context.onTestFailed(reportFailure);
+  context.onTestFinished(cleanup);
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) onAbort();
+  return {
+    assertActive,
+    isActive: () => !retired && !signal.aborted,
+    track,
+    own,
+    waitFor: (next: MixedTimelinePhase, check: () => void) =>
+      own(next, () =>
+        vi.waitFor(() => {
+          assertActive();
+          check();
+        }),
+      ),
+    cleanup,
+    viewport: (width: number, height: number) =>
+      own("viewport", () => {
+        viewportAdmitted = true;
+        return page.viewport(width, height);
+      }),
+    render: (start: () => ReturnType<typeof render>) =>
+      own("render", () => {
+        rendering = start();
+        return rendering;
+      }),
+    setTransfers(value: () => Promise<void>) {
+      assertActive();
+      retireTransfers = value;
+    },
+    setReviewCleanup(value: () => void) {
+      assertActive();
+      removeReviewListeners = value;
+    },
+  };
+}
 /** Real shared list, actual frame geometry and real image decode; transport
  * replies contain only these fixture-owned synthetic PNGs. */
 function MixedTimelineFixture({
@@ -359,6 +484,7 @@ function MixedTimelineFixture({
   actions: {
     grow?: () => void;
     readState?: () => ReturnType<LegendListRef["getState"]> | undefined;
+    initialListLoaded?: () => void;
   };
   provider: "codex" | "claudeAgent";
   inlineImages: readonly PoolInlineImage[];
@@ -420,6 +546,9 @@ function MixedTimelineFixture({
         onIsAtEndChange={() => undefined}
         onRevertUserMessage={() => undefined}
         onUserScrollIntent={() => setFollowing(false)}
+        onDebugScrollEvent={(event) => {
+          if (event.reason === "initial-list-load") actions.initialListLoaded?.();
+        }}
         revertTurnCountByUserMessageId={new Map()}
         stickToEndRevision={0}
         timelineEntries={[
@@ -461,51 +590,71 @@ interface PoolImageTransfer {
   signal: AbortSignal;
   outcome: "pending" | "response" | "aborted";
 }
-async function installPoolInlineImagePeer(images: readonly PoolInlineImage[]) {
+async function installPoolInlineImagePeer(
+  images: readonly PoolInlineImage[],
+  fixtureOwner?: ReturnType<typeof createMixedTimelineOwner>,
+) {
+  fixtureOwner?.assertActive();
   const transfers: PoolImageTransfer[] = [];
+  const held = new Set<{ readonly promise: Promise<Response>; readonly retire: () => void }>();
   const peers = await Promise.all(
-    images.map(async (image) => {
-      const canvas = document.createElement("canvas");
-      canvas.width = image.width;
-      canvas.height = image.height;
-      canvas.getContext("2d")!.fillRect(0, 0, image.width, image.height);
-      const blob = await new Promise<Blob>((resolve, reject) =>
-        canvas.toBlob(
-          (value) => (value ? resolve(value) : reject(new Error("fixture-png-unavailable"))),
-          "image/png",
-        ),
-      );
-      const png = new Uint8Array(await blob.arrayBuffer());
-      const manifest = deferred<void>();
-      const bytes = deferred<void>();
-      return {
-        image,
-        manifest,
-        bytes,
-        // Readiness is shared, never a one-use Response body. Initial list
-        // measurement can cancel a row and then admit its current replacement.
-        // Every actual request must receive its own fresh bounded body.
-        manifestResponse: () =>
-          new Response(
-            JSON.stringify([
-              {
-                source: image.source,
-                mimeType: "image/png",
-                width: image.width,
-                height: image.height,
-                sizeBytes: png.length,
-              },
-            ]),
+    images.map((image) => {
+      const preparation = (async () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width;
+        canvas.height = image.height;
+        canvas.getContext("2d")!.fillRect(0, 0, image.width, image.height);
+        const blob = await new Promise<Blob>((resolve, reject) =>
+          canvas.toBlob(
+            (value) => (value ? resolve(value) : reject(new Error("fixture-png-unavailable"))),
+            "image/png",
           ),
-        bytesResponse: () =>
-          new Response(png.slice().buffer, { headers: { "content-type": "image/png" } }),
-        releaseManifest: () => manifest.resolve(undefined),
-        releaseBytes: () => bytes.resolve(undefined),
-      };
+        );
+        fixtureOwner?.assertActive();
+        const png = new Uint8Array(await blob.arrayBuffer());
+        fixtureOwner?.assertActive();
+        const manifest = deferred<void>();
+        const bytes = deferred<void>();
+        return {
+          image,
+          manifest,
+          bytes,
+          // Readiness is shared, never a one-use Response body. Initial list
+          // measurement can cancel a row and then admit its current replacement.
+          // Every actual request must receive its own fresh bounded body.
+          manifestResponse: () =>
+            new Response(
+              JSON.stringify([
+                {
+                  source: image.source,
+                  mimeType: "image/png",
+                  width: image.width,
+                  height: image.height,
+                  sizeBytes: png.length,
+                },
+              ]),
+            ),
+          bytesResponse: () =>
+            new Response(png.slice().buffer, { headers: { "content-type": "image/png" } }),
+          releaseManifest: () => manifest.resolve(undefined),
+          releaseBytes: () => bytes.resolve(undefined),
+        };
+      })();
+      // Promise.all can reject before another native toBlob completes. Keep
+      // each admitted preparation owned independently until actual settlement.
+      return fixtureOwner ? fixtureOwner.track(preparation) : preparation;
     }),
   );
-  vi.mocked(fileRequest).mockImplementation(async (owner, path, init, query) => {
-    expect(owner).toBe(environmentId);
+  fixtureOwner?.assertActive();
+  const retireTransfers = async () => {
+    const owned = [...held];
+    for (const transfer of owned) transfer.retire();
+    await Promise.allSettled(owned.map((transfer) => transfer.promise));
+  };
+  fixtureOwner?.setTransfers(retireTransfers);
+  vi.mocked(fileRequest).mockImplementation(async (environment, path, init, query) => {
+    fixtureOwner?.assertActive();
+    expect(environment).toBe(environmentId);
     expect(path).toBe(CHAT_IMAGES_PATH);
     expect(init?.signal).toBeInstanceOf(AbortSignal);
     const peer = peers.find((candidate) => candidate.image.id === query?.messageId);
@@ -528,17 +677,24 @@ async function installPoolInlineImagePeer(images: readonly PoolInlineImage[]) {
     };
     transfers.push(transfer);
     if (signal.aborted) throw new Error("fixture-image-cancelled");
-    return new Promise<Response>((resolve, reject) => {
+    let retire!: () => void;
+    const promise = new Promise<Response>((resolve, reject) => {
       const abort = () => {
         if (transfer.outcome !== "pending") return;
         transfer.outcome = "aborted";
+        signal.removeEventListener("abort", abort);
         reject(new Error("fixture-image-cancelled"));
       };
+      retire = abort;
       signal.addEventListener("abort", abort, { once: true });
       void (kind === "manifest" ? peer.manifest.promise : peer.bytes.promise).then(
         () => {
           signal.removeEventListener("abort", abort);
           if (transfer.outcome !== "pending") return;
+          if (fixtureOwner && !fixtureOwner.isActive()) {
+            abort();
+            return;
+          }
           transfer.outcome = "response";
           resolve(kind === "manifest" ? peer.manifestResponse() : peer.bytesResponse());
         },
@@ -548,6 +704,13 @@ async function installPoolInlineImagePeer(images: readonly PoolInlineImage[]) {
         },
       );
     });
+    const owned = { promise, retire };
+    held.add(owned);
+    void promise.then(
+      () => held.delete(owned),
+      () => held.delete(owned),
+    );
+    return promise;
   });
   return { peers, transfers };
 }
@@ -570,7 +733,13 @@ async function wheelVisualizationScroller({ x, y }: { x: number; y: number }, de
   await cdp().send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY });
 }
 
-afterEach(() => {
+beforeEach(() => {
+  if (activeMixedTimelineOwner) throw new Error("The prior mixed timeline fixture is retiring.");
+});
+afterEach(async () => {
+  // The shared hook precedes onTestFinished; join the same exact owner before
+  // resetting its mocks, document styles or viewport for another case.
+  await activeMixedTimelineOwner?.cleanup();
   __resetEnvironmentApiOverridesForTests();
   if (originalBridge) window.desktopBridge = originalBridge;
   else delete window.desktopBridge;
@@ -583,60 +752,74 @@ afterEach(() => {
 });
 
 describe("Full-access live inline visualizations", () => {
-  it.each(["codex", "claudeAgent"] as const)(
+  it.for(["codex", "claudeAgent"] as const)(
     "keeps %s image growth and full-width chart layout in one real list without losing tail or review ownership",
-    async (provider) => {
-      setUiLocale("en");
-      const images: readonly PoolInlineImage[] = [
-        {
-          id: "pool-image-tail",
-          source: "/repo/pool-follow-tail.png",
-          name: "Tail image",
-          width: 640,
-          height: 128,
-        },
-        {
-          id: "pool-image-review",
-          source: "/repo/pool-review.png",
-          name: "Review image",
-          width: 640,
-          height: 96,
-        },
-      ];
-      const { peers, transfers } = await installPoolInlineImagePeer(images);
-      const api = installApi(),
-        actions: {
-          grow?: () => void;
-          readState?: () => ReturnType<LegendListRef["getState"]> | undefined;
-        } = {};
-      const read = api.inline.getMockImplementation()!;
-      api.inline.mockImplementation(async (input) => ({
-        ...(await read(input)),
-        html: '<main style="height:180px;padding:8px"><button id="counter">Change range</button><output id="count">0</output><svg viewBox="0 0 640 100" width="100%" height="100"><rect width="640" height="100" fill="var(--chart-1)"/><text x="10" y="25" fill="var(--foreground)">Current chart data</text></svg></main>',
-      }));
-      const originalViewport = { width: window.innerWidth, height: window.innerHeight };
-      let view: Awaited<ReturnType<typeof render>> | undefined;
+    async (provider, context) => {
+      const owner = createMixedTimelineOwner(context);
       try {
+        owner.assertActive();
+        setUiLocale("en");
+        const images: readonly PoolInlineImage[] = [
+          {
+            id: "pool-image-tail",
+            source: "/repo/pool-follow-tail.png",
+            name: "Tail image",
+            width: 640,
+            height: 128,
+          },
+          {
+            id: "pool-image-review",
+            source: "/repo/pool-review.png",
+            name: "Review image",
+            width: 640,
+            height: 96,
+          },
+        ];
+        const { peers, transfers } = await owner.own("png", () =>
+          installPoolInlineImagePeer(images, owner),
+        );
+        let initialListLoaded = false;
+        const api = installApi(),
+          actions: {
+            grow?: () => void;
+            readState?: () => ReturnType<LegendListRef["getState"]> | undefined;
+            initialListLoaded?: () => void;
+          } = {
+            initialListLoaded: () => {
+              if (owner.isActive()) initialListLoaded = true;
+            },
+          };
+        const read = api.inline.getMockImplementation()!;
+        api.inline.mockImplementation(async (input) => {
+          owner.assertActive();
+          const value = await owner.track(read(input));
+          owner.assertActive();
+          return {
+            ...value,
+            html: '<main style="height:180px;padding:8px"><button id="counter">Change range</button><output id="count">0</output><svg viewBox="0 0 640 100" width="100%" height="100"><rect width="640" height="100" fill="var(--chart-1)"/><text x="10" y="25" fill="var(--foreground)">Current chart data</text></svg></main>',
+          };
+        });
         // This case deliberately contrasts full-pane charts with capped prose.
         // Use the runner's supported viewport API, not CSS/media overrides, and
         // restore its exact incoming dimensions even if render/assertion fails.
-        await page.viewport(1200, 900);
-        view = await render(
-          <VisualizationViewerProvider>
-            <MixedTimelineFixture
-              actions={actions}
-              provider={provider}
-              inlineImages={images}
-              width={1100}
-            />
-          </VisualizationViewerProvider>,
+        await owner.viewport(1200, 900);
+        await owner.render(() =>
+          render(
+            <VisualizationViewerProvider>
+              <MixedTimelineFixture
+                actions={actions}
+                provider={provider}
+                inlineImages={images}
+                width={1100}
+              />
+            </VisualizationViewerProvider>,
+          ),
         );
-        await loadedFrame();
-        expect(api.inline).toHaveBeenCalledOnce();
         // Two independent completed messages have exact separate manifests.
         // Keep both binary replies held so metadata, not image load timing,
         // is what reserves the first larger row in the real virtualized list.
-        await vi.waitFor(() => {
+        await owner.waitFor("initial-list", () => {
+          expect(initialListLoaded).toBe(true);
           const current = transfers.filter((transfer) => transfer.outcome === "pending");
           expect(current.map((transfer) => transfer.messageId).sort()).toEqual(
             images.map((image) => image.id).sort(),
@@ -666,13 +849,18 @@ describe("Full-access live inline visualizations", () => {
           )!,
         );
         // Observe the held loading state itself; its CSS height/border are not a feature contract.
-        await vi.waitFor(() => {
+        await owner.waitFor("held-loading", () => {
           for (const host of hosts) {
             expect(host).toHaveTextContent(uiText("Loading image…"));
             expect(host.style.aspectRatio).toBe("");
             expect(host.getBoundingClientRect().height).toBeGreaterThan(0);
           }
         });
+        // The list may legitimately retire a fully offscreen bootstrap
+        // document while the held loading rows finish their layout. Inspect
+        // the current complete frame only after that public list boundary;
+        // no-refetch/no-replacement proof starts at the visible review owner.
+        await owner.own("initial-frame", () => loadedFrame(owner.assertActive));
         const initialImageHeights = hosts.map((host) => host.getBoundingClientRect().height);
         const expectSharedWidth = () => {
           const style = getComputedStyle(scroller);
@@ -701,7 +889,7 @@ describe("Full-access live inline visualizations", () => {
         expectSharedWidth();
         peers[0]!.releaseManifest();
 
-        await vi.waitFor(() => {
+        await owner.waitFor("tail-growth", () => {
           expect(hosts[0]!.getBoundingClientRect().height).toBeGreaterThan(initialImageHeights[0]!);
           expect(hosts[0]!.style.aspectRatio).toBe("640 / 128");
           expect(anchor.getBoundingClientRect().height).toBe(180);
@@ -715,7 +903,7 @@ describe("Full-access live inline visualizations", () => {
         ).not.toBeNull();
         peers[0]!.releaseBytes();
         const firstImage = page.getByRole("img", { name: "Tail image", exact: true });
-        await vi.waitFor(() =>
+        await owner.waitFor("tail-image", () =>
           expect((firstImage.element() as HTMLImageElement).naturalWidth).toBe(640),
         );
         const imageNode = firstImage.element();
@@ -723,14 +911,14 @@ describe("Full-access live inline visualizations", () => {
         expect(imageSource).toMatch(/^blob:/);
         // Establish review ownership only after the image is decoded and the real list is at tail.
         // Bootstrap and metadata can legitimately take a unit fully offscreen before this point.
-        await vi.waitFor(() => {
+        await owner.waitFor("tail-ready", () => {
           expect((imageNode as HTMLImageElement).complete).toBe(true);
           expect(actions.readState?.()?.isAtEnd).toBe(true);
           expect(scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop).toBeLessThan(
             1,
           );
         });
-        const frame = await loadedFrame();
+        const frame = await owner.own("review-frame", () => loadedFrame(owner.assertActive));
         const frameDocument = frame.contentDocument;
         const inlineReadsAtReview = api.inline.mock.calls.length;
         const retireCallsAtReview = api.retireInlineFrame.mock.calls.length;
@@ -782,9 +970,10 @@ describe("Full-access live inline visualizations", () => {
             }
           | undefined;
         const observeWheel = (event: WheelEvent) => {
+          if (!owner.isActive()) return;
           wheelCount += 1;
           if (admission) return;
-          const owner = {
+          const nativeOwner = {
             scrollerConnected: scroller.isConnected,
             currentFrame: frameElement() === frame,
             currentDocument: frame.contentDocument === frameDocument,
@@ -796,21 +985,27 @@ describe("Full-access live inline visualizations", () => {
             deltaY: event.deltaY,
             deltaMode: event.deltaMode,
             following: timeline.dataset.following === "true",
-            ...owner,
-            exactOwner: Object.values(owner).every((value) => value),
+            ...nativeOwner,
+            exactOwner: Object.values(nativeOwner).every((value) => value),
           };
         };
+        owner.setReviewCleanup(() => {
+          scroller.removeEventListener("wheel", observeWheel, true);
+          frameDocument!.removeEventListener("wheel", observeWheel, true);
+        });
         scroller.addEventListener("wheel", observeWheel, { capture: true, passive: true });
         frameDocument!.addEventListener("wheel", observeWheel, { capture: true, passive: true });
         try {
           expectOriginalOwner("before native pointer preparation");
-          const wheelPosition = await prepareVisualizationScrollerWheel(scroller);
+          const wheelPosition = await owner.own("pointer", () =>
+            prepareVisualizationScrollerWheel(scroller),
+          );
           expectOriginalOwner("after native pointer preparation");
           const beforeWheel = scroller.scrollTop;
           expect(Number.isFinite(beforeWheel)).toBe(true);
           expect(timeline.dataset.following).toBe("true");
-          await wheelVisualizationScroller(wheelPosition, -64);
-          await vi.waitFor(() => {
+          await owner.own("wheel", () => wheelVisualizationScroller(wheelPosition, -64));
+          await owner.waitFor("wheel", () => {
             expect(wheelCount).toBe(1);
             expect(admission).toBeDefined();
             expect(admission!.trusted).toBe(true);
@@ -840,14 +1035,14 @@ describe("Full-access live inline visualizations", () => {
         peers[1]!.releaseManifest();
         frame.contentDocument!.querySelector<HTMLElement>("main")!.style.height = "240px";
         actions.grow?.();
-        await vi.waitFor(() => {
+        await owner.waitFor("review-growth", () => {
           expect(hosts[1]!.getBoundingClientRect().height).toBeGreaterThan(initialImageHeights[1]!);
           expect(hosts[1]!.style.aspectRatio).toBe("640 / 96");
           expect(anchor.getBoundingClientRect().height).toBe(240);
           expect(fileRequest).toHaveBeenCalledTimes(startupRequests + 2);
         });
         peers[1]!.releaseBytes();
-        await vi.waitFor(() =>
+        await owner.waitFor("review-image", () =>
           expect(
             (
               page
@@ -860,7 +1055,7 @@ describe("Full-access live inline visualizations", () => {
         // animation-frame correction have restored the retained review anchor.
         // Observe that actual restoration within the existing wait; keep the
         // same exact position/offset assertions after the readiness boundary.
-        await vi.waitFor(() => {
+        await owner.waitFor("review-anchor", () => {
           expect(anchor.getBoundingClientRect().height).toBe(240);
           expect(scroller.scrollTop).toBeCloseTo(reviewTop, 0);
           expect(anchor.getBoundingClientRect().top).toBeCloseTo(anchorTop, 0);
@@ -877,11 +1072,7 @@ describe("Full-access live inline visualizations", () => {
         expect(frame.contentDocument).toBe(frameDocument);
         expect(api.details).not.toHaveBeenCalled();
       } finally {
-        try {
-          await view?.unmount();
-        } finally {
-          await page.viewport(originalViewport.width, originalViewport.height);
-        }
+        await owner.cleanup();
       }
     },
   );

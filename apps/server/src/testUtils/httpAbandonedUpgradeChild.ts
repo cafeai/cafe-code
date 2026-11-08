@@ -7,7 +7,7 @@ import * as Http from "node:http";
 // baseline's fatal error event.
 import { errorMonitor, type EventEmitter } from "node:events";
 // Exact native socket ownership is needed for test-only cleanup after handover.
-import type { Socket } from "node:net";
+import { Socket } from "node:net";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
@@ -40,13 +40,27 @@ const failureSyscall = (error: unknown): string => {
   return syscall === "write" || syscall === "writev" ? syscall : "other";
 };
 
+type PeerCase = "fin" | "reset";
+const peerForPath = (path: string | undefined): PeerCase | undefined =>
+  path === "/abandoned-upgrade" ? "fin" : path === "/abandoned-upgrade-reset" ? "reset" : undefined;
+// Sequential cases share one bounded, never-mutated response allocation.
+const responseBytes = new Uint8Array(16 * 1024 * 1024);
 const server = Http.createServer();
 const sockets = new Set<Socket>();
 let stopping = false;
-let release!: () => void;
-const responseGate = new Promise<void>((resolve) => {
-  release = resolve;
-});
+const gate = () => {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+};
+const gates = { fin: gate(), reset: gate() };
+const caseBySocket = new WeakMap<Socket, PeerCase>();
+const caseSockets = new Map<PeerCase, Socket>();
+const enteredCases = new Set<PeerCase>();
+const backpressuredCases = new Set<PeerCase>();
+let resetReleased = false;
 
 server.on("connection", (socket) => {
   sockets.add(socket);
@@ -58,36 +72,76 @@ server.on("connection", (socket) => {
   // type overloads narrow event names to strings, so retain the base event
   // contract for this passive native monitor without changing any behavior.
   (socket as EventEmitter).on(errorMonitor, (error: unknown) => {
-    send({ type: "native-error", code: failureCode(error), syscall: failureSyscall(error) });
+    const peerCase = caseBySocket.get(socket);
+    send({
+      type: "native-error",
+      ...(peerCase ? { peerCase } : {}),
+      code: failureCode(error),
+      syscall: failureSyscall(error),
+    });
   });
 });
-server.prependListener("upgrade", (request, socket) => {
-  if (request.url !== "/abandoned-upgrade") return;
-  send({ type: "native-upgrade" });
+server.prependListener("upgrade", (request, rawSocket) => {
+  const peerCase = peerForPath(request.url);
+  if (!peerCase) return;
+  if (!(rawSocket instanceof Socket) || caseSockets.has(peerCase))
+    throw new Error("The inert upgrade case has no unique native socket.");
+  const socket = rawSocket;
+  caseBySocket.set(socket, peerCase);
+  caseSockets.set(peerCase, socket);
+  socket.pause();
+  send({ type: "native-upgrade", peerCase });
   socket.once("end", () => {
-    // Release directly from native FIN observation, before socket close. An
-    // IPC round trip here could let close win and turn the response into an
-    // ignored write to an already-destroyed socket instead of a pending write.
-    send({ type: "peer-ended" });
-    release();
+    send({ type: "peer-ended", peerCase });
+    if (peerCase === "fin") gates.fin.release();
   });
-  socket.once("close", () => send({ type: "peer-closed" }));
-  // The rejected upgrade has no WebSocket reader. This exact test peer owns
-  // draining its empty request stream so the real TCP FIN can be observed.
-  socket.resume();
+  socket.once("finish", () => send({ type: "peer-finished", peerCase }));
+  socket.once("close", () => send({ type: "peer-closed", peerCase }));
+  if (peerCase === "fin") {
+    socket.resume();
+    return;
+  }
+  const highWaterMark = socket.readableHighWaterMark;
+  if (!Number.isSafeInteger(highWaterMark) || highWaterMark <= 0 || highWaterMark > 64 * 1024)
+    throw new Error("The inert native read bound is unsupported.");
+  const observeBackpressure = (): void => {
+    if (
+      stopping ||
+      socket.destroyed ||
+      caseSockets.get("reset") !== socket ||
+      backpressuredCases.has("reset")
+    )
+      return;
+    const bufferedBytes = socket.readableLength;
+    if (bufferedBytes < highWaterMark) return;
+    if (!Number.isSafeInteger(bufferedBytes) || bufferedBytes > 128 * 1024)
+      throw new Error("The inert native readable buffer exceeded its bound.");
+    // Node24 onStreamRead calls readStop synchronously after push(false),
+    // before its deferred readable event. No consumer reads this buffer.
+    // Observing its actual HWM is native backpressure, not pause() alone.
+    backpressuredCases.add("reset");
+    socket.off("readable", observeBackpressure);
+    socket.pause();
+    send({ type: "read-backpressured", peerCase: "reset", highWaterMark, bufferedBytes });
+  };
+  socket.on("readable", observeBackpressure);
+  socket.once("close", () => socket.off("readable", observeBackpressure));
 });
 
 const app = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
-  if (request.url === "/abandoned-upgrade") {
-    send({ type: "route-entered" });
-    yield* Effect.promise(() => responseGate);
+  const peerCase = peerForPath(request.url);
+  if (peerCase) {
+    if (enteredCases.has(peerCase))
+      return yield* Effect.die(new Error("The inert response case was duplicated."));
+    enteredCases.add(peerCase);
+    send({ type: "route-entered", peerCase });
+    yield* Effect.promise(() => gates[peerCase].promise);
     if (stopping) return HttpServerResponse.empty({ status: 503 });
-    send({ type: "response-admitted" });
-    // Keep a real native write pending after peer closure. The small-response
-    // FIN race need not fail on every host; this bounded inert payload proved
-    // the same unowned Socket error boundary without synthetic emit/errors.
-    return HttpServerResponse.uint8Array(new Uint8Array(16 * 1024 * 1024), { status: 401 });
+    send({ type: "response-admitted", peerCase });
+    // Use the unchanged production Uint8Array response branch. Only this
+    // test-owned peer admission differs; no error or write is synthesized.
+    return HttpServerResponse.uint8Array(responseBytes, { status: 401 });
   }
   return HttpServerResponse.text("healthy");
 });
@@ -101,7 +155,8 @@ const runtime = ManagedRuntime.make(
 const stop = async (): Promise<void> => {
   if (stopping) return;
   stopping = true;
-  release();
+  gates.fin.release();
+  gates.reset.release();
   // closeAllConnections omits upgraded sockets. Destroy only the exact native
   // sockets admitted by this inert server, then join its scoped native close.
   for (const socket of sockets) socket.destroy();
@@ -118,13 +173,23 @@ const stopAfterControl = (): void => {
 // Parent retirement is installed before the first native layer acquisition.
 // A disconnected parent cannot leave this test listener detached.
 process.on("message", (message: unknown) => {
+  if (typeof message !== "object" || message === null || !("type" in message)) return;
+  if (message.type === "stop") return stopAfterControl();
+  if (message.type !== "release-response") return;
+  const socket = caseSockets.get("reset");
   if (
-    typeof message === "object" &&
-    message !== null &&
-    "type" in message &&
-    message.type === "stop"
+    stopping ||
+    resetReleased ||
+    !("peerCase" in message) ||
+    message.peerCase !== "reset" ||
+    !socket ||
+    socket.destroyed ||
+    !enteredCases.has("reset") ||
+    !backpressuredCases.has("reset")
   )
-    stopAfterControl();
+    throw new Error("The inert reset response release lacks its exact owner.");
+  resetReleased = true;
+  gates.reset.release();
 });
 process.once("disconnect", stopAfterControl);
 

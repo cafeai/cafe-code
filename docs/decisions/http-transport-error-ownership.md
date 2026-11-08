@@ -2,10 +2,10 @@
 
 Decision status: Accepted within the reported backend-disconnection repair
 Implementation status: Implemented in source; rebuilt runtime adoption pending
-Verification status: Native regression, targeted HTTP compatibility, server
-typecheck, format, lint and repository audit passed locally; runtime adoption pending
+Verification status: Native regression and HTTP compatibility protect this
+contract; exact hosted CI and runtime adoption are separately qualified
 Created: 2026-11-08 03:38:48 JST (UTC+0900)
-Last updated: 2026-11-08 05:50:35 JST (UTC+0900)
+Last updated: 2026-11-08 08:56:34 JST (UTC+0900)
 Decision authority: The user's recurrent Debug disconnection report and request
 to investigate the running application's debug statistics.
 
@@ -56,20 +56,33 @@ The native failed-upgrade/late-response regression runs in a test-owned child.
 The unchanged pre-fix adapter failed with an actual unhandled `ECONNRESET`
 write error and native exit code 1. The repaired adapter observes the same
 native failure, serves an independent healthy request and closes cleanly.
-Its bounded large response holds a real write pending; the historical small
-response's exact `EPIPE` timing was not reproduced. Both errors exercise the
-same missing socket error owner, without synthetic error emission.
+The historical small response's exact `EPIPE` timing was not reproduced. Both
+errors exercise the same missing socket error owner, without synthetic error
+emission. A large single `ServerResponse.end` call and first client data alone
+cannot establish that a write remains pending on every host. An attempted
+first-data handshake still reached native peer close on Windows without the
+required write-error witness; that observation does not identify the exact
+kernel completion path.
 
-The peer keeps its read side open after sending the real TCP FIN. It abandons
-that exact connection only from its first native response-data callback, so
-actual response progress precedes reset. An earlier fixture closed immediately
-after FIN; the Windows CI test timed out without recording the blocked phase.
-That timeout alone does not prove a particular native event ordering. The
-revised fixture removes the premature-close ambiguity while still requiring
-an actual write/writev error, independent healthy response and clean child
-exit. A reset/read error or merely surviving without an observed failed write
-does not qualify this regression. Failure-only diagnostics contain bounded
-phase names, never response bytes or arbitrary native error text.
+Use separate native peers for reset and FIN. Combining shutdown and reset on
+one TCP handle violates the [libuv reset contract](https://docs.libuv.org/en/v1.x/tcp.html#c.uv_tcp_close_reset).
+The reset peer never sends FIN. After route admission, a bounded raw upgrade
+suffix fills the accepted socket's real readable high-water mark without being
+drained. In the pinned Node implementation, the deferred readable observation
+follows synchronous native read-stop from backpressure. Only then may the
+client reset its own socket; join its actual close and padding write callback
+before releasing the rejected response. This keeps the reset from being
+consumed first by an ordinary read. The regression must still observe an actual
+`EPIPE` or `ECONNRESET` from `write` or `writev`; a read error or peer close is
+insufficient. Native Windows execution remains a separate CI qualification.
+
+The second peer retains the original FIN request and abandons its read side
+after actual response data using ordinary close, without a reset on that same
+handle. Both responses share one never-mutated, bounded 16 MiB allocation.
+Case-bound observations prevent either peer from supplying another's witness.
+The independent healthy response and clean child exit remain mandatory.
+Failure-only diagnostics contain bounded phase/case names and counts, never
+response bytes or arbitrary native error text.
 
 Cleanup is registered before asynchronous acquisition and joins the exact
 native child, requests and sockets. Existing request, authentication and
