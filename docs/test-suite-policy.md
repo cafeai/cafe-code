@@ -1,6 +1,6 @@
 # Test suite policy
 
-Last updated: 2026-10-28 10:42:43 JST (UTC+0900)
+Last updated: 2026-11-10 05:08:27 JST (UTC+0900)
 
 Required CI protects features: correct actions and values, retained user input,
 authorization, account/chat ownership, persistence, cancellation, history and
@@ -132,6 +132,8 @@ result and resulting settings to remove only the target's preferences/favorites.
 An optimistic UI update or a caught missing-method error is not persistence
 proof. Preserve deliberate rejected-write tests as explicit failure cases rather
 than filling unrelated API methods or suppressing their diagnostics.
+
+Large synthetic build-version fixtures keep every native payload write and the real publication, hashing and verification boundary. Within one fresh temporary output root, prepare a parent directory once after its successful creation rather than issuing recursive directory operations for every sibling file. Keep this directory set local to that fixture call; never turn it into a production path cache or omit native file identity checks. Retained phase counters may distinguish setup from verification, but do not attribute a whole timeout to an unmeasured native call.
 
 Native HTTP fixtures register their public test-signal retirement and owned
 completion cleanup before the first asynchronous acquisition. Timeout must

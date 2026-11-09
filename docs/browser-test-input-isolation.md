@@ -1,6 +1,6 @@
 # Browser test input isolation
 
-Last updated: 2026-11-08 21:51:31 JST (UTC+0900)
+Last updated: 2026-11-10 05:08:27 JST (UTC+0900)
 
 Current suite design is governed by [Test suite policy](test-suite-policy.md).
 The October 16 overhaul retires the exact fluid inventory, sample commit-chart
@@ -123,6 +123,12 @@ dispatch the second CDP operation or enter another action. The retained CI
 assertion reported a zero review distance without load or wheel-delivery
 receipts; it does not prove the historical cause, and a local baseline pass
 does not erase that failure.
+
+## Settings app-icon action readiness
+
+The Dekai toggle journey retains its original native title clicks and real themed-image fetch, bitmap decoding and PNG encoding. Join the exact original image-render promise before starting the existing bridge-write assertion; an input acknowledgement is not completion of that asynchronous prerequisite. Preserve the original tap window, assertion and enclosing test deadlines.
+
+Register the case owner before render and keep its exact image, bridge and native-action promises through public test-signal retirement. Shared cleanup joins that owner before resetting native adapters or globals. The original action clears its live control's busy state in its final continuation; observe that terminal edge before unmount and release rather than treating a mock invocation as completed work. Retired owners cannot admit another image or bridge action. The archived zero-call assertion did not retain a render phase, so this readiness repair does not establish which native stage caused the historical delay.
 
 ## Ordinary-motion fluid lifecycle ownership
 
