@@ -21,7 +21,7 @@ import {
   AxiomAccount,
   AxiomModels,
   decodeAxiom,
-  makeAxiomControl,
+  makeAxiomBackgroundControl,
   type AxiomModel,
 } from "../acp/AxiomAcpSupport.ts";
 import { makeAxiomAdapter } from "../Layers/AxiomAdapter.ts";
@@ -111,7 +111,7 @@ export const AxiomDriver: ProviderDriver<AxiomSettings, AxiomDriverEnv> = {
         const base = initial(yield* timestamp);
         if (!enabled) return { ...base, message: "Axiom is disabled." };
         return yield* Effect.gen(function* () {
-          const { client, initialized, extension } = yield* makeAxiomControl(
+          const { client, initialized, extension } = yield* makeAxiomBackgroundControl(
             config,
             server.cwd,
             processEnvironment,
@@ -203,7 +203,11 @@ export const AxiomDriver: ProviderDriver<AxiomSettings, AxiomDriverEnv> = {
         checkProvider,
         refreshModels: () =>
           Effect.gen(function* () {
-            const { client } = yield* makeAxiomControl(config, server.cwd, processEnvironment);
+            const { client } = yield* makeAxiomBackgroundControl(
+              config,
+              server.cwd,
+              processEnvironment,
+            );
             return (yield* client.raw
               .request("_axiom/models/list", {})
               .pipe(Effect.flatMap((value) => decodeAxiom(AxiomModels, value)))).models

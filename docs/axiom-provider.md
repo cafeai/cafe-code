@@ -54,6 +54,15 @@ Discovery supports a bounded model-only refresh, without creating a chat or
 running inference. Read-only account credit is optional when the native billing
 contract is available; integer microUSD is displayed without decimal rounding.
 
+On macOS, background health and catalog processes pass `--no-keychain-ui` before native
+authentication starts. An unapproved or locked Keychain credential
+reports unavailable instead of displaying a dialog after the short-lived probe
+has exited. Main-backend and provider-daemon polling keep the same rule. Open
+Axiom to authorize its saved login, then refresh Cafe's provider. Explicit
+**Log In** and interactive conversation processes retain ordinary Keychain UI.
+Native versions that do not recognize the flag stop before credential access;
+Cafe never retries a background check with interactive permissions.
+
 ## Supported session behavior
 
 - ACP create/load, streamed text/reasoning, tool progress/diffs, plans and

@@ -224,9 +224,15 @@ export const axiomSpawnInput = (
   cwd: string,
   environment?: NodeJS.ProcessEnv,
   frontend: AxiomFrontend = "desktop-chat",
+  keychainUi: "interactive" | "forbidden" = "interactive",
 ) => ({
   command: settings.binaryPath || "axiomcli",
-  args: ["acp", "--frontend", frontend],
+  args: [
+    "acp",
+    "--frontend",
+    frontend,
+    ...(keychainUi === "forbidden" ? ["--no-keychain-ui"] : []),
+  ],
   cwd,
   ...(environment ? { env: environment } : {}),
 });
@@ -237,10 +243,11 @@ export const makeAxiomControl = (
   settings: AxiomSettings,
   cwd: string,
   environment?: NodeJS.ProcessEnv,
+  options: { readonly keychainUi?: "interactive" | "forbidden" } = {},
 ) =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const spawn = axiomSpawnInput(settings, cwd, environment);
+    const spawn = axiomSpawnInput(settings, cwd, environment, "desktop-chat", options.keychainUi);
     const child = yield* spawner
       .spawn(
         ChildProcess.make(spawn.command, spawn.args, {
@@ -260,6 +267,21 @@ export const makeAxiomControl = (
     });
     const extension = yield* negotiateAxiom(initialized);
     return { client, initialized, extension };
+  });
+
+/** Periodic health/catalog checks must never open an OS credential dialog.
+ * Older native clients reject the flag before credential initialization. Do
+ * not retry without it: the timed-out helper's dialog can otherwise outlive
+ * its owner and reappear on every backend/daemon refresh. Explicit Log In and
+ * interactive conversation owners keep their ordinary interactive policy. */
+export const makeAxiomBackgroundControl = (
+  settings: AxiomSettings,
+  cwd: string,
+  environment?: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+) =>
+  makeAxiomControl(settings, cwd, environment, {
+    keychainUi: platform === "darwin" ? "forbidden" : "interactive",
   });
 
 export interface AxiomSessionIdentity {

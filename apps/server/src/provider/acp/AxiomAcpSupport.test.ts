@@ -6,6 +6,8 @@ import {
 } from "@cafecode/contracts";
 import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import {
   AXIOM_CLIENT_CAPABILITIES,
   AXIOM_CLI_CLIENT_CAPABILITIES,
@@ -14,6 +16,8 @@ import {
   axiomCreditBalance,
   applyAxiomSelection,
   axiomSpawnInput,
+  makeAxiomBackgroundControl,
+  makeAxiomControl,
   negotiateAxiom,
   validateAxiomEvidence,
 } from "./AxiomAcpSupport.ts";
@@ -38,6 +42,55 @@ export const evidenceFixture = (
 });
 
 describe("Axiom native protocol admission", () => {
+  it.effect(
+    "never retries an unsupported background probe with interactive credential access",
+    () =>
+      Effect.gen(function* () {
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const attempts: boolean[] = [];
+        const rejectingPeer = ChildProcessSpawner.make((command) => {
+          if (!ChildProcess.isStandardCommand(command)) {
+            return Effect.die(new Error("Expected a direct native probe command"));
+          }
+          attempts.push(command.args.includes("--no-keychain-ui"));
+          return spawner.spawn(
+            ChildProcess.make(process.execPath, ["-e", "process.exit(2)"], { shell: false }),
+          );
+        });
+        const settings = Schema.decodeSync(AxiomSettings)({});
+        const result = yield* makeAxiomBackgroundControl(
+          settings,
+          process.cwd(),
+          undefined,
+          "darwin",
+        ).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, rejectingPeer),
+          Effect.scoped,
+          Effect.exit,
+        );
+        expect(result._tag).toBe("Failure");
+        expect(attempts).toEqual([true]);
+        const foreground = yield* makeAxiomControl(settings, process.cwd()).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, rejectingPeer),
+          Effect.scoped,
+          Effect.exit,
+        );
+        expect(foreground._tag).toBe("Failure");
+        expect(attempts).toEqual([true, false]);
+        const otherPlatform = yield* makeAxiomBackgroundControl(
+          settings,
+          process.cwd(),
+          undefined,
+          "win32",
+        ).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, rejectingPeer),
+          Effect.scoped,
+          Effect.exit,
+        );
+        expect(otherPlatform._tag).toBe("Failure");
+        expect(attempts).toEqual([true, false, false]);
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
   it.effect("applies supported native defaults while retaining an explicit thinking choice", () =>
     Effect.gen(function* () {
       for (const [levels, explicit, expected] of [
@@ -103,6 +156,9 @@ describe("Axiom native protocol admission", () => {
       "--frontend",
       "cli",
     ]);
+    expect(
+      axiomSpawnInput(settings, process.cwd(), undefined, "desktop-chat", "forbidden").args,
+    ).toEqual(["acp", "--frontend", "desktop-chat", "--no-keychain-ui"]);
   });
   it.effect("requires desktop contracts for chats while allowing isolated CLI helpers", () =>
     Effect.gen(function* () {
