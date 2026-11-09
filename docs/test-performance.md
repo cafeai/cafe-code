@@ -1,6 +1,6 @@
 # Complete local verification
 
-Last updated: 2026-10-28 10:42:43 JST (UTC+0900)
+Last updated: 2026-11-10 05:46:40 JST (UTC+0900)
 
 Use the pinned standalone Node and Corepack Yarn. Dependencies and the native
 Chromium test browser must already be installed through the existing locked
@@ -217,9 +217,15 @@ digests. Each reuse requires the exact canonical path and complete current
 native file identity, followed by the ordinary named recheck and final change
 fence. Source text, environment, open handles and successful task results are
 not shared by this memo; changed tools must be read again. This avoids repeated
-byte hashing of an unchanged large Node executable without increasing buffers,
-workers, heaps or deadlines. It does not establish a historical timeout's cause
-or replace actual cold/warm task-result qualification.
+byte hashing of an unchanged large Node executable without changing workers,
+heaps or deadlines. Cold binary reads use one sequential buffer clipped to the
+held file size and capped at 1 MiB, with a one-byte minimum for EOF; text reads
+retain their 64 KiB buffer. Every byte, EOF and the held/named identity fences
+remain mandatory. Cancellation is rechecked after each native batch and EOF
+before hashing or memo admission; a larger binary batch has a correspondingly
+coarser cancellation observation quantum, without introducing concurrent IO.
+This reduces native read admissions but does not establish a historical
+timeout's cause or replace actual cold/warm task-result qualification.
 
 Fingerprint fixtures retire new IO admission and drain their exact admitted
 observations before removing private files or resetting native-observation

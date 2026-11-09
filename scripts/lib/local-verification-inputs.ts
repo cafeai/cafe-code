@@ -339,7 +339,14 @@ export function createLocalVerificationFingerprint(
           const before = await file.stat({ bigint: true });
           if (!before.isFile() || nativeIdentity(before) !== identity) refuse();
           const hash = createHash("sha256");
-          const buffer = Buffer.alloc(64 * 1024);
+          // Large binary tools need every admitted byte, but not one native
+          // Promise admission per 64 KiB. Keep a single sequential buffer capped
+          // at 1 MiB and clipped to this held file; even an empty file needs one
+          // byte for the original EOF observation. Text retains its 64 KiB cap
+          // and all file/snapshot/retained-text budgets remain unchanged.
+          const buffer = Buffer.alloc(
+            text ? 64 * 1024 : Math.max(1, Math.min(1024 * 1024, Number(before.size))),
+          );
           const chunks: Buffer[] = [];
           let position = 0;
           while (position < Number(before.size)) {
@@ -350,15 +357,21 @@ export function createLocalVerificationFingerprint(
               Math.min(buffer.length, Number(before.size) - position),
               position,
             );
+            // Cancellation during a native batch cannot hash or memoize the
+            // late bytes. The finally block still joins this exact descriptor.
+            check();
             if (result.bytesRead === 0) refuse();
             const chunk = buffer.subarray(0, result.bytesRead);
             hash.update(chunk);
             if (text) chunks.push(Buffer.from(chunk));
             position += result.bytesRead;
           }
-          if ((await file.read(buffer, 0, 1, position)).bytesRead !== 0) refuse();
+          const eof = await file.read(buffer, 0, 1, position);
+          check();
+          if (eof.bytesRead !== 0) refuse();
           const after = await file.stat({ bigint: true });
           const named = await lstat(entry.path, { bigint: true });
+          check();
           if (
             !named.isFile() ||
             nativeIdentity(after) !== identity ||
@@ -1194,6 +1207,9 @@ export function createLocalVerificationFingerprint(
         // permission to mutate/delete a supposedly exclusive native resource.
         // Held/named identity, nlink and all change metadata still must agree.
         const content = await read(entry, false, false);
+        // A close that settles after cancellation does not mint a completed
+        // cross-producer tool observation. Ownership still drains in read().
+        check();
         if (
           !rememberedToolDigests.has(canonical) &&
           rememberedToolDigests.size === maximumRememberedToolDigests
