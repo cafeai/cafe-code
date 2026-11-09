@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createModelCapabilities } from "@cafecode/shared/model";
+import {
+  buildProviderOptionSelectionsFromDescriptors,
+  createModelCapabilities,
+  createModelSelection,
+  getProviderOptionDescriptors,
+} from "@cafecode/shared/model";
 import {
   formatClaudeModelUpgradeMessage,
   getBuiltInClaudeModelsForVersion,
@@ -15,7 +20,6 @@ import {
   supportsClaudeUltracode,
 } from "./claudeModelMetadata.ts";
 import { resolveClaudeModelSessionOptions } from "./Layers/ClaudeAdapter.ts";
-import { createModelSelection } from "@cafecode/shared/model";
 import { ProviderInstanceId } from "@cafecode/contracts";
 
 describe("Claude native model metadata", () => {
@@ -45,9 +49,95 @@ describe("Claude native model metadata", () => {
       expect(models.some((model) => model.slug === "claude-haiku-4-5")).toBe(true);
     }
     expect(formatClaudeModelUpgradeMessage("2.1.292")).toBe(
-      "Claude Code v2.1.292 is too old for Claude Haiku 5.5. Upgrade to v2.1.293 or newer to access it.",
+      "Claude Code v2.1.292 is too old for Claude Fable 5.2. Upgrade to v2.1.321 or newer to access it.",
     );
-    expect(formatClaudeModelUpgradeMessage("2.1.293")).toBeUndefined();
+    expect(formatClaudeModelUpgradeMessage("2.1.293")).toBe(
+      "Claude Code v2.1.293 is too old for Claude Fable 5.2. Upgrade to v2.1.321 or newer to access it.",
+    );
+  });
+
+  it("gates Fable 5.2 on its stable native CLI release without advancing older Fable models", () => {
+    for (const version of [undefined, null, "unknown", "2.1.320", "2.1.321-beta.1", "2.2.0-beta.1"])
+      expect(
+        getBuiltInClaudeModelsForVersion(version).some(
+          (model) => model.slug === "claude-fable-5-2",
+        ),
+      ).toBe(false);
+    for (const version of ["2.1.320", "2.1.321", "2.1.322", "2.2.0"]) {
+      const models = getBuiltInClaudeModelsForVersion(version);
+      expect(models.some((model) => model.slug === "claude-fable-5")).toBe(true);
+      expect(models.some((model) => model.slug === "claude-fable-5-1")).toBe(true);
+      expect(models.filter((model) => model.slug === "claude-fable-5-2")).toHaveLength(
+        version === "2.1.320" ? 0 : 1,
+      );
+      // A new optional model must not silently change the first built-in
+      // fallback used when a provider has no saved selection.
+      expect(models[0]?.slug).toBe("claude-opus-5-5");
+    }
+    expect(formatClaudeModelUpgradeMessage("2.1.320")).toBe(
+      "Claude Code v2.1.320 is too old for Claude Fable 5.2. Upgrade to v2.1.321 or newer to access it.",
+    );
+    expect(formatClaudeModelUpgradeMessage("2.1.321")).toBeUndefined();
+  });
+
+  it("dispatches Fable 5.2's Medium, fixed 1M and explicit Fast-off defaults through the real option pipeline", () => {
+    const caps = getClaudeModelCapabilities("claude-fable-5-2");
+    const descriptors = caps.optionDescriptors ?? [];
+    const effort = descriptors.find((option) => option.id === "effort");
+    expect(effort?.type === "select" ? effort.options.map((option) => option.id) : []).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(
+      effort?.type === "select" ? effort.options.filter((option) => option.isDefault) : [],
+    ).toEqual([{ id: "medium", label: "Medium", isDefault: true }]);
+    expect(descriptors.some((option) => option.id === "thinking")).toBe(false);
+    const context = descriptors.find((option) => option.id === "contextWindow");
+    expect(context?.type === "select" ? context.options : []).toEqual([
+      { id: "1m", label: "1M", isDefault: true },
+    ]);
+
+    const instance = ProviderInstanceId.make("claudeAgent");
+    // Ordinary composer submission materializes defaults from the actual
+    // descriptors; a bare SDK selection intentionally still means omission.
+    const defaults = buildProviderOptionSelectionsFromDescriptors(
+      getProviderOptionDescriptors({ caps }),
+    );
+    expect(
+      resolveClaudeModelSessionOptions(
+        createModelSelection(instance, "claude-fable-5-2", defaults),
+        caps,
+        "2.1.321",
+      ),
+    ).toEqual({
+      apiModelId: "claude-fable-5-2[1m]",
+      selectedContextWindowTokens: 1_000_000,
+      effectiveEffort: "medium",
+      agentProgressSummaries: true,
+      settings: { fastMode: false },
+    });
+    for (const fastMode of [false, true]) {
+      const selections = buildProviderOptionSelectionsFromDescriptors(
+        getProviderOptionDescriptors({
+          caps,
+          selections: [
+            { id: "fastMode", value: fastMode },
+            { id: "effort", value: "max" },
+            { id: "thinking", value: false },
+          ],
+        }),
+      );
+      const resolved = resolveClaudeModelSessionOptions(
+        createModelSelection(instance, "claude-fable-5-2", selections),
+        caps,
+        "2.1.321",
+      );
+      expect(resolved.effectiveEffort).toBe("max");
+      expect(resolved.settings).toEqual({ fastMode });
+    }
   });
 
   it("uses Haiku 5.5's Medium default without inventing a context variant or disabling thinking", () => {

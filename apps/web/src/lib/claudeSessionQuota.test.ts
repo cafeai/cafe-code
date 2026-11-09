@@ -171,7 +171,13 @@ describe("Claude session quota presentation", () => {
           (row) => row.id,
         ),
       ).toEqual(["meter-0", "meter-1"]);
-    for (const model of ["fable", "claude-fable-5", "claude-fable-5-1", "Fable[1m]"])
+    for (const model of [
+      "fable",
+      "claude-fable-5",
+      "claude-fable-5-1",
+      "claude-fable-5-2",
+      "Fable[1m]",
+    ])
       expect(
         formatClaudeSessionQuota(native, { ...options, selectedModel: model }).meters?.map(
           (row) => row.id,

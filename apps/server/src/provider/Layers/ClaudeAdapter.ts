@@ -9033,7 +9033,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             !context.terminalTaskIds.has(String(startedBinding.taskId))
               ? startedBinding.taskGeneration
               : randomUUID(),
-          backgrounded: taskStartedRecord.is_backgrounded === true,
+          // SDK 0.3.319+ MCP tasks are registered in the background, but the
+          // native is_backgrounded field is only promised for local agents and
+          // Bash. Keep their exact start/stop owner while withholding a second
+          // background action; this classification grants no new control.
+          // https://github.com/anthropics/claude-agent-sdk-typescript/releases/tag/v0.3.319
+          backgrounded: taskStartedRecord.is_backgrounded === true || taskType === "mcp_task",
           startedAt: base.createdAt,
           turnId: context.turnState?.turnId ?? null,
         });

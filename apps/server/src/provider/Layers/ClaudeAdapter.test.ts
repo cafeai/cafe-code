@@ -2263,99 +2263,142 @@ describe("ClaudeAdapterLive", () => {
       },
     );
   }
-  it.effect(
-    "publishes background-only controls for ordinary foreground tools and stop controls for exact native non-agent tasks",
-    () => {
-      const harness = makeHarness({ nativeVersion: "2.1.287", environment: {} });
-      return Effect.gen(function* () {
-        const adapter = yield* ClaudeAdapter;
-        const session = yield* adapter.startSession({
-          threadId: THREAD_ID,
-          runtimeMode: "approval-required",
+  for (const taskType of ["local_bash", "mcp_task"] as const) {
+    it.effect(
+      `publishes background-only foreground controls and stop-only native ${taskType} controls`,
+      () => {
+        const harness = makeHarness({
+          nativeVersion: taskType === "mcp_task" ? "2.1.321" : "2.1.287",
+          environment: {},
         });
-        const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "fetch" });
-        const item = yield* adapter.streamEvents.pipe(
-          Stream.filter((event) => event.type === "item.started"),
-          Stream.runHead,
-          Effect.forkChild,
-        );
-        harness.query.emit({
-          type: "stream_event",
-          session_id: "synthetic",
-          parent_tool_use_id: null,
-          uuid: "tool-start",
-          event: {
-            type: "content_block_start",
-            index: 0,
-            content_block: { type: "tool_use", id: "raw-fetch", name: "WebFetch", input: {} },
-          },
-        } as unknown as SDKMessage);
-        const itemEvent = yield* Fiber.join(item);
-        if (itemEvent._tag !== "Some" || itemEvent.value.type !== "item.started")
-          throw new Error("Missing foreground item");
-        const reference = itemEvent.value.payload.individualTaskControl!;
-        assert.ok(reference);
-        assert.equal(reference.capability.canStop, false);
-        assert.equal(reference.capability.canBackground, true);
-        assert.notEqual(reference.taskId, "raw-fetch");
-        const input = {
-          threadId: THREAD_ID,
-          turnId: turn.turnId,
-          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
-          runtimeId: session.subagentRuntimeId!,
-          taskId: reference.taskId,
-          taskGeneration: reference.capability.taskGeneration,
-        };
-        assert.equal(
-          (yield* adapter.controlTask!({ ...input, action: "stop" }).pipe(Effect.result))._tag,
-          "Failure",
-        );
-        assert.deepEqual(yield* adapter.controlTask!({ ...input, action: "background" }), {
-          status: "accepted",
-        });
-        assert.deepEqual(harness.query.backgroundTaskCalls, ["raw-fetch"]);
-        const task = yield* adapter.streamEvents.pipe(
-          Stream.filter((event) => event.type === "task.started"),
-          Stream.runHead,
-          Effect.forkChild,
-        );
-        harness.query.emit({
-          type: "system",
-          subtype: "task_started",
-          task_id: "native-fetch",
-          tool_use_id: "raw-fetch",
-          task_type: "local_bash",
-          is_backgrounded: true,
-          description: "Fetch running",
-          session_id: "synthetic",
-          uuid: "00000000-0000-4000-8000-000000000005",
-        } as unknown as SDKMessage);
-        const taskEvent = yield* Fiber.join(task);
-        if (taskEvent._tag !== "Some" || taskEvent.value.type !== "task.started")
-          throw new Error("Missing native task");
-        assert.equal(taskEvent.value.payload.subagent, undefined);
-        const native = taskEvent.value.payload.individualTaskControl!;
-        assert.ok(native.capability.canStop);
-        assert.equal(native.capability.canBackground, false);
-        assert.deepEqual(yield* adapter.controlTask!({ ...input, action: "background" }), {
-          status: "not-foreground",
-        });
-        assert.deepEqual(harness.query.backgroundTaskCalls, ["raw-fetch"]);
-        assert.deepEqual(
-          yield* adapter.controlTask!({
-            ...input,
-            taskId: native.taskId,
-            taskGeneration: native.capability.taskGeneration,
-            action: "stop",
-          }),
-          { status: "accepted" },
-        );
-        assert.deepEqual(harness.query.stopTaskCalls, ["native-fetch"]);
-        assert.deepEqual(harness.query.interruptCalls, []);
-        assert.equal((yield* adapter.listSessions())[0]?.status, "running");
-      }).pipe(Effect.provide(harness.layer));
-    },
-  );
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const session = yield* adapter.startSession({
+            threadId: THREAD_ID,
+            runtimeMode: "approval-required",
+          });
+          const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "fetch" });
+          const item = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "item.started"),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          harness.query.emit({
+            type: "stream_event",
+            session_id: "synthetic",
+            parent_tool_use_id: null,
+            uuid: "tool-start",
+            event: {
+              type: "content_block_start",
+              index: 0,
+              content_block: {
+                type: "tool_use",
+                id: "raw-fetch",
+                name: taskType === "mcp_task" ? "mcp__reports__fetch" : "WebFetch",
+                input: {},
+              },
+            },
+          } as unknown as SDKMessage);
+          const itemEvent = yield* Fiber.join(item);
+          if (itemEvent._tag !== "Some" || itemEvent.value.type !== "item.started")
+            throw new Error("Missing foreground item");
+          const reference = itemEvent.value.payload.individualTaskControl!;
+          assert.ok(reference);
+          assert.equal(reference.capability.canStop, false);
+          assert.equal(reference.capability.canBackground, true);
+          assert.notEqual(reference.taskId, "raw-fetch");
+          const input = {
+            threadId: THREAD_ID,
+            turnId: turn.turnId,
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            runtimeId: session.subagentRuntimeId!,
+            taskId: reference.taskId,
+            taskGeneration: reference.capability.taskGeneration,
+          };
+          assert.equal(
+            (yield* adapter.controlTask!({ ...input, action: "stop" }).pipe(Effect.result))._tag,
+            "Failure",
+          );
+          assert.deepEqual(yield* adapter.controlTask!({ ...input, action: "background" }), {
+            status: "accepted",
+          });
+          assert.deepEqual(harness.query.backgroundTaskCalls, ["raw-fetch"]);
+          const task = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "task.started"),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          harness.query.emit({
+            type: "system",
+            subtype: "task_started",
+            task_id: "native-fetch",
+            tool_use_id: "raw-fetch",
+            task_type: taskType,
+            // The SDK only promises this Boolean on local_agent/local_bash.
+            // An MCP task must already be backgrounded when it omits the field.
+            ...(taskType === "local_bash" ? { is_backgrounded: true } : {}),
+            description: "Fetch running",
+            session_id: "synthetic",
+            uuid: "00000000-0000-4000-8000-000000000005",
+          } as unknown as SDKMessage);
+          const taskEvent = yield* Fiber.join(task);
+          if (taskEvent._tag !== "Some" || taskEvent.value.type !== "task.started")
+            throw new Error("Missing native task");
+          assert.equal(taskEvent.value.payload.subagent, undefined);
+          const native = taskEvent.value.payload.individualTaskControl!;
+          assert.ok(native.capability.canStop);
+          assert.equal(native.capability.canBackground, false);
+          const progress = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "task.progress"),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          harness.query.emit({
+            type: "system",
+            subtype: "task_progress",
+            task_id: "native-fetch",
+            tool_use_id: "raw-fetch",
+            description: "Fetch running",
+            summary: "Reading the requested result.",
+            usage: { total_tokens: 0, tool_uses: 1, duration_ms: 1_200 },
+            session_id: "synthetic",
+            uuid: "00000000-0000-4000-8000-000000000006",
+          } as unknown as SDKMessage);
+          const progressEvent = yield* Fiber.join(progress);
+          if (progressEvent._tag !== "Some" || progressEvent.value.type !== "task.progress")
+            throw new Error("Missing native task progress");
+          assert.equal(progressEvent.value.payload.subagent, undefined);
+          assert.equal(progressEvent.value.payload.summary, "Reading the requested result.");
+          assert.deepEqual(progressEvent.value.payload.individualTaskControl, native);
+          assert.deepEqual(
+            yield* adapter.controlTask!({
+              ...input,
+              taskId: native.taskId,
+              taskGeneration: native.capability.taskGeneration,
+              action: "background",
+            }),
+            { status: "not-foreground" },
+          );
+          assert.deepEqual(yield* adapter.controlTask!({ ...input, action: "background" }), {
+            status: "not-foreground",
+          });
+          assert.deepEqual(harness.query.backgroundTaskCalls, ["raw-fetch"]);
+          assert.deepEqual(
+            yield* adapter.controlTask!({
+              ...input,
+              taskId: native.taskId,
+              taskGeneration: native.capability.taskGeneration,
+              action: "stop",
+            }),
+            { status: "accepted" },
+          );
+          assert.deepEqual(harness.query.stopTaskCalls, ["native-fetch"]);
+          assert.deepEqual(harness.query.interruptCalls, []);
+          assert.equal((yield* adapter.listSessions())[0]?.status, "running");
+        }).pipe(Effect.provide(harness.layer));
+      },
+    );
+  }
   it.effect(
     "keeps ordinary task liveness uncertain after unresolved binding eviction even when every retained task ends",
     () => {

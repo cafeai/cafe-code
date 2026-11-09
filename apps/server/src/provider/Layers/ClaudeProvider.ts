@@ -150,6 +150,15 @@ function decodeClaudeModelCatalog(raw: unknown) {
 // is independent of the user's native CLI response budget and is not a reason
 // to silently raise that budget. Live discovery still controls availability
 // and can narrow these fallback options for an account or deployment.
+// Fable 5.2 (verified 2026-11-10) requires CLI 2.1.321. Claude Code uses
+// Medium effort by default, distinct from the direct API's High default:
+// https://code.claude.com/docs/en/model-config
+// Its five concrete efforts, always-on adaptive thinking and fixed native 1M
+// window do not introduce a thinking-off control or legacy Ultrathink prefix.
+// https://code.claude.com/docs/en/fast-mode also qualifies Fast; its catalog
+// Boolean defaults Off so ordinary composer dispatch explicitly preserves
+// Standard instead of inheriting an unrelated native Fast setting. Explicit
+// user choices and live native capability narrowing remain authoritative.
 const DECODED_CLAUDE_MODEL_CATALOG = decodeClaudeModelCatalog(claudeModelCatalog);
 const VERSIONED_BUILT_IN_MODELS = DECODED_CLAUDE_MODEL_CATALOG.models;
 const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = VERSIONED_BUILT_IN_MODELS.map(

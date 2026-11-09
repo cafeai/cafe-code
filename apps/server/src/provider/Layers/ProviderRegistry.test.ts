@@ -4618,7 +4618,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               "claude-sonnet-5",
             ],
             upgrade:
-              "Claude Code v2.1.280 is too old for Claude Sonnet 5.5. Upgrade to v2.1.284 or newer to access it.",
+              "Claude Code v2.1.280 is too old for Claude Fable 5.2. Upgrade to v2.1.321 or newer to access it.",
           },
           {
             version: "2.1.283",
@@ -4632,7 +4632,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               "claude-sonnet-5",
             ],
             upgrade:
-              "Claude Code v2.1.283 is too old for Claude Sonnet 5.5. Upgrade to v2.1.284 or newer to access it.",
+              "Claude Code v2.1.283 is too old for Claude Fable 5.2. Upgrade to v2.1.321 or newer to access it.",
           },
           {
             version: "2.1.284",
@@ -4651,6 +4651,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         const gatedSlugs = [
           "claude-opus-5-5",
           "claude-opus-5",
+          "claude-fable-5-2",
           "claude-fable-5-1",
           "claude-opus-4-7",
           "claude-opus-4-8",
@@ -4878,7 +4879,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           },
         );
         // Sonnet's 1M window is native: offering a 200K or [1m] variant would
-        // promise a request policy the model does not provide. Fast is Opus-only.
+        // promise a request policy the model does not provide. This Sonnet
+        // model does not support the Fast control advertised by other families.
         assert.equal(
           sonnet55Descriptors.some(
             (descriptor) => descriptor.id === "contextWindow" || descriptor.id === "fastMode",
@@ -4887,9 +4889,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         );
         assert.equal(
           formatClaudeModelUpgradeMessage("2.1.284"),
-          "Claude Code v2.1.284 is too old for Claude Haiku 5.5. Upgrade to v2.1.293 or newer to access it.",
+          "Claude Code v2.1.284 is too old for Claude Fable 5.2. Upgrade to v2.1.321 or newer to access it.",
         );
-        assert.isUndefined(formatClaudeModelUpgradeMessage("2.1.293"));
+        assert.equal(
+          formatClaudeModelUpgradeMessage("2.1.293"),
+          "Claude Code v2.1.293 is too old for Claude Fable 5.2. Upgrade to v2.1.321 or newer to access it.",
+        );
 
         for (const model of getBuiltInClaudeModelsForVersion("2.1.219")) {
           const descriptors = model.capabilities?.optionDescriptors ?? [];
