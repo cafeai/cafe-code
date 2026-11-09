@@ -30,6 +30,7 @@ function startSyntheticProbe(
   observeBootstrap?: (phase: MermaidProbeBootstrapPhase) => void,
   admitSourceOnReady = false,
   signal?: AbortSignal,
+  graph = false,
 ) {
   const nonce = crypto.randomUUID();
   const id = crypto.randomUUID();
@@ -59,7 +60,7 @@ function startSyntheticProbe(
     documentSource,
     source,
     theme: "dark",
-    kind: "Family admission probe",
+    kind: graph ? "Graph admission probe" : "Family admission probe",
     invocation: "baseline",
     ...(signal ? { signal } : {}),
     ...(observeBootstrap
@@ -498,6 +499,9 @@ describe("Mermaid family probe qualification", () => {
     },
   ])("$name", async ({ admitSourceOnReady }, { signal }) => {
     const phases: MermaidProbeBootstrapPhase[] = [];
+    // Only the policy clock advances: the held opaque document still executes
+    // its real full engine/receiver and the original parser-count positive.
+    const now = admitSourceOnReady ? vi.spyOn(performance, "now").mockReturnValue(0) : undefined;
     let markReady: (() => void) | undefined;
     const ready = new Promise<void>((resolve) => {
       markReady = resolve;
@@ -529,7 +533,10 @@ describe("Mermaid family probe qualification", () => {
       1,
       (phase) => {
         phases.push(phase);
-        if (phase === "fixture-ready") markReady?.();
+        if (phase === "fixture-ready") {
+          now?.mockReturnValue(12_172);
+          markReady?.();
+        }
       },
       admitSourceOnReady,
       signal,
@@ -827,28 +834,39 @@ describe("Mermaid family probe qualification", () => {
     {
       name: "refuses an exact queued startup marker at the unchanged absolute deadline",
       admitSourceOnReady: false,
+      graph: false,
       terminal: false,
       elapsedMs: 10_000,
     },
     {
-      name: "refuses initial Family bootstrap at the unchanged absolute deadline",
+      name: "refuses Graph startup at ten seconds even with a Family-only readiness request",
       admitSourceOnReady: true,
+      graph: true,
       terminal: false,
       elapsedMs: 10_000,
     },
     {
-      name: "refuses terminal Family readiness at the unchanged absolute deadline",
+      name: "refuses initial Family bootstrap at its fixed twenty-second deadline",
       admitSourceOnReady: true,
+      graph: false,
+      terminal: false,
+      elapsedMs: 20_000,
+    },
+    {
+      name: "refuses terminal Family readiness at its fixed twenty-second deadline",
+      admitSourceOnReady: true,
+      graph: false,
       terminal: true,
-      elapsedMs: 10_000,
+      elapsedMs: 20_000,
     },
     {
       name: "bounds the separate rejected late-bootstrap witness without admitting expired source",
       admitSourceOnReady: true,
+      graph: false,
       terminal: true,
       elapsedMs: 100_000,
     },
-  ])("$name", async ({ admitSourceOnReady, terminal, elapsedMs }, { signal }) => {
+  ])("$name", async ({ admitSourceOnReady, graph, terminal, elapsedMs }, { signal }) => {
     const now = vi.spyOn(performance, "now").mockReturnValue(0);
     const phases: MermaidProbeBootstrapPhase[] = [];
     const close = vi.spyOn(MessagePort.prototype, "close");
@@ -859,6 +877,7 @@ describe("Mermaid family probe qualification", () => {
       (phase) => phases.push(phase),
       admitSourceOnReady,
       signal,
+      graph,
     );
     const load = probe.frame.onload;
     probe.frame.onload = null;
@@ -988,46 +1007,126 @@ describe("Mermaid family probe qualification", () => {
     expectRetiredProbe(probe.frame, close.mock.contexts);
   });
 
-  it("refuses a queued valid reply at the absolute deadline before timer delivery", async ({
-    signal,
-  }) => {
-    // Only this synthetic peer's monotonic clock is controlled. Its actual
-    // ten-second callback stays pending, proving that a queued result cannot
-    // gain extra allowance merely by being dispatched before that callback.
-    const now = vi.spyOn(performance, "now").mockReturnValue(0);
-    const close = vi.spyOn(MessagePort.prototype, "close");
-    const clear = vi.spyOn(globalThis, "clearTimeout");
-    const timers = vi.spyOn(globalThis, "setTimeout");
-    vi.spyOn(MessagePort.prototype, "postMessage").mockImplementation(function (
-      this: MessagePort,
-      message: unknown,
-    ) {
-      const queuedResponse = this.onmessage;
-      queueMicrotask(() => {
-        now.mockReturnValue(10_000);
-        queuedResponse?.call(
-          this,
-          new MessageEvent("message", {
-            data: { id: (message as { readonly id: string }).id, svg: probeSentinel },
-          }),
-        );
+  it.for([
+    { name: "default combined", admitSourceOnReady: false, reservedAt: 0, replyAt: 10_000 },
+    {
+      name: "ready-gated Family response",
+      admitSourceOnReady: true,
+      reservedAt: 12_172,
+      replyAt: 22_172,
+    },
+  ])(
+    "refuses a queued valid $name reply at its deadline before timer delivery",
+    async ({ admitSourceOnReady, reservedAt, replyAt }, { signal }) => {
+      // Only the synthetic peer's monotonic clock is controlled. The native
+      // timers stay pending: delivery order must not admit an expired result.
+      const now = vi.spyOn(performance, "now").mockReturnValue(0);
+      const close = vi.spyOn(MessagePort.prototype, "close");
+      const clear = vi.spyOn(globalThis, "clearTimeout");
+      const timers = vi.spyOn(globalThis, "setTimeout");
+      let probe: ReturnType<typeof startSyntheticProbe> | undefined;
+      const startupWitness = { invoked: false, retiredResponse: false };
+      const send = vi.spyOn(MessagePort.prototype, "postMessage").mockImplementation(function (
+        this: MessagePort,
+        message: unknown,
+      ) {
+        const queuedResponse = this.onmessage;
+        queueMicrotask(() => {
+          if (admitSourceOnReady) {
+            // A cleared bootstrap callback may already be queued. It cannot
+            // retire the separately reserved response before its own deadline.
+            now.mockReturnValue(20_000);
+            const startup = timers.mock.calls.find((call) => call[1] === 20_000)?.[0];
+            if (typeof startup === "function") {
+              startupWitness.invoked = true;
+              (startup as () => void)();
+              startupWitness.retiredResponse = !probe!.frame.isConnected;
+            }
+            // Replayed terminal and partial markers cannot renew that response.
+            for (const phase of ["fixture-ready", "engine-entered"]) {
+              window.dispatchEvent(
+                new MessageEvent("message", {
+                  source: probe!.frame.contentWindow,
+                  origin: "null",
+                  data: { id: probe!.id, nonce: probe!.nonce, probeBootstrapPhase: phase },
+                }),
+              );
+            }
+          }
+          now.mockReturnValue(replyAt);
+          queuedResponse?.call(
+            this,
+            new MessageEvent("message", {
+              data: { id: (message as { readonly id: string }).id, svg: probeSentinel },
+            }),
+          );
+        });
       });
-    });
-    const probe = startSyntheticProbe(
-      `port.postMessage({ id, svg: ${JSON.stringify(probeSentinel)} });`,
-      undefined,
-      undefined,
-      false,
-      signal,
-    );
-    await expect(probe.result).rejects.toThrow("did not reply (baseline; phase request-sent)");
-    expectRetiredProbe(probe.frame, close.mock.contexts);
-    const timerIndex = timers.mock.calls.findIndex((call) => call[1] === 10_000);
-    expect(timerIndex).toBeGreaterThanOrEqual(0);
-    const timer = timers.mock.results[timerIndex]!;
-    expect(timer.type).toBe("return");
-    expect(clear).toHaveBeenCalledWith(timer.value);
-  });
+      probe = startSyntheticProbe(
+        `port.postMessage({ id, svg: ${JSON.stringify(probeSentinel)} });`,
+        undefined,
+        admitSourceOnReady ? () => undefined : undefined,
+        admitSourceOnReady,
+        signal,
+      );
+      const ownedProbe = probe;
+      const capture: { resolve?: (event: Event) => void } = {};
+      const loaded = new Promise<Event>((resolve) => {
+        capture.resolve = resolve;
+      });
+      const witness = (event: Event) => capture.resolve?.(event);
+      ownedProbe.frame.addEventListener("load", witness, { once: true });
+      const rejected = expect(ownedProbe.result).rejects.toThrow(
+        "did not reply (baseline; phase request-sent)",
+      );
+      try {
+        if (admitSourceOnReady) {
+          const nativeLoad = await Promise.race([
+            loaded,
+            ownedProbe.result.then(() => {
+              throw new Error("Synthetic peer completed before native receiver load");
+            }),
+          ]);
+          expect(nativeLoad.isTrusted).toBe(true);
+          expect(nativeLoad.target).toBe(ownedProbe.frame);
+          now.mockReturnValue(reservedAt);
+          for (const phase of [
+            "engine-entered",
+            "engine-returned",
+            "receiver-installed",
+            "fixture-ready",
+          ]) {
+            window.dispatchEvent(
+              new MessageEvent("message", {
+                source: ownedProbe.frame.contentWindow,
+                origin: "null",
+                data: { id: ownedProbe.id, nonce: ownedProbe.nonce, probeBootstrapPhase: phase },
+              }),
+            );
+          }
+        }
+        await rejected;
+        if (admitSourceOnReady) {
+          expect(startupWitness.invoked).toBe(true);
+          expect(startupWitness.retiredResponse).toBe(false);
+        }
+        expect(ownedProbe.readResult).not.toHaveBeenCalled();
+        expect(send).toHaveBeenCalledTimes(1);
+        expectRetiredProbe(ownedProbe.frame, close.mock.contexts);
+        for (const allowance of admitSourceOnReady ? [20_000, 10_000] : [10_000]) {
+          const timerIndex = timers.mock.calls.findIndex((call) => call[1] === allowance);
+          expect(timerIndex).toBeGreaterThanOrEqual(0);
+          const timer = timers.mock.results[timerIndex]!;
+          expect(timer.type).toBe("return");
+          expect(clear).toHaveBeenCalledWith(timer.value);
+        }
+      } finally {
+        ownedProbe.frame.removeEventListener("load", witness);
+        if (ownedProbe.frame.isConnected) ownedProbe.frame.dispatchEvent(new Event("error"));
+        await ownedProbe.result.catch(() => undefined);
+      }
+    },
+  );
 
   it("fences queued load and response callbacks after a source-send exception", async ({
     signal,
@@ -1104,36 +1203,49 @@ describe("Mermaid family probe qualification", () => {
     expectRetiredProbe(probe.frame, close.mock.contexts);
   });
 
-  it("keeps one ten-second allowance after construction and fences a late load", async ({
-    signal,
-  }) => {
-    // Advance only the isolated helper's original timer. This is not a retry,
-    // an increased native-renderer deadline or a browser/media override.
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    try {
-      const close = vi.spyOn(MessagePort.prototype, "close");
-      const send = vi.spyOn(MessagePort.prototype, "postMessage");
-      const probe = startSyntheticProbe(
-        "port.postMessage({ id, failed: true });",
-        undefined,
-        undefined,
-        false,
-        signal,
-      );
-      const queuedLoad = probe.frame.onload;
-      const rejected = expect(probe.result).rejects.toThrow(
-        "did not reply (baseline; phase document-constructed)",
-      );
-      vi.advanceTimersByTime(9_999);
-      expect(probe.frame.isConnected).toBe(true);
-      vi.advanceTimersByTime(1);
-      await rejected;
-      expect(vi.getTimerCount()).toBe(0);
-      queuedLoad?.call(probe.frame, new Event("load"));
-      expect(send).not.toHaveBeenCalled();
-      expectRetiredProbe(probe.frame, close.mock.contexts);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+  it.for([
+    { name: "default ten-second combined", admitSourceOnReady: false, allowance: 10_000 },
+    { name: "Family twenty-second bootstrap", admitSourceOnReady: true, allowance: 20_000 },
+  ])(
+    "keeps one fixed $name allowance and fences a late load",
+    async ({ admitSourceOnReady, allowance }, { signal }) => {
+      // Advance only this isolated helper's timer. Partial startup cannot renew
+      // its allowance; no native renderer/media/outer deadline is changed.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        const close = vi.spyOn(MessagePort.prototype, "close");
+        const send = vi.spyOn(MessagePort.prototype, "postMessage");
+        const probe = startSyntheticProbe(
+          "port.postMessage({ id, failed: true });",
+          undefined,
+          admitSourceOnReady ? () => undefined : undefined,
+          admitSourceOnReady,
+          signal,
+        );
+        const queuedLoad = probe.frame.onload;
+        const rejected = expect(probe.result).rejects.toThrow(
+          "did not reply (baseline; phase document-constructed)",
+        );
+        vi.advanceTimersByTime(allowance - 1);
+        expect(probe.frame.isConnected).toBe(true);
+        if (admitSourceOnReady) {
+          window.dispatchEvent(
+            new MessageEvent("message", {
+              source: probe.frame.contentWindow,
+              origin: "null",
+              data: { id: probe.id, nonce: probe.nonce, probeBootstrapPhase: "engine-entered" },
+            }),
+          );
+        }
+        vi.advanceTimersByTime(1);
+        await rejected;
+        expect(vi.getTimerCount()).toBe(0);
+        queuedLoad?.call(probe.frame, new Event("load"));
+        expect(send).not.toHaveBeenCalled();
+        expectRetiredProbe(probe.frame, close.mock.contexts);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 });

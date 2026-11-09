@@ -1,6 +1,6 @@
 # Browser test input isolation
 
-Last updated: 2026-11-10 05:08:27 JST (UTC+0900)
+Last updated: 2026-11-10 06:42:25 JST (UTC+0900)
 
 Current suite design is governed by [Test suite policy](test-suite-policy.md).
 The October 16 overhaul retires the exact fluid inventory, sample commit-chart
@@ -292,12 +292,13 @@ that an outstanding helper's callbacks and transferred ports have retired.
 
 Complete local browser qualification admits the Mermaid family files serially
 with `--fileParallelism=false` while retaining the existing two-worker cap and
-every file. Probes retain their independent opaque documents and keep their
-original probe and outer deadlines, inputs and sandbox policy. macOS CI uses
+every file. Probes retain their independent opaque documents, original outer
+deadlines, inputs and sandbox policy. The ready-gated family phase bounds below
+are the only probe-budget exception. macOS CI uses
 that same serial file admission only for the Mermaid family group. All other
 macOS groups and the Windows/Linux CI plans retain their existing scheduling.
-This bounds overlapping full-engine startup without enlarging the per-probe
-allowance. A late bootstrap observation is not proof of its underlying CPU,
+This scheduling alone bounds overlapping full-engine startup without changing
+a probe allowance. A late bootstrap observation is not proof of its underlying CPU,
 memory, parser or scheduling cause.
 
 Parsed, allocation and native-output family cases capture their public test
@@ -321,11 +322,24 @@ Admission binds the owning WindowProxy, opaque origin, fresh nonce and invocatio
 ID, exact content-free message shape, absent transferred ports and ordered
 engine/receiver/fixture observations. Reserve the one-use source transfer before
 either transport call. Duplicate, stale, foreign, malformed or retired callbacks
-cannot send source again, regress progress or revive a settled owner. The same
-absolute ten-second allowance begins before appending the document and covers
-engine startup, parsing and reply; readiness never renews it or admits an expired
-message ahead of a delayed timer callback. Keep all original source, parsed-data,
-native parser-count and output refusal assertions unchanged.
+cannot send source again, regress progress or revive a settled owner. Only the
+source-owned ready-gated Family admission and Native diagram-output fixtures
+use a fixed twenty-second bound from before native insertion for engine, receiver
+and fixture initialization. Their exact terminal readiness and one-use source/port
+reservation starts one separate fixed ten-second response bound before transport.
+Partial, foreign or duplicate startup observations and native progress never renew
+either phase. A cleared bootstrap callback that was already queued cannot retire
+the reserved response. Queued results still check their exact phase deadline
+before decoding; timer delivery order cannot admit an expired result. Graph,
+default and MermaidSecurity load-gated probes retain their original combined
+ten-second allowance. Keep all original source, parsed-data, native parser-count
+and output refusal assertions unchanged.
+
+The existing thirty-second outer test deadline and its AbortSignal remain the
+final owner, including document construction and multiple invocations. The two
+phase bounds grant no additional outer time and do not promise that every probe
+receives their full sum. This fixture-only budget partition is separate from
+production renderer admission or permission policy.
 
 An otherwise valid next bootstrap marker received after expiry is reported as a
 separate rejected phase, with elapsed milliseconds capped at 60,000. The last
@@ -342,7 +356,7 @@ accepted/rejected invocation, startup-phase and bounded elapsed observations;
 it never logs source, received errors, native results or private identities.
 Both invocations otherwise report `baseline`, so a last request-sent breadcrumb
 alone cannot identify which boundary expired. Keep the original counts, sources,
-assertions, readiness gate and absolute allowance. The full-engine cancellation
+assertions, readiness gate and the phase allowances above. The full-engine cancellation
 control retires its owner synchronously at the real fixture-ready marker and
 requires zero source sends plus closed ports/frame and no queued-load replay;
 this qualifies cancellation propagation, not the cause of a historical timeout.
@@ -354,7 +368,7 @@ platform delivery. Earlier macOS failures retained only a pre-request
 `document-constructed` phase, so neither those controls nor local passes establish
 the original delay's CPU, parser or scheduling cause. Native hosted results remain
 required. This fixture-only repair changes no production renderer, CSP, network,
-accessibility, permissions, browser contexts, worker caps or deadlines.
+accessibility, permissions, browser contexts, worker caps or outer deadlines.
 
 ## Keyboard popup readiness
 
