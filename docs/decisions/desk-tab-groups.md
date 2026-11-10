@@ -113,6 +113,13 @@ acknowledgement, fallback navigation requires that same owner, location and exac
 chat/environment. Navigating away and back is new intent, not renewed authority.
 This fences only post-delete navigation: accepted deletion and draft cleanup
 still target the original chat, and existing confirmations remain mandatory.
+After the delete acknowledgement, a rejected or synchronously refused fallback
+navigation is a presentation failure: it must not prevent the existing owned
+worktree cleanup or a caller's separately confirmed permanent purge. Mutation
+failures still propagate without automatic replay. The shared recycle,
+confirmation and permanent-delete entries reject an unavailable exact
+environment API; another selected server is never a fallback, and missing
+transport cannot report successful deletion.
 
 Shared menu cleanup restores the opener for Escape or selection, but never
 after an outside press/focus transfer. Replacing a menu transfers its original
@@ -215,6 +222,9 @@ ComposerTaskProgress and SidebarFooterNavigation.
 `components/ThreadActions.browser.tsx` exercises the real shared action hook
 with synthetic transport/router boundaries, including late acknowledgements,
 unmount, cross-environment navigation, session-stop waits and normal fallback.
+It also holds synthetic worktree completion to verify that both rejected and
+synchronously refused navigation preserve cleanup-before-purge ordering, and
+checks missing-connection refusals through each public deletion entry point.
 Sidebar cases exercise the real Desk store for replacement and unchanged-group
 edits. The same browser fixtures run in the cross-platform CI subset; no native
 provider or real account is required.

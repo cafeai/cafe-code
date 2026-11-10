@@ -1993,7 +1993,7 @@
   },
   "Chat deleted, but the worktree couldn't be removed": {
     "message": "Chat deleted, but the worktree couldn't be removed",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:620"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:654"]
   },
   "Chat duplicated, but could not open it": {
     "message": "Chat duplicated, but could not open it",
@@ -3724,7 +3724,7 @@
   },
   "Could not remove {value1}. {message}": {
     "message": "Could not remove {value1}. {message}",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:626"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:660"]
   },
   "Could not rename chat": {
     "message": "Could not rename chat",
@@ -4473,11 +4473,11 @@
   },
   "Delete the worktree too?": {
     "message": "Delete the worktree too?",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:527"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:551"]
   },
   "Delete this chat forever?": {
     "message": "Delete this chat forever?",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:434"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:447"]
   },
   "Delete this schedule? Future runs will stop. An already running turn is not interrupted.": {
     "message": "Delete this schedule? Future runs will stop. An already running turn is not interrupted.",
@@ -5350,7 +5350,12 @@
   },
   "Environment API not found for environment {environmentId}": {
     "message": "Environment API not found for environment {environmentId}",
-    "locations": ["apps/web/src/environmentApi.ts:101"]
+    "locations": [
+      "apps/web/src/environmentApi.ts:101",
+      "apps/web/src/hooks/useThreadActions.ts:432",
+      "apps/web/src/hooks/useThreadActions.ts:475",
+      "apps/web/src/hooks/useThreadActions.ts:692"
+    ]
   },
   "Environment disconnected": {
     "message": "Environment disconnected",
@@ -6735,7 +6740,7 @@
   },
   "Its history, attachments and checkpoints are removed. This can't be undone.": {
     "message": "Its history, attachments and checkpoints are removed. This can't be undone.",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:435"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:448"]
   },
   "Jan": {
     "message": "Jan",
@@ -7542,7 +7547,7 @@
   },
   "Move \"{title}\" to the Recycle Bin?": {
     "message": "Move \"{title}\" to the Recycle Bin?",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:662"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:709"]
   },
   "Move \"{title}\" to the Recycle Bin?\nYou can review it later in Settings '>' Recently Deleted.": {
     "message": "Move \"{title}\" to the Recycle Bin?\nYou can review it later in Settings '>' Recently Deleted.",
@@ -13271,7 +13276,7 @@
   },
   "This chat is the only one using this worktree:": {
     "message": "This chat is the only one using this worktree:",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:519"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:543"]
   },
   "This chat no longer fits in the model's context window. Run /compact, or start a new chat.": {
     "message": "This chat no longer fits in the model's context window. Run /compact, or start a new chat.",
@@ -14041,7 +14046,7 @@
   },
   "Unknown error removing worktree.": {
     "message": "Unknown error removing worktree.",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:610"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:644"]
   },
   "Unlimited": {
     "message": "Unlimited",
@@ -15039,7 +15044,7 @@
   },
   "You can restore it from Settings > Recently Deleted.": {
     "message": "You can restore it from Settings > Recently Deleted.",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:663"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:710"]
   },
   "You have no earned resets available. Your limits reset on schedule.": {
     "message": "You have no earned resets available. Your limits reset on schedule.",
@@ -16001,7 +16006,7 @@
   },
   "this chat": {
     "message": "this chat",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:659"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:706"]
   },
   "time format": {
     "message": "time format",

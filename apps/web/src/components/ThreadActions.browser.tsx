@@ -1,7 +1,7 @@
 import { CommandId, EnvironmentId, ThreadId } from "@cafecode/contracts";
 import { CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE } from "@cafecode/shared/codexHistorySafety";
 import { useLayoutEffect } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { render } from "vitest-browser-react";
 
 import { useThreadActions } from "../hooks/useThreadActions";
@@ -26,6 +26,10 @@ const mocks = vi.hoisted(() => ({
     >(),
   confirm: vi.fn<(message: string) => Promise<boolean>>(),
   readApi: vi.fn(),
+  hardDelete: vi.fn<(input: { threadId: string }) => Promise<{ deleted: boolean }>>(),
+  removeWorktree: vi.fn<(input: { cwd: string; path: string; force: boolean }) => Promise<void>>(),
+  project: null as { id: string; environmentId: string; cwd: string } | null,
+  orphanedWorktreePath: null as string | null,
   workspace: { environmentId: "fixture" },
   desk: { revision: 0 },
   summaryUnavailable: false,
@@ -38,7 +42,7 @@ const mocks = vi.hoisted(() => ({
   threads: ["a", "b", "c"].map((id) => ({
     id,
     environmentId: "fixture",
-    projectId: null,
+    projectId: null as string | null,
     session: null as {
       status: string;
       provider?: string;
@@ -60,7 +64,7 @@ const mocks = vi.hoisted(() => ({
       turnId?: string;
     } | null,
     branch: null,
-    worktreePath: null,
+    worktreePath: null as string | null,
     runtimeMode: "full-access",
     interactionMode: "default",
     title: id,
@@ -84,7 +88,11 @@ vi.mock("../hooks/useSettings", () => ({
 }));
 vi.mock("../environmentApi", () => ({
   readEnvironmentApi: mocks.readApi,
-  ensureEnvironmentApi: vi.fn(),
+  ensureEnvironmentApi: (environmentId: string) => {
+    const api = mocks.readApi(environmentId);
+    if (!api) throw new Error("Synthetic environment is unavailable.");
+    return api;
+  },
 }));
 vi.mock("../environments/workspace", () => ({
   readWorkspaceEnvironmentId: () => mocks.workspace.environmentId,
@@ -125,14 +133,17 @@ vi.mock("../store", () => ({
       : undefined;
   },
   selectThreadsForEnvironment: () => mocks.threads,
-  selectProjectByRef: () => undefined,
+  selectProjectByRef: (_store: unknown, ref: { environmentId: string; projectId: string }) =>
+    mocks.project?.environmentId === ref.environmentId && mocks.project.id === ref.projectId
+      ? mocks.project
+      : undefined,
 }));
 vi.mock("./Sidebar.logic", () => ({ getFallbackThreadIdAfterDelete: () => mocks.fallback }));
 vi.mock("../localApi", () => ({
   readLocalApi: () => ({ dialogs: { confirm: mocks.confirm } }),
 }));
 vi.mock("../worktreeCleanup", () => ({
-  getOrphanedWorktreePathForThread: () => null,
+  getOrphanedWorktreePathForThread: () => mocks.orphanedWorktreePath,
   formatWorktreePathForDisplay: (path: string) => path,
 }));
 vi.mock("../lib/gitReactQuery", () => ({ invalidateGitQueries: vi.fn() }));
@@ -179,13 +190,114 @@ async function mountActions() {
   return { actions, screen };
 }
 
-beforeEach(() => {
+// These regressions use the real action hook. A UI caller must be able to
+// distinguish a refused mutation from completed deletion, and post-ACK view
+// failure must not strand the rest of an already confirmed deletion. Register
+// retirement before render, then join exact actions before shared DOM reset.
+let deleteActionCleanup: (() => Promise<void>) | null = null;
+function createDeleteActionFixture(context: TestContext) {
+  if (deleteActionCleanup) throw new Error("A delete action fixture is already owned.");
+  let retired = false;
+  let rendering: ReturnType<typeof mountActions> | undefined;
+  let completion: Promise<void> | undefined;
+  const pending = new Set<Promise<unknown>>();
+  const releaseHeldCleanup = new Set<() => void>();
+  const assertActive = () => {
+    if (retired) throw new Error("Delete action fixture has retired.");
+  };
+  const cleanup = () => {
+    retired = true;
+    for (const release of releaseHeldCleanup) release();
+    return (completion ??= Promise.resolve().then(async () => {
+      await Promise.allSettled([...pending]);
+      const mounted = await rendering?.catch(() => null);
+      await mounted?.screen.unmount();
+      context.signal.removeEventListener("abort", retire);
+    }));
+  };
+  const retire = () => {
+    void cleanup().catch(() => {});
+  };
+  context.signal.addEventListener("abort", retire, { once: true });
+  context.onTestFinished(cleanup);
+  deleteActionCleanup = cleanup;
+  if (context.signal.aborted) retire();
+  return {
+    async mount() {
+      assertActive();
+      rendering = mountActions();
+      const mounted = await rendering;
+      assertActive();
+      return mounted;
+    },
+    holdWorktreeCleanup() {
+      assertActive();
+      let observeEntry!: () => void;
+      let finish!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        observeEntry = resolve;
+      });
+      const completed = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        releaseHeldCleanup.delete(release);
+        finish();
+      };
+      releaseHeldCleanup.add(release);
+      return {
+        entered,
+        start() {
+          assertActive();
+          // Only the actual synthetic VCS invocation observes entry. Cleanup
+          // releases completion, never fabricates an entered receipt.
+          observeEntry();
+          return completed;
+        },
+        release,
+      };
+    },
+    run<T>(start: () => Promise<T>): Promise<T> {
+      assertActive();
+      const operation = start();
+      pending.add(operation);
+      void operation.then(
+        () => pending.delete(operation),
+        () => pending.delete(operation),
+      );
+      return operation;
+    },
+    cleanup,
+  };
+}
+
+// An unclosed old fixture must block reset/admission, including after a hook
+// failure. Never clear its only cleanup capability before joined close.
+async function joinDeleteActionFixture() {
+  const owner = deleteActionCleanup;
+  if (!owner) return;
+  await owner();
+  if (deleteActionCleanup === owner) deleteActionCleanup = null;
+}
+
+beforeEach(async () => {
+  await joinDeleteActionFixture();
   navigateTo("a");
-  mocks.router.navigate.mockClear();
+  mocks.router.navigate.mockReset().mockResolvedValue(undefined);
   mocks.dispatch.mockReset();
   mocks.dispatch.mockResolvedValue(undefined);
   mocks.confirm.mockReset().mockResolvedValue(true);
-  mocks.readApi.mockReset().mockReturnValue({ orchestration: { dispatchCommand: mocks.dispatch } });
+  mocks.hardDelete.mockReset().mockResolvedValue({ deleted: true });
+  mocks.removeWorktree.mockReset().mockResolvedValue(undefined);
+  mocks.project = null;
+  mocks.orphanedWorktreePath = null;
+  mocks.readApi.mockReset().mockReturnValue({
+    orchestration: { dispatchCommand: mocks.dispatch, hardDeleteThread: mocks.hardDelete },
+    vcs: { removeWorktree: mocks.removeWorktree },
+  });
   mocks.workspace = { environmentId: "fixture" };
   mocks.desk = { revision: 0 };
   mocks.summaryUnavailable = false;
@@ -198,13 +310,127 @@ beforeEach(() => {
   mocks.threads.splice(3);
   for (const thread of mocks.threads) {
     thread.session = null;
+    thread.projectId = null;
+    thread.worktreePath = null;
     thread.error = null;
     thread.latestTurn = null;
     thread.modelSelection = { instanceId: "codex-personal", model: "gpt-6.1-sol" };
   }
 });
-afterEach(() => {
+afterEach(async () => {
+  await joinDeleteActionFixture();
   document.body.innerHTML = "";
+});
+
+describe("delete action acknowledgement boundaries", () => {
+  it.for(["rejects", "throws"] as const)(
+    "finishes acknowledged deletion and owned cleanup when fallback navigation %s",
+    async (navigationFailure, context) => {
+      const fixture = createDeleteActionFixture(context);
+      const { actions } = await fixture.mount();
+      const cleanup = fixture.holdWorktreeCleanup();
+      try {
+        mocks.threads[0]!.projectId = "project-a";
+        mocks.threads[0]!.worktreePath = "/synthetic/delete-worktree";
+        mocks.project = { id: "project-a", environmentId: "fixture", cwd: "/synthetic/project" };
+        mocks.orphanedWorktreePath = "/synthetic/delete-worktree";
+        const error = new Error("Synthetic post-ACK navigation refusal");
+        if (navigationFailure === "rejects") mocks.router.navigate.mockRejectedValueOnce(error);
+        else
+          mocks.router.navigate.mockImplementationOnce(() => {
+            throw error;
+          });
+        mocks.removeWorktree.mockImplementationOnce(cleanup.start);
+
+        // This is the public two-action composition after Desk's separately
+        // covered permanent-delete consent. Both actions are real; only their
+        // transport, VCS and presentation boundaries use synthetic services.
+        const operation = fixture.run(async () => {
+          await actions.deleteThread(target);
+          await actions.hardDeleteThread(target, { confirm: false });
+        });
+        // A pre-fix navigation rejection settles the real action immediately.
+        // Do not await an entry promise that that failing action cannot reach.
+        // No timeout/retry or invented VCS completion is introduced here.
+        const boundary = await Promise.race([
+          cleanup.entered.then(() => "cleanup-entered" as const),
+          operation.then(
+            () => "action-completed" as const,
+            () => "action-failed" as const,
+          ),
+        ]);
+        expect(boundary).toBe("cleanup-entered");
+        expect(mocks.hardDelete).not.toHaveBeenCalled();
+        cleanup.release();
+        await operation;
+
+        expect(mocks.dispatch).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ type: "thread.delete", threadId: target.threadId }),
+        );
+        expect(mocks.router.navigate).toHaveBeenCalledOnce();
+        expect(mocks.confirm).toHaveBeenCalledOnce();
+        expect(mocks.removeWorktree).toHaveBeenCalledExactlyOnceWith({
+          cwd: "/synthetic/project",
+          path: "/synthetic/delete-worktree",
+          force: true,
+        });
+        expect(mocks.hardDelete).toHaveBeenCalledExactlyOnceWith({ threadId: target.threadId });
+        expect(mocks.clear).toHaveBeenCalledWith(target);
+        expect(mocks.refreshDeleted).toHaveBeenCalledWith(target.environmentId);
+      } finally {
+        cleanup.release();
+        await fixture.cleanup();
+      }
+    },
+  );
+
+  it.for(["recycle", "confirmed recycle", "permanent"] as const)(
+    "refuses a missing target environment before %s deletion can report completion",
+    async (action, context) => {
+      const fixture = createDeleteActionFixture(context);
+      const { actions } = await fixture.mount();
+      try {
+        navigateTo("a", "other");
+        mocks.workspace = { environmentId: "other" };
+        mocks.threads.push({ ...mocks.threads[0]!, environmentId: "other" });
+        const otherApi = {
+          orchestration: { dispatchCommand: mocks.dispatch, hardDeleteThread: mocks.hardDelete },
+          vcs: { removeWorktree: mocks.removeWorktree },
+        };
+        mocks.readApi.mockImplementation((environmentId: string) =>
+          environmentId === "other" ? otherApi : undefined,
+        );
+
+        // Rejecting this real public action prevents its awaiting Desk caller
+        // from closing a view as if history had been deleted. An available
+        // peer with the same chat ID is never a fallback mutation target.
+        await expect(
+          fixture.run(() =>
+            action === "recycle"
+              ? actions.deleteThread(target)
+              : action === "confirmed recycle"
+                ? actions.confirmAndDeleteThread(target)
+                : actions.hardDeleteThread(target, { confirm: false }),
+          ),
+        ).rejects.toThrow();
+        expect(mocks.dispatch).not.toHaveBeenCalled();
+        expect(mocks.hardDelete).not.toHaveBeenCalled();
+        expect(mocks.removeWorktree).not.toHaveBeenCalled();
+        expect(mocks.router.navigate).not.toHaveBeenCalled();
+        expect(mocks.confirm).not.toHaveBeenCalled();
+        expect(mocks.clear).not.toHaveBeenCalled();
+        expect(mocks.refreshArchived).not.toHaveBeenCalled();
+        expect(mocks.refreshDeleted).not.toHaveBeenCalled();
+        expect(
+          mocks.readApi.mock.calls.every(
+            ([environmentId]) => environmentId === target.environmentId,
+          ),
+        ).toBe(true);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  );
 });
 
 describe("delete acknowledgement navigation ownership", () => {
