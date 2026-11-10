@@ -1822,21 +1822,32 @@ describe("ClaudeAdapterLive", () => {
     );
   }
 
-  for (const priority of ["now", "next", "later"] as const) {
-    for (const boundary of [
-      "unchanged",
-      "completed",
-      "replaced",
-      "ended",
-      "failed",
-      "pending-result",
-      "pending-lifecycle-completed",
-      "pending-lifecycle-cancelled",
-      "pending-lifecycle-discarded",
-      "pending-delta",
-    ] as const) {
+  for (const priority of [undefined, "now", "next", "later"] as const) {
+    const boundaries =
+      priority === undefined
+        ? ([
+            "unchanged",
+            "completed",
+            "replaced",
+            "ended",
+            "pending-result",
+            "pending-delta",
+          ] as const)
+        : ([
+            "unchanged",
+            "completed",
+            "replaced",
+            "ended",
+            "failed",
+            "pending-result",
+            "pending-lifecycle-completed",
+            "pending-lifecycle-cancelled",
+            "pending-lifecycle-discarded",
+            "pending-delta",
+          ] as const);
+    for (const boundary of boundaries) {
       it.effect(
-        `rechecks ${priority} priority after attachment preparation with ${boundary} query`,
+        `rechecks ${priority === undefined ? "ordinary delivery" : `${priority} priority`} after attachment preparation with ${boundary} query`,
         () =>
           Effect.gen(function* () {
             const fileSystem = yield* FileSystem.FileSystem;
@@ -1915,14 +1926,18 @@ describe("ClaudeAdapterLive", () => {
                 .steerTurn({
                   threadId: THREAD_ID,
                   expectedTurnId: turn.turnId,
-                  expectedPrioritySession: {
-                    providerInstanceId: ProviderInstanceId.make("claudeAgent"),
-                    subagentRuntimeId: session.subagentRuntimeId ?? null,
-                    activeTurnId: turn.turnId,
-                  },
+                  ...(priority !== undefined
+                    ? {
+                        expectedPrioritySession: {
+                          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+                          subagentRuntimeId: session.subagentRuntimeId ?? null,
+                          activeTurnId: turn.turnId,
+                        },
+                        deliveryPriority: priority,
+                      }
+                    : {}),
                   input: "must stay bound to first turn",
                   attachments: [attachment],
-                  deliveryPriority: priority,
                 })
                 .pipe(Effect.result, Effect.forkChild);
               yield* Deferred.await(readingAttachment);
@@ -1967,8 +1982,17 @@ describe("ClaudeAdapterLive", () => {
               if (pendingNativeFrame) yield* Deferred.await(loggingMessage);
               yield* Deferred.succeed(releaseAttachment, undefined);
               const result = yield* Fiber.join(pendingSteer);
-              const accepted = boundary === "unchanged" || boundary === "pending-delta";
+              const accepted =
+                boundary === "unchanged" ||
+                boundary === "pending-delta" ||
+                (priority === undefined && boundary === "pending-result");
               assert.equal(result._tag, accepted ? "Success" : "Failure");
+              if (priority === undefined && !accepted && result._tag === "Failure") {
+                assert.equal(
+                  "remoteErrorTag" in result.failure ? result.failure.remoteErrorTag : undefined,
+                  "claude-steer-not-submitted",
+                );
+              }
 
               if (accepted) {
                 const delivered = yield* Fiber.join(nextPrompt);
@@ -4780,6 +4804,262 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  for (const nativeOwner of ["fresh-query", "retained-background"] as const)
+    it.effect(
+      `binds normal-start consumption to its exact durable input and primary native owner (${nativeOwner})`,
+      () => {
+        const harness = makeHarness();
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const events: ProviderRuntimeEvent[] = [];
+          const boundaries = yield* Effect.forEach([0, 1, 2], () => Deferred.make<void>());
+          const completions = yield* Effect.forEach([0, 1, 2], () => Deferred.make<void>());
+          const retainedProgress = yield* Deferred.make<ProviderRuntimeEvent>();
+          let boundaryIndex = 0;
+          let completionIndex = 0;
+          yield* Stream.runForEach(adapter.streamEvents, (event) => {
+            events.push(event);
+            if (
+              event.type === "task.progress" &&
+              event.payload.taskId === "retained-native-work" &&
+              event.payload.summary === "Still running after root completion."
+            )
+              return Deferred.succeed(retainedProgress, event);
+            if (event.type === "session.state.changed" && event.payload.reason === "status:active")
+              return Deferred.succeed(boundaries[boundaryIndex++]!, undefined);
+            if (event.type === "turn.completed")
+              return Deferred.succeed(completions[completionIndex++]!, undefined);
+            return Effect.void;
+          }).pipe(Effect.forkChild);
+          const receipts = () =>
+            events.filter(
+              (event) =>
+                event.type === "task.progress" &&
+                String(event.payload.taskId).startsWith("claude-turn-steer-processing:"),
+            );
+          const session = yield* adapter.startSession({
+            threadId: THREAD_ID,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            runtimeMode: "full-access",
+          });
+          const nativeSessionId = "claude-initial-input-owner";
+          let oldUuid: string | undefined;
+          if (nativeOwner === "retained-background") {
+            yield* adapter.sendTurn({
+              threadId: session.threadId,
+              input: "start background work",
+              attachments: [],
+            });
+            oldUuid = (yield* Effect.promise(() =>
+              readPromptMessages(harness.getLastCreateQueryInput(), 1),
+            ))[0]?.uuid;
+            if (!oldUuid) throw new Error("Expected the native warm-up input UUID.");
+            emitWorkflowFixtureInit(harness.query, "2.1.321", nativeSessionId, [
+              "msg_lifecycle_v1",
+            ]);
+            harness.query.emit({
+              type: "system",
+              subtype: "task_started",
+              task_id: "retained-native-work",
+              task_type: "local_agent",
+              subagent_type: "reviewer",
+              spawn_depth: 1,
+              ambient: true,
+              is_backgrounded: true,
+              description: "Retained background work",
+              session_id: nativeSessionId,
+              uuid: "initial-background-task",
+            } as unknown as SDKMessage);
+            harness.query.emit({
+              ...makeSuccessfulClaudeResult(nativeSessionId),
+              uuid: "22800000-0000-4000-8000-000000000001",
+              user_message_uuid: oldUuid,
+            });
+            yield* Deferred.await(completions[0]!);
+            assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+          }
+          const queryInput = harness.getLastCreateQueryInput();
+          const input = {
+            threadId: session.threadId,
+            messageId: MessageId.make("normal-start-follow-up"),
+            intentSequence: 37,
+            input: "continue the unfinished work",
+            attachments: [],
+          };
+          const turn = yield* adapter.sendTurn(input);
+          assert.equal(harness.getLastCreateQueryInput(), queryInput);
+          const uuid = (yield* Effect.promise(() =>
+            readPromptMessages(harness.getLastCreateQueryInput(), 1),
+          ))[0]?.uuid;
+          assert.isString(uuid);
+          if (!uuid) throw new Error("Expected the actual UUID-stamped normal input.");
+          const emitBoundary = (index: number) => {
+            harness.query.emit({
+              type: "system",
+              subtype: "status",
+              status: null,
+              session_id: nativeSessionId,
+              uuid: `initial-input-boundary-${index}`,
+            } as unknown as SDKMessage);
+            return Deferred.await(boundaries[index]!);
+          };
+          if (nativeOwner === "fresh-query") {
+            // Queue admission and even an exact UUID before independent native
+            // initialization cannot grant consumption or turn-retarget authority.
+            harness.query.emit({
+              type: "command_lifecycle",
+              command_uuid: uuid,
+              state: "started",
+              session_id: nativeSessionId,
+              uuid: "before-primary-init",
+            } as unknown as SDKMessage);
+            yield* emitBoundary(0);
+            assert.equal(receipts().length, 0);
+            emitWorkflowFixtureInit(harness.query, "2.1.321", nativeSessionId, [
+              "msg_lifecycle_v1",
+            ]);
+          } else {
+            // The previous root's UUID cannot settle this new durable input even
+            // though the exact query/runtime and its background task are retained.
+            harness.query.emit({
+              type: "command_lifecycle",
+              command_uuid: oldUuid,
+              state: "started",
+              session_id: nativeSessionId,
+              uuid: "old-root-cannot-consume-new-input",
+            } as unknown as SDKMessage);
+            yield* emitBoundary(0);
+            assert.equal(receipts().length, 0);
+          }
+          for (const extra of [
+            { session_id: "foreign-native-owner" },
+            { session_id: nativeSessionId, parent_tool_use_id: "child-tool" },
+            { session_id: nativeSessionId, task_id: "child-task" },
+            { session_id: nativeSessionId, command_uuid: "00000000-0000-4000-8000-000000000228" },
+          ])
+            harness.query.emit({
+              type: "command_lifecycle",
+              command_uuid: uuid,
+              state: "started",
+              uuid: "unowned-initial-input",
+              ...extra,
+            } as unknown as SDKMessage);
+          yield* emitBoundary(1);
+          assert.equal(receipts().length, 0);
+          harness.query.emit({
+            type: "command_lifecycle",
+            command_uuid: uuid,
+            state: "started",
+            session_id: nativeSessionId,
+            uuid: "primary-initial-input-consumed",
+            // Native payloads cannot choose the source-owned delivery kind.
+            usage: {
+              deliveryKind: "live-steer",
+              intentSequence: 999,
+              messageId: "foreign-message",
+            },
+            deliveryKind: "live-steer",
+          } as unknown as SDKMessage);
+          yield* emitBoundary(2);
+          const processing = receipts()[0];
+          assert.equal(receipts().length, 1);
+          if (!processing || processing.type !== "task.progress")
+            throw new Error("Expected one native receipt.");
+          assert.equal(processing.turnId, turn.turnId);
+          assert.equal(processing.subagentRuntimeId, session.subagentRuntimeId);
+          assert.deepEqual(processing.payload.usage, {
+            provider: "claudeAgent",
+            messageId: input.messageId,
+            intentSequence: 37,
+            deliveryKind: "turn-start",
+            providerInstanceId: "claudeAgent",
+            subagentRuntimeId: session.subagentRuntimeId,
+          });
+          // Exact repeated native evidence is one-shot. Root completion adds no
+          // receipt and does not retire the separate retained background task.
+          harness.query.emit({
+            type: "command_lifecycle",
+            command_uuid: uuid,
+            state: "completed",
+            session_id: nativeSessionId,
+            uuid: "repeated-primary-consumption",
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            ...makeSuccessfulClaudeResult(nativeSessionId),
+            uuid: "22800000-0000-4000-8000-000000000002",
+            user_message_uuid: uuid,
+          });
+          yield* Deferred.await(completions[nativeOwner === "fresh-query" ? 0 : 1]!);
+          assert.equal(receipts().length, 1);
+          assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+          if (nativeOwner === "retained-background") {
+            const started = events.find(
+              (event) =>
+                event.type === "task.started" && event.payload.taskId === "retained-native-work",
+            );
+            if (!started || started.type !== "task.started")
+              throw new Error("Expected exact retained work start.");
+            const originalOwner = started.payload.subagent;
+            assert.isDefined(originalOwner);
+            harness.query.emit({
+              type: "system",
+              subtype: "task_progress",
+              task_id: "retained-native-work",
+              description: "Retained background work",
+              subagent_type: "reviewer",
+              summary: "Still running after root completion.",
+              session_id: nativeSessionId,
+              uuid: "retained-work-after-root",
+            } as unknown as SDKMessage);
+            const progress = yield* Deferred.await(retainedProgress);
+            if (progress.type !== "task.progress")
+              throw new Error("Expected native retained-work progress.");
+            assert.equal(progress.subagentRuntimeId, session.subagentRuntimeId);
+            assert.equal(progress.payload.subagent?.status, "active");
+            assert.equal(progress.payload.subagent?.startedAt, originalOwner?.startedAt);
+            assert.deepEqual(progress.payload.subagent?.taskControl, originalOwner?.taskControl);
+            assert.isFalse(
+              events.some(
+                (event) =>
+                  event.type === "task.completed" &&
+                  event.payload.taskId === "retained-native-work",
+              ),
+            );
+          }
+          // Missing legacy attempt metadata cannot be upgraded by a native frame
+          // spelling the new kind or repeating a prior attempt/message.
+          yield* adapter.sendTurn({
+            threadId: session.threadId,
+            messageId: input.messageId,
+            input: "legacy input without a durable sequence",
+            attachments: [],
+          });
+          const legacyUuid = (yield* Effect.promise(() =>
+            readPromptMessages(harness.getLastCreateQueryInput(), 1),
+          ))[0]?.uuid;
+          if (!legacyUuid) throw new Error("Expected the native legacy input UUID.");
+          harness.query.emit({
+            type: "command_lifecycle",
+            command_uuid: legacyUuid,
+            state: "started",
+            session_id: nativeSessionId,
+            uuid: "legacy-input-cannot-mint-retarget",
+            usage: { deliveryKind: "turn-start", intentSequence: 37 },
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            ...makeSuccessfulClaudeResult(nativeSessionId),
+            uuid: "22800000-0000-4000-8000-000000000003",
+            user_message_uuid: legacyUuid,
+          });
+          yield* Deferred.await(completions[nativeOwner === "fresh-query" ? 1 : 2]!);
+          assert.equal(receipts().length, 1);
+        }).pipe(
+          Effect.provideService(Random.Random, makeDeterministicRandomService()),
+          Effect.provide(harness.layer),
+        );
+      },
+    );
+
   it.effect("keeps one Cafe turn active across a queued Claude follow-up", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -4949,6 +5229,7 @@ describe("ClaudeAdapterLive", () => {
         state: "started",
         session_id: "claude-session-follow-up",
         uuid: "lifecycle-follow-up-started",
+        usage: { deliveryKind: "turn-start" },
       } as unknown as SDKMessage);
       harness.query.emit({
         type: "system",

@@ -6417,8 +6417,18 @@ describe("ChatView full app (composer)", () => {
     });
   });
 
-  it("settles only the consumed Claude follow-up while its primary query keeps working", async (testContext) => {
-    const owner = createChatViewCallerOwner(testContext, mountChatView, { label: "pending-steer" });
+  it("settles exact Claude input after live consumption and a late new-turn admission", async (testContext) => {
+    // Retain completion before any native input/RPC admission. A timeout may
+    // retire this owner before request2 enters, so a late callback must see an
+    // already-released gate rather than install an unowned pending ACK.
+    let releaseSecondAck!: () => void;
+    const secondAckCompletion = new Promise<void>((resolve) => {
+      releaseSecondAck = () => resolve();
+    });
+    const owner = createChatViewCallerOwner(testContext, mountChatView, {
+      label: "pending-steer",
+      beforeDrain: releaseSecondAck,
+    });
     await owner.run(async () => {
       const activeTurnId = TurnId.make("claude-consumed-follow-up-turn");
       const instanceId = ProviderInstanceId.make("claudeAgent");
@@ -6474,6 +6484,12 @@ describe("ChatView full app (composer)", () => {
           const sequence = nextIntent++;
           intentByMessageId.set(message.messageId, sequence);
           outgoingTexts.push(message.text);
+          if (intentByMessageId.size === 2) {
+            // The entry above supplies the actual command sequence. The
+            // preowned gate controls only completion; releasing it cannot
+            // invent request entry or a generation before the native RPC.
+            return secondAckCompletion.then(() => ({ sequence }));
+          }
           return { sequence };
         },
       });
@@ -6526,6 +6542,7 @@ describe("ChatView full app (composer)", () => {
         id: string,
         changes: Record<string, unknown> = {},
         taskId = `claude-turn-steer-processing:${"a".repeat(64)}`,
+        processingTurnId = activeTurnId,
       ) => {
         owner.assertActive();
         const current = chatViewFixture.fixture.snapshot;
@@ -6540,7 +6557,7 @@ describe("ChatView full app (composer)", () => {
               tone: "info" as const,
               kind: "task.progress",
               summary: "Reasoning update",
-              turnId: activeTurnId,
+              turnId: processingTurnId,
               sequence: snapshotSequence,
               createdAt: new Date().toISOString(),
               payload: {
@@ -6595,11 +6612,96 @@ describe("ChatView full app (composer)", () => {
       expect(
         selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn?.completedAt,
       ).toBeNull();
+      const beforeCompletion = chatViewFixture.fixture.snapshot;
+      const completedThread = {
+        ...beforeCompletion.threads[0]!,
+        latestTurn: {
+          ...beforeCompletion.threads[0]!.latestTurn!,
+          state: "completed" as const,
+          completedAt: new Date().toISOString(),
+        },
+        session: {
+          ...beforeCompletion.threads[0]!.session!,
+          status: "ready" as const,
+          activeTurnId: null,
+        },
+      };
+      const completedSequence = beforeCompletion.snapshotSequence + 1;
+      chatViewFixture.fixture.snapshot = {
+        ...beforeCompletion,
+        snapshotSequence: completedSequence,
+        threads: [completedThread],
+      };
+      rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+        kind: "snapshot",
+        snapshot: { snapshotSequence: completedSequence, thread: completedThread },
+      });
+      await owner.own("snapshot", () =>
+        vi.waitFor(() => {
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.session?.status).toBe("ready");
+          expect(steeringRows()).toHaveLength(1);
+        }),
+      );
+      const nextTurnId = TurnId.make("claude-late-follow-up-new-turn");
+      const startedAt = new Date().toISOString();
+      const nextThread = {
+        ...completedThread,
+        latestTurn: {
+          turnId: nextTurnId,
+          state: "running" as const,
+          requestedAt: startedAt,
+          startedAt,
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        session: {
+          ...completedThread.session,
+          status: "running" as const,
+          activeTurnId: nextTurnId,
+        },
+      };
+      const startedSequence = completedSequence + 1;
+      chatViewFixture.fixture.snapshot = {
+        ...chatViewFixture.fixture.snapshot,
+        snapshotSequence: startedSequence,
+        threads: [nextThread],
+      };
+      rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+        kind: "snapshot",
+        snapshot: { snapshotSequence: startedSequence, thread: nextThread },
+      });
+      await owner.own("snapshot", () =>
+        vi.waitFor(() => {
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.session?.activeTurnId).toBe(
+            nextTurnId,
+          );
+          expect(steeringRows()).toHaveLength(1);
+        }),
+      );
+      // A new root and an ordinary old-style receipt cannot rebind the old
+      // pending turn. Only explicit native consumption of this exact admitted
+      // start may do so, and even that cannot bypass the held command ACK.
       emitProcessing(
-        "claude-second-consumed",
+        "claude-second-unmapped-new-turn",
         { messageId: secondMessageId, intentSequence: secondIntent },
         `claude-turn-steer-processing:${"b".repeat(64)}`,
+        nextTurnId,
       );
+      await owner.own("layout", () => waitForLayout());
+      expect(steeringRows()).toHaveLength(1);
+      emitProcessing(
+        "claude-second-consumed-new-turn",
+        {
+          messageId: secondMessageId,
+          intentSequence: secondIntent,
+          deliveryKind: "turn-start",
+        },
+        `claude-turn-steer-processing:${"c".repeat(64)}`,
+        nextTurnId,
+      );
+      await owner.own("layout", () => waitForLayout());
+      expect(steeringRows()).toHaveLength(1);
+      releaseSecondAck();
       await owner.own("processing", () => vi.waitFor(() => expect(steeringRows()).toHaveLength(0)));
       expect(wsRequests.filter((request) => request.type === "thread.turn.steer")).toHaveLength(2);
       expect(

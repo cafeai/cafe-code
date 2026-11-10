@@ -766,6 +766,119 @@ describe("doesClaudeSteerProcessingActivityMatchPending", () => {
     }
     expect(getterCalls).toBe(0);
   });
+
+  it("requires an ACK-bound exact native input witness when a Claude steer starts a new turn", () => {
+    const nextTurnId = TurnId.make("claude-processing-new-turn");
+    const nextRuntimeId = "3ca776b7-f7ba-4ec9-9ad2-5f8cbdf00515";
+    for (const actualRuntimeId of [runtimeId, nextRuntimeId]) {
+      const nextUsage = {
+        ...usage,
+        subagentRuntimeId: actualRuntimeId,
+        deliveryKind: "turn-start",
+      };
+      const next = {
+        ...pending,
+        activity: {
+          ...activity,
+          turnId: nextTurnId,
+          payload: {
+            ...activity.payload,
+            nativeWorkRuntimeId: actualRuntimeId,
+            usage: nextUsage,
+          },
+        },
+        session: { ...pending.session, subagentRuntimeId: actualRuntimeId },
+      };
+      // Only the consumed input's exact intent may bridge the old turn and a
+      // new native query. A current/latest turn guess or queue ACK cannot do so.
+      expect(doesClaudeSteerProcessingActivityMatchPending(next)).toBe(true);
+      expect(
+        doesClaudeSteerProcessingActivityMatchPending({
+          ...next,
+          pendingIntentSequence: null,
+          requiresIntentSequence: false,
+        }),
+      ).toBe(false);
+      for (const changed of [
+        { deliveryKind: undefined },
+        { deliveryKind: "steer" },
+        { deliveryKind: "unknown" },
+        { intentSequence: undefined },
+        { intentSequence: 41 },
+        { intentSequence: 43 },
+      ]) {
+        expect(
+          doesClaudeSteerProcessingActivityMatchPending({
+            ...next,
+            activity: {
+              ...next.activity,
+              payload: { ...next.activity.payload, usage: { ...nextUsage, ...changed } },
+            },
+          }),
+        ).toBe(false);
+      }
+      expect(
+        doesClaudeSteerProcessingActivityMatchPending({
+          ...next,
+          session: { ...next.session, subagentRuntimeId: "unrelated-current-runtime" },
+        }),
+      ).toBe(false);
+      expect(
+        doesClaudeSteerProcessingActivityMatchPending({
+          ...next,
+          pendingProviderInstanceId: "another-admitted-account",
+        }),
+      ).toBe(false);
+      let getterCalls = 0;
+      const accessorUsage = Object.defineProperty({ ...nextUsage }, "deliveryKind", {
+        get: () => {
+          getterCalls += 1;
+          return "turn-start";
+        },
+      });
+      expect(
+        doesClaudeSteerProcessingActivityMatchPending({
+          ...next,
+          activity: {
+            ...next.activity,
+            payload: { ...next.activity.payload, usage: accessorUsage },
+          },
+        }),
+      ).toBe(false);
+      expect(getterCalls).toBe(0);
+    }
+    // Received malformed kind metadata cannot fall back to an old same-turn
+    // receipt, even though every pre-existing owner/attempt field is valid.
+    for (const deliveryKind of [undefined, null, "unknown"]) {
+      expect(
+        doesClaudeSteerProcessingActivityMatchPending({
+          ...pending,
+          activity: {
+            ...activity,
+            payload: { ...activity.payload, usage: { ...usage, deliveryKind } },
+          },
+        }),
+      ).toBe(false);
+    }
+    let inheritedGetterCalls = 0;
+    const inheritedUsage = { ...usage };
+    Object.setPrototypeOf(
+      inheritedUsage,
+      Object.defineProperty({}, "deliveryKind", {
+        get: () => {
+          inheritedGetterCalls += 1;
+          return "turn-start";
+        },
+      }),
+    );
+    expect(
+      doesClaudeSteerProcessingActivityMatchPending({
+        ...pending,
+        activity: { ...activity, payload: { ...activity.payload, usage: inheritedUsage } },
+      }),
+    ).toBe(false);
+    expect(inheritedGetterCalls).toBe(0);
+  });
 });
 
 describe("doesSteerProcessingActivityMatchPending", () => {

@@ -90,6 +90,22 @@ describe("ProviderRuntimeEvent", () => {
         payload: { taskId: "native-task", description: "Reviewing files" },
       },
       { type: "task.completed", payload: { taskId: "native-task", status: "completed" } },
+      {
+        type: "task.progress",
+        payload: {
+          taskId: `claude-turn-steer-processing:${"a".repeat(64)}`,
+          description: "Claude began processing the submitted follow-up.",
+          visibility: "ambient",
+          usage: {
+            provider: "claudeAgent",
+            messageId: "native-initial-input",
+            intentSequence: 37,
+            deliveryKind: "turn-start",
+            providerInstanceId: "claude_history_account",
+            subagentRuntimeId: "00000000-0000-4000-8000-000000000962",
+          },
+        },
+      },
     ];
     for (const task of tasks) {
       const legacy = { ...base, ...task };

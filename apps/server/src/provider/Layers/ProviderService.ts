@@ -2690,6 +2690,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
               : {}),
             expectedTurnId: activeSession.activeTurnId,
             ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
+            ...(input.intentSequence !== undefined ? { intentSequence: input.intentSequence } : {}),
             ...(input.input !== undefined ? { input: input.input } : {}),
             ...(input.attachments.length > 0 ? { attachments: input.attachments } : {}),
           });

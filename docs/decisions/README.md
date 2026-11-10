@@ -61,3 +61,6 @@ Related provider lifecycle decisions:
   guidance, separate from authentication, recovery and execution authority.
 
 - [Claude steer consumption](claude-steer-consumption.md): exact native input, message, attempt and runtime ownership for steering presentation.
+- [Initial Claude input consumption](claude-initial-input-consumption.md): narrow
+  successor for a committed initial input mapped by its exact native-consumption
+  receipt to the actual new turn, without ACK settlement or old-turn aliases.

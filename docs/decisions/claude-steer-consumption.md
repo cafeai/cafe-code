@@ -4,9 +4,17 @@ Decision status: Accepted within the reported stuck-steering repair
 Implementation status: Implemented in source; rebuilt runtime adoption pending
 Verification status: Synthetic SDK, durable-retention and native browser regressions protect this contract; hosted build and runtime adoption are separately qualified
 Created: 2026-11-08 06:06:19 JST (UTC+0900)
-Last updated: 2026-11-08 07:30:42 JST (UTC+0900)
+Last updated: 2026-11-10 17:21:51 JST (UTC+0900)
 Decision authority: The user's request to repair a Claude message left in the
 steering shelf while completing the CI repair.
+
+## Limited successor
+
+[Initial Claude input consumption](claude-initial-input-consumption.md) extends
+only the live-steer-only restriction and captured old-turn/runtime equality for
+a typed, server-bound initial-input consumption receipt. The accepted live-steer
+decision below remains the historical and current contract for ordinary live
+steers; its other ownership, retention and no-replay limits are unchanged.
 
 ## Context
 

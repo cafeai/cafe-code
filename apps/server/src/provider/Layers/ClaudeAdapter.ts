@@ -888,6 +888,8 @@ interface ClaudeSteerReceipt {
   readonly turn: ClaudeTurnState;
   readonly messageId: string;
   readonly intentSequence: number | undefined;
+  /** Source-owned delivery origin; native frames cannot choose this authority. */
+  readonly deliveryKind: "live-steer" | "turn-start";
 }
 
 interface ClaudeSessionContext {
@@ -5436,8 +5438,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const rememberClaudeSteerReceipt = (
     context: ClaudeSessionContext,
     messageUuid: string,
-    input: ProviderSteerTurnInput,
+    input: Pick<ProviderSteerTurnInput, "messageId" | "intentSequence">,
     turn: ClaudeTurnState,
+    deliveryKind: ClaudeSteerReceipt["deliveryKind"],
   ): void => {
     const owner = context.steerReceiptOwner;
     const sequence = input.intentSequence;
@@ -5449,6 +5452,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       input.messageId.length === 0 ||
       input.messageId.length > 1_024 ||
       (sequence !== undefined && (!Number.isSafeInteger(sequence) || sequence < 0)) ||
+      (deliveryKind === "turn-start" && sequence === undefined) ||
       context.steerReceiptsByUuid.size >= CLAUDE_PROMPT_CORRELATION_LIMIT
     )
       return;
@@ -5460,6 +5464,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       turn,
       messageId: input.messageId,
       intentSequence: sequence,
+      deliveryKind,
     });
   };
 
@@ -5613,6 +5618,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             usage: {
               provider: "claudeAgent",
               messageId: receipt.messageId,
+              // Only this locally admitted normal-start lease can retarget a
+              // pending input to its actual new turn. Native usage is ignored.
+              ...(receipt.deliveryKind === "turn-start" ? { deliveryKind: "turn-start" } : {}),
               ...(receipt.intentSequence !== undefined
                 ? { intentSequence: receipt.intentSequence }
                 : {}),
@@ -12332,6 +12340,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
 
     context.promptLifecycleByUuid.set(turnId, "submitted");
+    // Correlate an actual committed input before native admission, including a
+    // late steer that the decider admitted as a new root turn. This is only a
+    // bounded lease: the queue ACK cannot consume it. An independently bound
+    // primary init plus this exact UUID must still witness native processing.
+    // Legacy callers without the durable attempt sequence remain unknown.
+    rememberClaudeSteerReceipt(context, turnId, input, turnState, "turn-start");
     context.glideBinding?.resume();
     yield* Queue.offer(context.promptQueue, {
       type: "message",
@@ -12341,6 +12355,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       Effect.tapError(() =>
         Effect.sync(() => {
           context.promptLifecycleByUuid.delete(turnId);
+          context.steerReceiptsByUuid.delete(turnId);
         }),
       ),
       Effect.tapError((error) =>
@@ -13126,7 +13141,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // Keep accounting in the same critical section so completion cannot
         // clear/replace turnState before the accepted prompt is attributed.
         context.promptLifecycleByUuid.set(messageUuid, "submitted");
-        rememberClaudeSteerReceipt(context, messageUuid, input, admittedTurnState);
+        rememberClaudeSteerReceipt(context, messageUuid, input, admittedTurnState, "live-steer");
         if (!Queue.offerUnsafe(context.promptQueue, { type: "message", message })) {
           context.promptLifecycleByUuid.delete(messageUuid);
           context.steerReceiptsByUuid.delete(messageUuid);
@@ -13161,49 +13176,72 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
-    // Official Claude Agent SDK streaming input mode is the long-lived,
-    // interactive path: `query({ prompt: AsyncIterable<SDKUserMessage> })`
-    // supports dynamic message queueing and interruption, and the local
-    // package types document `streamInput()` as the multi-turn input pipe.
-    // Claude does not expose a Codex-style expected-turn RPC, so Cafe binds the
-    // steer to its own active turn id before queueing exactly one SDK user
-    // message into the already-running prompt stream.
-    context.promptLifecycleByUuid.set(messageUuid, "submitted");
-    rememberClaudeSteerReceipt(context, messageUuid, input, admittedTurnState);
-    yield* Queue.offer(context.promptQueue, {
-      type: "message",
-      message,
-    }).pipe(
-      Effect.mapError((cause) => toRequestError(input.threadId, "turn/steer", cause)),
-      Effect.tapError(() =>
-        Effect.sync(() => {
-          context.promptLifecycleByUuid.delete(messageUuid);
-          context.steerReceiptsByUuid.delete(messageUuid);
-        }),
-      ),
-    );
+    // Streaming input remains the native follow-up path. Attachment preparation
+    // above yields while SDK results and query retirement proceed independently
+    // of ProviderService's thread lock. Revalidate the exact admitted owner
+    // immediately beside the unbounded queue's synchronous offer: a completed
+    // root must not receive an input whose presentation lease belongs to it.
+    // Unlike explicit priority, an ordinary follow-up may still join a current
+    // response while its terminal frame awaits projection. Ordinary deltas and
+    // pending native frames therefore do not fence this admission.
+    return yield* Effect.suspend(() => {
+      if (
+        sessions.get(input.threadId) !== context ||
+        context.stopped ||
+        context.queryClosureUncertain ||
+        context.sdkStreamEnded ||
+        context.session.status !== "running" ||
+        context.turnState !== admittedTurnState ||
+        context.session.activeTurnId !== input.expectedTurnId
+      ) {
+        return Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "turn/steer",
+            remoteErrorTag: "claude-steer-not-submitted",
+            detail:
+              "The observed Claude session changed before follow-up admission. The message was not delivered.",
+          }),
+        );
+      }
 
-    context.hasSubmittedUserPrompt = true;
-    rememberClaudeForkMessage({
-      ids: context.forkMessageIds,
-      messageId: input.messageId,
-      nativeId: messageUuid,
-      turnId: activeTurnId,
-      turnCount: context.resumeBaseTurnCount + context.turns.length + 1,
+      context.promptLifecycleByUuid.set(messageUuid, "submitted");
+      rememberClaudeSteerReceipt(context, messageUuid, input, admittedTurnState, "live-steer");
+      if (!Queue.offerUnsafe(context.promptQueue, { type: "message", message })) {
+        context.promptLifecycleByUuid.delete(messageUuid);
+        context.steerReceiptsByUuid.delete(messageUuid);
+        return Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "turn/steer",
+            remoteErrorTag: "claude-steer-not-submitted",
+            detail: "The observed Claude prompt stream closed before follow-up admission.",
+          }),
+        );
+      }
+      // No await may separate the accepted offer from the same turn's
+      // accounting. This ACK remains queue admission, never native consumption.
+      context.hasSubmittedUserPrompt = true;
+      rememberClaudeForkMessage({
+        ids: context.forkMessageIds,
+        messageId: input.messageId,
+        nativeId: messageUuid,
+        turnId: activeTurnId,
+        turnCount: context.resumeBaseTurnCount + context.turns.length + 1,
+      });
+      admittedTurnState.promptTextBytes =
+        (admittedTurnState.promptTextBytes ?? 0) +
+        Buffer.byteLength(input.input?.trim() ?? "", "utf8");
+      admittedTurnState.promptAttachmentCount =
+        (admittedTurnState.promptAttachmentCount ?? 0) + (input.attachments?.length ?? 0);
+      return Effect.succeed({
+        threadId: context.session.threadId,
+        turnId: activeTurnId,
+        ...(context.session.resumeCursor !== undefined
+          ? { resumeCursor: context.session.resumeCursor }
+          : {}),
+      });
     });
-    context.turnState.promptTextBytes =
-      (context.turnState.promptTextBytes ?? 0) +
-      Buffer.byteLength(input.input?.trim() ?? "", "utf8");
-    context.turnState.promptAttachmentCount =
-      (context.turnState.promptAttachmentCount ?? 0) + (input.attachments?.length ?? 0);
-
-    return {
-      threadId: context.session.threadId,
-      turnId: activeTurnId,
-      ...(context.session.resumeCursor !== undefined
-        ? { resumeCursor: context.session.resumeCursor }
-        : {}),
-    };
   });
 
   const stopAll: ClaudeAdapterShape["stopAll"] = () =>

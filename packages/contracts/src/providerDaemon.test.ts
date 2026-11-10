@@ -53,6 +53,35 @@ it("keeps optional desktop-tools failure observations numeric and finite in JSON
   );
 });
 
+it("retains the exact input attempt through normal-start and live-steer daemon JSON requests", () => {
+  const json = Schema.fromJsonString(ProviderDaemonRpcRequest);
+  const decode = Schema.decodeUnknownSync(ProviderDaemonRpcRequest);
+  const decodeJson = Schema.decodeUnknownSync(json);
+  const encodeJson = Schema.encodeSync(json);
+  for (const method of ["sendTurn", "steerTurn"] as const) {
+    const request = {
+      method,
+      commandId: "10000000-0000-4000-8000-000000000228",
+      payload: {
+        threadId: "thread-private-input",
+        messageId: "durable-input-message",
+        intentSequence: 37,
+        ...(method === "steerTurn" ? { expectedTurnId: "actual-active-root" } : {}),
+        input: "synthetic input",
+      },
+    };
+    const admitted = decode(request);
+    assert.deepEqual(admitted, request);
+    assert.deepEqual(JSON.parse(encodeJson(admitted)), request);
+    assert.deepEqual(decodeJson(JSON.stringify(request)), request);
+    const { intentSequence: _omitted, ...legacyPayload } = request.payload;
+    assert.deepEqual(decode({ ...request, payload: legacyPayload }), {
+      ...request,
+      payload: legacyPayload,
+    });
+  }
+});
+
 it("keeps private phased recovery tokens and status shapes finite across the daemon codec", () => {
   const decodeRequest = Schema.decodeUnknownSync(ProviderDaemonRpcRequest);
   const decodePreparation = Schema.decodeUnknownSync(
