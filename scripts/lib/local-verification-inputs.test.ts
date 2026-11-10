@@ -1193,6 +1193,9 @@ describe("local verification input evidence", () => {
     },
   );
 
+  // These five explicitly guarded native-filesystem integration cases keep
+  // all of their snapshots. Only their outer test guards are 15 s; production
+  // budgets and every other case's default guard remain unchanged.
   it("publishes a real coordinator receipt when absent generated outputs first appear and reuses it after nested output writes", async (context) => {
     const started = performance.now();
     type Phase =
@@ -1336,7 +1339,7 @@ describe("local verification input evidence", () => {
     });
     expect(execute).toHaveBeenCalledTimes(1);
     expect(store.publish).toHaveBeenCalledTimes(1);
-  });
+  }, 15_000);
 
   it("stores and reuses server success when installed Vitest module caches first appear and are rewritten", async (context) => {
     const observation = observeNativeInputPhases(context, "vitest-output");
@@ -1418,7 +1421,7 @@ describe("local verification input evidence", () => {
     });
     expect(execute).toHaveBeenCalledOnce();
     expect(store.publish).toHaveBeenCalledOnce();
-  });
+  }, 15_000);
 
   for (const path of [
     "apps/server/src/.vitest-cache/runtime.ts",
@@ -1766,7 +1769,7 @@ describe("local verification input evidence", () => {
       expect(after, encode(f.refusals)).toBeDefined();
       expect(after?.key).not.toBe(before?.key);
     }
-  });
+  }, 15_000);
 
   it("binds scoped installed static assets and exact Vite modifiers without accepting unknown queries", async (context) => {
     const f = await fixture(context);
@@ -1796,7 +1799,7 @@ describe("local verification input evidence", () => {
       'import font from "@fontsource-variable/dm-sans/files/fixture.woff2?unqualified";\nexport { font };\n',
     );
     expect(await f.snapshot()).toBeUndefined();
-  });
+  }, 15_000);
 
   it("binds unimported cross-workspace ambient type roots and refuses excluded or external roots", async (context) => {
     const f = await fixture(context);
@@ -1839,7 +1842,7 @@ describe("local verification input evidence", () => {
     expect(await f.fingerprint(task, context.signal)).toBeUndefined();
     await configure(tmpdir());
     expect(await f.fingerprint(task, context.signal)).toBeUndefined();
-  });
+  }, 15_000);
 
   it.skipIf(process.platform === "win32")(
     "binds admitted source-link data and refuses excluded private link targets",
