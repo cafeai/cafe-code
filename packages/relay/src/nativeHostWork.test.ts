@@ -23,6 +23,7 @@ function challenge(difficulty: number): HostWorkChallenge {
   return {
     version: 1,
     purpose: "host-reservation",
+    replace: false,
     networkId: randomOpaque(),
     nodeId: randomOpaque(),
     bootId: randomOpaque(16),

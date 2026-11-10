@@ -34,6 +34,7 @@ export type HostWorkRequest = typeof HostWorkRequest.Type;
 export const HostWorkChallenge = Schema.Struct({
   version: Schema.Literal(1),
   purpose: Schema.Literal("host-reservation"),
+  replace: Schema.Boolean,
   networkId: Id32,
   nodeId: Id32,
   bootId: Id16,

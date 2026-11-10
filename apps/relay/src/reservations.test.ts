@@ -100,6 +100,27 @@ async function fixture() {
 }
 
 describe("work-paid host reservations", () => {
+  it("reclaims a lost reservation with fresh host work and fences a delayed old release", async () => {
+    const f = await fixture(),
+      firstProof = await f.claim(),
+      first = await f.authority.claim(firstProof);
+    f.advance(1000);
+    const challenge = f.challenge();
+    expect(challenge.replace).toBe(true);
+    expect(challenge.reservationId).toBe(first.credential.id);
+    const proof = await f.claim(challenge),
+      replacement = await f.authority.claim(proof);
+    expect(replacement.credential.id).not.toBe(first.credential.id);
+    expect(replacement.credential.token).not.toBe(first.credential.token);
+    await f.release(first);
+    expect(f.authority.authorize(f.locator, f.identity.publicKey, replacement.credential)).toEqual(
+      replacement,
+    );
+    expect(await f.authority.claim(proof)).toEqual(replacement);
+    await expect(f.authority.claim(firstProof)).rejects.toThrow();
+    expect(f.authority.stats().reservations).toBe(1);
+    f.authority.retire();
+  });
   it("retires a live registration when a heartbeat arrives after its paid expiry", async (test) => {
     const connections: PacketConnection[] = [];
     let broker: RelayBroker | undefined;

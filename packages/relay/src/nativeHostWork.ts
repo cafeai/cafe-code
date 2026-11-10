@@ -301,7 +301,10 @@ export class NativeHostWorkClient implements HostWorkClient {
         validateHostWorkScope(challenge, scope);
         requireRelay(
           challenge.claimId === claimId &&
-            challenge.reservationId === request.reservationId &&
+            ((challenge.reservationId === request.reservationId && !challenge.replace) ||
+              (request.reservationId === null &&
+                challenge.reservationId !== null &&
+                challenge.replace)) &&
             challenge.difficulty >= 2 &&
             challenge.difficulty <= HOST_WORK.maximumDifficulty &&
             challenge.reservationMs >= RELAY_LIMITS.leaseMs &&
@@ -340,7 +343,9 @@ export class NativeHostWorkClient implements HostWorkClient {
             reservation.expiresAt > epochNow() &&
             reservation.expiresAt <=
               epochNow() + HOST_WORK.reservationMs + RELAY_LIMITS.clockSkewMs &&
-            (!request.reservationId || reservation.credential.id === request.reservationId),
+            (challenge.replace
+              ? reservation.credential.id !== challenge.reservationId
+              : !challenge.reservationId || reservation.credential.id === challenge.reservationId),
           "AUTH_DENIED",
         );
         this.failures.delete(key);

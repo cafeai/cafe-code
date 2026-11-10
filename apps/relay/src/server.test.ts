@@ -179,6 +179,36 @@ async function sessions(
 }
 
 describe("native single-hop relay", () => {
+  it("lets a restarted desktop reclaim its slot with fresh work without accepting an old release", async (test) => {
+    const client = new NativeHostWorkClient(),
+      lifetime = new Lifetime();
+    test.signal.addEventListener("abort", () => lifetime.retire(), { once: true });
+    test.onTestFinished(async () => {
+      lifetime.retire();
+      await client.close();
+      await lifetime.close();
+    });
+    const f = await fixture(test),
+      previous = await f.reserve();
+    const scope = {
+      network: f.network,
+      node: { ...f.network.nodes[0]!, url: `ws://127.0.0.1:${f.server.port}/v1/relay` },
+      locator: f.locator,
+      capacityToken: f.token,
+      admissionIdentity: f.admission,
+      allowLoopbackTest: true,
+    };
+    const replacement = await client.acquire(scope, lifetime);
+    expect(replacement.credential.id).not.toBe(previous.credential.id);
+    await client.release(scope, previous);
+    const leg = f.connect();
+    await leg.register(f.locator, f.token, f.admission, 0, replacement.credential);
+    expect(f.server.stats()).toMatchObject({
+      registrations: 1,
+      hostReservations: { reservations: 1, receipts: 2 },
+    });
+    await f.close();
+  });
   it("refuses an enrolled host that has not paid for a reservation", async (test) => {
     const f = await fixture(test),
       leg = f.connect();

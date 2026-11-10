@@ -121,6 +121,11 @@ including while a renewal attempt is backing off. Replacing the connection
 retires only the exact previous registration. Signed release reclaims the slot;
 a delayed release cannot remove a different reservation incarnation.
 
+After a desktop restart loses its volatile capability, the enrolled host can
+pay fresh work to reclaim its existing slot. Reclaim rotates the reservation
+identity and credential without allocating a second slot, so a delayed release
+from the previous desktop owner cannot remove the replacement.
+
 Primary and warm-standby registrations consume one paid slot each at their own
 relay. Existing standby capacity permits immediate recovery. New capacity on a
 different node requires its own work; proofs cannot be transferred across nodes.

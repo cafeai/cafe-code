@@ -25,6 +25,7 @@ import { canonicalBytes } from "@cafecode/relay/protocol";
 import { createInvitationUrl } from "@cafecode/relay/invitation";
 import { connectNative } from "@cafecode/relay/nativeWire";
 import { RelayHost } from "@cafecode/relay/host";
+import { NativeHostWorkClient } from "@cafecode/relay/nativeHostWork";
 import { RelayError } from "@cafecode/relay/errors";
 import { epochNow, Lifetime } from "@cafecode/relay/lifetime";
 import { serveRelayedHttp } from "@cafecode/relay/http";
@@ -42,7 +43,8 @@ const localLookup: LookupFunction = (_host, options, callback) => {
 };
 
 async function fixture(test: TestContext, native: "chromium" | "electron") {
-  const lifetime = new Lifetime();
+  const lifetime = new Lifetime(),
+    work = new NativeHostWorkClient({ lookup: localLookup });
   let server: Awaited<ReturnType<typeof startRelayServer>> | undefined,
     host: RelayHost | undefined,
     vite: ViteDevServer | undefined,
@@ -79,6 +81,7 @@ async function fixture(test: TestContext, native: "chromium" | "electron") {
     await Promise.all([...closes.values()].map((close) => close()));
     await nativeClose;
     await lifetime.close();
+    await work.close();
     if (directory) await (removal ??= rm(directory, { recursive: true, force: true }));
   };
   test.onTestFinished(close);
@@ -140,6 +143,7 @@ async function fixture(test: TestContext, native: "chromium" | "electron") {
   let pairedDevice: string | undefined,
     consumed = false;
   host = new RelayHost({
+    work,
     network,
     identity: hostKey!,
     credentials: [{ nodeId, locator, token: capacity, admissionIdentity: admission! }],

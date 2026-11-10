@@ -110,7 +110,9 @@ export class HostReservations implements HostReservationAuthority {
     this.sweep();
     const current = this.reservations.get(request.locator);
     requireRelay(
-      request.reservationId ? current?.credential.id === request.reservationId : !current,
+      request.reservationId
+        ? current?.credential.id === request.reservationId
+        : !current || current.admissionPublicKey === request.admissionPublicKey,
       "BUSY",
     );
     requireRelay(current || this.reservations.size < RELAY_LIMITS.registrations, "BUSY");
@@ -124,7 +126,8 @@ export class HostReservations implements HostReservationAuthority {
       locator: request.locator,
       admissionPublicKey: request.admissionPublicKey,
       claimId: request.claimId,
-      reservationId: request.reservationId,
+      reservationId: current?.credential.id ?? null,
+      replace: !request.reservationId && !!current,
       slots: 1 as const,
       reservationMs: this.duration,
       difficulty: this.nextDifficulty(),
@@ -198,7 +201,10 @@ export class HostReservations implements HostReservationAuthority {
         "BUSY",
       );
       requireRelay(current || this.reservations.size < RELAY_LIMITS.registrations, "BUSY");
-      const credential = current?.credential ?? { id: randomOpaque(16), token: randomOpaque() };
+      const credential =
+        !challenge.replace && current
+          ? current.credential
+          : { id: randomOpaque(16), token: randomOpaque() };
       const result: HostReservation = {
         version: 1,
         networkId: this.input.networkId,
