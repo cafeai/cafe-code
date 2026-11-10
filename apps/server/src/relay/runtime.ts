@@ -83,6 +83,7 @@ export class RelayRuntime extends Context.Service<RelayRuntime, RuntimeShape>()(
 export interface RelayRuntimeIOShape {
   readonly dial: RelayDial;
   readonly measureLatency?: (node: RelayNode, lifetime: Lifetime) => Promise<number>;
+  readonly onHostStarted?: (networkId: string, serving: number) => void;
 }
 export class RelayRuntimeIO extends Context.Service<RelayRuntimeIO, RelayRuntimeIOShape>()(
   "cafecode/relay/RelayRuntimeIO",
@@ -403,7 +404,16 @@ export const makeRelayRuntime = Effect.gen(function* () {
         // runtime layer's finalizer after those services have started closing.
         yield* Effect.addFinalizer(() => Effect.promise(close));
         yield* Effect.promise(async () => {
-          await Promise.allSettled(hosts.map((entry) => entry.host.start()));
+          await Promise.allSettled(
+            hosts.map(async (entry) => {
+              await entry.host.start();
+              if (active && Option.isSome(connector))
+                connector.value.onHostStarted?.(
+                  entry.descriptor.networkId,
+                  entry.host.stats().servingNodes.length,
+                );
+            }),
+          );
         }).pipe(Effect.forkIn(runtimeScope));
       }),
   } satisfies RuntimeShape;

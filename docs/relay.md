@@ -234,7 +234,10 @@ Chromium profile, using normal public DNS/TLS, the actual deployed viewer and
 real regional discovery. It pairs and opens the synthetic project/thread,
 and exercises actual encrypted HTTP, typed RPC, attachment and branding routes.
 Provider services remain fake and no real Cafe profile is opened. The public
-test is excluded from ordinary test execution. Close its exact browser before
+test is excluded from ordinary test execution. Its readiness receipt observes
+the exact host's completed start and adopted registrations before issuing an
+invitation; scheduling startup or opening a transport is insufficient. The
+observer adds no native probes or permission authority. Close its exact browser before
 the test application's scoped backend is finalized. The listening router owns
 early relay retirement and joins the same cached close operation as the runtime
 layer, so admitted RPC requests drain before their application services retire.

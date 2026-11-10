@@ -1767,6 +1767,7 @@ const qualifyRelayRouter = (test: TestContext, compiled = false, publicNetwork =
       );
       yield* Effect.promise(() => relay!.updateNetwork(relayCanonicalBytes(network)));
     }
+    const hostStarted = Promise.withResolvers<{ networkId: string; serving: number }>();
     yield* buildAppUnderTest({
       layers: {
         serverEnvironment: {
@@ -1811,11 +1812,13 @@ const qualifyRelayRouter = (test: TestContext, compiled = false, publicNetwork =
       relayIO: {
         dial,
         ...(publicNetwork ? {} : { measureLatency: async () => 1 }),
+        onHostStarted: (networkId, serving) => hostStarted.resolve({ networkId, serving }),
       },
     });
     if (browser) yield* Effect.addFinalizer(() => Effect.promise(() => browser.close()));
-    if (!publicNetwork)
-      yield* Effect.promise(() => vi.waitFor(() => assert.equal(relay!.stats().registrations, 1)));
+    const started = yield* Effect.promise(() => hostStarted.promise);
+    assert.equal(started.networkId, network.networkId);
+    assert.isTrue(started.serving > 0);
     const owner = yield* getAuthenticatedBearerSessionToken();
     const issued = yield* HttpClient.post("/api/relay/invitations", {
       headers: { authorization: "Bearer " + owner },
