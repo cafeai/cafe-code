@@ -13,6 +13,7 @@ export async function compiledRelayViewer(
   test: TestContext,
   hostname: string,
   tls: { key: string; cert: string },
+  publicOrigin?: string,
 ) {
   let retired = false,
     server: PreviewServer | undefined,
@@ -54,16 +55,19 @@ export async function compiledRelayViewer(
       throw new Error("compiled-relay-fixture-retired");
     }
   };
-  server = await preview({
-    configFile: false,
-    root: fileURLToPath(new URL("../../../web/", import.meta.url)),
-    build: { outDir: "dist" },
-    preview: { host: "127.0.0.1", port: 0, https: tls, allowedHosts: [hostname] },
-  });
-  await check();
-  const address = server.httpServer.address();
-  if (!address || typeof address === "string") throw new Error("compiled-relay-preview-address");
-  const origin = `https://${hostname}:${address.port}`;
+  let origin = publicOrigin;
+  if (!origin) {
+    server = await preview({
+      configFile: false,
+      root: fileURLToPath(new URL("../../../web/", import.meta.url)),
+      build: { outDir: "dist" },
+      preview: { host: "127.0.0.1", port: 0, https: tls, allowedHosts: [hostname] },
+    });
+    await check();
+    const address = server.httpServer.address();
+    if (!address || typeof address === "string") throw new Error("compiled-relay-preview-address");
+    origin = `https://${hostname}:${address.port}`;
+  }
   directory = await mkdtemp(join(tmpdir(), "cafe-relay-application-"));
   await check();
   const env: Record<string, string> = {
@@ -89,7 +93,10 @@ export async function compiledRelayViewer(
   browserServer = await chromium.launchServer({
     env,
     headless: true,
-    args: [`--host-resolver-rules=MAP ${hostname} 127.0.0.1`, "--no-proxy-server"],
+    chromiumSandbox: true,
+    args: publicOrigin
+      ? ["--no-proxy-server"]
+      : [`--host-resolver-rules=MAP ${hostname} 127.0.0.1`, "--no-proxy-server"],
   });
   const child = browserServer.process();
   nativeClose = new Promise((resolve) => child.once("close", () => resolve()));

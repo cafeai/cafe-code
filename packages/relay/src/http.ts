@@ -277,6 +277,7 @@ export async function serveRelayedHttp(
     const init = {
       method: metadata.method,
       headers,
+      signal: stream.signal,
       ...(body ? { body } : {}),
       duplex: "half" as const,
     };

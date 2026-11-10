@@ -690,6 +690,8 @@ export class RelaySession {
 }
 
 export class RelayStream {
+  private readonly cancellation = new AbortController();
+  readonly signal = this.cancellation.signal;
   readonly id: number;
   readonly kind: StreamKind;
   readonly metadata: Promise<unknown>;
@@ -823,6 +825,7 @@ export class RelayStream {
     if (this.retired) return;
     this.retired = true;
     this.failed = error;
+    this.cancellation.abort();
     this.rejectMetadata(error);
     this.reader?.reject(error);
     this.reader = undefined;

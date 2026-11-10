@@ -37,7 +37,7 @@ import { readRelayPrivate, createRelayPrivate } from "./privateFiles.ts";
 import { RelayServerRequest, relayEffectSocket } from "./request.ts";
 import { RelayRequestContext } from "./requestContext.ts";
 
-const Config = Schema.Struct({
+export const RelayHostConfig = Schema.Struct({
   version: Schema.Literal(1),
   networks: Schema.Array(
     Schema.Struct({
@@ -60,7 +60,7 @@ type Handler = Effect.Effect<
   Scope.Scope | HttpServerRequest.HttpServerRequest
 >;
 interface RuntimeShape {
-  readonly start: (handler: Handler) => Effect.Effect<void>;
+  readonly start: (handler: Handler) => Effect.Effect<void, never, Scope.Scope>;
   readonly status: Effect.Effect<{
     readonly enabled: boolean;
     readonly networks: readonly { readonly networkId: string; readonly serving: number }[];
@@ -152,8 +152,8 @@ export const makeRelayRuntime = Effect.gen(function* () {
   const runtimeScope = yield* Scope.Scope;
   const connector = yield* Effect.serviceOption(RelayRuntimeIO);
   const runWith = Effect.runPromiseWith(services);
-  const run = async <A, E>(effect: Effect.Effect<A, E>): Promise<A> => {
-    const result = await runWith(Effect.result(effect));
+  const run = async <A, E>(effect: Effect.Effect<A, E>, signal?: AbortSignal): Promise<A> => {
+    const result = await runWith(Effect.result(effect), signal ? { signal } : undefined);
     if (Result.isFailure(result))
       throw result.failure instanceof RelayError ? result.failure : new RelayError("UNAVAILABLE");
     return result.success;
@@ -175,7 +175,7 @@ export const makeRelayRuntime = Effect.gen(function* () {
   });
   if (raw) {
     const parsed = yield* Effect.try({
-      try: () => readCanonical(Config, raw, 32_768),
+      try: () => readCanonical(RelayHostConfig, raw, 32_768),
       catch: () => new RelayError("PROTOCOL_ERROR"),
     });
     const seen = new Set<string>();
@@ -275,6 +275,7 @@ export const makeRelayRuntime = Effect.gen(function* () {
                   Effect.provideService(RelayRequestContext, requestContext),
                   Scope.provide(requestScope),
                 ),
+                stream.signal,
               );
             try {
               if (stream.kind === "rpc") {
@@ -292,6 +293,7 @@ export const makeRelayRuntime = Effect.gen(function* () {
                 await handle(
                   new Request("https://relay.cafecode.invalid" + open.path, {
                     headers: { authorization: "Bearer " + stream.owner.auth.bearerToken },
+                    signal: stream.signal,
                   }),
                   socket,
                 );
@@ -324,12 +326,15 @@ export const makeRelayRuntime = Effect.gen(function* () {
       });
     }
   }
-  yield* Effect.addFinalizer(() =>
-    Effect.promise(async () => {
-      active = false;
-      await Promise.allSettled(hosts.map((entry) => entry.host.close()));
-    }),
-  );
+  let closing: Promise<void> | undefined;
+  const close = () => {
+    active = false;
+    for (const entry of hosts) entry.host.retire();
+    return (closing ??= Promise.allSettled(hosts.map((entry) => entry.host.close())).then(
+      () => {},
+    ));
+  };
+  yield* Effect.addFinalizer(() => Effect.promise(close));
   const status = Effect.sync(() => ({
     enabled: hosts.length > 0,
     networks: hosts.map((entry) => ({
@@ -393,6 +398,10 @@ export const makeRelayRuntime = Effect.gen(function* () {
           Context.omit(Scope.Scope, HttpServerRequest.HttpServerRequest, RelayRequestContext),
         );
         handler = app.pipe(Effect.provide(handlerServices));
+        // The listening router owns admitted requests. Drain its relay work
+        // before its dependencies retire, rather than waiting for this lower
+        // runtime layer's finalizer after those services have started closing.
+        yield* Effect.addFinalizer(() => Effect.promise(close));
         yield* Effect.promise(async () => {
           await Promise.allSettled(hosts.map((entry) => entry.host.start()));
         }).pipe(Effect.forkIn(runtimeScope));

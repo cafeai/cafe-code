@@ -179,6 +179,71 @@ Do not roll back an accepted membership revision or delete another owner's state
 
 ## Qualification commands and limits
 
+### cafecode.sh edge deployment
+
+`ops/relay/wrangler.json` deploys the separate `cafecode-relay-edge` Worker in
+the account owning `cafecode.sh`. Its custom domains provision DNS and TLS for
+`relay.cafecode.sh` (compiled trusted viewer), `relay-uk.cafecode.sh`,
+`relay-ca.cafecode.sh`, and `relay-us-west.cafecode.sh`. The regional names
+forward only the public discovery/health paths and WebSocket upgrade to their
+fixed OVH TLS origins on port 8443. WireGuard mesh traffic remains direct and
+private. The application circuit still uses exactly one OVH relay; Cloudflare
+adds an edge transport proxy. Host latency measurements include that edge path.
+The apex website and unrelated Workers are outside this deployment.
+
+All asset requests run through the Worker first. Regional endpoints cannot
+serve viewer JavaScript. Incoming cookies, authorization and forwarded-IP
+headers are excluded from origin requests; origin cookies, redirects and
+arbitrary error bodies cannot reach the browser. Signed discovery bytes pass
+unchanged within finite request/response bounds. WebSocket handshakes have a
+bounded deadline; the successful native upgrade is passed through without
+terminating Noise. Neither Worker logging nor preview hostnames are enabled.
+
+Cloudflare and the trusted viewer publisher are additional infrastructure
+trust dependencies. Relays still cannot decrypt application content, while
+Cloudflare can see connection metadata. The native relay does not trust proxy
+IP headers: its IP limits apply conservatively to Cloudflare egress addresses.
+This can reduce fairness for users sharing an edge and does not qualify public
+capacity. Origin hostnames remain reachable for compatibility, so this is not
+complete origin shielding or a volumetric DDoS qualification.
+
+Deploy only qualified, frozen `apps/web/dist` assets and
+`apps/relay/dist/cloudflare.mjs` with the authenticated Wrangler profile and
+explicit account in that config. Never overwrite an unrelated existing custom
+domain. Publish a higher root-signed membership revision advertising the new
+regional WSS URLs, preserving node identities, keys and grants; reload the
+three exact relay units. The ordinary operator CLI deliberately refuses URL
+changes to existing nodes, so this migration needs an explicit reviewed root
+signature rather than weakening that guard. Keep the old signed revision and
+configuration receipts intact. Update the staged host enrollment's viewer
+origin to `https://relay.cafecode.sh`; an already running Cafe backend does not
+hot-adopt that configuration.
+
+For an opt-in public application check, put the private host enrollment at
+`<private-state-root>/relay/config.json`, with the same no-follow, single-link,
+0700-directory/0600-file rules as normal relay enrollment. Run:
+
+```sh
+CAFE_RELAY_PUBLIC_E2E=1 CAFE_RELAY_PUBLIC_STATE_ROOT=/absolute/private-state-root \
+  nice -n 10 corepack yarn workspace @cafeai/cafe-code test src/server.test.ts \
+  -t 'opens the public Cafe viewer' --maxWorkers=1
+```
+
+This owns an isolated test application/SQLite database and fresh sandboxed
+Chromium profile, using normal public DNS/TLS, the actual deployed viewer and
+real regional discovery. It pairs and opens the synthetic project/thread,
+and exercises actual encrypted HTTP, typed RPC, attachment and branding routes.
+Provider services remain fake and no real Cafe profile is opened. The public
+test is excluded from ordinary test execution. Close its exact browser before
+the test application's scoped backend is finalized. The listening router owns
+early relay retirement and joins the same cached close operation as the runtime
+layer, so admitted RPC requests drain before their application services retire.
+Each retired stream also aborts its exact application request Effect. Request
+scope cleanup is still joined separately, without the cancelled signal, before
+the handler releases its slot. The ordinary router test holds a real descriptor
+request, cancels that stream, observes its Effect interruption before releasing
+the test gate, and then uses typed RPC on the same healthy session.
+
 Run the focused core/native/auth tests and complete repository qualification:
 
 ```sh

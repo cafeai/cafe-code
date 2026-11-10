@@ -11,7 +11,10 @@ import {
   unopaque as relayUnopaque,
   randomOpaque as randomRelayOpaque,
 } from "@cafecode/relay/bytes";
-import { canonicalBytes as relayCanonicalBytes } from "@cafecode/relay/protocol";
+import {
+  canonicalBytes as relayCanonicalBytes,
+  readCanonical as readRelayCanonical,
+} from "@cafecode/relay/protocol";
 import { Lifetime as RelayLifetime, epochNow as relayEpochNow } from "@cafecode/relay/lifetime";
 import { connectNative as connectRelayNative } from "@cafecode/relay/nativeWire";
 import { connectViewer as connectRelayViewer } from "@cafecode/relay/client";
@@ -22,8 +25,10 @@ import {
   RelayRuntime,
   RelayRuntimeLive,
   RelayRuntimeIO,
+  RelayHostConfig,
   type RelayRuntimeIOShape,
 } from "./relay/runtime.ts";
+import { readRelayPrivate } from "./relay/privateFiles.ts";
 import { readProviderMcpCredentialIssuer } from "./auth/ProviderMcpCredentialBroker.ts";
 import { installGlideSessionRuntime } from "./glide/sessionRuntime.ts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
@@ -1618,7 +1623,7 @@ const getWsServerUrl = (
     );
   });
 
-const qualifyRelayRouter = (test: TestContext, compiled = false) => {
+const qualifyRelayRouter = (test: TestContext, compiled = false, publicNetwork = false) => {
   let phase = "setup";
   test.onTestFailed(() => {
     process.stdout.write("relay-router-phase: " + phase + "\n");
@@ -1640,100 +1645,135 @@ const qualifyRelayRouter = (test: TestContext, compiled = false) => {
   });
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
+    const publicConfig = publicNetwork
+      ? yield* Effect.promise(async () => {
+          const bytes = await readRelayPrivate(
+            process.env.CAFE_RELAY_PUBLIC_STATE_ROOT!,
+            "config.json",
+            32_768,
+          );
+          if (!bytes) throw new Error("public-relay-configuration-required");
+          return readRelayCanonical(RelayHostConfig, bytes, 32_768);
+        })
+      : undefined;
+    const publicEntry = publicConfig?.networks[0];
     const tlsRoot = new URL("../../desktop/src/settings/__fixtures__/remote-tls/", import.meta.url);
     const tls = {
       key: yield* fs.readFileString(
-        compiled
+        compiled && !publicNetwork
           ? process.env.CAFE_RELAY_TLS_KEY!
           : fileURLToPath(new URL("test-only-key.pem", tlsRoot)),
       ),
       cert: yield* fs.readFileString(
-        compiled
+        compiled && !publicNetwork
           ? process.env.CAFE_RELAY_TLS_CERT!
           : fileURLToPath(new URL("test-only-cert.pem", tlsRoot)),
       ),
     };
-    const hostname = compiled ? "vps-692e150f.vps.ovh.net" : "127.0.0.1";
+    const hostname = publicEntry
+      ? new URL(publicEntry.viewerOrigin).hostname
+      : compiled
+        ? "vps-692e150f.vps.ovh.net"
+        : "127.0.0.1";
     const browser = compiled
       ? yield* Effect.promise(async () => {
           const { compiledRelayViewer } = await import("./relay/browserFixture.e2e.ts");
-          return compiledRelayViewer(test, hostname, tls);
+          return compiledRelayViewer(test, hostname, tls, publicEntry?.viewerOrigin);
         })
       : undefined;
     const viewerOrigin = browser?.origin ?? "https://trusted-viewer.example";
     const descriptor = compiled
       ? { ...testEnvironmentDescriptor, serverVersion: serverPackage.version }
       : testEnvironmentDescriptor;
+    let holdDescriptor = false;
+    const descriptorEntered = yield* Deferred.make<void>();
+    const descriptorRelease = yield* Deferred.make<void>();
+    const descriptorInterrupted = yield* Deferred.make<void>();
+    const heldDescriptor = Effect.gen(function* () {
+      yield* Deferred.succeed(descriptorEntered, undefined);
+      yield* Deferred.await(descriptorRelease);
+      return descriptor;
+    }).pipe(Effect.onInterrupt(() => Deferred.succeed(descriptorInterrupted, undefined)));
     let clientSettings = DEFAULT_CLIENT_SETTINGS;
     const dial: RelayRuntimeIOShape["dial"] = (member, resources) =>
       connectRelayNative(
         member.url,
         resources,
-        compiled
-          ? {
-              lookup: (host, options, callback) => {
-                if (host !== hostname) {
-                  callback(new Error("fixture-host-refused"), "", 4);
-                  return;
-                }
-                if (options.all) callback(null, [{ address: "127.0.0.1", family: 4 }]);
-                else callback(null, "127.0.0.1", 4);
-              },
-            }
-          : { ca: tls.cert },
+        publicNetwork
+          ? undefined
+          : compiled
+            ? {
+                lookup: (host, options, callback) => {
+                  if (host !== hostname) {
+                    callback(new Error("fixture-host-refused"), "", 4);
+                    return;
+                  }
+                  if (options.all) callback(null, [{ address: "127.0.0.1", family: 4 }]);
+                  else callback(null, "127.0.0.1", 4);
+                },
+              }
+            : { ca: tls.cert },
       );
     const [root, node, admission, device, deviceAdmission] = yield* Effect.promise(() =>
       Promise.all(Array.from({ length: 5 }, () => createRelayIdentity())),
     );
     const nodeId = deriveRelayIdentityId("node", node!.publicKey),
-      locator = randomRelayOpaque(),
+      locator = publicEntry?.locator ?? randomRelayOpaque(),
       capacity = randomRelayOpaque();
-    let network = yield* Effect.promise(() =>
-      signRelayNetwork({
-        root: root!,
-        revision: 1,
-        expiresAt: relayEpochNow() + 3_600_000,
-        nodes: [{ id: nodeId, publicKey: node!.publicKey, url: `wss://${hostname}:1/v1/relay` }],
-      }),
-    );
-    relay = yield* Effect.promise(() =>
-      startRelayServer({
-        network,
-        nodeId,
-        host: "127.0.0.1",
-        port: 0,
-        tls,
-        grants: [
-          {
-            locator,
-            admissionPublicKey: admission!.publicKey,
-            tokenDigest: relayOpaque(relaySha256(relayUnopaque(capacity, 32))),
-          },
-        ],
-      }),
-    );
-    if (!lifetime.active) {
-      yield* Effect.promise(() => relay!.close());
-      return;
+    let network =
+      publicEntry?.descriptor ??
+      (yield* Effect.promise(() =>
+        signRelayNetwork({
+          root: root!,
+          revision: 1,
+          expiresAt: relayEpochNow() + 3_600_000,
+          nodes: [{ id: nodeId, publicKey: node!.publicKey, url: `wss://${hostname}:1/v1/relay` }],
+        }),
+      ));
+    if (!publicNetwork) {
+      relay = yield* Effect.promise(() =>
+        startRelayServer({
+          network,
+          nodeId,
+          host: "127.0.0.1",
+          port: 0,
+          tls,
+          grants: [
+            {
+              locator,
+              admissionPublicKey: admission!.publicKey,
+              tokenDigest: relayOpaque(relaySha256(relayUnopaque(capacity, 32))),
+            },
+          ],
+        }),
+      );
+      if (!lifetime.active) {
+        yield* Effect.promise(() => relay!.close());
+        return;
+      }
+      network = yield* Effect.promise(() =>
+        signRelayNetwork({
+          root: root!,
+          revision: 2,
+          expiresAt: relayEpochNow() + 3_600_000,
+          nodes: [
+            {
+              id: nodeId,
+              publicKey: node!.publicKey,
+              url: `wss://${hostname}:${relay!.port}/v1/relay`,
+            },
+          ],
+        }),
+      );
+      yield* Effect.promise(() => relay!.updateNetwork(relayCanonicalBytes(network)));
     }
-    network = yield* Effect.promise(() =>
-      signRelayNetwork({
-        root: root!,
-        revision: 2,
-        expiresAt: relayEpochNow() + 3_600_000,
-        nodes: [
-          {
-            id: nodeId,
-            publicKey: node!.publicKey,
-            url: `wss://${hostname}:${relay!.port}/v1/relay`,
-          },
-        ],
-      }),
-    );
-    yield* Effect.promise(() => relay!.updateNetwork(relayCanonicalBytes(network)));
     yield* buildAppUnderTest({
       layers: {
-        serverEnvironment: { getDescriptor: Effect.succeed(descriptor) },
+        serverEnvironment: {
+          getDescriptor: Effect.suspend(() =>
+            holdDescriptor ? heldDescriptor : Effect.succeed(descriptor),
+          ),
+        },
         ...(compiled
           ? {
               clientSettings: {
@@ -1754,7 +1794,7 @@ const qualifyRelayRouter = (test: TestContext, compiled = false) => {
       relayConfig: relayCanonicalBytes({
         version: 1,
         networks: [
-          {
+          publicEntry ?? {
             descriptor: network,
             viewerOrigin,
             locator,
@@ -1770,11 +1810,12 @@ const qualifyRelayRouter = (test: TestContext, compiled = false) => {
       }),
       relayIO: {
         dial,
-        measureLatency: async () => 1,
+        ...(publicNetwork ? {} : { measureLatency: async () => 1 }),
       },
     });
     if (browser) yield* Effect.addFinalizer(() => Effect.promise(() => browser.close()));
-    yield* Effect.promise(() => vi.waitFor(() => assert.equal(relay!.stats().registrations, 1)));
+    if (!publicNetwork)
+      yield* Effect.promise(() => vi.waitFor(() => assert.equal(relay!.stats().registrations, 1)));
     const owner = yield* getAuthenticatedBearerSessionToken();
     const issued = yield* HttpClient.post("/api/relay/invitations", {
       headers: { authorization: "Bearer " + owner },
@@ -1792,11 +1833,11 @@ const qualifyRelayRouter = (test: TestContext, compiled = false) => {
           hostPublicKey: invitation.hostPublicKey,
           environmentId: invitation.environmentId,
           locator,
-          preferredNodeId: nodeId,
+          preferredNodeId: invitation.nodeId,
           deviceIdentity: device!,
           tickets: [
             {
-              nodeId,
+              nodeId: invitation.nodeId,
               registrationId: invitation.registrationId,
               token: invitation.inviteTicket,
               expiresAt: invitation.expiresAt,
@@ -1808,10 +1849,16 @@ const qualifyRelayRouter = (test: TestContext, compiled = false) => {
         dial,
         // Discovery replication/native HTTP have their own tests. This seam keeps
         // this qualification on the real application auth/router/socket adapter.
-        fetcher: async () =>
-          new Response(
-            relayCanonicalBytes(relay!.broker.directory.lookup(locator, relayEpochNow())).slice(),
-          ),
+        ...(publicNetwork
+          ? {}
+          : {
+              fetcher: async () =>
+                new Response(
+                  relayCanonicalBytes(
+                    relay!.broker.directory.lookup(locator, relayEpochNow()),
+                  ).slice(),
+                ),
+            }),
       }),
     );
     if (!lifetime.active) {
@@ -1877,6 +1924,35 @@ const qualifyRelayRouter = (test: TestContext, compiled = false) => {
         fetchRelayHttp(session, "/api/auth/bootstrap/bearer", { method: "POST", body: "{}" }),
       ).rejects.toMatchObject({ code: "INCOMPLETE" });
     });
+    phase = "request-cancellation";
+    const cancellation = new AbortController();
+    let cancelledRequest: Promise<void> | undefined;
+    yield* Effect.gen(function* () {
+      holdDescriptor = true;
+      cancelledRequest = fetchRelayHttp(session, "/.well-known/cafe-code/environment", {
+        signal: cancellation.signal,
+      }).then(
+        () => {
+          throw new Error("held-relay-request-completed");
+        },
+        () => {},
+      );
+      yield* Deferred.await(descriptorEntered);
+      cancellation.abort();
+      yield* Deferred.await(descriptorInterrupted);
+      yield* Effect.promise(() => cancelledRequest!);
+      assert.isTrue(session.active);
+    }).pipe(
+      Effect.ensuring(
+        Effect.gen(function* () {
+          holdDescriptor = false;
+          cancellation.abort();
+          yield* Deferred.succeed(descriptorRelease, undefined);
+          const pending = cancelledRequest;
+          if (pending) yield* Effect.promise(() => pending);
+        }),
+      ),
+    );
     phase = "rpc";
     const rpc = yield* Effect.promise(() =>
       session.open("rpc", { method: "GET", path: "/ws", headers: [] }),
@@ -1922,6 +1998,11 @@ it.live(
 it.live.runIf(process.env.CAFE_RELAY_APP_E2E === "1")(
   "opens the compiled Cafe application through real pairing and encrypted HTTP/RPC",
   (test) => qualifyRelayRouter(test, true),
+  60_000,
+);
+it.live.runIf(process.env.CAFE_RELAY_PUBLIC_E2E === "1")(
+  "opens the public Cafe viewer through deployed encrypted relays with isolated application auth",
+  (test) => qualifyRelayRouter(test, true, true),
   60_000,
 );
 

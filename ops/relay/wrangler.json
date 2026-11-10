@@ -1,0 +1,22 @@
+{
+  "name": "cafecode-relay-edge",
+  "account_id": "e6b5ee9a1dc91f1eec4659442cd2dce9",
+  "main": "../../apps/relay/dist/cloudflare.mjs",
+  "compatibility_date": "2026-11-09",
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": { "enabled": false },
+  "assets": {
+    "directory": "../../apps/web/dist",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "html_handling": "none",
+    "not_found_handling": "none"
+  },
+  "routes": [
+    { "pattern": "relay.cafecode.sh", "custom_domain": true },
+    { "pattern": "relay-uk.cafecode.sh", "custom_domain": true },
+    { "pattern": "relay-ca.cafecode.sh", "custom_domain": true },
+    { "pattern": "relay-us-west.cafecode.sh", "custom_domain": true }
+  ]
+}

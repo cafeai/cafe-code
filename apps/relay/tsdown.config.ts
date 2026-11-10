@@ -1,7 +1,7 @@
 import { defineConfig } from "tsdown";
 
 export default defineConfig({
-  entry: ["src/main.ts"],
+  entry: ["src/main.ts", "src/cloudflare.ts"],
   outDir: "dist",
   platform: "node",
   format: "esm",
