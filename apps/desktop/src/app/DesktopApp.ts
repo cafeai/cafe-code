@@ -322,6 +322,17 @@ export const ensureProviderDaemonWithStartupRecovery = Effect.gen(function* () {
       : uiText(
           "Retry connection leaves running work alone. A verified startup restart is not available for this daemon. Stop it from its owning Cafe Code instance, then retry the connection.",
         );
+    // Fixed phases and booleans explain missing controls without recording a
+    // recovery ID, daemon identity, private path, credential or received error.
+    yield* logStartupWarning("provider daemon startup recovery dialog", {
+      phase: recoveryError?.phase ?? "unclassified",
+      typedRecoveryError: recoveryError !== undefined,
+      causeReasonCount: Math.min(result.cause.reasons.length, 16),
+      hasRecoveryId: recoveryId !== undefined,
+      supportsRestart: manager.restartForStartup !== undefined,
+      canRestart,
+      restartFailed,
+    });
     const response = yield* dialog.showMessageBox({
       type: "warning",
       title: uiText("Provider runtime could not start"),
@@ -338,6 +349,20 @@ export const ensureProviderDaemonWithStartupRecovery = Effect.gen(function* () {
       defaultId: 0,
       cancelId: 0,
       noLink: true,
+    });
+    // Map the native response to a finite label only. Keep the existing Quit
+    // fence after this logging await and before any Retry/Restart operation.
+    yield* logStartupInfo("provider daemon startup recovery decision", {
+      decision:
+        response.response === 1
+          ? "retry"
+          : response.response === 2 && canRestart
+            ? "restart"
+            : "cancel",
+      hasRecoveryId: recoveryId !== undefined,
+      supportsRestart: manager.restartForStartup !== undefined,
+      canRestart,
+      restartFailed,
     });
     // Native quit can retire startup while a modal dialog is open. A late
     // response must not restart provider work behind the closing application.

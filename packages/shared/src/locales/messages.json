@@ -1661,7 +1661,7 @@
   },
   "Cafe Code could not reconnect to its provider daemon.": {
     "message": "Cafe Code could not reconnect to its provider daemon.",
-    "locations": ["apps/desktop/src/app/DesktopApp.ts:330"]
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:341"]
   },
   "Cafe Code could not update its private credential store.": {
     "message": "Cafe Code could not update its private credential store.",
@@ -1845,8 +1845,8 @@
   "Cancel": {
     "message": "Cancel",
     "locations": [
-      "apps/desktop/src/app/DesktopApp.ts:336",
-      "apps/desktop/src/app/DesktopApp.ts:337",
+      "apps/desktop/src/app/DesktopApp.ts:347",
+      "apps/desktop/src/app/DesktopApp.ts:348",
       "apps/desktop/src/settings/DesktopRemoteCertificates.ts:170",
       "apps/desktop/src/updates/DesktopUpdates.ts:448",
       "apps/web/src/components/ProjectScriptsControl.tsx:508",
@@ -9574,7 +9574,7 @@
   },
   "Provider runtime could not start": {
     "message": "Provider runtime could not start",
-    "locations": ["apps/desktop/src/app/DesktopApp.ts:327"]
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:338"]
   },
   "Provider runtime ingestion": {
     "message": "Provider runtime ingestion",
@@ -10528,7 +10528,7 @@
   },
   "Restart daemon": {
     "message": "Restart daemon",
-    "locations": ["apps/desktop/src/app/DesktopApp.ts:336"]
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:347"]
   },
   "Restart provider": {
     "message": "Restart provider",
@@ -10605,8 +10605,8 @@
   "Retry connection": {
     "message": "Retry connection",
     "locations": [
-      "apps/desktop/src/app/DesktopApp.ts:336",
-      "apps/desktop/src/app/DesktopApp.ts:337"
+      "apps/desktop/src/app/DesktopApp.ts:347",
+      "apps/desktop/src/app/DesktopApp.ts:348"
     ]
   },
   "Retry connection leaves running work alone. A verified startup restart is not available for this daemon. Stop it from its owning Cafe Code instance, then retry the connection.": {
@@ -12898,7 +12898,7 @@
   },
   "The provider daemon could not be restarted.": {
     "message": "The provider daemon could not be restarted.",
-    "locations": ["apps/desktop/src/app/DesktopApp.ts:329"]
+    "locations": ["apps/desktop/src/app/DesktopApp.ts:340"]
   },
   "The provider declined this request under its usage policy. Try rephrasing it.": {
     "message": "The provider declined this request under its usage policy. Try rephrasing it.",

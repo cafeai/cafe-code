@@ -907,7 +907,7 @@ describe("DesktopProviderDaemonManager", () => {
     );
 
   if (process.platform !== "win32")
-    for (const decision of ["cancel", "unknown-force-ack"] as const) {
+    for (const decision of ["cancel", "unknown-force-ack", "namespace-refusal"] as const) {
       it.live(
         `retains exact startup consent and never replays native force after ${decision}`,
         () =>
@@ -936,6 +936,7 @@ describe("DesktopProviderDaemonManager", () => {
             yield* fileSystem.writeFileString(credentialPath, TEST_TOKEN);
             yield* fileSystem.chmod(credentialPath, 0o600);
             let posts = 0,
+              healthRequests = 0,
               captures = 0,
               forces = 0,
               spawns = 0;
@@ -945,8 +946,11 @@ describe("DesktopProviderDaemonManager", () => {
               baseDir,
               oldBuild,
               (pathname) => {
+                if (pathname === PROVIDER_DAEMON_HEALTH_PATH) healthRequests += 1;
                 if (pathname === PROVIDER_DAEMON_RETIRE_PATH) posts += 1;
-                return false;
+                // The third case reaches the real pending owner through an
+                // inconclusive health response, before any retirement POST.
+                return decision === "namespace-refusal" && pathname === PROVIDER_DAEMON_HEALTH_PATH;
               },
               "matching",
               { transport: "ipc", retirementProtocol: 1, startedAt: "2026-10-29T01:00:00.000Z" },
@@ -1016,21 +1020,71 @@ describe("DesktopProviderDaemonManager", () => {
               const manager = yield* DesktopProviderDaemonManager.DesktopProviderDaemonManager;
               const refused = yield* manager.ensureRunning.pipe(Effect.exit);
               const recoveryId = startupRecoveryId(refused);
+              if (decision === "namespace-refusal" && Exit.isFailure(refused)) {
+                const error = Cause.squash(refused.cause);
+                if (
+                  !(
+                    error instanceof
+                    DesktopProviderDaemonManager.ProviderDaemonStartupRecoveryRequiredError
+                  )
+                )
+                  throw new Error("Expected the exact health-refused startup owner");
+                assert.equal(error.phase, "health");
+                assert.equal(healthRequests, 2);
+              }
               assert.equal(captures, 1);
               assert.equal(
                 forces,
                 0,
                 "capturing an owner before the dialog is never consent to stop it",
               );
-              assert.equal(posts, 1);
-              assert.isTrue(
-                Exit.isFailure(
-                  yield* manager.restartForStartup!("foreign-recovery-owner").pipe(Effect.exit),
-                ),
+              const expectedPosts = decision === "namespace-refusal" ? 0 : 1;
+              assert.equal(posts, expectedPosts);
+              const foreign = yield* manager.restartForStartup!("foreign-recovery-owner").pipe(
+                Effect.exit,
               );
+              assert.isTrue(Exit.isFailure(foreign));
+              if (Exit.isFailure(foreign)) {
+                const error = Cause.squash(foreign.cause);
+                if (
+                  !(
+                    error instanceof
+                    DesktopProviderDaemonManager.ProviderDaemonStartupRecoveryRequiredError
+                  )
+                )
+                  throw new Error("Expected a typed foreign-owner refusal");
+                assert.equal(error.phase, "namespace");
+                assert.isUndefined(error.recoveryId);
+              }
               assert.equal(forces, 0);
-              if (decision === "cancel") {
-                const cancellation = yield* manager.cancelStartupRecovery!(recoveryId).pipe(
+              let cancelRecoveryId = recoveryId;
+              if (decision === "namespace-refusal") {
+                // Change only this retained fixture's private-file metadata.
+                // The same pending object and native controller still exist,
+                // but the real captured-namespace verifier must refuse control.
+                yield* fileSystem.chmod(credentialPath, 0o400);
+                const refused = yield* manager.restartForStartup!(recoveryId).pipe(Effect.exit);
+                assert.isTrue(Exit.isFailure(refused));
+                if (Exit.isFailure(refused)) {
+                  const error = Cause.squash(refused.cause);
+                  if (
+                    !(
+                      error instanceof
+                      DesktopProviderDaemonManager.ProviderDaemonStartupRecoveryRequiredError
+                    )
+                  )
+                    throw new Error("Expected a typed current-owner verification refusal");
+                  assert.equal(error.phase, "namespace");
+                  assert.equal(error.recoveryId, recoveryId);
+                }
+                cancelRecoveryId = startupRecoveryId(refused);
+                assert.equal(posts, 0);
+                assert.equal(forces, 0);
+                assert.equal(spawns, 0);
+                assert.isFalse(nativeControllerClosed);
+              }
+              if (decision !== "unknown-force-ack") {
+                const cancellation = yield* manager.cancelStartupRecovery!(cancelRecoveryId).pipe(
                   Effect.forkScoped,
                 );
                 yield* Deferred.await(nativeCloseEntered);
@@ -1049,14 +1103,24 @@ describe("DesktopProviderDaemonManager", () => {
               }
               // Neither a cancelled owner nor an uncertain destructive ACK may
               // be replayed by another confirmation or an ordinary Retry.
-              assert.isTrue(
-                Exit.isFailure(yield* manager.restartForStartup!(recoveryId).pipe(Effect.exit)),
-              );
+              const stale = yield* manager.restartForStartup!(recoveryId).pipe(Effect.exit);
+              assert.isTrue(Exit.isFailure(stale));
+              if (decision === "namespace-refusal" && Exit.isFailure(stale)) {
+                const error = Cause.squash(stale.cause);
+                if (
+                  !(
+                    error instanceof
+                    DesktopProviderDaemonManager.ProviderDaemonStartupRecoveryRequiredError
+                  )
+                )
+                  throw new Error("Expected a typed retired-owner refusal");
+                assert.isUndefined(error.recoveryId);
+              }
               if (decision === "unknown-force-ack")
                 assert.isTrue(Exit.isFailure(yield* manager.ensureRunning.pipe(Effect.exit)));
-              assert.equal(forces, decision === "cancel" ? 0 : 1);
+              assert.equal(forces, decision === "unknown-force-ack" ? 1 : 0);
               assert.equal(captures, 1);
-              assert.equal(posts, 1);
+              assert.equal(posts, expectedPosts);
               assert.equal(spawns, 0);
               assert.isTrue(signals.mock.calls.every(([, signal]) => signal === 0));
               assert.equal(yield* fileSystem.readFileString(markerPath), marker);

@@ -1629,8 +1629,21 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   ): Effect.Effect<ProviderDaemonClientConfig> =>
     Effect.suspend(() => {
       const pending = pendingStartupRecovery;
-      const refusal = () =>
-        Effect.die(new ProviderDaemonStartupRecoveryRequiredError({ phase: "namespace" }));
+      // The dialog intent is not permission to control a daemon. Keep it only
+      // while this exact live pending owner still matches the confirmed ID; all
+      // namespace, credential and native-control guards below remain mandatory.
+      // Every mapped asynchronous failure calls this factory again after its
+      // await, so a replaced or missing owner never inherits the old dialog ID.
+      const startupRecoveryError = (phase: ProviderDaemonStartupRecoveryPhase) =>
+        new ProviderDaemonStartupRecoveryRequiredError({
+          phase,
+          ...(pending !== undefined &&
+          pendingStartupRecovery === pending &&
+          pending.id === expectedRecoveryId
+            ? { recoveryId: pending.id }
+            : {}),
+        });
+      const refusal = () => Effect.die(startupRecoveryError("namespace"));
       if (
         pending === undefined ||
         pending.id !== expectedRecoveryId ||
@@ -1659,7 +1672,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
               endpoint = pending.endpoint;
             const verify = Effect.tryPromise({
               try: (signal) => verifyProviderDaemonStartupRetirementEvidence(evidence, signal),
-              catch: () => new ProviderDaemonStartupRecoveryRequiredError({ phase: "namespace" }),
+              catch: () => startupRecoveryError("namespace"),
             }).pipe(Effect.orDie);
             yield* verify;
             if (pendingStartupRecovery !== pending) return yield* refusal();
@@ -1675,12 +1688,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
               )
                 return yield* refusal();
               if (!(yield* stopOwnedProviderDaemonChild(pending.ownedChild)))
-                return yield* Effect.die(
-                  new ProviderDaemonStartupRecoveryRequiredError({
-                    phase: "owned-process",
-                    recoveryId: pending.id,
-                  }),
-                );
+                return yield* Effect.die(startupRecoveryError("owned-process"));
               // Native exit is confirmed before the existing directly-owned cleanup.
               // Revalidate the old private files after that await, not just at click.
               yield* verify;
@@ -1701,11 +1709,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
                 reconcileProviderDaemonStartupRetirement(evidence, signal, {
                   removeCapturedSocketAfterNativeExit: pending.nativeForceAttempted,
                 }),
-              catch: () =>
-                new ProviderDaemonStartupRecoveryRequiredError({
-                  phase: "native-exit",
-                  recoveryId: pending.id,
-                }),
+              catch: () => startupRecoveryError("native-exit"),
             }).pipe(Effect.orDie);
             const forceNative = Effect.gen(function* () {
               const controller = pending.nativeController;
@@ -1714,9 +1718,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
                   ? "native-exit"
                   : (pending.nativeFailurePhase ?? "native-control");
                 yield* logWarning("provider daemon native startup stop unavailable", { phase });
-                return yield* Effect.die(
-                  new ProviderDaemonStartupRecoveryRequiredError({ phase, recoveryId: pending.id }),
-                );
+                return yield* Effect.die(startupRecoveryError(phase));
               }
               // This action exists only inside the exact native dialog choice.
               // Reserve before ANY await; cancellation/unknown ACK cannot replay
@@ -1732,14 +1734,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
                   const phase =
                     error instanceof ProviderDaemonNativeControlError ? error.phase : "native-exit";
                   return logWarning("provider daemon native startup stop failed", { phase }).pipe(
-                    Effect.andThen(
-                      Effect.die(
-                        new ProviderDaemonStartupRecoveryRequiredError({
-                          phase,
-                          recoveryId: pending.id,
-                        }),
-                      ),
-                    ),
+                    Effect.andThen(Effect.suspend(() => Effect.die(startupRecoveryError(phase)))),
                   );
                 }),
                 Effect.ensuring(closePendingNative(pending)),
@@ -1769,23 +1764,14 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
                 // old endpoint for a fresh advertised cooperative-retirement receipt.
                 const health = yield* Effect.tryPromise({
                   try: (signal) => fetchProviderDaemonHealth(endpoint, signal),
-                  catch: () =>
-                    new ProviderDaemonStartupRecoveryRequiredError({
-                      phase: "health",
-                      recoveryId: pending.id,
-                    }),
+                  catch: () => startupRecoveryError("health"),
                 }).pipe(Effect.orDie);
                 yield* verify;
                 if (pendingStartupRecovery !== pending || !matchesCurrentProfile(health))
                   return yield* refusal();
                 const request = providerDaemonRetirementRequest(pending.marker, health);
                 if (request === undefined)
-                  return yield* Effect.die(
-                    new ProviderDaemonStartupRecoveryRequiredError({
-                      phase: "compatibility",
-                      recoveryId: pending.id,
-                    }),
-                  );
+                  return yield* Effect.die(startupRecoveryError("compatibility"));
                 pending.health = health;
                 // This nonce is reserved once before any log/HTTP await. Failure never
                 // clears it or allows the next explicit action to POST another nonce.
@@ -1805,11 +1791,7 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
                       decryptCredential: (bytes) =>
                         Effect.runPromise(safeStorage.decryptString(bytes)),
                     }),
-                  catch: () =>
-                    new ProviderDaemonStartupRecoveryRequiredError({
-                      phase: "compatibility",
-                      recoveryId: pending.id,
-                    }),
+                  catch: () => startupRecoveryError("compatibility"),
                 }).pipe(Effect.orDie);
               }).pipe(
                 Effect.catchCause((cause) =>

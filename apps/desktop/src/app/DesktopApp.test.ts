@@ -668,6 +668,66 @@ describe("DesktopApp provider daemon startup recovery", () => {
     );
   }
 
+  for (const owner of ["current", "foreign"] as const) {
+    it.effect(
+      `routes Cancel after a failed ${owner}-owner Restart without retaining a foreign recovery identity`,
+      () =>
+        Effect.gen(function* () {
+          let dialogs = 0;
+          const fixture = yield* startupRecoveryFixture({
+            ensureRunning: recoveryRequired(),
+            // This is a received manager result at the dialog boundary, not
+            // invented namespace/native proof. The real manager fixture owns
+            // preservation of a current ID; this boundary owns its UI routing.
+            restartForStartup: Effect.die(
+              new DesktopProviderDaemonManager.ProviderDaemonStartupRecoveryRequiredError({
+                phase: "namespace",
+                ...(owner === "current" ? { recoveryId: "synthetic-startup-owner" } : {}),
+              }),
+            ),
+            showMessageBox: () =>
+              Effect.sync(() => ({ response: dialogs++ === 0 ? 2 : 0, checkboxChecked: false })),
+          });
+          const result = yield* runDesktopStartupUntilShutdown({
+            startup: fixture.run,
+            awaitShutdown: fixture.shutdown.awaitRequest.pipe(
+              Effect.tap(() => Effect.sync(() => fixture.actions.push("shutdown-observed"))),
+            ),
+          });
+          assert.equal(result, "shutdown");
+          assert.equal(fixture.dialogs.length, 2);
+          assert.deepStrictEqual(fixture.dialogs[0]?.buttons, [
+            "Cancel",
+            "Retry connection",
+            "Restart daemon",
+          ]);
+          assert.deepStrictEqual(
+            fixture.dialogs[1]?.buttons,
+            owner === "current"
+              ? ["Cancel", "Retry connection", "Restart daemon"]
+              : ["Cancel", "Retry connection"],
+          );
+          assert.equal(fixture.dialogs[1]?.message, "The provider daemon could not be restarted.");
+          assert.equal(fixture.dialogs[1]?.defaultId, 0);
+          assert.equal(fixture.dialogs[1]?.cancelId, 0);
+          // A current refusal retains the exact cancellation callback. An
+          // ID-less foreign refusal must clear the old dialog identity rather
+          // than fall back to it just to keep the Restart button available.
+          assert.deepStrictEqual(fixture.actions, [
+            "ensure",
+            "close-startup",
+            "dialog",
+            "restart",
+            "dialog",
+            ...(owner === "current" ? ["cancel-native"] : []),
+            "shutdown-observed",
+            "quit",
+          ]);
+          assert.equal(yield* Ref.get(fixture.quitting), true);
+        }).pipe(Effect.provide(DesktopLifecycle.layerShutdown)),
+    );
+  }
+
   for (const failure of [
     {
       name: "an unrelated exception with matching refusal prose",

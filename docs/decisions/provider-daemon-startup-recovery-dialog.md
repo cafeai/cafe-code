@@ -2,9 +2,9 @@
 
 Decision status: Accepted within the user-requested startup recovery dialog
 Implementation status: Implemented in source; rebuilt application adoption required
-Verification status: Regression tests added but intentionally not executed at the user's request
+Verification status: Synthetic manager and dialog regression coverage; native qualification remains separate
 Created: 2026-11-08 15:50:36 JST (UTC+0900)
-Last updated: 2026-11-08 15:50:36 JST (UTC+0900)
+Last updated: 2026-11-10 11:39:32 JST (UTC+0900)
 Decision authority: The user requested an explicit daemon restart dialog when
 startup reports an inconclusive compatibility observation, a rebuilt local
 bundle, and tests to run later.
@@ -64,6 +64,23 @@ unknown acknowledgement successful or authorize another destructive request.
 Ordinary automatic retirement still requires its matching acknowledgement and
 all existing exit/namespace checks.
 
+## Retaining a current recovery after verification refuses
+
+A failed Restart can still belong to the same pending startup owner. Its typed
+failure retains the manager-issued recovery ID only while the exact pending
+object and confirmed ID remain current, including when an asynchronous
+verification fails. The dialog can then route another explicit recovery choice
+or Cancel to that exact owner. Missing, foreign and retired owners do not inherit
+an earlier ID. This presentation binding never bypasses private-file, profile,
+native identity, exit or consumed-request checks and never permits another
+destructive request after an unknown acknowledgement.
+
+Startup diagnostics record only fixed phase/choice labels, capability booleans
+and a cause count capped at 16. They distinguish an unavailable restart method,
+a missing typed recovery ID and a failed confirmation without recording IDs,
+credentials, private paths or received error contents. The existing Quit check
+still runs after the modal and its diagnostic await, before any recovery action.
+
 ## Limits and verification boundary
 
 Restart is an ownership-checked recovery operation. A completely unresponsive
@@ -76,6 +93,6 @@ global exception handler or native permission change is introduced.
 Regression coverage is owned by the existing desktop startup, daemon-manager
 and native retirement test files. It protects consent, cancellation, retry
 separation, stale-owner rejection, private namespace identity, native absence
-and unknown-request non-replay. These tests were added for later execution;
-neither source review nor a successful bundle build is a test pass, live
+and unknown-request non-replay. Neither source review nor a successful bundle
+build is a test pass, live
 daemon restart, installed-artifact qualification or provider-adoption claim.
