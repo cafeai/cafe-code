@@ -131,6 +131,30 @@ describe("primary Stop during provider opening or recovery", () => {
       showSend: false,
     });
   });
+  it("keeps background Stop beside a draft without making the terminal root running", () => {
+    const background = {
+      ...opening,
+      connectingStopAvailable: false,
+      backgroundStopAvailable: true,
+    };
+    expect(primaryStopState(background)).toEqual({
+      visible: true,
+      disabled: false,
+      showSend: true,
+    });
+    expect(primaryStopState({ ...background, hasSendableContent: false })).toEqual({
+      visible: true,
+      disabled: false,
+      showSend: false,
+    });
+    expect(primaryStopState({ ...background, isQueueEditing: true })).toEqual({
+      visible: true,
+      disabled: false,
+      showSend: false,
+    });
+    expect(primaryStopState({ ...background, stopInFlight: true }).disabled).toBe(true);
+    expect(primaryStopState({ ...background, isEnvironmentUnavailable: true }).disabled).toBe(true);
+  });
   it("preserves ordinary active-turn draft and send-guard behavior", () => {
     const running = { ...opening, isRunning: true, connectingStopAvailable: false };
     expect(primaryStopState(running).visible).toBe(false);

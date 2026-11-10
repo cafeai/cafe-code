@@ -11,6 +11,7 @@ const labels = [
   "editor-promotion",
   "restored-compaction",
   "worktree-overrides",
+  "composer-workspace",
   "image-only-send",
   "document-upload-retry",
   "pending-steer",

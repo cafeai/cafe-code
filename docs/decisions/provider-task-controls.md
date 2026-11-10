@@ -58,6 +58,18 @@ The same typed metadata crosses runtime ingestion, so reconnects do not reconstr
 authority from prose. A 15-second acknowledgement deadline persists unknown rather
 than hanging or replaying; it cannot retract an already-delivered native request.
 
+The composer also offers whole-chat Stop when the root has ended but exact
+current-runtime tasks or agents remain, including a foreground tool with only
+background capability. A current shell zero retracts the affordance; without a
+current shell summary, the same bound lifecycle fold used for live activity
+supplies it. Bind the displayed cancellation to its environment, chat, provider,
+account, native runtime and root boundary, and recheck canonical state at the
+click. A replacement owner or new root rejects the stale click. This explicit
+action uses the existing session-stop path to retire the chat's remaining native
+work, retaining its history and unsent draft. Running roots keep ordinary turn
+interrupt. No task ID, per-task Stop capability, completion or retry authority is
+inferred, and the durable whole-chat command is not a generation compare-and-swap.
+
 ## Composer presentation amendment — 2026-10-07 04:24:34 JST (UTC+0900)
 
 At the user's request, Message delivery now lives inside the existing effort/

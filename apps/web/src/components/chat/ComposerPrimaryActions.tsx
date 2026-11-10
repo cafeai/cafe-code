@@ -21,6 +21,7 @@ interface ComposerPrimaryActionsProps {
   /** Recovery owns a stoppable context without making a failed root running. */
   recoveryStopAvailable?: boolean | undefined;
   connectingStopAvailable?: boolean | undefined;
+  backgroundStopAvailable?: boolean | undefined;
   stopInFlight?: boolean | undefined;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
@@ -71,19 +72,23 @@ const SEND_BUTTON_CLASS_NAME = cn(
   "enabled:cursor-pointer bg-primary/90 text-primary-foreground hover:bg-primary",
 );
 
-/** Stop for an explicit recovery/start remains accessible even with a draft.
+/** Stop for background work or an explicit recovery/start remains accessible even with a draft.
  * Ordinary running turns retain their established send-before-stop behavior. */
 export function primaryStopState(input: {
   readonly isRunning: boolean;
   readonly isQueueEditing: boolean;
   readonly recoveryStopAvailable: boolean;
   readonly connectingStopAvailable: boolean;
+  readonly backgroundStopAvailable?: boolean;
   readonly hasSendableContent: boolean;
   readonly postSubmitInterruptGuardActive: boolean;
   readonly isEnvironmentUnavailable: boolean;
   readonly stopInFlight: boolean;
 }): { readonly visible: boolean; readonly disabled: boolean; readonly showSend: boolean } {
-  const contextStop = input.recoveryStopAvailable || input.connectingStopAvailable;
+  const contextStop =
+    input.recoveryStopAvailable ||
+    input.connectingStopAvailable ||
+    input.backgroundStopAvailable === true;
   return {
     visible:
       contextStop ||
@@ -92,7 +97,7 @@ export function primaryStopState(input: {
     showSend:
       !input.isQueueEditing &&
       !input.connectingStopAvailable &&
-      (input.isRunning || input.recoveryStopAvailable) &&
+      (input.isRunning || input.recoveryStopAvailable || input.backgroundStopAvailable === true) &&
       (input.hasSendableContent || input.postSubmitInterruptGuardActive),
   };
 }
@@ -103,6 +108,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   isRunning,
   recoveryStopAvailable = false,
   connectingStopAvailable = false,
+  backgroundStopAvailable = false,
   stopInFlight = false,
   showPlanFollowUpPrompt,
   promptHasText,
@@ -122,7 +128,13 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
-  if (isQueueEditing && !recoveryStopAvailable && !connectingStopAvailable) return null;
+  if (
+    isQueueEditing &&
+    !recoveryStopAvailable &&
+    !connectingStopAvailable &&
+    !backgroundStopAvailable
+  )
+    return null;
   const pointerFocusProps = preserveComposerFocusOnPointerDown
     ? { onPointerDown: preventPointerFocus }
     : undefined;
@@ -132,6 +144,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     isQueueEditing,
     recoveryStopAvailable,
     connectingStopAvailable,
+    backgroundStopAvailable,
     hasSendableContent,
     postSubmitInterruptGuardActive,
     isEnvironmentUnavailable,
@@ -150,7 +163,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       aria-label={
         recoveryStopAvailable
           ? uiText("Stop recovery", undefined, undefined, uiLocale)
-          : connectingStopAvailable
+          : connectingStopAvailable || backgroundStopAvailable
             ? uiText("Stop", undefined, undefined, uiLocale)
             : uiText("Stop generation", undefined, undefined, uiLocale)
       }
@@ -166,7 +179,9 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
       <div className={cn("flex items-center justify-end", compact ? "gap-1.5" : "gap-2")}>
         {/* Pending questions retain their existing navigation/submit policy.
             Context cancellation is independent from answering that request. */}
-        {recoveryStopAvailable || connectingStopAvailable ? stopAction : null}
+        {recoveryStopAvailable || connectingStopAvailable || backgroundStopAvailable
+          ? stopAction
+          : null}
         {pendingAction.questionIndex > 0 ? (
           compact ? (
             <Button
@@ -215,7 +230,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     );
   }
 
-  if (isRunning || recoveryStopAvailable || connectingStopAvailable) {
+  if (isRunning || recoveryStopAvailable || connectingStopAvailable || backgroundStopAvailable) {
     // Recovery keeps both actions when the draft can be sent. Starting a
     // provider instead keeps Stop in the formerly disabled connecting slot.
     const sendTemporarilyGuarded = postSubmitInterruptGuardActive && !hasSendableContent;

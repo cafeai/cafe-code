@@ -191,7 +191,23 @@ describe("Claude session quota presentation", () => {
         },
         options,
       ).extraUsageSummary,
-    ).toBe("12.5% of extra usage used");
+    ).toBe("12.5% of monthly cap");
+    for (const usedPercent of [0, 100])
+      expect(
+        formatClaudeSessionQuota(
+          {
+            ...native,
+            extraUsage: {
+              enabled: true,
+              usedPercent,
+              monthlyLimit: null,
+              usedCredits: null,
+              currency: null,
+            },
+          },
+          options,
+        ).extraUsageSummary,
+      ).toBe(`${usedPercent}% of monthly cap`);
     for (const extraUsage of [
       undefined,
       null,

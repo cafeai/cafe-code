@@ -165,7 +165,12 @@ export function ProviderAccountQuotaDetails(props: {
                   ))
                 )}
                 {session.extraUsageSummary ? (
-                  <p className="text-2xs text-subtle-foreground">{session.extraUsageSummary}</p>
+                  <dl className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-t border-border/40 pt-2 text-2xs">
+                    <dt className="text-subtle-foreground">
+                      {uiText("Extra usage", undefined, undefined, uiLocale)}
+                    </dt>
+                    <dd className="ml-auto text-right tabular-nums">{session.extraUsageSummary}</dd>
+                  </dl>
                 ) : null}
               </div>
             </>

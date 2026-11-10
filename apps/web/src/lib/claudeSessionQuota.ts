@@ -244,7 +244,7 @@ export function formatClaudeSessionQuota(
       }) ?? null,
     extraUsageSummary:
       report.extraUsage?.enabled && report.extraUsage.usedPercent !== null
-        ? uiText("{percent}% of extra usage used", {
+        ? uiText("{percent}% of monthly cap", {
             percent: percent(report.extraUsage.usedPercent, options.locale),
           })
         : null,

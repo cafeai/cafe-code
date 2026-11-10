@@ -120,11 +120,14 @@ Settings without a selected model uses the normal weekly view. Received account
 data remains complete; selection is presentation only and neither refreshes the
 subscription nor changes provider policy. Chat composer and rail use the current
 account-scoped draft model choice, falling back to the saved chat selection.
-Enabled extra usage with a reported utilization appears as one percentage line
-below the last bar; no extra-usage tab, disclosure, monetary breakdown or invented
-zero is rendered. Reset dates and stale readings stay beside the bars, with one
-bounded scroll owner. Source and receipt metadata remain internal to freshness
-and ownership validation.
+Enabled extra usage with a reported utilization appears as a compact label/value
+footer below the last bar: Extra usage and “{percent}% of monthly cap”. The
+denominator is the monthly extra-usage spending limit; 100% means the full limit
+has been used. This is the reported utilization, never a calculation from missing
+amounts or an assumed currency. No extra-usage tab, disclosure, monetary breakdown
+or invented zero is rendered. Reset dates and stale readings stay beside the
+bars, with one bounded scroll owner. Source and receipt metadata remain internal
+to freshness and ownership validation.
 Native login selection establishes the configured source; it does not create a
 stable remote principal or credential epoch in the public report. Reset labels
 use the viewer's locale and timezone. Cafe's processed-token/API-equivalent

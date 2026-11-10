@@ -345,6 +345,10 @@ interface ClaudePermissionModeOwner {
   readonly runtimeId: string;
 }
 
+interface ClaudePermissionModeIntent {
+  readonly mode: PermissionMode;
+}
+
 /** Advisory ownership is independent of permission mode and mutable history. */
 interface ClaudeCredentialExpiryOwner {
   readonly nativeSessionId: string;
@@ -367,6 +371,7 @@ interface ClaudePermissionModeObservation {
   readonly nativeSessionId: string;
   readonly runtimeId: string;
   readonly owner: ClaudePermissionModeOwner | undefined;
+  readonly intent: ClaudePermissionModeIntent;
 }
 
 /** Admit only the public SDK modes, never provider prose or inherited flags. */
@@ -436,7 +441,13 @@ function captureClaudePermissionModeObservation(
       return undefined;
   } else if (owner.nativeSessionId !== sessionId || owner.runtimeId !== context.subagentRuntimeId)
     return undefined;
-  return { mode, nativeSessionId: sessionId, runtimeId: context.subagentRuntimeId, owner };
+  return {
+    mode,
+    nativeSessionId: sessionId,
+    runtimeId: context.subagentRuntimeId,
+    owner,
+    intent: context.permissionModeIntent,
+  };
 }
 
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
@@ -942,8 +953,12 @@ interface ClaudeSessionContext {
   readonly basePermissionMode: PermissionMode | undefined;
   /** Frozen opening identity, independent of later legacy cursor adoption. */
   readonly permissionModeInitialResumeSessionId: string | undefined;
-  /** Seeded once by a qualified primary SDK init; never a permission grant. */
+  /** Seeded once by a qualified primary SDK init, independently of history. */
   permissionModeOwner: ClaudePermissionModeOwner | undefined;
+  permissionModeIntent: ClaudePermissionModeIntent;
+  /** Exact current intent admitted by primary init/status or a native setter ACK. */
+  adoptedPermissionModeIntent: ClaudePermissionModeIntent | undefined;
+  latestPermissionModeObservation: ClaudePermissionModeObservation | undefined;
   /** Only a qualified primary init can establish this advisory owner. */
   credentialExpiryOwner: ClaudeCredentialExpiryOwner | undefined;
   /** Immutable opening resume, then an exact qualified reset's next init. */
@@ -9792,6 +9807,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       sessions.get(context.session.threadId) === context
         ? captureClaudePermissionModeObservation(context, incomingMessage)
         : undefined;
+    if (permissionModeObservation) {
+      context.latestPermissionModeObservation = permissionModeObservation;
+      // Revoke before logging/normalization can await. A newly observed native
+      // restriction must also hold while its public status is still publishing.
+      if (permissionModeObservation.mode !== "bypassPermissions")
+        context.adoptedPermissionModeIntent = undefined;
+    }
     const identityFrame = incomingMessage as unknown as Record<string, unknown>;
     const extensionRecords = [identityFrame];
     if (
@@ -10193,6 +10215,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       sessions.get(context.session.threadId) === context &&
       context.subagentRuntimeId === permissionModeObservation.runtimeId &&
       context.permissionModeOwner === permissionModeObservation.owner &&
+      context.permissionModeIntent === permissionModeObservation.intent &&
+      context.latestPermissionModeObservation === permissionModeObservation &&
       context.resumeSessionId === permissionModeObservation.nativeSessionId &&
       context.lastThreadStartedId === permissionModeObservation.nativeSessionId
     ) {
@@ -10200,9 +10224,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         nativeSessionId: permissionModeObservation.nativeSessionId,
         runtimeId: permissionModeObservation.runtimeId,
       });
-      // This updates the next-turn setter's observed state only. Native
-      // callback decisions remain authoritative even when the mode is bypass.
       context.currentPermissionMode = permissionModeObservation.mode;
+      context.adoptedPermissionModeIntent =
+        permissionModeObservation.mode === permissionModeObservation.intent.mode
+          ? permissionModeObservation.intent
+          : undefined;
     }
     yield* recordTurnSdkMessage(context, message);
 
@@ -11072,7 +11098,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         callbackOptions: Parameters<CanUseTool>[2],
       ) {
         const context = yield* Ref.get(contextRef);
-        if (!context || context.stopped || callbackOptions.signal.aborted) {
+        if (
+          !context ||
+          context.stopped ||
+          context.authFailureSeen ||
+          sessions.get(context.session.threadId) !== context ||
+          callbackOptions.signal.aborted
+        ) {
           return {
             behavior: "deny",
             message: "Claude session context is unavailable.",
@@ -11114,20 +11146,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }
 
         const matchedAskRule = callbackOptions.matchedAskRule !== undefined;
-        // Agent SDK 0.3.215 marks prompts forced by a user-configured
-        // permissions.ask rule. That explicit rule is more specific than
-        // Cafe's broad full-access mode, so it must still reach a human instead
-        // of being silently auto-approved. Do not persist ruleContent here: it
-        // can contain sensitive project policy and is not needed to honor the
-        // upstream decision.
-        // Ordinary bypass approvals are resolved inside the native CLI before
-        // canUseTool is consulted. Reaching this callback is therefore an
-        // unresolved native decision, even when Cafe requested bypass and the
-        // older optional safety flags are absent. Organization/MCP policies,
-        // hooks and native critical-path checks must not be silently approved
-        // by a second host-side bypass. Keep AskUserQuestion/ExitPlanMode's
-        // distinct routes above and return only the user's exact decision.
+        // SDK 0.3.318 can still request a one-time native confirmation in
+        // bypassPermissions (for example for shell removal checks). Cafe's
+        // explicit Bypass selection approves these individual action requests,
+        // including defaultToNo/suppressAlwaysAllowRule, without saving a rule.
+        // A cached full-access label alone cannot grant this: require this exact
+        // live query's independently initialized owner and adopted current intent.
+        // Explicit permissions.ask rules still mean a human prompt; never retain
+        // their potentially sensitive ruleContent. Questions and plans keep their
+        // distinct routes above. Native denies/hooks that never call us are unchanged.
         // https://code.claude.com/docs/en/agent-sdk/permissions
+        const permissionOwner = context.permissionModeOwner;
+        if (
+          !matchedAskRule &&
+          context.session.runtimeMode === "full-access" &&
+          context.permissionModeIntent.mode === "bypassPermissions" &&
+          context.adoptedPermissionModeIntent === context.permissionModeIntent &&
+          context.currentPermissionMode === "bypassPermissions" &&
+          permissionOwner !== undefined &&
+          permissionOwner.runtimeId === context.subagentRuntimeId &&
+          permissionOwner.nativeSessionId === context.resumeSessionId &&
+          permissionOwner.nativeSessionId === context.lastThreadStartedId
+        ) {
+          return { behavior: "allow", updatedInput: toolInput } satisfies PermissionResult;
+        }
 
         if (pendingApprovals.size >= 64)
           return {
@@ -11686,6 +11728,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         basePermissionMode: permissionMode,
         permissionModeInitialResumeSessionId: existingResumeSessionId,
         permissionModeOwner: undefined,
+        permissionModeIntent: { mode: initialPermissionMode ?? "default" },
+        adoptedPermissionModeIntent: undefined,
+        latestPermissionModeObservation: undefined,
         credentialExpiryOwner: undefined,
         credentialExpiryExpectedInitSessionId: existingResumeSessionId,
         credentialExpiryLastResultIndex: -1,
@@ -12205,6 +12250,24 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     }
 
+    // Withdraw automatic permission before model/configuration IO. Returning to
+    // the same mode later creates a new intent; an older observation/ACK cannot
+    // adopt it across a rapid Bypass -> Plan -> Bypass transition.
+    const desiredPermissionMode =
+      input.interactionMode === undefined
+        ? undefined
+        : (resolveClaudePermissionMode({
+            interactionMode: input.interactionMode,
+            basePermissionMode: context.basePermissionMode,
+          }) ?? "default");
+    if (
+      desiredPermissionMode !== undefined &&
+      desiredPermissionMode !== context.permissionModeIntent.mode
+    ) {
+      context.permissionModeIntent = { mode: desiredPermissionMode };
+      context.adoptedPermissionModeIntent = undefined;
+    }
+    const requestedPermissionModeIntent = context.permissionModeIntent;
     if (modelSelection?.model) {
       const { apiModelId, selectedContextWindowTokens, effectiveEffort, settings } =
         resolveClaudeModelSessionOptions(
@@ -12257,18 +12320,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       };
     }
 
+    // Model/configuration preparation may have awaited while a newer intent or
+    // replacement arrived. Do not let this older application issue native IO.
+    if (
+      context.stopped ||
+      context.authFailureSeen ||
+      sessions.get(input.threadId) !== context ||
+      context.permissionModeIntent !== requestedPermissionModeIntent
+    ) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "turn/setPermissionMode",
+        detail: "Claude permission-mode intent changed during turn preparation.",
+      });
+    }
+
     // Apply only real permission-mode transitions here. The session's initial
     // permission mode is already bound into query() options at startSession
     // time; issuing a redundant setPermissionMode() before Claude Code has
     // attached the first streamed user message can fail with "No message
     // found" / "No conversation found" on current Claude Agent SDK releases.
-    const desiredPermissionMode =
-      input.interactionMode === undefined
-        ? undefined
-        : (resolveClaudePermissionMode({
-            interactionMode: input.interactionMode,
-            basePermissionMode: context.basePermissionMode,
-          }) ?? "default");
     if (
       desiredPermissionMode !== undefined &&
       desiredPermissionMode !== context.currentPermissionMode
@@ -12281,11 +12352,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             "Claude permission mode cannot be changed before the first streamed user prompt. Start the Claude session with the first turn's interaction mode instead.",
         });
       }
+      // Each native attempt fences already captured status frames, even when
+      // reconciling the same requested mode after a native mode change.
+      const permissionModeIntent = { mode: desiredPermissionMode };
+      context.permissionModeIntent = permissionModeIntent;
+      context.adoptedPermissionModeIntent = undefined;
+      const priorObservation = context.latestPermissionModeObservation;
       yield* Effect.tryPromise({
         try: () => context.query.setPermissionMode(desiredPermissionMode),
         catch: (cause) => toRequestError(input.threadId, "turn/setPermissionMode", cause),
       });
-      context.currentPermissionMode = desiredPermissionMode;
+      if (
+        context.stopped ||
+        context.authFailureSeen ||
+        sessions.get(input.threadId) !== context ||
+        context.permissionModeIntent !== permissionModeIntent
+      ) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "turn/setPermissionMode",
+          detail: "Claude permission-mode intent changed before native confirmation.",
+        });
+      }
+      // A status received during the request is newer native evidence than the
+      // ACK. Its exact processing owns adoption, including a native downgrade.
+      if (context.latestPermissionModeObservation === priorObservation) {
+        context.currentPermissionMode = desiredPermissionMode;
+        context.adoptedPermissionModeIntent = permissionModeIntent;
+      }
     }
 
     const turnId = TurnId.make(yield* Random.nextUUIDv4);

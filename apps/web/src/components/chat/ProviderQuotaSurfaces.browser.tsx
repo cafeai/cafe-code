@@ -390,8 +390,8 @@ describe("shared passive quota surfaces", () => {
               extraUsage: {
                 enabled: true,
                 monthlyLimit: 10000,
-                usedCredits: 2500,
-                usedPercent: 25,
+                usedCredits: 3311,
+                usedPercent: 33.11,
                 currency: "USD",
               },
               meters:
@@ -412,7 +412,8 @@ describe("shared passive quota surfaces", () => {
         expect(element.textContent).not.toContain("Reported by Claude Code");
         expect(element.textContent).not.toContain("Updates automatically while this view is open.");
         expect(element.textContent).not.toContain("normal");
-        expect(element.textContent).toContain("25% of extra usage used");
+        expect(element.textContent).toContain("Extra usage");
+        expect(element.textContent).toContain("33.11% of monthly cap");
         expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);
         expect(element.querySelectorAll("[data-account-quota-scroll]")).toHaveLength(1);
       }
@@ -430,6 +431,7 @@ describe("shared passive quota surfaces", () => {
       }
       if (import.meta.env.VITE_CAPTURE_CLAUDE_QUOTA === "1")
         await page.screenshot({
+          element: document.querySelector<HTMLElement>("[data-session-rail-usage]")!,
           path: `../../../../../.explorations/130-claude-quota/${dark ? "dark" : "light"}-${scale}.png`,
         });
     },

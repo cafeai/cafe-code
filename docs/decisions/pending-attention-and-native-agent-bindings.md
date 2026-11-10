@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Last updated: 2026-11-03 08:26:26 JST (UTC+0900)
+Last updated: 2026-11-09
 
 The shell's pending-decision counts describe the whole chat. The ordinary
 500-activity detail window must therefore retain unresolved approval and question
@@ -100,10 +100,32 @@ question cadence, prompts or native provider installations. See the official
 
 Selected permission policy is intent, not proof of native adoption. A turn-start
 projection can already contain the requested value before the live owner changes;
-the reactor must also compare the actual selected provider session. Claude's
-native permission callbacks remain decisions even when the cached mode says
-Bypass: normal automatic approvals happen upstream, while explicit and native
-confirmation paths can still reach the callback. Preserve one-time and default-
-decline restrictions and never infer approval from a mode label. The panel's fixed
-one-time explanation reports the received restriction, not an unrecorded native
-reason. See [Claude permission evaluation](https://code.claude.com/docs/en/agent-sdk/permissions).
+the reactor must also compare the actual selected provider session. Normal
+automatic approvals happen upstream, but explicit and native confirmation paths
+can still reach Claude's `canUseTool` callback in Bypass mode, including one-time
+shell confirmations in SDK 0.3.318.
+
+Cafe's explicit Bypass selection also approves these individual action callbacks
+after the exact live query has independently established its primary native
+init owner and adopted the current Bypass intent. A cached full-access label,
+pre-init status, foreign/child frame or old query cannot grant adoption. An exact
+native setter acknowledgement can adopt its own intent, unless a newer native
+mode observation has arrived. Withdraw automatic permission before mode-change
+IO and synchronously on an admitted native downgrade; bind observations and
+acknowledgements to their captured intent so delayed work cannot authorize a
+later Bypass selection or a replacement query.
+
+Automatic approval returns only the unchanged input for that one call. It never
+echoes suggested rules or writes persistent permission settings, including when
+`suppressAlwaysAllowRule` or `defaultToNo` accompanies the callback. A matched
+explicit `permissions.ask` rule still requires the user's decision. Unknown or
+unadopted modes retain the ordinary approval panel and its one-time/default-
+decline restrictions. The panel's fixed explanation reports only the received
+restriction, not an unrecorded native reason. `AskUserQuestion` still awaits real
+answers, and `ExitPlanMode` retains Cafe's separate plan-review flow. Native
+denials and hooks that do not reach this callback remain upstream decisions.
+
+Synthetic adapter tests qualify action approval, unchanged input/no rule writes,
+mode adoption, retirement and the retained human-input routes. They do not prove
+adoption by an already running backend or exercise real provider inference.
+See [Claude permission evaluation](https://code.claude.com/docs/en/agent-sdk/permissions).

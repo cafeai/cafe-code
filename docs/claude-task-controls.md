@@ -53,7 +53,13 @@ or history lookup. See [source-owner icons](decisions/provider-task-owner-icons.
 - **Stop task** targets one provider-issued native task. A foreground tool that
   has no native task identity can offer backgrounding, but does not pretend to
   have a safe individual Stop operation.
-- **Stop chat** remains the existing, separate whole-chat control.
+- **Stop chat** is the separate whole-chat control. The red composer Stop stays
+  available after the main response ends while its current native runtime still
+  reports tasks or agents. It stays available beside an unsent draft, including
+  when the model picker has changed. Without an active main turn, Stop closes
+  that chat's provider session and its remaining work; history and unsent input
+  are retained. A foreground tool without an individual Stop can still be
+  cancelled this way.
 
 An accepted request is not proof that the task has finished. Cafe keeps waiting
 for the provider's authoritative status update, leaving the parent and sibling

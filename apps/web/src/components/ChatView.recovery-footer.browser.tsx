@@ -7,6 +7,7 @@ import {
   THREAD_REF,
   wsRequests,
   WIDE_FOOTER_VIEWPORT,
+  COMPACT_FOOTER_VIEWPORT,
   isoAt,
   SUBAGENT_RUNTIME_ID,
   waitForElement,
@@ -34,6 +35,167 @@ import { createChatViewCallerOwner } from "./chatViewCallerOwner.test.fixture";
 
 describe("ChatView full app (recovery-footer)", () => {
   registerChatViewBrowserHooks();
+
+  const snapshotWithClaudeBackgroundWork = (withTool = true): OrchestrationReadModel => {
+    const base = createSnapshotWithActiveSubagent();
+    return {
+      ...base,
+      threads: base.threads.map((thread) => ({
+        ...thread,
+        latestTurn: { ...thread.latestTurn!, state: "completed", completedAt: isoAt(1_010) },
+        // The selected model may already be Sol while this native Claude
+        // owner still has work. Stop follows the owner, not the model picker.
+        session: {
+          ...thread.session!,
+          providerName: "claudeAgent",
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          status: "interrupted",
+          activeTurnId: null,
+          updatedAt: isoAt(1_010),
+        },
+        activities: withTool
+          ? [
+              {
+                id: EventId.make("claude-background-only-command"),
+                kind: "tool.started",
+                tone: "tool",
+                summary: "Shell command",
+                turnId: thread.latestTurn!.turnId,
+                createdAt: isoAt(1_005),
+                sequence: 1,
+                payload: {
+                  itemId: "native-tool-without-task-id",
+                  itemType: "command_execution",
+                  detail: "Bash: inspect the project",
+                  individualTaskControl: {
+                    taskId: "server-background-reference",
+                    runtimeId: SUBAGENT_RUNTIME_ID,
+                    capability: {
+                      providerInstanceId: "claudeAgent",
+                      taskGeneration: "00000000-0000-4000-8000-000000000002",
+                      canStop: false,
+                      canBackground: true,
+                    },
+                  },
+                },
+              },
+            ]
+          : [],
+      })),
+    };
+  };
+
+  it.for([WIDE_FOOTER_VIEWPORT, COMPACT_FOOTER_VIEWPORT])(
+    "keeps whole-chat Stop usable after Claude's root ends in the $name composer",
+    async (viewport, context) => {
+      const owner = createChatViewCallerOwner(context, mountChatView, {
+        label: "composer-opening-stop",
+      });
+      await owner.run(async () => {
+        const snapshot = snapshotWithClaudeBackgroundWork();
+        await owner.mount({
+          viewport,
+          snapshot,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? { sequence: snapshot.snapshotSequence + 1 }
+              : undefined,
+        });
+        await owner.own("editor", () => waitForComposerEditor());
+        const stop = page.getByRole("button", { name: "Stop", exact: true });
+        await owner.own("controls", () => expect.element(stop).toBeEnabled());
+        await owner.own("prompt", () =>
+          expect
+            .element(page.getByText("Background work running · 1 task", { exact: true }))
+            .toBeVisible(),
+        );
+        owner.assertActive();
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep this unsent instruction");
+        await owner.own("prompt", () =>
+          expect
+            .element(page.getByTestId("composer-editor"))
+            .toHaveTextContent("Keep this unsent instruction"),
+        );
+        await owner.own("controls", () => expect.element(stop).toBeEnabled());
+        await owner.own("controls", () =>
+          expect
+            .element(page.getByRole("button", { name: "Send message", exact: true }))
+            .toBeEnabled(),
+        );
+        expect(document.querySelector('button[aria-label="Queue message"]')).toBeNull();
+        await owner.own("input", () => stop.click());
+        await owner.own("request", () =>
+          vi.waitFor(() => {
+            const actions = wsRequests.filter(
+              (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+            );
+            expect(actions.filter((request) => request.type === "thread.session.stop")).toEqual([
+              expect.objectContaining({ threadId: THREAD_ID }),
+            ]);
+            expect(
+              actions.some(
+                (request) =>
+                  request.type === "thread.turn.start" || request.type === "thread.turn.interrupt",
+              ),
+            ).toBe(false);
+          }),
+        );
+        // A command ACK cannot complete the root's remaining work, discard the
+        // draft, or invent a new turn. Native session retirement clears it.
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.latestTurn).toEqual(
+          snapshot.threads[0]!.latestTurn,
+        );
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "Keep this unsent instruction",
+        );
+        await owner.own("prompt", () =>
+          expect
+            .element(page.getByText("Background work running · 1 task", { exact: true }))
+            .toBeVisible(),
+        );
+      });
+    },
+  );
+
+  it("offers Stop from current shell-only work and retracts it on a zero or foreign-runtime observation", async (context) => {
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "composer-opening-stop",
+    });
+    await owner.run(async () => {
+      const snapshot = snapshotWithClaudeBackgroundWork(false);
+      await owner.mount({ viewport: WIDE_FOOTER_VIEWPORT, snapshot });
+      await owner.own("editor", () => waitForComposerEditor());
+      const stop = page.getByRole("button", { name: "Stop", exact: true });
+      await owner.own("controls", () => expect.element(stop).not.toBeInTheDocument());
+      let sequence = snapshot.snapshotSequence;
+      for (const [runtimeId, taskCount, visible] of [
+        [SUBAGENT_RUNTIME_ID, 1, true],
+        [SUBAGENT_RUNTIME_ID, 0, false],
+        ["b73284bf-01be-4dbf-94c8-b54e54f17802", 1, false],
+      ] as const) {
+        owner.assertActive();
+        const liveWork = { runtimeId: SubagentRuntimeId.make(runtimeId), taskCount, agentCount: 0 };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
+          kind: "thread-upserted",
+          sequence: ++sequence,
+          thread: { ...toShellThread(snapshot.threads[0]!), liveWork },
+        });
+        await owner.own("snapshot", () =>
+          vi.waitFor(() => {
+            expect(
+              selectSidebarThreadSummaryByRef(useStore.getState(), THREAD_REF)?.liveWork,
+            ).toEqual(liveWork);
+          }),
+        );
+        await owner.own("controls", () =>
+          visible
+            ? expect.element(stop).toBeEnabled()
+            : expect.element(stop).not.toBeInTheDocument(),
+        );
+      }
+      expect(wsRequests.some((request) => request.type === "thread.session.stop")).toBe(false);
+    });
+  });
 
   it("keeps the native Tasks roster and warning aligned with exact-runtime source hints", async (context) => {
     const owner = createChatViewCallerOwner(context, mountChatView, {

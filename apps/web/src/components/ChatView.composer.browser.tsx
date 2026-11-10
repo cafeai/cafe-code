@@ -21,7 +21,6 @@ import {
   createAssistantMessage,
   createSnapshotForTargetUser,
   addThreadToSnapshot,
-  draftIdFromPath,
   serverThreadPath,
   createDraftOnlySnapshot,
   withProjectScripts,
@@ -2949,29 +2948,54 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
-  it("renders locked single-environment mobile run context as a static workspace label", async () => {
-    const mounted = await mountChatView({
-      viewport: COMPACT_FOOTER_VIEWPORT,
-      snapshot: createSnapshotForTargetUser({
-        targetMessageId: "msg-user-mobile-locked-workspace" as MessageId,
-        targetText: "locked mobile workspace",
-      }),
-    });
+  it.for([
+    ["started", "wide", WIDE_FOOTER_VIEWPORT],
+    ["started", "mobile", COMPACT_FOOTER_VIEWPORT],
+    ["new", "wide", WIDE_FOOTER_VIEWPORT],
+    ["new", "mobile", COMPACT_FOOTER_VIEWPORT],
+  ] as const)(
+    "omits the workspace and branch toolbar in a %s chat on %s layouts",
+    async ([state, _label, viewport], testContext) => {
+      const owner = createChatViewCallerOwner(testContext, mountChatView, {
+        label: "composer-workspace",
+      });
+      await owner.run(async () => {
+        if (state === "new") setDraftThreadWithoutWorktree();
+        await owner.mount({
+          viewport,
+          snapshot:
+            state === "new"
+              ? createDraftOnlySnapshot()
+              : createSnapshotForTargetUser({
+                  targetMessageId: "msg-user-started-workspace-toolbar" as MessageId,
+                  targetText: "started chat workspace toolbar",
+                }),
+        });
 
-    try {
-      await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll<HTMLElement>("span")).find(
-            (element) => element.textContent?.trim() === "Local checkout",
-          ) ?? null,
-        "Unable to find static mobile workspace label.",
-      );
+        await owner.own("controls", waitForComposerEditor);
+        if (state === "started") {
+          // The tail opens followed, so its newest message proves the started
+          // chat has rendered before asserting the toolbar's absence.
+          await owner.own("value", () =>
+            waitForElement(
+              () => document.querySelector('[data-message-id="msg-assistant-21"]'),
+              "Unable to find the started chat's newest message.",
+            ),
+          );
+        }
 
-      expect(findButtonByText("Local checkout")).toBeNull();
-    } finally {
-      await mounted.cleanup();
-    }
-  });
+        owner.assertActive();
+        const toolbarLabels = ["Local checkout", "Worktree", "Current checkout", "main"];
+        for (const label of toolbarLabels) {
+          expect(
+            Array.from(document.querySelectorAll<HTMLElement>("button, span")).some(
+              (element) => element.textContent?.trim() === label,
+            ),
+          ).toBe(false);
+        }
+      });
+    },
+  );
 
   it("keeps dismiss-only composer banners aligned on mobile", async () => {
     const mounted = await mountChatView({
@@ -3202,239 +3226,145 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
-  it("lets the server own setup after preparing a pull request worktree thread", async () => {
-    useComposerDraftStore.setState({
-      draftThreadsByThreadKey: {
-        [THREAD_KEY]: {
-          threadId: THREAD_ID,
-          environmentId: LOCAL_ENVIRONMENT_ID,
-          projectId: PROJECT_ID,
-          logicalProjectKey: PROJECT_DRAFT_KEY,
-          createdAt: NOW_ISO,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: null,
-          worktreePath: null,
-          envMode: "local",
-        },
-      },
-      logicalProjectDraftThreadKeyByLogicalProjectKey: {
-        [PROJECT_DRAFT_KEY]: THREAD_KEY,
-      },
+  it("carries the computer-use switch through first-send worktree bootstrap before any separate turn", async (testContext) => {
+    const owner = createChatViewCallerOwner(testContext, mountChatView, {
+      label: "composer-workspace",
     });
-
-    const mounted = await mountChatView({
-      viewport: WIDE_FOOTER_VIEWPORT,
-      snapshot: withProjectScripts(createDraftOnlySnapshot(), [
-        {
-          id: "setup",
-          name: "Setup",
-          command: "yarn install --immutable",
-          icon: "configure",
-          runOnWorktreeCreate: true,
-        },
-      ]),
-      resolveRpc: (body) => {
-        if (body._tag === WS_METHODS.gitResolvePullRequest) {
-          return {
-            pullRequest: {
-              number: 1359,
-              title: "Add thread archiving and settings navigation",
-              url: "https://github.com/cafeai/cafe-code/pull/1359",
-              baseBranch: "main",
-              headBranch: "archive-settings-overhaul",
-              state: "open",
-            },
-          };
-        }
-        if (body._tag === WS_METHODS.gitPreparePullRequestThread) {
-          return {
-            pullRequest: {
-              number: 1359,
-              title: "Add thread archiving and settings navigation",
-              url: "https://github.com/cafeai/cafe-code/pull/1359",
-              baseBranch: "main",
-              headBranch: "archive-settings-overhaul",
-              state: "open",
-            },
-            branch: "archive-settings-overhaul",
-            worktreePath: "/repo/worktrees/pr-1359",
-          };
-        }
-        return undefined;
-      },
-    });
-
-    try {
-      const branchButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.trim() === "main",
-          ) as HTMLButtonElement | null,
-        "Unable to find branch selector button.",
-      );
-      branchButton.click();
-
-      const branchInput = await waitForElement(
-        () => document.querySelector<HTMLInputElement>('input[placeholder="Search refs..."]'),
-        "Unable to find ref search input.",
-      );
-      branchInput.focus();
-      await page.getByPlaceholder("Search refs...").fill("1359");
-
-      const checkoutItem = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("span")).find(
-            (element) => element.textContent?.trim() === "Checkout pull request",
-          ) as HTMLSpanElement | null,
-        "Unable to find checkout pull request option.",
-      );
-      checkoutItem.click();
-
-      const worktreeButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.trim() === "Worktree",
-          ) as HTMLButtonElement | null,
-        "Unable to find Worktree button.",
-      );
-      worktreeButton.click();
-
-      await vi.waitFor(
-        () => {
-          const prepareRequest = wsRequests.find(
-            (request) => request._tag === WS_METHODS.gitPreparePullRequestThread,
-          );
-          expect(prepareRequest).toMatchObject({
-            _tag: WS_METHODS.gitPreparePullRequestThread,
-            cwd: "/repo/project",
-            reference: "1359",
-            mode: "worktree",
+    await owner.run(async () => {
+      useComposerDraftStore.setState({
+        draftThreadsByThreadKey: {
+          [THREAD_KEY]: {
             threadId: THREAD_ID,
-          });
+            environmentId: LOCAL_ENVIRONMENT_ID,
+            projectId: PROJECT_ID,
+            logicalProjectKey: PROJECT_DRAFT_KEY,
+            createdAt: NOW_ISO,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            envMode: "worktree",
+          },
         },
-        { timeout: 8_000, interval: 16 },
+        logicalProjectDraftThreadKeyByLogicalProjectKey: {
+          [PROJECT_DRAFT_KEY]: THREAD_KEY,
+        },
+      });
+
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: withProjectScripts(createDraftOnlySnapshot(), [
+          {
+            id: "setup",
+            name: "Setup",
+            command: "yarn install --immutable",
+            icon: "configure",
+            runOnWorktreeCreate: true,
+          },
+        ]),
+        resolveRpc: (body) => {
+          if (body._tag === WS_METHODS.vcsListRefs) {
+            return {
+              isRepo: true,
+              hasPrimaryRemote: true,
+              nextCursor: null,
+              totalCount: 1,
+              refs: [{ name: "main", current: true, isDefault: true, worktreePath: null }],
+            };
+          }
+          if (body._tag === "glide.control")
+            return {
+              available: true,
+              connected: false,
+              enabled: false,
+              fullAccess: false,
+              busy: false,
+              paused: false,
+              accessibility: true,
+              screenRecording: true,
+              apps: [],
+              runningApps: [],
+              message: "Background desktop control",
+            };
+          if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+            return {
+              sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1,
+            };
+          }
+          return undefined;
+        },
+      });
+
+      await owner.own("draft", () =>
+        vi.waitFor(() => {
+          expect(useComposerDraftStore.getState().getDraftThreadByRef(THREAD_REF)?.branch).toBe(
+            "main",
+          );
+        }),
       );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("carries the computer-use switch through first-send worktree bootstrap before any separate turn", async () => {
-    useComposerDraftStore.setState({
-      draftThreadsByThreadKey: {
-        [THREAD_KEY]: {
-          threadId: THREAD_ID,
-          environmentId: LOCAL_ENVIRONMENT_ID,
-          projectId: PROJECT_ID,
-          logicalProjectKey: PROJECT_DRAFT_KEY,
-          createdAt: NOW_ISO,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: "main",
-          worktreePath: null,
-          envMode: "worktree",
-        },
-      },
-      logicalProjectDraftThreadKeyByLogicalProjectKey: {
-        [PROJECT_DRAFT_KEY]: THREAD_KEY,
-      },
-    });
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: withProjectScripts(createDraftOnlySnapshot(), [
-        {
-          id: "setup",
-          name: "Setup",
-          command: "yarn install --immutable",
-          icon: "configure",
-          runOnWorktreeCreate: true,
-        },
-      ]),
-      resolveRpc: (body) => {
-        if (body._tag === "glide.control")
-          return {
-            available: true,
-            connected: false,
-            enabled: false,
-            fullAccess: false,
-            busy: false,
-            paused: false,
-            accessibility: true,
-            screenRecording: true,
-            apps: [],
-            runningApps: [],
-            message: "Background desktop control",
-          };
-        if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
-          return {
-            sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1,
-          };
-        }
-        return undefined;
-      },
-    });
-
-    try {
       const computerUse = page.getByRole("button", { name: "Computer use", exact: true });
-      await expect.element(computerUse).toBeEnabled();
-      await computerUse.click();
-      await expect.element(computerUse).toHaveAttribute("aria-pressed", "true");
-      await page
-        .elementLocator(document.querySelector('[data-chat-composer-form="true"]')!)
-        .screenshot({ path: "../../../../.logs/computer-use-new-thread.png" });
+      await owner.own("controls", () => expect.element(computerUse).toBeEnabled());
+      await owner.own("input", () => computerUse.click());
+      await owner.own("value", () =>
+        expect.element(computerUse).toHaveAttribute("aria-pressed", "true"),
+      );
+      await owner.own("image", () =>
+        page
+          .elementLocator(document.querySelector('[data-chat-composer-form="true"]')!)
+          .screenshot({ path: "../../../../.logs/computer-use-new-thread.png" }),
+      );
       expect(
         wsRequests.some((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
       ).toBe(false);
       useComposerDraftStore.getState().setPrompt(THREAD_REF, "Ship it");
-      await waitForLayout();
+      await owner.own("layout", waitForLayout);
 
-      const sendButton = await waitForSendButton();
+      const sendButton = await owner.own("controls", waitForSendButton);
+      owner.assertActive();
       expect(sendButton.disabled).toBe(false);
       sendButton.click();
 
-      await vi.waitFor(
-        () => {
-          const dispatchRequest = wsRequests.find(
-            (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
-          ) as
-            | {
-                _tag: string;
-                type?: string;
-                bootstrap?: {
-                  createThread?: { projectId?: string };
-                  prepareWorktree?: { projectCwd?: string; baseBranch?: string; branch?: string };
-                  runSetupScript?: boolean;
-                };
-              }
-            | undefined;
-          expect(dispatchRequest).toMatchObject({
-            _tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
-            type: "thread.turn.start",
-            bootstrap: {
-              createThread: {
-                computerUseEnabled: true,
-                projectId: PROJECT_ID,
+      await owner.own("value", () =>
+        vi.waitFor(
+          () => {
+            const dispatchRequest = wsRequests.find(
+              (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
+            ) as
+              | {
+                  _tag: string;
+                  type?: string;
+                  bootstrap?: {
+                    createThread?: { projectId?: string };
+                    prepareWorktree?: { projectCwd?: string; baseBranch?: string; branch?: string };
+                    runSetupScript?: boolean;
+                  };
+                }
+              | undefined;
+            expect(dispatchRequest).toMatchObject({
+              _tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
+              type: "thread.turn.start",
+              bootstrap: {
+                createThread: {
+                  computerUseEnabled: true,
+                  projectId: PROJECT_ID,
+                },
+                prepareWorktree: {
+                  projectCwd: "/repo/project",
+                  baseBranch: "main",
+                  branch: expect.stringMatching(/^cafecode\/[0-9a-f]{8}$/),
+                },
+                runSetupScript: true,
               },
-              prepareWorktree: {
-                projectCwd: "/repo/project",
-                baseBranch: "main",
-                branch: expect.stringMatching(/^cafecode\/[0-9a-f]{8}$/),
-              },
-              runSetupScript: true,
-            },
-          });
-        },
-        { timeout: 8_000, interval: 16 },
+            });
+          },
+          { timeout: 8_000, interval: 16 },
+        ),
       );
 
       expect(wsRequests.some((request) => request._tag === WS_METHODS.vcsCreateWorktree)).toBe(
         false,
       );
-    } finally {
-      await mounted.cleanup();
-    }
+    });
   });
 
   it("keeps custom provider instance ids when bootstrapping a local draft thread", async () => {
@@ -3706,232 +3636,21 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
-  it("keeps new-worktree mode on empty server threads and bootstraps the first send", async () => {
-    const snapshot = addThreadToSnapshot(createDraftOnlySnapshot(), THREAD_ID);
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: {
-        ...snapshot,
-        threads: snapshot.threads.map((thread) =>
-          thread.id === THREAD_ID ? Object.assign({}, thread, { session: null }) : thread,
-        ),
-      },
-      resolveRpc: (body) => {
-        if (body._tag === WS_METHODS.vcsListRefs) {
-          return {
-            isRepo: true,
-            hasPrimaryRemote: true,
-            nextCursor: null,
-            totalCount: 1,
-            refs: [
-              {
-                name: "main",
-                current: true,
-                isDefault: true,
-                worktreePath: null,
-              },
-            ],
-          };
-        }
-        if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
-          return {
-            sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1,
-          };
-        }
-        return undefined;
-      },
-    });
-
-    try {
-      (await waitForButtonByText("Current checkout")).click();
-      await page.getByText("New worktree", { exact: true }).click();
-
-      await vi.waitFor(
-        () => {
-          expect(findButtonByText("New worktree")).toBeTruthy();
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Ship it");
-      await waitForLayout();
-
-      const sendButton = await waitForSendButton();
-      expect(sendButton.disabled).toBe(false);
-      sendButton.click();
-
-      await vi.waitFor(
-        () => {
-          const turnStartRequest = wsRequests.find(
-            (request) =>
-              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
-              request.type === "thread.turn.start",
-          ) as
-            | {
-                _tag: string;
-                type?: string;
-                bootstrap?: {
-                  createThread?: { projectId?: string };
-                  prepareWorktree?: { projectCwd?: string; baseBranch?: string; branch?: string };
-                  runSetupScript?: boolean;
-                };
-              }
-            | undefined;
-
-          expect(turnStartRequest).toMatchObject({
-            _tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
-            type: "thread.turn.start",
-            bootstrap: {
-              prepareWorktree: {
-                projectCwd: "/repo/project",
-                baseBranch: "main",
-                branch: expect.stringMatching(/^cafecode\/[0-9a-f]{8}$/),
-              },
-              runSetupScript: true,
-            },
-          });
-          expect(turnStartRequest?.bootstrap?.createThread).toBeUndefined();
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("updates the selected worktree base branch on empty server threads", async () => {
-    const snapshot = addThreadToSnapshot(createDraftOnlySnapshot(), THREAD_ID);
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: {
-        ...snapshot,
-        threads: snapshot.threads.map((thread) =>
-          thread.id === THREAD_ID ? Object.assign({}, thread, { session: null }) : thread,
-        ),
-      },
-      resolveRpc: (body) => {
-        if (body._tag === WS_METHODS.vcsListRefs) {
-          return {
-            isRepo: true,
-            hasPrimaryRemote: true,
-            nextCursor: null,
-            totalCount: 2,
-            refs: [
-              {
-                name: "main",
-                current: true,
-                isDefault: true,
-                worktreePath: null,
-              },
-              {
-                name: "release/next",
-                current: false,
-                isDefault: false,
-                worktreePath: null,
-              },
-            ],
-          };
-        }
-        if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
-          return {
-            sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1,
-          };
-        }
-        return undefined;
-      },
-    });
-
-    try {
-      (await waitForButtonByText("Current checkout")).click();
-      await page.getByText("New worktree", { exact: true }).click();
-      await page.getByText("From main", { exact: true }).click();
-      await page.getByText("release/next", { exact: true }).click();
-
-      await vi.waitFor(
-        () => {
-          expect(findButtonByText("From release/next")).toBeTruthy();
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Ship it");
-      await waitForLayout();
-
-      const sendButton = await waitForSendButton();
-      expect(sendButton.disabled).toBe(false);
-      sendButton.click();
-
-      await vi.waitFor(
-        () => {
-          const turnStartRequest = wsRequests.find(
-            (request) =>
-              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
-              request.type === "thread.turn.start",
-          ) as
-            | {
-                _tag: string;
-                type?: string;
-                bootstrap?: {
-                  prepareWorktree?: { baseBranch?: string };
-                };
-              }
-            | undefined;
-
-          expect(turnStartRequest?.bootstrap?.prepareWorktree?.baseBranch).toBe("release/next");
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("clears pending worktree overrides when switching empty server threads", async (testContext) => {
+  it("uses the current checkout on an empty server chat's first send", async (testContext) => {
     const owner = createChatViewCallerOwner(testContext, mountChatView, {
-      label: "worktree-overrides",
+      label: "composer-workspace",
     });
     await owner.run(async () => {
-      const secondThreadId = "thread-browser-test-second" as ThreadId;
       const snapshot = addThreadToSnapshot(createDraftOnlySnapshot(), THREAD_ID);
-      const snapshotWithSecondThread = addThreadToSnapshot(snapshot, secondThreadId);
-      const snapshotWithTwoThreads = {
-        ...snapshotWithSecondThread,
-        threads: snapshotWithSecondThread.threads.map((thread) => {
-          if (thread.id === THREAD_ID) {
-            return Object.assign({}, thread, { session: null, title: "Thread alpha" });
-          }
-          if (thread.id === secondThreadId) {
-            return Object.assign({}, thread, { session: null, title: "Thread beta" });
-          }
-          return thread;
-        }),
-      };
-      const mounted = await owner.mount({
+      await owner.mount({
         viewport: DEFAULT_VIEWPORT,
-        snapshot: snapshotWithTwoThreads,
+        snapshot: {
+          ...snapshot,
+          threads: snapshot.threads.map((thread) =>
+            thread.id === THREAD_ID ? Object.assign({}, thread, { session: null }) : thread,
+          ),
+        },
         resolveRpc: (body) => {
-          if (body._tag === WS_METHODS.vcsListRefs) {
-            return {
-              isRepo: true,
-              hasPrimaryRemote: true,
-              nextCursor: null,
-              totalCount: 2,
-              refs: [
-                {
-                  name: "main",
-                  current: true,
-                  isDefault: true,
-                  worktreePath: null,
-                },
-                {
-                  name: "release/next",
-                  current: false,
-                  isDefault: false,
-                  worktreePath: null,
-                },
-              ],
-            };
-          }
           if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
             return {
               sequence: chatViewFixture.fixture.snapshot.snapshotSequence + 1,
@@ -3941,66 +3660,31 @@ describe("ChatView full app (composer)", () => {
         },
       });
 
-      const currentCheckout = await owner.own("controls", () =>
-        waitForButtonByText("Current checkout"),
-      );
+      await owner.own("controls", waitForComposerEditor);
       owner.assertActive();
-      currentCheckout.click();
-      owner.mark("controls");
-      await owner.own("controls", () => page.getByText("New worktree", { exact: true }).click());
-      await owner.own("controls", () => page.getByText("From main", { exact: true }).click());
-      await owner.own("controls", () => page.getByText("release/next", { exact: true }).click());
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "Ship it");
+      await owner.own("layout", waitForLayout);
 
-      await owner.own("value", () =>
-        vi.waitFor(
-          () => {
-            expect(findButtonByText("From release/next")).toBeTruthy();
-          },
-          { timeout: 8_000, interval: 16 },
-        ),
-      );
-
-      await owner.own("route", () =>
-        mounted.router.navigate({
-          to: "/$environmentId/$threadId",
-          params: {
-            environmentId: LOCAL_ENVIRONMENT_ID,
-            threadId: secondThreadId,
-          },
-        }),
-      );
-
-      await owner.own("route", () =>
-        waitForURL(
-          mounted.router,
-          (path) => path === serverThreadPath(secondThreadId),
-          "Route should switch to the second empty server thread.",
-        ),
-      );
-
-      await owner.own("value", () =>
-        vi.waitFor(
-          () => {
-            expect(findButtonByText("Current checkout")).toBeTruthy();
-            expect(findButtonByText("From release/next")).toBeNull();
-          },
-          { timeout: 8_000, interval: 16 },
-        ),
-      );
-
-      const nextCheckout = await owner.own("controls", () =>
-        waitForButtonByText("Current checkout"),
-      );
+      const sendButton = await owner.own("controls", waitForSendButton);
       owner.assertActive();
-      nextCheckout.click();
-      owner.mark("controls");
-      await owner.own("controls", () => page.getByText("New worktree", { exact: true }).click());
+      expect(sendButton.disabled).toBe(false);
+      sendButton.click();
 
       await owner.own("value", () =>
         vi.waitFor(
           () => {
-            expect(findButtonByText("From main")).toBeTruthy();
-            expect(findButtonByText("From release/next")).toBeNull();
+            const turnStartRequest = wsRequests.find(
+              (request) =>
+                request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                request.type === "thread.turn.start",
+            ) as { bootstrap?: unknown } | undefined;
+
+            expect(turnStartRequest).toMatchObject({
+              _tag: ORCHESTRATION_WS_METHODS.dispatchCommand,
+              type: "thread.turn.start",
+              threadId: THREAD_ID,
+            });
+            expect(turnStartRequest?.bootstrap).toBeUndefined();
           },
           { timeout: 8_000, interval: 16 },
         ),
@@ -4787,221 +4471,6 @@ describe("ChatView full app (composer)", () => {
           expect(draft?.interactionMode ?? "default").toBe(expected.interactionMode);
         });
       }
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("uses the active draft route session when changing the base branch", async () => {
-    const staleDraftId = draftIdFromPath("/draft/draft-stale-branch-session");
-    const activeDraftId = draftIdFromPath("/draft/draft-active-branch-session");
-
-    useComposerDraftStore.setState({
-      draftThreadsByThreadKey: {
-        [staleDraftId]: {
-          threadId: THREAD_ID,
-          environmentId: LOCAL_ENVIRONMENT_ID,
-          projectId: PROJECT_ID,
-          logicalProjectKey: `${PROJECT_DRAFT_KEY}:stale`,
-          createdAt: NOW_ISO,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: "main",
-          worktreePath: null,
-          envMode: "worktree",
-        },
-        [activeDraftId]: {
-          threadId: THREAD_ID,
-          environmentId: LOCAL_ENVIRONMENT_ID,
-          projectId: PROJECT_ID,
-          logicalProjectKey: PROJECT_DRAFT_KEY,
-          createdAt: NOW_ISO,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: "main",
-          worktreePath: null,
-          envMode: "worktree",
-        },
-      },
-      logicalProjectDraftThreadKeyByLogicalProjectKey: {
-        [`${PROJECT_DRAFT_KEY}:stale`]: staleDraftId,
-        [PROJECT_DRAFT_KEY]: activeDraftId,
-      },
-    });
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createDraftOnlySnapshot(),
-      initialPath: `/draft/${activeDraftId}`,
-      resolveRpc: (body) => {
-        if (body._tag === WS_METHODS.vcsListRefs) {
-          return {
-            isRepo: true,
-            hasPrimaryRemote: true,
-            nextCursor: null,
-            totalCount: 2,
-            refs: [
-              {
-                name: "main",
-                current: true,
-                isDefault: true,
-                worktreePath: null,
-              },
-              {
-                name: "release/next",
-                current: false,
-                isDefault: false,
-                worktreePath: null,
-              },
-            ],
-          };
-        }
-        return undefined;
-      },
-    });
-
-    try {
-      const branchButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.trim() === "From main",
-          ) as HTMLButtonElement | null,
-        'Unable to find branch selector button with "From main".',
-      );
-      branchButton.click();
-
-      const branchOption = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("span")).find(
-            (element) => element.textContent?.trim() === "release/next",
-          ) as HTMLSpanElement | null,
-        'Unable to find the "release/next" branch option.',
-      );
-      branchOption.click();
-
-      await vi.waitFor(
-        () => {
-          expect(useComposerDraftStore.getState().getDraftSession(activeDraftId)?.branch).toBe(
-            "release/next",
-          );
-          expect(useComposerDraftStore.getState().getDraftSession(staleDraftId)?.branch).toBe(
-            "main",
-          );
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-
-      await vi.waitFor(
-        () => {
-          const updatedButton = Array.from(document.querySelectorAll("button")).find((button) =>
-            button.textContent?.trim().includes("From release/next"),
-          );
-          expect(updatedButton).toBeTruthy();
-        },
-        { timeout: 8_000, interval: 16 },
-      );
-    } finally {
-      await mounted.cleanup();
-    }
-  });
-
-  it("keeps the new worktree branch picker anchored at the top when opening with a preselected branch", async () => {
-    const draftId = DraftId.make("draft-branch-picker-scroll-regression");
-    const branches = [
-      {
-        name: "feature/current",
-        current: true,
-        isDefault: false,
-        worktreePath: null,
-      },
-      {
-        name: "main",
-        current: false,
-        isDefault: true,
-        worktreePath: null,
-      },
-      ...Array.from({ length: 48 }, (_, index) => ({
-        name: `feature/${String(index).padStart(2, "0")}`,
-        current: false,
-        isDefault: false,
-        worktreePath: null,
-      })),
-      {
-        name: "feature/selected",
-        current: false,
-        isDefault: false,
-        worktreePath: null,
-      },
-    ];
-
-    useComposerDraftStore.setState({
-      draftThreadsByThreadKey: {
-        [draftId]: {
-          threadId: THREAD_ID,
-          environmentId: LOCAL_ENVIRONMENT_ID,
-          projectId: PROJECT_ID,
-          logicalProjectKey: PROJECT_DRAFT_KEY,
-          createdAt: NOW_ISO,
-          runtimeMode: "full-access",
-          interactionMode: "default",
-          branch: "feature/selected",
-          worktreePath: null,
-          envMode: "worktree",
-        },
-      },
-      logicalProjectDraftThreadKeyByLogicalProjectKey: {
-        [PROJECT_DRAFT_KEY]: draftId,
-      },
-    });
-
-    const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
-      snapshot: createDraftOnlySnapshot(),
-      initialPath: `/draft/${draftId}`,
-      resolveRpc: (body) => {
-        if (body._tag === WS_METHODS.vcsListRefs) {
-          return {
-            isRepo: true,
-            hasPrimaryRemote: true,
-            nextCursor: null,
-            totalCount: branches.length,
-            refs: branches,
-          };
-        }
-        return undefined;
-      },
-    });
-
-    try {
-      const branchButton = await waitForElement(
-        () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.trim() === "From feature/selected",
-          ) as HTMLButtonElement | null,
-        'Unable to find branch selector button with "From feature/selected".',
-      );
-      branchButton.click();
-
-      await waitForElement(
-        () => document.querySelector<HTMLInputElement>('input[placeholder="Search refs..."]'),
-        "Unable to find ref search input.",
-      );
-
-      const popup = await waitForElement(
-        () => document.querySelector<HTMLElement>('[data-slot="combobox-popup"]'),
-        "Unable to find the branch picker popup.",
-      );
-
-      await vi.waitFor(
-        () => {
-          const popupSpans = Array.from(popup.querySelectorAll("span"));
-          expect(
-            popupSpans.some((element) => element.textContent?.trim() === "feature/current"),
-          ).toBe(true);
-          expect(popupSpans.some((element) => element.textContent?.trim() === "main")).toBe(true);
-        },
-        { timeout: 8_000, interval: 16 },
-      );
     } finally {
       await mounted.cleanup();
     }

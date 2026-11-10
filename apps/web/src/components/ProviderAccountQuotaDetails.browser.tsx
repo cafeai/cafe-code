@@ -73,7 +73,8 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     await expect.element(weekly.getByText("82% left", { exact: true })).toBeVisible();
     await expect.element(weekly.getByText("Resets:", { exact: false })).toBeVisible();
     await expect.element(page.getByText("Weekly · Fable", { exact: true })).not.toBeInTheDocument();
-    await expect.element(page.getByText("25% of extra usage used", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Extra usage", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("25% of monthly cap", { exact: true })).toBeVisible();
     const text = document.querySelector("[data-claude-session-quota]")!.textContent!;
     for (const absent of [
       "all models",
@@ -264,9 +265,7 @@ describe("ProviderAccountQuotaDetails bounds", () => {
           .poll(() => scroll.scrollTop + scroll.clientHeight)
           .toBeGreaterThanOrEqual(scroll.scrollHeight - 1);
         observation.assertActive();
-        await expect
-          .element(page.getByText("25% of extra usage used", { exact: true }))
-          .toBeVisible();
+        await expect.element(page.getByText("25% of monthly cap", { exact: true })).toBeVisible();
         observation.assertActive();
         expect(document.querySelectorAll("[data-account-quota-scroll]")).toHaveLength(1);
         expect(document.querySelector("[data-claude-session-quota]")?.textContent).not.toContain(
