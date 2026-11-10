@@ -3,6 +3,7 @@
 // metadata exchange, and is cleared before returning the upgraded connection.
 
 const VIEWER = "relay.cafecode.sh";
+const SUBPROTOCOL = "cafe-relay.v1";
 const ORIGINS: Readonly<Record<string, string>> = {
   "relay-uk.cafecode.sh": "https://vps-692e150f.vps.ovh.net:8443",
   "relay-ca.cafecode.sh": "https://vps-697b49f9.vps.ovh.ca:8443",
@@ -125,7 +126,8 @@ export async function relayEdgeFetch(
   const websocket =
     url.pathname === "/v1/relay" &&
     request.method === "GET" &&
-    request.headers.get("upgrade")?.toLowerCase() === "websocket";
+    request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
+    request.headers.get("sec-websocket-protocol") === SUBPROTOCOL;
   const lookup = url.pathname === "/v1/lookup" && request.method === "POST";
   const metadata =
     request.method === "GET" && ["/v1/network", "/v1/latency", "/healthz"].includes(url.pathname);
@@ -138,7 +140,13 @@ export async function relayEdgeFetch(
   try {
     const headers = new Headers();
     if (websocket) {
-      for (const name of ["upgrade", "sec-websocket-key", "sec-websocket-version", "origin"]) {
+      for (const name of [
+        "upgrade",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-protocol",
+        "origin",
+      ]) {
         const value = request.headers.get(name);
         if (value !== null) headers.set(name, value);
       }
@@ -159,7 +167,7 @@ export async function relayEdgeFetch(
       const init: ResponseInit & { webSocket: WebSocket } = {
         status: 101,
         webSocket: socket,
-        headers: security,
+        headers: { ...security, "sec-websocket-protocol": SUBPROTOCOL },
       };
       return new Response(null, init);
     }

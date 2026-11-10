@@ -16,6 +16,33 @@ function fixture() {
 }
 
 describe("Cloudflare relay gateway policy", () => {
+  it("preserves the exact relay WebSocket subprotocol and excludes credentials", async () => {
+    const f = fixture();
+    f.origin.mockImplementation(async () => new Response(null, { status: 503 }));
+    const upgrade = (protocol?: string) =>
+      new Request("https://relay-uk.cafecode.sh/v1/relay", {
+        headers: {
+          upgrade: "websocket",
+          "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+          "sec-websocket-version": "13",
+          ...(protocol ? { "sec-websocket-protocol": protocol } : {}),
+          cookie: "parent=private",
+          authorization: "Bearer private",
+        },
+      });
+    for (const protocol of [undefined, "foreign", "cafe-relay.v1, foreign"]) {
+      expect((await relayEdgeFetch(upgrade(protocol), f.env, f.origin)).status).toBe(404);
+    }
+    expect(f.origin).not.toHaveBeenCalled();
+    expect((await relayEdgeFetch(upgrade("cafe-relay.v1"), f.env, f.origin)).status).toBe(502);
+    const [, init] = f.origin.mock.calls[0]!;
+    const headers = new Headers(init!.headers);
+    expect(headers.get("sec-websocket-protocol")).toBe("cafe-relay.v1");
+    expect(headers.get("upgrade")).toBe("websocket");
+    expect(headers.get("authorization")).toBeNull();
+    expect(headers.get("cookie")).toBeNull();
+    expect(f.assets).not.toHaveBeenCalled();
+  });
   it("recovers document navigation without converting missing scripts or APIs into HTML", async () => {
     const f = fixture();
     f.assets.mockImplementation(async () => new Response(null, { status: 404 }));
