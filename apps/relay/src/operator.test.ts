@@ -6,9 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { configureNetwork } from "./operator.ts";
-import { readNodeConfig, readPrivateFile } from "./config.ts";
+import { RelayNodeConfig, readNodeConfig, readPrivateFile } from "./config.ts";
 import { verifyNetwork } from "@cafecode/relay/descriptor";
-import { canonicalBytes } from "@cafecode/relay/protocol";
+import { canonicalBytes, readCanonical } from "@cafecode/relay/protocol";
 import { epochNow } from "@cafecode/relay/lifetime";
 import { randomOpaque } from "@cafecode/relay/bytes";
 
@@ -68,6 +68,13 @@ it.skipIf(process.platform === "win32")(
     await write(nodes.slice(0, 1));
     await own(() => configureNetwork(output, recipe));
     const first = await own(() => readNodeConfig(join(output, "node-0.json")));
+    const policy = (difficulty: number) =>
+      readCanonical(
+        RelayNodeConfig,
+        canonicalBytes({ ...first, hostWork: { difficulty, reservationMs: 600_000 } }),
+      );
+    expect(policy(17).hostWork?.difficulty).toBe(17);
+    expect(() => policy(16)).toThrow();
     const forwardedIpKeys = [randomOpaque(), randomOpaque()];
     const hostWork = { difficulty: 22, reservationMs: 300_000 };
     await own(() =>

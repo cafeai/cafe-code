@@ -7,6 +7,7 @@ import { NetworkDescriptor } from "@cafecode/relay/descriptor";
 import { Id32, readCanonical, SafeCounter } from "@cafecode/relay/protocol";
 import { RelayError, requireRelay } from "@cafecode/relay/errors";
 import { unopaque } from "@cafecode/relay/bytes";
+import { HOST_WORK } from "@cafecode/relay/hostWork";
 const Port = SafeCounter.check(Schema.isLessThanOrEqualTo(65_535));
 const Address = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64));
 const FilePath = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024));
@@ -22,8 +23,8 @@ export const RelayNodeConfig = Schema.Struct({
   hostWork: Schema.optionalKey(
     Schema.Struct({
       difficulty: SafeCounter.check(
-        Schema.isGreaterThanOrEqualTo(18),
-        Schema.isLessThanOrEqualTo(24),
+        Schema.isGreaterThanOrEqualTo(HOST_WORK.minimumDifficulty),
+        Schema.isLessThanOrEqualTo(HOST_WORK.maximumDifficulty),
       ),
       reservationMs: SafeCounter.check(
         Schema.isGreaterThanOrEqualTo(120_000),

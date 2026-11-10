@@ -98,17 +98,19 @@ results before bounded signature verification and atomic capacity admission.
 Each puzzle hashes a domain-separated challenge digest, a part index and a
 32-bit big-endian nonce. Four independent parts each require d-2 leading zero
 bits, for approximately 2^d total SHA-256 trials and four verification hashes.
-The default effective difficulty is 20 bits (about 1,048,576 expected trials).
-At 24 occupied slots it can rise to 21 bits, and at 28 to 22. Decreases use
+The default effective difficulty is 17 bits (about 131,072 expected trials),
+one eighth of the original 20-bit baseline's expected hashing work.
+At 24 occupied slots it can rise to 18 bits, and at 28 to 19. Decreases use
 lower occupancy thresholds and every change has a thirty-second cooldown.
 Already-issued authenticated challenges remain valid until expiry. A private
-node policy can choose an 18–24-bit base and a two-to-ten-minute duration;
+node policy can choose a 17–24-bit base and a two-to-ten-minute duration;
 adaptive increases are capped at 24. Policy changes require a rolling restart,
 and ordinary operator renewal preserves the policy and forwarding keys.
 
-A small local qualification on 2026-11-10 used Node 24.22.1 at nice 15, including
-worker startup and exit: eight 20-bit solves took 260–816 ms, and four 22-bit
-solves took 554–3049 ms. Every sampled solve completed within the work cap.
+Before lowering the baseline, a small local qualification on 2026-11-10 used
+Node 24.22.1 at nice 15, including worker startup and exit: eight 20-bit solves
+took 260–816 ms, and four 22-bit solves took 554–3049 ms. Every sampled solve
+completed within the work cap.
 These are observations on one Mac, not a fleet or slow-hardware guarantee.
 
 A reservation lasts ten minutes by default. The desktop starts renewal two

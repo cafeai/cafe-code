@@ -8,7 +8,8 @@ import { requireRelay } from "./errors.ts";
 
 /** Work buys one host slot. It grants no viewer/application authority. */
 export const HOST_WORK = Object.freeze({
-  difficulty: 20,
+  difficulty: 17,
+  minimumDifficulty: 17,
   maximumDifficulty: 24,
   challengeMs: 30_000,
   reservationMs: 600_000,

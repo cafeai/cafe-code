@@ -100,6 +100,31 @@ async function fixture() {
 }
 
 describe("work-paid host reservations", () => {
+  it("issues the 17-bit baseline and ten-minute term without an explicit host work policy", async () => {
+    const f = await fixture();
+    const authority = new HostReservations({
+      networkId: f.input.networkId,
+      nodeId: f.input.nodeId,
+      grants: f.input.grants,
+      now: f.input.now,
+    });
+    try {
+      const challenge = authority.challenge({
+        version: 1,
+        networkId: f.input.networkId,
+        locator: f.locator,
+        admissionPublicKey: f.identity.publicKey,
+        capacityToken: f.token,
+        claimId: randomOpaque(16),
+        reservationId: null,
+      });
+      expect(challenge.difficulty).toBe(17);
+      expect(challenge.reservationMs).toBe(600_000);
+    } finally {
+      authority.retire();
+      f.authority.retire();
+    }
+  });
   it("reclaims a lost reservation with fresh host work and fences a delayed old release", async () => {
     const f = await fixture(),
       firstProof = await f.claim(),

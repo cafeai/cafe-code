@@ -15,7 +15,12 @@ import { RelayMesh } from "@cafecode/relay/mesh";
 import { RelayError, requireRelay } from "@cafecode/relay/errors";
 import { epochNow, Lifetime } from "@cafecode/relay/lifetime";
 import { HostReservations } from "./reservations.ts";
-import { HostWorkRequest, HostWorkClaim, HostWorkRelease } from "@cafecode/relay/hostWork";
+import {
+  HOST_WORK,
+  HostWorkRequest,
+  HostWorkClaim,
+  HostWorkRelease,
+} from "@cafecode/relay/hostWork";
 import { RELAY_LIMITS } from "@cafecode/relay/limits";
 import { nativeDriver } from "@cafecode/relay/nativeWire";
 import { PacketConnection, relayResources } from "@cafecode/relay/wire";
@@ -53,7 +58,8 @@ export async function startRelayServer(options: RelayServerOptions) {
   requireRelay(
     options.allowLoopbackTest ||
       !options.hostWork ||
-      (options.hostWork.difficulty >= 18 && options.hostWork.reservationMs >= RELAY_LIMITS.leaseMs),
+      (options.hostWork.difficulty >= HOST_WORK.minimumDifficulty &&
+        options.hostWork.reservationMs >= RELAY_LIMITS.leaseMs),
   );
   const reservations = new HostReservations({
     networkId: options.network.networkId,

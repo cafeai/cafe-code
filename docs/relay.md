@@ -11,7 +11,7 @@ The implementation is in `packages/relay`, `apps/relay`,
 
 Desktop Cafe hosts solve PoW when reserving or renewing relay server slots.
 Browser viewers keep the ordinary invitation/authentication flow without work.
-The default is effective 20-bit SHA-256 work for a ten-minute reservation, with
+The default is effective 17-bit SHA-256 work for a ten-minute reservation, with
 bounded increases under slot pressure. See [host reservation work](decisions/encrypted-relay-pilot.md#desktop-host-reservation-proof-of-work).
 New relay versions require a compatible host backend; older hosts cannot register
 without a paid reservation. Existing viewer handshakes remain compatible.

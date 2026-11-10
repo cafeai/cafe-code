@@ -127,7 +127,7 @@ describe("native host-only work solver", () => {
     const lifetime = new Lifetime();
     test.signal.addEventListener("abort", () => lifetime.retire(), { once: true });
     test.onTestFinished(() => lifetime.close());
-    const value = challenge(8),
+    const value = challenge(HOST_WORK.difficulty),
       solutions = await solveHostWork(value, lifetime);
     expect(verifyHostWork(value, solutions)).toBe(true);
     const prefix = hostWorkPrefix(value),
