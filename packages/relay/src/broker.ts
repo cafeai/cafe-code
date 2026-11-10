@@ -19,6 +19,7 @@ import {
 } from "./protocol.ts";
 import { TicketStore } from "./tickets.ts";
 import type { PacketConnection, RelayResources } from "./wire.ts";
+import type { HostReservationAuthority } from "./hostWork.ts";
 
 export interface HostCapacityGrant {
   readonly locator: string;
@@ -42,6 +43,7 @@ interface Registration {
   readonly locator: string;
   readonly admissionPublicKey: string;
   readonly id: string;
+  readonly reservationId: string;
   expiresAt: number;
   priority: 0 | 1;
 }
@@ -73,10 +75,11 @@ export function admissionProof(hello: C.Hello, request: unknown): Uint8Array {
 export class RelayBroker {
   network: NetworkDescriptor;
   readonly nodeId: string;
-  readonly bootId = randomOpaque(16);
+  readonly bootId: string;
   readonly directory: RelayDirectory;
   private readonly resources: RelayResources;
   private readonly grants: readonly HostCapacityGrant[];
+  private readonly reservations: HostReservationAuthority;
   private readonly now: () => number;
   private readonly lifetime = new Lifetime(() => this.retire());
   private readonly legs = new Set<Leg>();
@@ -96,6 +99,7 @@ export class RelayBroker {
     readonly network: NetworkDescriptor;
     readonly nodeId: string;
     readonly grants: readonly HostCapacityGrant[];
+    readonly reservations: HostReservationAuthority;
     readonly resources: RelayResources;
     readonly now?: () => number;
     readonly directory?: RelayDirectory;
@@ -108,6 +112,8 @@ export class RelayBroker {
     );
     requireRelay(input.grants.length <= RELAY_LIMITS.registrations);
     this.grants = input.grants;
+    this.reservations = input.reservations;
+    this.bootId = input.reservations.bootId;
     this.resources = input.resources;
     this.now = input.now ?? epochNow;
     this.directory = input.directory ?? new RelayDirectory(input.network);
@@ -208,7 +214,9 @@ export class RelayBroker {
           this.registrations.get(host.locator) === host &&
           frame.circuitId === ZERO_CIRCUIT,
       );
-      host.expiresAt = this.now() + RELAY_LIMITS.leaseMs;
+      const paidExpiry = this.reservations.expiry(host.locator, host.reservationId);
+      requireRelay(paidExpiry > this.now(), "EXPIRED");
+      host.expiresAt = Math.min(this.now() + RELAY_LIMITS.leaseMs, paidExpiry);
       host.priority = request.priority;
       this.publish();
       return;
@@ -301,6 +309,7 @@ export class RelayBroker {
         equalBytes(unopaque(grant.tokenDigest, 32), sha256(unopaque(request.capacityToken, 32))),
       "AUTH_DENIED",
     );
+    this.reservations.authorize(request.locator, request.admissionPublicKey, request.reservation);
     requireRelay(!this.registering.has(request.locator), "BUSY");
     const owner = {};
     this.registering.set(request.locator, owner);
@@ -322,14 +331,20 @@ export class RelayBroker {
         "EXPIRED",
       );
       const previous = this.registrations.get(request.locator);
+      const paid = this.reservations.authorize(
+        request.locator,
+        request.admissionPublicKey,
+        request.reservation,
+      );
       requireRelay(previous || this.registrations.size < RELAY_LIMITS.registrations, "BUSY");
       const host: Registration = {
         leg,
         locator: request.locator,
         admissionPublicKey: request.admissionPublicKey,
         id: randomOpaque(16),
+        reservationId: paid.credential.id,
         priority: request.priority,
-        expiresAt: this.now() + RELAY_LIMITS.leaseMs,
+        expiresAt: Math.min(this.now() + RELAY_LIMITS.leaseMs, paid.expiresAt),
       };
       this.registrations.set(request.locator, host);
       leg.host = host;
@@ -532,7 +547,11 @@ export class RelayBroker {
     if (!this.lifetime.active) return;
     const now = this.now();
     for (const host of this.registrations.values())
-      if (host.expiresAt <= now) host.leg.connection.retire();
+      if (
+        host.expiresAt <= now ||
+        this.reservations.expiry(host.locator, host.reservationId) <= now
+      )
+        host.leg.connection.retire();
     for (const circuit of this.circuits.values())
       if (circuit.expiresAt <= now) this.closeCircuit(circuit);
     this.tickets.expire(now);
@@ -540,6 +559,7 @@ export class RelayBroker {
   }
   retire(): void {
     this.lifetime.retire();
+    this.reservations.retire();
     for (const leg of this.legs) leg.connection.retire();
     this.publishOwn.retire();
   }

@@ -19,6 +19,7 @@ import {
   type OuterOpcode,
 } from "./protocol.ts";
 import type { PacketConnection, RelayResources } from "./wire.ts";
+import type { HostReservationCredential } from "./hostWork.ts";
 
 export class RelayLeg {
   readonly connection: PacketConnection;
@@ -251,11 +252,18 @@ export class RelayLeg {
     capacityToken: string,
     identity: RelayIdentity,
     priority: 0 | 1 = 0,
+    reservation?: HostReservationCredential,
   ): Promise<C.Registered> {
     await this.connection.opened;
     const hello = await this.hello;
     this.priority = priority;
-    const unsigned = { locator, admissionPublicKey: identity.publicKey, capacityToken, priority };
+    const unsigned = {
+      locator,
+      admissionPublicKey: identity.publicKey,
+      capacityToken,
+      priority,
+      ...(reservation ? { reservation } : {}),
+    };
     const signature = await signBytes(identity, admissionProof(hello, unsigned));
     requireRelay(this.connection.active && hello.expiresAt > epochNow(), "EXPIRED");
     this.send(OUTER.REGISTER, ZERO_CIRCUIT, { ...unsigned, signature });

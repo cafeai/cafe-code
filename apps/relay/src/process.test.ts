@@ -19,6 +19,7 @@ import { LookupResult } from "@cafecode/relay/controls";
 import { epochNow, Lifetime } from "@cafecode/relay/lifetime";
 import { RelayLeg } from "@cafecode/relay/leg";
 import { connectNative } from "@cafecode/relay/nativeWire";
+import { NativeHostWorkClient } from "@cafecode/relay/nativeHostWork";
 import { relayResources, type PacketConnection } from "@cafecode/relay/wire";
 import type { RelayNodeConfig } from "./config.ts";
 
@@ -28,6 +29,7 @@ it.skipIf(process.platform === "win32")(
     let retired = false,
       directory: string | undefined;
     const lifetime = new Lifetime(),
+      work = new NativeHostWorkClient(),
       children = new Set<ChildProcess>(),
       closes = new Map<ChildProcess, Promise<void>>(),
       connections = new Set<PacketConnection>();
@@ -55,6 +57,7 @@ it.skipIf(process.platform === "win32")(
       await Promise.all([...closes.values()]);
       cancel();
       await lifetime.close();
+      await work.close();
       if (directory) await fs.rm(directory, { recursive: true, force: true });
       expect(forced).toBe(false);
     });
@@ -219,7 +222,18 @@ it.skipIf(process.platform === "win32")(
       connection = connectNative(`ws://127.0.0.1:${started[0]!.port}/v1/relay`, resources);
     connections.add(connection);
     const leg = new RelayLeg(connection, resources, network.networkId, nodeIds[0]!);
-    const registered = await leg.register(locator, capacity, admission!);
+    const paid = await work.acquire(
+      {
+        network,
+        node: { ...network.nodes[0]!, url: `ws://127.0.0.1:${started[0]!.port}/v1/relay` },
+        locator,
+        capacityToken: capacity,
+        admissionIdentity: admission!,
+        allowLoopbackTest: true,
+      },
+      lifetime,
+    );
+    const registered = await leg.register(locator, capacity, admission!, 0, paid.credential);
     const response = await fetch(`http://127.0.0.1:${started[2]!.port}/v1/lookup`, {
       method: "POST",
       headers: { "content-type": "application/json" },

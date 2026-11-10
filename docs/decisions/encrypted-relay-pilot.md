@@ -78,64 +78,78 @@ cover the broker's complete aggregate budget, rather than mistake several
 healthy viewers for one abusive viewer. Resource ceilings are independent of
 application authorization. This is overload containment, not upstream DDoS
 protection, NAT identity, fleet-wide quotas or an audited capacity benchmark.
-PoW is not implemented in this deployment. It is required planned work, with the
-staged acceptance criteria below; successful existing rate/functional tests are
-not evidence of PoW protection.
+Desktop Cafe hosts must solve proof of work before reserving server capacity.
+Browser viewers do not solve work for discovery, pairing, connecting or
+reconnecting. Host work grants capacity only; the existing private pilot still
+requires operator-issued host enrollment and ordinary end-to-end viewer auth.
 
-### Required PoW implementation plan
+### Desktop host reservation proof of work
 
-1. Specify and test a versioned SHA-256 client puzzle, separate from pairing,
-   authentication and existing signed admission nonces. Require work for new
-   anonymous admission. Bind the challenge to network, intended relay/purpose,
-   current boot, expiry, nonce and an ephemeral admission key. Authenticate it
-   with dedicated online admission keys, never the offline membership root.
-   The caller cannot lower difficulty or repurpose a challenge for another
-   network, device or operation. Start with candidate effective difficulties
-   18/20/22/24 bits for measurement, not production defaults. Expected trial
-   count is approximately 2^d. Consider four smaller independent subpuzzles to
-   reduce completion-time variance while keeping verification constant work.
-2. Implement cancellable browser and Node solvers. Use the existing qualified
-   SHA-256 library in one owned worker per client; never run a hash loop on the
-   UI thread or execute code supplied by a relay. Keep hash batches, total work,
-   worker count and cleanup bounded. Validate the exact challenge/attempt owner
-   before consuming any result. Cancel and join on replacement, logout or
-   navigation. A malicious relay cannot exceed the fixed local difficulty/time
-   ceiling. Benchmark actual Node and Chromium plus available real mobile
-   devices; label simulated mobile measurements. Target roughly 100–250 ms on
-   reference devices under ordinary load and at most two seconds of total
-   automatic work per connection attempt. These are goals, not measured claims.
-3. Enforce at the Cloudflare edge before opening an origin WebSocket or running
-   Noise/app authentication. Keep challenge minting stateless with authenticated
-   cookies, and verify MAC/expiry/scope/work before origin resources are reserved.
-   Cache only bounded fresh relay boot/policy metadata; an old boot cannot mint
-   valid admission. Carry the resulting short-lived capacity token in a strict
-   additional WebSocket subprotocol, preserving negotiated `cafe-relay.v1` and
-   keeping tokens out of URLs, cookies and application credentials. The origin
-   verifies the exact authenticated gateway/permit and consumes a bounded
-   one-use nonce before upgrade. Provide equivalent direct-origin enforcement
-   or restrict the official origin to the authenticated gateway; leaving a
-   public no-PoW WebSocket bypass fails this stage. Cheap static discovery must
-   stay bounded, and expensive lookup/mesh-refresh work must also require the
-   appropriate admission or work credit.
-4. Add narrowly scoped, short-lived, admission-key-bound reconnect credits so a
-   healthy paired client does not solve work for every RPC, file chunk or brief
-   reconnect. Cap reuse per node, preserve separate recovery capacity and require
-   the usual Noise host pin, device proof, bearer/2FA and revocation checks.
-   Credits authorize only bounded transport capacity. Failover may mint a fresh
-   target permit from valid work credit, but cannot replay application commands
-   or convert a permission/authentication result into retry authority. Raise
-   difficulty from bounded aggregate load signals with hysteresis, cooldown and
-   fixed floors/ceilings; never trust client-reported CPU speed for easier work.
-5. Qualify malformed/forged/expired/future/replayed/wrong-scope/wrong-boot work,
-   simultaneous double use, spoofed client IPs, cancellation and worker cleanup,
-   challenge-endpoint floods, capped state and overload/failover. Use real public
-   browser pairing and serving-node failure as final checks. Run the complete
-   local gates and forced desktop build last before rollout. Deploy compatible
-   clients and verifiers first, then explicitly enable required anonymous PoW;
-   publish measured solve/verify distributions and the chosen policy. A release
-   cannot claim PoW protection while enforcement is disabled. It supplements
-   IP/global bounds and Cloudflare/OVH network protection; it does not prevent
-   upstream bandwidth floods or eliminate optimized hardware/botnets.
+The version-one host-only HTTP protocol has three bounded POST endpoints:
+`/v1/host/challenge`, `/v1/host/claim` and `/v1/host/release`.
+Challenge issuance checks the enrolled host’s existing capacity credential but
+allocates no slot or retained challenge record. A fresh per-boot HMAC-SHA-256 key
+authenticates each challenge’s network, node, boot, host admission key, locator,
+claim ID, reservation purpose, one-slot amount, duration, nonce, issue/expiry
+times and difficulty. It is independent of offline signing and forwarding keys.
+Challenges expire in thirty seconds. The relay checks the MAC and four puzzle
+results before bounded signature verification and atomic capacity admission.
+
+Each puzzle hashes a domain-separated challenge digest, a part index and a
+32-bit big-endian nonce. Four independent parts each require d-2 leading zero
+bits, for approximately 2^d total SHA-256 trials and four verification hashes.
+The default effective difficulty is 20 bits (about 1,048,576 expected trials).
+At 24 occupied slots it can rise to 21 bits, and at 28 to 22. Decreases use
+lower occupancy thresholds and every change has a thirty-second cooldown.
+Already-issued authenticated challenges remain valid until expiry. A private
+node policy can choose an 18–24-bit base and a two-to-ten-minute duration;
+adaptive increases are capped at 24. Policy changes require a rolling restart,
+and ordinary operator renewal preserves the policy and forwarding keys.
+
+A small local qualification on 2026-11-10 used Node 24.22.1 at nice 15, including
+worker startup and exit: eight 20-bit solves took 260–816 ms, and four 22-bit
+solves took 554–3049 ms. Every sampled solve completed within the work cap.
+These are observations on one Mac, not a fleet or slow-hardware guarantee.
+
+A reservation lasts ten minutes by default. The desktop starts renewal two
+minutes before expiry; shorter configured durations use a proportional margin.
+Fresh work extends its paid expiry. Ordinary forty-second heartbeats renew only
+the existing short liveness lease, clamped to paid expiry; they cannot keep a
+slot forever. Unpaid, expired, wrong-host, wrong-node and old-boot registration
+credentials fail closed. An unexpired reservation can reconnect without work,
+including while a renewal attempt is backing off. Replacing the connection
+retires only the exact previous registration. Signed release reclaims the slot;
+a delayed release cannot remove a different reservation incarnation.
+
+Primary and warm-standby registrations consume one paid slot each at their own
+relay. Existing standby capacity permits immediate recovery. New capacity on a
+different node requires its own work; proofs cannot be transferred across nodes.
+The desktop retains only volatile reservation capabilities, and a relay restart
+invalidates them. Returning viewers retain the existing recovery and app-auth
+flow without mining. Host admission is enforced at the relay for both direct
+origins and the Cloudflare gateway, so bypassing the edge does not skip work.
+
+The desktop backend owns one bounded FIFO across its configured networks, with
+at most eight admitted work jobs and one active solver worker. The worker runs
+fixed checked-in Node source with public puzzle bytes, an empty environment,
+no inherited preload arguments and finite heap/stack limits. It never runs on
+the renderer thread or executes relay-supplied code. It accepts at most 24-bit
+challenges, limits hashing to four seconds and 67,108,864 trials, and has an
+additional half-second parent termination allowance. Cancellation joins exact
+worker exit and native HTTP close before adoption or replacement. Automatic
+work is limited to once per node per minute; failures add bounded exponential
+backoff. These limits are separate from browser/device authentication.
+
+Each node permits four concurrent host proof verifiers, at most 32 reserved
+hosts and 256 short-lived claim receipts. A retried identical signed claim
+returns its original result; it cannot allocate another slot or extend the paid
+period again. Live replay receipts are never evicted to admit new work. The
+client permits one identical-claim retry after an uncertain transport response,
+while explicit denials do not trigger retries. Request/response bodies, queued
+jobs and deadlines are bounded, and shutdown fences in-flight verification.
+Existing authenticated-IP, native socket, global resource and ticket limits
+remain in force. Work supplements those limits and provider network mitigation;
+it does not independently protect viewer traffic or upstream bandwidth.
 
 Application pairing uses a distinct full-strength 256-bit fragment secret and a
 five-minute one-use SQL invitation. Direct/native pairing credentials cannot

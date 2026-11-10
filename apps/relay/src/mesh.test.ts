@@ -5,6 +5,7 @@ import { canonicalBytes } from "@cafecode/relay/protocol";
 import { opaque, randomOpaque, unopaque, utf8 } from "@cafecode/relay/bytes";
 import { signNetwork } from "@cafecode/relay/descriptor";
 import { RelayHost } from "@cafecode/relay/host";
+import { NativeHostWorkClient } from "@cafecode/relay/nativeHostWork";
 import { connectViewer } from "@cafecode/relay/client";
 import { connectNative } from "@cafecode/relay/nativeWire";
 import { RelayError } from "@cafecode/relay/errors";
@@ -12,6 +13,7 @@ import { epochNow, Lifetime } from "@cafecode/relay/lifetime";
 
 function owner(test: TestContext) {
   const lifetime = new Lifetime(),
+    work = new NativeHostWorkClient(),
     servers: Array<Awaited<ReturnType<typeof startRelayServer>>> = [],
     closers = new Set<() => Promise<void>>();
   let retired = false;
@@ -27,9 +29,11 @@ function owner(test: TestContext) {
     await Promise.allSettled([...closers].map((close) => close()));
     await Promise.allSettled(servers.map((server) => server.close()));
     await lifetime.close();
+    await work.close();
   });
   return {
     lifetime,
+    work,
     servers,
     closers,
     add: async (server: Awaited<ReturnType<typeof startRelayServer>>) => {
@@ -110,7 +114,7 @@ describe("native three-node private mesh", () => {
     );
     byId.set(members[1]!.id, second);
     peers.set(members[1]!.id, `http://127.0.0.1:${second.meshPort}/v1/mesh`);
-    const network = await networkFor(3);
+    let network = await networkFor(3);
     await first.updateNetwork(canonicalBytes(network));
     await second.updateNetwork(canonicalBytes(network));
     const third = await fixture.add(
@@ -129,8 +133,15 @@ describe("native three-node private mesh", () => {
     );
     byId.set(members[2]!.id, third);
     peers.set(members[2]!.id, `http://127.0.0.1:${third.meshPort}/v1/mesh`);
+    for (const member of members)
+      member.url = `ws://127.0.0.1:${byId.get(member.id)!.port}/v1/relay`;
+    network = await networkFor(3);
+    await Promise.all(
+      [first, second, third].map((server) => server.updateNetwork(canonicalBytes(network))),
+    );
     let boundDevice: string | undefined;
     const host = new RelayHost({
+      work: fixture.work,
       network,
       identity: hostIdentity!,
       credentials: members.map((node) => ({
@@ -141,6 +152,7 @@ describe("native three-node private mesh", () => {
       })),
       dial: (node, resources) =>
         connectNative(`ws://127.0.0.1:${byId.get(node.id)!.port}/v1/relay`, resources),
+      measureLatency: async (node) => members.findIndex((member) => member.id === node.id) * 10 + 1,
       allowLoopbackTest: true,
       handlers: {
         authenticate: async (auth, key) => {

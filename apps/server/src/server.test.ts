@@ -1695,25 +1695,22 @@ const qualifyRelayRouter = (test: TestContext, compiled = false, publicNetwork =
       return descriptor;
     }).pipe(Effect.onInterrupt(() => Deferred.succeed(descriptorInterrupted, undefined)));
     let clientSettings = DEFAULT_CLIENT_SETTINGS;
-    const dial: RelayRuntimeIOShape["dial"] = (member, resources) =>
-      connectRelayNative(
-        member.url,
-        resources,
-        publicNetwork
-          ? undefined
-          : compiled
-            ? {
-                lookup: (host, options, callback) => {
-                  if (host !== hostname) {
-                    callback(new Error("fixture-host-refused"), "", 4);
-                    return;
-                  }
-                  if (options.all) callback(null, [{ address: "127.0.0.1", family: 4 }]);
-                  else callback(null, "127.0.0.1", 4);
-                },
+    const hostWorkTls: RelayRuntimeIOShape["hostWorkTls"] = publicNetwork
+      ? undefined
+      : compiled
+        ? {
+            lookup: (host, options, callback) => {
+              if (host !== hostname) {
+                callback(new Error("fixture-host-refused"), "", 4);
+                return;
               }
-            : { ca: tls.cert },
-      );
+              if (options.all) callback(null, [{ address: "127.0.0.1", family: 4 }]);
+              else callback(null, "127.0.0.1", 4);
+            },
+          }
+        : { ca: tls.cert };
+    const dial: RelayRuntimeIOShape["dial"] = (member, resources) =>
+      connectRelayNative(member.url, resources, hostWorkTls);
     const [root, node, admission, device, deviceAdmission] = yield* Effect.promise(() =>
       Promise.all(Array.from({ length: 5 }, () => createRelayIdentity())),
     );
@@ -1811,6 +1808,7 @@ const qualifyRelayRouter = (test: TestContext, compiled = false, publicNetwork =
       }),
       relayIO: {
         dial,
+        ...(hostWorkTls ? { hostWorkTls } : {}),
         ...(publicNetwork ? {} : { measureLatency: async () => 1 }),
         onHostStarted: (networkId, serving) => hostStarted.resolve({ networkId, serving }),
       },

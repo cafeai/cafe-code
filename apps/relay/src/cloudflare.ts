@@ -132,9 +132,12 @@ export async function relayEdgeFetch(
     request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
     request.headers.get("sec-websocket-protocol") === SUBPROTOCOL;
   const lookup = url.pathname === "/v1/lookup" && request.method === "POST";
+  const hostWork =
+    request.method === "POST" &&
+    ["/v1/host/challenge", "/v1/host/claim", "/v1/host/release"].includes(url.pathname);
   const metadata =
     request.method === "GET" && ["/v1/network", "/v1/latency", "/healthz"].includes(url.pathname);
-  if (!websocket && !lookup && !metadata) return refusal();
+  if (!websocket && !lookup && !hostWork && !metadata) return refusal();
   const controller = new AbortController();
   const abort = () => controller.abort();
   request.signal.addEventListener("abort", abort, { once: true });
@@ -153,7 +156,7 @@ export async function relayEdgeFetch(
         const value = request.headers.get(name);
         if (value !== null) headers.set(name, value);
       }
-    } else if (lookup) headers.set("content-type", "application/json");
+    } else if (lookup || hostWork) headers.set("content-type", "application/json");
     const forwardingKey = (
       {
         "relay-uk.cafecode.sh": env.RELAY_FORWARD_UK_KEY,
@@ -175,7 +178,10 @@ export async function relayEdgeFetch(
       headers.set("cf-connecting-ip", client);
       headers.set("x-cafe-relay-forward-key", forwardingKey);
     }
-    const body = lookup ? await bounded(request.body, 8_192, controller.signal) : undefined;
+    const body =
+      lookup || hostWork
+        ? await bounded(request.body, hostWork ? 4096 : 8_192, controller.signal)
+        : undefined;
     const upstream = await fetcher(new URL(url.pathname, origin), {
       method: request.method,
       headers,

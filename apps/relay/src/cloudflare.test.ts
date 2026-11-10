@@ -16,6 +16,40 @@ function fixture() {
 }
 
 describe("Cloudflare relay gateway policy", () => {
+  it("carries bounded host-only work requests without forwarding application credentials", async () => {
+    const f = fixture();
+    for (const path of ["challenge", "claim", "release"]) {
+      const response = await relayEdgeFetch(
+        new Request(`https://relay-uk.cafecode.sh/v1/host/${path}`, {
+          method: "POST",
+          body: '{"fixture":true}',
+          headers: { authorization: "Bearer private", cookie: "private=1" },
+        }),
+        f.env,
+        f.origin,
+      );
+      expect(response.status).toBe(200);
+      const [url, init] = f.origin.mock.calls.at(-1)!;
+      expect(new URL(String(url)).pathname).toBe(`/v1/host/${path}`);
+      expect(new Headers(init!.headers).get("authorization")).toBeNull();
+      expect(new Headers(init!.headers).get("cookie")).toBeNull();
+      expect(new TextDecoder().decode(init!.body as Uint8Array)).toBe('{"fixture":true}');
+    }
+    f.origin.mockClear();
+    expect(
+      (
+        await relayEdgeFetch(
+          new Request("https://relay-uk.cafecode.sh/v1/host/claim", {
+            method: "POST",
+            body: "x".repeat(4097),
+          }),
+          f.env,
+          f.origin,
+        )
+      ).status,
+    ).toBe(502);
+    expect(f.origin).not.toHaveBeenCalled();
+  });
   it("overwrites caller forwarding credentials and forwards only the Cloudflare address", async () => {
     const f = fixture(),
       key = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE";

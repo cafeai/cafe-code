@@ -9,6 +9,13 @@ The implementation is in `packages/relay`, `apps/relay`,
 `apps/server/src/relay`, and `apps/web/src/environments/relay`. See
 [the trust and protocol decision](decisions/encrypted-relay-pilot.md).
 
+Desktop Cafe hosts solve PoW when reserving or renewing relay server slots.
+Browser viewers keep the ordinary invitation/authentication flow without work.
+The default is effective 20-bit SHA-256 work for a ten-minute reservation, with
+bounded increases under slot pressure. See [host reservation work](decisions/encrypted-relay-pilot.md#desktop-host-reservation-proof-of-work).
+New relay versions require a compatible host backend; older hosts cannot register
+without a paid reservation. Existing viewer handshakes remain compatible.
+
 ## Initial endpoints
 
 The initial deployment uses the existing VPS names. All nodes run the same relay;
@@ -242,7 +249,7 @@ For an opt-in public application check, put the private host enrollment at
 
 ```sh
 CAFE_RELAY_PUBLIC_E2E=1 CAFE_RELAY_PUBLIC_STATE_ROOT=/absolute/private-state-root \
-  nice -n 10 corepack yarn workspace @cafeai/cafe-code test src/server.test.ts \
+  nice -n 15 corepack yarn workspace @cafeai/cafe-code test src/server.test.ts \
   -t 'opens the public Cafe viewer' --maxWorkers=1
 ```
 
@@ -267,10 +274,10 @@ the test gate, and then uses typed RPC on the same healthy session.
 Run the focused core/native/auth tests and complete repository qualification:
 
 ```sh
-nice -n 10 corepack yarn workspace @cafecode/relay test --maxWorkers=1
-nice -n 10 corepack yarn workspace @cafecode/relay-server test --maxWorkers=1
-nice -n 10 corepack yarn workspace @cafeai/cafe-code test src/relay/auth.test.ts src/server.test.ts --maxWorkers=1
-nice -n 10 corepack yarn verify:local --fresh --typecheck-concurrency=1 --test-concurrency=1
+nice -n 15 corepack yarn workspace @cafecode/relay test --maxWorkers=1
+nice -n 15 corepack yarn workspace @cafecode/relay-server test --maxWorkers=1
+nice -n 15 corepack yarn workspace @cafeai/cafe-code test src/relay/auth.test.ts src/server.test.ts --maxWorkers=1
+nice -n 15 corepack yarn verify:local --fresh --typecheck-concurrency=1 --test-concurrency=1
 ```
 
 The complete coordinator performs formatting, lint, audit, actual compiler

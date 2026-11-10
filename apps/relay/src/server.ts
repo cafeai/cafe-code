@@ -14,6 +14,8 @@ import type { RelayIdentity } from "@cafecode/relay/crypto";
 import { RelayMesh } from "@cafecode/relay/mesh";
 import { RelayError, requireRelay } from "@cafecode/relay/errors";
 import { epochNow, Lifetime } from "@cafecode/relay/lifetime";
+import { HostReservations } from "./reservations.ts";
+import { HostWorkRequest, HostWorkClaim, HostWorkRelease } from "@cafecode/relay/hostWork";
 import { RELAY_LIMITS } from "@cafecode/relay/limits";
 import { nativeDriver } from "@cafecode/relay/nativeWire";
 import { PacketConnection, relayResources } from "@cafecode/relay/wire";
@@ -34,6 +36,7 @@ export interface RelayServerOptions {
   readonly meshPeerUrls?: ReadonlyMap<string, string>;
   readonly manualMeshSync?: boolean;
   readonly forwardedIpKeys?: readonly string[];
+  readonly hostWork?: { readonly difficulty: number; readonly reservationMs: number };
 }
 
 export async function startRelayServer(options: RelayServerOptions) {
@@ -47,6 +50,18 @@ export async function startRelayServer(options: RelayServerOptions) {
   const anonymous = new AdmissionLimiter(epochNow());
   const pending = new Budget(RELAY_LIMITS.pendingTls);
   const peers = new PeerAttribution(options.forwardedIpKeys);
+  requireRelay(
+    options.allowLoopbackTest ||
+      !options.hostWork ||
+      (options.hostWork.difficulty >= 18 && options.hostWork.reservationMs >= RELAY_LIMITS.leaseMs),
+  );
+  const reservations = new HostReservations({
+    networkId: options.network.networkId,
+    nodeId: options.nodeId,
+    grants: options.grants,
+    now: epochNow,
+    ...options.hostWork,
+  });
   const sockets = new Set<Socket>();
   const requestsHeld = new Set<Promise<void>>();
   const broker = new RelayBroker({
@@ -54,6 +69,7 @@ export async function startRelayServer(options: RelayServerOptions) {
     nodeId: options.nodeId,
     grants: options.grants,
     resources,
+    reservations,
   });
   const mesh = options.nodeIdentity
     ? new RelayMesh({
@@ -195,8 +211,13 @@ export async function startRelayServer(options: RelayServerOptions) {
             respond(response, 200, { version: 1, ready: lifetime.active });
             return;
           }
+          const workPath =
+            request.method === "POST" &&
+            ["/v1/host/challenge", "/v1/host/claim", "/v1/host/release"].includes(
+              request.url ?? "",
+            );
           requireRelay(
-            isMesh || (request.method === "POST" && request.url === "/v1/lookup"),
+            isMesh || workPath || (request.method === "POST" && request.url === "/v1/lookup"),
             "NOT_FOUND",
           );
           const chunks: Uint8Array[] = [];
@@ -204,7 +225,9 @@ export async function startRelayServer(options: RelayServerOptions) {
           for await (const chunk of request) {
             requireRelay(!controller.signal.aborted && chunk instanceof Uint8Array);
             length += chunk.byteLength;
-            requireRelay(length <= (isMesh ? RELAY_LIMITS.controlBytes : RELAY_LIMITS.lookupBytes));
+            requireRelay(
+              length <= (isMesh || workPath ? RELAY_LIMITS.controlBytes : RELAY_LIMITS.lookupBytes),
+            );
             chunks.push(chunk);
           }
           const body = new Uint8Array(length);
@@ -223,6 +246,25 @@ export async function startRelayServer(options: RelayServerOptions) {
               connection: "close",
             });
             response.end(answer);
+            return;
+          }
+          if (workPath) {
+            requireRelay(!controller.signal.aborted && lifetime.active, "UNAVAILABLE");
+            if (request.url === "/v1/host/challenge")
+              respond(
+                response,
+                200,
+                reservations.challenge(readCanonical(HostWorkRequest, body, 4096)),
+              );
+            else if (request.url === "/v1/host/claim") {
+              const result = await reservations.claim(readCanonical(HostWorkClaim, body, 4096));
+              requireRelay(!controller.signal.aborted && lifetime.active, "UNAVAILABLE");
+              respond(response, 200, result);
+            } else {
+              await reservations.release(readCanonical(HostWorkRelease, body, 4096));
+              requireRelay(!controller.signal.aborted && lifetime.active, "UNAVAILABLE");
+              respond(response, 200, { version: 1 });
+            }
             return;
           }
           const lookup = readCanonical(Lookup, body, RELAY_LIMITS.lookupBytes);
@@ -346,6 +388,7 @@ export async function startRelayServer(options: RelayServerOptions) {
       close,
       stats: () => ({
         ...broker.stats(),
+        hostReservations: reservations.stats(),
         owners: resources.owners.current,
         pendingBytes: resources.pending.current,
         nativeSockets: sockets.size,

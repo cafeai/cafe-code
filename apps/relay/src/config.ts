@@ -19,6 +19,18 @@ export const RelayNodeConfig = Schema.Struct({
   forwardedIpKeys: Schema.optionalKey(
     Schema.Array(Id32).check(Schema.isMinLength(1), Schema.isMaxLength(2)),
   ),
+  hostWork: Schema.optionalKey(
+    Schema.Struct({
+      difficulty: SafeCounter.check(
+        Schema.isGreaterThanOrEqualTo(18),
+        Schema.isLessThanOrEqualTo(24),
+      ),
+      reservationMs: SafeCounter.check(
+        Schema.isGreaterThanOrEqualTo(120_000),
+        Schema.isLessThanOrEqualTo(600_000),
+      ),
+    }),
+  ),
   grants: Schema.Array(
     Schema.Struct({ locator: Id32, admissionPublicKey: Id32, tokenDigest: Id32 }),
   ).check(Schema.isMaxLength(32)),

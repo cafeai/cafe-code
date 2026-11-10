@@ -85,6 +85,7 @@ async function main(): Promise<void> {
     host: config.listen.host,
     port: config.listen.port,
     ...(config.forwardedIpKeys ? { forwardedIpKeys: config.forwardedIpKeys } : {}),
+    ...(config.hostWork ? { hostWork: config.hostWork } : {}),
     ...(tls ? { tls } : {}),
     meshListen: config.mesh,
     meshPeerUrls: new Map(config.mesh.peers.map((peer) => [peer.nodeId, peer.url])),
@@ -124,6 +125,8 @@ async function main(): Promise<void> {
           replacement.nodeId === config.nodeId &&
             replacement.rootPublicKey === config.rootPublicKey &&
             replacement.privateIdentity === config.privateIdentity &&
+            canonicalBytes(replacement.hostWork ?? null).toString() ===
+              canonicalBytes(config.hostWork ?? null).toString() &&
             canonicalBytes(replacement.forwardedIpKeys ?? []).toString() ===
               canonicalBytes(config.forwardedIpKeys ?? []).toString() &&
             canonicalBytes(replacement.grants).toString() ===

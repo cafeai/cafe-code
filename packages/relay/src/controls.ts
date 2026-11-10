@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import { Id16, Id32, SafeCounter } from "./protocol.ts";
+import { HostReservationCredential } from "./hostWork.ts";
 
 export const Signature = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{86}$/));
 export const Hello = Schema.Struct({
@@ -17,6 +18,7 @@ export const Register = Schema.Struct({
   admissionPublicKey: Id32,
   capacityToken: Id32,
   priority: Priority,
+  reservation: Schema.optionalKey(HostReservationCredential),
   signature: Signature,
 });
 export type Register = typeof Register.Type;

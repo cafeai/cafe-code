@@ -14,6 +14,7 @@ import { fetchCanonical } from "./discovery.ts";
 import { relayHttpEndpoint } from "./descriptor.ts";
 import { monotonicMillis } from "./lifetime.ts";
 import { selectHostRelays, type RelayObservation } from "./selection.ts";
+import { type HostReservation, type HostWorkClient, type HostWorkScope } from "./hostWork.ts";
 
 const LatencyResponse = Schema.Struct({ version: Schema.Literal(1) });
 
@@ -40,6 +41,10 @@ export class RelayHost {
   private readonly credentials: readonly HostNodeCredential[];
   private readonly dial: RelayDial;
   private readonly handlers: SessionHandlers;
+  private readonly work: HostWorkClient;
+  private readonly reservations = new Map<string, HostReservation>();
+  private readonly workJobs = new Set<Promise<void>>();
+  private readonly renewing = new Set<string>();
   private readonly allowLoopbackTest: boolean;
   private readonly serving = new Map<string, ServingNode>();
   private readonly acquiring = new Set<string>();
@@ -60,6 +65,7 @@ export class RelayHost {
     readonly credentials: readonly HostNodeCredential[];
     readonly dial: RelayDial;
     readonly handlers: SessionHandlers;
+    readonly work: HostWorkClient;
     readonly allowLoopbackTest?: boolean;
     readonly resources?: RelayResources;
     readonly measureLatency?: (node: RelayNode, lifetime: Lifetime) => Promise<number>;
@@ -70,6 +76,7 @@ export class RelayHost {
     this.credentials = input.credentials;
     this.dial = input.dial;
     this.handlers = input.handlers;
+    this.work = input.work;
     this.allowLoopbackTest = input.allowLoopbackTest ?? false;
     this.resources = input.resources ?? relayResources();
     this.measure =
@@ -92,6 +99,7 @@ export class RelayHost {
   }
   private tick(): void {
     this.lifetime.later(5_000, () => {
+      this.renewReservations();
       void this.reconcile()
         .catch(() => {})
         .finally(() => {
@@ -180,11 +188,76 @@ export class RelayHost {
         entry.leg.setPriority(id === this.primaryNodeId ? 0 : 1);
       else entry.connection.retire();
     }
+    for (const [id, reservation] of this.reservations) {
+      if (this.serving.has(id) || desired.some((node) => node.id === id)) continue;
+      this.reservations.delete(id);
+      const node = this.network.nodes.find((node) => node.id === id);
+      const credential = this.credentials.find((value) => value.nodeId === id);
+      if (node && credential) this.releaseReservation(node, credential, reservation);
+    }
+  }
+
+  private workScope(node: RelayNode, credential: HostNodeCredential): HostWorkScope {
+    return {
+      network: this.network,
+      node,
+      locator: credential.locator,
+      capacityToken: credential.token,
+      admissionIdentity: credential.admissionIdentity,
+      allowLoopbackTest: this.allowLoopbackTest,
+    };
+  }
+  private releaseReservation(
+    node: RelayNode,
+    credential: HostNodeCredential,
+    reservation: HostReservation,
+  ) {
+    const job = Promise.resolve()
+      .then(() => this.work.release(this.workScope(node, credential), reservation))
+      .catch(() => {})
+      .finally(() => this.workJobs.delete(job));
+    this.workJobs.add(job);
+  }
+  private renewReservations() {
+    if (!this.lifetime.active) return;
+    for (const [id, entry] of this.serving) {
+      const previous = this.reservations.get(id),
+        credential = this.credentials.find((value) => value.nodeId === id);
+      if (!previous || !credential || this.renewing.has(id) || previous.renewAt > epochNow())
+        continue;
+      this.renewing.add(id);
+      const job = this.work
+        .acquire(this.workScope(entry.node, credential), this.lifetime, previous, true)
+        .then((reservation) => {
+          if (
+            this.lifetime.active &&
+            this.reservations.get(id) === previous &&
+            this.serving.get(id) === entry
+          )
+            this.reservations.set(id, reservation);
+        })
+        .catch(() => {
+          if (this.serving.get(id) === entry && previous.expiresAt <= epochNow())
+            entry.connection.retire();
+        })
+        .finally(() => {
+          this.renewing.delete(id);
+          this.workJobs.delete(job);
+        });
+      this.workJobs.add(job);
+    }
   }
 
   private async open(node: RelayNode, credential: HostNodeCredential): Promise<void> {
     relayEndpoint(node.url, this.allowLoopbackTest);
     requireRelay(this.lifetime.active, "UNAVAILABLE");
+    const reservation = await this.work.acquire(
+      this.workScope(node, credential),
+      this.lifetime,
+      this.reservations.get(node.id),
+    );
+    requireRelay(this.lifetime.active, "UNAVAILABLE");
+    this.reservations.set(node.id, reservation);
     const connection = this.dial(node, this.resources);
     this.connections.add(connection);
     const leg = new RelayLeg(connection, this.resources, this.network.networkId, node.id);
@@ -283,11 +356,17 @@ export class RelayHost {
       // its unauthenticated deadline independently of provider/session work.
     });
     try {
+      const hello = await leg.hello;
+      if (hello.bootId !== reservation.bootId) {
+        this.reservations.delete(node.id);
+        throw new RelayError("EXPIRED");
+      }
       const registered = await leg.register(
         credential.locator,
         credential.token,
         credential.admissionIdentity,
         node.id === this.primaryNodeId ? 0 : 1,
+        reservation.credential,
       );
       requireRelay(this.lifetime.active && connection.active, "UNAVAILABLE");
       this.serving.set(node.id, {
@@ -328,6 +407,14 @@ export class RelayHost {
     this.retire();
     await Promise.all(held.map((connection) => connection.close()));
     await this.reconciling?.catch(() => {});
+    await Promise.all(this.workJobs);
+    for (const [id, reservation] of this.reservations) {
+      const node = this.network.nodes.find((node) => node.id === id),
+        credential = this.credentials.find((value) => value.nodeId === id);
+      if (node && credential) this.releaseReservation(node, credential, reservation);
+    }
+    this.reservations.clear();
+    await Promise.all(this.workJobs);
     await Promise.all(this.openings);
     await Promise.all([...this.sessions].map((session) => session.close()));
     await this.lifetime.close();

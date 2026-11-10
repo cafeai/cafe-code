@@ -44,7 +44,14 @@ export function relayEndpoint(value: string, allowLoopbackTest = false): URL {
 
 export function relayHttpEndpoint(
   node: RelayNode,
-  pathname: "/v1/network" | "/v1/lookup" | "/v1/latency" | "/v1/mesh",
+  pathname:
+    | "/v1/network"
+    | "/v1/lookup"
+    | "/v1/latency"
+    | "/v1/mesh"
+    | "/v1/host/challenge"
+    | "/v1/host/claim"
+    | "/v1/host/release",
   allowLoopbackTest = false,
 ): string {
   const url = relayEndpoint(node.url, allowLoopbackTest);

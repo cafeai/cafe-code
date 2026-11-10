@@ -69,10 +69,15 @@ it.skipIf(process.platform === "win32")(
     await own(() => configureNetwork(output, recipe));
     const first = await own(() => readNodeConfig(join(output, "node-0.json")));
     const forwardedIpKeys = [randomOpaque(), randomOpaque()];
+    const hostWork = { difficulty: 22, reservationMs: 300_000 };
     await own(() =>
-      fs.writeFile(join(output, "node-0.json"), canonicalBytes({ ...first, forwardedIpKeys }), {
-        mode: 0o600,
-      }),
+      fs.writeFile(
+        join(output, "node-0.json"),
+        canonicalBytes({ ...first, forwardedIpKeys, hostWork }),
+        {
+          mode: 0o600,
+        },
+      ),
     );
     await write(nodes);
     await own(() => configureNetwork(output, recipe));
@@ -81,6 +86,7 @@ it.skipIf(process.platform === "win32")(
     expect(current.grants).toEqual(first.grants);
     expect(current.rootPublicKey).toBe(first.rootPublicKey);
     expect(current.forwardedIpKeys).toEqual(forwardedIpKeys);
+    expect(current.hostWork).toEqual(hostWork);
     expect(current.descriptor.revision).toBe(2);
     expect(current.descriptor.nodes.length).toBe(3);
     const networkBytes = await own(() => readPrivateFile(join(output, "network.json"), 8192));

@@ -8,7 +8,9 @@ import { RelayLeg, type EndpointCircuit } from "@cafecode/relay/leg";
 import { relayResources, type PacketConnection } from "@cafecode/relay/wire";
 import { admissionProof } from "@cafecode/relay/broker";
 import { OUTER, ZERO_CIRCUIT } from "@cafecode/relay/protocol";
-import { epochNow } from "@cafecode/relay/lifetime";
+import { epochNow, Lifetime } from "@cafecode/relay/lifetime";
+import { NativeHostWorkClient } from "@cafecode/relay/nativeHostWork";
+import type { HostReservation } from "@cafecode/relay/hostWork";
 import { RelaySession, type SessionHandlers } from "@cafecode/relay/session";
 import { RelayError } from "@cafecode/relay/errors";
 import { fetchRelayed, serveRelayedHttp } from "@cafecode/relay/http";
@@ -26,10 +28,13 @@ async function fixture(
   forwardedIpKeys?: readonly string[],
 ) {
   let retired = false;
+  const work = new NativeHostWorkClient(),
+    workLifetime = new Lifetime();
   const held = new Set<PacketConnection>();
   let server: Awaited<ReturnType<typeof startRelayServer>> | undefined;
   const retire = () => {
     retired = true;
+    workLifetime.retire();
     beforeClose();
     for (const connection of held) connection.retire();
     void server?.close();
@@ -39,6 +44,8 @@ async function fixture(
     retire();
     await Promise.all([...held].map((connection) => connection.close()));
     await server?.close();
+    await work.close();
+    await workLifetime.close();
   };
   test.onTestFinished(close);
   const [root, node, admission, host, viewer, viewerAdmission] = await Promise.all(
@@ -75,6 +82,7 @@ async function fixture(
     host: "127.0.0.1",
     port: 0,
     allowLoopbackTest: true,
+    hostWork: { difficulty: 8, reservationMs: 600_000 },
     ...(forwardedIpKeys ? { forwardedIpKeys } : {}),
   });
   if (retired) {
@@ -88,7 +96,31 @@ async function fixture(
     if (retired) connection.retire();
     return new RelayLeg(connection, resources, network.networkId, nodeId);
   };
-  return { ...identities, network, nodeId, locator, token, server, connect, resources, close };
+  const reserve = (previous?: HostReservation) =>
+    work.acquire(
+      {
+        network,
+        node: { ...network.nodes[0]!, url: `ws://127.0.0.1:${server!.port}/v1/relay` },
+        locator,
+        capacityToken: token,
+        admissionIdentity: identities.admission,
+        allowLoopbackTest: true,
+      },
+      workLifetime,
+      previous,
+    );
+  return {
+    ...identities,
+    network,
+    nodeId,
+    locator,
+    token,
+    server,
+    connect,
+    resources,
+    close,
+    reserve,
+  };
 }
 
 async function sessions(
@@ -105,7 +137,8 @@ async function sessions(
     circuit.accept();
     hostOffered.resolve(circuit);
   });
-  const registration = await hostLeg.register(f.locator, f.token, f.admission);
+  const paid = await f.reserve();
+  const registration = await hostLeg.register(f.locator, f.token, f.admission, 0, paid.credential);
   const ticket = (await hostLeg.mintTickets(registration.registrationId, "invite", null))
     .tickets[0]!;
   const viewerLeg = f.connect(),
@@ -146,6 +179,38 @@ async function sessions(
 }
 
 describe("native single-hop relay", () => {
+  it("refuses an enrolled host that has not paid for a reservation", async (test) => {
+    const f = await fixture(test),
+      leg = f.connect();
+    await expect(leg.register(f.locator, f.token, f.admission)).rejects.toThrow();
+    await leg.connection.close();
+    expect(f.server.stats()).toMatchObject({
+      registrations: 0,
+      hostReservations: { reservations: 0, receipts: 0 },
+    });
+    await f.close();
+  });
+  it("reuses one paid slot on reconnect and retires only its previous registration", async (test) => {
+    const f = await fixture(test),
+      paid = await f.reserve(),
+      first = f.connect();
+    const before = await first.register(f.locator, f.token, f.admission, 0, paid.credential);
+    expect(await f.reserve(paid)).toEqual(paid);
+    const second = f.connect(),
+      after = await second.register(f.locator, f.token, f.admission, 0, paid.credential);
+    expect(after.registrationId).not.toBe(before.registrationId);
+    await first.connection.closed;
+    expect(f.server.stats()).toMatchObject({
+      registrations: 1,
+      hostReservations: { reservations: 1, receipts: 1 },
+    });
+    await f.close();
+    expect(f.server.stats()).toMatchObject({
+      registrations: 0,
+      nativeSockets: 0,
+      hostReservations: { reservations: 0, checking: 0 },
+    });
+  });
   it("carries real Noise over native sockets and releases exact circuit/socket owners", async (test) => {
     const f = await fixture(test),
       hostLeg = f.connect();
@@ -155,7 +220,14 @@ describe("native single-hop relay", () => {
       circuit.accept();
       offered.resolve(circuit);
     });
-    const registration = await hostLeg.register(f.locator, f.token, f.admission);
+    const paid = await f.reserve();
+    const registration = await hostLeg.register(
+      f.locator,
+      f.token,
+      f.admission,
+      0,
+      paid.credential,
+    );
     const ticket = (await hostLeg.mintTickets(registration.registrationId, "invite", null))
       .tickets[0]!;
     const viewerLeg = f.connect(),

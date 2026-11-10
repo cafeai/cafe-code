@@ -9,6 +9,7 @@ import {
 import { NetworkDescriptor, relayHttpEndpoint, verifyNetwork } from "@cafecode/relay/descriptor";
 import { createInvitationUrl } from "@cafecode/relay/invitation";
 import { RelayHost } from "@cafecode/relay/host";
+import { NativeHostWorkClient, type HostWorkTls } from "@cafecode/relay/nativeHostWork";
 import { serveRelayedHttp, HttpOpen, relativeAppPath } from "@cafecode/relay/http";
 import { connectNative } from "@cafecode/relay/nativeWire";
 import { unopaqueBounded } from "@cafecode/relay/bytes";
@@ -84,6 +85,7 @@ export interface RelayRuntimeIOShape {
   readonly dial: RelayDial;
   readonly measureLatency?: (node: RelayNode, lifetime: Lifetime) => Promise<number>;
   readonly onHostStarted?: (networkId: string, serving: number) => void;
+  readonly hostWorkTls?: HostWorkTls;
 }
 export class RelayRuntimeIO extends Context.Service<RelayRuntimeIO, RelayRuntimeIOShape>()(
   "cafecode/relay/RelayRuntimeIO",
@@ -152,6 +154,9 @@ export const makeRelayRuntime = Effect.gen(function* () {
   const services = yield* Effect.context<never>();
   const runtimeScope = yield* Scope.Scope;
   const connector = yield* Effect.serviceOption(RelayRuntimeIO);
+  const hostWork = new NativeHostWorkClient(
+    Option.isSome(connector) ? connector.value.hostWorkTls : undefined,
+  );
   const runWith = Effect.runPromiseWith(services);
   const run = async <A, E>(effect: Effect.Effect<A, E>, signal?: AbortSignal): Promise<A> => {
     const result = await runWith(Effect.result(effect), signal ? { signal } : undefined);
@@ -217,6 +222,7 @@ export const makeRelayRuntime = Effect.gen(function* () {
         );
       const host = new RelayHost({
         network: descriptor,
+        work: hostWork,
         identity,
         credentials: entry.credentials.map((credential) => ({
           nodeId: credential.nodeId,
@@ -331,8 +337,8 @@ export const makeRelayRuntime = Effect.gen(function* () {
   const close = () => {
     active = false;
     for (const entry of hosts) entry.host.retire();
-    return (closing ??= Promise.allSettled(hosts.map((entry) => entry.host.close())).then(
-      () => {},
+    return (closing ??= Promise.allSettled(hosts.map((entry) => entry.host.close())).then(() =>
+      hostWork.close(),
     ));
   };
   yield* Effect.addFinalizer(() => Effect.promise(close));

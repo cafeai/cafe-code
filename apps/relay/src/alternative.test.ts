@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import { startRelayServer } from "./server.ts";
 import { RelayHost } from "@cafecode/relay/host";
+import { NativeHostWorkClient } from "@cafecode/relay/nativeHostWork";
 import { connectViewer } from "@cafecode/relay/client";
 import { connectNative } from "@cafecode/relay/nativeWire";
 import { createIdentity, deriveIdentityId, sha256 } from "@cafecode/relay/crypto";
@@ -13,6 +14,7 @@ import { fetchRelayed, serveRelayedHttp } from "@cafecode/relay/http";
 
 it("uses a separately selected root without consulting or depending on the official network", async (test) => {
   const lifetime = new Lifetime(),
+    work = new NativeHostWorkClient(),
     servers: Awaited<ReturnType<typeof startRelayServer>>[] = [],
     hosts: RelayHost[] = [];
   let connection: Awaited<ReturnType<typeof connectViewer>> | undefined;
@@ -29,6 +31,7 @@ it("uses a separately selected root without consulting or depending on the offic
     await Promise.all(hosts.map((host) => host.close()));
     await Promise.all(servers.map((server) => server.close()));
     await lifetime.close();
+    await work.close();
   });
   const networks = [];
   for (let index = 0; index < 2; index++) {
@@ -76,6 +79,7 @@ it("uses a separately selected root without consulting or depending on the offic
     });
     await server.updateNetwork(canonicalBytes(network));
     const host = new RelayHost({
+      work,
       network,
       identity: hostIdentity!,
       credentials: [{ nodeId, locator, token, admissionIdentity: admission! }],
