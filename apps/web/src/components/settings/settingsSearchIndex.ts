@@ -625,6 +625,20 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
       uiText("remote server, connect, pairing code", undefined, "settings search keywords", locale),
   },
   {
+    id: "connections.relay",
+    path: "/settings/connections",
+    kind: "setting",
+    title: (locale) => uiText("Relay access", undefined, undefined, locale),
+    section: section.localServer,
+    keywords: (locale) =>
+      uiText(
+        "relay, mesh, tunnel, remote invitation",
+        undefined,
+        "settings search keywords",
+        locale,
+      ),
+  },
+  {
     id: "connections.networkAccess",
     path: "/settings/connections",
     kind: "setting",

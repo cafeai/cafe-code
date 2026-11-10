@@ -1,3 +1,4 @@
+import { fetchAppResource, readPrimaryRelay } from "./environments/relay/active";
 import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import {
@@ -84,6 +85,8 @@ export function useSidebarBrandImageSrc(asset: SidebarBrandImageAsset | null): s
   const environmentId = useWorkspaceEnvironmentId();
   const primaryId = usePrimaryEnvironmentId();
   const remote = environmentId !== null && environmentId !== primaryId;
+  const relayPrimary =
+    environmentId !== null && environmentId === readPrimaryRelay()?.environmentId;
   const connected = useSavedEnvironmentRuntimeStore((s) =>
     environmentId ? s.byId[environmentId]?.connectionState === "connected" : false,
   );
@@ -91,10 +94,15 @@ export function useSidebarBrandImageSrc(asset: SidebarBrandImageAsset | null): s
   const [image, setImage] = useState<{ key: string; url: string } | null>(null);
   useEffect(() => {
     setImage(null);
-    if (!remote || !environmentId || !asset || !connected) return;
+    if ((!remote && !relayPrimary) || !environmentId || !asset || (!connected && !relayPrimary))
+      return;
     const controller = new AbortController();
     let url: string | null = null;
-    void requestRemoteBrandImage(environmentId, asset.url, { signal: controller.signal })
+    void (
+      relayPrimary
+        ? fileRequest(environmentId, asset.url, { signal: controller.signal })
+        : requestRemoteBrandImage(environmentId, asset.url, { signal: controller.signal })
+    )
       .then(async (response) => {
         const bytes = await readBounded(response, MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES);
         return new Blob([bytes.buffer as ArrayBuffer], { type: asset.mimeType });
@@ -109,9 +117,9 @@ export function useSidebarBrandImageSrc(asset: SidebarBrandImageAsset | null): s
       controller.abort();
       if (url) URL.revokeObjectURL(url);
     };
-  }, [asset, connected, environmentId, key, remote]);
-  return remote
-    ? connected && image?.key === key
+  }, [asset, connected, environmentId, key, remote, relayPrimary]);
+  return remote || relayPrimary
+    ? (connected || relayPrimary) && image?.key === key
       ? image.url
       : null
     : uiPresentation.resolveSidebarBrandImageSrc(asset);
@@ -133,7 +141,7 @@ export async function uploadSidebarBrandImage(
   };
   const response = remote
     ? await requestRemoteBrandImage(environmentId, "/api/branding/sidebar-image", init)
-    : await fetch(resolvePrimaryEnvironmentHttpUrl("/api/branding/sidebar-image"), init);
+    : await fetchAppResource(resolvePrimaryEnvironmentHttpUrl("/api/branding/sidebar-image"), init);
 
   if (!response.ok) {
     const message = (await response.text()).trim();

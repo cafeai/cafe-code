@@ -1,3 +1,4 @@
+import { fetchAppResource } from "../environments/relay/active";
 import { getUiLocale, subscribeUiLocale, uiText } from "@cafecode/shared/i18n";
 /**
  * Web Push client plumbing for the per-device notifications toggle.
@@ -79,7 +80,7 @@ export async function enableWebPushNotifications(
     );
   }
 
-  const keyResponse = await fetch("/api/notifications/web-push/public-key");
+  const keyResponse = await fetchAppResource("/api/notifications/web-push/public-key");
   if (!keyResponse.ok) {
     throw new Error(uiText("The server could not provide a push key."));
   }
@@ -92,7 +93,7 @@ export async function enableWebPushNotifications(
     applicationServerKey: urlBase64ToUint8Array(publicKey).buffer as ArrayBuffer,
   });
 
-  const storeResponse = await fetch("/api/notifications/web-push/subscriptions", {
+  const storeResponse = await fetchAppResource("/api/notifications/web-push/subscriptions", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -124,7 +125,7 @@ export function installWebPushLocaleSynchronization(): () => void {
         const registration = await navigator.serviceWorker.getRegistration("/sw.js");
         const subscription = await registration?.pushManager.getSubscription();
         if (!subscription || disposed) return;
-        await fetch("/api/notifications/web-push/subscriptions/locale", {
+        await fetchAppResource("/api/notifications/web-push/subscriptions/locale", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -149,7 +150,7 @@ export async function disableWebPushNotifications(): Promise<void> {
   const subscription = await registration?.pushManager.getSubscription();
   if (!subscription) return;
 
-  await fetch("/api/notifications/web-push/unsubscribe", {
+  await fetchAppResource("/api/notifications/web-push/unsubscribe", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ endpoint: subscription.endpoint }),

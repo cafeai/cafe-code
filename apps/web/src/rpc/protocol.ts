@@ -6,6 +6,7 @@ import * as Latch from "effect/Latch";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import { RpcClient, RpcClientError, RpcSerialization } from "effect/unstable/rpc";
+import { makeAppWebSocket, relayForUrl } from "../environments/relay/active";
 import * as Socket from "effect/unstable/socket/Socket";
 
 import {
@@ -282,7 +283,7 @@ export function createWsRpcProtocolLayer(
   const trackingWebSocketConstructorLayer = Layer.succeed(
     Socket.WebSocketConstructor,
     (socketUrl, protocols) => {
-      const socket = new globalThis.WebSocket(socketUrl, protocols);
+      const socket = makeAppWebSocket(socketUrl, protocols);
       activeSocket = socket;
       const isCurrentSocket = () => lifecycle.isActive() && activeSocket === socket;
 
@@ -549,7 +550,15 @@ export function createWsRpcProtocolLayer(
 
   return Layer.mergeAll(
     protocolLayer.pipe(
-      Layer.provide(Layer.mergeAll(socketLayer, RpcSerialization.layerJson, connectionHooksLayer)),
+      Layer.provide(
+        Layer.mergeAll(
+          socketLayer,
+          staticSocketUrl && relayForUrl(staticSocketUrl)
+            ? RpcSerialization.layerNdjson
+            : RpcSerialization.layerJson,
+          connectionHooksLayer,
+        ),
+      ),
     ),
     requestHooksLayer,
     connectionHooksLayer,

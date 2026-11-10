@@ -36,6 +36,7 @@ import {
 } from "../Services/SessionCredentialService.ts";
 import { AuthControlPlaneLive, AuthCoreLive } from "./AuthControlPlane.ts";
 import { TwoFactorService } from "../Services/TwoFactorService.ts";
+import { validateRelayRequestSession } from "../../relay/requestContext.ts";
 
 type BootstrapExchangeResult = {
   readonly response: AuthBootstrapResult;
@@ -223,7 +224,7 @@ export const makeServerAuth = Effect.gen(function* () {
         }),
       );
     }
-    return authenticateToken(credential);
+    return authenticateToken(credential).pipe(Effect.flatMap(validateRelayRequestSession));
   };
 
   const getSessionState: ServerAuthShape["getSessionState"] = (request) =>
@@ -637,7 +638,7 @@ export const makeServerAuth = Effect.gen(function* () {
       }
 
       return yield* authenticateRequest(request);
-    });
+    }).pipe(Effect.flatMap(validateRelayRequestSession));
 
   return {
     getDescriptor,

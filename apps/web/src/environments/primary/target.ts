@@ -1,6 +1,7 @@
 import { uiText } from "@cafecode/shared/i18n";
 import type { DesktopEnvironmentBootstrap } from "@cafecode/contracts";
 import type { KnownEnvironment } from "@cafecode/client-runtime";
+import { readPrimaryRelay } from "../relay/active";
 
 export interface PrimaryEnvironmentTarget {
   readonly source: KnownEnvironment["source"];
@@ -155,6 +156,12 @@ export function resolvePrimaryEnvironmentHttpUrl(
 }
 
 export function readPrimaryEnvironmentTarget(): PrimaryEnvironmentTarget | null {
+  const relay = readPrimaryRelay();
+  if (relay && !window.desktopBridge)
+    return {
+      source: "configured",
+      target: { httpBaseUrl: relay.httpBaseUrl, wsBaseUrl: relay.wsBaseUrl },
+    };
   return (
     resolveDesktopPrimaryTarget() ??
     resolveConfiguredPrimaryTarget() ??

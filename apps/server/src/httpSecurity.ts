@@ -7,6 +7,7 @@ import {
 } from "@cafecode/shared/environmentEndpoint";
 import { ServerConfig } from "./config.ts";
 import { isHttpsProxyRequest, isLocalPeer } from "./httpTransport.ts";
+import { RelayRequestContext } from "./relay/requestContext.ts";
 
 export const httpSecurityLayer = HttpRouter.middleware(
   (handler) =>
@@ -14,6 +15,11 @@ export const httpSecurityLayer = HttpRouter.middleware(
       const config = yield* ServerConfig;
       const request = yield* HttpServerRequest.HttpServerRequest;
       const path = request.url.split("?", 1)[0] ?? "";
+      const relay = yield* Effect.serviceOption(RelayRequestContext);
+      if (Option.isSome(relay)) {
+        yield* relay.value.validate;
+        return yield* handler;
+      }
       if (
         config.httpsEnabled &&
         config.httpsPort !== undefined &&

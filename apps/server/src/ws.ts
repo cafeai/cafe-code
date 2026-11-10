@@ -1,4 +1,5 @@
 import { makeGlideService, glideOwnerOperationSchema } from "./glide/sessionRuntime.ts";
+import { RelayRequestContext } from "./relay/requestContext.ts";
 import { GlideControlResult, GlideError } from "@cafecode/contracts";
 import { axiomConfigurationKey } from "./provider/acp/AxiomAcpSupport.ts";
 import {
@@ -2501,10 +2502,14 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         // headers, before accepting a permanent key or returning an ephemeral
         // OpenAI credential. A remote reverse proxy must likewise connect over
         // a local/IPC boundary; direct non-loopback cleartext always fails shut.
-        const secureSecretTransport = Option.match(request.remoteAddress, {
-          onNone: () => false,
-          onSome: hasObservedPrivateRpcTransport,
-        });
+        const relay = yield* Effect.serviceOption(RelayRequestContext);
+        const isRelay = Option.isSome(relay);
+        const secureSecretTransport =
+          isRelay ||
+          Option.match(request.remoteAddress, {
+            onNone: () => false,
+            onSome: hasObservedPrivateRpcTransport,
+          });
         const rpcWebSocketHttpEffect = yield* RpcServer.toHttpEffectWebsocket(WsRpcGroup, {
           disableTracing: true,
         }).pipe(
@@ -2516,9 +2521,11 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               orchestrationSubscriptionHub,
               providerMaintenanceRunner,
               mcpManagement,
-              secureSecretTransport && !request.headers["x-cafe-code-https-proxy"],
+              !isRelay && secureSecretTransport && !request.headers["x-cafe-code-https-proxy"],
             ).pipe(
-              Layer.provideMerge(RpcSerialization.layerJson),
+              Layer.provideMerge(
+                isRelay ? RpcSerialization.layerNdjson : RpcSerialization.layerJson,
+              ),
               Layer.provide(ProviderJournalMessageRepairLive),
               Layer.provide(
                 SourceControlDiscoveryLayer.layer.pipe(

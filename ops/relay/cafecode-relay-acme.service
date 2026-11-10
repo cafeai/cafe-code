@@ -1,0 +1,12 @@
+[Unit]
+Description=Renew Cafe relay pilot TLS certificate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cafecode-relay-renew
+ExecStopPost=/usr/local/sbin/cafecode-relay-renew --close-abandoned
+Nice=10
+TimeoutStartSec=300
+UMask=0077

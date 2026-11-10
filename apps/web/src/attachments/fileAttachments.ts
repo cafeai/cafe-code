@@ -1,3 +1,5 @@
+import { fetchAppResource, relayForUrl } from "../environments/relay/active";
+import { RELAY_LIMITS } from "@cafecode/relay/limits";
 import { uiText } from "@cafecode/shared/i18n";
 import {
   ChatFileAttachment,
@@ -29,9 +31,6 @@ export async function fileRequest(
   if (!primary && !bearer) throw new FileAttachmentRequestError("environment-unavailable");
   const requestHeaders = new Headers(init.headers);
   if (bearer) requestHeaders.set("authorization", `Bearer ${bearer}`);
-  const signal = init.signal
-    ? AbortSignal.any([init.signal, AbortSignal.timeout(60_000)])
-    : AbortSignal.timeout(60_000);
   // Both environment resolvers assign URL.pathname rather than concatenate a
   // URL string. Passing "?preview=text" inside pathname encodes the question
   // mark into the attachment ID, producing a local 404 for a valid upload.
@@ -43,9 +42,13 @@ export async function fileRequest(
         pathname,
         ...(searchParams ? { searchParams } : {}),
       });
+  const deadlineMs = relayForUrl(url) ? RELAY_LIMITS.httpMs : 60_000;
+  const signal = init.signal
+    ? AbortSignal.any([init.signal, AbortSignal.timeout(deadlineMs)])
+    : AbortSignal.timeout(deadlineMs);
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await fetchAppResource(url, {
       ...init,
       headers: requestHeaders,
       credentials: primary ? "include" : "omit",

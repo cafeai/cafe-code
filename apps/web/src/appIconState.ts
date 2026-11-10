@@ -1,3 +1,4 @@
+import { fetchAppResource } from "./environments/relay/active";
 import type {
   DesktopAppIconState,
   DesktopAppIconVariant,
@@ -97,7 +98,7 @@ export async function renderThemedAppIcon(
   color: SidebarImageColorId,
   theme: SidebarImageTheme,
 ): Promise<DesktopThemedAppIcon> {
-  const response = await fetch(themedAppIconUrl(variant, color, theme));
+  const response = await fetchAppResource(themedAppIconUrl(variant, color, theme));
   if (!response.ok) throw new Error("The app icon artwork could not be loaded.");
   const icon = await renderAppIconPngs(await response.blob(), {
     size: THEMED_APP_ICON_SIZE,

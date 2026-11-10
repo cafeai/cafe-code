@@ -1,3 +1,4 @@
+import { fetchAppResource } from "../relay/active";
 import { uiText } from "@cafecode/shared/i18n";
 import type {
   AuthBearerBootstrapResult,
@@ -92,7 +93,7 @@ export async function fetchRemoteJson<T>(input: {
   const requestUrl = remoteEndpointUrl(input.httpBaseUrl, input.pathname);
   let response: Response;
   try {
-    response = await fetch(requestUrl, {
+    response = await fetchAppResource(requestUrl, {
       method: input.method ?? "GET",
       // Saved servers authenticate independently of primary/browser cookies.
       // Never forward a bootstrap POST body through a server-supplied redirect.

@@ -1,3 +1,4 @@
+import { fetchAppResource } from "../relay/active";
 import { uiText } from "@cafecode/shared/i18n";
 import type {
   AuthAdminPasswordStatus,
@@ -97,7 +98,7 @@ function getDesktopBootstrapCredential(): string | null {
 
 export async function fetchSessionState(): Promise<AuthSessionState> {
   return retryTransientBootstrap(async () => {
-    const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/session"), {
+    const response = await fetchAppResource(resolvePrimaryEnvironmentHttpUrl("/api/auth/session"), {
       credentials: "include",
     });
     if (!response.ok) {
@@ -164,14 +165,17 @@ async function exchangeBootstrapCredential(
 ): Promise<AuthBootstrapResult> {
   return retryTransientBootstrap(async () => {
     const payload: AuthBootstrapInput = { credential, ...(secondFactor ? { secondFactor } : {}) };
-    const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/bootstrap"), {
-      body: JSON.stringify(payload),
-      credentials: "include",
-      headers: {
-        "content-type": "application/json",
+    const response = await fetchAppResource(
+      resolvePrimaryEnvironmentHttpUrl("/api/auth/bootstrap"),
+      {
+        body: JSON.stringify(payload),
+        credentials: "include",
+        headers: {
+          "content-type": "application/json",
+        },
+        method: "POST",
       },
-      method: "POST",
-    });
+    );
 
     if (!response.ok) {
       const message = toFriendlyBootstrapErrorMessage(response.status, await response.text());
@@ -209,14 +213,17 @@ async function exchangePasswordCredential(
   input: AuthPasswordBootstrapInput,
 ): Promise<AuthBootstrapResult> {
   return retryTransientBootstrap(async () => {
-    const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/bootstrap/password"), {
-      body: JSON.stringify(input),
-      credentials: "include",
-      headers: {
-        "content-type": "application/json",
+    const response = await fetchAppResource(
+      resolvePrimaryEnvironmentHttpUrl("/api/auth/bootstrap/password"),
+      {
+        body: JSON.stringify(input),
+        credentials: "include",
+        headers: {
+          "content-type": "application/json",
+        },
+        method: "POST",
       },
-      method: "POST",
-    });
+    );
 
     if (!response.ok) {
       const message = toFriendlyPasswordBootstrapErrorMessage(
@@ -362,14 +369,17 @@ export async function createServerPairingCredential(
 ): Promise<AuthPairingCredentialResult> {
   const trimmedLabel = label?.trim();
   const payload: AuthCreatePairingCredentialInput = trimmedLabel ? { label: trimmedLabel } : {};
-  const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/pairing-token"), {
-    body: JSON.stringify(payload),
-    credentials: "include",
-    headers: {
-      "content-type": "application/json",
+  const response = await fetchAppResource(
+    resolvePrimaryEnvironmentHttpUrl("/api/auth/pairing-token"),
+    {
+      body: JSON.stringify(payload),
+      credentials: "include",
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
     },
-    method: "POST",
-  });
+  );
 
   if (!response.ok) {
     throw new Error(
@@ -384,9 +394,12 @@ export async function createServerPairingCredential(
 }
 
 export async function fetchServerAdminPasswordStatus(): Promise<AuthAdminPasswordStatus> {
-  const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/admin-password"), {
-    credentials: "include",
-  });
+  const response = await fetchAppResource(
+    resolvePrimaryEnvironmentHttpUrl("/api/auth/admin-password"),
+    {
+      credentials: "include",
+    },
+  );
 
   if (!response.ok) {
     throw new Error(
@@ -407,14 +420,17 @@ export async function setServerAdminPassword(password: string): Promise<AuthAdmi
   }
 
   const payload: AuthSetAdminPasswordInput = { password: trimmedPassword };
-  const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/admin-password"), {
-    body: JSON.stringify(payload),
-    credentials: "include",
-    headers: {
-      "content-type": "application/json",
+  const response = await fetchAppResource(
+    resolvePrimaryEnvironmentHttpUrl("/api/auth/admin-password"),
+    {
+      body: JSON.stringify(payload),
+      credentials: "include",
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
     },
-    method: "POST",
-  });
+  );
 
   if (!response.ok) {
     throw new Error(
@@ -429,10 +445,13 @@ export async function setServerAdminPassword(password: string): Promise<AuthAdmi
 }
 
 export async function clearServerAdminPassword(): Promise<AuthAdminPasswordStatus> {
-  const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/admin-password/clear"), {
-    credentials: "include",
-    method: "POST",
-  });
+  const response = await fetchAppResource(
+    resolvePrimaryEnvironmentHttpUrl("/api/auth/admin-password/clear"),
+    {
+      credentials: "include",
+      method: "POST",
+    },
+  );
 
   if (!response.ok) {
     throw new Error(
@@ -447,9 +466,12 @@ export async function clearServerAdminPassword(): Promise<AuthAdminPasswordStatu
 }
 
 export async function listServerPairingLinks(): Promise<ReadonlyArray<ServerPairingLinkRecord>> {
-  const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/pairing-links"), {
-    credentials: "include",
-  });
+  const response = await fetchAppResource(
+    resolvePrimaryEnvironmentHttpUrl("/api/auth/pairing-links"),
+    {
+      credentials: "include",
+    },
+  );
 
   if (!response.ok) {
     throw new Error(
@@ -465,14 +487,17 @@ export async function listServerPairingLinks(): Promise<ReadonlyArray<ServerPair
 
 export async function revokeServerPairingLink(id: string): Promise<void> {
   const payload: AuthRevokePairingLinkInput = { id };
-  const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/pairing-links/revoke"), {
-    body: JSON.stringify(payload),
-    credentials: "include",
-    headers: {
-      "content-type": "application/json",
+  const response = await fetchAppResource(
+    resolvePrimaryEnvironmentHttpUrl("/api/auth/pairing-links/revoke"),
+    {
+      body: JSON.stringify(payload),
+      credentials: "include",
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
     },
-    method: "POST",
-  });
+  );
 
   if (!response.ok) {
     throw new Error(
@@ -487,7 +512,7 @@ export async function revokeServerPairingLink(id: string): Promise<void> {
 export async function listServerClientSessions(): Promise<
   ReadonlyArray<ServerClientSessionRecord>
 > {
-  const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/clients"), {
+  const response = await fetchAppResource(resolvePrimaryEnvironmentHttpUrl("/api/auth/clients"), {
     credentials: "include",
   });
 
@@ -505,14 +530,17 @@ export async function listServerClientSessions(): Promise<
 
 export async function revokeServerClientSession(sessionId: AuthSessionId): Promise<void> {
   const payload: AuthRevokeClientSessionInput = { sessionId };
-  const response = await fetch(resolvePrimaryEnvironmentHttpUrl("/api/auth/clients/revoke"), {
-    body: JSON.stringify(payload),
-    credentials: "include",
-    headers: {
-      "content-type": "application/json",
+  const response = await fetchAppResource(
+    resolvePrimaryEnvironmentHttpUrl("/api/auth/clients/revoke"),
+    {
+      body: JSON.stringify(payload),
+      credentials: "include",
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
     },
-    method: "POST",
-  });
+  );
 
   if (!response.ok) {
     throw new Error(
@@ -525,7 +553,7 @@ export async function revokeServerClientSession(sessionId: AuthSessionId): Promi
 }
 
 export async function revokeOtherServerClientSessions(): Promise<number> {
-  const response = await fetch(
+  const response = await fetchAppResource(
     resolvePrimaryEnvironmentHttpUrl("/api/auth/clients/revoke-others"),
     {
       credentials: "include",

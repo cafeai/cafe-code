@@ -1,0 +1,46 @@
+[Unit]
+Description=Trusted static Cafe relay browser viewer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cafecode-relay-viewer
+Group=cafecode-relay-viewer
+StateDirectory=cafecode-relay-viewer
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/cafecode-relay-viewer
+ExecStartPre=/usr/sbin/nginx -t -p /var/lib/cafecode-relay-viewer/ -c /etc/cafecode-relay-viewer/nginx.conf
+ExecStart=/usr/sbin/nginx -p /var/lib/cafecode-relay-viewer/ -c /etc/cafecode-relay-viewer/nginx.conf -g "daemon off;"
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+Nice=10
+CPUQuota=50%
+MemoryMax=192M
+MemorySwapMax=0
+TasksMax=16
+LimitNOFILE=1024
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/cafecode-relay-viewer
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=30
+
+[Install]
+WantedBy=multi-user.target

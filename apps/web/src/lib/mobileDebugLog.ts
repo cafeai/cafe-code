@@ -1,3 +1,4 @@
+import { fetchAppResource } from "../environments/relay/active";
 /**
  * Mobile debugging instrumentation (disabled by default).
  *
@@ -80,7 +81,7 @@ export function mobileDebugLog(event: string, data: Record<string, unknown> = {}
   const payload = { seq: ++sequence, event, ...data };
   console.info("[mobile-debug]", payload);
   try {
-    void fetch("/api/client-debug-log", {
+    void fetchAppResource("/api/client-debug-log", {
       method: "POST",
       keepalive: true,
       headers: { "content-type": "application/json" },

@@ -9,6 +9,7 @@ import { OtlpSerialization, OtlpTracer } from "effect/unstable/observability";
 import { resolvePrimaryEnvironmentHttpUrl } from "../environments/primary";
 import { isElectron } from "../env";
 import { APP_VERSION } from "~/branding";
+import { fetchAppResource } from "../environments/relay/active";
 
 const DEFAULT_EXPORT_INTERVAL_MS = 1_000;
 const CLIENT_TRACING_RESOURCE = {
@@ -21,7 +22,7 @@ const CLIENT_TRACING_RESOURCE = {
 } as const;
 
 const delegateRuntimeLayer = Layer.mergeAll(
-  FetchHttpClient.layer,
+  FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetchAppResource))),
   OtlpSerialization.layerJson,
   Layer.succeed(HttpClient.TracerDisabledWhen, () => true),
 );

@@ -13,7 +13,7 @@ const srcPath = fileURLToPath(new URL("./src", import.meta.url));
 export default mergeConfig(
   mergeConfig(viteConfig, baseConfig),
   defineConfig({
-    test: { exclude: [...configDefaults.exclude, "**/*.soak.test.ts"] },
+    test: { exclude: [...configDefaults.exclude, "**/*.soak.test.ts", "**/*.e2e.test.ts"] },
     resolve: {
       alias: {
         "~": srcPath,
