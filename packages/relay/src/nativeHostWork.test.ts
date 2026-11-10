@@ -47,6 +47,7 @@ describe("native host-only work solver", () => {
       entered = Promise.withResolvers<void>();
     let retired = false,
       requests = 0;
+    let listening: Promise<void> | undefined;
     const server = http.createServer((request, response) => {
       request.on("error", () => {});
       response.on("error", () => {});
@@ -68,6 +69,7 @@ describe("native host-only work solver", () => {
     const close = async () => {
       retire();
       await client.close();
+      await listening?.catch(() => {});
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await lifetime.close();
     };
@@ -77,7 +79,15 @@ describe("native host-only work solver", () => {
       node = await createIdentity(),
       admission = await createIdentity();
     if (retired) throw Error("fixture-retired");
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    listening = new Promise<void>((resolve, reject) => {
+      const failed = () => reject(Error("fixture-listen-refused"));
+      server.once("error", failed);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", failed);
+        resolve();
+      });
+    });
+    await listening;
     if (retired) {
       await close();
       throw Error("fixture-retired");
