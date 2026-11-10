@@ -17,6 +17,9 @@ import { epochNow, Lifetime } from "@cafecode/relay/lifetime";
 import { RELAY_LIMITS } from "@cafecode/relay/limits";
 import { nativeDriver } from "@cafecode/relay/nativeWire";
 import { PacketConnection, relayResources } from "@cafecode/relay/wire";
+import { PeerAttribution, peerPrefix } from "./peer.ts";
+
+export { peerPrefix } from "./peer.ts";
 
 export interface RelayServerOptions {
   readonly network: NetworkDescriptor;
@@ -30,31 +33,7 @@ export interface RelayServerOptions {
   readonly meshListen?: { readonly host: string; readonly port: number };
   readonly meshPeerUrls?: ReadonlyMap<string, string>;
   readonly manualMeshSync?: boolean;
-}
-
-/** Native peer only: forwarded headers never influence admission or identity. */
-export function peerPrefix(address: string | undefined): string {
-  requireRelay(address && address.length <= 64);
-  const value = address.startsWith("::ffff:") ? address.slice(7) : address;
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) return "v4:" + value;
-  // Node supplies a parsed socket address. Normalize the first 64 IPv6 bits;
-  // compressed aliases cannot create independent limiter entries.
-  const halves = value.toLowerCase().split("::");
-  requireRelay(halves.length <= 2 && !value.includes("%"));
-  const left = halves[0] ? halves[0].split(":") : [];
-  const right = halves[1] ? halves[1].split(":") : [];
-  const words =
-    halves.length === 2
-      ? [...left, ...Array<string>(8 - left.length - right.length).fill("0"), ...right]
-      : left;
-  requireRelay(words.length === 8 && words.every((word) => /^[a-f0-9]{1,4}$/.test(word)));
-  return (
-    "v6:" +
-    words
-      .slice(0, 4)
-      .map((word) => Number.parseInt(word, 16).toString(16))
-      .join(":")
-  );
+  readonly forwardedIpKeys?: readonly string[];
 }
 
 export async function startRelayServer(options: RelayServerOptions) {
@@ -67,6 +46,7 @@ export async function startRelayServer(options: RelayServerOptions) {
     requests = new AdmissionLimiter(epochNow(), "native");
   const anonymous = new AdmissionLimiter(epochNow());
   const pending = new Budget(RELAY_LIMITS.pendingTls);
+  const peers = new PeerAttribution(options.forwardedIpKeys);
   const sockets = new Set<Socket>();
   const requestsHeld = new Set<Promise<void>>();
   const broker = new RelayBroker({
@@ -180,7 +160,11 @@ export async function startRelayServer(options: RelayServerOptions) {
             (meshOnly || !meshServer);
           requireRelay(
             lifetime.active &&
-              (isMesh || requests.admit(peerPrefix(request.socket.remoteAddress), epochNow())),
+              (isMesh ||
+                requests.admit(
+                  peers.prefix(request.headers, request.socket.remoteAddress),
+                  epochNow(),
+                )),
             "BUSY",
           );
           requireRelay(
@@ -274,7 +258,10 @@ export async function startRelayServer(options: RelayServerOptions) {
     socket.on("error", () => socket.destroy());
     try {
       requireRelay(lifetime.active && request.method === "GET" && request.url === "/v1/relay");
-      requireRelay(anonymous.admit(peerPrefix(request.socket.remoteAddress), epochNow()), "BUSY");
+      requireRelay(
+        anonymous.admit(peers.prefix(request.headers, request.socket.remoteAddress), epochNow()),
+        "BUSY",
+      );
       requireRelay(request.headers["sec-websocket-protocol"] === "cafe-relay.v1");
       // Browsers always offer compression. The no-compression server declines
       // that offer; rejecting the header would reject ordinary browser clients.

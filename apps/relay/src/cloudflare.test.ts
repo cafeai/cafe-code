@@ -16,6 +16,42 @@ function fixture() {
 }
 
 describe("Cloudflare relay gateway policy", () => {
+  it("overwrites caller forwarding credentials and forwards only the Cloudflare address", async () => {
+    const f = fixture(),
+      key = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE";
+    const response = await relayEdgeFetch(
+      new Request("https://relay-uk.cafecode.sh/v1/network", {
+        headers: {
+          "cf-connecting-ip": "203.0.113.9",
+          "x-forwarded-for": "192.0.2.1",
+          "x-real-ip": "192.0.2.2",
+          "x-cafe-relay-forward-key": "caller-controlled",
+        },
+      }),
+      { ...f.env, RELAY_FORWARD_UK_KEY: key },
+      f.origin,
+    );
+    expect(response.status).toBe(200);
+    const headers = new Headers(f.origin.mock.calls[0]![1]!.headers);
+    expect(headers.get("cf-connecting-ip")).toBe("203.0.113.9");
+    expect(headers.get("x-cafe-relay-forward-key")).toBe(key);
+    expect(headers.get("x-forwarded-for")).toBeNull();
+    expect(headers.get("x-real-ip")).toBeNull();
+    expect(response.headers.get("x-cafe-relay-forward-key")).toBeNull();
+    expect(await response.text()).not.toContain(key);
+    f.origin.mockClear();
+    for (const client of [undefined, "203.0.113.9, 192.0.2.1", "fe80::1%en0"]) {
+      const response = await relayEdgeFetch(
+        new Request("https://relay-uk.cafecode.sh/v1/network", {
+          headers: client ? { "cf-connecting-ip": client } : {},
+        }),
+        { ...f.env, RELAY_FORWARD_UK_KEY: key },
+        f.origin,
+      );
+      expect(response.status).toBe(400);
+    }
+    expect(f.origin).not.toHaveBeenCalled();
+  });
   it("preserves the exact relay WebSocket subprotocol and excludes credentials", async () => {
     const f = fixture();
     f.origin.mockImplementation(async () => new Response(null, { status: 503 }));

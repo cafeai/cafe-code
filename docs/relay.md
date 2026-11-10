@@ -192,8 +192,8 @@ adds an edge transport proxy. Host latency measurements include that edge path.
 The apex website and unrelated Workers are outside this deployment.
 
 All asset requests run through the Worker first. Regional endpoints cannot
-serve viewer JavaScript. Incoming cookies, authorization and forwarded-IP
-headers are excluded from origin requests; origin cookies, redirects and
+serve viewer JavaScript. Incoming cookies, authorization and caller forwarding
+claims are excluded from origin requests; origin cookies, redirects and
 arbitrary error bodies cannot reach the browser. Signed discovery bytes pass
 unchanged within finite request/response bounds. WebSocket handshakes have a
 bounded deadline; the successful native upgrade is passed through without
@@ -201,10 +201,27 @@ terminating Noise. Neither Worker logging nor preview hostnames are enabled.
 
 Cloudflare and the trusted viewer publisher are additional infrastructure
 trust dependencies. Relays still cannot decrypt application content, while
-Cloudflare can see connection metadata. The native relay does not trust proxy
-IP headers: its IP limits apply conservatively to Cloudflare egress addresses.
-This can reduce fairness for users sharing an edge and does not qualify public
-capacity. Origin hostnames remain reachable for compatibility, so this is not
+Cloudflare can see connection metadata. The gateway forwards Cloudflare's
+incoming `CF-Connecting-IP` with its private per-node credential in
+`X-Cafe-Relay-Forward-Key`. Each node uses that address for HTTP and WebSocket
+admission only after constant-time credential verification. A Cloudflare source
+IP alone does not authenticate our Worker. Unauthenticated direct connections
+retain their actual socket address, so rotating forged forwarding headers cannot
+rotate their quotas. Invalid private credentials or malformed authenticated IPs
+are rejected. IPv6 aliases normalize before /64 grouping, including IPv4-mapped
+addresses. None of these claims can authenticate an application session.
+
+Configure one or two independent 256-bit `forwardedIpKeys` in each node's private
+config. Set `RELAY_FORWARD_UK_KEY`, `RELAY_FORWARD_CA_KEY` and
+`RELAY_FORWARD_US_WEST_KEY` as Cloudflare secrets, with each node's own current
+key; never share one credential across nodes or put secrets in public Wrangler
+vars, logs or command arguments. The operator's ordinary renewal preserves these
+keys. Key changes require a rolling service restart; a HUP that requests an
+unadopted key change is refused. Deploy accepting nodes first and the credentialed
+Worker second. Two keys permit overlap during rotation. Native TCP/TLS admission
+still uses actual socket addresses because it runs before headers are available;
+its independent global/socket bounds remain in force. Origin hostnames remain
+reachable for compatibility, so this is not
 complete origin shielding or a volumetric DDoS qualification.
 
 Deploy only qualified, frozen `apps/web/dist` assets and

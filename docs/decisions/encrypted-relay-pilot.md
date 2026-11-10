@@ -65,8 +65,11 @@ per-owner pending bytes and 16 MiB aggregate pending bytes. Control has a separa
 tickets per registration at 32, IP tracking at 4096 prefixes. Capacities reserve
 synchronously before async work and release exact reservations at owned close.
 
-IPv6 limits aggregate by /64 and never trust forwarded headers. Native TCP and
-cheap discovery HTTP use a separate 16-burst/four-per-second prefix lane;
+IPv6 limits aggregate by /64. Native TCP admission uses actual socket addresses.
+HTTP and WebSocket admission accept Cloudflare's forwarded client address only
+with this operator's private per-node gateway credential; arbitrary direct
+forwarding claims cannot select a limiter bucket. Native TCP and cheap discovery
+HTTP use separate 16-burst/four-per-second prefix lanes;
 anonymous WS admission uses four-burst/twelve-per-minute. Global admission is
 bounded independently. Browser CORS preflights count as HTTP work, so discovery
 cannot use the much smaller anonymous WS budget. Endpoint sends are paced;
@@ -75,7 +78,64 @@ cover the broker's complete aggregate budget, rather than mistake several
 healthy viewers for one abusive viewer. Resource ceilings are independent of
 application authorization. This is overload containment, not upstream DDoS
 protection, NAT identity, fleet-wide quotas or an audited capacity benchmark.
-PoW remains disabled pending measured need.
+PoW is not implemented in this deployment. It is required planned work, with the
+staged acceptance criteria below; successful existing rate/functional tests are
+not evidence of PoW protection.
+
+### Required PoW implementation plan
+
+1. Specify and test a versioned SHA-256 client puzzle, separate from pairing,
+   authentication and existing signed admission nonces. Require work for new
+   anonymous admission. Bind the challenge to network, intended relay/purpose,
+   current boot, expiry, nonce and an ephemeral admission key. Authenticate it
+   with dedicated online admission keys, never the offline membership root.
+   The caller cannot lower difficulty or repurpose a challenge for another
+   network, device or operation. Start with candidate effective difficulties
+   18/20/22/24 bits for measurement, not production defaults. Expected trial
+   count is approximately 2^d. Consider four smaller independent subpuzzles to
+   reduce completion-time variance while keeping verification constant work.
+2. Implement cancellable browser and Node solvers. Use the existing qualified
+   SHA-256 library in one owned worker per client; never run a hash loop on the
+   UI thread or execute code supplied by a relay. Keep hash batches, total work,
+   worker count and cleanup bounded. Validate the exact challenge/attempt owner
+   before consuming any result. Cancel and join on replacement, logout or
+   navigation. A malicious relay cannot exceed the fixed local difficulty/time
+   ceiling. Benchmark actual Node and Chromium plus available real mobile
+   devices; label simulated mobile measurements. Target roughly 100–250 ms on
+   reference devices under ordinary load and at most two seconds of total
+   automatic work per connection attempt. These are goals, not measured claims.
+3. Enforce at the Cloudflare edge before opening an origin WebSocket or running
+   Noise/app authentication. Keep challenge minting stateless with authenticated
+   cookies, and verify MAC/expiry/scope/work before origin resources are reserved.
+   Cache only bounded fresh relay boot/policy metadata; an old boot cannot mint
+   valid admission. Carry the resulting short-lived capacity token in a strict
+   additional WebSocket subprotocol, preserving negotiated `cafe-relay.v1` and
+   keeping tokens out of URLs, cookies and application credentials. The origin
+   verifies the exact authenticated gateway/permit and consumes a bounded
+   one-use nonce before upgrade. Provide equivalent direct-origin enforcement
+   or restrict the official origin to the authenticated gateway; leaving a
+   public no-PoW WebSocket bypass fails this stage. Cheap static discovery must
+   stay bounded, and expensive lookup/mesh-refresh work must also require the
+   appropriate admission or work credit.
+4. Add narrowly scoped, short-lived, admission-key-bound reconnect credits so a
+   healthy paired client does not solve work for every RPC, file chunk or brief
+   reconnect. Cap reuse per node, preserve separate recovery capacity and require
+   the usual Noise host pin, device proof, bearer/2FA and revocation checks.
+   Credits authorize only bounded transport capacity. Failover may mint a fresh
+   target permit from valid work credit, but cannot replay application commands
+   or convert a permission/authentication result into retry authority. Raise
+   difficulty from bounded aggregate load signals with hysteresis, cooldown and
+   fixed floors/ceilings; never trust client-reported CPU speed for easier work.
+5. Qualify malformed/forged/expired/future/replayed/wrong-scope/wrong-boot work,
+   simultaneous double use, spoofed client IPs, cancellation and worker cleanup,
+   challenge-endpoint floods, capped state and overload/failover. Use real public
+   browser pairing and serving-node failure as final checks. Run the complete
+   local gates and forced desktop build last before rollout. Deploy compatible
+   clients and verifiers first, then explicitly enable required anonymous PoW;
+   publish measured solve/verify distributions and the chosen policy. A release
+   cannot claim PoW protection while enforcement is disabled. It supplements
+   IP/global bounds and Cloudflare/OVH network protection; it does not prevent
+   upstream bandwidth floods or eliminate optimized hardware/botnets.
 
 Application pairing uses a distinct full-strength 256-bit fragment secret and a
 five-minute one-use SQL invitation. Direct/native pairing credentials cannot

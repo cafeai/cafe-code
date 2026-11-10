@@ -6,6 +6,7 @@ import * as Schema from "effect/Schema";
 import { NetworkDescriptor } from "@cafecode/relay/descriptor";
 import { Id32, readCanonical, SafeCounter } from "@cafecode/relay/protocol";
 import { RelayError, requireRelay } from "@cafecode/relay/errors";
+import { unopaque } from "@cafecode/relay/bytes";
 const Port = SafeCounter.check(Schema.isLessThanOrEqualTo(65_535));
 const Address = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64));
 const FilePath = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024));
@@ -15,6 +16,9 @@ export const RelayNodeConfig = Schema.Struct({
   descriptor: NetworkDescriptor,
   nodeId: Id32,
   privateIdentity: Schema.String.check(Schema.isMaxLength(172)),
+  forwardedIpKeys: Schema.optionalKey(
+    Schema.Array(Id32).check(Schema.isMinLength(1), Schema.isMaxLength(2)),
+  ),
   grants: Schema.Array(
     Schema.Struct({ locator: Id32, admissionPublicKey: Id32, tokenDigest: Id32 }),
   ).check(Schema.isMaxLength(32)),
@@ -73,5 +77,7 @@ export async function readPrivateFile(filename: string, maximum: number): Promis
   }
 }
 export async function readNodeConfig(filename: string): Promise<RelayNodeConfig> {
-  return readCanonical(RelayNodeConfig, await readPrivateFile(filename, 65_536), 65_536);
+  const config = readCanonical(RelayNodeConfig, await readPrivateFile(filename, 65_536), 65_536);
+  for (const key of config.forwardedIpKeys ?? []) unopaque(key, 32);
+  return config;
 }

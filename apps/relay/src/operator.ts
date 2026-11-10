@@ -89,6 +89,7 @@ export async function configureNetwork(directory: string, specFile: string): Pro
     const root = await key(directory, "operator-root.key");
     let revision = 1;
     let previous: NetworkDescriptor | undefined;
+    const previousConfigs: RelayNodeConfig[] = [];
     if (hadNetwork) {
       previous = readCanonical(NetworkDescriptor, await readPrivateFile(oldNetworkPath, 8192));
       requireRelay(
@@ -101,6 +102,7 @@ export async function configureNetwork(directory: string, specFile: string): Pro
         requireRelay(await exists(path.join(directory, "node-" + index + ".key")));
         requireRelay(await exists(path.join(directory, "host-admission-" + index + ".key")));
         const saved = await readNodeConfig(path.join(directory, "node-" + index + ".json"));
+        previousConfigs.push(saved);
         requireRelay(
           saved.nodeId === previous.nodes[index]!.id &&
             saved.mesh.host === spec.nodes[index]!.wireGuardAddress,
@@ -153,12 +155,14 @@ export async function configureNetwork(directory: string, specFile: string): Pro
         token,
         admissionPrivateKey: opaque(privateIdentityBytes(admission)),
       });
+      const forwardedIpKeys = previousConfigs[index]?.forwardedIpKeys;
       const config: RelayNodeConfig = {
         version: 1,
         rootPublicKey: root.publicKey,
         descriptor: network,
         nodeId: nodes[index]!.id,
         privateIdentity: opaque(privateIdentityBytes(identities[index]!)),
+        ...(forwardedIpKeys ? { forwardedIpKeys } : {}),
         grants: [
           {
             locator,

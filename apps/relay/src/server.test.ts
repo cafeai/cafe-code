@@ -17,8 +17,14 @@ import * as Scope from "effect/Scope";
 import * as Exit from "effect/Exit";
 import * as TestClock from "effect/testing/TestClock";
 import type * as Clock from "effect/Clock";
+import WebSocket from "ws";
 
-async function fixture(test: TestContext, clock?: Clock.Clock, beforeClose: () => void = () => {}) {
+async function fixture(
+  test: TestContext,
+  clock?: Clock.Clock,
+  beforeClose: () => void = () => {},
+  forwardedIpKeys?: readonly string[],
+) {
   let retired = false;
   const held = new Set<PacketConnection>();
   let server: Awaited<ReturnType<typeof startRelayServer>> | undefined;
@@ -69,6 +75,7 @@ async function fixture(test: TestContext, clock?: Clock.Clock, beforeClose: () =
     host: "127.0.0.1",
     port: 0,
     allowLoopbackTest: true,
+    ...(forwardedIpKeys ? { forwardedIpKeys } : {}),
   });
   if (retired) {
     await server.close();
@@ -205,11 +212,60 @@ describe("native single-hop relay", () => {
     expect(f.resources.owners.current).toBe(0);
     expect(f.resources.pending.current).toBe(0);
   });
-  it("groups IPv6 aliases by /64 and never consumes forwarded peer claims", () => {
+  it("groups native IPv6 aliases by /64", () => {
     expect(peerPrefix("2001:0db8:0:0:1:2:3:4")).toBe(peerPrefix("2001:db8::abcd"));
     expect(peerPrefix("::ffff:192.0.2.2")).toBe(peerPrefix("192.0.2.2"));
     expect(peerPrefix("2001:db8:0:1::1")).not.toBe(peerPrefix("2001:db8::1"));
     expect(() => peerPrefix(undefined)).toThrow();
+  });
+
+  it("charges real WebSocket upgrades to authenticated client addresses and rejects spoofed quota rotation", async (test) => {
+    const key = randomOpaque(),
+      held = new Set<WebSocket>(),
+      closing = new Set<Promise<void>>();
+    const retire = () => {
+      for (const socket of held) socket.terminate();
+    };
+    test.signal.addEventListener("abort", retire, { once: true });
+    test.onTestFinished(async () => {
+      retire();
+      await Promise.all(closing);
+    });
+    const f = await fixture(test, undefined, retire, [key]);
+    const upgrade = (client: string, credential?: string) =>
+      new Promise<boolean>((resolve) => {
+        const socket = new WebSocket(`ws://127.0.0.1:${f.server.port}/v1/relay`, "cafe-relay.v1", {
+          perMessageDeflate: false,
+          headers: {
+            "cf-connecting-ip": client,
+            ...(credential ? { "x-cafe-relay-forward-key": credential } : {}),
+          },
+        });
+        held.add(socket);
+        let opened = false;
+        const close = new Promise<void>((joined) =>
+          socket.once("close", () => {
+            held.delete(socket);
+            joined();
+            resolve(opened);
+          }),
+        );
+        closing.add(close);
+        socket.on("error", () => {});
+        socket.once("open", () => {
+          opened = true;
+          socket.close();
+        });
+        if (test.signal.aborted) socket.terminate();
+      });
+    for (let index = 0; index < 4; index++) expect(await upgrade("203.0.113.1", key)).toBe(true);
+    expect(await upgrade("203.0.113.1", key)).toBe(false);
+    expect(await upgrade("203.0.113.2", key)).toBe(true);
+    expect(await upgrade("203.0.113.3", randomOpaque())).toBe(false);
+    for (let index = 0; index < 5; index++)
+      expect(await upgrade(`192.0.2.${index}`)).toBe(index < 4);
+    await f.close();
+    expect(f.server.stats().nativeSockets).toBe(0);
   });
 
   it("binds the device, preserves explicit second-factor retry, and streams complete files", async (test) => {

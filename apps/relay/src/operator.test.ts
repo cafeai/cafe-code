@@ -10,6 +10,7 @@ import { readNodeConfig, readPrivateFile } from "./config.ts";
 import { verifyNetwork } from "@cafecode/relay/descriptor";
 import { canonicalBytes } from "@cafecode/relay/protocol";
 import { epochNow } from "@cafecode/relay/lifetime";
+import { randomOpaque } from "@cafecode/relay/bytes";
 
 it.skipIf(process.platform === "win32")(
   "extends a private recipe without replacing identities or silently moving/removing nodes",
@@ -67,12 +68,19 @@ it.skipIf(process.platform === "win32")(
     await write(nodes.slice(0, 1));
     await own(() => configureNetwork(output, recipe));
     const first = await own(() => readNodeConfig(join(output, "node-0.json")));
+    const forwardedIpKeys = [randomOpaque(), randomOpaque()];
+    await own(() =>
+      fs.writeFile(join(output, "node-0.json"), canonicalBytes({ ...first, forwardedIpKeys }), {
+        mode: 0o600,
+      }),
+    );
     await write(nodes);
     await own(() => configureNetwork(output, recipe));
     const current = await own(() => readNodeConfig(join(output, "node-0.json")));
     expect(current.privateIdentity).toBe(first.privateIdentity);
     expect(current.grants).toEqual(first.grants);
     expect(current.rootPublicKey).toBe(first.rootPublicKey);
+    expect(current.forwardedIpKeys).toEqual(forwardedIpKeys);
     expect(current.descriptor.revision).toBe(2);
     expect(current.descriptor.nodes.length).toBe(3);
     const networkBytes = await own(() => readPrivateFile(join(output, "network.json"), 8192));

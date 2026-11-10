@@ -12,6 +12,9 @@ const ORIGINS: Readonly<Record<string, string>> = {
 
 export interface RelayEdgeEnvironment {
   ASSETS: { fetch(request: Request): Promise<Response> };
+  RELAY_FORWARD_UK_KEY?: string;
+  RELAY_FORWARD_CA_KEY?: string;
+  RELAY_FORWARD_US_WEST_KEY?: string;
 }
 
 const security = {
@@ -151,6 +154,27 @@ export async function relayEdgeFetch(
         if (value !== null) headers.set(name, value);
       }
     } else if (lookup) headers.set("content-type", "application/json");
+    const forwardingKey = (
+      {
+        "relay-uk.cafecode.sh": env.RELAY_FORWARD_UK_KEY,
+        "relay-ca.cafecode.sh": env.RELAY_FORWARD_CA_KEY,
+        "relay-us-west.cafecode.sh": env.RELAY_FORWARD_US_WEST_KEY,
+      } as Readonly<Record<string, string | undefined>>
+    )[url.hostname];
+    if (forwardingKey !== undefined) {
+      const client = request.headers.get("cf-connecting-ip");
+      // CF supplies this header on the incoming request. Do not copy a caller's
+      // X-Forwarded-For, X-Real-IP or private gateway-credential header.
+      if (
+        !/^[A-Za-z0-9_-]{43}$/.test(forwardingKey) ||
+        !client ||
+        client.length > 64 ||
+        !/^[0-9A-Fa-f:.]+$/.test(client)
+      )
+        return refusal(400);
+      headers.set("cf-connecting-ip", client);
+      headers.set("x-cafe-relay-forward-key", forwardingKey);
+    }
     const body = lookup ? await bounded(request.body, 8_192, controller.signal) : undefined;
     const upstream = await fetcher(new URL(url.pathname, origin), {
       method: request.method,
