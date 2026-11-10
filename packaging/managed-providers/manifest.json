@@ -3,7 +3,7 @@
   "node": "24.22.1",
   "providers": {
     "codex": "0.166.0",
-    "claude": "2.1.318"
+    "claude": "2.1.321"
   },
   "packages": [
     {
@@ -32,27 +32,27 @@
     },
     {
       "name": "@anthropic-ai/claude-code",
-      "version": "2.1.318",
+      "version": "2.1.321",
       "installPath": "@anthropic-ai/claude-code",
       "arch": "all",
-      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.318.tgz",
-      "integrity": "sha512-OTJgLxcvWefv8IdTsq5n90Z2IxEhLwKqHUBhwZYE4odXzKA/Tb6p2Zb5Iy9Vq7JIVcNZzn9cPxW5sb42wLF95Q=="
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.321.tgz",
+      "integrity": "sha512-g9IMBKV0t092/KXM1iHE3LrsPzDaOqeYO6nHtXkztwP42Rf/w+pg/G4h5QVU51p3Nnkf/RyR0xi3V/1GEqmRsA=="
     },
     {
       "name": "@anthropic-ai/claude-code-win32-x64",
-      "version": "2.1.318",
+      "version": "2.1.321",
       "installPath": "@anthropic-ai/claude-code-win32-x64",
       "arch": "x64",
-      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-win32-x64/-/claude-code-win32-x64-2.1.318.tgz",
-      "integrity": "sha512-g/fa2hqcU/+Qd3NMaY/8i+AoX6HQt3zBcj+V/Ot9icr5TN4PmOmuy6YhVNFLHb2IniLIrBA+gZFqonUe0aYLxg=="
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-win32-x64/-/claude-code-win32-x64-2.1.321.tgz",
+      "integrity": "sha512-1Ja+h1xaDpNmPAieDM/Q4pEh5MZYxIQe12ni+0rfYfbEdzxU1bl897Q4bcGa9aDdKLI6WuLXHavJVjXDYFtdoA=="
     },
     {
       "name": "@anthropic-ai/claude-code-win32-arm64",
-      "version": "2.1.318",
+      "version": "2.1.321",
       "installPath": "@anthropic-ai/claude-code-win32-arm64",
       "arch": "arm64",
-      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-win32-arm64/-/claude-code-win32-arm64-2.1.318.tgz",
-      "integrity": "sha512-+yn6RI0BeeiG+xbX8OkxSgRAiKIJZhO1foPNG8wUfjIPYaaxYsm8GL3TV7KyuBgGrjPYR1+pFzXaHY2bLsF37g=="
+      "url": "https://registry.npmjs.org/@anthropic-ai/claude-code-win32-arm64/-/claude-code-win32-arm64-2.1.321.tgz",
+      "integrity": "sha512-snXBO1jOe8saXspZp36ugMkGvEQD0ITV57by2bEvGOPVBENB9jU1HjfOjFMJCidMadUQf88YnPqD6sZ/aBjXLA=="
     }
   ]
 }

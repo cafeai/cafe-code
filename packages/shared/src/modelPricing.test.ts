@@ -22,13 +22,19 @@ describe("Claude cache-write duration pricing", () => {
     outputTokens: 0,
   };
 
-  it("prices only verified one-hour writes at the one-hour rate", () => {
-    const result = rollUpCost([entry]);
-    expect(result.cost).toBeCloseTo(0.7 * 5 + 0.3 * 8);
-    expect(result.cacheSavings).toBeCloseTo(4 - result.cost);
-    expect(result.unknownCacheWriteTokens).toBe(500_000);
-    expect(result.pricedTokens).toBe(1_000_000);
-  });
+  it.each([
+    ["claude-opus-5-5", 4, 5, 8],
+    ["claude-fable-5-2", 8, 10, 16],
+  ] as const)(
+    "prices only verified %s one-hour writes at the one-hour rate",
+    (model, inputRate, fiveMinuteRate, oneHourRate) => {
+      const result = rollUpCost([{ ...entry, model }]);
+      expect(result.cost).toBeCloseTo(0.7 * fiveMinuteRate + 0.3 * oneHourRate);
+      expect(result.cacheSavings).toBeCloseTo(inputRate - result.cost);
+      expect(result.unknownCacheWriteTokens).toBe(500_000);
+      expect(result.pricedTokens).toBe(1_000_000);
+    },
+  );
 
   it("keeps older custom write overrides authoritative for both durations", () => {
     const result = rollUpCost([entry], { "claude-opus": RATE });
@@ -129,7 +135,13 @@ describe("resolveModelRate", () => {
     expect(haiku?.output).toBeLessThan(generic!.output);
   });
 
-  it("uses the distinct published cache-read rates for Fable 5.1 and Fable 5", () => {
+  it("uses the distinct published rates for Fable 5.2, Fable 5.1 and Fable 5", () => {
+    expect(resolveModelRate("claude-fable-5-2")).toEqual({
+      input: 8,
+      cachedInput: 0.2,
+      cacheWrite: 10,
+      output: 40,
+    });
     expect(resolveModelRate("claude-fable-5-1")).toEqual({
       input: 10,
       cachedInput: 0.25,
@@ -157,8 +169,9 @@ describe("resolveModelRate", () => {
     expect(resolveModelRate("claude-opus-4-5", overrides)).toEqual(RATE);
   });
 
-  it("lets a Fable family override beat the more-specific bundled 5.1 rate", () => {
-    expect(resolveModelRate("claude-fable-5-1", { "claude-fable": RATE })).toEqual(RATE);
+  it("lets a Fable family override beat the more-specific bundled rates", () => {
+    for (const model of ["claude-fable-5-1", "claude-fable-5-2"])
+      expect(resolveModelRate(model, { "claude-fable": RATE })).toEqual(RATE);
   });
 
   it("uses Astra's published rates instead of the generic GPT fallback", () => {

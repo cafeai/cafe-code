@@ -1,5 +1,6 @@
 /** Transport qualification only: callers construct the ordinary opaque
- * document before entering this helper, as the original ten-second probes did.
+ * document before entering this helper. Ready-gated family fixtures own their
+ * finite bootstrap and response phases; ordinary probes retain one allowance.
  * No renderer state, source admission or native browser context is shared. */
 import library from "mermaid/dist/mermaid.min.js?raw";
 import runtime from "../lib/mermaid/sandboxRuntime.js?raw";
@@ -112,7 +113,7 @@ interface MermaidProbeOptions<T> {
     readonly onPhase?: (phase: MermaidProbeBootstrapPhase) => void;
     // Family fixtures require their actual engine/receiver/overrides to be
     // ready, rather than a later generic iframe-load callback. Other probes
-    // retain their original load gate. Both span the same absolute allowance.
+    // retain their original load gate and combined ten-second allowance.
     readonly admitSourceOnReady?: boolean;
   };
 }
@@ -131,6 +132,8 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
     let phase: ProbePhase = "document-constructed";
     let bootstrapPhase = -1;
     let sourceReserved = false;
+    let responseDeadline: number | undefined;
+    let responseTimeout: ReturnType<typeof setTimeout> | undefined;
     // A valid next marker can reach the parent after its admission allowance.
     // Keep that rejected observation separate from accepted readiness. It
     // cannot advance bootstrapPhase, invoke the observer or authorize source.
@@ -151,6 +154,7 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      clearTimeout(responseTimeout);
       // Clear every callback before closing/removing its owner. Already queued
       // callbacks also check settled: a retired frame cannot transfer its port,
       // send another source request, or settle a later invocation's result.
@@ -171,14 +175,23 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
       // same exact-owner cleanup without reading/coercing the received reason.
       finish({ error: new Error("Mermaid probe owner retired") });
     }
-    // Preserve the original scope and duration: document construction has
-    // finished, while frame loading, parsing and the reply all share one fixed
-    // allowance. Observed breadcrumbs never renew this timer or authorize a
-    // retry, and it remains an asynchronous bound rather than a CPU deadline.
+    // Only source-owned family builders that require terminal exact readiness
+    // receive a separate bootstrap allowance. Kind labels alone, Graph/default
+    // load callbacks and partial markers cannot opt into a response phase.
+    // Every phase remains subordinate to the unchanged outer test's signal.
+    const readyGatedFamily =
+      options.bootstrapObservation?.admitSourceOnReady === true &&
+      (options.kind === "Family admission probe" || options.kind === "Native diagram-output probe");
     const startedAt = performance.now();
-    const deadline = startedAt + 10_000;
-    const expired = () => performance.now() >= deadline;
-    const timeout = setTimeout(() => finish({ error: failure("did not reply") }), 10_000);
+    const bootstrapAllowance = readyGatedFamily ? 20_000 : 10_000;
+    const bootstrapDeadline = startedAt + bootstrapAllowance;
+    const expired = () => performance.now() >= (responseDeadline ?? bootstrapDeadline);
+    const timeout = setTimeout(() => {
+      // clearTimeout cannot retract an already queued callback. Only this
+      // exact family's completed one-use reservation retires its startup timer;
+      // default probes still expire at their original combined deadline.
+      if (!readyGatedFamily || !sourceReserved) finish({ error: failure("did not reply") });
+    }, bootstrapAllowance);
     const sendSource = (readyPhase: "frame-loaded" | "fixture-ready") => {
       if (settled || sourceReserved) return;
       if (expired()) {
@@ -195,7 +208,19 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
         // Reserve the exact one-use source/port before either transport I/O.
         // Queued duplicate load/readiness callbacks cannot transfer again or
         // regress a phase already observed on the original request's port.
+        const reservedAt = performance.now();
+        if (reservedAt >= bootstrapDeadline) {
+          finish({ error: failure("did not reply") });
+          return;
+        }
         sourceReserved = true;
+        if (readyGatedFamily) {
+          // This is the sole phase transition, before either transport call.
+          // Duplicate/foreign/partial markers and progress cannot renew it.
+          responseDeadline = reservedAt + 10_000;
+          clearTimeout(timeout);
+          responseTimeout = setTimeout(() => finish({ error: failure("did not reply") }), 10_000);
+        }
         frame.onload = null;
         ownerWindow.postMessage("cafe-mermaid-render", "*", [channel.port2]);
         if (settled) return;
@@ -228,7 +253,7 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
         return;
       const next = bootstrapPhases.indexOf(data.probeBootstrapPhase as MermaidProbeBootstrapPhase);
       if (next < 0 || next !== bootstrapPhase + 1) return;
-      // Every startup step remains inside the original allowance. Only the
+      // Every startup step remains inside its fixed bootstrap allowance. Only the
       // terminal exact marker may own Family source admission; prior/foreign
       // observations cannot renew the timer or authorize a transferred port.
       if (expired()) {
@@ -245,19 +270,25 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
       bootstrapPhase = next;
       try {
         observation.onPhase?.(bootstrapPhases[next]!);
-        if (next === bootstrapPhases.length - 1 && observation.admitSourceOnReady)
-          sendSource("fixture-ready");
+        if (next === bootstrapPhases.length - 1 && readyGatedFamily) sendSource("fixture-ready");
       } catch {
         finish({ error: failure("bootstrap observer failed") });
       }
     }
     if (options.bootstrapObservation) window.addEventListener("message", observeBootstrap);
     channel.port1.onmessage = ({ data }: MessageEvent<unknown>) => {
-      if (settled || !data || typeof data !== "object" || !("id" in data) || data.id !== options.id)
+      if (
+        settled ||
+        !sourceReserved ||
+        !data ||
+        typeof data !== "object" ||
+        !("id" in data) ||
+        data.id !== options.id
+      )
         return;
       // Browser work can delay the timer callback behind an already queued
       // message. An expired reply still fails; timer delivery order is never
-      // permission to accept success beyond the original allowance.
+      // permission to accept success beyond the exact current phase allowance.
       if (expired()) {
         finish({ error: failure("did not reply") });
         return;
@@ -293,7 +324,7 @@ export function runMermaidProbe<T>(options: MermaidProbeOptions<T>): Promise<T> 
     channel.port1.onmessageerror = () => finish({ error: failure("message failed") });
     frame.onerror = () => finish({ error: failure("load failed") });
     frame.onload = () => {
-      if (settled || sourceReserved || options.bootstrapObservation?.admitSourceOnReady) return;
+      if (settled || sourceReserved || readyGatedFamily) return;
       sendSource("frame-loaded");
     };
     // Register before native insertion, then close the check/register race.

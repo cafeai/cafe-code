@@ -425,7 +425,20 @@ export function useThreadActions() {
       opts: { readonly confirm?: boolean; readonly refresh?: boolean } = {},
     ) => {
       const api = readEnvironmentApi(target.environmentId);
-      if (!api) return;
+      // An unavailable exact environment is a refused action, never a completed
+      // purge. Callers must retain their view/recovery state on this failure.
+      if (!api) {
+        throw new Error(
+          uiText(
+            "Environment API not found for environment {environmentId}",
+            {
+              environmentId: target.environmentId,
+            },
+            undefined,
+            uiLocale,
+          ),
+        );
+      }
       if (opts.confirm !== false) {
         const localApi = readLocalApi();
         if (!localApi) return;
@@ -457,7 +470,18 @@ export function useThreadActions() {
   const deleteThread = useCallback(
     async (target: ScopedThreadRef, opts: { deletedThreadKeys?: ReadonlySet<string> } = {}) => {
       const api = readEnvironmentApi(target.environmentId);
-      if (!api) return;
+      if (!api) {
+        throw new Error(
+          uiText(
+            "Environment API not found for environment {environmentId}",
+            {
+              environmentId: target.environmentId,
+            },
+            undefined,
+            uiLocale,
+          ),
+        );
+      }
       const resolved = resolveThreadTarget(target);
       if (!resolved) {
         // Thread not in main store (e.g. archived thread) — dispatch delete directly.
@@ -569,25 +593,35 @@ export function useThreadActions() {
         currentRouteThreadRef?.threadId === threadRef.threadId &&
         currentRouteThreadRef.environmentId === threadRef.environmentId
       ) {
-        if (fallbackThreadId) {
-          const fallbackThread = selectThreadByRef(
-            useStore.getState(),
-            scopeThreadRef(threadRef.environmentId, fallbackThreadId),
-          );
-          if (fallbackThread) {
+        // The server has acknowledged deletion. Presentation failure must not
+        // strand owned cleanup or the caller's separately confirmed hard purge.
+        // Catch only navigation: mutation failures still reject and are never
+        // replayed. Keep the owner checks and navigation invocation synchronous
+        // with respect to each other, including a synchronous router refusal.
+        try {
+          if (fallbackThreadId) {
+            const fallbackThread = selectThreadByRef(
+              useStore.getState(),
+              scopeThreadRef(threadRef.environmentId, fallbackThreadId),
+            );
+            if (fallbackThread) {
+              await router.navigate({
+                to: "/$environmentId/$threadId",
+                params: buildThreadRouteParams(
+                  scopeThreadRef(fallbackThread.environmentId, fallbackThread.id),
+                ),
+                replace: true,
+              });
+            } else {
+              await router.navigate({ to: "/", replace: true });
+            }
+          } else {
             await router.navigate({
-              to: "/$environmentId/$threadId",
-              params: buildThreadRouteParams(
-                scopeThreadRef(fallbackThread.environmentId, fallbackThread.id),
-              ),
+              to: "/",
               replace: true,
             });
-          } else {
-            await router.navigate({ to: "/", replace: true });
           }
-        } else {
-          await router.navigate({ to: "/", replace: true });
-        }
+        } catch {}
       }
 
       if (!shouldDeleteWorktree || !orphanedWorktreePath || !threadProject) {
@@ -651,7 +685,20 @@ export function useThreadActions() {
   const confirmAndDeleteThread = useCallback(
     async (target: ScopedThreadRef) => {
       const api = readEnvironmentApi(target.environmentId);
-      if (!api) return;
+      // This public entry point must not swallow missing-connection failures
+      // before it can delegate to the same exact-target deletion boundary.
+      if (!api) {
+        throw new Error(
+          uiText(
+            "Environment API not found for environment {environmentId}",
+            {
+              environmentId: target.environmentId,
+            },
+            undefined,
+            uiLocale,
+          ),
+        );
+      }
       const localApi = readLocalApi();
       const resolved = resolveThreadTarget(target);
 

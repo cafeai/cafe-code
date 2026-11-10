@@ -2079,14 +2079,20 @@ describe("local verification input evidence", () => {
     expect(selectedTool.opens).toBe(firstOpens);
   });
 
-  it("rereads changed selected-tool bytes even when length and native mtime are restored", async (context) => {
+  it("rereads changed selected-tool tail bytes even when length and native mtime are restored", async (context) => {
     const f = await selectedToolFixture(context);
+    // Keep the changed byte beyond the first bounded binary batch. The real
+    // native file remains inert, and no source/config input changes between
+    // snapshots can accidentally satisfy the tool-content assertion.
+    const originalBytes = `${f.toolBytes}#${"x".repeat(2 * 1024 ** 2)}0\n`;
+    await f.ownPreparation(() => writeFile(f.path, originalBytes));
+    await f.ownPreparation(() => utimes(f.path, 1_700_000_000, 1_700_000_000));
     const first = await f.snapshot();
     expect(first, encode(f.refusals)).toBeDefined();
     const firstOpens = selectedTool.opens;
     const before = await f.ownPreparation(() => lstat(f.path, { bigint: true }));
-    const changedBytes = "#!/bin/sh\nexit 1\n";
-    expect(Buffer.byteLength(changedBytes)).toBe(Buffer.byteLength(f.toolBytes));
+    const changedBytes = `${originalBytes.slice(0, -2)}1\n`;
+    expect(Buffer.byteLength(changedBytes)).toBe(Buffer.byteLength(originalBytes));
     await f.ownPreparation(() => writeFile(f.path, changedBytes));
     await f.ownPreparation(() => utimes(f.path, before.atime, before.mtime));
     const after = await f.ownPreparation(() => lstat(f.path, { bigint: true }));

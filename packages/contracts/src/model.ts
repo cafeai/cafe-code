@@ -199,6 +199,16 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
     "opus-5": "claude-opus-5",
     opus_5: "claude-opus-5",
     "claude-opus-5[1m]": "claude-opus-5",
+    // Explicit version aliases never advance saved bare Fable selections.
+    // Claude Code 2.1.321 qualifies the new row independently of this spelling.
+    "fable-5.2": "claude-fable-5-2",
+    "claude-fable-5.2": "claude-fable-5-2",
+    "fable-5-2": "claude-fable-5-2",
+    "fable5.2": "claude-fable-5-2",
+    fable52: "claude-fable-5-2",
+    fable_5_2: "claude-fable-5-2",
+    "claude-fable-5-2[1m]": "claude-fable-5-2",
+    "fable-5-2[1m]": "claude-fable-5-2",
     "fable-5.1": "claude-fable-5-1",
     "claude-fable-5.1": "claude-fable-5-1",
     "fable-5-1": "claude-fable-5-1",

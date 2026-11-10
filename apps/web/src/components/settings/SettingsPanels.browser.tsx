@@ -111,6 +111,43 @@ function LanguageSelectionHarness() {
   return <LanguageSettingsRow />;
 }
 
+// Observe the original image rendering and bridge operations without replacing
+// their results. The one participating case owns these promises across timeout;
+// other settings fixtures call the unchanged implementation directly.
+const appIconActionHarness = vi.hoisted(() => {
+  type Owner = {
+    render<T>(start: () => Promise<T>): Promise<T>;
+    change<T>(start: () => Promise<T>): Promise<T>;
+  };
+  let current: Owner | null = null;
+  return {
+    install(owner: Owner) {
+      if (current) throw new Error("An app-icon action fixture is already owned.");
+      current = owner;
+      return () => {
+        if (current === owner) current = null;
+      };
+    },
+    render<T>(start: () => Promise<T>): Promise<T> {
+      return current ? current.render(start) : start();
+    },
+    change<T>(start: () => Promise<T>): Promise<T> {
+      return current ? current.change(start) : start();
+    },
+  };
+});
+
+vi.mock("../../appIconState", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../appIconState")>();
+  return {
+    ...actual,
+    renderThemedAppIcon: (...args: Parameters<typeof actual.renderThemedAppIcon>) =>
+      appIconActionHarness.render(() => actual.renderThemedAppIcon(...args)),
+    setDesktopAppIcon: (...args: Parameters<typeof actual.setDesktopAppIcon>) =>
+      appIconActionHarness.change(() => actual.setDesktopAppIcon(...args)),
+  };
+});
+
 const authAccessHarness = vi.hoisted(() => {
   type Snapshot = AuthAccessSnapshot;
   let snapshot: Snapshot = {
@@ -832,6 +869,102 @@ function createCodexLoginSettings(deviceCodeLogin: boolean): ServerConfig {
 }
 
 describe("settings panels", () => {
+  let closeIconFixture: (() => Promise<void>) | null = null;
+  function iconFixture(context: Pick<TestContext, "signal" | "onTestFinished">) {
+    const pending = new Set<Promise<unknown>>();
+    const renderedIcons: Promise<unknown>[] = [];
+    let retired = false;
+    let rendering: ReturnType<typeof renderWithTestRouter> | null = null;
+    let control: HTMLElement | null = null;
+    let closing: Promise<void> | null = null;
+    const assertActive = () => {
+      if (retired || context.signal.aborted)
+        throw new Error("The exact app-icon action fixture was retired.");
+    };
+    const track = <T,>(start: () => PromiseLike<T>): Promise<T> => {
+      const original = Promise.resolve(start());
+      pending.add(original);
+      void original.then(
+        () => {
+          pending.delete(original);
+        },
+        () => {
+          pending.delete(original);
+        },
+      );
+      return original;
+    };
+    const release = appIconActionHarness.install({
+      render<T>(start: () => Promise<T>) {
+        assertActive();
+        const original = track(start);
+        renderedIcons.push(original);
+        return original;
+      },
+      change<T>(start: () => Promise<T>) {
+        // A late original image result must never enter the shared icon queue
+        // after this test has retired or another fixture replaces its bridge.
+        assertActive();
+        return track(start);
+      },
+    });
+    const close = () => {
+      if (closing) return closing;
+      retired = true;
+      context.signal.removeEventListener("abort", onAbort);
+      closing = Promise.resolve().then(async () => {
+        while (pending.size) await Promise.allSettled([...pending]);
+        // The public busy flag is cleared in applyDefault's final continuation,
+        // after the real render and bridge promises. Keep its exact live target
+        // and bridge until that original action has reached its terminal edge.
+        if (renderedIcons.length && control)
+          await vi.waitFor(() => expect(control!.getAttribute("aria-busy")).toBe("false"));
+        const view = rendering ? await rendering.catch(() => null) : null;
+        if (view) await view.unmount();
+        if (mounted === view) mounted = null;
+        release();
+      });
+      return closing;
+    };
+    const onAbort = () => {
+      void close().catch(() => undefined);
+    };
+    context.signal.addEventListener("abort", onAbort, { once: true });
+    context.onTestFinished(close);
+    closeIconFixture = close;
+    if (context.signal.aborted) onAbort();
+    return {
+      async own<T>(start: () => PromiseLike<T>): Promise<T> {
+        assertActive();
+        const value = await track(start);
+        assertActive();
+        return value;
+      },
+      async render(children: ReactNode) {
+        assertActive();
+        rendering = renderWithTestRouter(children);
+        const view = await track(() => rendering!);
+        assertActive();
+        mounted = view;
+        return view;
+      },
+      observeControl(element: HTMLElement | null) {
+        assertActive();
+        if (!element || !element.isConnected)
+          throw new Error("The exact app-icon action control is unavailable.");
+        control = element;
+      },
+      async renderedIcon(index: number) {
+        assertActive();
+        const original = renderedIcons[index];
+        if (!original)
+          throw new Error("The native title click did not admit its original icon render.");
+        await track(() => original);
+        assertActive();
+      },
+      close,
+    };
+  }
   let closePowerFixture: (() => Promise<void>) | null = null;
   // New power fixtures retain their exact pending render across hard timeout.
   // Shared afterEach joins this same owner before resetting DOM/native mocks.
@@ -877,6 +1010,9 @@ describe("settings panels", () => {
     | null = null;
 
   beforeEach(async () => {
+    // A failed/unfinished retirement must not release global ownership to the next case.
+    await closeIconFixture?.();
+    closeIconFixture = null;
     setUiLocale("en");
     selectWorkspaceEnvironment(null);
     resetServerStateForTests();
@@ -891,6 +1027,8 @@ describe("settings panels", () => {
   });
 
   afterEach(async () => {
+    await closeIconFixture?.();
+    closeIconFixture = null;
     await closePowerFixture?.();
     closePowerFixture = null;
     if (mounted) {
@@ -2236,80 +2374,114 @@ describe("settings panels", () => {
     });
   });
 
-  it("unlocks the Dekai icon after ten clicks on the Icon title and restores it the same way", async () => {
-    await page.viewport(1100, 900);
-    let iconState: DesktopAppIconState = {
-      variant: "standard",
-      source: "default",
-      themedIconKey: null,
-      customIconPreviewPng: null,
-    };
-    const setAppIcon = vi.fn(async (input: SetDesktopAppIconInput) => {
-      iconState = {
-        ...iconState,
-        variant: input.variant,
-        source: input.source,
-        themedIconKey: input.themedIcon?.key ?? iconState.themedIconKey,
+  it("unlocks the Dekai icon after ten clicks on the Icon title and restores it the same way", async (context) => {
+    const owner = iconFixture(context);
+    try {
+      await owner.own(() => page.viewport(1100, 900));
+      let iconState: DesktopAppIconState = {
+        variant: "standard",
+        source: "default",
+        themedIconKey: null,
+        customIconPreviewPng: null,
       };
-      return iconState;
-    });
-    const desktopBridge: DesktopBridge = {
-      ...createDesktopBridgeStub(),
-      getAppIconState: async () => iconState,
-      setAppIcon,
-    };
-    window.desktopBridge = desktopBridge;
-    installClientSettingsNativeApi(desktopBridge);
-    setServerConfigSnapshot(createBaseServerConfig());
+      const setAppIcon = vi.fn(async (input: SetDesktopAppIconInput) => {
+        iconState = {
+          ...iconState,
+          variant: input.variant,
+          source: input.source,
+          themedIconKey: input.themedIcon?.key ?? iconState.themedIconKey,
+        };
+        return iconState;
+      });
+      const desktopBridge: DesktopBridge = {
+        ...createDesktopBridgeStub(),
+        getAppIconState: async () => iconState,
+        setAppIcon,
+      };
+      window.desktopBridge = desktopBridge;
+      installClientSettingsNativeApi(desktopBridge);
+      setServerConfigSnapshot(createBaseServerConfig());
 
-    mounted = await renderWithTestRouter(
-      <AppAtomRegistryProvider>
-        <AppearanceSettingsPanel />
-      </AppAtomRegistryProvider>,
-    );
-
-    const iconTitle = page.getByRole("button", { name: "Icon", exact: true });
-    await expect
-      .element(page.getByRole("button", { name: "Default", exact: true }))
-      .toHaveAttribute("aria-pressed", "true");
-    for (let tap = 1; tap <= 4; tap += 1) await iconTitle.click();
-    expect(document.body.textContent).not.toContain("away from unlocking");
-    await iconTitle.click();
-    await expect
-      .element(page.getByText("You're 5 clicks away from unlocking a secret icon."))
-      .toBeInTheDocument();
-    for (let tap = 6; tap <= 9; tap += 1) await iconTitle.click();
-    await expect
-      .element(page.getByText("You're 1 click away from unlocking a secret icon."))
-      .toBeInTheDocument();
-    expect(setAppIcon).not.toHaveBeenCalled();
-
-    await iconTitle.click();
-    await vi.waitFor(() => {
-      expect(setAppIcon).toHaveBeenCalledWith(
-        expect.objectContaining({ variant: "dekai", source: "default" }),
+      await owner.render(
+        <AppAtomRegistryProvider>
+          <AppearanceSettingsPanel />
+        </AppAtomRegistryProvider>,
       );
-    });
-    // The unlocked icon arrives already colored for the current accent color and theme.
-    await vi.waitFor(() => {
-      expect(setAppIcon.mock.calls[0]?.[0].themedIcon?.key).toMatch(/^dekai-[a-z]+-(dark|light)$/);
-    });
-    await expect.element(page.getByText("Secret icon unlocked.")).toBeInTheDocument();
-    await expect
-      .element(page.getByRole("button", { name: "Dekai", exact: true }))
-      .toHaveAttribute("aria-pressed", "true");
 
-    for (let tap = 1; tap <= 10; tap += 1) await iconTitle.click();
-    await vi.waitFor(() => {
-      expect(setAppIcon).toHaveBeenLastCalledWith(
-        expect.objectContaining({ variant: "standard", source: "default" }),
+      const iconTitle = page.getByRole("button", { name: "Icon", exact: true });
+      await owner.own(() =>
+        expect
+          .element(page.getByRole("button", { name: "Default", exact: true }))
+          .toHaveAttribute("aria-pressed", "true"),
       );
-    });
-    await expect.element(page.getByText("Default icon restored.")).toBeInTheDocument();
-    await expect
-      .element(page.getByRole("button", { name: "Default", exact: true }))
-      .toBeInTheDocument();
-    expect(setAppIcon).toHaveBeenCalledTimes(2);
+      owner.observeControl(
+        iconTitle.element().closest("section")?.querySelector<HTMLElement>("[aria-busy]") ?? null,
+      );
+      for (let tap = 1; tap <= 4; tap += 1) await owner.own(() => iconTitle.click());
+      expect(document.body.textContent).not.toContain("away from unlocking");
+      await owner.own(() => iconTitle.click());
+      await owner.own(() =>
+        expect
+          .element(page.getByText("You're 5 clicks away from unlocking a secret icon."))
+          .toBeInTheDocument(),
+      );
+      for (let tap = 6; tap <= 9; tap += 1) await owner.own(() => iconTitle.click());
+      await owner.own(() =>
+        expect
+          .element(page.getByText("You're 1 click away from unlocking a secret icon."))
+          .toBeInTheDocument(),
+      );
+      expect(setAppIcon).not.toHaveBeenCalled();
+
+      await owner.own(() => iconTitle.click());
+      // Preserve the real fetch/bitmap/canvas result and join that exact prerequisite
+      // before the original one-second assertion of the later bridge operation.
+      await owner.renderedIcon(0);
+      await owner.own(() =>
+        vi.waitFor(() => {
+          expect(setAppIcon).toHaveBeenCalledWith(
+            expect.objectContaining({ variant: "dekai", source: "default" }),
+          );
+        }),
+      );
+      // The unlocked icon arrives already colored for the current accent color and theme.
+      await owner.own(() =>
+        vi.waitFor(() => {
+          expect(setAppIcon.mock.calls[0]?.[0].themedIcon?.key).toMatch(
+            /^dekai-[a-z]+-(dark|light)$/,
+          );
+        }),
+      );
+      await owner.own(() =>
+        expect.element(page.getByText("Secret icon unlocked.")).toBeInTheDocument(),
+      );
+      await owner.own(() =>
+        expect
+          .element(page.getByRole("button", { name: "Dekai", exact: true }))
+          .toHaveAttribute("aria-pressed", "true"),
+      );
+
+      for (let tap = 1; tap <= 10; tap += 1) await owner.own(() => iconTitle.click());
+      await owner.renderedIcon(1);
+      await owner.own(() =>
+        vi.waitFor(() => {
+          expect(setAppIcon).toHaveBeenLastCalledWith(
+            expect.objectContaining({ variant: "standard", source: "default" }),
+          );
+        }),
+      );
+      await owner.own(() =>
+        expect.element(page.getByText("Default icon restored.")).toBeInTheDocument(),
+      );
+      await owner.own(() =>
+        expect
+          .element(page.getByRole("button", { name: "Default", exact: true }))
+          .toBeInTheDocument(),
+      );
+      expect(setAppIcon).toHaveBeenCalledTimes(2);
+    } finally {
+      await owner.close();
+    }
   });
 
   it("shows detected editor icons in the Files default editor selector", async () => {

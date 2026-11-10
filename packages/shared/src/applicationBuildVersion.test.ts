@@ -64,8 +64,15 @@ interface TestManifest {
 function output(files: Readonly<Record<string, string | Uint8Array>>, onFileWritten?: () => void) {
   const root = mkdtempSync(join(tmpdir(), "cafe-build-version-"));
   temporary.push(root);
+  // This invocation owns a fresh root. Prepare each successful parent once;
+  // hundreds of sibling payloads need no repeated recursive native directory IO.
+  const preparedParents = new Set([root]);
   for (const [name, bytes] of Object.entries(files)) {
-    mkdirSync(dirname(join(root, name)), { recursive: true });
+    const parent = dirname(join(root, name));
+    if (!preparedParents.has(parent)) {
+      mkdirSync(parent, { recursive: true });
+      preparedParents.add(parent);
+    }
     writeFileSync(join(root, name), bytes);
     onFileWritten?.();
   }

@@ -78,6 +78,11 @@ const BUNDLED_RATES: ReadonlyArray<readonly [prefix: string, rate: ModelRate]> =
   ["claude-haiku-5-5", { input: 0.1, cachedInput: 0.01, cacheWrite: 0.125, output: 0.5 }],
   ["claude-haiku-4-5", { input: 1, cachedInput: 0.1, cacheWrite: 1.25, output: 5 }],
   ["claude-haiku", { input: 0.8, cachedInput: 0.08, cacheWrite: 1, output: 4 }],
+  // Verified 2026-11-10: https://platform.claude.com/docs/en/models/fable-5-2/overview.
+  // Fable 5.2 has its own lower baseline; the existing verified Claude TTL
+  // calculation charges its one-hour cache writes at 2x input ($16/M).
+  // Keep historical 5/5.1 rates and user-entered overrides independent.
+  ["claude-fable-5-2", { input: 8, cachedInput: 0.2, cacheWrite: 10, output: 40 }],
   // Fable 5.1 cuts cache reads from 0.1x to 0.025x of base input, so keep its
   // longer prefix separate from the Fable 5 family fallback.
   ["claude-fable-5-1", { input: 10, cachedInput: 0.25, cacheWrite: 12.5, output: 50 }],
