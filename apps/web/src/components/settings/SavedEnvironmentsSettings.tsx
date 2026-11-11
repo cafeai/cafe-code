@@ -341,7 +341,9 @@ function SavedEnvironmentRow({
               />
             </div>
             <span className="break-all text-xs text-muted-foreground">
-              {uiPresentation.safeSavedEnvironmentHost(record.httpBaseUrl)}
+              {record.transport === "relay"
+                ? uiText("Relay connection")
+                : uiPresentation.safeSavedEnvironmentHost(record.httpBaseUrl)}
             </span>
             {versionMismatch ? (
               <span className="flex items-start gap-1.5 text-xs text-warning-foreground">
@@ -519,12 +521,19 @@ function SavedEnvironmentRow({
                 {uiText("Edit saved environment", undefined, undefined, uiLocale)}
               </DialogTitle>
               <DialogDescription>
-                {uiText(
-                  "Update this environment's name and server address on this device.",
-                  undefined,
-                  undefined,
-                  uiLocale,
-                )}
+                {record.transport === "relay"
+                  ? uiText(
+                      "Update this environment's name on this device.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )
+                  : uiText(
+                      "Update this environment's name and server address on this device.",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )}
               </DialogDescription>
             </DialogHeader>
             <DialogPanel className="space-y-4">
@@ -540,39 +549,41 @@ function SavedEnvironmentRow({
                   disabled={actionsDisabled}
                 />
               </div>
-              <div className="flex gap-3">
-                <div className="min-w-0 flex-1 space-y-1.5">
-                  <label htmlFor={`${editId}-host`} className="text-xs font-medium">
-                    {uiText("IP address or hostname", undefined, undefined, uiLocale)}
-                  </label>
-                  <Input
-                    id={`${editId}-host`}
-                    value={edit.host}
-                    onChange={(event) => setEdit({ ...edit, host: event.target.value })}
-                    autoCapitalize="none"
-                    spellCheck={false}
-                    required
-                    disabled={actionsDisabled}
-                  />
+              {record.transport !== "relay" ? (
+                <div className="flex gap-3">
+                  <div className="min-w-0 flex-1 space-y-1.5">
+                    <label htmlFor={`${editId}-host`} className="text-xs font-medium">
+                      {uiText("IP address or hostname", undefined, undefined, uiLocale)}
+                    </label>
+                    <Input
+                      id={`${editId}-host`}
+                      value={edit.host}
+                      onChange={(event) => setEdit({ ...edit, host: event.target.value })}
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      required
+                      disabled={actionsDisabled}
+                    />
+                  </div>
+                  <div className="w-24 space-y-1.5">
+                    <label htmlFor={`${editId}-port`} className="text-xs font-medium">
+                      {uiText("Port", undefined, undefined, uiLocale)}
+                    </label>
+                    <Input
+                      id={`${editId}-port`}
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      max={65535}
+                      step={1}
+                      value={edit.port}
+                      onChange={(event) => setEdit({ ...edit, port: event.target.value })}
+                      required
+                      disabled={actionsDisabled}
+                    />
+                  </div>
                 </div>
-                <div className="w-24 space-y-1.5">
-                  <label htmlFor={`${editId}-port`} className="text-xs font-medium">
-                    {uiText("Port", undefined, undefined, uiLocale)}
-                  </label>
-                  <Input
-                    id={`${editId}-port`}
-                    type="number"
-                    inputMode="numeric"
-                    min={1}
-                    max={65535}
-                    step={1}
-                    value={edit.port}
-                    onChange={(event) => setEdit({ ...edit, port: event.target.value })}
-                    required
-                    disabled={actionsDisabled}
-                  />
-                </div>
-              </div>
+              ) : null}
               {actionError ? (
                 <p role="alert" className="text-xs text-destructive-foreground">
                   {actionError}
@@ -663,6 +674,7 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
 
   const [isOpen, setIsOpen] = useState(false);
   const [tab, setTab] = useState<"url" | "code" | "login">("url");
+  const [connectionType, setConnectionType] = useState<"direct" | "relay">("direct");
   const [label, setLabel] = useState("");
   const [pairingUrl, setPairingUrl] = useState("");
   const [host, setHost] = useState("");
@@ -674,6 +686,7 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
 
   const resetForm = () => {
     setTab("url");
+    setConnectionType("direct");
     setLabel("");
     setPairingUrl("");
     setHost("");
@@ -713,13 +726,16 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
     const submittedPassword = password;
     const factor = secondFactor.trim() ? { secondFactor: secondFactor.trim() } : {};
     const submittedTab = tab;
+    const submittedConnectionType = connectionType;
 
     setPairingUrl("");
     setPairingCode("");
     setPassword("");
     setSecondFactor("");
     try {
-      if (submittedTab === "url") {
+      if (submittedConnectionType === "relay") {
+        await actions.add({ label: submittedLabel, relayInvitation: submittedUrl, ...factor });
+      } else if (submittedTab === "url") {
         await actions.add({ label: submittedLabel, pairingUrl: submittedUrl, ...factor });
       } else if (submittedTab === "code") {
         await actions.add({
@@ -791,27 +807,41 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
         <form onSubmit={handleSubmit} className="flex min-h-0 flex-col">
           <DialogPanel className="flex flex-col gap-4">
             <SegmentedControl
-              aria-label={uiText("Connection method", undefined, undefined, uiLocale)}
-              value={tab}
-              onValueChange={changeTab}
+              aria-label={uiText("Connection type")}
+              value={connectionType}
+              onValueChange={(value) => {
+                setConnectionType(value);
+                changeTab("url");
+              }}
               options={[
-                {
-                  value: "url",
-                  label: uiText("Pairing URL", undefined, undefined, uiLocale),
-                  disabled: isSubmitting,
-                },
-                {
-                  value: "code",
-                  label: uiText("Host + code", undefined, undefined, uiLocale),
-                  disabled: isSubmitting,
-                },
-                {
-                  value: "login",
-                  label: uiText("Host + password", undefined, undefined, uiLocale),
-                  disabled: isSubmitting,
-                },
+                { value: "direct", label: uiText("Direct"), disabled: isSubmitting },
+                { value: "relay", label: uiText("Relay host"), disabled: isSubmitting },
               ]}
             />
+            {connectionType === "direct" ? (
+              <SegmentedControl
+                aria-label={uiText("Connection method", undefined, undefined, uiLocale)}
+                value={tab}
+                onValueChange={changeTab}
+                options={[
+                  {
+                    value: "url",
+                    label: uiText("Pairing URL", undefined, undefined, uiLocale),
+                    disabled: isSubmitting,
+                  },
+                  {
+                    value: "code",
+                    label: uiText("Host + code", undefined, undefined, uiLocale),
+                    disabled: isSubmitting,
+                  },
+                  {
+                    value: "login",
+                    label: uiText("Host + password", undefined, undefined, uiLocale),
+                    disabled: isSubmitting,
+                  },
+                ]}
+              />
+            ) : null}
 
             <div className="flex flex-col gap-2">
               <label htmlFor="env-label" className="text-sm font-medium">
@@ -826,16 +856,22 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
               />
             </div>
 
-            {tab === "url" ? (
+            {connectionType === "relay" || tab === "url" ? (
               <div className="flex flex-col gap-2">
                 <label htmlFor="env-url" className="text-sm font-medium">
-                  {uiText("Pairing URL", undefined, undefined, uiLocale)}
+                  {connectionType === "relay"
+                    ? uiText("Relay invitation link")
+                    : uiText("Pairing URL", undefined, undefined, uiLocale)}
                 </label>
                 <Input
                   id="env-url"
                   value={pairingUrl}
                   onChange={(event) => setPairingUrl(event.target.value)}
-                  placeholder="https://server.example/pair#token=..."
+                  placeholder={
+                    connectionType === "relay"
+                      ? "https://relay.cafecode.sh/relay/connect#..."
+                      : "https://server.example/pair#token=..."
+                  }
                   required
                   disabled={isSubmitting}
                   autoComplete="off"
@@ -892,6 +928,13 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
               </>
             )}
 
+            {connectionType === "relay" ? (
+              <p className="text-xs text-muted-foreground">
+                {uiText(
+                  "On the host, turn on Relay in Connections and create an invitation. Paste that private link here.",
+                )}
+              </p>
+            ) : null}
             <SecondFactorInput
               id="env-second-factor"
               value={secondFactor}

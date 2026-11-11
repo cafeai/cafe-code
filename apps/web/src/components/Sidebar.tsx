@@ -23,7 +23,16 @@ import {
 import { SegmentedControl } from "./ui/segmented-control";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { autoAnimate } from "@formkit/auto-animate";
-import React, { useCallback, useEffect, memo, useMemo, useRef, useState } from "react";
+import React, {
+  Fragment,
+  useCallback,
+  useContext,
+  useEffect,
+  memo,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useShallow } from "zustand/react/shallow";
 import {
   DndContext,
@@ -166,6 +175,7 @@ import {
 } from "./ui/sidebar";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
+import { openThreadSecretsDialog } from "../cafeSecrets/threadSecretsDialogStore";
 import {
   buildSidebarThreadContextMenuItems,
   isProjectDeleteRequiresForceError,
@@ -218,6 +228,18 @@ import { SidebarThreadOverflowToggle } from "./sidebar/SidebarThreadOverflowTogg
 import { SidebarHiddenProjectsToggle } from "./sidebar/SidebarHiddenProjectsToggle";
 import { SidebarSectionToggle } from "./sidebar/SidebarSectionToggle";
 import { useHiddenThreadStatusSummary } from "./sidebar/useHiddenThreadStatusSummary";
+import {
+  sidebarNestingIndentStyle,
+  SidebarThreadGroupContext,
+  SidebarThreadGroups,
+  type SidebarThreadGroupContextValue,
+} from "./sidebar/SidebarThreadGroups";
+import {
+  buildSidebarThreadGroupIndex,
+  sidebarRootThreadKey,
+  type SidebarThreadGroupIndex,
+} from "./sidebar/threadGroups.logic";
+import { ThreadMetadataDialogHost, useThreadMetadataDialogStore } from "./ThreadMetadataDialog";
 import {
   nextHiddenSidebarProjectKeys,
   partitionHiddenSidebarProjects,
@@ -356,6 +378,8 @@ function buildThreadJumpLabelMap(input: {
 
 interface SidebarThreadRowProps {
   thread: SidebarThreadSummary;
+  /** Rows inside an agent-created group are indented beneath their folder. */
+  nestingDepth?: number;
   projectCwd: string | null;
   orderedProjectThreadKeys: readonly string[];
   isActive: boolean;
@@ -566,6 +590,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     attemptArchiveThread,
     openPrLink,
     thread,
+    nestingDepth = 0,
   } = props;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const threadKey = scopedThreadKey(threadRef);
@@ -770,6 +795,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     <SidebarMenuSubItem
       className="w-full"
       data-thread-item
+      style={sidebarNestingIndentStyle(nestingDepth)}
       onMouseLeave={handleMouseLeave}
       onBlurCapture={handleBlurCapture}
     >
@@ -973,8 +999,21 @@ const EMPTY_SIDEBAR_THREADS: readonly SidebarThreadSummary[] = [];
  * thread. Closing a tab remains view-only.
  * This component intentionally receives shell metadata, not full chat history.
  */
+/** Members nested in groups, keyed for context-menu and selection lookups. */
+function groupMemberRows(index: SidebarThreadGroupIndex) {
+  const rows: Array<readonly [string, SidebarThreadSummary]> = [];
+  for (const nodes of index.groupsByOwnerKey.values()) {
+    for (const node of nodes) {
+      for (const member of node.members) {
+        rows.push([scopedThreadKey(scopeThreadRef(member.environmentId, member.id)), member]);
+      }
+    }
+  }
+  return rows;
+}
+
 export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
-  entries,
+  entries: allEntries,
   previewCount,
   expanded,
   sectionExpanded = true,
@@ -1004,6 +1043,12 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
 }) {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+  const { index: threadGroupIndex } = useContext(SidebarThreadGroupContext);
+  // Group members render beneath their parent chat, not as top-level rows.
+  const entries = useMemo(
+    () => allEntries.filter((entry) => !threadGroupIndex.nestedThreadKeys.has(entry.key)),
+    [allEntries, threadGroupIndex],
+  );
 
   const [renamingThreadKey, setRenamingThreadKey] = useState<string | null>(null);
   const [renamingTitle, setRenamingTitle] = useState("");
@@ -1023,16 +1068,23 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
   const rangeSelectTo = useThreadSelectionStore((state) => state.rangeSelectTo);
   const removeFromSelection = useThreadSelectionStore((state) => state.removeFromSelection);
   const orderedKeys = useMemo(() => entries.map((entry) => entry.key), [entries]);
+  // Context-menu lookups also cover nested members rendered inside groups.
   const rowsByKey = useMemo(
-    () => new Map(entries.map((entry) => [entry.key, entry.thread])),
-    [entries],
+    () =>
+      new Map([
+        ...allEntries.map((entry) => [entry.key, entry.thread] as const),
+        ...groupMemberRows(threadGroupIndex),
+      ]),
+    [allEntries, threadGroupIndex],
   );
   const rowsByKeyRef = useRef(rowsByKey);
   rowsByKeyRef.current = rowsByKey;
   const activeEntryKey =
     activeTarget?.kind === "server" ? scopedThreadKey(activeTarget.threadRef) : null;
+  // A collapsed section still shows the open chat, via its top-level parent.
+  const activeRootKey = sidebarRootThreadKey(threadGroupIndex, activeEntryKey);
   const visibleEntries = !sectionExpanded
-    ? entries.filter((entry) => entry.key === activeEntryKey)
+    ? entries.filter((entry) => entry.key === activeRootKey)
     : expanded
       ? entries
       : entries.slice(0, previewCount);
@@ -1170,6 +1222,10 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
         [
           { id: "rename", label: uiText("Rename", undefined, undefined, uiLocale) },
           {
+            id: "edit-metadata",
+            label: uiText("Edit metadata…", undefined, undefined, uiLocale),
+          },
+          {
             id: "duplicate",
             label: uiText("Duplicate chat", undefined, undefined, uiLocale),
             disabled: !duplicateAvailable,
@@ -1179,6 +1235,7 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
             label: uiText("Archive", undefined, undefined, uiLocale),
             disabled: running,
           },
+          { id: "secrets", label: uiText("Secrets…", undefined, undefined, uiLocale) },
           {
             id: "delete",
             label: uiText("Move to Recycle Bin", undefined, undefined, uiLocale),
@@ -1188,6 +1245,9 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
         position,
       );
       if (action === "rename") beginRename(threadRef, thread.title);
+      else if (action === "edit-metadata")
+        useThreadMetadataDialogStore.getState().open({ threadRef, title: thread.title });
+      else if (action === "secrets") openThreadSecretsDialog(threadRef, thread.title);
       else if (
         action === "duplicate" &&
         duplicateAvailable &&
@@ -1293,6 +1353,43 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
     event.preventDefault();
     event.stopPropagation();
   }, []);
+  // One row renderer for top-level chats and for members nested in groups,
+  // so every row keeps the same rename/archive/selection/menu behavior.
+  const renderStandaloneRow = (thread: SidebarThreadSummary, nestingDepth: number) => {
+    const key = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+    return (
+      <SidebarThreadRow
+        key={JSON.stringify(["server", thread.environmentId, thread.id])}
+        thread={thread}
+        nestingDepth={nestingDepth}
+        projectCwd={null}
+        orderedProjectThreadKeys={orderedKeys}
+        isActive={
+          activeTarget?.kind === "server" && scopedThreadKey(activeTarget.threadRef) === key
+        }
+        jumpLabel={nestingDepth === 0 ? (jumpLabelByKey.get(key) ?? null) : null}
+        appSettingsConfirmThreadArchive={archiveRequiresConfirmation}
+        renamingThreadKey={renamingThreadKey}
+        renamingTitle={renamingTitle}
+        setRenamingTitle={setRenamingTitle}
+        renamingInputRef={renamingInputRef}
+        renamingCommittedRef={renamingCommittedRef}
+        confirmingArchiveThreadKey={confirmingArchiveThreadKey}
+        setConfirmingArchiveThreadKey={setConfirmingArchiveThreadKey}
+        confirmArchiveButtonRefs={confirmArchiveButtonRefs}
+        handleThreadClick={handleThreadClick}
+        navigateToThread={navigateToThread}
+        handleMultiSelectContextMenu={handleMultiSelectContextMenu}
+        handleThreadContextMenu={handleThreadContextMenu}
+        clearSelection={clearSelection}
+        commitRename={commitRename}
+        cancelRename={cancelRename}
+        beginRename={beginRename}
+        attemptArchiveThread={attemptArchiveThread}
+        openPrLink={ignorePrLink}
+      />
+    );
+  };
 
   return (
     <SidebarGroup
@@ -1323,36 +1420,14 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
         className="mx-1 mt-1 mb-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1.5 py-0 empty:mt-0"
       >
         {visibleEntries.map((entry) => (
-          <SidebarThreadRow
-            key={JSON.stringify(["server", entry.thread.environmentId, entry.thread.id])}
-            thread={entry.thread}
-            projectCwd={null}
-            orderedProjectThreadKeys={orderedKeys}
-            isActive={
-              activeTarget?.kind === "server" &&
-              scopedThreadKey(activeTarget.threadRef) === entry.key
-            }
-            jumpLabel={jumpLabelByKey.get(entry.key) ?? null}
-            appSettingsConfirmThreadArchive={archiveRequiresConfirmation}
-            renamingThreadKey={renamingThreadKey}
-            renamingTitle={renamingTitle}
-            setRenamingTitle={setRenamingTitle}
-            renamingInputRef={renamingInputRef}
-            renamingCommittedRef={renamingCommittedRef}
-            confirmingArchiveThreadKey={confirmingArchiveThreadKey}
-            setConfirmingArchiveThreadKey={setConfirmingArchiveThreadKey}
-            confirmArchiveButtonRefs={confirmArchiveButtonRefs}
-            handleThreadClick={handleThreadClick}
-            navigateToThread={navigateToThread}
-            handleMultiSelectContextMenu={handleMultiSelectContextMenu}
-            handleThreadContextMenu={handleThreadContextMenu}
-            clearSelection={clearSelection}
-            commitRename={commitRename}
-            cancelRename={cancelRename}
-            beginRename={beginRename}
-            attemptArchiveThread={attemptArchiveThread}
-            openPrLink={ignorePrLink}
-          />
+          <Fragment key={JSON.stringify(["server", entry.thread.environmentId, entry.thread.id])}>
+            {renderStandaloneRow(entry.thread, 0)}
+            <SidebarThreadGroups
+              ownerThread={entry.thread}
+              depth={0}
+              renderRow={renderStandaloneRow}
+            />
+          </Fragment>
         ))}
         {sectionExpanded && hiddenEntryCount > 0 ? (
           <SidebarThreadOverflowToggle
@@ -1464,6 +1539,41 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
     collapseThreadListForProject,
   } = props;
 
+  // Shared by top-level rows and members nested in agent-created groups.
+  const renderProjectRow = (thread: SidebarThreadSummary, nestingDepth: number) => {
+    const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
+    return (
+      <SidebarThreadRow
+        key={threadKey}
+        thread={thread}
+        nestingDepth={nestingDepth}
+        projectCwd={projectCwd}
+        orderedProjectThreadKeys={orderedProjectThreadKeys}
+        isActive={activeRouteThreadKey === threadKey}
+        jumpLabel={nestingDepth === 0 ? (threadJumpLabelByKey.get(threadKey) ?? null) : null}
+        appSettingsConfirmThreadArchive={appSettingsConfirmThreadArchive}
+        renamingThreadKey={renamingThreadKey}
+        renamingTitle={renamingTitle}
+        setRenamingTitle={setRenamingTitle}
+        renamingInputRef={renamingInputRef}
+        renamingCommittedRef={renamingCommittedRef}
+        confirmingArchiveThreadKey={confirmingArchiveThreadKey}
+        setConfirmingArchiveThreadKey={setConfirmingArchiveThreadKey}
+        confirmArchiveButtonRefs={confirmArchiveButtonRefs}
+        handleThreadClick={handleThreadClick}
+        navigateToThread={navigateToThread}
+        handleMultiSelectContextMenu={handleMultiSelectContextMenu}
+        handleThreadContextMenu={handleThreadContextMenu}
+        clearSelection={clearSelection}
+        commitRename={commitRename}
+        cancelRename={cancelRename}
+        beginRename={beginRename}
+        attemptArchiveThread={attemptArchiveThread}
+        openPrLink={openPrLink}
+      />
+    );
+  };
+
   return (
     <SidebarMenuSub
       ref={attachThreadListAutoAnimateRef}
@@ -1484,33 +1594,10 @@ const SidebarProjectThreadList = memo(function SidebarProjectThreadList(
         renderedThreads.map((thread) => {
           const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
           return (
-            <SidebarThreadRow
-              key={threadKey}
-              thread={thread}
-              projectCwd={projectCwd}
-              orderedProjectThreadKeys={orderedProjectThreadKeys}
-              isActive={activeRouteThreadKey === threadKey}
-              jumpLabel={threadJumpLabelByKey.get(threadKey) ?? null}
-              appSettingsConfirmThreadArchive={appSettingsConfirmThreadArchive}
-              renamingThreadKey={renamingThreadKey}
-              renamingTitle={renamingTitle}
-              setRenamingTitle={setRenamingTitle}
-              renamingInputRef={renamingInputRef}
-              renamingCommittedRef={renamingCommittedRef}
-              confirmingArchiveThreadKey={confirmingArchiveThreadKey}
-              setConfirmingArchiveThreadKey={setConfirmingArchiveThreadKey}
-              confirmArchiveButtonRefs={confirmArchiveButtonRefs}
-              handleThreadClick={handleThreadClick}
-              navigateToThread={navigateToThread}
-              handleMultiSelectContextMenu={handleMultiSelectContextMenu}
-              handleThreadContextMenu={handleThreadContextMenu}
-              clearSelection={clearSelection}
-              commitRename={commitRename}
-              cancelRename={cancelRename}
-              beginRename={beginRename}
-              attemptArchiveThread={attemptArchiveThread}
-              openPrLink={openPrLink}
-            />
+            <Fragment key={threadKey}>
+              {renderProjectRow(thread, 0)}
+              <SidebarThreadGroups ownerThread={thread} depth={0} renderRow={renderProjectRow} />
+            </Fragment>
           );
         })}
 
@@ -1682,22 +1769,38 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     ),
   );
   const allProjects = useWorkspaceProjects();
+  const { index: threadGroupIndex } = useContext(SidebarThreadGroupContext);
+  // Context-menu lookups also cover group members, which can belong to any
+  // project but are rendered beneath their parent chat here.
   const sidebarThreadByKey = useMemo(
     () =>
-      new Map(
-        sidebarThreads.map(
+      new Map([
+        ...sidebarThreads.map(
           (thread) =>
             [scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)), thread] as const,
         ),
-      ),
-    [sidebarThreads],
+        ...groupMemberRows(threadGroupIndex),
+      ]),
+    [sidebarThreads, threadGroupIndex],
   );
   // Keep a ref so callbacks can read the latest map without appearing in
   // dependency arrays (avoids invalidating every thread-row memo on each
   // thread-list change).
   const sidebarThreadByKeyRef = useRef(sidebarThreadByKey);
   sidebarThreadByKeyRef.current = sidebarThreadByKey;
-  const projectThreads = sidebarThreads;
+  // Group members render beneath their parent chat, never as top-level rows.
+  const projectThreads = useMemo(
+    () =>
+      threadGroupIndex.nestedThreadKeys.size === 0
+        ? sidebarThreads
+        : sidebarThreads.filter(
+            (thread) =>
+              !threadGroupIndex.nestedThreadKeys.has(
+                scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+              ),
+          ),
+    [sidebarThreads, threadGroupIndex],
+  );
   const projectEnvironmentIds = useMemo(
     () => project.memberProjects.map((member) => member.environmentId),
     [project.memberProjects],
@@ -1817,7 +1920,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   }, [projectThreads, scheduledPresence, threadLastVisitedAts, threadSortOrder]);
 
   const pinnedCollapsedThread = useMemo(() => {
-    const activeThreadKey = activeRouteThreadKey ?? undefined;
+    // A chat open inside a group pins its top-level parent instead.
+    const activeThreadKey =
+      sidebarRootThreadKey(threadGroupIndex, activeRouteThreadKey ?? null) ?? undefined;
     if (!activeThreadKey || projectExpanded) {
       return null;
     }
@@ -1827,7 +1932,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === activeThreadKey,
       ) ?? null
     );
-  }, [activeRouteThreadKey, projectExpanded, visibleProjectThreads]);
+  }, [activeRouteThreadKey, projectExpanded, threadGroupIndex, visibleProjectThreads]);
 
   const {
     hasOverflowingThreads,
@@ -3032,6 +3137,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         beginRename(threadRef, thread.title);
         return;
       }
+      if (clicked === "edit-metadata") {
+        useThreadMetadataDialogStore.getState().open({ threadRef, title: thread.title });
+        return;
+      }
 
       if (clicked === "fork") {
         // Keep the established menu ID while sharing the exact same native
@@ -3070,6 +3179,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
       if (clicked === "copy-thread-id") {
         copyThreadIdToClipboard(thread.id, { threadId: thread.id });
+        return;
+      }
+      if (clicked === "secrets") {
+        openThreadSecretsDialog(threadRef, thread.title);
         return;
       }
       if (clicked === "repair-thread") {
@@ -4517,6 +4630,16 @@ export default function Sidebar() {
     select: (params) => resolveThreadRouteTarget(params),
   });
   const routeThreadKey = routeThreadRef ? scopedThreadKey(routeThreadRef) : null;
+  // Agent-created groups nest their members beneath the parent chat; the same
+  // index tells every list which chats to omit from the top level.
+  const threadGroupIndex = useMemo(
+    () => buildSidebarThreadGroupIndex(sidebarThreads),
+    [sidebarThreads],
+  );
+  const threadGroupContext = useMemo<SidebarThreadGroupContextValue>(
+    () => ({ index: threadGroupIndex, activeThreadKey: routeThreadKey }),
+    [routeThreadKey, threadGroupIndex],
+  );
   const keybindings = useServerKeybindings();
   const openAddProjectCommandPalette = useCommandPaletteStore((store) => store.openAddProject);
 
@@ -5391,9 +5514,10 @@ export default function Sidebar() {
   }, []);
 
   return (
-    <>
+    <SidebarThreadGroupContext.Provider value={threadGroupContext}>
       <SidebarChromeHeader isElectron={isElectron} />
       <WorkspaceEnvironmentSelector />
+      <ThreadMetadataDialogHost />
 
       {isOnSettings ? (
         <div className={cn("flex min-h-0 flex-1 flex-col", navSwapClassName)}>
@@ -5487,7 +5611,7 @@ export default function Sidebar() {
           <SidebarChromeFooter />
         </>
       )}
-    </>
+    </SidebarThreadGroupContext.Provider>
   );
 }
 

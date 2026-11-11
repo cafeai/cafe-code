@@ -1,5 +1,13 @@
 import { makeGlideService, glideOwnerOperationSchema } from "./glide/sessionRuntime.ts";
 import { RelayRequestContext } from "./relay/requestContext.ts";
+import { ThreadSecretsError } from "@cafecode/contracts";
+import {
+  supportsCafeSecrets,
+  containsCafeSecrets,
+  hasCafeSecretReference,
+  redactCafeSecretText,
+} from "@cafecode/shared/cafeSecrets";
+import { CafeSecretsStoreError, getThreadSecretsStore } from "./secrets/store.ts";
 import { GlideControlResult, GlideError } from "@cafecode/contracts";
 import { axiomConfigurationKey } from "./provider/acp/AxiomAcpSupport.ts";
 import {
@@ -20,6 +28,7 @@ import * as References from "effect/References";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { type AuthAccessStreamEvent, AuthSessionId } from "@cafecode/contracts/auth";
 import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
@@ -244,6 +253,99 @@ const makeWsRpcLayer = (
       const providerRegistry = yield* ProviderRegistry;
       const providerService = yield* ProviderService;
       const config = yield* ServerConfig;
+      const threadSecrets = getThreadSecretsStore(config.secretsDir);
+      const secretSql = yield* Effect.serviceOption(SqlClient.SqlClient);
+      const admitSecretThread = (threadId: ThreadId, allowDraft: boolean) =>
+        Effect.gen(function* () {
+          if (Option.isNone(secretSql))
+            return yield* new ThreadSecretsError({
+              message: "Cafe Secrets chat ownership is unavailable.",
+            });
+          const retired = yield* secretSql.value<{
+            readonly present: number;
+          }>`SELECT 1 AS present FROM hard_deleted_threads WHERE thread_id = ${threadId} LIMIT 1`.pipe(
+            Effect.mapError(
+              () =>
+                new ThreadSecretsError({ message: "Cafe Secrets chat ownership is unavailable." }),
+            ),
+          );
+          if (retired.length > 0) {
+            // A manager write admitted just before hard deletion may have joined
+            // the file queue after cleanup. Reconcile it before returning failure.
+            yield* Effect.tryPromise({
+              try: () => threadSecrets.clear(threadId),
+              catch: () =>
+                new ThreadSecretsError({ message: "Deleted chat secrets cleanup is incomplete." }),
+            });
+            return yield* new ThreadSecretsError({
+              message: "This chat has been permanently deleted.",
+            });
+          }
+          if (!allowDraft) {
+            const thread = yield* projectionSnapshotQuery.getThreadShellById(threadId).pipe(
+              Effect.mapError(
+                () =>
+                  new ThreadSecretsError({
+                    message: "Cafe Secrets chat ownership is unavailable.",
+                  }),
+              ),
+            );
+            if (Option.isNone(thread))
+              return yield* new ThreadSecretsError({
+                message: "This chat is no longer available.",
+              });
+          }
+        });
+      const secretOperation = <A>(
+        operation: () => Promise<A>,
+        thread?: { readonly threadId: ThreadId; readonly allowDraft?: boolean },
+      ) =>
+        Effect.gen(function* () {
+          if (currentSession.role !== "owner" || !secureSecretTransport)
+            return yield* new ThreadSecretsError({
+              message: "Cafe Secrets require an owner connection over HTTPS or the same machine.",
+            });
+          yield* sessions
+            .validateActiveSession(currentSession)
+            .pipe(
+              Effect.mapError(
+                () =>
+                  new ThreadSecretsError({ message: "The Cafe Secrets owner session expired." }),
+              ),
+            );
+          if (thread) yield* admitSecretThread(thread.threadId, thread.allowDraft === true);
+          const result = yield* Effect.tryPromise({
+            try: operation,
+            catch: (error) =>
+              new ThreadSecretsError({
+                message:
+                  error instanceof CafeSecretsStoreError
+                    ? error.message
+                    : "Cafe Secrets are unavailable.",
+              }),
+          });
+          yield* sessions
+            .validateActiveSession(currentSession)
+            .pipe(
+              Effect.mapError(
+                () =>
+                  new ThreadSecretsError({ message: "The Cafe Secrets owner session expired." }),
+              ),
+            );
+          if (thread) yield* admitSecretThread(thread.threadId, thread.allowDraft === true);
+          return result;
+        }).pipe(Effect.withTracerEnabled(false));
+      const secretProviderSupported = (instanceId: string) =>
+        providerRegistry.getProviders.pipe(
+          Effect.map((providers) =>
+            providers.some(
+              (provider) =>
+                provider.instanceId === instanceId &&
+                provider.enabled &&
+                supportsCafeSecrets(provider.driver),
+            ),
+          ),
+        );
       const standaloneWorkspaces = yield* makeStandaloneWorkspaceStore;
       const normalizationContext =
         yield* Effect.context<Effect.Services<ReturnType<typeof normalizeDispatchCommand>>>();
@@ -717,6 +819,10 @@ const makeWsRpcLayer = (
                 interactionMode: bootstrap.createThread.interactionMode,
                 branch: bootstrap.createThread.branch,
                 worktreePath: bootstrap.createThread.worktreePath,
+                provenance: {
+                  creationPath: "cafe-ui",
+                  recordedAt: bootstrap.createThread.createdAt,
+                },
                 createdAt: bootstrap.createThread.createdAt,
               });
               createdThread = true;
@@ -959,10 +1065,89 @@ const makeWsRpcLayer = (
           privateVisualizationRead(withMcpApps((service) => service.resolve(input))),
         [WS_METHODS.mcpAppsDetails]: (input) =>
           privateVisualizationRead(withMcpApps((service) => service.details(input))),
-        [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
+        [WS_METHODS.threadSecretsCapabilities]: (input) =>
+          Effect.gen(function* () {
+            yield* secretOperation(() => Promise.resolve(undefined));
+            return { supported: yield* secretProviderSupported(input.providerInstanceId) };
+          }),
+        [WS_METHODS.threadSecretsPrepare]: (input) =>
+          Effect.gen(function* () {
+            yield* secretOperation(() => Promise.resolve(undefined));
+            if (!(yield* secretProviderSupported(input.providerInstanceId)))
+              return yield* new ThreadSecretsError({
+                message:
+                  "Cafe Secrets are not supported by the current provider. Escape literal text with a backslash: \\[sec:VALUE].",
+              });
+            return yield* secretOperation(() => threadSecrets.prepare(input.threadId, input.text), {
+              threadId: input.threadId,
+              allowDraft: true,
+            });
+          }).pipe(Effect.withTracerEnabled(false)),
+        [WS_METHODS.threadSecretsList]: (input) =>
+          secretOperation(() => threadSecrets.list(input.threadId), input),
+        [WS_METHODS.threadSecretsSet]: (input) =>
+          secretOperation(() => threadSecrets.set(input), input),
+        [WS_METHODS.threadSecretsReveal]: (input) =>
+          secretOperation(() => threadSecrets.reveal(input.threadId, input.id), input),
+        [WS_METHODS.threadSecretsRemove]: (input) =>
+          secretOperation(() => threadSecrets.remove(input.threadId, input.id), input),
+        [WS_METHODS.threadSecretsClear]: (input) =>
+          secretOperation(() => threadSecrets.clear(input.threadId), input),
+        [ORCHESTRATION_WS_METHODS.dispatchCommand]: (receivedCommand) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,
             Effect.gen(function* () {
+              let command = receivedCommand;
+              if (
+                command.type === "thread.turn.start" &&
+                command.bootstrap &&
+                (containsCafeSecrets(command.message.text) ||
+                  hasCafeSecretReference(command.message.text))
+              ) {
+                const existing = yield* projectionSnapshotQuery.getThreadShellById(
+                  command.threadId,
+                );
+                const instanceId =
+                  command.modelSelection?.instanceId ??
+                  command.bootstrap.createThread?.modelSelection.instanceId ??
+                  (Option.isSome(existing) ? existing.value.modelSelection.instanceId : undefined);
+                if (!instanceId || !(yield* secretProviderSupported(instanceId)))
+                  return yield* new OrchestrationDispatchCommandError({
+                    message:
+                      "Cafe Secrets are not supported by the current provider. Escape literal text with a backslash: \\[sec:VALUE].",
+                  });
+                const secretThreadId = command.threadId;
+                const secretText = command.message.text;
+                const prepared = yield* secretOperation(
+                  () => threadSecrets.prepare(secretThreadId, secretText),
+                  { threadId: secretThreadId, allowDraft: true },
+                );
+                const values = yield* secretOperation(
+                  () => threadSecrets.snapshot(secretThreadId),
+                  { threadId: secretThreadId, allowDraft: true },
+                );
+                command = {
+                  ...command,
+                  message: { ...command.message, text: prepared.text },
+                  ...(command.titleSeed === undefined
+                    ? {}
+                    : { titleSeed: redactCafeSecretText(command.titleSeed, values) }),
+                  bootstrap: {
+                    ...command.bootstrap,
+                    ...(command.bootstrap.createThread
+                      ? {
+                          createThread: {
+                            ...command.bootstrap.createThread,
+                            title: redactCafeSecretText(
+                              command.bootstrap.createThread.title,
+                              values,
+                            ),
+                          },
+                        }
+                      : {}),
+                  },
+                };
+              }
               if (command.type === "thread.turn.start" && command.bootstrap) {
                 return yield* startup.enqueueCommand(dispatchBootstrapTurnStart(command));
               }

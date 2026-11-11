@@ -11,8 +11,11 @@ import {
 } from "../attachmentStore.ts";
 import { CheckpointStore } from "../checkpointing/Services/CheckpointStore.ts";
 import { ServerConfig } from "../config.ts";
+import { getThreadSecretsStore } from "../secrets/store.ts";
+import { OrchestrationThreadHardDeleteError } from "./Errors.ts";
 import { purgeProviderDaemonThreadPersistence } from "../providerDaemon/ProviderDaemonThreadPurge.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
+import { purgeOwnedThreadGroups } from "../persistence/threadOrganization.ts";
 import { makeStandaloneWorkspaceStore } from "./standaloneWorkspace.ts";
 import {
   checkpointRefForThreadTurn,
@@ -279,6 +282,10 @@ export const purgeHardDeletedThreadPersistence = Effect.fn("purgeHardDeletedThre
         yield* sql`
         DELETE FROM thread_checkpoint_workspace_fences WHERE thread_id = ${input.threadId}
       `;
+        // Groups this thread owned and its own metadata row. Surviving members
+        // (live or in the Recycle Bin) return to top level instead of being
+        // orphaned beneath a group that can never be restored.
+        yield* purgeOwnedThreadGroups(sql, input.threadId);
         yield* sql`
         DELETE FROM projection_threads
         WHERE thread_id = ${input.threadId}
@@ -305,6 +312,19 @@ export const hardDeleteThreadLocalData = Effect.fn("hardDeleteThreadLocalData")(
   const orchestrationEngine = yield* OrchestrationEngineService;
 
   yield* orchestrationEngine.retireThreadForHardDelete(input);
+  const secretConfig = yield* ServerConfig;
+  const secretStore = getThreadSecretsStore(secretConfig.secretsDir);
+  yield* Effect.tryPromise({
+    try: async () => {
+      if ((await secretStore.list(input.threadId)).secrets.length > 0)
+        await secretStore.clear(input.threadId);
+    },
+    catch: () =>
+      new OrchestrationThreadHardDeleteError({
+        operation: "purge",
+        detail: "hard-delete-persistence-failed",
+      }),
+  });
   yield* deleteThreadCheckpointRefs(input.threadId);
   yield* deleteThreadAttachments(input.threadId);
   const standaloneWorkspaces = yield* makeStandaloneWorkspaceStore;

@@ -46,6 +46,12 @@ const mockUpsert = vi.fn((record: Record<string, unknown>) => {
 const mockListSavedEnvironmentRecords = vi.fn(() => mockSavedRecords);
 const mockToPersistedSavedEnvironmentRecord = vi.fn((record) => record);
 const mockCreateEnvironmentConnection = vi.fn();
+const mockPairSavedRelay = vi.fn();
+const mockActivateSavedRelay = vi.fn();
+vi.mock("../relay/saved", () => ({
+  pairSavedRelay: mockPairSavedRelay,
+  activateSavedRelay: mockActivateSavedRelay,
+}));
 const mockClientGetConfig = vi.fn(async () => ({
   environment: {
     environmentId: EnvironmentId.make("environment-1"),
@@ -82,6 +88,7 @@ vi.mock("./catalog", () => ({
   listSavedEnvironmentRecords: mockListSavedEnvironmentRecords,
   persistSavedEnvironmentRecord: mockPersistSavedEnvironmentRecord,
   readSavedEnvironmentBearerToken: mockReadSavedEnvironmentBearerToken,
+  readSavedEnvironmentSecret: mockReadSavedEnvironmentBearerToken,
   removeSavedEnvironmentBearerToken: mockRemoveSavedEnvironmentBearerToken,
   toPersistedSavedEnvironmentRecord: mockToPersistedSavedEnvironmentRecord,
   useSavedEnvironmentRegistryStore: {
@@ -207,6 +214,90 @@ describe("direct saved environments", () => {
         label: "Remote environment",
       },
     });
+  });
+
+  it("pairs a relay once, persists only public metadata, and uses the inner bearer with NDJSON", async () => {
+    const record = {
+      ...remoteRecord(),
+      transport: "relay" as const,
+      httpBaseUrl: "https://test-owned.cafecode-relay.invalid/",
+      wsBaseUrl: "wss://test-owned.cafecode-relay.invalid/",
+    };
+    const secret = "test-owned-encrypted-slot-payload";
+    const close = vi.fn(async () => {});
+    mockPairSavedRelay.mockResolvedValueOnce({ record, secret, role: "client" });
+    mockActivateSavedRelay.mockReturnValueOnce({
+      relay: { close, retire: vi.fn() },
+      bearerToken: "inner-session-bearer",
+    });
+    mockWriteSavedEnvironmentBearerToken.mockResolvedValue(true);
+    const { addSavedEnvironment, removeSavedEnvironment } = await import("./service");
+    await addSavedEnvironment({
+      label: "Relay laptop",
+      relayInvitation: "https://viewer.example/relay/connect#one-use",
+      secondFactor: "123456",
+    });
+    expect(mockPairSavedRelay).toHaveBeenCalledTimes(1);
+    expect(mockPersistSavedEnvironmentRecord).toHaveBeenCalledExactlyOnceWith({
+      ...record,
+      label: "Relay laptop",
+    });
+    expect(mockWriteSavedEnvironmentBearerToken).toHaveBeenCalledExactlyOnceWith(
+      record.environmentId,
+      secret,
+    );
+    expect(mockFetchRemoteSessionState).toHaveBeenCalledWith({
+      httpBaseUrl: record.httpBaseUrl,
+      bearerToken: "inner-session-bearer",
+    });
+    const { WsTransport } = await import("../../rpc/wsTransport");
+    expect(vi.mocked(WsTransport)).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ serialization: "ndjson", trackGlobalConnectionStatus: false }),
+    );
+    expect(mockBootstrapRemoteBearerSession).not.toHaveBeenCalled();
+    expect(mockBootstrapRemotePasswordBearerSession).not.toHaveBeenCalled();
+    await removeSavedEnvironment(record.environmentId);
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("rolls back a relay registry update if encrypted credential persistence refuses it", async () => {
+    const record = { ...remoteRecord(), transport: "relay" as const };
+    mockPairSavedRelay.mockResolvedValueOnce({
+      record,
+      secret: "test-owned-private-slot",
+      role: "client",
+    });
+    const { addSavedEnvironment } = await import("./service");
+    await expect(
+      addSavedEnvironment({
+        label: "Relay",
+        relayInvitation: "https://viewer.example/relay/connect#one-use",
+      }),
+    ).rejects.toThrow("Unable to persist");
+    expect(mockPairSavedRelay).toHaveBeenCalledTimes(1);
+    expect(mockActivateSavedRelay).not.toHaveBeenCalled();
+    expect(mockCreateEnvironmentConnection).not.toHaveBeenCalled();
+    expect(mockSetSavedEnvironmentRegistry).toHaveBeenCalled();
+  });
+
+  it("requires fresh pairing for an unusable saved relay credential without opening a native connection", async () => {
+    const record = { ...remoteRecord(), transport: "relay" as const };
+    mockSavedRecords = [record];
+    mockReadSavedEnvironmentBearerToken.mockResolvedValue("test-owned-corrupt-private-slot");
+    mockActivateSavedRelay.mockImplementationOnce(() => {
+      throw new Error("opaque-test-owned-failure");
+    });
+    const { reconnectSavedEnvironment } = await import("./service");
+    await expect(reconnectSavedEnvironment(record.environmentId)).rejects.toThrow(
+      "missing its saved credential",
+    );
+    expect(mockPatchRuntime).toHaveBeenCalledWith(
+      record.environmentId,
+      expect.objectContaining({ authState: "requires-auth", role: null }),
+    );
+    expect(mockCreateEnvironmentConnection).not.toHaveBeenCalled();
+    expect(mockBootstrapRemoteBearerSession).not.toHaveBeenCalled();
   });
 
   it("reviews a certificate and reconnects using the existing bearer without pairing again", async () => {

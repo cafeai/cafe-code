@@ -36,6 +36,11 @@ import {
 } from "@cafecode/shared/model";
 
 import { truncate } from "@cafecode/shared/String";
+import {
+  type CafeSecretPreparation,
+  needsCafeSecretAdmission,
+  prepareCafeSecretsForSend,
+} from "../cafeSecrets/cafeSecretsClient";
 import { CLAUDE_SHORTER_CONTINUATION_PROMPT } from "@cafecode/shared/claudeResponseLimits";
 import { Debouncer } from "@tanstack/react-pacer";
 import { useInfiniteQuery } from "@tanstack/react-query";
@@ -5042,6 +5047,22 @@ export default function ChatView(props: ChatViewProps) {
   };
 
   const enqueueAsyncQuestionAnswer = async (text: string, messageId: string): Promise<boolean> => {
+    // Answers enter durable browser-stored queues with a stable id; they are
+    // not a secret-admission surface. Refuse raw markers instead of storing
+    // or forwarding them; escaped literal text remains allowed.
+    if (needsCafeSecretAdmission(text)) {
+      if (activeThread)
+        setThreadError(
+          activeThread.id,
+          uiText(
+            "Cafe Secrets can only be sent from the message composer. If this is literal text, escape it with a backslash: \\[sec:VALUE].",
+            undefined,
+            undefined,
+            uiLocale,
+          ),
+        );
+      return false;
+    }
     if (
       !activeThread ||
       !isServerThread ||
@@ -5950,6 +5971,152 @@ export default function ChatView(props: ChatViewProps) {
     manualStopBarrierByThreadIdRef,
   ]);
 
+  /**
+   * Replace complete `[sec:VALUE]` markers with server-owned references before
+   * any optimistic insertion, queue persistence or dispatch. Scoped to the
+   * exact captured environment/thread, send intent and attachments. Changes
+   * while preparation is pending abandon this attempt and keep the latest draft.
+   * Unsupported providers and incomplete markers block the send in place and
+   * leave text and attachments untouched.
+   */
+  const prepareSnapshotCafeSecrets = async (
+    snapshot: ComposerSendSnapshot,
+    mode: "composer" | "resend" = "composer",
+  ): Promise<ComposerSendSnapshot | null> => {
+    if (!needsCafeSecretAdmission(snapshot.promptText)) return snapshot;
+    if (!activeThread || sendInFlightRef.current) return null;
+    const capturedThreadKey = routeThreadKey;
+    const capturedThreadId = activeThread.id;
+    const capturedTarget = composerDraftTarget;
+    const rawPrompt = snapshot.promptText;
+    const capturedApi = readEnvironmentApi(environmentId)?.threadSecrets;
+    // Read store policy directly on both sides of the await. The callback's
+    // React runtime/interaction closures may belong to an older render, and
+    // picker/attachment updates can reach the store before its handle commits.
+    const readPreparationState = () => {
+      const draftStore = useComposerDraftStore.getState();
+      const draft = draftStore.getComposerDraft(capturedTarget);
+      const thread =
+        (routeKind === "server" ? selectThreadByRef(useStore.getState(), routeThreadRef) : null) ??
+        (draftId
+          ? draftStore.getDraftSession(draftId)
+          : draftStore.getDraftSessionByRef(routeThreadRef));
+      const context = composerRef.current?.getSendContext();
+      if (!thread || !context) return null;
+      return {
+        context,
+        draft,
+        runtimeMode: draft?.runtimeMode ?? thread.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+        interactionMode:
+          draft?.interactionMode ?? thread.interactionMode ?? DEFAULT_INTERACTION_MODE,
+        // Only finite send policy is compared here; never serialize prompt or
+        // attachment values into an intent key. Include both handle options
+        // and current draft/canonical policy so uncommitted changes also fence.
+        intent: JSON.stringify([
+          context.selectedProvider,
+          context.selectedModel,
+          context.selectedModelSelection,
+          context.selectedModelOptionsForDispatch,
+          context.selectedPromptEffort,
+          context.subagentLimits,
+          context.codexContextWindowOverride,
+          context.deliveryPriority,
+          context.computerUseEnabled,
+          context.computerUseRevision,
+          context.axiomWebEnabled,
+          context.axiomMcpRevision,
+          draft?.activeProvider,
+          draft?.modelSelectionByProvider,
+          draft?.runtimeMode,
+          draft?.interactionMode,
+          draft?.subagentLimits,
+          draft?.codexContextWindowOverride,
+          "modelSelection" in thread ? thread.modelSelection : undefined,
+          thread.runtimeMode,
+          thread.interactionMode,
+        ]),
+      };
+    };
+    const captured = readPreparationState();
+    if (
+      !captured ||
+      captured.context.selectedProvider !== snapshot.provider ||
+      captured.context.selectedModel !== snapshot.model ||
+      JSON.stringify(captured.context.selectedModelSelection) !==
+        JSON.stringify(snapshot.modelSelection) ||
+      captured.runtimeMode !== snapshot.runtimeMode ||
+      captured.interactionMode !== snapshot.interactionMode
+    )
+      return null;
+    sendInFlightRef.current = true;
+    let result: CafeSecretPreparation;
+    try {
+      result = await prepareCafeSecretsForSend({
+        environmentId,
+        threadId: capturedThreadId,
+        instanceId: snapshot.modelSelection.instanceId,
+        driver: snapshot.provider,
+        text: rawPrompt,
+      });
+    } finally {
+      sendInFlightRef.current = false;
+    }
+    if (!chatViewMountedRef.current || currentRouteThreadKeyRef.current !== capturedThreadKey)
+      return null;
+    const current = readPreparationState();
+    if (
+      !current ||
+      readEnvironmentApi(environmentId)?.threadSecrets !== capturedApi ||
+      current.intent !== captured.intent ||
+      current.runtimeMode !== captured.runtimeMode ||
+      current.interactionMode !== captured.interactionMode ||
+      current.draft?.images !== captured.draft?.images ||
+      current.draft?.files !== captured.draft?.files ||
+      current.draft?.queueEditingItemId !== captured.draft?.queueEditingItemId ||
+      current.context.images.length !== captured.context.images.length ||
+      current.context.images.some((image, index) => image !== captured.context.images[index]) ||
+      current.context.files.length !== captured.context.files.length ||
+      current.context.files.some((file, index) => file !== captured.context.files[index])
+    )
+      return null;
+    if (mode === "resend") {
+      // Stored message text never touches the composer. Its references are
+      // revalidated against this exact chat before any optimistic copy.
+      if (result.ok) return { ...snapshot, promptText: result.text };
+      setThreadError(
+        capturedThreadId,
+        result.issue === "unsupported"
+          ? uiText(
+              "Cafe Secrets are not supported by the current provider. If this is literal text, escape it with a backslash: \\[sec:VALUE].",
+              undefined,
+              undefined,
+              uiLocale,
+            )
+          : uiText(
+              "A Cafe Secret in this message could not be prepared or is no longer available in this chat, so the message was not sent. If this is literal text, escape it with a backslash.",
+              undefined,
+              undefined,
+              uiLocale,
+            ),
+      );
+      return null;
+    }
+    if ((current.draft?.prompt ?? "") !== rawPrompt || current.context.prompt !== rawPrompt)
+      return null;
+    if (!result.ok) {
+      composerRef.current?.reportCafeSecretIssue(result.issue, rawPrompt);
+      return null;
+    }
+    // Keep the editor on the prepared references so a later retry, queue edit
+    // or failure restore reuses the same stored secrets instead of raw text.
+    if (result.text !== rawPrompt) {
+      useComposerDraftStore.getState().setPrompt(capturedTarget, result.text);
+      promptRef.current = result.text;
+      composerRef.current?.resetCursorState({ prompt: result.text });
+    }
+    return { ...snapshot, promptText: result.text };
+  };
+
   const onSend = async (
     e?: { preventDefault: () => void },
     resend?: { snapshot: ComposerSendSnapshot; isCurrent: () => boolean; onAdmitted: () => void },
@@ -5976,7 +6143,14 @@ export default function ChatView(props: ChatViewProps) {
     // Control-only commands do not request a new numeric process policy. Keep
     // /compact and goal inspection/editing available while a pending override
     // needs Reset; ordinary sends are admitted below before any dispatch.
-    const snapshot = resend?.snapshot ?? readComposerSnapshotForDispatch(false);
+    const composerSnapshot = resend?.snapshot ?? readComposerSnapshotForDispatch(false);
+    if (!composerSnapshot) return;
+    // Fresh input and stored-message resends both pass secret admission:
+    // escapes are retained verbatim; references are revalidated per chat.
+    const snapshot = await prepareSnapshotCafeSecrets(
+      composerSnapshot,
+      resend ? "resend" : "composer",
+    );
     if (!snapshot) return;
     const {
       images: composerImages,
@@ -6723,12 +6897,17 @@ export default function ChatView(props: ChatViewProps) {
       onAdvanceActivePendingUserInput();
       return;
     }
-    const snapshot = readComposerSnapshotForDispatch(false);
-    if (!snapshot) return;
-    if (parseComposerCompactionCommand(snapshot.provider, snapshot.promptText) !== null) {
+    const composerSnapshot = readComposerSnapshotForDispatch(false);
+    if (!composerSnapshot) return;
+    if (
+      parseComposerCompactionCommand(composerSnapshot.provider, composerSnapshot.promptText) !==
+      null
+    ) {
       await onSend(e);
       return;
     }
+    const snapshot = await prepareSnapshotCafeSecrets(composerSnapshot);
+    if (!snapshot) return;
     if (!admitComposerTurnPolicy(snapshot)) return;
     const { hasSendableContent } = deriveComposerSendState({
       prompt: snapshot.promptText,
@@ -7132,7 +7311,10 @@ export default function ChatView(props: ChatViewProps) {
       queueDispatchInFlightRef.current
     )
       return;
-    const snapshot = readComposerSnapshotForDispatch();
+    const composerSnapshot = readComposerSnapshotForDispatch();
+    if (!composerSnapshot) return;
+    // Queue rows are persisted in browser storage: prepare before saving.
+    const snapshot = await prepareSnapshotCafeSecrets(composerSnapshot);
     if (
       !snapshot ||
       (!snapshot.promptText.trim() && snapshot.images.length === 0 && snapshot.files.length === 0)

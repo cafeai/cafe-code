@@ -39,6 +39,7 @@
     "src/components/chat/ProviderDiagnosticWorkEntry.browser.tsx",
     "src/components/chat/ThreadErrorBanner.browser.tsx",
     "src/components/ChatView.composer.browser.tsx",
+    "src/components/ThreadSecretsDialog.browser.tsx",
     "src/components/ChatView.standalone.browser.tsx",
     "src/components/ChatView.recovery-footer.browser.tsx",
     "src/components/chat/ScheduledFollowups.browser.tsx",

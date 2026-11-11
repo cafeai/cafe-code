@@ -2225,7 +2225,7 @@ export function ConnectionsSettings() {
   return (
     <SettingsPageContainer title={uiText("Connections", undefined, undefined, uiLocale)}>
       <SavedEnvironmentsSettings />
-      {isPrimary && canManageLocalBackend ? <RelayConnectionsSettings /> : null}
+      {canManageLocalBackend ? <RelayConnectionsSettings /> : null}
       {canManageLocalBackend ? (
         <>
           <SettingsSection

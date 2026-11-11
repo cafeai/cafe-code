@@ -26,6 +26,10 @@ const ACTIONS = {
   unarchive_thread: "unarchiveThread",
   delete_thread: "deleteThread",
   restore_thread: "restoreThread",
+  create_thread_group: "createGroup",
+  list_thread_groups: "groups",
+  delete_thread_group: "deleteGroup",
+  restore_thread_group: "restoreGroup",
   send_message: "message",
   interrupt_thread: "interrupt",
   set_provider_settings: "updateSettings",
@@ -211,6 +215,26 @@ export function cafeMcpHistoryTitle({ tool, state }: CafeMcpHistoryAction): stri
     case "restoreThread":
       return uiText(
         "{state, select, running {Restoring Cafe Code thread} completed {Restored Cafe Code thread} other {Could not restore Cafe Code thread}}",
+        { state },
+      );
+    case "createGroup":
+      return uiText(
+        "{state, select, running {Creating Cafe Code thread group} completed {Created Cafe Code thread group} other {Could not create Cafe Code thread group}}",
+        { state },
+      );
+    case "groups":
+      return uiText(
+        "{state, select, running {Viewing Cafe Code thread groups} completed {Viewed Cafe Code thread groups} other {Could not view Cafe Code thread groups}}",
+        { state },
+      );
+    case "deleteGroup":
+      return uiText(
+        "{state, select, running {Deleting Cafe Code thread group} completed {Deleted Cafe Code thread group} other {Could not delete Cafe Code thread group}}",
+        { state },
+      );
+    case "restoreGroup":
+      return uiText(
+        "{state, select, running {Restoring Cafe Code thread group} completed {Restored Cafe Code thread group} other {Could not restore Cafe Code thread group}}",
         { state },
       );
     case "message":

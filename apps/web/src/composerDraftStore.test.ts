@@ -236,6 +236,26 @@ describe("composer file and queue edit durability", () => {
     },
   );
 
+  it("never writes raw Cafe Secret values to browser storage", () => {
+    const store = useComposerDraftStore.getState();
+    const options = useComposerDraftStore.persist.getOptions();
+    const persistedPrompt = (prompt: string) => {
+      store.setPrompt(ref, prompt);
+      const persisted = JSON.stringify(options.partialize!(useComposerDraftStore.getState()));
+      return persisted;
+    };
+    // Complete marker, still-typed marker, and an escaped literal.
+    const complete = persistedPrompt("use [sec:hunter2-complete] now");
+    expect(complete).not.toContain("hunter2-complete");
+    expect(complete).toContain("use  now");
+    const incomplete = persistedPrompt("token [sec:hunter2-partial");
+    expect(incomplete).not.toContain("hunter2-partial");
+    const literal = persistedPrompt("docs say \\[sec:VALUE] stays literal");
+    expect(literal).toContain("[sec:VALUE]");
+    // The in-memory editor keeps the user's text until send/prepare.
+    expect(store.getComposerDraft(ref)?.prompt).toBe("docs say \\[sec:VALUE] stays literal");
+  });
+
   it("persists an empty draft's computer-use choice without giving it to another draft or environment", () => {
     const store = useComposerDraftStore.getState();
     store.setComputerUseEnabled(ref, true, "7");

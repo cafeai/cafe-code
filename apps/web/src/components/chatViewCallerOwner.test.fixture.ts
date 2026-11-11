@@ -35,6 +35,7 @@ const labels = [
   "subagent-owner-release",
   "recovery-diagnostic-visibility",
   "failed-message-resend",
+  "cafe-secret-preparation",
 ] as const;
 export type ChatViewCallerLabel = (typeof labels)[number];
 const phases = [

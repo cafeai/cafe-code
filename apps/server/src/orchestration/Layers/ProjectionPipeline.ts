@@ -58,6 +58,12 @@ import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/Projectio
 import { ProjectionThreadRepositoryLive } from "../../persistence/Layers/ProjectionThreads.ts";
 import { ServerConfig } from "../../config.ts";
 import {
+  clearThreadMetadataColumn,
+  insertThreadGroup,
+  patchThreadMetadata,
+  updateThreadGroup,
+} from "../../persistence/threadOrganization.ts";
+import {
   OrchestrationProjectionPipeline,
   type OrchestrationProjectionPipelineShape,
 } from "../Services/ProjectionPipeline.ts";
@@ -976,9 +982,164 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       });
     });
 
+    /**
+     * Organization/origin sidecar writes. They run inside the existing
+     * `projection.threads` projector (same transaction and cursor) so no new
+     * projector has to replay history at startup. Historical events carry none
+     * of these fields and therefore create no rows.
+     */
+    const applyThreadOrganizationProjection = Effect.fn("applyThreadOrganizationProjection")(
+      function* (event: OrchestrationEvent) {
+        switch (event.type) {
+          case "thread.created": {
+            const { groupId, description, provenance, origin } = event.payload;
+            if (
+              groupId === undefined &&
+              description === undefined &&
+              provenance === undefined &&
+              origin === undefined
+            ) {
+              return;
+            }
+            yield* patchThreadMetadata(
+              sql,
+              event.payload.threadId,
+              {
+                ...(groupId !== undefined ? { groupId } : {}),
+                ...(description !== undefined ? { description } : {}),
+                ...(provenance !== undefined ? { provenance } : {}),
+                ...(origin !== undefined ? { origin } : {}),
+              },
+              event.payload.createdAt,
+            );
+            return;
+          }
+          case "thread.deleted":
+            if (event.payload.deletionId === undefined) {
+              yield* clearThreadMetadataColumn(
+                sql,
+                event.payload.threadId,
+                "deletion_id",
+                event.payload.deletedAt,
+              );
+              return;
+            }
+            yield* patchThreadMetadata(
+              sql,
+              event.payload.threadId,
+              { deletionId: event.payload.deletionId },
+              event.payload.deletedAt,
+            );
+            return;
+          case "thread.restored":
+            if (event.payload.detachFromGroup === true) {
+              yield* patchThreadMetadata(
+                sql,
+                event.payload.threadId,
+                { groupId: null, deletionId: null },
+                event.payload.updatedAt,
+              );
+              return;
+            }
+            yield* clearThreadMetadataColumn(
+              sql,
+              event.payload.threadId,
+              "deletion_id",
+              event.payload.updatedAt,
+            );
+            return;
+          case "thread.archived":
+            if (event.payload.archiveCascadeId === undefined) {
+              yield* clearThreadMetadataColumn(
+                sql,
+                event.payload.threadId,
+                "archive_cascade_id",
+                event.payload.updatedAt,
+              );
+              return;
+            }
+            yield* patchThreadMetadata(
+              sql,
+              event.payload.threadId,
+              { archiveCascadeId: event.payload.archiveCascadeId },
+              event.payload.updatedAt,
+            );
+            return;
+          case "thread.unarchived":
+            yield* clearThreadMetadataColumn(
+              sql,
+              event.payload.threadId,
+              "archive_cascade_id",
+              event.payload.updatedAt,
+            );
+            return;
+          case "thread.metadata-updated":
+            yield* patchThreadMetadata(
+              sql,
+              event.payload.threadId,
+              {
+                ...(event.payload.origin !== undefined ? { origin: event.payload.origin } : {}),
+                ...(event.payload.description !== undefined
+                  ? { description: event.payload.description }
+                  : {}),
+              },
+              event.payload.updatedAt,
+            );
+            return;
+          case "thread.group-created":
+            yield* insertThreadGroup(sql, {
+              id: event.payload.groupId,
+              ownerThreadId: event.payload.ownerThreadId,
+              title: event.payload.title,
+              description: event.payload.description,
+              provenance: event.payload.provenance,
+              createdAt: event.payload.createdAt,
+              updatedAt: event.payload.createdAt,
+              deletedAt: null,
+              deletionId: null,
+            });
+            return;
+          case "thread.group-deleted":
+            yield* updateThreadGroup(
+              sql,
+              event.payload.groupId,
+              { deletedAt: event.payload.deletedAt, deletionId: event.payload.deletionId },
+              event.payload.deletedAt,
+            );
+            return;
+          case "thread.group-restored":
+            yield* updateThreadGroup(
+              sql,
+              event.payload.groupId,
+              { deletedAt: null, deletionId: null },
+              event.payload.updatedAt,
+            );
+            return;
+          case "thread.group-meta-updated":
+            yield* updateThreadGroup(
+              sql,
+              event.payload.groupId,
+              {
+                ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
+                ...(event.payload.description !== undefined
+                  ? { description: event.payload.description }
+                  : {}),
+              },
+              event.payload.updatedAt,
+            );
+            return;
+          default:
+            return;
+        }
+      },
+    );
+
     const applyThreadsProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyThreadsProjection",
     )(function* (event, attachmentSideEffects) {
+      yield* applyThreadOrganizationProjection(event).pipe(
+        Effect.mapError(toPersistenceSqlError("ProjectionPipeline.threadOrganization:query")),
+      );
       switch (event.type) {
         case "thread.created":
           yield* projectionThreadRepository.upsert({

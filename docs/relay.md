@@ -1,9 +1,8 @@
-# Encrypted relay private pilot
+# Encrypted relay access
 
-This branch adds outbound relay access to a Cafe backend and a trusted browser
-viewer. The same viewer can run in an isolated Electron browser window. Native
-saved-environment enrollment in the installed desktop UI is not included in this
-pilot. Existing direct connections and their pairing codes keep their own flow.
+Cafe supports outbound relay hosting, relay connections in Saved environments,
+and a trusted browser viewer. Direct connections keep their existing pairing
+codes and password flow. The relay membership mesh remains operator controlled.
 
 The implementation is in `packages/relay`, `apps/relay`,
 `apps/server/src/relay`, and `apps/web/src/environments/relay`. See
@@ -45,6 +44,43 @@ source before installing it; a relay rollout does not update a running Cafe app.
 The app must adopt this branch's backend and frontend on a later user-controlled
 launch. Do not restart the user's existing app to install relay configuration.
 
+### Settings flow
+
+On the host, open **Settings → Connections → Relay** and turn the switch on.
+Fresh profiles start with hosting off. The Cafe network's pinned public trust
+anchor and three HTTPS bootstrap endpoints are bundled; users do not need an
+operator token, a tunnel, or a private configuration file. The backend generates
+separate stable admission and Noise identity keys inside this exact data profile,
+discovers the signed network and solves host-only PoW before registering.
+Connection loss retries automatically; expired descriptors are rediscovered.
+Off synchronously retires the current transport owner before settings IO.
+Replacement joins old transport and solver closure; rapid preference changes
+coalesce to the latest intent rather than replaying queued starts.
+
+Once connected, choose **Create relay invitation**. On another Cafe device,
+choose **Saved environments → + → Relay host**, paste the private invitation and
+add an authenticator/recovery code if required. The saved connection appears in
+the ordinary environment selector, uses encrypted HTTP/RPC, and reconnects with
+its bound device key and application session. Pairing is submitted only once by
+the explicit action; an uncertain result requires a fresh invitation.
+
+**Advanced relay settings** is collapsed by default. It contains the optional
+owner-role grant and alternative networks' **public** configuration: label,
+root public key, one to three HTTPS `/v1/network` bootstrap URLs, minimum signed
+revision and trusted HTTPS viewer origin. An empty configuration restores Cafe
+relays. Do not put host private keys, operator credentials or invitations there.
+Each custom network needs compatible host admission configured by its operator.
+
+The desktop saved-environment credential slot encrypts the device key, bearer
+and reconnect tickets with native safe storage; public registry metadata contains
+only `transport: "relay"` and the ordinary identity/label/transport addresses.
+Browser Saved environments use the same nonextractable wrapping key and tab-only
+ciphertext policy as the standalone viewer. Their generic session slot contains
+only a reference, never the plaintext relay payload. Removal joins the exact
+transport and admitted credential writes before deleting its secret.
+
+### Operator-controlled enrollment
+
 The operator CLI accepts a private canonical JSON recipe and a private local
 operator directory. It creates the network signing key, individual node keys,
 one host's per-node enrollment capabilities, signed descriptor, and host config.
@@ -70,11 +106,13 @@ canonical private `relay` directory (0700), owned by the backend user. It has
 `admissionPrivateKey`). Configure the intended Debug or Production profile
 explicitly. Never copy credentials or provider sessions between profiles.
 The backend creates a separate 0600 `host-<networkId>.key` in that directory.
-No config means relay access is disabled. An invalid existing config fails shut.
-Explicit relay host enrollment is currently qualified on POSIX; ordinary Windows
-launches with no relay configuration keep their existing behavior.
+An existing provisioned profile retains its prior hosting intent until the user
+chooses On or Off. An invalid existing config fails shut. POSIX key storage
+requires exact private ownership, 0700/0600 modes and held no-follow identities;
+Windows uses the qualified profile's inherited user ACLs with held namespace
+checks. Native Windows hosting remains a separate host-qualification boundary.
 
-On that host, open Settings → Connections → Manage relays. An owner can create a
+On that host, open Settings → Connections → Relay. An owner can create a
 client or owner invitation and revoke an unused invitation. Share the complete
 private link out of band. It includes a 256-bit single-use pairing secret in the
 fragment, the expected host key, the chosen network root/minimum revision, and a

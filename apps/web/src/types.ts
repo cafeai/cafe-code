@@ -3,6 +3,10 @@ import type {
   ModelSelection,
   OrchestrationLatestTurn,
   OrchestrationLiveWork,
+  OrchestrationThreadGroupSummary,
+  ThreadGroupId,
+  ThreadOrigin,
+  ThreadProvenance,
   OrchestrationProposedPlanId,
   RepositoryIdentity,
   OrchestrationSessionStatus,
@@ -126,6 +130,19 @@ export interface Thread {
   /** Display-only bounded-detail omission; never native request authority. */
   pendingRequestRetentionTruncated?: boolean | undefined;
   goal?: ProviderThreadGoal | null;
+  /** Detail-only organization metadata; absence is legacy/unrecorded. */
+  organization?: ThreadOrganizationDetail | undefined;
+}
+
+/**
+ * Editable origin label and description plus the immutable recorded creation
+ * fact. Organisation only: none of it grants permission or native ownership.
+ */
+export interface ThreadOrganizationDetail {
+  groupId: ThreadGroupId | null;
+  origin: ThreadOrigin | null;
+  description: string | null;
+  provenance: ThreadProvenance | null;
 }
 
 export interface ThreadShell {
@@ -172,6 +189,11 @@ export interface SidebarThreadSummary {
   hasPendingUserInput: boolean;
   hasActionableProposedPlan: boolean;
   liveWork?: OrchestrationLiveWork | undefined;
+  /** Sidebar containment: member of this agent-created group (owner shell lists it). */
+  groupId?: ThreadGroupId | null | undefined;
+  origin?: ThreadOrigin | undefined;
+  /** Live groups this thread owns, rendered as folder rows beneath it. */
+  ownedGroups?: readonly OrchestrationThreadGroupSummary[] | undefined;
 }
 
 export interface ThreadSession {

@@ -95,6 +95,52 @@ export function operationInputHash(owner: McpOperationOwner, tool: string, input
     .digest("hex");
 }
 
+/** Tools whose created target ID is derived from the reservation. */
+export const PLANNED_TARGET_TOOLS = {
+  create_thread: "threadId",
+  create_thread_group: "groupId",
+} as const;
+
+/**
+ * Deterministic target ID for a reserved create request: the same bearer
+ * scope, requestId and tool always name the same thread/group. A receipt can
+ * therefore point at the exact target to confirm a positive recorded result,
+ * and an engine-level duplicate is refused by ID. This is a reconciliation
+ * aid only: a lookup that finds the target absent at one moment does not prove
+ * that the originally admitted, possibly delayed action cannot still create
+ * it, and grants no authority to replay or issue a replacement request.
+ */
+export function plannedTargetId(
+  owner: McpOperationOwner,
+  requestId: string,
+  tool: keyof typeof PLANNED_TARGET_TOOLS,
+): string {
+  const hex = createHash("sha256")
+    .update("cafe-mcp-planned-target-v1\0")
+    .update(operationScopeId(owner))
+    .update("\0")
+    .update(tool)
+    .update("\0")
+    .update(requestId)
+    .digest("hex");
+  // UUID-shaped (version 8, RFC 9562 custom) for readability; not a secret.
+  const variant = ((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+/** Deterministic command ID so engine receipts also dedupe a re-dispatch. */
+export function plannedCommandId(owner: McpOperationOwner, requestId: string, tool: string) {
+  return `mcp:${createHash("sha256")
+    .update("cafe-mcp-command-v1\0")
+    .update(operationScopeId(owner))
+    .update("\0")
+    .update(tool)
+    .update("\0")
+    .update(requestId)
+    .digest("hex")
+    .slice(0, 48)}`;
+}
+
 export function operationReference(
   owner: McpOperationOwner,
   requestId: string,

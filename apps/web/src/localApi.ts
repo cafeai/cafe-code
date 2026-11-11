@@ -22,12 +22,14 @@ import { getLocalShellCapabilities } from "./localCapabilities";
 import {
   readBrowserClientSettings,
   readBrowserSavedEnvironmentRegistry,
-  readBrowserSavedEnvironmentSecret,
-  removeBrowserSavedEnvironmentSecret,
   writeBrowserClientSettings,
   writeBrowserSavedEnvironmentRegistry,
-  writeBrowserSavedEnvironmentSecret,
 } from "./clientPersistenceStorage";
+import {
+  readBrowserSavedSecret,
+  writeBrowserSavedSecret,
+  removeBrowserSavedSecret,
+} from "./environments/relay/browserSavedSecret";
 
 let cachedApi: LocalApi | undefined;
 
@@ -143,19 +145,19 @@ function createBrowserLocalApi(rpcClient?: WsRpcClient): LocalApi {
         if (window.desktopBridge) {
           return window.desktopBridge.getSavedEnvironmentSecret(environmentId);
         }
-        return readBrowserSavedEnvironmentSecret(environmentId);
+        return readBrowserSavedSecret(environmentId);
       },
       setSavedEnvironmentSecret: async (environmentId, secret) => {
         if (window.desktopBridge) {
           return window.desktopBridge.setSavedEnvironmentSecret(environmentId, secret);
         }
-        return writeBrowserSavedEnvironmentSecret(environmentId, secret);
+        return writeBrowserSavedSecret(environmentId, secret);
       },
       removeSavedEnvironmentSecret: async (environmentId) => {
         if (window.desktopBridge) {
           return window.desktopBridge.removeSavedEnvironmentSecret(environmentId);
         }
-        removeBrowserSavedEnvironmentSecret(environmentId);
+        await removeBrowserSavedSecret(environmentId);
       },
     },
     server: {

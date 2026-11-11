@@ -37,6 +37,7 @@ export interface PersistedUiState {
   chatRightPanelWidth?: number | null;
   standaloneChatsExpanded?: boolean;
   projectsSectionExpanded?: boolean;
+  expandedThreadGroupKeys?: string[];
 }
 
 export interface UiProjectState {
@@ -52,7 +53,15 @@ export interface UiProjectState {
    * local layout preference; collapsing it never hides the active chat's project.
    */
   projectsSectionExpanded: boolean;
+  /**
+   * Agent-created thread groups the user expanded, keyed by environment and
+   * group ID. Groups start collapsed, so only expanded keys are stored, newest
+   * last and bounded. Presentation only: it never changes a group or chat.
+   */
+  expandedThreadGroupKeys: readonly string[];
 }
+
+export const MAX_EXPANDED_THREAD_GROUP_KEYS = 256;
 
 export interface UiThreadState {
   threadLastVisitedAtById: Record<string, string>;
@@ -117,6 +126,7 @@ const initialState: UiState = {
   projectOrder: [],
   standaloneChatsExpanded: true,
   projectsSectionExpanded: true,
+  expandedThreadGroupKeys: [],
   threadLastVisitedAtById: {},
   threadPlanSidebarOpenById: {},
   composerTabCollapsed: false,
@@ -265,6 +275,16 @@ export function hydratePersistedUiState(parsed: PersistedUiState): UiState {
     chatRightPanelWidth: normalizeChatRightPanelWidth(parsed.chatRightPanelWidth),
     standaloneChatsExpanded: parsed.standaloneChatsExpanded !== false,
     projectsSectionExpanded: parsed.projectsSectionExpanded !== false,
+    expandedThreadGroupKeys: Array.isArray(parsed.expandedThreadGroupKeys)
+      ? [
+          ...new Set(
+            parsed.expandedThreadGroupKeys.filter(
+              (key): key is string =>
+                typeof key === "string" && key.length > 0 && key.length <= 512,
+            ),
+          ),
+        ].slice(-MAX_EXPANDED_THREAD_GROUP_KEYS)
+      : [],
   };
 }
 
@@ -323,6 +343,7 @@ export function persistState(state: UiState): void {
         chatRightPanelWidth: state.chatRightPanelWidth,
         standaloneChatsExpanded: state.standaloneChatsExpanded,
         projectsSectionExpanded: state.projectsSectionExpanded,
+        expandedThreadGroupKeys: [...state.expandedThreadGroupKeys],
       } satisfies PersistedUiState),
     );
     if (!legacyKeysCleanedUp) {
@@ -686,6 +707,18 @@ export function setStandaloneChatsExpanded(state: UiState, expanded: boolean): U
   };
 }
 
+export function setThreadGroupExpanded(state: UiState, key: string, expanded: boolean): UiState {
+  const present = state.expandedThreadGroupKeys.includes(key);
+  if (present === expanded) return state;
+  const remaining = state.expandedThreadGroupKeys.filter((entry) => entry !== key);
+  return {
+    ...state,
+    expandedThreadGroupKeys: expanded
+      ? [...remaining, key].slice(-MAX_EXPANDED_THREAD_GROUP_KEYS)
+      : remaining,
+  };
+}
+
 export function setProjectsSectionExpanded(state: UiState, expanded: boolean): UiState {
   if (state.projectsSectionExpanded === expanded) {
     return state;
@@ -777,6 +810,7 @@ interface UiStateStore extends UiState {
   setChatRightPanelWidth: (width: number | null) => void;
   setStandaloneChatsExpanded: (expanded: boolean) => void;
   setProjectsSectionExpanded: (expanded: boolean) => void;
+  setThreadGroupExpanded: (key: string, expanded: boolean) => void;
   toggleProject: (projectId: string) => void;
   setProjectExpanded: (projectId: string, expanded: boolean) => void;
   reorderProjects: (
@@ -806,6 +840,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setStandaloneChatsExpanded(state, expanded)),
   setProjectsSectionExpanded: (expanded) =>
     set((state) => setProjectsSectionExpanded(state, expanded)),
+  setThreadGroupExpanded: (key, expanded) =>
+    set((state) => setThreadGroupExpanded(state, key, expanded)),
   toggleProject: (projectId) => set((state) => toggleProject(state, projectId)),
   setProjectExpanded: (projectId, expanded) =>
     set((state) => setProjectExpanded(state, projectId, expanded)),

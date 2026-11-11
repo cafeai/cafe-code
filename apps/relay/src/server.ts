@@ -42,6 +42,7 @@ export interface RelayServerOptions {
   readonly manualMeshSync?: boolean;
   readonly forwardedIpKeys?: readonly string[];
   readonly hostWork?: { readonly difficulty: number; readonly reservationMs: number };
+  readonly selfService?: boolean;
 }
 
 export async function startRelayServer(options: RelayServerOptions) {
@@ -66,6 +67,7 @@ export async function startRelayServer(options: RelayServerOptions) {
     nodeId: options.nodeId,
     grants: options.grants,
     now: epochNow,
+    selfService: options.selfService === true,
     ...options.hostWork,
   });
   const sockets = new Set<Socket>();
@@ -75,6 +77,7 @@ export async function startRelayServer(options: RelayServerOptions) {
     nodeId: options.nodeId,
     grants: options.grants,
     resources,
+    selfService: options.selfService === true,
     reservations,
   });
   const mesh = options.nodeIdentity

@@ -1,7 +1,17 @@
 import { useUiLocale } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
-import { parseScopedThreadKey, scopeProjectRef, scopeThreadRef } from "@cafecode/client-runtime";
-import { type ScopedThreadRef, ThreadId } from "@cafecode/contracts";
+import {
+  parseScopedThreadKey,
+  scopedThreadKey,
+  scopeProjectRef,
+  scopeThreadRef,
+} from "@cafecode/client-runtime";
+import {
+  type ScopedThreadRef,
+  ThreadId,
+  type ThreadGroupId,
+  type ThreadOriginClassification,
+} from "@cafecode/contracts";
 import { isCodexHistoryRecoveryRequiredError } from "@cafecode/shared/codexHistorySafety";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@tanstack/react-router";
@@ -725,7 +735,112 @@ export function useThreadActions() {
     [confirmThreadDelete, deleteThread, resolveThreadTarget, uiLocale],
   );
 
+  /**
+   * Move one agent-created group and its whole subtree to the Recycle Bin.
+   * The server computes the exact closure; the parent chat is kept. Active
+   * members receive the existing stop request, which is not proof of native
+   * cleanup. Drafts stay in place so a restore finds them again.
+   */
+  const deleteThreadGroup = useCallback(
+    async (input: {
+      readonly environmentId: ScopedThreadRef["environmentId"];
+      readonly groupId: ThreadGroupId;
+      readonly ownerThreadId: ThreadId;
+      readonly memberThreadKeys: ReadonlySet<string>;
+    }) => {
+      const api = readEnvironmentApi(input.environmentId);
+      if (!api) {
+        throw new Error(
+          uiText(
+            "Environment API not found for environment {environmentId}",
+            { environmentId: input.environmentId },
+            undefined,
+            uiLocale,
+          ),
+        );
+      }
+      // Captured before the await: a newer navigation wins over this ACK.
+      const originalNavigationOwner = navigationOwner.current;
+      const originalLocation = router.state.location;
+      const routeRef = getCurrentRouteThreadRef();
+      const viewingMember =
+        routeRef !== null &&
+        routeRef !== undefined &&
+        routeRef.environmentId === input.environmentId &&
+        input.memberThreadKeys.has(scopedThreadKey(routeRef));
+      await api.orchestration.dispatchCommand({
+        type: "thread.group.delete",
+        commandId: newCommandId(),
+        groupId: input.groupId,
+      });
+      refreshDeletedThreadsForEnvironment(input.environmentId);
+      if (
+        viewingMember &&
+        originalNavigationOwner !== null &&
+        navigationOwner.current === originalNavigationOwner &&
+        router.state.location === originalLocation
+      ) {
+        try {
+          await router.navigate({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(
+              scopeThreadRef(input.environmentId, input.ownerThreadId),
+            ),
+            replace: true,
+          });
+        } catch {}
+      }
+    },
+    [getCurrentRouteThreadRef, router, uiLocale],
+  );
+
+  const restoreThreadGroup = useCallback(
+    async (environmentId: ScopedThreadRef["environmentId"], groupId: ThreadGroupId) => {
+      const api = readEnvironmentApi(environmentId);
+      if (!api) {
+        throw new Error(
+          uiText(
+            "Environment API not found for environment {environmentId}",
+            { environmentId },
+            undefined,
+            uiLocale,
+          ),
+        );
+      }
+      await api.orchestration.dispatchCommand({
+        type: "thread.group.restore",
+        commandId: newCommandId(),
+        groupId,
+      });
+      refreshDeletedThreadsForEnvironment(environmentId);
+    },
+    [uiLocale],
+  );
+
+  /** Save a person's correction of the origin label and/or description. */
+  const updateThreadMetadata = useCallback(
+    async (
+      target: ScopedThreadRef,
+      patch: {
+        readonly originClassification?: ThreadOriginClassification;
+        readonly description?: string | null;
+      },
+    ) => {
+      const api = ensureEnvironmentApi(target.environmentId);
+      await api.orchestration.dispatchCommand({
+        type: "thread.metadata.update",
+        commandId: newCommandId(),
+        threadId: target.threadId,
+        ...patch,
+      });
+    },
+    [],
+  );
+
   return {
+    deleteThreadGroup,
+    restoreThreadGroup,
+    updateThreadMetadata,
     archiveThread,
     unarchiveThread,
     restoreThread,

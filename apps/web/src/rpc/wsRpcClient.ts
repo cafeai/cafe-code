@@ -50,6 +50,7 @@ type RpcInputStreamMethod<TTag extends RpcTag> =
     : never;
 
 export interface WsRpcClient {
+  readonly threadSecrets: import("@cafecode/contracts").ThreadSecretsApi;
   readonly glide: { readonly control: RpcUnaryMethod<typeof WS_METHODS.glideControl> };
   readonly mcpApps: {
     readonly prepare: RpcUnaryMethod<typeof WS_METHODS.mcpAppsPrepare>;
@@ -434,6 +435,36 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
           ...options,
           tag: WS_METHODS.subscribeUsageStats,
         }),
+    },
+    threadSecrets: {
+      capabilities: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.threadSecretsCapabilities](input).pipe(Effect.withTracerEnabled(false)),
+        ),
+      prepare: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.threadSecretsPrepare](input).pipe(Effect.withTracerEnabled(false)),
+        ),
+      list: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.threadSecretsList](input).pipe(Effect.withTracerEnabled(false)),
+        ),
+      set: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.threadSecretsSet](input).pipe(Effect.withTracerEnabled(false)),
+        ),
+      reveal: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.threadSecretsReveal](input).pipe(Effect.withTracerEnabled(false)),
+        ),
+      remove: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.threadSecretsRemove](input).pipe(Effect.withTracerEnabled(false)),
+        ),
+      clear: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.threadSecretsClear](input).pipe(Effect.withTracerEnabled(false)),
+        ),
     },
     visualizations: {
       list: (input) => transport.request((client) => client[WS_METHODS.visualizationsList](input)),

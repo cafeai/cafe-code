@@ -28,6 +28,7 @@ export default defineConfig([
       launcher: "src/launcher.ts",
       "sqlite-worker": "src/persistence/sqliteWorkerEntry.ts",
       "sqlite-worker-native": "src/persistence/sqliteWorkerNative.ts",
+      "secret-runner": "src/secrets/runnerEntry.ts",
     },
     outDir: "dist",
     sourcemap: false,

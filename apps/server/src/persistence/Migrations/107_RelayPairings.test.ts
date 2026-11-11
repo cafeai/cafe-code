@@ -33,7 +33,9 @@ it.effect(
 
       // Dev has already assigned 106 to MCP receipts. Upgrade through the real
       // loader so a duplicate or skipped relay migration cannot pass unnoticed.
-      assert.deepEqual(yield* runMigrations(), [[107, "RelayPairings"]]);
+      assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 107 }), [
+        [107, "RelayPairings"],
+      ]);
       assert.deepEqual(yield* sql`SELECT * FROM mcp_operations`, receipts);
       assert.deepEqual(yield* sql`SELECT * FROM auth_sessions`, sessions);
       assert.deepEqual(
@@ -54,7 +56,7 @@ it.effect(
       assert.deepEqual(yield* sql`SELECT session_id FROM relay_device_sessions`, [
         { session_id: "existing-session" },
       ]);
-      assert.deepEqual(yield* runMigrations(), []);
+      assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 107 }), []);
       assert.deepEqual(yield* sql`SELECT id FROM relay_invitations`, [{ id: "invitation" }]);
       assert.deepEqual(yield* sql`SELECT * FROM mcp_operations`, receipts);
     }).pipe(Effect.provide(TestSqliteClient.layerMemory())),

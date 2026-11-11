@@ -12,6 +12,12 @@ const record = {
 };
 
 describe("saved environment edits", () => {
+  it("renames a relay environment without changing its authenticated transport", () => {
+    const relay = { ...record, transport: "relay" as const };
+    expect(
+      applySavedEnvironmentEdit(relay, { label: "New name", host: "ignored.example", port: "1" }),
+    ).toEqual({ ...relay, label: "New name" });
+  });
   it("changes the local name and both addresses while preserving identity and history", () => {
     expect(
       applySavedEnvironmentEdit(record, { label: " New box ", host: "10.0.0.2", port: "3775" }),

@@ -55,7 +55,14 @@ export function savedTransportTickets(
   });
 }
 let primary: ActiveRelay | undefined;
+const saved = new Map<string, ActiveRelay>();
 const suffix = ".cafecode-relay.invalid";
+export function savedRelayUrls(id: string) {
+  return {
+    httpBaseUrl: "https://" + id.toLowerCase() + suffix + "/",
+    wsBaseUrl: "wss://" + id.toLowerCase() + suffix + "/",
+  };
+}
 export class ActiveRelay {
   readonly httpBaseUrl: string;
   readonly wsBaseUrl: string;
@@ -64,19 +71,22 @@ export class ActiveRelay {
   private readonly lifetime = new Lifetime();
   private current: Awaited<ReturnType<typeof connectViewer>> | undefined;
   private acquiring: Promise<RelaySession> | undefined;
+  private closing: Promise<void> | undefined;
   private readonly initialLifetime: Lifetime | undefined;
   constructor(
     record: SavedRelayTarget,
     identity: RelayIdentity,
     initial?: Awaited<ReturnType<typeof connectViewer>>,
     initialLifetime?: Lifetime,
+    private readonly persist = saveRelayTarget,
   ) {
     this.record = record;
     this.identity = identity;
     this.current = initial;
     this.initialLifetime = initialLifetime;
-    this.httpBaseUrl = "https://" + record.id.toLowerCase() + suffix + "/";
-    this.wsBaseUrl = "wss://" + record.id.toLowerCase() + suffix + "/";
+    const urls = savedRelayUrls(record.id);
+    this.httpBaseUrl = urls.httpBaseUrl;
+    this.wsBaseUrl = urls.wsBaseUrl;
   }
   session(): Promise<RelaySession> {
     if (!this.lifetime.active) return Promise.reject(new RelayError("UNAVAILABLE"));
@@ -115,7 +125,7 @@ export class ActiveRelay {
       tickets: [],
       minimumRevision: Math.max(this.record.minimumRevision, network.revision),
     };
-    await saveRelayTarget(this.record, this.identity, this.lifetime.signal);
+    await this.persist(this.record, this.identity, this.lifetime.signal);
     const connection = await connectViewer({
       target: {
         network,
@@ -143,7 +153,7 @@ export class ActiveRelay {
         preferredNodeId: connection.nodeId,
         tickets: savedTransportTickets(connection),
       };
-      await saveRelayTarget(this.record, this.identity, this.lifetime.signal);
+      await this.persist(this.record, this.identity, this.lifetime.signal);
       if (!this.lifetime.active) throw new RelayError("UNAVAILABLE");
       this.current = connection;
       return connection.session;
@@ -158,17 +168,44 @@ export class ActiveRelay {
   socket(url: string): WebSocket {
     return new RelayWebSocket(url, () => this.session());
   }
-  async close(): Promise<void> {
+  retire(): void {
+    const hostname = new URL(this.httpBaseUrl).hostname;
+    if (saved.get(hostname) === this) saved.delete(hostname);
     this.lifetime.retire();
     this.initialLifetime?.retire();
-    await this.current?.close();
-    await this.acquiring?.catch(() => {});
-    await this.lifetime.close();
-    await this.initialLifetime?.close();
+  }
+  close(): Promise<void> {
+    this.retire();
+    return (this.closing ??= (async () => {
+      await Promise.allSettled([this.current?.close(), this.acquiring]);
+      await Promise.all([this.lifetime.close(), this.initialLifetime?.close()]);
+    })());
   }
   get environmentId(): string {
     return this.record.environmentId;
   }
+  matches(record: SavedRelayTarget, identity: RelayIdentity): boolean {
+    return (
+      this.lifetime.active &&
+      this.identity.publicKey === identity.publicKey &&
+      this.record.id === record.id &&
+      this.record.networkId === record.networkId &&
+      this.record.environmentId === record.environmentId &&
+      this.record.rootPublicKey === record.rootPublicKey &&
+      this.record.hostPublicKey === record.hostPublicKey &&
+      this.record.locator === record.locator &&
+      this.record.bearerToken === record.bearerToken
+    );
+  }
+}
+export function readSavedRelay(url: string): ActiveRelay | undefined {
+  return saved.get(new URL(url).hostname);
+}
+export function installSavedRelay(relay: ActiveRelay): void {
+  const hostname = new URL(relay.httpBaseUrl).hostname;
+  if (saved.get(hostname) === relay) return;
+  if (saved.has(hostname) || saved.size >= 64) throw new RelayError("BUSY");
+  saved.set(hostname, relay);
 }
 export async function installPrimaryRelay(relay: ActiveRelay): Promise<void> {
   const previous = primary;
@@ -181,16 +218,22 @@ export function readPrimaryRelay(): ActiveRelay | undefined {
 export function relayForUrl(input: string | URL): ActiveRelay | undefined {
   const url = new URL(input);
   if (!url.hostname.endsWith(suffix)) return undefined;
-  if (!primary || new URL(primary.httpBaseUrl).hostname !== url.hostname)
-    throw new RelayError("UNAVAILABLE");
-  return primary;
+  const relay =
+    primary && new URL(primary.httpBaseUrl).hostname === url.hostname
+      ? primary
+      : saved.get(url.hostname);
+  if (!relay || url.username || url.password) throw new RelayError("UNAVAILABLE");
+  return relay;
 }
 /** Explicit target dependency injection; never patches global fetch/WebSocket. */
 export const fetchAppResource: typeof globalThis.fetch = async (input, init) => {
   if (!primary) {
     const absolute = input instanceof Request ? input.url : input.toString();
-    if (URL.canParse(absolute) && new URL(absolute).hostname.endsWith(suffix))
-      throw new RelayError("UNAVAILABLE");
+    if (URL.canParse(absolute) && new URL(absolute).hostname.endsWith(suffix)) {
+      if (input instanceof Request) throw new RelayError("PROTOCOL_ERROR");
+      const url = new URL(absolute);
+      return relayForUrl(url)!.request(url.pathname + url.search, init);
+    }
     return init === undefined ? fetch(input) : fetch(input, init);
   }
   const url =

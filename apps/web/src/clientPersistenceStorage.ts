@@ -21,6 +21,7 @@ export const SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY =
   "cafe-code:saved-environment-session-secrets:v1";
 
 const BrowserSavedEnvironmentRecordSchema = Schema.Struct({
+  transport: Schema.optionalKey(Schema.Literal("relay")),
   environmentId: EnvironmentId,
   label: Schema.String,
   httpBaseUrl: Schema.String,
@@ -31,6 +32,7 @@ const BrowserSavedEnvironmentRecordSchema = Schema.Struct({
 type BrowserSavedEnvironmentRecord = typeof BrowserSavedEnvironmentRecordSchema.Type;
 
 const LegacyBrowserSavedEnvironmentRecordSchema = Schema.Struct({
+  transport: Schema.optionalKey(Schema.Literal("relay")),
   environmentId: EnvironmentId,
   label: Schema.String,
   httpBaseUrl: Schema.String,
@@ -81,6 +83,7 @@ function toPersistedSavedEnvironmentRecord(
   record: PersistedSavedEnvironmentRecord,
 ): PersistedSavedEnvironmentRecord {
   return {
+    ...(record.transport ? { transport: record.transport } : {}),
     environmentId: record.environmentId,
     label: record.label,
     httpBaseUrl: record.httpBaseUrl,

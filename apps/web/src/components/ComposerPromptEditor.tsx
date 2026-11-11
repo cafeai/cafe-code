@@ -57,6 +57,10 @@ import {
   splitPromptIntoComposerSegments,
 } from "~/composer-editor-mentions";
 import { cn } from "~/lib/utils";
+import {
+  ComposerCafeSecretHighlightPlugin,
+  type CafeSecretHighlightTone,
+} from "./composerCafeSecretHighlight";
 import { basenameOfPath, getVscodeIconUrlForEntry, inferEntryKindFromPath } from "~/vscode-icons";
 import {
   COMPOSER_INLINE_CHIP_CLASS_NAME,
@@ -818,6 +822,8 @@ interface ComposerPromptEditorProps {
   ) => boolean;
   onPaste: React.ClipboardEventHandler<HTMLElement>;
   editorRef: React.RefObject<ComposerPromptEditorHandle | null>;
+  /** Paint `[sec:...]` syntax; "error" when it cannot be sent as written. */
+  cafeSecretTone?: CafeSecretHighlightTone;
 }
 
 function ComposerCommandKeyPlugin(props: {
@@ -1300,6 +1306,7 @@ function ComposerPromptEditorInner({
   onCommandKeyDown,
   onPaste,
   editorRef,
+  cafeSecretTone = "secret",
 }: ComposerPromptEditorProps) {
   const [editor] = useLexicalComposerContext();
   const onChangeRef = useRef(onChange);
@@ -1561,6 +1568,7 @@ function ComposerPromptEditorInner({
       <ComposerInlineTokenArrowPlugin />
       <ComposerInlineTokenSelectionNormalizePlugin />
       <ComposerInlineTokenBackspacePlugin />
+      <ComposerCafeSecretHighlightPlugin tone={cafeSecretTone} />
       <HistoryPlugin />
     </div>
   );
@@ -1578,6 +1586,7 @@ export function ComposerPromptEditor({
   onCommandKeyDown,
   onPaste,
   editorRef,
+  cafeSecretTone,
 }: ComposerPromptEditorProps) {
   const initialValueRef = useRef(value);
   const initialSkillMetadataRef = useRef(skillMetadataByName(skills));
@@ -1608,6 +1617,7 @@ export function ComposerPromptEditor({
         onChange={onChange}
         onPaste={onPaste}
         editorRef={editorRef}
+        {...(cafeSecretTone ? { cafeSecretTone } : {})}
         {...(onCommandKeyDown ? { onCommandKeyDown } : {})}
         {...(className ? { className } : {})}
       />

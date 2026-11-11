@@ -20,6 +20,7 @@ import {
 import { TicketStore } from "./tickets.ts";
 import type { PacketConnection, RelayResources } from "./wire.ts";
 import type { HostReservationAuthority } from "./hostWork.ts";
+import { authorizeHostEnrollment } from "./admission.ts";
 
 export interface HostCapacityGrant {
   readonly locator: string;
@@ -79,6 +80,7 @@ export class RelayBroker {
   readonly directory: RelayDirectory;
   private readonly resources: RelayResources;
   private readonly grants: readonly HostCapacityGrant[];
+  private readonly selfService: boolean;
   private readonly reservations: HostReservationAuthority;
   private readonly now: () => number;
   private readonly lifetime = new Lifetime(() => this.retire());
@@ -99,6 +101,7 @@ export class RelayBroker {
     readonly network: NetworkDescriptor;
     readonly nodeId: string;
     readonly grants: readonly HostCapacityGrant[];
+    readonly selfService?: boolean;
     readonly reservations: HostReservationAuthority;
     readonly resources: RelayResources;
     readonly now?: () => number;
@@ -112,6 +115,7 @@ export class RelayBroker {
     );
     requireRelay(input.grants.length <= RELAY_LIMITS.registrations);
     this.grants = input.grants;
+    this.selfService = input.selfService === true;
     this.reservations = input.reservations;
     this.bootId = input.reservations.bootId;
     this.resources = input.resources;
@@ -299,16 +303,12 @@ export class RelayBroker {
   private async register(leg: Leg, request: C.Register): Promise<void> {
     const now = this.now();
     requireRelay(leg.hello.expiresAt > now, "EXPIRED");
-    const grant = this.grants.find(
-      (value) =>
-        value.locator === request.locator &&
-        value.admissionPublicKey === request.admissionPublicKey,
-    );
-    requireRelay(
-      grant &&
-        equalBytes(unopaque(grant.tokenDigest, 32), sha256(unopaque(request.capacityToken, 32))),
-      "AUTH_DENIED",
-    );
+    authorizeHostEnrollment({
+      ...request,
+      networkId: this.network.networkId,
+      grants: this.grants,
+      selfService: this.selfService,
+    });
     this.reservations.authorize(request.locator, request.admissionPublicKey, request.reservation);
     requireRelay(!this.registering.has(request.locator), "BUSY");
     const owner = {};

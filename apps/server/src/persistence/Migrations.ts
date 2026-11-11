@@ -129,6 +129,7 @@ import Migration0104 from "./Migrations/104_ThreadContextWindowLookup.ts";
 import Migration0105 from "./Migrations/105_CurrentNativeAgentBindings.ts";
 import Migration0106 from "./Migrations/106_McpOperations.ts";
 import Migration0107 from "./Migrations/107_RelayPairings.ts";
+import Migration0108 from "./Migrations/108_ThreadGroupsAndOrigin.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -252,6 +253,7 @@ export const migrationEntries = [
   [105, "CurrentNativeAgentBindings", Migration0105],
   [106, "McpOperations", Migration0106],
   [107, "RelayPairings", Migration0107],
+  [108, "ThreadGroupsAndOrigin", Migration0108],
 ] as const;
 
 export const makeMigrationLoader = (

@@ -16,7 +16,7 @@ export const Priority = Schema.Literals([0, 1]);
 export const Register = Schema.Struct({
   locator: Id32,
   admissionPublicKey: Id32,
-  capacityToken: Id32,
+  capacityToken: Schema.NullOr(Id32),
   priority: Priority,
   reservation: Schema.optionalKey(HostReservationCredential),
   signature: Signature,

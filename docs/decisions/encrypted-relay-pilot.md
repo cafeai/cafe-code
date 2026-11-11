@@ -80,14 +80,23 @@ application authorization. This is overload containment, not upstream DDoS
 protection, NAT identity, fleet-wide quotas or an audited capacity benchmark.
 Desktop Cafe hosts must solve proof of work before reserving server capacity.
 Browser viewers do not solve work for discovery, pairing, connecting or
-reconnecting. Host work grants capacity only; the existing private pilot still
-requires operator-issued host enrollment and ordinary end-to-end viewer auth.
+reconnecting. Host work grants capacity only; ordinary end-to-end viewer auth is
+still required. Operators explicitly choose whether hosts may enroll themselves.
+Cafe's public endpoints enable `selfService: true`; alternative/private operators
+default to false and retain token-based enrollment. Self-service hosts use
+SHA-256 of a domain separator, network identity and admission public key as their
+locator. A different key cannot claim a locator even after a lease expires.
+An explicit null enrollment token selects this mode; an invalid operator token
+never falls through to self-service. Static grants always retain their exact
+key/token checks. Both modes require the same signed paid reservation, resource
+limits and authenticated forwarding policy. This opens host capacity admission,
+not relay membership, machine discovery, application pairing or owner access.
 
 ### Desktop host reservation proof of work
 
 The version-one host-only HTTP protocol has three bounded POST endpoints:
 `/v1/host/challenge`, `/v1/host/claim` and `/v1/host/release`.
-Challenge issuance checks the enrolled host’s existing capacity credential but
+Challenge issuance checks the host's selected enrollment mode and key binding but
 allocates no slot or retained challenge record. A fresh per-boot HMAC-SHA-256 key
 authenticates each challenge’s network, node, boot, host admission key, locator,
 claim ID, reservation purpose, one-slot amount, duration, nonce, issue/expiry

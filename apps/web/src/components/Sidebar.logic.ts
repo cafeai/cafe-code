@@ -44,10 +44,12 @@ export type ThreadTraversalDirection = "previous" | "next";
 
 export type SidebarThreadContextMenuAction =
   | "rename"
+  | "edit-metadata"
   | "fork"
   | "move"
   | "copy-path"
   | "copy-thread-id"
+  | "secrets"
   | "repair-thread"
   | "delete";
 
@@ -65,10 +67,12 @@ export function buildSidebarThreadContextMenuItems(input: {
 }): ReadonlyArray<SidebarThreadContextMenuItem> {
   const items: SidebarThreadContextMenuItem[] = [
     { id: "rename", label: uiText("Rename chat") },
+    { id: "edit-metadata", label: uiText("Edit metadata…") },
     { id: "fork", label: uiText("Duplicate chat"), disabled: input.forkDisabled === true },
     { id: "move", label: uiText("Move chat…") },
     { id: "copy-path", label: uiText("Copy path") },
     { id: "copy-thread-id", label: uiText("Copy chat ID") },
+    { id: "secrets", label: uiText("Secrets…") },
   ];
 
   if (input.debugEnabled) {

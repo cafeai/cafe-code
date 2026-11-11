@@ -11,6 +11,7 @@ import * as Schema from "effect/Schema";
 import { z } from "zod";
 import { type CafeMcpDependencies, type CafeMcpServerOptions } from "./CafeMcpServer.ts";
 import { jsonToolResult, McpToolError } from "./results.ts";
+import { pageOutput, paginate } from "./pagination.ts";
 import { operationScopeId } from "./operations.ts";
 import { withStatusWait } from "./statusWait.ts";
 
@@ -129,6 +130,13 @@ export function registerThreadStatusTools(
             expiresAt: z.string(),
           })
           .nullable(),
+        // First bounded page of this chat's live groups. Continue with
+        // list_thread_groups({ ownerThreadId, cursor: nextCursor }).
+        ownedGroups: z.object({
+          items: z.array(z.object({ id: z.string(), title: z.string(), createdAt: z.string() })),
+          ...pageOutput,
+          lookupTool: z.literal("list_thread_groups"),
+        }),
         contractVersion: z.literal(2),
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -166,6 +174,18 @@ export function registerThreadStatusTools(
                       ),
                     );
             const sessionId = shell.value.session?.providerInstanceId ?? null;
+            const groupsPage = paginate(
+              shell.value.ownedGroups ?? [],
+              { limit: 20 },
+              // Same scope as list_thread_groups so its cursor continues there.
+              {
+                tool: "list_thread_groups",
+                ownerThreadId: shell.value.id,
+                state: "active",
+                query: undefined,
+              },
+              (group) => group.id,
+            );
             const summary = Option.isSome(project) ? summarizeProject(project.value) : null;
             return {
               thread: summarizeThread(shell.value),
@@ -195,6 +215,17 @@ export function registerThreadStatusTools(
                     expiresAt: options.operationOwner.expiresAt,
                   }
                 : null,
+              ownedGroups: {
+                items: groupsPage.items.map((group) => ({
+                  id: group.id,
+                  title: group.title,
+                  createdAt: group.createdAt,
+                })),
+                hasMore: groupsPage.hasMore,
+                nextCursor: groupsPage.nextCursor,
+                totalMatches: groupsPage.totalMatches,
+                lookupTool: "list_thread_groups" as const,
+              },
               contractVersion: 2 as const,
             };
           }),

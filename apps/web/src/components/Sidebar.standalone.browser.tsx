@@ -1,5 +1,11 @@
 import "../index.css";
-import { EnvironmentId, ProviderDriverKind, ThreadId, TurnId } from "@cafecode/contracts";
+import {
+  EnvironmentId,
+  ProviderDriverKind,
+  ThreadGroupId,
+  ThreadId,
+  TurnId,
+} from "@cafecode/contracts";
 import { scopeThreadRef, scopedThreadKey } from "@cafecode/client-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
@@ -9,6 +15,10 @@ import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import type { SidebarThreadSummary } from "../types";
 import { buildStandaloneCatalog } from "./sidebar/standaloneNavigation.logic";
+import { SidebarThreadGroupContext } from "./sidebar/SidebarThreadGroups";
+import { buildSidebarThreadGroupIndex } from "./sidebar/threadGroups.logic";
+import { useThreadMetadataDialogStore } from "./ThreadMetadataDialog";
+import { useUiStateStore } from "../uiStateStore";
 import { SidebarStandaloneChats } from "./Sidebar";
 
 const mocks = vi.hoisted(() => ({
@@ -18,7 +28,9 @@ const mocks = vi.hoisted(() => ({
   rename: vi.fn(),
   gitStatus: vi.fn(),
   duplicate: vi.fn(),
+  deleteGroup: vi.fn(),
   showMenu: vi.fn(),
+  confirm: vi.fn(),
 }));
 vi.mock("../hooks/useThreadActions", () => ({
   useThreadActions: () => ({
@@ -26,14 +38,21 @@ vi.mock("../hooks/useThreadActions", () => ({
     deleteThread: mocks.delete,
     confirmAndDeleteThread: mocks.confirmDelete,
     duplicateThread: mocks.duplicate,
+    deleteThreadGroup: mocks.deleteGroup,
   }),
 }));
 // This row fixture owns only the menu boundary. Importing the real API from
 // an asynchronous mock pulls in runtime/service, which imports this same API
 // back; it also unnecessarily admits the real transport graph into the test.
 vi.mock("../localApi", () => ({
-  readLocalApi: () => ({ contextMenu: { show: mocks.showMenu } }),
-  ensureLocalApi: () => ({ contextMenu: { show: mocks.showMenu } }),
+  readLocalApi: () => ({
+    contextMenu: { show: mocks.showMenu },
+    dialogs: { confirm: mocks.confirm },
+  }),
+  ensureLocalApi: () => ({
+    contextMenu: { show: mocks.showMenu },
+    dialogs: { confirm: mocks.confirm },
+  }),
 }));
 vi.mock("../threadRename", () => ({ renameThread: mocks.rename }));
 vi.mock("../hooks/useSettings", async () => {
@@ -95,6 +114,10 @@ beforeEach(async () => {
   mocks.gitStatus.mockReturnValue({ data: null });
   mocks.duplicate.mockReset().mockResolvedValue(undefined);
   mocks.showMenu.mockReset().mockResolvedValue(undefined);
+  mocks.deleteGroup.mockReset().mockResolvedValue(undefined);
+  mocks.confirm.mockReset().mockResolvedValue(true);
+  useUiStateStore.setState({ expandedThreadGroupKeys: [] });
+  useThreadMetadataDialogStore.getState().close();
   useThreadSelectionStore.getState().clearSelection();
   useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
   useComposerDraftStore
@@ -118,25 +141,33 @@ async function setup(
   const onOpen = vi.fn();
   const onExpansionChange = vi.fn();
   const onNewChat = vi.fn();
+  const groupContext = {
+    index: buildSidebarThreadGroupIndex(threads),
+    activeThreadKey: activeThread
+      ? scopedThreadKey(scopeThreadRef(activeThread.environmentId, activeThread.id))
+      : null,
+  };
   const screen = await render(
     <div className="w-72">
-      <SidebarStandaloneChats
-        onNewChat={onNewChat}
-        entries={buildStandaloneCatalog({ threads, sortOrder: "updated_at" })}
-        previewCount={8}
-        expanded={false}
-        activeTarget={
-          activeThread
-            ? {
-                kind: "server",
-                threadRef: scopeThreadRef(activeThread.environmentId, activeThread.id),
-              }
-            : null
-        }
-        jumpLabelByKey={new Map()}
-        onOpen={onOpen}
-        onExpansionChange={onExpansionChange}
-      />
+      <SidebarThreadGroupContext.Provider value={groupContext}>
+        <SidebarStandaloneChats
+          onNewChat={onNewChat}
+          entries={buildStandaloneCatalog({ threads, sortOrder: "updated_at" })}
+          previewCount={8}
+          expanded={false}
+          activeTarget={
+            activeThread
+              ? {
+                  kind: "server",
+                  threadRef: scopeThreadRef(activeThread.environmentId, activeThread.id),
+                }
+              : null
+          }
+          jumpLabelByKey={new Map()}
+          onOpen={onOpen}
+          onExpansionChange={onExpansionChange}
+        />
+      </SidebarThreadGroupContext.Provider>
     </div>,
   );
   return { screen, onOpen, onNewChat };
@@ -164,6 +195,86 @@ function duplicableStandalone(provider: "codex" | "claudeAgent"): SidebarThreadS
     },
   };
 }
+
+describe("agent-created thread groups", () => {
+  const coordinator = standaloneFixture("coordinator", "Coordinator", "2026-09-05T00:00:00Z", {
+    ownedGroups: [
+      { id: ThreadGroupId.make("wave"), title: "Audit workers", createdAt: saved.createdAt },
+    ],
+  });
+  const worker = standaloneFixture("worker", "Worker one", "2026-09-04T00:00:00Z", {
+    groupId: ThreadGroupId.make("wave"),
+  });
+
+  it("nests members in a collapsed folder under their parent and expands on click", async () => {
+    const { screen } = await setup([coordinator, worker]);
+    try {
+      await expect.element(screen.getByTestId("thread-group-row-wave")).toBeVisible();
+      await expect.element(screen.getByText("1 chat")).toBeVisible();
+      // Member rows never appear at top level while their folder is collapsed.
+      expect(screen.getByTestId(`thread-row-${worker.id}`).query()).toBeNull();
+      await screen.getByTestId("thread-group-row-wave").getByRole("button").click();
+      await expect.element(screen.getByTestId(`thread-row-${worker.id}`)).toBeVisible();
+      await userEvent.keyboard("{Enter}");
+      await expect.poll(() => screen.getByTestId(`thread-row-${worker.id}`).query()).toBeNull();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps the open chat visible inside a collapsed group", async () => {
+    const { screen } = await setup([coordinator, worker], worker);
+    try {
+      await expect.element(screen.getByTestId(`thread-row-${worker.id}`)).toBeVisible();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("deletes the whole group after confirmation and offers no manual group creation", async () => {
+    const { screen } = await setup([coordinator, worker]);
+    try {
+      mocks.showMenu.mockResolvedValueOnce("delete-group");
+      await screen
+        .getByTestId("thread-group-row-wave")
+        .getByRole("button")
+        .click({ button: "right" });
+      await expect.poll(() => mocks.deleteGroup.mock.calls.length).toBe(1);
+      expect(mocks.showMenu.mock.calls[0]?.[0].map((item: { id: string }) => item.id)).toEqual([
+        "copy-group-id",
+        "delete-group",
+      ]);
+      expect(mocks.confirm).toHaveBeenCalledOnce();
+      expect(mocks.deleteGroup).toHaveBeenCalledWith(
+        expect.objectContaining({ groupId: "wave", ownerThreadId: coordinator.id }),
+      );
+      // Declining the confirmation deletes nothing.
+      mocks.confirm.mockResolvedValueOnce(false);
+      mocks.showMenu.mockResolvedValueOnce("delete-group");
+      await screen
+        .getByTestId("thread-group-row-wave")
+        .getByRole("button")
+        .click({ button: "right" });
+      await expect.poll(() => mocks.confirm.mock.calls.length).toBe(2);
+      expect(mocks.deleteGroup).toHaveBeenCalledOnce();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("opens Edit metadata for a chat from its context menu", async () => {
+    const { screen } = await setup([coordinator, worker]);
+    try {
+      mocks.showMenu.mockResolvedValueOnce("edit-metadata");
+      await screen.getByTestId(`thread-row-${coordinator.id}`).click({ button: "right" });
+      await expect
+        .poll(() => useThreadMetadataDialogStore.getState().target?.threadRef.threadId)
+        .toBe(coordinator.id);
+    } finally {
+      await screen.unmount();
+    }
+  });
+});
 
 describe("standalone Chats catalog", () => {
   it.each(["codex", "claudeAgent"] as const)(

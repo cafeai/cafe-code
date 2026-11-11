@@ -8,6 +8,7 @@ import { canonicalBytes } from "@cafecode/relay/protocol";
 import { requireRelay } from "@cafecode/relay/errors";
 import { RELAY_LIMITS } from "@cafecode/relay/limits";
 import type { HostCapacityGrant } from "@cafecode/relay/broker";
+import { authorizeHostEnrollment, authorizeHostIdentity } from "@cafecode/relay/admission";
 import {
   HOST_WORK,
   hostWorkProof,
@@ -27,6 +28,7 @@ interface ReservationOptions {
   readonly grants: readonly HostCapacityGrant[];
   readonly now: () => number;
   readonly difficulty?: number;
+  readonly selfService?: boolean;
   readonly reservationMs?: number;
 }
 export class HostReservations implements HostReservationAuthority {
@@ -88,11 +90,14 @@ export class HostReservations implements HostReservationAuthority {
       .digest("base64url");
   }
   private grant(locator: string, key: string) {
-    const grant = this.input.grants.find(
-      (g) => g.locator === locator && g.admissionPublicKey === key,
-    );
-    requireRelay(this.active && grant, "AUTH_DENIED");
-    return grant;
+    requireRelay(this.active, "AUTH_DENIED");
+    return authorizeHostIdentity({
+      networkId: this.input.networkId,
+      locator,
+      admissionPublicKey: key,
+      grants: this.input.grants,
+      selfService: this.input.selfService === true,
+    });
   }
   private sweep() {
     const now = this.input.now();
@@ -101,12 +106,13 @@ export class HostReservations implements HostReservationAuthority {
     for (const [id, value] of this.receipts) if (value.expiresAt <= now) this.receipts.delete(id);
   }
   challenge(request: HostWorkRequest): HostWorkChallenge {
-    const grant = this.grant(request.locator, request.admissionPublicKey);
+    this.grant(request.locator, request.admissionPublicKey);
     requireRelay(request.networkId === this.input.networkId, "NETWORK_MISMATCH");
-    requireRelay(
-      timingSafeEqual(unopaque(grant.tokenDigest, 32), sha256(unopaque(request.capacityToken, 32))),
-      "AUTH_DENIED",
-    );
+    authorizeHostEnrollment({
+      ...request,
+      grants: this.input.grants,
+      selfService: this.input.selfService === true,
+    });
     this.sweep();
     const current = this.reservations.get(request.locator);
     requireRelay(

@@ -21,7 +21,7 @@ const LatencyResponse = Schema.Struct({ version: Schema.Literal(1) });
 export interface HostNodeCredential {
   readonly nodeId: string;
   readonly locator: string;
-  readonly token: string;
+  readonly token: string | null;
   readonly admissionIdentity: RelayIdentity;
 }
 interface ServingNode {
@@ -34,6 +34,9 @@ interface ServingNode {
 
 /** Outbound-only host endpoint. Losing a transport never stops Cafe work. */
 export class RelayHost {
+  get active(): boolean {
+    return this.lifetime.active && this.network.expiresAt > epochNow();
+  }
   readonly resources: RelayResources;
   private readonly lifetime = new Lifetime(() => this.retire());
   private readonly network: NetworkDescriptor;

@@ -402,6 +402,7 @@ export const MacKeepAwakeStateSchema = Schema.Struct({
 export type MacKeepAwakeState = typeof MacKeepAwakeStateSchema.Type;
 
 export const PersistedSavedEnvironmentRecordSchema = Schema.Struct({
+  transport: Schema.optionalKey(Schema.Literal("relay")),
   environmentId: EnvironmentId,
   label: Schema.String,
   wsBaseUrl: Schema.String,
@@ -649,6 +650,8 @@ export interface LocalApi {
  * `environmentId` rather than reaching through the local desktop bridge.
  */
 export interface EnvironmentApi {
+  /** Missing on older backends; callers must refuse secret-bearing sends. */
+  threadSecrets?: import("./threadSecrets.ts").ThreadSecretsApi;
   glide?: { control: (input: GlideControlInput) => Promise<GlideControlResult> };
   /** App actions retain fresh one-operation consent, separate from provider approvals. */
   mcpApps?: {

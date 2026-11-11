@@ -85,6 +85,7 @@ import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
 import { cdp, page, userEvent } from "vitest/browser";
 import { failBrowserWsRpc } from "../../test/wsRpcHarness";
+import { resetCafeSecretsCapabilityCacheForTests } from "../cafeSecrets/cafeSecretsClient";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { deskTabKey } from "../deskModel";
 import { useDeskStore } from "../deskStore";
@@ -100,6 +101,29 @@ import { createChatViewCallerOwner } from "./chatViewCallerOwner.test.fixture";
 import { createFollowUpQueuePersistence } from "./chat/followUpQueuePersistence";
 import { toastManager } from "./ui/toast";
 import { browserInputPoint } from "./nativeInput.browser.fixture";
+
+const cafeSecretSendObservation = vi.hoisted(() => ({
+  capture: undefined as ((completion: void | Promise<void>) => void) | undefined,
+}));
+vi.mock("./chat/ChatComposer", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./chat/ChatComposer")>();
+  const { createElement } = await import("react");
+  return {
+    ...original,
+    ChatComposer: (props: import("./chat/ChatComposer").ChatComposerProps) =>
+      createElement(original.ChatComposer, {
+        ...props,
+        onSend: (...args: Parameters<typeof props.onSend>) => {
+          // Observe the actual ChatView handler's completion, without changing
+          // its input, returned promise, result or error. A prepare RPC receipt
+          // alone cannot prove that the remaining send continuation finished.
+          const completion = props.onSend(...args);
+          cafeSecretSendObservation.capture?.(completion);
+          return completion;
+        },
+      }),
+  };
+});
 
 const attachmentUploadObservation = vi.hoisted(() => ({
   capture: undefined as
@@ -2142,6 +2166,369 @@ describe("ChatView full app (composer)", () => {
       await mounted.cleanup();
     }
   });
+
+  it("blocks Cafe Secrets in place when the server cannot confirm support", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "secret-unsupported" as MessageId,
+        targetText: "Existing conversation",
+        history: "essential",
+      }),
+      configureFixture: (fixture) => {
+        const codex = fixture.serverConfig.providers[0]!;
+        fixture.serverConfig = {
+          ...fixture.serverConfig,
+          providers: [
+            ...fixture.serverConfig.providers,
+            { ...codex, instanceId: ProviderInstanceId.make("codex-secret-supported") },
+          ],
+        };
+      },
+    });
+    const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+    // An older backend rejects the capability read; the renderer fails closed.
+    resetCafeSecretsCapabilityCacheForTests();
+    const capabilities = vi
+      .spyOn(api.threadSecrets!, "capabilities")
+      .mockRejectedValue(new Error("unknown method"));
+    const prepare = vi.spyOn(api.threadSecrets!, "prepare");
+    try {
+      const prompt = "deploy with [sec:hunter2-unsupported] please";
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
+      await waitForLayout();
+      (await waitForSendButton()).click();
+      await vi.waitFor(() =>
+        expect(
+          document.querySelector('[data-testid="composer-cafe-secret-error"]')?.textContent,
+        ).toContain("Cafe Secrets are not supported by the current provider"),
+      );
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(prompt);
+      expect(prepare).not.toHaveBeenCalled();
+      expect(wsRequests.some((request) => request.type === "thread.turn.start")).toBe(false);
+      expect(JSON.stringify(wsRequests)).not.toContain("hunter2-unsupported");
+      // A copied reference needs the same admission and is blocked identically.
+      useComposerDraftStore
+        .getState()
+        .setPrompt(THREAD_REF, "reuse [CAFE_SECRET_0123456789abcdef0123456789abcdef]");
+      await waitForLayout();
+      (await waitForSendButton()).click();
+      await vi.waitFor(() =>
+        expect(
+          document.querySelector('[data-testid="composer-cafe-secret-error"]')?.textContent,
+        ).toContain("Cafe Secrets are not supported by the current provider"),
+      );
+      expect(prepare).not.toHaveBeenCalled();
+      expect(wsRequests.some((request) => request.type === "thread.turn.start")).toBe(false);
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+        "reuse [CAFE_SECRET_0123456789abcdef0123456789abcdef]",
+      );
+      // A refusal belongs to its exact provider/connection. Switching to a
+      // supported instance retires it without rewriting the user's input.
+      capabilities.mockResolvedValue({ supported: true });
+      useComposerDraftStore
+        .getState()
+        .setModelSelection(
+          THREAD_REF,
+          createModelSelection(ProviderInstanceId.make("codex-secret-supported"), "gpt-5.3-codex"),
+        );
+      await vi.waitFor(() =>
+        expect(document.querySelector('[data-testid="composer-cafe-secret-error"]')).toBeNull(),
+      );
+      expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+        "reuse [CAFE_SECRET_0123456789abcdef0123456789abcdef]",
+      );
+      // Editing the offending text retires the error; escaping makes it literal.
+      useComposerDraftStore
+        .getState()
+        .setPrompt(THREAD_REF, "deploy with \\[sec:hunter2-unsupported] please");
+      await vi.waitFor(() =>
+        expect(document.querySelector('[data-testid="composer-cafe-secret-error"]')).toBeNull(),
+      );
+    } finally {
+      capabilities.mockRestore();
+      prepare.mockRestore();
+      await mounted.cleanup();
+    }
+  });
+
+  it("sends only prepared Cafe Secret references, never the raw value", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "secret-supported" as MessageId,
+        targetText: "Existing conversation",
+        history: "essential",
+      }),
+      resolveRpc: (body) =>
+        body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 41 } : undefined,
+    });
+    const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+    const reference = "[CAFE_SECRET_0123456789abcdef0123456789abcdef]";
+    resetCafeSecretsCapabilityCacheForTests();
+    const capabilities = vi
+      .spyOn(api.threadSecrets!, "capabilities")
+      .mockResolvedValue({ supported: true });
+    const prepare = vi.spyOn(api.threadSecrets!, "prepare").mockImplementation(async (input) => ({
+      text: input.text.replace("[sec:hunter2-supported]", reference),
+    }));
+    try {
+      useComposerDraftStore
+        .getState()
+        .setPrompt(THREAD_REF, "use [sec:hunter2-supported] and \\[sec:literal]");
+      await waitForLayout();
+      (await waitForSendButton()).click();
+      await vi.waitFor(() =>
+        expect(wsRequests.some((request) => request.type === "thread.turn.start")).toBe(true),
+      );
+      expect(prepare).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: THREAD_REF.threadId }),
+      );
+      const start = wsRequests.find(
+        (request) => request.type === "thread.turn.start",
+      ) as unknown as {
+        message: { text: string };
+      };
+      expect(start.message.text).toContain(reference);
+      // Escapes are retained verbatim for the server's single admission.
+      expect(start.message.text).toContain("\\[sec:literal]");
+      expect(JSON.stringify(wsRequests)).not.toContain("hunter2-supported");
+      expect(document.body.textContent).not.toContain("hunter2-supported");
+    } finally {
+      capabilities.mockRestore();
+      prepare.mockRestore();
+      await mounted.cleanup();
+    }
+  });
+
+  it.for([
+    "provider",
+    "model",
+    "options",
+    "runtime mode",
+    "interaction mode",
+    "images",
+    "files",
+  ] as const)(
+    "abandons held Cafe Secret preparation after changing %s and preserves the current draft",
+    async (change, context) => {
+      const reference = "[CAFE_SECRET_0123456789abcdef0123456789abcdef]";
+      const prompt = "Use [sec:synthetic-held-secret] for this task";
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let retired = false;
+      let sendCompletion: Promise<void> | undefined;
+      let restoreMocks: (() => void) | undefined;
+      const capture = (completion: void | Promise<void>) => {
+        const original = Promise.resolve(completion);
+        sendCompletion = original;
+        if (!retired) void owner.own("ack", () => original).catch(() => undefined);
+      };
+      const owner = createChatViewCallerOwner(context, mountChatView, {
+        label: "cafe-secret-preparation",
+        beforeDrain: () => {
+          retired = true;
+          release();
+        },
+        afterUnmount: async () => {
+          // Join the original handler before the shared fixture resets APIs,
+          // including an admission that raced exact-test retirement.
+          try {
+            await sendCompletion;
+          } finally {
+            if (cafeSecretSendObservation.capture === capture)
+              cafeSecretSendObservation.capture = undefined;
+            try {
+              restoreMocks?.();
+            } finally {
+              resetCafeSecretsCapabilityCacheForTests();
+            }
+          }
+        },
+      });
+      await owner.run(async () => {
+        const base = createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("secret-held-preparation"),
+          targetText: "Existing conversation",
+          history: "essential",
+        });
+        const selection = base.threads[0]!.modelSelection;
+        const nextModel = "gpt-secret-race-model";
+        const unsupportedInstance = ProviderInstanceId.make("opencode");
+        cafeSecretSendObservation.capture = capture;
+        await owner.mount({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot: base,
+          configureFixture: (fixture) => {
+            const codex = fixture.serverConfig.providers.find(
+              (provider) => provider.driver === "codex",
+            )!;
+            fixture.serverConfig = {
+              ...fixture.serverConfig,
+              providers: [
+                ...fixture.serverConfig.providers.map((provider) =>
+                  provider === codex
+                    ? {
+                        ...provider,
+                        models: [
+                          {
+                            slug: selection.model,
+                            name: "Current model",
+                            isCustom: false,
+                            capabilities: createModelCapabilities({ optionDescriptors: [] }),
+                          },
+                          {
+                            slug: nextModel,
+                            name: "Other model",
+                            isCustom: false,
+                            capabilities: createModelCapabilities({ optionDescriptors: [] }),
+                          },
+                        ],
+                      }
+                    : provider,
+                ),
+                {
+                  ...codex,
+                  driver: ProviderDriverKind.make("opencode"),
+                  instanceId: unsupportedInstance,
+                },
+              ],
+            };
+          },
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 41 } : undefined,
+        });
+        const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+        resetCafeSecretsCapabilityCacheForTests();
+        const capabilities = vi
+          .spyOn(api.threadSecrets!, "capabilities")
+          .mockResolvedValue({ supported: true });
+        const prepare = vi.spyOn(api.threadSecrets!, "prepare").mockImplementation(async () => {
+          await gate;
+          return { text: prompt.replace("[sec:synthetic-held-secret]", reference) };
+        });
+        restoreMocks = () => {
+          prepare.mockRestore();
+          capabilities.mockRestore();
+        };
+        const store = useComposerDraftStore.getState();
+        store.setPrompt(THREAD_REF, prompt);
+        const imageData =
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6dAAAAABJRU5ErkJggg==";
+        const image = {
+          type: "image" as const,
+          id: "secret-held-image",
+          name: "before.png",
+          mimeType: "image/png",
+          sizeBytes: 67,
+          previewUrl: `data:image/png;base64,${imageData}`,
+          file: new File(
+            [Uint8Array.from(atob(imageData), (byte) => byte.charCodeAt(0))],
+            "before.png",
+            { type: "image/png" },
+          ),
+        };
+        const file = {
+          id: "secret-held-file",
+          environmentId: LOCAL_ENVIRONMENT_ID,
+          targetThreadId: THREAD_ID,
+          name: "before.txt",
+          mimeType: "text/plain",
+          sizeBytes: 12,
+          status: "ready" as const,
+          attachment: {
+            type: "file" as const,
+            id: "secret-held-file",
+            name: "before.txt",
+            mimeType: "text/plain",
+            sizeBytes: 12,
+          },
+        };
+        store.addImages(THREAD_REF, [image]);
+        store.setFiles(THREAD_REF, [file]);
+        await owner.own("layout", waitForLayout);
+        await owner.own("send", () =>
+          page.getByRole("button", { name: "Send message", exact: true }).click(),
+        );
+        await owner.own("request", () =>
+          vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1)),
+        );
+        expect(prepare).toHaveBeenCalledWith({
+          threadId: THREAD_ID,
+          providerInstanceId: selection.instanceId,
+          text: prompt,
+        });
+        expect(wsRequests.filter((request) => request.type === "thread.turn.start")).toHaveLength(
+          0,
+        );
+        switch (change) {
+          case "provider":
+            store.setModelSelection(
+              THREAD_REF,
+              createModelSelection(unsupportedInstance, selection.model),
+            );
+            break;
+          case "model":
+            store.setModelSelection(
+              THREAD_REF,
+              createModelSelection(selection.instanceId, nextModel),
+            );
+            break;
+          case "options":
+            store.setModelSelection(
+              THREAD_REF,
+              createModelSelection(selection.instanceId, selection.model, [
+                { id: "reasoningEffort", value: "low" },
+              ]),
+            );
+            break;
+          case "runtime mode":
+            store.setRuntimeMode(THREAD_REF, "approval-required");
+            break;
+          case "interaction mode":
+            store.setInteractionMode(THREAD_REF, "plan");
+            break;
+          case "images":
+            store.removeImage(THREAD_REF, image.id);
+            store.addImages(THREAD_REF, [
+              { ...image, id: "secret-held-new-image", name: "after.png" },
+            ]);
+            break;
+          case "files":
+            store.setFiles(THREAD_REF, [
+              {
+                ...file,
+                id: "secret-held-new-file",
+                name: "after.txt",
+                attachment: { ...file.attachment, id: "secret-held-new-file", name: "after.txt" },
+              },
+            ]);
+            break;
+        }
+        const latest = store.getComposerDraft(THREAD_REF)!;
+        await owner.own("layout", waitForLayout);
+        expect(sendCompletion).toBeDefined();
+        release();
+        await owner.own("receipt", () => sendCompletion!);
+        const preserved = useComposerDraftStore.getState().getComposerDraft(THREAD_REF)!;
+        expect(preserved.prompt).toBe(prompt);
+        expect(preserved.images).toBe(latest.images);
+        expect(preserved.files).toBe(latest.files);
+        expect(preserved.activeProvider).toBe(latest.activeProvider);
+        expect(preserved.modelSelectionByProvider).toBe(latest.modelSelectionByProvider);
+        expect(preserved.runtimeMode).toBe(latest.runtimeMode);
+        expect(preserved.interactionMode).toBe(latest.interactionMode);
+        expect((await owner.own("editor", waitForComposerEditor)).textContent).toBe(prompt);
+        expect(document.body.textContent).not.toContain(reference);
+        expect(
+          wsRequests.filter((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
+        ).toHaveLength(0);
+        expect(prepare).toHaveBeenCalledTimes(1);
+      });
+    },
+  );
 
   it("places configured dictation immediately before the send action", async () => {
     const mounted = await mountChatView({

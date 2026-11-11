@@ -76,6 +76,12 @@ afterEach(() => {
 });
 
 describe("clientPersistenceStorage", () => {
+  it("retains a saved relay's transport across browser metadata reloads", () => {
+    getTestWindow();
+    const record = { ...savedRegistryRecord, transport: "relay" as const };
+    writeBrowserSavedEnvironmentRegistry([record]);
+    expect(readBrowserSavedEnvironmentRegistry()).toEqual([record]);
+  });
   it("migrates legacy browser client settings into the Cafe Code key", () => {
     const testWindow = getTestWindow();
     testWindow.localStorage.setItem(

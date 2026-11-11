@@ -22,6 +22,7 @@ export function applySavedEnvironmentEdit(
 ): SavedEnvironmentRecord {
   const label = input.label.trim();
   if (!label) throw new Error(uiText("Enter a name for this environment."));
+  if (record.transport === "relay") return { ...record, label };
   const host = input.host.trim();
   const port = input.port.trim();
   if (!host || /[\s/@?#\\]/u.test(host)) {

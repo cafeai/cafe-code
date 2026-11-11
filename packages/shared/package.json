@@ -299,6 +299,10 @@
     "./startupProfiler": {
       "types": "./src/startupProfiler.ts",
       "import": "./src/startupProfiler.ts"
+    },
+    "./cafeSecrets": {
+      "types": "./src/cafeSecrets.ts",
+      "import": "./src/cafeSecrets.ts"
     }
   },
   "scripts": {

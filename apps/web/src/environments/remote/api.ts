@@ -1,4 +1,5 @@
 import { fetchAppResource } from "../relay/active";
+import { RelayError } from "@cafecode/relay/errors";
 import { uiText } from "@cafecode/shared/i18n";
 import type {
   AuthBearerBootstrapResult,
@@ -106,11 +107,30 @@ export async function fetchRemoteJson<T>(input: {
       },
       ...(input.body !== undefined ? { body: JSON.stringify(input.body) } : {}),
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof RelayError) {
+      if (["AUTH_REQUIRED", "AUTH_REJECTED", "SECOND_FACTOR_REQUIRED"].includes(error.code))
+        throw new RemoteEnvironmentAuthHttpError(
+          uiText("The saved relay session was rejected. Pair this host again."),
+          401,
+        );
+      if (
+        [
+          "ENVIRONMENT_MISMATCH",
+          "HOST_IDENTITY_MISMATCH",
+          "NETWORK_MISMATCH",
+          "CRYPTO_FAILURE",
+        ].includes(error.code)
+      )
+        throw new RemoteEnvironmentConnectionError(
+          uiText("The relay host identity could not be verified. Pair this host again."),
+        );
+    }
     // The native probe sends no HTTP/auth data and never opens a trust dialog.
     // Browser clients and older desktop bridges retain ordinary network handling.
     if (
       new URL(input.httpBaseUrl).protocol === "https:" &&
+      !new URL(input.httpBaseUrl).hostname.endsWith(".cafecode-relay.invalid") &&
       window.desktopBridge?.inspectRemoteCertificate
     ) {
       const inspection = await window.desktopBridge

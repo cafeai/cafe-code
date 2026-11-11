@@ -296,7 +296,7 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
               <li>{uiText("Open a relay-enabled Cafe build on your computer.")}</li>
               <li>
                 {uiText(
-                  "Go to Settings → Connections → Manage relays and create a pairing invitation.",
+                  "Go to Settings → Connections, turn on Relay, then create a relay invitation.",
                 )}
               </li>
               <li>
@@ -306,10 +306,10 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
               </li>
             </ol>
             <div className="rounded-xl border bg-muted/30 p-4">
-              <h2 className="mb-2 font-medium">{uiText("Don't see Manage relays?")}</h2>
+              <h2 className="mb-2 font-medium">{uiText("Don't see Relay?")}</h2>
               <p className="text-sm text-muted-foreground">
                 {uiText(
-                  "Your Cafe build needs relay support, and the computer must be enrolled in a relay network. If that setup is missing, this browser page cannot connect yet.",
+                  "Use a Cafe build with relay support on the host. This browser page cannot turn on hosting for that computer.",
                 )}
               </p>
             </div>

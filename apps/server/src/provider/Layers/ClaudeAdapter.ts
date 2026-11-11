@@ -179,6 +179,9 @@ import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { getThreadSecretsStore } from "../../secrets/store.ts";
+import { makeSecretRunnerSession, type SecretRunnerSession } from "../../secrets/session.ts";
+import { makeClaudeSecretHooks } from "../../secrets/claudeHooks.ts";
 import { readSystemPromptFileForInjection } from "../../systemPromptFile.ts";
 import { buildCafeInstructions } from "../CafeInstructions.ts";
 import {
@@ -943,6 +946,8 @@ interface ClaudeSessionContext {
   /** Exact query-owned scheduling authority; never shared with a resumed query. */
   readonly schedulingBinding: SchedulingSessionBinding | undefined;
   readonly managementBinding: ManagementMcpBinding | undefined;
+  readonly secretRunner?: SecretRunnerSession;
+  readonly secretHooks?: ReturnType<typeof makeClaudeSecretHooks>;
   readonly visualizationBinding: VisualizationSessionBinding | undefined;
   readonly glideBinding?: GlideSessionBinding | undefined;
   readonly archivedToolPrivacy?: ArchivedToolPayloadRedactor | undefined;
@@ -5774,7 +5779,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               }
             : {}),
           ...(providerItemId ? { itemId: ProviderItemId.make(providerItemId) } : {}),
-          payload: redactClaudeNativeProviderIdentities(boundedClaudeNativeMessagePayload(message)),
+          payload: redactClaudeNativeProviderIdentities(
+            boundedClaudeNativeMessagePayload(
+              context.secretHooks?.hasValues()
+                ? (context.secretHooks.redact(message) as SDKMessage)
+                : message,
+            ),
+          ),
         },
       },
       context.session.threadId,
@@ -10486,6 +10497,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const { quotaReport: _stoppedQuota, ...stoppedSession } = context.session;
     context.session = stoppedSession;
     context.stopped = true;
+    context.secretHooks?.retire();
+    context.secretRunner?.retire();
     context.steerReceiptsByUuid.clear();
     const credentialExpiryOwner = context.credentialExpiryOwner;
     context.credentialExpiryOwner = undefined;
@@ -10499,6 +10512,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // Revoke before any asynchronous provider teardown. Even an uncertain
     // native close must not leave a stopped query able to schedule new work.
     yield* context.managementBinding?.dispose ?? Effect.void;
+    yield* Effect.promise(() => context.secretRunner?.dispose() ?? Promise.resolve()).pipe(
+      Effect.catchCause(() =>
+        Effect.logWarning("Private Cafe Secrets runner cleanup remains incomplete."),
+      ),
+    );
     yield* disposeGlideSession(context.glideBinding);
     yield* Effect.promise(() => context.schedulingBinding?.dispose() ?? Promise.resolve()).pipe(
       Effect.catchCause(() => Effect.logWarning("Claude scheduling cleanup remains pending.")),
@@ -10674,6 +10692,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     let startedQuery: ClaudeQueryRuntime | undefined;
     let startedContext: ClaudeSessionContext | undefined;
     let sessionTransferred = false;
+    let secretRunner: SecretRunnerSession | undefined;
+    let secretHooks: ReturnType<typeof makeClaudeSecretHooks> | undefined;
     return Effect.gen(function* () {
       if (input.provider !== undefined && input.provider !== PROVIDER) {
         return yield* new ProviderAdapterValidationError({
@@ -11483,7 +11503,36 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         visualizationBinding,
         glideBinding,
       ].filter((binding) => binding !== undefined);
+      secretRunner = yield* Effect.tryPromise({
+        try: () => makeSecretRunnerSession({ threadId, secretsDir: serverConfig.secretsDir }),
+        catch: () =>
+          new ProviderAdapterProcessError({
+            provider: PROVIDER,
+            threadId,
+            detail: "Could not prepare Cafe Secrets.",
+          }),
+      });
+      secretHooks = makeClaudeSecretHooks({
+        store: getThreadSecretsStore(serverConfig.secretsDir),
+        threadId,
+        nativeVersion: options?.getNativeVersion?.(),
+        runnerInvocation: secretRunner.invocation,
+        isCurrent: () =>
+          startedContext === undefined
+            ? !sessionTransferred
+            : sessions.get(threadId) === startedContext &&
+              !startedContext.stopped &&
+              !startedContext.sdkStreamEnded,
+        retire: async () => {
+          if (startedContext) {
+            startedContext.stopped = true;
+            startedContext.queryClosureUncertain = true;
+          }
+          await startedQuery?.close();
+        },
+      });
       const queryOptions: ClaudeQueryOptions = {
+        hooks: secretHooks.hooks,
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
         pathToClaudeCodeExecutable: claudeBinaryPath,
@@ -11495,6 +11544,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           preset: "claude_code",
           append:
             cafeInstructions +
+            secretRunner.instructions +
             (visualizationBinding ? `\n\n${GENERATED_VISUALIZATION_INSTRUCTIONS}` : ""),
         },
         settingSources: [...CLAUDE_SETTING_SOURCES],
@@ -11723,6 +11773,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         pendingCommandCatalog: undefined,
         schedulingBinding,
         managementBinding,
+        secretRunner,
+        secretHooks,
         visualizationBinding,
         archivedToolPrivacy: new ArchivedToolPayloadRedactor(),
         glideBinding,
@@ -11889,6 +11941,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // Effect scope. Cover both synchronous SDK launch failures and
         // cancellation during publication before ownership is transferred.
         return Effect.gen(function* () {
+          secretHooks?.retire();
+          secretRunner?.retire();
+          yield* Effect.promise(() => secretRunner?.dispose() ?? Promise.resolve()).pipe(
+            Effect.catchCause(() =>
+              Effect.logWarning("Private Cafe Secrets runner cleanup remains incomplete."),
+            ),
+          );
           yield* managementBinding?.dispose ?? Effect.void;
           yield* disposeGlideSession(glideBinding);
           yield* Effect.promise(() => schedulingBinding?.dispose() ?? Promise.resolve()).pipe(

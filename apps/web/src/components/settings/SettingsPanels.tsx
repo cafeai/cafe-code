@@ -1,4 +1,8 @@
 import { getSettingsPageReset } from "./settingsReset";
+import {
+  collectDeletedThreadGroupEntries,
+  type DeletedThreadGroupEntry,
+} from "../../lib/deletedThreadGroups";
 import { AmbianceSettingsSections } from "./AmbianceSettings";
 import { DataProfileSettings } from "./DataProfileSettings";
 import { useUiLocale, useUiPresentation } from "~/i18n";
@@ -16,6 +20,7 @@ import {
   ArchiveX,
   CopyIcon,
   FileTextIcon,
+  FolderIcon,
   MessageSquareIcon,
   MinusIcon,
   PlusIcon,
@@ -2724,6 +2729,152 @@ export function ArchivedThreadsPanel() {
   );
 }
 
+/**
+ * Recycle Bin entries for deleted agent-created groups. Restore asks the
+ * server for the exact subtree/incarnation; Delete forever runs the existing
+ * per-chat permanent delete for each chat, in order, without retrying.
+ */
+function DeletedThreadGroupsSection({
+  entries,
+  onChanged,
+}: {
+  entries: readonly DeletedThreadGroupEntry[];
+  onChanged: () => void;
+}) {
+  const uiLocale = useUiLocale();
+  const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
+  const { restoreThreadGroup, hardDeleteThread } = useThreadActions();
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  if (entries.length === 0) return null;
+
+  const restore = async (entry: DeletedThreadGroupEntry) => {
+    setBusyKey(entry.group.id);
+    try {
+      await restoreThreadGroup(entry.environmentId, entry.group.id);
+      onChanged();
+    } catch (error) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: uiText("Could not restore group", undefined, undefined, uiLocale),
+          description:
+            error instanceof Error
+              ? error.message
+              : uiText("An error occurred.", undefined, undefined, uiLocale),
+        }),
+      );
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const deleteForever = async (entry: DeletedThreadGroupEntry) => {
+    const api = readWorkspaceApi();
+    if (!api) return;
+    const confirmed = await api.dialogs.confirm(
+      uiText(
+        'Permanently delete group "{title}" and its {count, plural, one {# chat} other {# chats}}? This cannot be undone.',
+        { title: entry.group.title, count: entry.threadIds.length },
+        undefined,
+        uiLocale,
+      ),
+    );
+    if (!confirmed) return;
+    setBusyKey(entry.group.id);
+    let deleted = 0;
+    try {
+      for (const threadId of entry.threadIds) {
+        await hardDeleteThread(scopeThreadRef(entry.environmentId, threadId), {
+          confirm: false,
+          refresh: false,
+        });
+        deleted += 1;
+      }
+    } catch (error) {
+      // Stop at the first failure; the remaining chats stay in the Recycle
+      // Bin with their group hint. Nothing is replayed.
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: uiText("Could not delete group", undefined, undefined, uiLocale),
+          description: uiText(
+            "Deleted {deleted} of {count} {count, plural, one {chat} other {chats}}. {detail}",
+            {
+              deleted,
+              count: entry.threadIds.length,
+              detail:
+                error instanceof Error
+                  ? error.message
+                  : uiText("Unknown deletion error.", undefined, undefined, uiLocale),
+            },
+            undefined,
+            uiLocale,
+          ),
+        }),
+      );
+    } finally {
+      setBusyKey(null);
+      onChanged();
+    }
+  };
+
+  return (
+    <SettingsSection
+      title={uiText("Groups", undefined, undefined, uiLocale)}
+      icon={<FolderIcon className="size-3.5" />}
+    >
+      {entries.map((entry) => (
+        <SettingsRow
+          key={`${entry.environmentId}:${entry.group.id}`}
+          title={uiText('Group "{title}"', { title: entry.group.title }, undefined, uiLocale)}
+          description={
+            <>
+              {uiText(
+                "{count, plural, one {# chat} other {# chats}}",
+                { count: entry.threadIds.length },
+                undefined,
+                uiLocale,
+              )}
+              {entry.nestedGroupCount > 0
+                ? uiText(
+                    " · {count, plural, one {# nested group} other {# nested groups}}",
+                    { count: entry.nestedGroupCount },
+                    undefined,
+                    uiLocale,
+                  )
+                : null}
+              {uiText(" · Moved to Recycle Bin ", undefined, undefined, uiLocale)}
+              {uiPresentation.formatRelativeTimeLabel(entry.group.deletedAt)}
+            </>
+          }
+          control={
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={busyKey !== null}
+                onClick={() => void restore(entry)}
+              >
+                {uiText("Restore group", undefined, undefined, uiLocale)}
+              </Button>
+              <Button
+                type="button"
+                variant="destructive-outline"
+                size="sm"
+                disabled={busyKey !== null}
+                onClick={() => void deleteForever(entry)}
+              >
+                {uiText("Delete forever", undefined, undefined, uiLocale)}
+              </Button>
+            </div>
+          }
+        />
+      ))}
+    </SettingsSection>
+  );
+}
+
 export function RecentlyDeletedThreadsPanel() {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
@@ -2742,6 +2893,20 @@ export function RecentlyDeletedThreadsPanel() {
     () => groupThreadHistory(deletedSnapshots, "deleted"),
     [deletedSnapshots],
   );
+  const deletedThreadGroupEntries = useMemo(
+    () => collectDeletedThreadGroupEntries(deletedSnapshots),
+    [deletedSnapshots],
+  );
+  // "From group …" hints for chats that were deleted with a group.
+  const deletedGroupTitleByKey = useMemo(() => {
+    const titles = new Map<string, string>();
+    for (const { environmentId, snapshot } of deletedSnapshots) {
+      for (const group of snapshot.deletedThreadGroups ?? []) {
+        titles.set(`${environmentId}:${group.id}`, group.title);
+      }
+    }
+    return titles;
+  }, [deletedSnapshots]);
   const deletedThreadRefs = useMemo(
     () => collectRecentlyDeletedThreadRefs(deletedGroups),
     [deletedGroups],
@@ -2901,6 +3066,10 @@ export function RecentlyDeletedThreadsPanel() {
   return (
     <SettingsPageContainer title={uiText("History", undefined, undefined, uiLocale)}>
       <HistorySettingsNavigation deleted />
+      <DeletedThreadGroupsSection
+        entries={deletedThreadGroupEntries}
+        onChanged={refreshDeletedThreads}
+      />
       {deletedGroups.length === 0 ? (
         isLoadingDeleted || showDeletedSkeleton ? (
           showDeletedSkeleton ? (
@@ -2951,6 +3120,19 @@ export function RecentlyDeletedThreadsPanel() {
                     {uiPresentation.formatRelativeTimeLabel(thread.deletedAt ?? thread.updatedAt)}
                     {uiText(" · Created ", undefined, undefined, uiLocale)}
                     {uiPresentation.formatRelativeTimeLabel(thread.createdAt)}
+                    {thread.groupId &&
+                    deletedGroupTitleByKey.has(`${thread.environmentId}:${thread.groupId}`)
+                      ? uiText(
+                          ' · From group "{title}"',
+                          {
+                            title: deletedGroupTitleByKey.get(
+                              `${thread.environmentId}:${thread.groupId}`,
+                            ),
+                          },
+                          undefined,
+                          uiLocale,
+                        )
+                      : null}
                   </>
                 }
               />

@@ -3,9 +3,11 @@ import type {
   OrchestrationProject,
   OrchestrationProjectShell,
   OrchestrationThread,
+  OrchestrationThreadGroup,
   OrchestrationThreadShell,
   ServerProvider,
 } from "@cafecode/contracts";
+import type { ThreadOrganizationRecord } from "../persistence/threadOrganization.ts";
 
 export const nonEmptyString = z.string().trim().min(1);
 export const entityId = nonEmptyString.describe("Stable Cafe Code entity identifier.");
@@ -69,7 +71,91 @@ export const threadSummary = z.object({
       unconfirmedAgentCountTruncated: z.boolean(),
     })
     .nullable(),
+  // Organisation and origin metadata. Classification is an editable label;
+  // provenance is the separate server-recorded creation fact. Neither grants
+  // permission, native ownership or retry authority.
+  groupId: z.string().nullable(),
+  origin: z
+    .object({
+      classification: z.enum(["human", "agent", "unknown"]),
+      source: z.enum(["recorded", "user"]),
+    })
+    .nullable(),
+  provenance: z
+    .object({
+      creationPath: z.enum([
+        "cafe-ui",
+        "mcp-launch",
+        "mcp-owner-client",
+        "fork",
+        "duplicate",
+        "server",
+      ]),
+      originThreadId: z.string().nullable(),
+      recordedAt: z.string(),
+    })
+    .nullable(),
+  description: z.string().nullable(),
 });
+
+export const threadGroupSummary = z.object({
+  id: z.string(),
+  ownerThreadId: z.string(),
+  title: z.string(),
+  description: z.string().nullable(),
+  memberCount: z.number().int().nonnegative(),
+  nestedGroupCount: z.number().int().nonnegative(),
+  createdAt: z.string(),
+  deletedAt: z.string().nullable(),
+  provenance: z.object({
+    creationPath: z.enum(["mcp-launch", "mcp-owner-client", "server"]),
+    attribution: z.enum(["launch-claim", "explicit-argument"]),
+    launchThreadId: z.string().nullable(),
+  }),
+});
+
+/**
+ * Member counts cover live members for a live group and still-deleted members
+ * of the same incarnation for a deleted one, so cleanup previews are honest.
+ */
+export function summarizeThreadGroup(
+  group: OrchestrationThreadGroup,
+  groups: ReadonlyArray<OrchestrationThreadGroup>,
+  organization: ReadonlyMap<string, ThreadOrganizationRecord>,
+  deletedThreadIds: ReadonlySet<string>,
+) {
+  let memberCount = 0;
+  const memberIds = new Set<string>();
+  for (const [threadId, record] of organization) {
+    if (record.groupId !== group.id) continue;
+    const deleted = deletedThreadIds.has(threadId);
+    if (group.deletedAt === null ? deleted : !deleted || record.deletionId !== group.deletionId)
+      continue;
+    memberCount += 1;
+    memberIds.add(threadId);
+  }
+  return {
+    id: group.id,
+    ownerThreadId: group.ownerThreadId,
+    title: group.title,
+    description: group.description,
+    memberCount,
+    nestedGroupCount: groups.filter(
+      (other) =>
+        memberIds.has(other.ownerThreadId) &&
+        (group.deletedAt === null
+          ? other.deletedAt === null
+          : other.deletionId === group.deletionId),
+    ).length,
+    createdAt: group.createdAt,
+    deletedAt: group.deletedAt,
+    provenance: {
+      creationPath: group.provenance.creationPath,
+      attribution: group.provenance.attribution,
+      launchThreadId: group.provenance.launchThreadId ?? null,
+    },
+  };
+}
 export const providerSummary = z.object({
   instanceId: providerInstanceId,
   driver: nonEmptyString,
@@ -106,9 +192,26 @@ export function summarizeProject(project: OrchestrationProject | OrchestrationPr
   };
 }
 
-export function summarizeThread(thread: OrchestrationThread | OrchestrationThreadShell) {
+export function summarizeThread(
+  thread: OrchestrationThread | OrchestrationThreadShell,
+  organization?: ThreadOrganizationRecord,
+) {
   const live = "liveWork" in thread ? thread.liveWork : undefined;
+  const origin = organization?.origin ?? thread.origin ?? null;
+  const provenance =
+    organization?.provenance ?? ("provenance" in thread ? thread.provenance : null);
   return {
+    groupId: organization?.groupId ?? thread.groupId ?? null,
+    origin: origin ? { classification: origin.classification, source: origin.source } : null,
+    provenance: provenance
+      ? {
+          creationPath: provenance.creationPath,
+          originThreadId: provenance.originThreadId ?? null,
+          recordedAt: provenance.recordedAt,
+        }
+      : null,
+    description:
+      organization?.description ?? ("description" in thread ? (thread.description ?? null) : null),
     id: thread.id,
     projectId: thread.projectId,
     title: thread.title,

@@ -86,6 +86,7 @@ async function main(): Promise<void> {
     port: config.listen.port,
     ...(config.forwardedIpKeys ? { forwardedIpKeys: config.forwardedIpKeys } : {}),
     ...(config.hostWork ? { hostWork: config.hostWork } : {}),
+    selfService: config.selfService === true,
     ...(tls ? { tls } : {}),
     meshListen: config.mesh,
     meshPeerUrls: new Map(config.mesh.peers.map((peer) => [peer.nodeId, peer.url])),
@@ -123,6 +124,7 @@ async function main(): Promise<void> {
         );
         requireRelay(
           replacement.nodeId === config.nodeId &&
+            replacement.selfService === config.selfService &&
             replacement.rootPublicKey === config.rootPublicKey &&
             replacement.privateIdentity === config.privateIdentity &&
             canonicalBytes(replacement.hostWork ?? null).toString() ===

@@ -31,6 +31,7 @@ interface SavedEnvironmentRegistryStorageDocument {
 }
 
 const PersistedSavedEnvironmentStorageRecordSchema = Schema.Struct({
+  transport: Schema.optionalKey(Schema.Literal("relay")),
   environmentId: EnvironmentId,
   label: Schema.String,
   httpBaseUrl: Schema.String,
@@ -114,6 +115,7 @@ function toPersistedSavedEnvironmentRecord(
   record: PersistedSavedEnvironmentStorageRecord,
 ): PersistedSavedEnvironmentRecord {
   const nextRecord = {
+    ...(record.transport ? { transport: record.transport } : {}),
     environmentId: record.environmentId,
     label: record.label,
     httpBaseUrl: record.httpBaseUrl,
@@ -129,6 +131,7 @@ function toSavedEnvironmentStorageRecord(
   encryptedBearerToken: Option.Option<string>,
 ): PersistedSavedEnvironmentStorageRecord {
   const nextRecord = {
+    ...(record.transport ? { transport: record.transport } : {}),
     environmentId: record.environmentId,
     label: record.label,
     httpBaseUrl: record.httpBaseUrl,

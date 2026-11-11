@@ -1,3 +1,6 @@
+import { activateSavedRelay, pairSavedRelay } from "../relay/saved";
+import type { ActiveRelay } from "../relay/active";
+import { readSavedEnvironmentSecret } from "./catalog";
 import { uiText } from "@cafecode/shared/i18n";
 import {
   type AuthSessionRole,
@@ -1391,6 +1394,9 @@ function createSavedEnvironmentClient(
         // unrelated auxiliary socket from overwriting primary connection
         // truth.
         trackGlobalConnectionStatus: false,
+        ...(getSavedEnvironmentRecord(environmentId)?.transport === "relay"
+          ? { serialization: "ndjson" as const }
+          : {}),
         getConnectionLabel: () => getSavedEnvironmentRecord(environmentId)?.label ?? null,
         getVersionMismatchHint: () =>
           resolveServerConfigVersionMismatch(
@@ -1575,146 +1581,188 @@ async function ensureSavedEnvironmentConnection(
     cancelled: false,
     promise: Promise.resolve().then(async () => {
       const activeRecord = record;
-      const roleHint = options?.role ?? null;
-      const bearerToken =
-        options?.bearerToken ?? (await readSavedEnvironmentBearerToken(record.environmentId));
-      const assertCurrent = () => {
-        if (
-          pendingEntry.cancelled ||
-          pendingSavedEnvironmentConnections.get(record.environmentId) !== pendingEntry
-        ) {
-          throw new SavedEnvironmentConnectionCancelledError(record.environmentId);
-        }
-      };
-      assertCurrent();
-      if (!bearerToken) {
-        useSavedEnvironmentRuntimeStore.getState().patch(record.environmentId, {
-          authState: "requires-auth",
-          role: null,
-        });
-        setRuntimeError(
-          record.environmentId,
-          // This legacy error text is a canonical classifier input above.
-          // getRuntimeErrorFields translates the safe outward explanation.
-          new Error("Saved environment is missing its saved credential."),
-        );
-        throw new Error("Saved environment is missing its saved credential.");
-      }
-
-      const activeBearerToken = bearerToken;
-      const client =
-        options?.client ??
-        createSavedEnvironmentClient(activeRecord.environmentId, activeBearerToken);
-      const initialConfigSnapshot = createDeferredPromise<ServerConfig>();
-      const knownEnvironment = createKnownEnvironment({
-        id: activeRecord.environmentId,
-        label: activeRecord.label,
-        source: "manual",
-        target: {
-          httpBaseUrl: activeRecord.httpBaseUrl,
-          wsBaseUrl: activeRecord.wsBaseUrl,
-        },
-      });
-      const connection = createEnvironmentConnection({
-        kind: "saved",
-        knownEnvironment: {
-          ...knownEnvironment,
-          environmentId: activeRecord.environmentId,
-        },
-        client,
-        refreshMetadata: async () => {
-          await refreshSavedEnvironmentMetadata(
-            activeRecord.environmentId,
-            activeBearerToken,
-            client,
-            undefined,
-            undefined,
-            () => pendingEntry.cancelled,
-          );
-        },
-        onConfigSnapshot: (config) => {
-          if (pendingEntry.cancelled) return;
-          initialConfigSnapshot.resolve(config);
-          useSavedEnvironmentRuntimeStore.getState().patch(activeRecord.environmentId, {
-            descriptor: config.environment,
-            serverConfig: config,
-          });
-        },
-        onSettingsUpdated: (payload) => {
-          if (pendingEntry.cancelled) return;
-          const store = useSavedEnvironmentRuntimeStore.getState();
-          const current = store.byId[activeRecord.environmentId]?.serverConfig;
-          if (current)
-            store.patch(activeRecord.environmentId, {
-              serverConfig: projectServerConfigSettings(current, payload),
-            });
-        },
-        onProviderStatuses: (payload) => {
-          if (pendingEntry.cancelled) return;
-          const store = useSavedEnvironmentRuntimeStore.getState();
-          const current = store.byId[activeRecord.environmentId]?.serverConfig;
-          if (current)
-            store.patch(activeRecord.environmentId, {
-              serverConfig: { ...current, providers: payload.providers },
-            });
-        },
-        onWelcome: (payload) => {
-          if (pendingEntry.cancelled) return;
-          useSavedEnvironmentRuntimeStore.getState().patch(activeRecord.environmentId, {
-            descriptor: payload.environment,
-          });
-        },
-        ...createEnvironmentConnectionHandlers(),
-      });
+      let relayOwner: ActiveRelay | undefined;
+      let connectionOwner: EnvironmentConnection | undefined;
       let disposal: Promise<void> | undefined;
-      const dispose = () => (disposal ??= connection.dispose());
+      const dispose = () => {
+        relayOwner?.retire();
+        return (disposal ??= (async () => {
+          // Both owners must close even when one rejects. A late encrypted
+          // credential write must finish before removal or replacement.
+          const results = await Promise.allSettled([
+            connectionOwner?.dispose(),
+            relayOwner?.close(),
+          ]);
+          if (results.some((result) => result.status === "rejected"))
+            throw new Error("Saved environment transport could not close.");
+        })());
+      };
       pendingEntry.dispose = dispose;
-
       try {
-        try {
-          const initialServerConfig =
-            options?.serverConfig ??
-            (await waitForConfigSnapshot(
-              initialConfigSnapshot.promise,
-              INITIAL_SERVER_CONFIG_SNAPSHOT_WAIT_MS,
-            ));
-          await refreshSavedEnvironmentMetadata(
-            activeRecord.environmentId,
-            activeBearerToken,
-            client,
-            roleHint,
-            initialServerConfig,
-            () => pendingEntry.cancelled,
+        const roleHint = options?.role ?? null;
+        const bearerToken =
+          options?.bearerToken ??
+          (await (record.transport === "relay"
+            ? readSavedEnvironmentSecret(record.environmentId)
+            : readSavedEnvironmentBearerToken(record.environmentId)));
+        const assertCurrent = () => {
+          if (
+            pendingEntry.cancelled ||
+            pendingSavedEnvironmentConnections.get(record.environmentId) !== pendingEntry
+          ) {
+            throw new SavedEnvironmentConnectionCancelledError(record.environmentId);
+          }
+        };
+        assertCurrent();
+        if (!bearerToken) {
+          useSavedEnvironmentRuntimeStore.getState().patch(record.environmentId, {
+            authState: "requires-auth",
+            role: null,
+          });
+          setRuntimeError(
+            record.environmentId,
+            // This legacy error text is a canonical classifier input above.
+            // getRuntimeErrorFields translates the safe outward explanation.
+            new Error("Saved environment is missing its saved credential."),
           );
-        } catch (error) {
-          assertCurrent();
-          const isAuthError = isRemoteEnvironmentAuthHttpError(error) && error.status === 401;
-          if (!isAuthError) {
+          throw new Error("Saved environment is missing its saved credential.");
+        }
+
+        let relayTransport: ReturnType<typeof activateSavedRelay> | undefined;
+        if (activeRecord.transport === "relay") {
+          try {
+            relayTransport = activateSavedRelay(activeRecord, bearerToken);
+          } catch {
+            // Corrupt/private state or a changed metadata binding cannot fall
+            // back to native HTTP or become a retryable pairing submission.
+            useSavedEnvironmentRuntimeStore.getState().patch(record.environmentId, {
+              authState: "requires-auth",
+              role: null,
+            });
+            const error = new Error("Saved environment is missing its saved credential.");
+            setRuntimeError(record.environmentId, error);
             throw error;
           }
-          await removeSavedEnvironmentBearerToken(activeRecord.environmentId);
-          throw new Error("Saved environment credential expired. Add it again to sign in.", {
-            cause: error,
-          });
         }
-        if (
-          pendingEntry.cancelled ||
-          pendingSavedEnvironmentConnections.get(activeRecord.environmentId) !== pendingEntry
-        ) {
-          throw new SavedEnvironmentConnectionCancelledError(activeRecord.environmentId);
+        relayOwner = relayTransport?.relay;
+        const activeBearerToken = relayTransport?.bearerToken ?? bearerToken;
+        const client =
+          options?.client ??
+          createSavedEnvironmentClient(activeRecord.environmentId, activeBearerToken);
+        const initialConfigSnapshot = createDeferredPromise<ServerConfig>();
+        const knownEnvironment = createKnownEnvironment({
+          id: activeRecord.environmentId,
+          label: activeRecord.label,
+          source: "manual",
+          target: {
+            httpBaseUrl: activeRecord.httpBaseUrl,
+            wsBaseUrl: activeRecord.wsBaseUrl,
+          },
+        });
+        const baseConnection = createEnvironmentConnection({
+          kind: "saved",
+          knownEnvironment: {
+            ...knownEnvironment,
+            environmentId: activeRecord.environmentId,
+          },
+          client,
+          refreshMetadata: async () => {
+            await refreshSavedEnvironmentMetadata(
+              activeRecord.environmentId,
+              activeBearerToken,
+              client,
+              undefined,
+              undefined,
+              () => pendingEntry.cancelled,
+            );
+          },
+          onConfigSnapshot: (config) => {
+            if (pendingEntry.cancelled) return;
+            initialConfigSnapshot.resolve(config);
+            useSavedEnvironmentRuntimeStore.getState().patch(activeRecord.environmentId, {
+              descriptor: config.environment,
+              serverConfig: config,
+            });
+          },
+          onSettingsUpdated: (payload) => {
+            if (pendingEntry.cancelled) return;
+            const store = useSavedEnvironmentRuntimeStore.getState();
+            const current = store.byId[activeRecord.environmentId]?.serverConfig;
+            if (current)
+              store.patch(activeRecord.environmentId, {
+                serverConfig: projectServerConfigSettings(current, payload),
+              });
+          },
+          onProviderStatuses: (payload) => {
+            if (pendingEntry.cancelled) return;
+            const store = useSavedEnvironmentRuntimeStore.getState();
+            const current = store.byId[activeRecord.environmentId]?.serverConfig;
+            if (current)
+              store.patch(activeRecord.environmentId, {
+                serverConfig: { ...current, providers: payload.providers },
+              });
+          },
+          onWelcome: (payload) => {
+            if (pendingEntry.cancelled) return;
+            useSavedEnvironmentRuntimeStore.getState().patch(activeRecord.environmentId, {
+              descriptor: payload.environment,
+            });
+          },
+          ...createEnvironmentConnectionHandlers(),
+        });
+        connectionOwner = baseConnection;
+        const connection: EnvironmentConnection = { ...baseConnection, dispose };
+
+        try {
+          try {
+            const initialServerConfig =
+              options?.serverConfig ??
+              (await waitForConfigSnapshot(
+                initialConfigSnapshot.promise,
+                INITIAL_SERVER_CONFIG_SNAPSHOT_WAIT_MS,
+              ));
+            await refreshSavedEnvironmentMetadata(
+              activeRecord.environmentId,
+              activeBearerToken,
+              client,
+              roleHint,
+              initialServerConfig,
+              () => pendingEntry.cancelled,
+            );
+          } catch (error) {
+            assertCurrent();
+            const isAuthError = isRemoteEnvironmentAuthHttpError(error) && error.status === 401;
+            if (!isAuthError) {
+              throw error;
+            }
+            await dispose();
+            await removeSavedEnvironmentBearerToken(activeRecord.environmentId);
+            throw new Error("Saved environment credential expired. Add it again to sign in.", {
+              cause: error,
+            });
+          }
+          if (
+            pendingEntry.cancelled ||
+            pendingSavedEnvironmentConnections.get(activeRecord.environmentId) !== pendingEntry
+          ) {
+            throw new SavedEnvironmentConnectionCancelledError(activeRecord.environmentId);
+          }
+          registerConnection(connection);
+          return connection;
+        } catch (error) {
+          if (pendingEntry.cancelled || error instanceof SavedEnvironmentConnectionCancelledError) {
+            await dispose().catch(() => undefined);
+            throw new SavedEnvironmentConnectionCancelledError(activeRecord.environmentId);
+          }
+          setRuntimeError(activeRecord.environmentId, error);
+          const removed = await removeConnection(activeRecord.environmentId).catch(() => false);
+          if (!removed) {
+            await dispose().catch(() => undefined);
+          }
+          throw error;
         }
-        registerConnection(connection);
-        return connection;
       } catch (error) {
-        if (pendingEntry.cancelled || error instanceof SavedEnvironmentConnectionCancelledError) {
-          await dispose().catch(() => undefined);
-          throw new SavedEnvironmentConnectionCancelledError(activeRecord.environmentId);
-        }
-        setRuntimeError(activeRecord.environmentId, error);
-        const removed = await removeConnection(activeRecord.environmentId).catch(() => false);
-        if (!removed) {
-          await dispose().catch(() => undefined);
-        }
+        await dispose().catch(() => undefined);
         throw error;
       }
     }),
@@ -1934,10 +1982,10 @@ export async function reviewSavedEnvironmentCertificate(
 export async function removeSavedEnvironment(environmentId: EnvironmentId): Promise<void> {
   await disconnectSavedEnvironment(environmentId);
   disposeThreadDetailSubscriptionsForEnvironment(environmentId);
+  await removeSavedEnvironmentBearerToken(environmentId);
   useSavedEnvironmentRegistryStore.getState().remove(environmentId);
   useSavedEnvironmentRuntimeStore.getState().clear(environmentId);
   useStore.getState().removeEnvironmentState(environmentId);
-  await removeSavedEnvironmentBearerToken(environmentId);
 }
 
 export async function updateSavedEnvironment(
@@ -1963,11 +2011,42 @@ export async function updateSavedEnvironment(
 export async function addSavedEnvironment(input: {
   readonly label: string;
   readonly pairingUrl?: string;
+  readonly relayInvitation?: string;
   readonly host?: string;
   readonly pairingCode?: string;
   readonly password?: string;
   readonly secondFactor?: string;
 }): Promise<SavedEnvironmentRecord> {
+  if (input.relayInvitation !== undefined) {
+    const paired = await pairSavedRelay(
+      {
+        label: input.label,
+        relayInvitation: input.relayInvitation,
+        ...(input.secondFactor ? { secondFactor: input.secondFactor } : {}),
+      },
+      getPrimaryKnownEnvironment()?.environmentId,
+    );
+    const environmentId = paired.record.environmentId;
+    const registrySnapshot = snapshotSavedEnvironmentRegistry([environmentId]);
+    const existing = getSavedEnvironmentRecord(environmentId);
+    const record = {
+      ...paired.record,
+      label: input.label.trim() || existing?.label || paired.record.label,
+      createdAt: existing?.createdAt ?? paired.record.createdAt,
+    };
+    await disconnectSavedEnvironment(environmentId);
+    await persistSavedEnvironmentRecord(record);
+    if (!(await writeSavedEnvironmentBearerToken(environmentId, paired.secret))) {
+      await persistSavedEnvironmentRegistryRollback(registrySnapshot);
+      throw new Error(uiText("Unable to persist saved environment credentials."));
+    }
+    useSavedEnvironmentRegistryStore.getState().upsert(record);
+    await ensureSavedEnvironmentConnection(record, {
+      bearerToken: paired.secret,
+      role: paired.role,
+    });
+    return record;
+  }
   const password = input.password?.trim();
   if (password !== undefined && !password) {
     throw new Error(uiText("Enter the server admin password."));

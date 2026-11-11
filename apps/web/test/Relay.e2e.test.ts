@@ -366,7 +366,7 @@ for (const native of ["chromium", "electron"] as const)
       expect(await f.page.getByRole("combobox").count()).toBe(0);
       expect(await f.page.getByRole("textbox").count()).toBe(0);
       expect(await f.page.getByRole("button", { name: "Connect", exact: true }).count()).toBe(0);
-      await f.page.getByText("Don't see Manage relays?", { exact: true }).waitFor();
+      await f.page.getByText("Don't see Relay?", { exact: true }).waitFor();
       const screenshotDirectory = process.env.CAFE_RELAY_SCREENSHOTS;
       if (screenshotDirectory && native === "chromium") {
         await mkdir(screenshotDirectory, { recursive: true, mode: 0o700 });

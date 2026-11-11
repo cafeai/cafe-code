@@ -523,10 +523,12 @@ describe("buildSidebarThreadContextMenuItems", () => {
     });
     expect(items.map((item) => item.id)).toEqual([
       "rename",
+      "edit-metadata",
       "fork",
       "move",
       "copy-path",
       "copy-thread-id",
+      "secrets",
       "repair-thread",
       "delete",
     ]);
@@ -576,10 +578,12 @@ describe("buildSidebarThreadContextMenuItems", () => {
     expect(items.some((item) => item.id === "repair-thread")).toBe(false);
     expect(items.map((item) => item.id)).toEqual([
       "rename",
+      "edit-metadata",
       "fork",
       "move",
       "copy-path",
       "copy-thread-id",
+      "secrets",
       "delete",
     ]);
   });

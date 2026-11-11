@@ -51,6 +51,7 @@ import { brotliCompressSync, constants as zlibConstants, gzipSync } from "node:z
 import {
   CommandId,
   DEFAULT_SERVER_SETTINGS,
+  type ServerSettings,
   EnvironmentId,
   EventId,
   GitCommandError,
@@ -166,6 +167,7 @@ import { claudeCommandsConfigurationKey } from "./provider/claudeCommands.ts";
 import { ServerLifecycleEvents, type ServerLifecycleEventsShape } from "./serverLifecycleEvents.ts";
 import { ServerRuntimeStartup, type ServerRuntimeStartupShape } from "./serverRuntimeStartup.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "./serverSettings.ts";
+import { applyServerSettingsPatch } from "@cafecode/shared/serverSettings";
 import {
   ServerClientSettingsService,
   type ServerClientSettingsShape,
@@ -548,7 +550,9 @@ const buildAppUnderTest = (options?: {
     const tempBaseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-router-test-" });
     const baseDir =
       options?.config?.baseDir ??
-      (options?.relayConfig ? yield* fileSystem.realPath(tempBaseDir) : tempBaseDir);
+      (options?.relayConfig || options?.relayIO
+        ? yield* fileSystem.realPath(tempBaseDir)
+        : tempBaseDir);
     const devUrl = options?.config?.devUrl;
     const derivedPaths = yield* deriveServerPaths(baseDir, devUrl);
     const config: ServerConfigShape = {
@@ -726,25 +730,29 @@ const buildAppUnderTest = (options?: {
         })
       : VcsStatusBroadcaster.layer.pipe(Layer.provide(gitWorkflowLayer));
 
-    const relayListening = options?.relayConfig
-      ? Layer.effectDiscard(
-          Effect.gen(function* () {
-            const router = yield* HttpRouter.HttpRouter,
-              relay = yield* RelayRuntime;
-            // Same public opaque router boundary as the production HTTP adapter.
-            // @effect-diagnostics-next-line anyUnknownInErrorContext:off
-            const handler = router
-              .asHttpEffect()
-              .pipe(Effect.catch(() => Effect.succeed(HttpServerResponse.empty({ status: 500 }))));
-            yield* relay.start(handler);
-          }),
-        ).pipe(Layer.provideMerge(makeRoutesLayer))
-      : makeRoutesLayer;
+    const relayListening =
+      options?.relayConfig || options?.relayIO
+        ? Layer.effectDiscard(
+            Effect.gen(function* () {
+              const router = yield* HttpRouter.HttpRouter,
+                relay = yield* RelayRuntime;
+              // Same public opaque router boundary as the production HTTP adapter.
+              // @effect-diagnostics-next-line anyUnknownInErrorContext:off
+              const handler = router
+                .asHttpEffect()
+                .pipe(
+                  Effect.catch(() => Effect.succeed(HttpServerResponse.empty({ status: 500 }))),
+                );
+              yield* relay.start(handler);
+            }),
+          ).pipe(Layer.provideMerge(makeRoutesLayer))
+        : makeRoutesLayer;
     const relayLayer = RelayRuntimeLive;
     const servedRoutesLayer = HttpRouter.serve(relayListening, {
       disableListenLog: true,
       disableLogger: true,
     })
+      .pipe(Layer.provideMerge(relayLayer))
       .pipe(
         Layer.provide(
           Layer.mock(Keybindings)({
@@ -1087,6 +1095,8 @@ const buildAppUnderTest = (options?: {
             ...options?.layers?.projectionSnapshotQuery,
           }),
         ),
+      )
+      .pipe(
         Layer.provide(
           Layer.mock(CheckpointStore)({
             isGitRepository: () => Effect.succeed(false),
@@ -1100,7 +1110,6 @@ const buildAppUnderTest = (options?: {
         ),
       )
       .pipe(
-        Layer.provideMerge(relayLayer),
         Layer.provide(
           options?.relayIO ? Layer.succeed(RelayRuntimeIO, options.relayIO) : Layer.empty,
         ),
@@ -1625,7 +1634,12 @@ const getWsServerUrl = (
     );
   });
 
-const qualifyRelayRouter = (test: TestContext, compiled = false, publicNetwork = false) => {
+const qualifyRelayRouter = (
+  test: TestContext,
+  compiled = false,
+  publicNetwork = false,
+  selfService = false,
+) => {
   let phase = "setup";
   test.onTestFailed(() => {
     process.stdout.write("relay-router-phase: " + phase + "\n");
@@ -1744,6 +1758,7 @@ const qualifyRelayRouter = (test: TestContext, compiled = false, publicNetwork =
               tokenDigest: relayOpaque(relaySha256(relayUnopaque(capacity, 32))),
             },
           ],
+          selfService,
         }),
       );
       if (!lifetime.active) {
@@ -1767,8 +1782,23 @@ const qualifyRelayRouter = (test: TestContext, compiled = false, publicNetwork =
       yield* Effect.promise(() => relay!.updateNetwork(relayCanonicalBytes(network)));
     }
     const hostStarted = Promise.withResolvers<{ networkId: string; serving: number }>();
+    let relaySettings: ServerSettings = DEFAULT_SERVER_SETTINGS;
     yield* buildAppUnderTest({
       layers: {
+        ...(selfService
+          ? {
+              serverSettings: {
+                getSettings: Effect.sync(() => relaySettings),
+                updateSettingsWith: (update) =>
+                  update(relaySettings).pipe(
+                    Effect.map((patch) => {
+                      relaySettings = applyServerSettingsPatch(relaySettings, patch);
+                      return relaySettings;
+                    }),
+                  ),
+              },
+            }
+          : {}),
         serverEnvironment: {
           getDescriptor: Effect.suspend(() =>
             holdDescriptor ? heldDescriptor : Effect.succeed(descriptor),
@@ -1791,35 +1821,66 @@ const qualifyRelayRouter = (test: TestContext, compiled = false, publicNetwork =
             }
           : {}),
       },
-      relayConfig: relayCanonicalBytes({
-        version: 1,
-        networks: [
-          publicEntry ?? {
-            descriptor: network,
-            viewerOrigin,
-            locator,
-            credentials: [
-              {
-                nodeId,
-                token: capacity,
-                admissionPrivateKey: relayOpaque(privateRelayIdentityBytes(admission!)),
-              },
-            ],
-          },
-        ],
-      }),
+      ...(selfService
+        ? {}
+        : {
+            relayConfig: relayCanonicalBytes({
+              version: 1,
+              networks: [
+                publicEntry ?? {
+                  descriptor: network,
+                  viewerOrigin,
+                  locator,
+                  credentials: [
+                    {
+                      nodeId,
+                      token: capacity,
+                      admissionPrivateKey: relayOpaque(privateRelayIdentityBytes(admission!)),
+                    },
+                  ],
+                },
+              ],
+            }),
+          }),
       relayIO: {
         dial,
+        ...(selfService && !publicNetwork
+          ? {
+              defaultNetwork: {
+                label: "Fixture relays",
+                rootPublicKey: network.rootPublicKey,
+                bootstrapUrls: [`https://${hostname}:${relay!.port}/v1/network`],
+                minimumRevision: network.revision,
+                viewerOrigin,
+              },
+              fetchNetwork: async (input) => {
+                assert.equal(input, `https://${hostname}:${relay!.port}/v1/network`);
+                return new Response(relayCanonicalBytes(network).slice());
+              },
+            }
+          : {}),
         ...(hostWorkTls ? { hostWorkTls } : {}),
         ...(publicNetwork ? {} : { measureLatency: async () => 1 }),
         onHostStarted: (networkId, serving) => hostStarted.resolve({ networkId, serving }),
       },
     });
     if (browser) yield* Effect.addFinalizer(() => Effect.promise(() => browser.close()));
+    const owner = yield* getAuthenticatedBearerSessionToken();
+    if (selfService) {
+      const before = yield* HttpClient.get("/api/relay", {
+        headers: { authorization: "Bearer " + owner },
+      });
+      assert.deepEqual((yield* before.json as Effect.Effect<{ enabled: boolean }>).enabled, false);
+      const enabled = yield* HttpClient.post("/api/relay", {
+        headers: { authorization: "Bearer " + owner },
+        body: HttpBody.jsonUnsafe({ enabled: true }),
+      });
+      assert.equal(enabled.status, 200);
+      assert.equal(relaySettings.relayEnabled, true);
+    }
     const started = yield* Effect.promise(() => hostStarted.promise);
     assert.equal(started.networkId, network.networkId);
     assert.isTrue(started.serving > 0);
-    const owner = yield* getAuthenticatedBearerSessionToken();
     const issued = yield* HttpClient.post("/api/relay/invitations", {
       headers: { authorization: "Bearer " + owner },
       body: HttpBody.jsonUnsafe({ networkId: network.networkId, role: "owner" }),
@@ -1835,7 +1896,7 @@ const qualifyRelayRouter = (test: TestContext, compiled = false, publicNetwork =
           network,
           hostPublicKey: invitation.hostPublicKey,
           environmentId: invitation.environmentId,
-          locator,
+          locator: invitation.locator,
           preferredNodeId: invitation.nodeId,
           deviceIdentity: device!,
           tickets: [
@@ -1858,7 +1919,7 @@ const qualifyRelayRouter = (test: TestContext, compiled = false, publicNetwork =
               fetcher: async () =>
                 new Response(
                   relayCanonicalBytes(
-                    relay!.broker.directory.lookup(locator, relayEpochNow()),
+                    relay!.broker.directory.lookup(invitation.locator, relayEpochNow()),
                   ).slice(),
                 ),
             }),
@@ -1991,12 +2052,32 @@ const qualifyRelayRouter = (test: TestContext, compiled = false, publicNetwork =
       );
       phase = "backend-close";
     }
+    if (selfService) {
+      const disabled = yield* HttpClient.post("/api/relay", {
+        headers: { authorization: "Bearer " + owner },
+        body: HttpBody.jsonUnsafe({ enabled: false }),
+      });
+      assert.equal(disabled.status, 200);
+      assert.equal(relaySettings.relayEnabled, false);
+      // Off withdraws application admission synchronously; transport close is
+      // joined by this fixture's exact runtime before its dependencies retire.
+      yield* Effect.promise(() => connection!.close());
+      const unavailable = yield* HttpClient.post("/api/relay/invitations", {
+        headers: { authorization: "Bearer " + owner },
+        body: HttpBody.jsonUnsafe({ networkId: network.networkId, role: "client" }),
+      });
+      assert.equal(unavailable.status, 503);
+    }
   }).pipe(Effect.provide(makeHttpServerTestLayer().pipe(Layer.provideMerge(NodeServices.layer))));
 };
 
 it.live(
   "serves the Cafe router and typed RPC through a pinned encrypted relay with durable auth",
   (test) => qualifyRelayRouter(test),
+);
+it.live(
+  "enables a fresh default host with paid self-service admission and stops it through the owner toggle",
+  (test) => qualifyRelayRouter(test, false, false, true),
 );
 it.live.runIf(process.env.CAFE_RELAY_APP_E2E === "1")(
   "opens the compiled Cafe application through real pairing and encrypted HTTP/RPC",
@@ -2005,7 +2086,7 @@ it.live.runIf(process.env.CAFE_RELAY_APP_E2E === "1")(
 );
 it.live.runIf(process.env.CAFE_RELAY_PUBLIC_E2E === "1")(
   "opens the public Cafe viewer through deployed encrypted relays with isolated application auth",
-  (test) => qualifyRelayRouter(test, true, true),
+  (test) => qualifyRelayRouter(test, true, true, true),
   60_000,
 );
 

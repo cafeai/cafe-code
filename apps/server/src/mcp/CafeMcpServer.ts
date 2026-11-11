@@ -27,6 +27,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  ThreadGroupId,
   ThreadId,
   type ModelSelection,
   type OrchestrationReadModel,
@@ -57,6 +58,16 @@ import type { ServerRuntimeStartupShape } from "../serverRuntimeStartup.ts";
 import { redactServerSettingsForClient, type ServerSettingsShape } from "../serverSettings.ts";
 import type { WorkspacePathsShape } from "../workspace/Services/WorkspacePaths.ts";
 import type { ScheduledFollowupsShape } from "../scheduledFollowups/service.ts";
+import {
+  groupIdInput,
+  loadOrganization,
+  mcpThreadProvenance,
+  mintCommandId,
+  mintTargetId,
+  registerThreadGroupTools,
+  requestIdOf,
+  threadDescriptionInput,
+} from "./threadGroupTools.ts";
 import { registerScheduledFollowupTools } from "../scheduledFollowups/mcp.ts";
 import type { ManagementLaunchContext } from "../auth/managementLaunchContext.ts";
 import { registerThreadUsageTool } from "./threadUsage.ts";
@@ -102,6 +113,7 @@ export interface CafeMcpDependencies extends ProviderRuntimeControlDependencies 
     | "getThreadQuestionContextById"
     | "getThreadAsyncQuestionActivitiesPage"
     | "getThreadAsyncQuestionActivity"
+    | "getThreadOrganization"
   >;
   readonly providerRegistry: Pick<ProviderRegistryShape, "getProviders" | "refreshInstance">;
   readonly providerService: Pick<
@@ -311,6 +323,41 @@ function providerSettingsView(settings: ServerSettings, instanceId: ProviderInst
   };
 }
 
+/** Description/provenance are not on the compact shell; read them per page. */
+async function loadOrganizationOrEmpty(
+  dependencies: CafeMcpDependencies,
+  threadIds: ReadonlyArray<string>,
+) {
+  if (!dependencies.projectionSnapshotQuery.getThreadOrganization || threadIds.length === 0)
+    return new Map<string, never>();
+  return (await loadOrganization(dependencies, threadIds)).threads;
+}
+
+async function enrichThreadSummaries(
+  dependencies: CafeMcpDependencies,
+  items: ReadonlyArray<ReturnType<typeof summarizeThread>>,
+) {
+  const organization = await loadOrganizationOrEmpty(
+    dependencies,
+    items.map((item) => item.id),
+  );
+  return items.map((item) => {
+    const record = organization.get(item.id);
+    if (!record) return item;
+    return {
+      ...item,
+      description: record.description,
+      provenance: record.provenance
+        ? {
+            creationPath: record.provenance.creationPath,
+            originThreadId: record.provenance.originThreadId ?? null,
+            recordedAt: record.provenance.recordedAt,
+          }
+        : item.provenance,
+    };
+  });
+}
+
 function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependencies): void {
   server.registerTool(
     "list_projects",
@@ -400,7 +447,7 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
       const threads = snapshots
         .flatMap((snapshot) => snapshot.threads)
         .filter((thread) => thread.projectId === project.id)
-        .map(summarizeThread);
+        .map((thread) => summarizeThread(thread));
       const page = paginate(
         threads.filter(
           (thread) =>
@@ -417,7 +464,11 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
       );
       const { items, ...metadata } = page;
       return toolResult(
-        { project: summarizeProject(project), threads: items, ...metadata },
+        {
+          project: summarizeProject(project),
+          threads: await enrichThreadSummaries(dependencies, items),
+          ...metadata,
+        },
         `Loaded project '${project.title}' with ${threads.length} thread(s).`,
       );
     },
@@ -433,12 +484,17 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
         projectId: entityId.nullable().optional(),
         state: z.enum(["active", "archived", "deleted", "all"]).default("active"),
         status: threadSummary.shape.status.optional(),
+        groupId: groupIdInput.optional().describe("Only members of this exact thread group."),
+        topLevelOnly: z
+          .boolean()
+          .default(false)
+          .describe("Exclude chats that are members of a group."),
         ...pageInput,
       },
       outputSchema: z.object({ threads: z.array(threadSummary), ...pageOutput }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    async ({ projectId, state, status, query, limit, cursor }) => {
+    async ({ projectId, state, status, groupId, topLevelOnly, query, limit, cursor }) => {
       const snapshots = await runEffect(
         state === "active"
           ? Effect.map(dependencies.projectionSnapshotQuery.getShellSnapshot(), (value) => [value])
@@ -461,19 +517,29 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
       );
       const threads = snapshots
         .flatMap((snapshot) => snapshot.threads)
-        .filter((thread) => projectId === undefined || thread.projectId === projectId)
-        .map(summarizeThread);
+        .filter(
+          (thread) =>
+            (projectId === undefined || thread.projectId === projectId) &&
+            (groupId === undefined || thread.groupId === groupId) &&
+            (!topLevelOnly || !thread.groupId),
+        )
+        .map((thread) => summarizeThread(thread));
+      const scope =
+        groupId === undefined && !topLevelOnly
+          ? { tool: "list_threads", projectId, state, status, query }
+          : { tool: "list_threads", projectId, state, status, query, groupId, topLevelOnly };
       const page = paginate(
         threads.filter(
           (thread) =>
             matchesQuery(query, thread.title) && (status === undefined || thread.status === status),
         ),
         { limit, ...(cursor ? { cursor } : {}) },
-        { tool: "list_threads", projectId, state, status, query },
+        scope,
         (thread) => thread.id,
       );
       const { items, ...metadata } = page;
-      return toolResult({ threads: items, ...metadata }, `Found ${threads.length} thread(s).`);
+      const enriched = await enrichThreadSummaries(dependencies, items);
+      return toolResult({ threads: enriched, ...metadata }, `Found ${threads.length} thread(s).`);
     },
   );
 
@@ -546,7 +612,10 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
         .toReversed();
       return toolResult(
         {
-          thread: summarizeThread(shell.value),
+          thread: summarizeThread(
+            shell.value,
+            (await loadOrganizationOrEmpty(dependencies, [shell.value.id])).get(shell.value.id),
+          ),
           messages,
           hasMoreMessages: tail.hasMore,
           omittedMessageTexts: messages.filter((message) => message.textOmitted).length,
@@ -877,14 +946,20 @@ function registerProjectTools(server: McpServer, dependencies: CafeMcpDependenci
   );
 }
 
-function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencies): void {
+function registerThreadTools(
+  server: McpServer,
+  dependencies: CafeMcpDependencies,
+  options: CafeMcpServerOptions,
+): void {
   server.registerTool(
     "create_thread",
     {
       title: "Create a Cafe Code thread",
       description:
-        "Create a standalone chat or a thread in a project. Provider/model defaults resolve from Cafe settings and the selected project when omitted.",
+        "Create a standalone chat or a thread in a project. Provider/model defaults resolve from Cafe settings and the selected project when omitted. Pass groupId (from create_thread_group) to place a worker inside its parent's sidebar group, and description to record its purpose. Cafe records how the chat was created; callers cannot set provenance. Retain requestId: after a lost acknowledgement, get_operation names the exact planned threadId. Finding that ID confirms creation; not finding it is not proof it will not appear later and never authorizes a replacement request.",
       inputSchema: {
+        groupId: groupIdInput.optional(),
+        description: threadDescriptionInput.optional(),
         projectId: entityId.nullable().default(null),
         title: nonEmptyString.default("New chat"),
         providerInstanceId: providerInstanceId.optional(),
@@ -898,17 +973,21 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
       outputSchema: z.object({ threadId: entityId, sequence: z.number().int().nonnegative() }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    async ({
-      projectId,
-      title,
-      providerInstanceId: selectedProviderInstanceId,
-      model,
-      providerOptions,
-      runtimeMode: selectedRuntimeMode,
-      interactionMode: selectedInteractionMode,
-      branch,
-      worktreePath,
-    }) => {
+    async (args) => {
+      const {
+        projectId,
+        title,
+        providerInstanceId: selectedProviderInstanceId,
+        model,
+        providerOptions,
+        runtimeMode: selectedRuntimeMode,
+        interactionMode: selectedInteractionMode,
+        branch,
+        worktreePath,
+        groupId,
+        description,
+      } = args;
+      const requestId = requestIdOf(args);
       const projectOption =
         projectId === null
           ? Option.none()
@@ -931,11 +1010,14 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
         ),
         "Failed to resolve a provider and model for the thread.",
       );
-      const threadId = ThreadId.make(crypto.randomUUID());
+      // Derived from the reservation: the same request names the same thread,
+      // and the engine refuses a second creation of an existing ID.
+      const threadId = ThreadId.make(mintTargetId(options, requestId, "create_thread"));
+      const createdAt = nowIso();
       const result = await runEffect(
         dispatch(dependencies, {
           type: "thread.create",
-          commandId: commandId(),
+          commandId: mintCommandId(options, requestId, "create_thread"),
           threadId,
           projectId: project?.id ?? null,
           title,
@@ -944,9 +1026,14 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
           interactionMode: selectedInteractionMode,
           branch,
           worktreePath,
-          createdAt: nowIso(),
+          ...(groupId !== undefined ? { groupId: ThreadGroupId.make(groupId) } : {}),
+          ...(description !== undefined ? { description } : {}),
+          provenance: mcpThreadProvenance(options, createdAt),
+          createdAt,
         }),
-        "Failed to create the thread.",
+        groupId !== undefined
+          ? "Failed to create the thread. Its group may have been deleted; check list_thread_groups."
+          : "Failed to create the thread.",
       );
       return toolResult({ threadId, sequence: result.sequence }, `Created thread '${threadId}'.`);
     },
@@ -969,6 +1056,10 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
         interactionMode: interactionMode.optional(),
         branch: nonEmptyString.nullable().optional(),
         worktreePath: nonEmptyString.nullable().optional(),
+        description: threadDescriptionInput
+          .nullable()
+          .optional()
+          .describe("Purpose/description; null clears. Does not change the origin label."),
       },
       outputSchema: z.object({ threadId: entityId, sequences: z.array(z.number().int()) }),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -984,6 +1075,7 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
       interactionMode: selectedInteractionMode,
       branch,
       worktreePath,
+      description,
     }) => {
       const threadOption = await runEffect(
         dependencies.projectionSnapshotQuery.getThreadShellById(ThreadId.make(threadId)),
@@ -1074,6 +1166,18 @@ function registerThreadTools(server: McpServer, dependencies: CafeMcpDependencie
             createdAt: nowIso(),
           }),
           "Failed to update the thread interaction mode.",
+        );
+        sequences.push(result.sequence);
+      }
+      if (description !== undefined) {
+        const result = await runEffect(
+          dispatch(dependencies, {
+            type: "thread.metadata.update",
+            commandId: commandId(),
+            threadId: thread.id,
+            description,
+          }),
+          "Failed to update the thread description.",
         );
         sequences.push(result.sequence);
       }
@@ -1509,7 +1613,8 @@ export function makeCafeMcpServer(
   if (dependencies.scheduledFollowups)
     registerScheduledFollowupTools(server, dependencies.scheduledFollowups);
   registerProjectTools(server, dependencies);
-  registerThreadTools(server, dependencies);
+  registerThreadTools(server, dependencies, options);
+  registerThreadGroupTools(server, dependencies, options);
   registerProviderMutationTools(server, dependencies, options);
   return server;
 }

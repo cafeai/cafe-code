@@ -64,6 +64,41 @@ offset shifts; these are live reads, not a frozen snapshot. A foreign/malformed
 cursor is refused. Complete JSON results have a 4 MiB ceiling; request smaller
 pages/options when a complete response cannot fit.
 
+### Thread groups and origin
+
+Coordinators can keep worker chats out of the top-level sidebar by creating a
+named group beneath a parent Cafe chat and creating workers in it:
+
+1. `create_thread_group({ title, description? })` — the owner defaults to the
+   signed launch chat; manual connections pass `ownerThreadId`. A parent may
+   own up to 128 live groups; membership is unlimited and there is no worker or
+   concurrency cap.
+2. `create_thread({ ..., groupId, description? })` for each worker.
+3. `list_threads({ groupId })` to find members, then `get_thread_status` /
+   `wait_for_thread` on exact IDs. `get_cafe_context.ownedGroups` returns the
+   first page of the launch chat's groups; continue with
+   `list_thread_groups({ ownerThreadId, cursor: nextCursor })`.
+4. `delete_thread_group({ groupId })` moves the group, every member and every
+   nested group to the Recycle Bin and keeps the parent. Active members get a
+   stop request; the result says `recorded`, not stopped.
+   `restore_thread_group` restores only that group's subtree deleted with it.
+
+Thread summaries include `groupId`, the editable `origin` label (Human / Agent /
+Unknown and whether a person set it), the separate recorded `provenance`
+(`creationPath`, `originThreadId`, `recordedAt`; `null` when unrecorded) and an
+optional `description`. Callers cannot set provenance. A signed launch claim
+records the Cafe chat that made the call, not a native subagent; a manual owner
+client records `mcp-owner-client`. `update_thread({ description })` edits the
+description; only people change the origin label. None of these fields grants
+permission, native ownership or retry authority.
+
+For a tracked `create_thread`/`create_thread_group`, `get_operation` returns
+`plannedTargets` naming the exact ID the reserved action creates. Finding it
+confirms the action. Not finding it at one moment is **not** proof the
+original, possibly delayed action cannot still create it, and never authorizes
+a replacement request or replay. See
+[the decision](decisions/thread-groups-and-origin.md).
+
 ### Settings patches and hidden values
 
 `get_provider_settings` returns redacted settings plus the built-in driver's

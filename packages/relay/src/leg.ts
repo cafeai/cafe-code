@@ -249,7 +249,7 @@ export class RelayLeg {
   }
   async register(
     locator: string,
-    capacityToken: string,
+    capacityToken: string | null,
     identity: RelayIdentity,
     priority: 0 | 1 = 0,
     reservation?: HostReservationCredential,

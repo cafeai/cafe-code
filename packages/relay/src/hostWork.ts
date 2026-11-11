@@ -27,7 +27,7 @@ export const HostWorkRequest = Schema.Struct({
   networkId: Id32,
   locator: Id32,
   admissionPublicKey: Id32,
-  capacityToken: Id32,
+  capacityToken: Schema.NullOr(Id32),
   claimId: Id16,
   reservationId: Schema.Union([Id16, Schema.Null]),
 });
@@ -154,7 +154,7 @@ export interface HostWorkScope {
   readonly network: NetworkDescriptor;
   readonly node: RelayNode;
   readonly locator: string;
-  readonly capacityToken: string;
+  readonly capacityToken: string | null;
   readonly admissionIdentity: RelayIdentity;
   readonly allowLoopbackTest: boolean;
 }

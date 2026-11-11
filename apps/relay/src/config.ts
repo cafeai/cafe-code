@@ -17,6 +17,7 @@ export const RelayNodeConfig = Schema.Struct({
   descriptor: NetworkDescriptor,
   nodeId: Id32,
   privateIdentity: Schema.String.check(Schema.isMaxLength(172)),
+  selfService: Schema.optionalKey(Schema.Boolean),
   forwardedIpKeys: Schema.optionalKey(
     Schema.Array(Id32).check(Schema.isMinLength(1), Schema.isMaxLength(2)),
   ),

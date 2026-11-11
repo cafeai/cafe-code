@@ -31,10 +31,11 @@ const Target = Schema.Struct({
     ).check(Schema.isMaxLength(4)),
   ),
 });
-const Payload = Schema.Struct({
+export const SavedRelayPayload = Schema.Struct({
   target: Target,
   devicePrivateKey: Schema.String.check(Schema.isMaxLength(172)),
 });
+const Payload = SavedRelayPayload;
 const maximum = 16_384;
 const SessionRecord = Schema.Struct({
   version: Schema.Literal(1),
@@ -237,6 +238,24 @@ export async function loadRelayTarget(
     };
   } catch {
     throw new RelayError("AUTH_REQUIRED");
+  } finally {
+    database.close();
+  }
+}
+
+/** Retire the tab capability before joining its metadata transaction. The
+ * caller joins the transport and all admitted writes before invoking removal. */
+export async function removeRelayTarget(id: string): Promise<void> {
+  unopaque(id, 32);
+  sessionStorage.removeItem(sessionKey(id));
+  const database = await open();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("targets", "readwrite");
+      transaction.objectStore("targets").delete(id);
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = transaction.onerror = () => reject(new RelayError("UNAVAILABLE"));
+    });
   } finally {
     database.close();
   }

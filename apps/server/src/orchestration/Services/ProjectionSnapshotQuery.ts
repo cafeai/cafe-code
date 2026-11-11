@@ -31,11 +31,18 @@ import type {
   ThreadId,
   TurnId,
 } from "@cafecode/contracts";
+import type { OrchestrationThreadGroup } from "@cafecode/contracts";
 import * as Context from "effect/Context";
 import type * as Option from "effect/Option";
 import type * as Effect from "effect/Effect";
 
 import type { ProjectionRepositoryError } from "../../persistence/Errors.ts";
+import type { ThreadOrganizationRecord } from "../../persistence/threadOrganization.ts";
+
+export interface ProjectionThreadOrganization {
+  readonly groups: ReadonlyArray<OrchestrationThreadGroup>;
+  readonly threads: ReadonlyMap<string, ThreadOrganizationRecord>;
+}
 
 export interface ProjectionSnapshotCounts {
   readonly projectCount: number;
@@ -354,6 +361,16 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadShellById: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<OrchestrationThreadShell>, ProjectionRepositoryError>;
+
+  /**
+   * Thread organization read for management discovery: every retained group
+   * record (live and soft-deleted) plus per-thread metadata, either for the
+   * given threads or all threads. Organisation only, never authority.
+   * Optional so narrow test doubles need not implement it.
+   */
+  readonly getThreadOrganization?: (
+    threadIds: ReadonlyArray<ThreadId> | null,
+  ) => Effect.Effect<ProjectionThreadOrganization, ProjectionRepositoryError>;
 
   readonly getThreadQuestionContextById: (
     threadId: ThreadId,

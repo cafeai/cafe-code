@@ -6,6 +6,7 @@ import { render } from "vitest-browser-react";
 import { page, userEvent } from "vitest/browser";
 
 import type { DraftId } from "../../composerDraftStore";
+import { useThreadSecretsDialogStore } from "../../cafeSecrets/threadSecretsDialogStore";
 import { createDeskState, deskTabKey, hydrateDesk } from "../../deskModel";
 import { useDeskStore } from "../../deskStore";
 import type { ThreadRouteTarget } from "../../threadRoutes";
@@ -159,6 +160,7 @@ function rethrowDeskHoverFailure(error: unknown): never {
 
 beforeEach(async () => {
   await page.viewport(1100, 800);
+  useThreadSecretsDialogStore.getState().close();
   diagnosticPointer?.stop();
   diagnosticPointer = trackDeskDiagnosticPointer(document);
   useDeskStore.setState({
@@ -184,6 +186,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await clearActionCleanup?.();
   clearActionCleanup = null;
+  useThreadSecretsDialogStore.getState().close();
   diagnosticPointer?.stop();
   diagnosticPointer = null;
   useDeskStore.setState({ desk: createDeskState(), draftEditors: {}, activeDraftId: null });
@@ -414,27 +417,37 @@ describe("Desk sidebar", () => {
     await screen.unmount();
   });
 
-  it("offers exact-chat actions on right-click without activating the row", async () => {
-    const { screen, onNavigate } = await setup();
+  it("offers exact-chat actions and opens Secrets on right-click without activating the row", async (context) => {
+    const fixture = createClearActionFixture(context);
+    useDeskStore.getState().dispatch({ type: "open", target: chat });
+    useDeskStore.getState().dispatch({ type: "open", target: draft });
+    const { screen, onNavigate } = await fixture.mount();
     const before = useDeskStore.getState().desk;
     const row = screen.getByRole("button", { name: "Chat fixture", exact: true });
-    row.element().dispatchEvent(
-      new MouseEvent("contextmenu", {
-        bubbles: true,
-        cancelable: true,
-        clientX: 50,
-        clientY: 60,
-      }),
-    );
-    await expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1);
+    await fixture.input(() => row.click({ button: "right" }));
+    await fixture.input(() => expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1));
     expect(mocks.showMenu.mock.calls[0]?.[0].map((item: { id: string }) => item.id)).toEqual([
       "rename",
       "duplicate",
+      "secrets",
       "archive",
       "delete",
       "delete-forever",
       "close",
     ]);
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(useDeskStore.getState().desk).toBe(before);
+    mocks.showMenu.mockResolvedValueOnce("secrets");
+    await fixture.input(() => row.click({ button: "right" }));
+    await fixture.input(() =>
+      expect
+        .poll(() => useThreadSecretsDialogStore.getState().target?.threadId)
+        .toBe(chat.threadRef.threadId),
+    );
+    expect(useThreadSecretsDialogStore.getState().target).toMatchObject({
+      ...chat.threadRef,
+      title: "Chat fixture",
+    });
     expect(onNavigate).not.toHaveBeenCalled();
     expect(useDeskStore.getState().desk).toBe(before);
   });

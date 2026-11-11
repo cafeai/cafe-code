@@ -137,6 +137,29 @@ const withSavedEnvironments = <A, E, R>(
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped);
 
 describe("DesktopSavedEnvironments", () => {
+  it.effect(
+    "retains relay transport metadata while keeping its device credential in encrypted storage",
+    () =>
+      withSavedEnvironments(
+        Effect.gen(function* () {
+          const saved = yield* DesktopSavedEnvironments.DesktopSavedEnvironments;
+          const environment = yield* DesktopEnvironment.DesktopEnvironment;
+          const fs = yield* FileSystem.FileSystem;
+          const record = { ...savedRegistryRecord, transport: "relay" as const };
+          const secret = Schema.encodeSync(Schema.UnknownFromJsonString)({
+            bearer: "test-only-relay-bearer",
+            devicePrivateKey: "test-only-device-key",
+          });
+          yield* saved.setRegistry([record]);
+          assert.isTrue(yield* saved.setSecret({ environmentId: record.environmentId, secret }));
+          assert.deepEqual(yield* saved.getRegistry, [record]);
+          assert.deepEqual(yield* saved.getSecret(record.environmentId), Option.some(secret));
+          const rawMetadata = yield* fs.readFileString(environment.savedEnvironmentRegistryPath);
+          assert.notInclude(rawMetadata, "test-only-relay-bearer");
+          assert.notInclude(rawMetadata, "test-only-device-key");
+        }),
+      ),
+  );
   it.effect("persists and reloads saved environment metadata", () =>
     withSavedEnvironments(
       Effect.gen(function* () {

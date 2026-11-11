@@ -1,12 +1,9 @@
-import type {
-  OrchestrationEvent,
-  OrchestrationReadModel,
-  ProjectId,
-  ThreadId,
-} from "@cafecode/contracts";
+import type { OrchestrationEvent, OrchestrationReadModel, ProjectId } from "@cafecode/contracts";
+import { containsCafeSecrets } from "@cafecode/shared/cafeSecrets";
 import {
   OrchestrationCommand,
   OrchestrationThreadActivity,
+  ThreadId,
   ThreadTurnStartRequestedPayload,
 } from "@cafecode/contracts";
 import * as Cause from "effect/Cause";
@@ -310,11 +307,27 @@ type EngineEnvelope =
   | RetireThreadForHardDeleteEnvelope
   | PurgeHardDeletedThreadEnvelope;
 
-function commandToAggregateRef(command: OrchestrationCommand): {
+function commandToAggregateRef(
+  command: OrchestrationCommand,
+  readModel?: OrchestrationReadModel,
+): {
   readonly aggregateKind: "project" | "thread";
   readonly aggregateId: ProjectId | ThreadId;
 } {
   switch (command.type) {
+    // Group commands are filed on the owner thread's stream (matching their
+    // events), so hard-delete retirement of the owner fences them as well.
+    case "thread.group.create":
+      return { aggregateKind: "thread", aggregateId: command.ownerThreadId };
+    case "thread.group.delete":
+    case "thread.group.restore":
+    case "thread.group.meta.update": {
+      const owner = readModel?.threadGroups?.find((group) => group.id === command.groupId);
+      return {
+        aggregateKind: "thread",
+        aggregateId: owner?.ownerThreadId ?? ThreadId.make(command.groupId),
+      };
+    }
     case "project.create":
     case "project.meta.update":
     case "project.delete":
@@ -335,6 +348,34 @@ function commandToAggregateRef(command: OrchestrationCommand): {
         aggregateId: command.threadId,
       };
   }
+}
+
+/**
+ * Remove permanently retired threads from the command read model. Groups they
+ * owned go with them and their surviving members return to top level, matching
+ * the SQL purge, so no member can point at a group that will never exist again.
+ */
+function withoutHardDeletedThreads(
+  readModel: OrchestrationReadModel,
+  threadIds: ReadonlySet<string>,
+): OrchestrationReadModel {
+  const groups = readModel.threadGroups ?? [];
+  const removedGroupIds = new Set(
+    groups.filter((group) => threadIds.has(String(group.ownerThreadId))).map((group) => group.id),
+  );
+  return {
+    ...readModel,
+    threads: readModel.threads
+      .filter((thread) => !threadIds.has(String(thread.id)))
+      .map((thread) =>
+        thread.groupId && removedGroupIds.has(thread.groupId)
+          ? { ...thread, groupId: null }
+          : thread,
+      ),
+    ...(readModel.threadGroups
+      ? { threadGroups: groups.filter((group) => !removedGroupIds.has(group.id)) }
+      : {}),
+  };
 }
 
 const makeOrchestrationEngine = Effect.gen(function* () {
@@ -502,7 +543,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const processEnvelope = (envelope: CommandEnvelope): Effect.Effect<void> => {
     const dispatchStartSequence = commandReadModel.snapshotSequence;
     let processingStartedAtMs = 0;
-    const aggregateRef = commandToAggregateRef(envelope.command);
+    const aggregateRef = commandToAggregateRef(envelope.command, commandReadModel);
     const baseMetricAttributes = {
       commandType: envelope.command.type,
       aggregateKind: aggregateRef.aggregateKind,
@@ -1193,11 +1234,13 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         // that decides commands. Commands queued before this envelope see the
         // old thread; commands queued after it see an absent, permanently
         // retired identity. No timing assumption or external mutex is needed.
-        commandReadModel = {
-          ...commandReadModel,
-          threads: commandReadModel.threads.filter((thread) => thread.id !== envelope.threadId),
-          updatedAt: deletedAt,
-        };
+        commandReadModel = withoutHardDeletedThreads(
+          {
+            ...commandReadModel,
+            updatedAt: deletedAt,
+          },
+          new Set([String(envelope.threadId)]),
+        );
       }),
     ).pipe(
       Effect.flatMap((exit) => {
@@ -1261,12 +1304,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     for (const threadId of hardDeletedThreadIds) {
       hardDeleteRetiringThreadIds.add(threadId);
     }
-    commandReadModel = {
-      ...commandReadModel,
-      threads: commandReadModel.threads.filter(
-        (thread) => !hardDeletedThreadIds.has(String(thread.id)),
-      ),
-    };
+    commandReadModel = withoutHardDeletedThreads(commandReadModel, hardDeletedThreadIds);
   }
 
   const worker = Effect.forever(
@@ -1282,6 +1320,15 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
   const dispatch: OrchestrationEngineShape["dispatch"] = (command) =>
     Effect.gen(function* () {
+      // Internal callers cannot bypass the normalizer and journal raw markers.
+      if (
+        (command.type === "thread.turn.start" || command.type === "thread.turn.steer") &&
+        containsCafeSecrets(command.message.text)
+      )
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Cafe Secrets must be prepared before dispatch.",
+        });
       const result = yield* Deferred.make<{ sequence: number }, OrchestrationDispatchError>();
       yield* Queue.offer(commandQueue, {
         kind: "command",

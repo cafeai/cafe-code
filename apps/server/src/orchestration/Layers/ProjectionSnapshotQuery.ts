@@ -32,6 +32,7 @@ import {
   type OrchestrationProject,
   type OrchestrationSession,
   type OrchestrationThreadShell,
+  type OrchestrationThreadGroupSummary,
   type OrchestrationLiveWork,
   ModelSelection,
   ProjectId,
@@ -47,6 +48,12 @@ import {
   PUBLIC_REASONING_SUMMARY_PROVIDERS,
 } from "@cafecode/shared/providerWorkLog";
 import { MAX_PENDING_REQUEST_RETENTION_IDENTITIES } from "@cafecode/shared/pendingRequestRetention";
+import {
+  readAllThreadGroups,
+  readLiveGroupSummaries,
+  readThreadOrganization,
+  type ThreadOrganizationRecord,
+} from "../../persistence/threadOrganization.ts";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -395,6 +402,31 @@ const REQUIRED_SNAPSHOT_PROJECTORS = [
   ORCHESTRATION_PROJECTOR_NAMES.threadGoals,
   ORCHESTRATION_PROJECTOR_NAMES.checkpoints,
 ] as const;
+
+/** Engine/detail metadata fields; absent record = top level, unrecorded origin. */
+function threadOrganizationFields(record: ThreadOrganizationRecord | undefined) {
+  if (!record) return {};
+  return {
+    ...(record.groupId !== null ? { groupId: record.groupId } : {}),
+    ...(record.origin !== null ? { origin: record.origin } : {}),
+    ...(record.description !== null ? { description: record.description } : {}),
+    ...(record.provenance !== null ? { provenance: record.provenance } : {}),
+    ...(record.deletionId !== null ? { deletionId: record.deletionId } : {}),
+    ...(record.archiveCascadeId !== null ? { archiveCascadeId: record.archiveCascadeId } : {}),
+  };
+}
+
+/** Shell fields stay compact: no description or provenance text. */
+function threadShellOrganizationFields(
+  record: ThreadOrganizationRecord | undefined,
+  ownedGroups: ReadonlyArray<OrchestrationThreadGroupSummary> | undefined,
+) {
+  return {
+    ...(record?.groupId ? { groupId: record.groupId } : {}),
+    ...(record?.origin ? { origin: record.origin } : {}),
+    ...(ownedGroups && ownedGroups.length > 0 ? { ownedGroups: [...ownedGroups] } : {}),
+  };
+}
 
 function maxIso(left: string | null, right: string): string {
   if (left === null) {
@@ -3722,6 +3754,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             stateRows,
           ]) =>
             Effect.gen(function* () {
+              const organizationByThread = yield* readThreadOrganization(sql, null).pipe(
+                Effect.mapError(
+                  toPersistenceSqlError("ProjectionSnapshotQuery.organization:query"),
+                ),
+              );
               const messagesByThread = new Map<string, Array<OrchestrationMessage>>();
               const proposedPlansByThread = new Map<string, Array<OrchestrationProposedPlan>>();
               const activitiesByThread = new Map<string, Array<OrchestrationThreadActivity>>();
@@ -3901,6 +3938,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 checkpoints: checkpointsByThread.get(row.threadId) ?? [],
                 session: sessionsByThread.get(row.threadId) ?? null,
                 goal: goalsByThread.get(row.threadId) ?? null,
+                ...threadOrganizationFields(organizationByThread.get(row.threadId)),
               }));
 
               const snapshot = {
@@ -3985,6 +4023,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
           ),
+          readThreadOrganization(sql, null).pipe(
+            Effect.mapError(
+              toPersistenceSqlError(
+                "ProjectionSnapshotQuery.getCommandReadModel:organization:query",
+              ),
+            ),
+          ),
+          readAllThreadGroups(sql).pipe(
+            Effect.mapError(
+              toPersistenceSqlError("ProjectionSnapshotQuery.getCommandReadModel:groups:query"),
+            ),
+          ),
         ]),
       )
       .pipe(
@@ -3997,6 +4047,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             goalRows,
             latestTurnRows,
             stateRows,
+            organizationByThread,
+            threadGroupRecords,
           ]) =>
             Effect.sync(() => {
               let updatedAt: string | null = null;
@@ -4135,6 +4187,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   checkpoints: [],
                   session: sessionByThread.get(row.threadId) ?? null,
                   goal: goalByThread.get(row.threadId) ?? null,
+                  ...threadOrganizationFields(organizationByThread.get(row.threadId)),
                 });
               }
 
@@ -4142,6 +4195,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 snapshotSequence: computeSnapshotSequence(stateRows),
                 projects,
                 threads,
+                threadGroups: threadGroupRecords,
                 updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
               } satisfies OrchestrationReadModel;
             }),
@@ -4204,6 +4258,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         Effect.flatMap(([projectRows, threadRows, sessionRows, latestTurnRows, stateRows]) =>
           Effect.gen(function* () {
             const liveWorkByThread = yield* readLiveWorkSummaries(null);
+            const organizationByThread = yield* readThreadOrganization(sql, null).pipe(
+              Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.organization:query")),
+            );
+            const ownedGroupsByThread = yield* readLiveGroupSummaries(sql, null).pipe(
+              Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.ownedGroups:query")),
+            );
             let updatedAt: string | null = null;
             for (const row of projectRows) {
               updatedAt = maxIso(updatedAt, row.updatedAt);
@@ -4278,6 +4338,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   ...(liveWorkByThread.get(row.threadId)
                     ? { liveWork: liveWorkByThread.get(row.threadId)! }
                     : {}),
+                  ...threadShellOrganizationFields(
+                    organizationByThread.get(row.threadId),
+                    ownedGroupsByThread.get(row.threadId),
+                  ),
                 })),
               updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
             };
@@ -4349,6 +4413,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         Effect.flatMap(([projectRows, threadRows, sessionRows, latestTurnRows, stateRows]) =>
           Effect.gen(function* () {
             const liveWorkByThread = yield* readLiveWorkSummaries(null);
+            const organizationByThread = yield* readThreadOrganization(sql, null).pipe(
+              Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.organization:query")),
+            );
+            const ownedGroupsByThread = yield* readLiveGroupSummaries(sql, null).pipe(
+              Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.ownedGroups:query")),
+            );
             let updatedAt: string | null = null;
             for (const row of projectRows) {
               updatedAt = maxIso(updatedAt, row.updatedAt);
@@ -4422,6 +4492,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ...(liveWorkByThread.get(row.threadId)
                   ? { liveWork: liveWorkByThread.get(row.threadId)! }
                   : {}),
+                ...threadShellOrganizationFields(
+                  organizationByThread.get(row.threadId),
+                  ownedGroupsByThread.get(row.threadId),
+                ),
               })),
               updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
             };
@@ -4495,6 +4569,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         Effect.flatMap(([projectRows, threadRows, sessionRows, latestTurnRows, stateRows]) =>
           Effect.gen(function* () {
             const liveWorkByThread = yield* readLiveWorkSummaries(null);
+            const organizationByThread = yield* readThreadOrganization(sql, null).pipe(
+              Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.organization:query")),
+            );
+            const ownedGroupsByThread = yield* readLiveGroupSummaries(sql, null).pipe(
+              Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.ownedGroups:query")),
+            );
+            // Restore/cleanup entries for the Recycle Bin view.
+            const deletedThreadGroups = (yield* readAllThreadGroups(sql).pipe(
+              Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.deletedGroups:query")),
+            )).filter((group) => group.deletedAt !== null);
             let updatedAt: string | null = null;
             for (const row of projectRows) {
               updatedAt = maxIso(updatedAt, row.updatedAt);
@@ -4572,6 +4656,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ...(liveWorkByThread.get(row.threadId)
                   ? { liveWork: liveWorkByThread.get(row.threadId)! }
                   : {}),
+                ...threadShellOrganizationFields(
+                  organizationByThread.get(row.threadId),
+                  ownedGroupsByThread.get(row.threadId),
+                ),
+              })),
+              deletedThreadGroups: deletedThreadGroups.map((group) => ({
+                id: group.id,
+                ownerThreadId: group.ownerThreadId,
+                title: group.title,
+                deletedAt: group.deletedAt!,
               })),
               updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
             };
@@ -4748,6 +4842,24 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       });
     });
 
+  const getThreadOrganization: NonNullable<
+    ProjectionSnapshotQueryShape["getThreadOrganization"]
+  > = (threadIds) =>
+    Effect.gen(function* () {
+      const groups = yield* readAllThreadGroups(sql);
+      if (threadIds === null) {
+        return { groups, threads: yield* readThreadOrganization(sql, null) };
+      }
+      const threads = new Map<string, ThreadOrganizationRecord>();
+      for (const threadId of threadIds) {
+        const record = (yield* readThreadOrganization(sql, threadId)).get(threadId);
+        if (record) threads.set(threadId, record);
+      }
+      return { groups, threads };
+    }).pipe(
+      Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.getThreadOrganization:query")),
+    );
+
   const getThreadShellById: ProjectionSnapshotQueryShape["getThreadShellById"] = (threadId) =>
     Effect.gen(function* () {
       const [threadRow, latestTurnRow, sessionRow] = yield* Effect.all([
@@ -4782,6 +4894,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       }
 
       const liveWork = (yield* readLiveWorkSummaries(threadId)).get(threadId);
+      const organization = (yield* readThreadOrganization(sql, threadId).pipe(
+        Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.organization:query")),
+      )).get(threadId);
+      const ownedGroups = (yield* readLiveGroupSummaries(sql, threadId).pipe(
+        Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.ownedGroups:query")),
+      )).get(threadId);
 
       return Option.some({
         id: threadRow.value.threadId,
@@ -4814,6 +4932,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         hasPendingUserInput: threadRow.value.pendingUserInputCount > 0,
         hasActionableProposedPlan: threadRow.value.hasActionableProposedPlan > 0,
         ...(liveWork ? { liveWork } : {}),
+        ...threadShellOrganizationFields(organization, ownedGroups),
       } satisfies OrchestrationThreadShell);
     });
 
@@ -5387,6 +5506,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         };
       }
 
+      const organization = (yield* readThreadOrganization(sql, threadRow.value.threadId).pipe(
+        Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.organization:query")),
+      )).get(threadRow.value.threadId);
       const thread = {
         id: threadRow.value.threadId,
         projectId: threadRow.value.projectId,
@@ -5442,6 +5564,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             )
           : null,
         goal: Option.getOrNull(goalRow),
+        // Detail omits the cascade tags; they are engine bookkeeping.
+        ...threadOrganizationFields(
+          organization && { ...organization, deletionId: null, archiveCascadeId: null },
+        ),
       };
 
       return {
@@ -5797,6 +5923,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getFirstActiveThreadIdByProjectId,
     getThreadCheckpointContext,
     getThreadShellById,
+    getThreadOrganization,
     getThreadContextWindowActivity: (threadId) =>
       getThreadContextWindowRow({ threadId }).pipe(
         Effect.mapError(

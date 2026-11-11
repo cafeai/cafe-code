@@ -157,6 +157,7 @@ export async function configureNetwork(directory: string, specFile: string): Pro
       });
       const forwardedIpKeys = previousConfigs[index]?.forwardedIpKeys;
       const hostWork = previousConfigs[index]?.hostWork;
+      const selfService = previousConfigs[index]?.selfService;
       const config: RelayNodeConfig = {
         version: 1,
         rootPublicKey: root.publicKey,
@@ -165,6 +166,7 @@ export async function configureNetwork(directory: string, specFile: string): Pro
         privateIdentity: opaque(privateIdentityBytes(identities[index]!)),
         ...(forwardedIpKeys ? { forwardedIpKeys } : {}),
         ...(hostWork ? { hostWork } : {}),
+        ...(selfService !== undefined ? { selfService } : {}),
         grants: [
           {
             locator,

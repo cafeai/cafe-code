@@ -1,6 +1,13 @@
 import { Buffer } from "node:buffer";
 
-import { CommandId, MessageId, ThreadId } from "@cafecode/contracts";
+import {
+  CommandId,
+  MessageId,
+  ThreadId,
+  ProviderInstanceId,
+  ProviderDriverKind,
+  type ServerProvider,
+} from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -21,6 +28,8 @@ import { RepositoryIdentityResolverLive } from "../project/Layers/RepositoryIden
 import { WorkspacePathsLive } from "../workspace/Layers/WorkspacePaths.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./Layers/ProjectionSnapshotQuery.ts";
 import { normalizeDispatchCommand } from "./Normalizer.ts";
+import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import { getThreadSecretsStore } from "../secrets/store.ts";
 
 const layer = it.layer(
   Layer.mergeAll(
@@ -31,6 +40,77 @@ const layer = it.layer(
 );
 
 layer("normalizeDispatchCommand attachment commitments", (it) => {
+  const secretCommand = (text: string) => ({
+    type: "thread.turn.start" as const,
+    commandId: CommandId.make("secret-command"),
+    threadId: ThreadId.make("secret-chat"),
+    message: {
+      messageId: MessageId.make("secret-message"),
+      role: "user" as const,
+      text,
+      attachments: [],
+    },
+    modelSelection: { instanceId: ProviderInstanceId.make("company_account"), model: "test-model" },
+    runtimeMode: "full-access" as const,
+    interactionMode: "default" as const,
+    createdAt: "2026-11-10T00:00:00.000Z",
+  });
+  const registry = (driver: string) => {
+    const provider: ServerProvider = {
+      instanceId: ProviderInstanceId.make("company_account"),
+      driver: ProviderDriverKind.make(driver),
+      enabled: true,
+      installed: true,
+      version: "1.0.0",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-11-10T00:00:00.000Z",
+      models: [],
+      slashCommands: [],
+      skills: [],
+    };
+    return Layer.mock(ProviderRegistry)({ getProviders: Effect.succeed([provider]) });
+  };
+  it.effect("captures secrets for a configured provider alias before durable dispatch", () =>
+    Effect.gen(function* () {
+      const command = secretCommand("Use [sec:synthetic-normalizer-value] and \\[sec:literal].");
+      const result = yield* normalizeDispatchCommand(command).pipe(
+        Effect.provide(registry("codex")),
+      );
+      assert.equal(result.type, "thread.turn.start");
+      if (result.type !== "thread.turn.start") return assert.fail("Expected a turn start.");
+      assert.notInclude(result.message.text, "synthetic-normalizer-value");
+      assert.include(result.message.text, "[CAFE_SECRET_");
+      assert.include(result.message.text, "\\[sec:literal]");
+      const config = yield* ServerConfig;
+      const stored = yield* Effect.promise(() =>
+        getThreadSecretsStore(config.secretsDir).list(command.threadId),
+      );
+      assert.lengthOf(stored.secrets, 1);
+      assert.notProperty(stored.secrets[0], "value");
+    }),
+  );
+  it.effect("refuses unimplemented providers without capturing or forwarding a value", () =>
+    Effect.gen(function* () {
+      const command = {
+        ...secretCommand("[sec:never-forward-this]"),
+        threadId: ThreadId.make("unsupported-secret-chat"),
+      };
+      const error = yield* normalizeDispatchCommand(command).pipe(
+        Effect.provide(registry("openCode")),
+        Effect.flip,
+      );
+      assert.include(error.message, "not supported");
+      assert.notInclude(error.message, "never-forward-this");
+      const config = yield* ServerConfig;
+      assert.deepEqual(
+        yield* Effect.promise(() =>
+          getThreadSecretsStore(config.secretsDir).list(command.threadId),
+        ),
+        { secrets: [] },
+      );
+    }),
+  );
   it.effect("records exact upload bytes privately without adding a wire field", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

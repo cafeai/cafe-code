@@ -4,6 +4,28 @@ import { EnvironmentId } from "@cafecode/contracts";
 import { cdp, page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { render } from "vitest-browser-react";
+import type { ReactNode } from "react";
+import { createIdentity, privateIdentityBytes } from "@cafecode/relay/crypto";
+import { opaque, randomOpaque } from "@cafecode/relay/bytes";
+import { RelayConnectionsSettings, type RelaySettingsRequest } from "./RelayConnectionsSettings";
+import {
+  selectWorkspaceEnvironment,
+  resetWorkspaceEnvironmentForTests,
+} from "../../environments/workspace";
+import {
+  readBrowserSavedEnvironmentRegistry,
+  writeBrowserSavedEnvironmentRegistry,
+  SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY,
+  SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY,
+} from "../../clientPersistenceStorage";
+import {
+  readBrowserSavedSecret,
+  writeBrowserSavedSecret,
+  removeBrowserSavedSecret,
+} from "../../environments/relay/browserSavedSecret";
+import { encodeSavedRelaySecret } from "../../environments/relay/savedSecret";
+import { savedRelayUrls } from "../../environments/relay/active";
+import { removeRelayTarget } from "../../environments/relay/storage";
 
 import {
   resetSavedEnvironmentRegistryStoreForTests,
@@ -52,7 +74,7 @@ function ownSettingsFixture({ signal, onTestFinished }: TestContext) {
   let pendingRender: ReturnType<typeof render> | null = null;
   let cleanupPromise: Promise<void> | null = null;
   const nativeOperations = new Set<Promise<unknown>>();
-  const afterUnmount = new Set<() => void>();
+  const afterUnmount = new Set<() => void | Promise<void>>();
   let releasePointer: (() => Promise<void>) | null = null;
   const host = document.createElement("div");
   const assertActive = () => {
@@ -70,7 +92,7 @@ function ownSettingsFixture({ signal, onTestFinished }: TestContext) {
       const view = await pendingRender?.catch(() => null);
       await view?.unmount();
       host.remove();
-      for (const release of afterUnmount) release();
+      await Promise.all([...afterUnmount].map((release) => release()));
     })());
   };
   onTestFinished(cleanup);
@@ -78,7 +100,25 @@ function ownSettingsFixture({ signal, onTestFinished }: TestContext) {
   if (signal.aborted) retire();
   return {
     cleanup,
-    afterUnmount: (release: () => void) => afterUnmount.add(release),
+    afterUnmount: (release: () => void | Promise<void>) => afterUnmount.add(release),
+    async screenshot(path: string) {
+      const previous = { width: window.innerWidth, height: window.innerHeight };
+      const wasDark = document.documentElement.classList.contains("dark");
+      let restoring: Promise<void> | undefined;
+      const restore = () =>
+        (restoring ??= (async () => {
+          if (!wasDark) document.documentElement.classList.remove("dark");
+          await page.viewport(previous.width, previous.height);
+        })());
+      afterUnmount.add(restore);
+      try {
+        await this.native(() => page.viewport(1200, 850));
+        document.documentElement.classList.add("dark");
+        await this.native(() => page.screenshot({ path }));
+      } finally {
+        await restore();
+      }
+    },
     async drag(source: HTMLElement, target: HTMLElement) {
       const point = (element: HTMLElement) => {
         const bounds = element.getBoundingClientRect();
@@ -147,10 +187,10 @@ function ownSettingsFixture({ signal, onTestFinished }: TestContext) {
         await release();
       }
     },
-    async mount() {
+    async mount(node: ReactNode = <SavedEnvironmentsSettings actions={actions} />) {
       assertActive();
       document.body.append(host);
-      pendingRender = render(<SavedEnvironmentsSettings actions={actions} />, { container: host });
+      pendingRender = render(node, { container: host });
       const view = await pendingRender;
       assertActive();
       return view;
@@ -177,6 +217,7 @@ describe("SavedEnvironmentsSettings", () => {
     fixture = ownSettingsFixture(context);
     resetSavedEnvironmentRegistryStoreForTests();
     resetSavedEnvironmentRuntimeStoreForTests();
+    resetWorkspaceEnvironmentForTests();
     runtimeMocks.addSavedEnvironment.mockReset();
     runtimeMocks.reconnectSavedEnvironment.mockReset().mockResolvedValue(undefined);
     runtimeMocks.reviewSavedEnvironmentCertificate.mockReset().mockResolvedValue(undefined);
@@ -187,7 +228,211 @@ describe("SavedEnvironmentsSettings", () => {
 
   afterEach(async () => {
     await fixture.cleanup();
+    resetWorkspaceEnvironmentForTests();
     document.body.innerHTML = "";
+  });
+
+  it("hosts with one toggle, keeps network management collapsed, and issues a client invitation", async () => {
+    const networkId = randomOpaque();
+    let status = {
+      enabled: false,
+      phase: "off",
+      networks: [] as { networkId: string; serving: number }[],
+    };
+    const request = vi.fn<RelaySettingsRequest>(async (path, init) => {
+      if (path === "/api/relay/invitations")
+        return {
+          id: randomOpaque(16),
+          url: "https://relay.cafecode.sh/relay/connect#synthetic-private-invitation",
+          expiresAt: Date.now() + 60_000,
+        };
+      if (init.method === "POST" && path === "/api/relay") {
+        const enabled = JSON.parse(String(init.body)).enabled;
+        status = {
+          enabled,
+          phase: enabled ? "connected" : "off",
+          networks: enabled ? [{ networkId, serving: 1 }] : [],
+        };
+      }
+      return status;
+    });
+    await fixture.mount(
+      <div className="mx-auto max-w-3xl space-y-8 p-8">
+        <SavedEnvironmentsSettings actions={actions} />
+        <RelayConnectionsSettings request={request} />
+      </div>,
+    );
+    const toggle = page.getByRole("switch", { name: "Relay", exact: true });
+    await expect.element(toggle).toBeEnabled();
+    await expect.element(toggle).not.toBeChecked();
+    await expect.element(page.getByLabelText("Custom relay networks")).not.toBeVisible();
+    await fixture.native(() => toggle.click());
+    await expect.element(page.getByText("Connected", { exact: true })).toBeVisible();
+    await fixture.native(() =>
+      page.getByRole("button", { name: "Create relay invitation" }).click(),
+    );
+    await expect
+      .element(page.getByLabelText("Relay invitation link"))
+      .toHaveValue("https://relay.cafecode.sh/relay/connect#synthetic-private-invitation");
+    expect(request).toHaveBeenCalledWith("/api/relay/invitations", {
+      method: "POST",
+      body: JSON.stringify({ networkId, role: "client" }),
+    });
+    await fixture.native(() => page.getByText("Advanced relay settings", { exact: true }).click());
+    await expect.element(page.getByLabelText("Custom relay networks")).toBeVisible();
+    await fixture.native(() => page.getByRole("button", { name: "Save relay network" }).click());
+    await expect
+      .poll(() =>
+        request.mock.calls.some(
+          ([path, init]) =>
+            path === "/api/relay/networks" && init.body === JSON.stringify({ networks: [] }),
+        ),
+      )
+      .toBe(true);
+    await fixture.native(() => page.getByText("Advanced relay settings", { exact: true }).click());
+    if (import.meta.env.VITE_RELAY_SCREENSHOTS === "1")
+      await fixture.screenshot("../../../../../.explorations/relay/connections-hosting.png");
+    await fixture.native(() => toggle.click());
+    await expect.element(toggle).not.toBeChecked();
+    await expect
+      .element(page.getByRole("button", { name: "Create relay invitation" }))
+      .not.toBeInTheDocument();
+  });
+
+  it("does not apply an old host-toggle acknowledgement after switching environments", async () => {
+    let resolveHeld!: (value: unknown) => void;
+    const held = {
+      promise: new Promise<unknown>((resolve) => {
+        resolveHeld = resolve;
+      }),
+      resolve: (value: unknown) => resolveHeld(value),
+    };
+    fixture.afterUnmount(() => held.resolve({ enabled: false, networks: [] }));
+    const request = vi.fn<RelaySettingsRequest>((_path, init) =>
+      init.method === "POST" ? held.promise : Promise.resolve({ enabled: false, networks: [] }),
+    );
+    await fixture.mount(<RelayConnectionsSettings request={request} />);
+    const toggle = page.getByRole("switch", { name: "Relay", exact: true });
+    await expect.element(toggle).toBeEnabled();
+    await fixture.native(() => toggle.click());
+    await expect.element(toggle).toBeDisabled();
+    selectWorkspaceEnvironment(EnvironmentId.make("other-test-owned-environment"));
+    await expect.element(toggle).toBeEnabled();
+    held.resolve({
+      enabled: true,
+      phase: "connected",
+      networks: [{ networkId: randomOpaque(), serving: 1 }],
+    });
+    await held.promise;
+    await expect.element(toggle).not.toBeChecked();
+  });
+
+  it("adds a relay host through Saved environments and clears its one-use invitation immediately", async () => {
+    let resolveAdded!: (value: SavedEnvironmentRecord) => void;
+    const added = {
+      promise: new Promise<SavedEnvironmentRecord>((resolve) => {
+        resolveAdded = resolve;
+      }),
+      resolve: (value: SavedEnvironmentRecord) => resolveAdded(value),
+    };
+    const record = {
+      transport: "relay" as const,
+      environmentId: EnvironmentId.make("relay-test-environment"),
+      label: "My Cafe",
+      ...savedRelayUrls(randomOpaque()),
+      createdAt: "2026-11-10T00:00:00.000Z",
+      lastConnectedAt: null,
+    };
+    fixture.afterUnmount(() => added.resolve(record));
+    runtimeMocks.addSavedEnvironment.mockReturnValueOnce(added.promise);
+    await fixture.mount();
+    await fixture.native(() => page.getByRole("button", { name: "Add environment" }).click());
+    const dialog = page.getByRole("dialog");
+    await fixture.native(() =>
+      dialog.getByRole("button", { name: "Relay host", exact: true }).click(),
+    );
+    await expect.element(dialog.getByLabelText("Relay invitation")).toBeVisible();
+    await fixture.native(() => dialog.getByLabelText("Label (optional)").fill("My Cafe"));
+    await fixture.native(() =>
+      dialog
+        .getByLabelText("Relay invitation")
+        .fill("https://relay.cafecode.sh/relay/connect#test-owned-one-use-secret"),
+    );
+    if (import.meta.env.VITE_RELAY_SCREENSHOTS === "1")
+      await fixture.screenshot("../../../../../.explorations/relay/add-relay-environment.png");
+    await fixture.native(() =>
+      dialog.getByRole("button", { name: "Add environment", exact: true }).click(),
+    );
+    await expect.element(dialog.getByLabelText("Relay invitation")).toHaveValue("");
+    expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledExactlyOnceWith({
+      label: "My Cafe",
+      relayInvitation: "https://relay.cafecode.sh/relay/connect#test-owned-one-use-secret",
+    });
+    added.resolve(record);
+    useSavedEnvironmentRegistryStore.getState().upsert(record);
+    await expect.element(page.getByText("Relay connection", { exact: true })).toBeVisible();
+    await fixture.native(() => page.getByRole("button", { name: "Edit My Cafe" }).click());
+    await expect
+      .element(page.getByRole("dialog").getByLabelText("Name", { exact: true }))
+      .toHaveValue("My Cafe");
+    await expect
+      .element(page.getByRole("dialog").getByLabelText("Host", { exact: true }))
+      .not.toBeInTheDocument();
+  });
+
+  it("wraps saved relay device keys in tab ciphertext and removes the exact capability", async () => {
+    let targetId: string | undefined;
+    const registry = localStorage.getItem(SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY);
+    const slots = sessionStorage.getItem(SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY);
+    fixture.afterUnmount(async () => {
+      if (targetId) await removeRelayTarget(targetId);
+      if (registry === null) localStorage.removeItem(SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY);
+      else localStorage.setItem(SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY, registry);
+      if (slots === null) sessionStorage.removeItem(SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY);
+      else sessionStorage.setItem(SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY, slots);
+    });
+    const identity = await fixture.native(() => createIdentity());
+    targetId = randomOpaque();
+    const environmentId = EnvironmentId.make(randomOpaque());
+    const target = {
+      id: targetId,
+      networkId: randomOpaque(),
+      rootPublicKey: randomOpaque(),
+      bootstrapUrls: ["https://relay.example/v1/network"],
+      minimumRevision: 1,
+      hostPublicKey: randomOpaque(),
+      environmentId,
+      locator: randomOpaque(),
+      preferredNodeId: randomOpaque(),
+      bearerToken: "test-only-browser-relay-bearer",
+      tickets: [],
+    };
+    const record = {
+      transport: "relay" as const,
+      environmentId,
+      label: "Relay browser fixture",
+      ...savedRelayUrls(targetId),
+      createdAt: "2026-11-10T00:00:00.000Z",
+      lastConnectedAt: null,
+    };
+    writeBrowserSavedEnvironmentRegistry([record]);
+    const secret = encodeSavedRelaySecret(target, identity);
+    expect(await fixture.native(() => writeBrowserSavedSecret(environmentId, secret))).toBe(true);
+    expect(readBrowserSavedEnvironmentRegistry()).toEqual([record]);
+    const rawSlots = sessionStorage.getItem(SAVED_ENVIRONMENT_SESSION_SECRETS_STORAGE_KEY)!;
+    const rawCiphertext = sessionStorage.getItem("cafe-relay-target:" + targetId)!;
+    for (const raw of [
+      rawSlots,
+      rawCiphertext,
+      localStorage.getItem(SAVED_ENVIRONMENT_REGISTRY_STORAGE_KEY)!,
+    ]) {
+      expect(raw).not.toContain(target.bearerToken);
+      expect(raw).not.toContain(opaque(privateIdentityBytes(identity)));
+    }
+    expect(await fixture.native(() => readBrowserSavedSecret(environmentId))).toBe(secret);
+    await fixture.native(() => removeBrowserSavedSecret(environmentId));
+    expect(sessionStorage.getItem("cafe-relay-target:" + targetId)).toBeNull();
+    expect(await fixture.native(() => readBrowserSavedSecret(environmentId))).toBeNull();
   });
 
   it("warns about a changed certificate and reviews it only after an explicit click", async () => {

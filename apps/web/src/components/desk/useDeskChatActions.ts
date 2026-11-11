@@ -9,6 +9,7 @@ import { deskTabKey } from "../../deskModel";
 import { useDeskStore } from "../../deskStore";
 import { isThreadDuplicationPending } from "../../lib/threadDuplication";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { openThreadSecretsDialog } from "../../cafeSecrets/threadSecretsDialogStore";
 import { readDeskTabMetadata } from "./useDeskTabMetadata";
 
 // A row and its top tab can represent the same chat. Share only pending action
@@ -28,6 +29,7 @@ function items(target: ThreadRouteTarget): ContextMenuItem[] {
       label: uiText("Duplicate chat"),
       disabled: pending || isThreadDuplicationPending(metadata.threadRef) || !metadata.canDuplicate,
     },
+    { id: "secrets", label: uiText("Secrets…") },
     { id: "archive", label: uiText("Archive chat"), disabled: pending || metadata.working },
     { id: "delete", label: uiText("Move to Recycle Bin"), destructive: true, disabled: pending },
     {
@@ -47,6 +49,13 @@ export function useDeskChatActions() {
   const confirmArchive = useSettings((settings) => settings.confirmThreadArchive);
 
   const run = async (action: string, target: ThreadRouteTarget): Promise<boolean> => {
+    if (action === "secrets") {
+      // View-only: resolve the exact captured chat again after the menu closes.
+      const metadata = readDeskTabMetadata(target);
+      if (metadata.threadRef && metadata.exists)
+        openThreadSecretsDialog(metadata.threadRef, metadata.title);
+      return true;
+    }
     if (
       action !== "duplicate" &&
       action !== "archive" &&

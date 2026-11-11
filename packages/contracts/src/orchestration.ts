@@ -40,6 +40,17 @@ import {
   ProviderThreadGoalClearInput,
   ProviderThreadGoalSetInput,
 } from "./providerGoal.ts";
+import {
+  OrchestrationThreadGroup,
+  OrchestrationThreadGroupSummary,
+  ThreadDescription,
+  ThreadGroupId,
+  ThreadGroupProvenance,
+  ThreadGroupTitle,
+  ThreadOrigin,
+  ThreadOriginClassification,
+  ThreadProvenance,
+} from "./threadOrganization.ts";
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
@@ -451,6 +462,17 @@ export const OrchestrationThread = Schema.Struct({
   // the transport boundary; current projectors emit either a canonical goal or
   // null, while legacy snapshots decode without a migration-time rewrite.
   goal: Schema.optional(Schema.NullOr(ProviderThreadGoal)),
+  // Organization/origin metadata. Every field is optional so historical
+  // snapshots decode unchanged: absence means top level / unrecorded origin.
+  // None of these fields grants permission, native ownership or retry rights.
+  groupId: Schema.optional(Schema.NullOr(ThreadGroupId)),
+  origin: Schema.optional(ThreadOrigin),
+  description: Schema.optional(Schema.NullOr(ThreadDescription)),
+  provenance: Schema.optional(Schema.NullOr(ThreadProvenance)),
+  // Exact cascade incarnation tags (command IDs). Restore/unarchive cascades
+  // match these within a subtree; they never reach across sibling groups.
+  deletionId: Schema.optional(Schema.NullOr(CommandId)),
+  archiveCascadeId: Schema.optional(Schema.NullOr(CommandId)),
 });
 export type OrchestrationThread = typeof OrchestrationThread.Type;
 
@@ -458,6 +480,9 @@ export const OrchestrationReadModel = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projects: Schema.Array(OrchestrationProject),
   threads: Schema.Array(OrchestrationThread),
+  // Engine-side group records, including soft-deleted ones needed for exact
+  // subtree restore. Client snapshots receive live summaries on owner shells.
+  threadGroups: Schema.optional(Schema.Array(OrchestrationThreadGroup)),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationReadModel = typeof OrchestrationReadModel.Type;
@@ -517,13 +542,29 @@ export const OrchestrationThreadShell = Schema.Struct({
   hasPendingUserInput: Schema.Boolean,
   hasActionableProposedPlan: Schema.Boolean,
   liveWork: Schema.optional(OrchestrationLiveWork),
+  // Sidebar containment: members name their group; owners carry compact live
+  // group summaries. Older servers omit both and render flat.
+  groupId: Schema.optional(Schema.NullOr(ThreadGroupId)),
+  origin: Schema.optional(ThreadOrigin),
+  ownedGroups: Schema.optional(Schema.Array(OrchestrationThreadGroupSummary)),
 });
 export type OrchestrationThreadShell = typeof OrchestrationThreadShell.Type;
+
+export const OrchestrationDeletedThreadGroup = Schema.Struct({
+  id: ThreadGroupId,
+  ownerThreadId: ThreadId,
+  title: ThreadGroupTitle,
+  deletedAt: IsoDateTime,
+});
+export type OrchestrationDeletedThreadGroup = typeof OrchestrationDeletedThreadGroup.Type;
 
 export const OrchestrationShellSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projects: Schema.Array(OrchestrationProjectShell),
   threads: Schema.Array(OrchestrationThreadShell),
+  // Recycle-bin view only: groups in the Recycle Bin, for group restore and
+  // cleanup entries. Live groups travel on their owner's shell instead.
+  deletedThreadGroups: Schema.optional(Schema.Array(OrchestrationDeletedThreadGroup)),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationShellSnapshot = typeof OrchestrationShellSnapshot.Type;
@@ -1099,6 +1140,13 @@ const ThreadCreateCommand = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  // Membership is fixed at creation; a new thread has no descendants, so this
+  // can never create a cycle.
+  groupId: Schema.optional(ThreadGroupId),
+  description: Schema.optional(ThreadDescription),
+  // Server-resolved. The client dispatch normalizer always overwrites it, so a
+  // renderer can never claim an agent or MCP creation path.
+  provenance: Schema.optional(ThreadProvenance),
   createdAt: IsoDateTime,
 });
 
@@ -1153,6 +1201,51 @@ const ThreadUnarchiveCommand = Schema.Struct({
   type: Schema.Literal("thread.unarchive"),
   commandId: CommandId,
   threadId: ThreadId,
+});
+
+/** Editable label/description only; provenance is never writable. */
+const ThreadMetadataUpdateCommand = Schema.Struct({
+  type: Schema.Literal("thread.metadata.update"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  originClassification: Schema.optional(ThreadOriginClassification),
+  // Omitted means unchanged; null clears.
+  description: Schema.optional(Schema.NullOr(ThreadDescription)),
+});
+
+const ThreadGroupDeleteCommand = Schema.Struct({
+  type: Schema.Literal("thread.group.delete"),
+  commandId: CommandId,
+  groupId: ThreadGroupId,
+});
+
+const ThreadGroupRestoreCommand = Schema.Struct({
+  type: Schema.Literal("thread.group.restore"),
+  commandId: CommandId,
+  groupId: ThreadGroupId,
+});
+
+const ThreadGroupMetaUpdateCommand = Schema.Struct({
+  type: Schema.Literal("thread.group.meta.update"),
+  commandId: CommandId,
+  groupId: ThreadGroupId,
+  title: Schema.optional(ThreadGroupTitle),
+  description: Schema.optional(Schema.NullOr(ThreadDescription)),
+});
+
+/**
+ * Group creation is deliberately absent from the client command unions: the
+ * product offers no renderer entry point. The management tool dispatches it.
+ */
+const ThreadGroupCreateCommand = Schema.Struct({
+  type: Schema.Literal("thread.group.create"),
+  commandId: CommandId,
+  groupId: ThreadGroupId,
+  ownerThreadId: ThreadId,
+  title: ThreadGroupTitle,
+  description: Schema.optional(ThreadDescription),
+  provenance: ThreadGroupProvenance,
+  createdAt: IsoDateTime,
 });
 
 const ThreadMetaUpdateCommand = Schema.Struct({
@@ -1544,6 +1637,10 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
   ThreadMetaUpdateCommand,
+  ThreadMetadataUpdateCommand,
+  ThreadGroupDeleteCommand,
+  ThreadGroupRestoreCommand,
+  ThreadGroupMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
   ThreadTurnStartCommand,
@@ -1574,6 +1671,10 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadArchiveCommand,
   ThreadUnarchiveCommand,
   ThreadMetaUpdateCommand,
+  ThreadMetadataUpdateCommand,
+  ThreadGroupDeleteCommand,
+  ThreadGroupRestoreCommand,
+  ThreadGroupMetaUpdateCommand,
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
   ClientThreadTurnStartCommand,
@@ -1784,6 +1885,7 @@ const ThreadGoalSyncCommand = Schema.Struct({
 });
 
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadGroupCreateCommand,
   ThreadMcpUserInputRespondCommand,
   ThreadAsyncQuestionAnswerCommand,
   ThreadMcpAsyncQuestionsResolveCommand,
@@ -1818,6 +1920,11 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.archived",
   "thread.unarchived",
   "thread.meta-updated",
+  "thread.metadata-updated",
+  "thread.group-created",
+  "thread.group-deleted",
+  "thread.group-restored",
+  "thread.group-meta-updated",
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
   "thread.message-sent",
@@ -1887,6 +1994,10 @@ export const ThreadCreatedPayload = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  groupId: Schema.optional(ThreadGroupId),
+  description: Schema.optional(ThreadDescription),
+  provenance: Schema.optional(ThreadProvenance),
+  origin: Schema.optional(ThreadOrigin),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1907,16 +2018,22 @@ export const ThreadForkedPayload = Schema.Struct({
 
 export const ThreadDeletedPayload = Schema.Struct({
   threadId: ThreadId,
+  // Exact delete operation (command ID). Legacy events omit it and therefore
+  // never join a cascade restore.
+  deletionId: Schema.optional(CommandId),
   deletedAt: IsoDateTime,
 });
 
 export const ThreadRestoredPayload = Schema.Struct({
   threadId: ThreadId,
+  // The owning group cannot be restored (its owner is gone): return top level.
+  detachFromGroup: Schema.optional(Schema.Boolean),
   updatedAt: IsoDateTime,
 });
 
 export const ThreadArchivedPayload = Schema.Struct({
   threadId: ThreadId,
+  archiveCascadeId: Schema.optional(CommandId),
   archivedAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1935,6 +2052,43 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   codexContextWindowOverride: Schema.optional(Schema.NullOr(CodexContextWindowOverride)),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadOriginMetadataUpdatedPayload = Schema.Struct({
+  threadId: ThreadId,
+  origin: Schema.optional(ThreadOrigin),
+  description: Schema.optional(Schema.NullOr(ThreadDescription)),
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadGroupCreatedPayload = Schema.Struct({
+  groupId: ThreadGroupId,
+  ownerThreadId: ThreadId,
+  title: ThreadGroupTitle,
+  description: Schema.NullOr(ThreadDescription),
+  provenance: ThreadGroupProvenance,
+  createdAt: IsoDateTime,
+});
+
+export const ThreadGroupDeletedPayload = Schema.Struct({
+  groupId: ThreadGroupId,
+  ownerThreadId: ThreadId,
+  deletionId: CommandId,
+  deletedAt: IsoDateTime,
+});
+
+export const ThreadGroupRestoredPayload = Schema.Struct({
+  groupId: ThreadGroupId,
+  ownerThreadId: ThreadId,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadGroupMetaUpdatedPayload = Schema.Struct({
+  groupId: ThreadGroupId,
+  ownerThreadId: ThreadId,
+  title: Schema.optional(ThreadGroupTitle),
+  description: Schema.optional(Schema.NullOr(ThreadDescription)),
   updatedAt: IsoDateTime,
 });
 
@@ -2236,6 +2390,33 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.meta-updated"),
     payload: ThreadMetaUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.metadata-updated"),
+    payload: ThreadOriginMetadataUpdatedPayload,
+  }),
+  // Group events are filed on the owner thread's stream so per-thread
+  // tombstones and hard-delete purge fence them with no new aggregate kind.
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.group-created"),
+    payload: ThreadGroupCreatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.group-deleted"),
+    payload: ThreadGroupDeletedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.group-restored"),
+    payload: ThreadGroupRestoredPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.group-meta-updated"),
+    payload: ThreadGroupMetaUpdatedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

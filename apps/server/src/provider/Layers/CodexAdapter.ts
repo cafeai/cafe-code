@@ -156,6 +156,7 @@ import {
   prepareFileAttachmentPrompt,
 } from "../fileAttachmentPrompt.ts";
 import { ServerConfig } from "../../config.ts";
+import { makeSecretRunnerSession } from "../../secrets/session.ts";
 import { readSystemPromptFileForInjection } from "../../systemPromptFile.ts";
 import {
   CodexResumeCursorSchema,
@@ -5920,20 +5921,40 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ).pipe(Effect.provideService(Scope.Scope, sessionScope));
         yield* assertPreparation();
         const currentTransportPolicy = toRuntimeTransportPolicy(yield* Ref.get(transportPolicyRef));
-        const runtimeInput: CodexSessionRuntimeOptions = {
-          customInstructions: yield* readSystemPromptFileForInjection(
-            serverConfig.systemPromptPath,
-          ).pipe(
-            Effect.provideService(FileSystem.FileSystem, fileSystem),
-            Effect.mapError(
-              () =>
-                new ProviderAdapterProcessError({
-                  provider: PROVIDER,
-                  threadId: input.threadId,
-                  detail: "Could not read custom instructions.",
-                }),
+        const secretRunner = yield* Effect.acquireRelease(
+          Effect.tryPromise({
+            try: () =>
+              makeSecretRunnerSession({
+                threadId: input.threadId,
+                secretsDir: serverConfig.secretsDir,
+              }),
+            catch: () =>
+              new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                detail: "Could not prepare Cafe Secrets.",
+              }),
+          }),
+          (binding) =>
+            Effect.promise(binding.dispose).pipe(
+              Effect.catchCause(() =>
+                Effect.logWarning("Private Cafe Secrets runner cleanup remains incomplete."),
+              ),
             ),
-          ),
+        ).pipe(Effect.provideService(Scope.Scope, sessionScope));
+        const runtimeInput: CodexSessionRuntimeOptions = {
+          customInstructions:
+            ((yield* readSystemPromptFileForInjection(serverConfig.systemPromptPath).pipe(
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.mapError(
+                () =>
+                  new ProviderAdapterProcessError({
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    detail: "Could not read custom instructions.",
+                  }),
+              ),
+            )) ?? "") + secretRunner.instructions,
           historySafety: {
             isBlocked: (nativeThreadId) =>
               historySafety

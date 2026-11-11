@@ -2,10 +2,18 @@ import * as Schema from "effect/Schema";
 import { isDeepStrictEqual } from "node:util";
 
 import type {
+  CommandId,
   OrchestrationCommand,
   OrchestrationEvent,
   OrchestrationReadModel,
+  OrchestrationThread,
   ProviderPrioritySessionBinding,
+  ThreadProvenance,
+} from "@cafecode/contracts";
+import {
+  MAX_LIVE_THREAD_GROUPS_PER_OWNER,
+  MAX_THREAD_GROUP_DEPTH,
+  defaultThreadOriginClassification,
 } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -26,6 +34,17 @@ import {
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
 import { resolveThreadForkMessageCutoff } from "./threadForkCutoff.ts";
+import {
+  collectArchiveClosure,
+  collectDeletionClosure,
+  collectRestoreClosure,
+  findThreadGroup,
+  liveGroupsOwnedBy,
+  normalizedGroupTitle,
+  threadGroupDepth,
+  threadGroups,
+  type ContainmentClosure,
+} from "./threadGroups.ts";
 import { SESSION_LIFECYCLE_SUPERSEDED, sessionLifecycleSnapshot } from "./sessionLifecycle.ts";
 import {
   derivePendingQuestionRequests,
@@ -62,6 +81,92 @@ function withEventBase(
 }
 
 type PlannedOrchestrationEvent = Omit<OrchestrationEvent, "sequence">;
+
+/**
+ * One delete batch: owner-stream group deletions plus ordinary thread
+ * deletions, all tagged with the same exact deletion incarnation. Every
+ * `thread.deleted` keeps the existing ThreadDeletionReactor stop request, which
+ * is a requested native stop, not proof of cleanup.
+ */
+function closureDeletionEvents(
+  closure: ContainmentClosure,
+  deletionId: CommandId,
+  occurredAt: string,
+): PlannedOrchestrationEvent[] {
+  return [
+    ...closure.groups.map((group): PlannedOrchestrationEvent => ({
+      ...withEventBase({
+        aggregateKind: "thread",
+        aggregateId: group.ownerThreadId,
+        occurredAt,
+        commandId: deletionId,
+      }),
+      type: "thread.group-deleted",
+      payload: {
+        groupId: group.id,
+        ownerThreadId: group.ownerThreadId,
+        deletionId,
+        deletedAt: occurredAt,
+      },
+    })),
+    ...closure.threads.map((thread): PlannedOrchestrationEvent => ({
+      ...withEventBase({
+        aggregateKind: "thread",
+        aggregateId: thread.id,
+        occurredAt,
+        commandId: deletionId,
+      }),
+      type: "thread.deleted",
+      payload: { threadId: thread.id, deletionId, deletedAt: occurredAt },
+    })),
+  ];
+}
+
+function closureRestoreEvents(
+  closure: ContainmentClosure,
+  commandId: CommandId,
+  occurredAt: string,
+): PlannedOrchestrationEvent[] {
+  return [
+    ...closure.groups.map((group): PlannedOrchestrationEvent => ({
+      ...withEventBase({
+        aggregateKind: "thread",
+        aggregateId: group.ownerThreadId,
+        occurredAt,
+        commandId,
+      }),
+      type: "thread.group-restored",
+      payload: { groupId: group.id, ownerThreadId: group.ownerThreadId, updatedAt: occurredAt },
+    })),
+    ...closure.threads.map((thread): PlannedOrchestrationEvent => ({
+      ...withEventBase({
+        aggregateKind: "thread",
+        aggregateId: thread.id,
+        occurredAt,
+        commandId,
+      }),
+      type: "thread.restored",
+      payload: { threadId: thread.id, updatedAt: occurredAt },
+    })),
+  ];
+}
+
+function isLiveThread(thread: OrchestrationThread | undefined): thread is OrchestrationThread {
+  return thread !== undefined && thread.deletedAt === null;
+}
+
+/** Recorded label derived from server provenance; absent provenance stays unknown. */
+function recordedOriginFields(provenance: ThreadProvenance | undefined, recordedAt: string) {
+  if (provenance === undefined) return {};
+  return {
+    provenance,
+    origin: {
+      classification: defaultThreadOriginClassification(provenance),
+      source: "recorded" as const,
+      updatedAt: recordedAt,
+    },
+  };
+}
 
 type DecideOrchestrationCommandResult =
   | PlannedOrchestrationEvent
@@ -244,9 +349,21 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         projectId: command.projectId,
       });
-      const activeThreads = listThreadsByProjectId(readModel, command.projectId).filter(
+      const projectThreads = listThreadsByProjectId(readModel, command.projectId).filter(
         (thread) => thread.deletedAt === null,
       );
+      // Deleting an owner already cascades through its groups; do not issue a
+      // second, differently tagged delete for a member it covers.
+      const cascaded = new Set<string>();
+      for (const thread of projectThreads) {
+        for (const member of collectDeletionClosure(
+          readModel,
+          liveGroupsOwnedBy(readModel, thread.id),
+        ).threads) {
+          cascaded.add(member.id);
+        }
+      }
+      const activeThreads = projectThreads.filter((thread) => !cascaded.has(thread.id));
       if (activeThreads.length > 0 && command.force !== true) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
@@ -303,6 +420,21 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (command.groupId !== undefined) {
+        // The engine serializes commands, so a create decided after a group
+        // delete is refused here and one decided before is in that delete's
+        // closure. Neither path can leave an orphaned member.
+        const group = findThreadGroup(readModel, command.groupId);
+        const owner = group
+          ? readModel.threads.find((thread) => thread.id === group.ownerThreadId)
+          : undefined;
+        if (!group || group.deletedAt !== null || !isLiveThread(owner)) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Thread group '${command.groupId}' is not available; it may have been deleted.`,
+          });
+        }
+      }
       return {
         ...withEventBase({
           aggregateKind: "thread",
@@ -326,6 +458,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           interactionMode: command.interactionMode,
           branch: command.branch,
           worktreePath: command.worktreePath,
+          ...(command.groupId !== undefined ? { groupId: command.groupId } : {}),
+          ...(command.description !== undefined ? { description: command.description } : {}),
+          ...recordedOriginFields(command.provenance, command.createdAt),
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
@@ -375,6 +510,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             interactionMode: sourceThread.interactionMode,
             branch: sourceThread.branch,
             worktreePath: sourceThread.worktreePath,
+            // A copy is top level and owns no groups: membership is never
+            // copied, so the source group cannot gain a duplicate row.
+            ...(sourceThread.description ? { description: sourceThread.description } : {}),
+            ...recordedOriginFields(
+              {
+                creationPath: "duplicate",
+                originThreadId: command.sourceThreadId,
+                recordedAt: command.createdAt,
+              },
+              command.createdAt,
+            ),
             createdAt: command.createdAt,
             updatedAt: command.createdAt,
           },
@@ -493,6 +639,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             interactionMode: sourceThread.interactionMode,
             branch: sourceThread.branch,
             worktreePath: sourceThread.worktreePath,
+            ...(sourceThread.description ? { description: sourceThread.description } : {}),
+            ...recordedOriginFields(
+              {
+                creationPath: "fork",
+                originThreadId: command.sourceThreadId,
+                recordedAt: command.createdAt,
+              },
+              command.createdAt,
+            ),
             createdAt: command.createdAt,
             updatedAt: command.createdAt,
           },
@@ -538,7 +693,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       const occurredAt = yield* nowIso;
-      return {
+      const deleted: PlannedOrchestrationEvent = {
         ...withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -548,9 +703,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.deleted",
         payload: {
           threadId: command.threadId,
+          deletionId: command.commandId,
           deletedAt: occurredAt,
         },
       };
+      // Owned groups and their members join the same batch, so no member can
+      // remain beneath a parent that is in the Recycle Bin.
+      const cascade = collectDeletionClosure(
+        readModel,
+        liveGroupsOwnedBy(readModel, command.threadId),
+      );
+      if (cascade.groups.length === 0) return deleted;
+      return [deleted, ...closureDeletionEvents(cascade, command.commandId, occurredAt)];
     }
 
     case "thread.restore": {
@@ -566,7 +730,29 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
       const occurredAt = yield* nowIso;
-      return {
+      const before: PlannedOrchestrationEvent[] = [];
+      let detachFromGroup = false;
+      if (thread.groupId) {
+        const group = findThreadGroup(readModel, thread.groupId);
+        const owner = group
+          ? readModel.threads.find((entry) => entry.id === group.ownerThreadId)
+          : undefined;
+        if (!group || !isLiveThread(owner)) {
+          // The parent is gone or in the Recycle Bin: return top level rather
+          // than beneath an invisible owner.
+          detachFromGroup = true;
+        } else if (group.deletedAt !== null) {
+          // Restore only the group shell; its other members stay deleted.
+          before.push(
+            ...closureRestoreEvents(
+              { groups: [group], threads: [] },
+              command.commandId,
+              occurredAt,
+            ),
+          );
+        }
+      }
+      const restored: PlannedOrchestrationEvent = {
         ...withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -576,9 +762,24 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.restored",
         payload: {
           threadId: command.threadId,
+          ...(detachFromGroup ? { detachFromGroup: true } : {}),
           updatedAt: occurredAt,
         },
       };
+      // Restoring a thread also restores its own subtree, but only rows that
+      // still carry this thread's exact deletion incarnation.
+      const deletionId = thread.deletionId ?? null;
+      const subtree =
+        deletionId === null
+          ? { groups: [], threads: [] }
+          : collectRestoreClosure(
+              readModel,
+              threadGroups(readModel).filter((group) => group.ownerThreadId === thread.id),
+              deletionId,
+            );
+      const after = closureRestoreEvents(subtree, command.commandId, occurredAt);
+      if (before.length === 0 && after.length === 0) return restored;
+      return [...before, restored, ...after];
     }
 
     case "thread.archive": {
@@ -588,28 +789,81 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         threadId: command.threadId,
       });
       const occurredAt = yield* nowIso;
-      return {
+      // Archiving a parent also archives its group members, otherwise live
+      // members would vanish beneath a parent the sidebar no longer shows.
+      // Archive never stops sessions, so neither does the cascade.
+      const members = collectArchiveClosure(readModel, command.threadId).threads.filter(
+        (thread) => thread.archivedAt === null,
+      );
+      const archived = (threadId: OrchestrationThread["id"]): PlannedOrchestrationEvent => ({
         ...withEventBase({
           aggregateKind: "thread",
-          aggregateId: command.threadId,
+          aggregateId: threadId,
           occurredAt,
           commandId: command.commandId,
         }),
         type: "thread.archived",
         payload: {
-          threadId: command.threadId,
+          threadId,
+          ...(members.length > 0 ? { archiveCascadeId: command.commandId } : {}),
           archivedAt: occurredAt,
           updatedAt: occurredAt,
         },
-      };
+      });
+      if (members.length === 0) return archived(command.threadId);
+      return [archived(command.threadId), ...members.map((member) => archived(member.id))];
     }
 
     case "thread.unarchive": {
-      yield* requireThreadArchived({
+      const archivedThread = yield* requireThreadArchived({
         readModel,
         command,
         threadId: command.threadId,
       });
+      const occurredAt = yield* nowIso;
+      const unarchived = (threadId: OrchestrationThread["id"]): PlannedOrchestrationEvent => ({
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.unarchived",
+        payload: {
+          threadId,
+          updatedAt: occurredAt,
+        },
+      });
+      // Reverse only the exact cascade this thread started. Members archived
+      // independently carry another cascade ID (or none) and stay archived.
+      const cascadeId = archivedThread.archiveCascadeId ?? null;
+      const members =
+        cascadeId === null
+          ? []
+          : readModel.threads.filter(
+              (thread) =>
+                thread.id !== archivedThread.id &&
+                thread.archivedAt !== null &&
+                thread.archiveCascadeId === cascadeId,
+            );
+      if (members.length === 0) return unarchived(command.threadId);
+      return [unarchived(command.threadId), ...members.map((member) => unarchived(member.id))];
+    }
+
+    case "thread.metadata.update": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      if (thread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This chat is in the Recycle Bin.",
+        });
+      }
+      if (command.originClassification === undefined && command.description === undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "No metadata change was requested.",
+        });
+      }
       const occurredAt = yield* nowIso;
       return {
         ...withEventBase({
@@ -618,12 +872,173 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           occurredAt,
           commandId: command.commandId,
         }),
-        type: "thread.unarchived",
+        type: "thread.metadata-updated",
         payload: {
           threadId: command.threadId,
+          // A saved label is the user's correction; provenance is untouched.
+          ...(command.originClassification !== undefined
+            ? {
+                origin: {
+                  classification: command.originClassification,
+                  source: "user" as const,
+                  updatedAt: occurredAt,
+                },
+              }
+            : {}),
+          ...(command.description !== undefined ? { description: command.description } : {}),
           updatedAt: occurredAt,
         },
       };
+    }
+
+    case "thread.group.create": {
+      const owner = yield* requireThread({ readModel, command, threadId: command.ownerThreadId });
+      if (owner.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The parent chat is in the Recycle Bin.",
+        });
+      }
+      if (findThreadGroup(readModel, command.groupId)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread group '${command.groupId}' already exists.`,
+        });
+      }
+      const ownerGroups = liveGroupsOwnedBy(readModel, owner.id);
+      if (ownerGroups.length >= MAX_LIVE_THREAD_GROUPS_PER_OWNER) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `A chat can own at most ${MAX_LIVE_THREAD_GROUPS_PER_OWNER} live groups.`,
+        });
+      }
+      const title = normalizedGroupTitle(command.title);
+      if (ownerGroups.some((group) => normalizedGroupTitle(group.title) === title)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This chat already has a group with that title.",
+        });
+      }
+      const depth = threadGroupDepth(readModel, {
+        id: command.groupId,
+        ownerThreadId: owner.id,
+        title: command.title,
+        description: null,
+        provenance: command.provenance,
+        createdAt: command.createdAt,
+        updatedAt: command.createdAt,
+        deletedAt: null,
+        deletionId: null,
+      });
+      if (depth > MAX_THREAD_GROUP_DEPTH) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Groups can be nested at most ${MAX_THREAD_GROUP_DEPTH} levels deep.`,
+        });
+      }
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: owner.id,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.group-created",
+        payload: {
+          groupId: command.groupId,
+          ownerThreadId: owner.id,
+          title: command.title,
+          description: command.description ?? null,
+          provenance: command.provenance,
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.group.meta.update": {
+      const group = findThreadGroup(readModel, command.groupId);
+      if (!group || group.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread group '${command.groupId}' is not available.`,
+        });
+      }
+      if (command.title === undefined && command.description === undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "No group change was requested.",
+        });
+      }
+      if (command.title !== undefined) {
+        const title = normalizedGroupTitle(command.title);
+        if (
+          liveGroupsOwnedBy(readModel, group.ownerThreadId).some(
+            (other) => other.id !== group.id && normalizedGroupTitle(other.title) === title,
+          )
+        ) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: "This chat already has a group with that title.",
+          });
+        }
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: group.ownerThreadId,
+          occurredAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.group-meta-updated",
+        payload: {
+          groupId: group.id,
+          ownerThreadId: group.ownerThreadId,
+          ...(command.title !== undefined ? { title: command.title } : {}),
+          ...(command.description !== undefined ? { description: command.description } : {}),
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "thread.group.delete": {
+      const group = findThreadGroup(readModel, command.groupId);
+      if (!group || group.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread group '${command.groupId}' is not available; it may already be deleted.`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      // The parent (owner) thread is never part of its group's closure.
+      return closureDeletionEvents(
+        collectDeletionClosure(readModel, [group]),
+        command.commandId,
+        occurredAt,
+      );
+    }
+
+    case "thread.group.restore": {
+      const group = findThreadGroup(readModel, command.groupId);
+      if (!group || group.deletedAt === null || group.deletionId === null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread group '${command.groupId}' is not in the Recycle Bin.`,
+        });
+      }
+      const owner = readModel.threads.find((thread) => thread.id === group.ownerThreadId);
+      if (!isLiveThread(owner)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Restore the parent chat first.",
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return closureRestoreEvents(
+        collectRestoreClosure(readModel, [group], group.deletionId),
+        command.commandId,
+        occurredAt,
+      );
     }
 
     case "thread.meta.update": {
@@ -757,6 +1172,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      // A chat in the Recycle Bin (for example after a group delete) must not
+      // start new work through any path, including queued renderer rows.
+      if (targetThread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This chat is in the Recycle Bin.",
+        });
+      }
       if (command.scheduledFollowUp !== undefined) {
         const scheduled = command.scheduledFollowUp;
         // Scheduling is idle-only. It must never inherit ordinary user-submit
@@ -1124,6 +1547,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (targetThread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This chat is in the Recycle Bin.",
+        });
+      }
       const activeTurnId =
         targetThread.session?.status === "running" ? targetThread.session.activeTurnId : null;
       // Renderer attachment preparation and transport can race an account

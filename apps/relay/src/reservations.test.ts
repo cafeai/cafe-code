@@ -24,6 +24,7 @@ import {
 } from "@cafecode/relay/wire";
 import { signNetwork } from "@cafecode/relay/descriptor";
 import { epochNow } from "@cafecode/relay/lifetime";
+import { selfServiceHostLocator } from "@cafecode/relay/admission";
 
 function solve(challenge: HostWorkChallenge): HostWorkSolutions {
   const prefix = hostWorkPrefix(challenge),
@@ -100,6 +101,77 @@ async function fixture() {
 }
 
 describe("work-paid host reservations", () => {
+  it("requires paid work and exact key ownership for explicit self-service enrollment", async () => {
+    const f = await fixture(),
+      attacker = await createIdentity();
+    const authority = new HostReservations({ ...f.input, grants: [], selfService: true });
+    try {
+      const locator = selfServiceHostLocator(f.input.networkId, f.identity.publicKey);
+      const request = {
+        version: 1 as const,
+        networkId: f.input.networkId,
+        locator,
+        admissionPublicKey: f.identity.publicKey,
+        capacityToken: null,
+        claimId: randomOpaque(16),
+        reservationId: null,
+      };
+      const challenge = authority.challenge(request);
+      expect(() => authority.authorize(locator, f.identity.publicKey, undefined)).toThrow();
+      const paid = await authority.claim(await f.claim(challenge));
+      expect(authority.authorize(locator, f.identity.publicKey, paid.credential)).toEqual(paid);
+      expect(() =>
+        authority.challenge({ ...request, admissionPublicKey: attacker.publicKey }),
+      ).toThrow();
+      expect(() => authority.challenge({ ...request, capacityToken: randomOpaque() })).toThrow();
+      expect(() => authority.authorize(locator, attacker.publicKey, paid.credential)).toThrow();
+      f.advance(10_001);
+      // Expiry must not make another machine's locator claimable.
+      expect(() =>
+        authority.challenge({ ...request, admissionPublicKey: attacker.publicKey }),
+      ).toThrow();
+      expect(() => authority.authorize(locator, f.identity.publicKey, paid.credential)).toThrow();
+      const fresh = authority.challenge({ ...request, claimId: randomOpaque(16) });
+      const proof = { challenge: fresh, solutions: solve(fresh) };
+      await expect(
+        authority.claim({ ...proof, signature: await signBytes(attacker, hostWorkProof(proof)) }),
+      ).rejects.toThrow();
+      expect(authority.stats().reservations).toBe(0);
+    } finally {
+      authority.retire();
+      f.authority.retire();
+    }
+  });
+
+  it("keeps self-service disabled by default and never bypasses operator enrollment", async () => {
+    const f = await fixture();
+    const authority = new HostReservations({ ...f.input, selfService: true });
+    try {
+      const request = {
+        version: 1 as const,
+        networkId: f.input.networkId,
+        locator: selfServiceHostLocator(f.input.networkId, f.identity.publicKey),
+        admissionPublicKey: f.identity.publicKey,
+        capacityToken: null,
+        claimId: randomOpaque(16),
+        reservationId: null,
+      };
+      expect(() => f.authority.challenge(request)).toThrow();
+      expect(() => authority.challenge({ ...request, locator: f.locator })).toThrow();
+      const challenge = f.challenge();
+      const unsigned = { challenge, solutions: [0, 0, 0, 0] as const };
+      await expect(
+        authority.claim({
+          ...unsigned,
+          signature: await signBytes(f.identity, hostWorkProof(unsigned)),
+        }),
+      ).rejects.toThrow();
+      expect(authority.stats().reservations).toBe(0);
+    } finally {
+      authority.retire();
+      f.authority.retire();
+    }
+  });
   it("issues the 17-bit baseline and ten-minute term without an explicit host work policy", async () => {
     const f = await fixture();
     const authority = new HostReservations({

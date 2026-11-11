@@ -38,6 +38,7 @@ import {
   type Project,
   type ProposedPlan,
   type SidebarThreadSummary,
+  type ThreadOrganizationDetail,
   type Thread,
   type ThreadSession,
   type ThreadShell,
@@ -100,6 +101,8 @@ export interface EnvironmentState {
   activityByThreadId: Record<ThreadId, Record<string, OrchestrationThreadActivity>>;
   /** Detail-only display omission; absence on a legacy snapshot stays unknown. */
   pendingRequestRetentionTruncatedByThreadId?: Record<ThreadId, boolean | undefined>;
+  /** Detail-only origin/description/provenance, read by the metadata dialog. */
+  threadOrganizationById?: Record<ThreadId, ThreadOrganizationDetail>;
   proposedPlanIdsByThreadId: Record<ThreadId, string[]>;
   proposedPlanByThreadId: Record<ThreadId, Record<string, ProposedPlan>>;
   turnDiffIdsByThreadId: Record<ThreadId, TurnId[]>;
@@ -326,6 +329,12 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     activities: thread.activities.map((activity) => ({ ...activity })),
     pendingRequestRetentionTruncated: thread.pendingRequestRetentionTruncated,
     goal: thread.goal ?? null,
+    organization: {
+      groupId: thread.groupId ?? null,
+      origin: thread.origin ?? null,
+      description: thread.description ?? null,
+      provenance: thread.provenance ?? null,
+    },
   };
 }
 
@@ -381,6 +390,11 @@ function mapThreadShell(
     hasPendingUserInput: thread.hasPendingUserInput,
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     liveWork: thread.liveWork,
+    groupId: thread.groupId ?? null,
+    ...(thread.origin ? { origin: thread.origin } : {}),
+    ...(thread.ownedGroups && thread.ownedGroups.length > 0
+      ? { ownedGroups: thread.ownedGroups }
+      : {}),
   };
   return {
     shell,
@@ -642,8 +656,24 @@ function sidebarThreadSummariesEqual(
       (left.liveWork?.unconfirmedAgentIds?.length === right.liveWork?.unconfirmedAgentIds?.length &&
         left.liveWork?.unconfirmedAgentIds?.every(
           (id, index) => id === right.liveWork?.unconfirmedAgentIds?.[index],
-        ) === true))
+        ) === true)) &&
+    (left.groupId ?? null) === (right.groupId ?? null) &&
+    left.origin?.classification === right.origin?.classification &&
+    left.origin?.source === right.origin?.source &&
+    threadGroupSummariesEqual(left.ownedGroups, right.ownedGroups)
   );
+}
+
+function threadGroupSummariesEqual(
+  left: SidebarThreadSummary["ownedGroups"],
+  right: SidebarThreadSummary["ownedGroups"],
+): boolean {
+  if (left === right) return true;
+  if ((left?.length ?? 0) !== (right?.length ?? 0)) return false;
+  return (left ?? []).every((group, index) => {
+    const other = right?.[index];
+    return other !== undefined && group.id === other.id && group.title === other.title;
+  });
 }
 
 function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): boolean {
@@ -873,6 +903,23 @@ function reconcileThreadCodexContextPolicy(
  * keeps the shared shell/session/turn current. Policy watermarks travel with
  * their maps atomically; sidebar summaries remain shell-stream-only.
  */
+function threadOrganizationsEqual(
+  left: ThreadOrganizationDetail | undefined,
+  right: ThreadOrganizationDetail,
+): boolean {
+  return (
+    left !== undefined &&
+    left.groupId === right.groupId &&
+    left.description === right.description &&
+    left.origin?.classification === right.origin?.classification &&
+    left.origin?.source === right.origin?.source &&
+    left.origin?.updatedAt === right.origin?.updatedAt &&
+    left.provenance?.creationPath === right.provenance?.creationPath &&
+    left.provenance?.originThreadId === right.provenance?.originThreadId &&
+    left.provenance?.recordedAt === right.provenance?.recordedAt
+  );
+}
+
 function writeThreadState(
   state: EnvironmentState,
   nextThread: Thread,
@@ -960,6 +1007,22 @@ function writeThreadState(
       activityByThreadId: {
         ...nextState.activityByThreadId,
         [nextThread.id]: nextActivitySlice.byId,
+      },
+    };
+  }
+
+  if (
+    nextThread.organization !== undefined &&
+    !threadOrganizationsEqual(
+      nextState.threadOrganizationById?.[nextThread.id],
+      nextThread.organization,
+    )
+  ) {
+    nextState = {
+      ...nextState,
+      threadOrganizationById: {
+        ...nextState.threadOrganizationById,
+        [nextThread.id]: nextThread.organization,
       },
     };
   }
@@ -1157,6 +1220,8 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
     state.turnDiffSummaryByThreadId;
   const { [threadId]: _removedSidebarSummary, ...sidebarThreadSummaryById } =
     state.sidebarThreadSummaryById;
+  const { [threadId]: _removedOrganization, ...threadOrganizationById } =
+    state.threadOrganizationById ?? {};
 
   return {
     ...state,
@@ -1177,6 +1242,7 @@ function removeThreadState(state: EnvironmentState, threadId: ThreadId): Environ
     turnDiffIdsByThreadId,
     turnDiffSummaryByThreadId,
     sidebarThreadSummaryById,
+    threadOrganizationById,
   };
 }
 
@@ -2400,6 +2466,24 @@ function applyEnvironmentOrchestrationEvent(
         updatedAt: event.payload.updatedAt,
       }));
 
+    case "thread.metadata-updated": {
+      // Detail view of the label/description; the shell stream remains the
+      // sidebar's source of truth and also republishes this thread.
+      const current = state.threadOrganizationById?.[event.payload.threadId];
+      if (!current) return state;
+      const next: ThreadOrganizationDetail = {
+        ...current,
+        ...(event.payload.origin !== undefined ? { origin: event.payload.origin } : {}),
+        ...(event.payload.description !== undefined
+          ? { description: event.payload.description }
+          : {}),
+      };
+      return {
+        ...state,
+        threadOrganizationById: { ...state.threadOrganizationById, [event.payload.threadId]: next },
+      };
+    }
+
     case "thread.goal-synced":
       return updateThreadState(state, event.payload.threadId, (thread) => ({
         ...thread,
@@ -3015,6 +3099,16 @@ export function selectThreadByRef(
 ): Thread | undefined {
   return ref
     ? getThreadFromEnvironmentState(selectEnvironmentState(state, ref.environmentId), ref.threadId)
+    : undefined;
+}
+
+/** Detail-only organization metadata; present once the thread detail loaded. */
+export function selectThreadOrganizationByRef(
+  state: AppState,
+  ref: ScopedThreadRef | null | undefined,
+): ThreadOrganizationDetail | undefined {
+  return ref
+    ? selectEnvironmentState(state, ref.environmentId).threadOrganizationById?.[ref.threadId]
     : undefined;
 }
 

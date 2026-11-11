@@ -15,6 +15,8 @@ import {
   operationReference,
   operationReferenceSchema,
   operationScopeId,
+  PLANNED_TARGET_TOOLS,
+  plannedTargetId,
   requestIdSchema,
   type OperationState,
 } from "./operations.ts";
@@ -152,7 +154,7 @@ export function installManagementToolResults(
     {
       title: "Reconcile a Cafe management action",
       description:
-        "Read the receipt for a requestId in this exact bearer session. A missing or unconfirmed receipt does not prove that no action ran. Never automatically repeat an uncertain action. Credential rotation changes this scope; compare scopeId. Recorded means durable intent, not provider consumption or finished work.",
+        "Read the receipt for a requestId in this exact bearer session. A missing or unconfirmed receipt does not prove that no action ran. Never automatically repeat an uncertain action. Credential rotation changes this scope; compare scopeId. Recorded means durable intent, not provider consumption or finished work. For create_thread/create_thread_group, plannedTargets names the exact ID the reserved action creates: finding it confirms the action; not finding it is not proof it will not appear later and never authorizes a replacement request.",
       inputSchema: { requestId: requestIdSchema },
       outputSchema: z.object({
         scopeId: z.string(),
@@ -160,6 +162,9 @@ export function installManagementToolResults(
         operation: operationReferenceSchema.nullable(),
         tool: z.string().nullable(),
         result: z.record(z.string(), z.unknown()).nullable(),
+        // Exact target a reserved create names. Use it only to confirm a
+        // positive recorded result; its absence is not proof of non-creation.
+        plannedTargets: z.record(z.string(), z.string()).nullable(),
         updatedAt: z.string().nullable(),
         mayHaveApplied: z.boolean(),
       }),
@@ -181,6 +186,17 @@ export function installManagementToolResults(
           operation: operation ? operationReference(owner, requestId, operation.state) : null,
           tool: operation?.tool ?? null,
           result: operation?.result ?? null,
+          plannedTargets:
+            operation && operation.tool in PLANNED_TARGET_TOOLS
+              ? {
+                  [PLANNED_TARGET_TOOLS[operation.tool as keyof typeof PLANNED_TARGET_TOOLS]]:
+                    plannedTargetId(
+                      owner,
+                      requestId,
+                      operation.tool as keyof typeof PLANNED_TARGET_TOOLS,
+                    ),
+                }
+              : null,
           updatedAt: operation?.updatedAt ?? null,
           mayHaveApplied: true,
         },

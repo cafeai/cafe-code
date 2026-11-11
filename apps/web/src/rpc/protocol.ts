@@ -37,6 +37,7 @@ export interface WsProtocolRetryScheduled {
 }
 
 export interface WsProtocolLifecycleHandlers {
+  readonly serialization?: "ndjson";
   /**
    * The singleton renderer connection atom represents the primary Cafe
    * backend. Auxiliary saved-environment transports have their own scoped
@@ -553,7 +554,7 @@ export function createWsRpcProtocolLayer(
       Layer.provide(
         Layer.mergeAll(
           socketLayer,
-          staticSocketUrl && relayForUrl(staticSocketUrl)
+          handlers?.serialization === "ndjson" || (staticSocketUrl && relayForUrl(staticSocketUrl))
             ? RpcSerialization.layerNdjson
             : RpcSerialization.layerJson,
           connectionHooksLayer,

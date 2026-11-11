@@ -37,6 +37,7 @@ import { resolveAppModelSelection, resolveAppModelSelectionForInstance } from ".
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type ChatImageAttachment } from "./types";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
+import { redactCafeSecretsForPersistence } from "./cafeSecrets/draftRedaction";
 import { useShallow } from "zustand/react/shallow";
 import {
   createDebouncedStorage,
@@ -1867,7 +1868,9 @@ function partializeComposerDraftStoreState(
       continue;
     }
     const persistedDraft: DeepMutable<PersistedComposerThreadDraftState> = {
-      prompt: draft.prompt,
+      // Raw Cafe Secret values (complete or still being typed) never enter
+      // browser storage; the in-memory editor keeps them until send/prepare.
+      prompt: redactCafeSecretsForPersistence(draft.prompt),
       attachments: draft.persistedAttachments,
       files: draft.files.map(persistComposerFile),
       ...(draft.queueEditingItemId ? { queueEditingItemId: draft.queueEditingItemId } : {}),

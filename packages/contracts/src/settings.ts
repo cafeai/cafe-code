@@ -1010,7 +1010,30 @@ export const DEFAULT_PROVIDER_INSTANCES: ProviderInstanceConfigMap = {
 
 const ProviderInstances = Schema.Record(ProviderInstanceId, ProviderInstanceConfig);
 
+export const RelayNetworkSettings = Schema.Struct({
+  label: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(80)),
+  rootPublicKey: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{43}$/)),
+  bootstrapUrls: Schema.Array(Schema.String.check(Schema.isMaxLength(256))).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(3),
+  ),
+  minimumRevision: Schema.Number.check(
+    Schema.isInt(),
+    Schema.isGreaterThanOrEqualTo(0),
+    Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+  ),
+  viewerOrigin: Schema.String.check(Schema.isMaxLength(256)),
+});
+export type RelayNetworkSettings = typeof RelayNetworkSettings.Type;
+
 export const ServerSettings = Schema.Struct({
+  // Null preserves already provisioned private-pilot profiles on upgrade.
+  relayEnabled: Schema.NullOr(Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  relayNetworks: Schema.Array(RelayNetworkSettings)
+    .check(Schema.isMaxLength(4))
+    .pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   // Cafe management MCP only; preserve its existing endpoint on upgrade.
   mcpEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
@@ -1143,6 +1166,10 @@ const OpenCodeSettingsPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  relayEnabled: Schema.optionalKey(Schema.Boolean),
+  relayNetworks: Schema.optionalKey(
+    Schema.Array(RelayNetworkSettings).check(Schema.isMaxLength(4)),
+  ),
   mcpEnabled: Schema.optionalKey(Schema.Boolean),
   // Server settings
   enableAssistantStreaming: Schema.optionalKey(Schema.Boolean),

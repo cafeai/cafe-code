@@ -60,8 +60,9 @@ vi.mock("~/environments/runtime", () => {
 });
 vi.mock("~/rpc/serverState", () => ({ useServerConfig: () => null }));
 vi.mock("./SavedEnvironmentsSettings", () => ({ SavedEnvironmentsSettings: () => null }));
-// Enrollment has separate browser coverage. Keep this password/endpoint fixture
-// inside its synthetic auth boundary without importing the live factor API.
+// Relay and factor enrollment have separate browser coverage. Keep this
+// password/endpoint fixture inside its synthetic auth boundary.
+vi.mock("./RelayConnectionsSettings", () => ({ RelayConnectionsSettings: () => null }));
 vi.mock("./TwoFactorManagementRow", () => ({ TwoFactorManagementRow: () => null }));
 vi.mock("../ui/toast", () => ({
   toastManager: { add: vi.fn() },

@@ -1,10 +1,12 @@
 import {
+  CommandId,
   DEFAULT_SERVER_SETTINGS,
   EventId,
   MessageId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ThreadGroupId,
   ThreadId,
   type OrchestrationProject,
   type OrchestrationReadModel,
@@ -2105,5 +2107,266 @@ describe("Cafe Code MCP server", () => {
       delayMs: CAFE_MCP_RESTART_DELAY_MS,
     });
     expect(scheduled).toHaveLength(1);
+  });
+});
+
+describe("Cafe MCP thread groups and origin", () => {
+  const owner = { sessionId: "group-owner", expiresAt: "2099-01-01T00:00:00.000Z" };
+
+  async function operationsRuntime(context: TestContext) {
+    const runtime = ManagedRuntime.make(
+      McpOperationsLive.pipe(Layer.provide(SqlitePersistenceTest)),
+    );
+    context.onTestFinished(() => runtime.dispose());
+    return runtime.runPromise(Effect.service(McpOperations));
+  }
+
+  it("records launch-claim and manual-client provenance without accepting caller input", async (context) => {
+    const dispatched: NonNullable<Parameters<typeof makeDependencies>[0]>["dispatched"] = [];
+    const dependencies = makeDependencies({ dispatched });
+    await withClient(
+      context,
+      dependencies,
+      async (client) => {
+        const group = await client.callTool({
+          name: "create_thread_group",
+          arguments: { title: "Audit workers" },
+        });
+        expect(group.isError).not.toBe(true);
+        const created = await client.callTool({
+          name: "create_thread",
+          arguments: {
+            title: "Worker",
+            groupId: (group.structuredContent as { groupId: string }).groupId,
+            description: "Check relay PoW",
+            provenance: { creationPath: "cafe-ui" },
+          },
+        });
+        expect(created.isError).not.toBe(true);
+      },
+      { managementLaunchContext: { threadId, providerInstanceId: actualInstanceId, launchNonce } },
+    );
+    await withClient(context, dependencies, async (client) => {
+      await client.callTool({ name: "create_thread", arguments: { title: "Manual" } });
+    });
+    const [groupCommand, launched, manual] = dispatched;
+    expect(groupCommand).toMatchObject({
+      type: "thread.group.create",
+      ownerThreadId: threadId,
+      provenance: { creationPath: "mcp-launch", attribution: "launch-claim" },
+    });
+    expect(launched).toMatchObject({
+      type: "thread.create",
+      groupId: (groupCommand as { groupId: string }).groupId,
+      description: "Check relay PoW",
+      // The launch claim names a Cafe chat; caller-supplied provenance is ignored.
+      provenance: { creationPath: "mcp-launch", originThreadId: threadId },
+    });
+    expect(manual).toMatchObject({ provenance: { creationPath: "mcp-owner-client" } });
+    expect(
+      (manual as { provenance: { originThreadId?: string } }).provenance.originThreadId,
+    ).toBeUndefined();
+  });
+
+  it("names the planned thread for a lost acknowledgement but never treats absence as retry permission", async (context) => {
+    const operations = await operationsRuntime(context);
+    const requestId = "0b7a9a3c-5d0e-4d33-9b51-5b8f0e1a2c3d";
+    const dispatched: NonNullable<Parameters<typeof makeDependencies>[0]>["dispatched"] = [];
+    const defaults = makeDependencies({ dispatched });
+    // The admitted create is delayed: it reaches the engine only after the
+    // caller has already lost the acknowledgement and looked the target up.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let entered!: () => void;
+    // Resolved once the reserved action reaches the engine boundary.
+    const dispatchEntered = new Promise<void>((resolve) => (entered = resolve));
+    const createdIds = new Set<string>();
+    const dependencies: CafeMcpDependencies = {
+      ...defaults,
+      orchestrationEngine: {
+        dispatch: (command) =>
+          Effect.sync(() => entered()).pipe(
+            Effect.andThen(Effect.promise(() => held)),
+            Effect.andThen(defaults.orchestrationEngine.dispatch(command)),
+            Effect.tap(() =>
+              Effect.sync(() => {
+                if (command.type === "thread.create") createdIds.add(command.threadId);
+              }),
+            ),
+          ),
+      },
+    };
+    await withClient(
+      context,
+      dependencies,
+      async (client) => {
+        const pending = client.callTool({
+          name: "create_thread",
+          arguments: { title: "Worker", requestId },
+        });
+        // Reconcile while the original action is still in flight.
+        await dispatchEntered;
+        const receipt = await client.callTool({ name: "get_operation", arguments: { requestId } });
+        const planned = (receipt.structuredContent as { plannedTargets: { threadId: string } })
+          .plannedTargets.threadId;
+        expect(receipt.structuredContent).toMatchObject({
+          found: true,
+          operation: { state: "unconfirmed" },
+          mayHaveApplied: true,
+        });
+        // Absent now …
+        expect(createdIds.has(planned)).toBe(false);
+        // … and the same requestId is refused rather than executed again.
+        const repeat = await client.callTool({
+          name: "create_thread",
+          arguments: { title: "Worker", requestId },
+        });
+        expect(repeat.isError).toBe(true);
+        release();
+        const original = await pending;
+        // … yet the delayed original still creates exactly that thread.
+        expect((original.structuredContent as { threadId: string }).threadId).toBe(planned);
+        expect(createdIds.has(planned)).toBe(true);
+        expect(dispatched.filter((command) => command.type === "thread.create")).toHaveLength(1);
+      },
+      { operations, operationOwner: owner },
+    );
+  });
+
+  it("pages owned groups from context and lists group members", async (context) => {
+    const groups = Array.from({ length: 25 }, (_, index) => ({
+      id: ThreadGroupId.make(`group-${String(index).padStart(2, "0")}`),
+      title: `Group ${index}`,
+      createdAt: now,
+    }));
+    const defaults = makeDependencies();
+    const dependencies: CafeMcpDependencies = {
+      ...defaults,
+      projectionSnapshotQuery: {
+        ...defaults.projectionSnapshotQuery,
+        getThreadShellById: (requested) =>
+          Effect.map(defaults.projectionSnapshotQuery.getThreadShellById(requested), (shell) =>
+            Option.map(shell, (value) => ({ ...value, ownedGroups: groups })),
+          ),
+        getThreadOrganization: () =>
+          Effect.succeed({
+            groups: groups.map((group) => ({
+              ...group,
+              ownerThreadId: threadId,
+              description: null,
+              provenance: {
+                creationPath: "mcp-launch" as const,
+                attribution: "launch-claim" as const,
+                recordedAt: now,
+              },
+              updatedAt: now,
+              deletedAt: null,
+              deletionId: null,
+            })),
+            threads: new Map(),
+          }),
+      },
+    };
+    await withClient(
+      context,
+      dependencies,
+      async (client) => {
+        const contextResult = await client.callTool({ name: "get_cafe_context", arguments: {} });
+        const owned = (
+          contextResult.structuredContent as {
+            ownedGroups: {
+              items: unknown[];
+              hasMore: boolean;
+              nextCursor: string;
+              totalMatches: number;
+            };
+          }
+        ).ownedGroups;
+        expect(owned).toMatchObject({
+          hasMore: true,
+          totalMatches: 25,
+          lookupTool: "list_thread_groups",
+        });
+        expect(owned.items).toHaveLength(20);
+        const rest = await client.callTool({
+          name: "list_thread_groups",
+          arguments: { ownerThreadId: threadId, cursor: owned.nextCursor },
+        });
+        expect(rest.isError).not.toBe(true);
+        expect(
+          (rest.structuredContent as { groups: unknown[]; hasMore: boolean }).groups,
+        ).toHaveLength(5);
+      },
+      { managementLaunchContext: { threadId, providerInstanceId: actualInstanceId, launchNonce } },
+    );
+  });
+
+  it("reports a group delete as recorded with requested stops, not finished cleanup", async (context) => {
+    const dispatched: NonNullable<Parameters<typeof makeDependencies>[0]>["dispatched"] = [];
+    const defaults = makeDependencies({ dispatched });
+    const groupId = ThreadGroupId.make("wave");
+    let deleted = false;
+    const record = () => ({
+      groupId: null,
+      origin: null,
+      description: null,
+      provenance: null,
+      deletionId: null,
+      archiveCascadeId: null,
+    });
+    const dependencies: CafeMcpDependencies = {
+      ...defaults,
+      orchestrationEngine: {
+        dispatch: (command) =>
+          Effect.tap(defaults.orchestrationEngine.dispatch(command), () =>
+            Effect.sync(() => {
+              deleted = command.type === "thread.group.delete" || deleted;
+            }),
+          ),
+      },
+      projectionSnapshotQuery: {
+        ...defaults.projectionSnapshotQuery,
+        getThreadOrganization: () =>
+          Effect.sync(() => ({
+            groups: [
+              {
+                id: groupId,
+                ownerThreadId: threadId,
+                title: "Wave",
+                description: null,
+                provenance: {
+                  creationPath: "mcp-launch" as const,
+                  attribution: "launch-claim" as const,
+                  recordedAt: now,
+                },
+                createdAt: now,
+                updatedAt: now,
+                deletedAt: deleted ? now : null,
+                deletionId: deleted ? CommandId.make("delete-cmd") : null,
+              },
+            ],
+            threads: new Map(
+              deleted
+                ? [["worker", { ...record(), groupId, deletionId: CommandId.make("delete-cmd") }]]
+                : [["worker", { ...record(), groupId }]],
+            ),
+          })),
+      },
+    };
+    await withClient(context, dependencies, async (client) => {
+      const result = await client.callTool({
+        name: "delete_thread_group",
+        arguments: { groupId },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        phase: "recorded",
+        deletedGroupCount: 1,
+        deletedThreadCount: 1,
+      });
+      expect(dispatched).toEqual([
+        expect.objectContaining({ type: "thread.group.delete", groupId }),
+      ]);
+    });
   });
 });

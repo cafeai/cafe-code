@@ -1233,7 +1233,9 @@ describe("settings panels", () => {
     await expect
       .element(page.getByText("Restart the server so other devices on your network can reach it."))
       .toBeInTheDocument();
-    await expect.element(page.getByText("Paired devices")).not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Paired devices", exact: true }))
+      .not.toBeInTheDocument();
     await expect.element(page.getByText("Chrome on Mac")).not.toBeInTheDocument();
   });
 
@@ -2633,7 +2635,9 @@ describe("settings panels", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await expect.element(page.getByText("Paired devices")).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("heading", { name: "Paired devices", exact: true }))
+      .toBeInTheDocument();
     await expect.element(page.getByText("Revoke others")).toBeInTheDocument();
     await expect.element(page.getByText("This Mac")).toBeInTheDocument();
     await page.getByRole("button", { name: "Create link", exact: true }).click();

@@ -4,6 +4,8 @@ import { GENERATED_VISUALIZATION_INSTRUCTIONS } from "../../visualizations/mcp.t
 import { installVisualizationSessionRuntime } from "../../visualizations/sessionRuntime.ts";
 import { installGlideSessionRuntime } from "../../glide/sessionRuntime.ts";
 import { buildCafeInstructions } from "../CafeInstructions.ts";
+import { readSecretRunnerConnection } from "../../secrets/session.ts";
+import { inspectSecretRunnerInstructions } from "../../secrets/runnerInstructions.test.fixture.ts";
 import {
   deriveProviderDiagnosticCategory,
   readProviderDiagnosticErrorBody,
@@ -2643,7 +2645,7 @@ describe("ClaudeAdapterLive", () => {
                 });
                 yield* Effect.addFinalizer(() => Effect.sync(releaseVisualization));
                 const adapter = yield* ClaudeAdapter;
-                const { systemPromptPath } = yield* ServerConfig;
+                const { systemPromptPath, secretsDir } = yield* ServerConfig;
                 yield* fileSystem.writeFileString(
                   systemPromptPath,
                   "Preserve fixture custom instructions.",
@@ -2655,15 +2657,31 @@ describe("ClaudeAdapterLive", () => {
                 });
                 assert.equal(harness.createInputs.length, 1);
                 const options = harness.createInputs[0]!.options;
-                assert.deepEqual(options.systemPrompt, {
-                  type: "preset",
-                  preset: "claude_code",
-                  append:
-                    buildCafeInstructions({
-                      cwd: directory,
-                      customInstructions: "Preserve fixture custom instructions.",
-                    }) + (enabled ? `\n\n${GENERATED_VISUALIZATION_INSTRUCTIONS}` : ""),
-                });
+                assert.ok(
+                  options.systemPrompt &&
+                    typeof options.systemPrompt === "object" &&
+                    "type" in options.systemPrompt &&
+                    options.systemPrompt.type === "preset",
+                );
+                const runner = inspectSecretRunnerInstructions(options.systemPrompt.append);
+                assert.deepEqual(
+                  { ...options.systemPrompt, append: runner.withoutRunner },
+                  {
+                    type: "preset",
+                    preset: "claude_code",
+                    append:
+                      buildCafeInstructions({
+                        cwd: directory,
+                        customInstructions: "Preserve fixture custom instructions.",
+                      }) + (enabled ? `\n\n${GENERATED_VISUALIZATION_INSTRUCTIONS}` : ""),
+                  },
+                );
+                assert.deepEqual(
+                  yield* Effect.promise(() => readSecretRunnerConnection(runner.connectionPath)),
+                  { version: 1, threadId: THREAD_ID, secretsDir: path.resolve(secretsDir) },
+                );
+                assert.ok(options.hooks?.PreToolUse?.[0]?.hooks[0]);
+                assert.ok(options.hooks?.PostToolUse?.[0]?.hooks[0]);
                 assert.deepEqual(options.mcpServers, {
                   "cafe-scheduling": { type: "stdio", ...schedulingLaunch, alwaysLoad: true },
                   ...(enabled
@@ -2691,6 +2709,7 @@ describe("ClaudeAdapterLive", () => {
                 ]);
                 yield* adapter.stopSession(THREAD_ID);
                 yield* adapter.stopAll();
+                assert.equal(yield* fileSystem.exists(runner.connectionPath), false);
                 assert.equal(
                   lifecycle.filter((entry) => entry === "visualization-disposed").length,
                   enabled ? 1 : 0,

@@ -80,7 +80,7 @@ it.skipIf(process.platform === "win32")(
     await own(() =>
       fs.writeFile(
         join(output, "node-0.json"),
-        canonicalBytes({ ...first, forwardedIpKeys, hostWork }),
+        canonicalBytes({ ...first, forwardedIpKeys, hostWork, selfService: true }),
         {
           mode: 0o600,
         },
@@ -94,6 +94,7 @@ it.skipIf(process.platform === "win32")(
     expect(current.rootPublicKey).toBe(first.rootPublicKey);
     expect(current.forwardedIpKeys).toEqual(forwardedIpKeys);
     expect(current.hostWork).toEqual(hostWork);
+    expect(current.selfService).toBe(true);
     expect(current.descriptor.revision).toBe(2);
     expect(current.descriptor.nodes.length).toBe(3);
     const networkBytes = await own(() => readPrivateFile(join(output, "network.json"), 8192));

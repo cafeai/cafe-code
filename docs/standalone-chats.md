@@ -82,3 +82,12 @@ provider-context, security and compatibility boundaries, and the
 for the shared heading action.
 The [collapsed-sidebar entrypoint decision](decisions/collapsed-sidebar-new-chat.md)
 describes its header placement and presentation lifecycle.
+
+## Agent-created groups
+
+Chats created by a coordinator through Cafe's management tools can be placed in
+a group owned by a parent chat. The sidebar shows each group as a collapsed
+folder row directly beneath its parent (in Chats or in a project) and lists
+members only there. People expand/collapse groups and delete a whole group from
+its context menu; there is no manual group creation. See
+[thread groups and origin](decisions/thread-groups-and-origin.md).

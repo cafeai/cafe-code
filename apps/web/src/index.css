@@ -2446,3 +2446,19 @@ html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
   outline-offset: 2px;
   animation: cafe-settings-search-ring 1660ms both;
 }
+
+/* Cafe Secrets composer syntax (CSS Custom Highlight API; see
+ * composerCafeSecretHighlight.tsx). Secrets read as a tinted, dotted span;
+ * text that cannot be sent as written turns the destructive red. */
+::highlight(cafe-secret) {
+  background-color: color-mix(in srgb, var(--primary) 14%, transparent);
+  text-decoration: underline dotted color-mix(in srgb, var(--primary) 70%, transparent);
+  text-underline-offset: 3px;
+}
+
+::highlight(cafe-secret-error) {
+  color: var(--destructive-foreground);
+  background-color: color-mix(in srgb, var(--destructive) 16%, transparent);
+  text-decoration: underline wavy var(--destructive);
+  text-underline-offset: 3px;
+}

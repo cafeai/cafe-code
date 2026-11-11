@@ -81,6 +81,14 @@ import {
   shouldUseCompactComposerFooter,
 } from "../composerFooterLayout";
 import { type ComposerPromptEditorHandle, ComposerPromptEditor } from "../ComposerPromptEditor";
+import {
+  type CafeSecretSendIssue,
+  readThreadSecretsApi,
+} from "../../cafeSecrets/cafeSecretsClient";
+import {
+  type ReportedCafeSecretIssue,
+  useCafeSecretsComposerState,
+} from "../../cafeSecrets/useCafeSecretsComposerState";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
@@ -381,6 +389,8 @@ export interface ChatComposerHandle {
     prompt?: string;
     detectTrigger?: boolean;
   }) => void;
+  /** Show a blocked Cafe Secret send for the exact prompt that was refused. */
+  reportCafeSecretIssue: (issue: CafeSecretSendIssue, prompt: string) => void;
   /** Get the current prompt/effort/model state for use in send. */
   getSendContext: () => {
     prompt: string;
@@ -3546,6 +3556,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   // Imperative handle
   // ------------------------------------------------------------------
+  const [reportedCafeSecretIssue, setReportedCafeSecretIssue] =
+    useState<ReportedCafeSecretIssue | null>(null);
+  const cafeSecrets = useCafeSecretsComposerState({
+    environmentId,
+    instanceId: selectedInstanceId,
+    driver: selectedProvider,
+    prompt,
+    reported: reportedCafeSecretIssue,
+  });
+
   useImperativeHandle(
     composerRef,
     () => ({
@@ -3566,6 +3586,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         setIsComposerModelPickerOpen((open) => !open);
       },
       isModelPickerOpen: () => isComposerModelPickerOpen,
+      reportCafeSecretIssue: (issue, reportedPrompt) => {
+        setReportedCafeSecretIssue({
+          issue,
+          prompt: reportedPrompt,
+          environmentId,
+          instanceId: selectedInstanceId,
+          driver: selectedProvider,
+          api: readThreadSecretsApi(environmentId),
+        });
+      },
       readDebugState: () => ({
         activeThreadId,
         phase,
@@ -3653,6 +3683,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerImagesRef,
       composerDraftTarget,
       activeThreadId,
+      environmentId,
       composerEditorDisabled,
       composerFocusRequestRevision,
       isComposerModelPickerOpen,
@@ -4372,6 +4403,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                                 )
                 }
                 disabled={composerEditorDisabled}
+                cafeSecretTone={cafeSecrets.issue ? "error" : "secret"}
               />
               {showMobileComposerActionsOverlay ? (
                 <div
@@ -4428,6 +4460,34 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 </div>
               ) : null}
             </div>
+            {cafeSecrets.issue && !isComposerApprovalState && !activePendingProgress ? (
+              <p
+                role="alert"
+                data-testid="composer-cafe-secret-error"
+                className="mt-1.5 text-xs leading-snug text-destructive-foreground"
+              >
+                {cafeSecrets.issue === "unsupported"
+                  ? uiText(
+                      "Cafe Secrets are not supported by the current provider. If this is literal text, escape it with a backslash: \\[sec:VALUE].",
+                      undefined,
+                      undefined,
+                      uiLocale,
+                    )
+                  : cafeSecrets.issue === "incomplete"
+                    ? uiText(
+                        "Finish the Cafe Secret with a closing ] or escape literal text with a backslash: \\[sec:VALUE].",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )
+                    : uiText(
+                        "A Cafe Secret in this message could not be prepared or is no longer available in this chat, so the message was not sent. If this is literal text, escape it with a backslash.",
+                        undefined,
+                        undefined,
+                        uiLocale,
+                      )}
+              </p>
+            ) : null}
           </div>
 
           {/* Bottom toolbar. On touch devices the full toolbar stays available

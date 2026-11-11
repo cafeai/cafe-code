@@ -14,6 +14,7 @@ import { QueryClient, useQueryClient } from "@tanstack/react-query";
 
 import { AmbianceLayer } from "../ambiance/AmbianceLayer";
 import { TaskAtriumOverlay } from "../components/atrium/TaskAtriumOverlay";
+import { ThreadSecretsDialogHost } from "../components/ThreadSecretsDialog";
 import { APP_DISPLAY_NAME } from "../branding";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
 import {
@@ -185,6 +186,7 @@ function RootRouteView() {
       <WebAppBrandingSync />
       <DeskOpenPolicySync />
       <TaskAtriumOverlay />
+      <ThreadSecretsDialogHost />
       <AmbianceLayer />
       <PowerSaveBlockerSync />
       {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}

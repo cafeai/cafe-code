@@ -13,8 +13,10 @@ import { ensureLocalApi } from "../../localApi";
 import type { WsReconnectPhase } from "../../rpc/wsConnectionState";
 import { getPrimaryKnownEnvironment } from "../primary";
 import { INITIAL_SAVED_ENVIRONMENT_CONNECTION_LIFECYCLE } from "./savedEnvironmentConnectionLifecycle";
+import { decodeSavedRelaySecret } from "../relay/savedSecret";
 
 export interface SavedEnvironmentRecord {
+  readonly transport?: "relay";
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly wsBaseUrl: string;
@@ -43,6 +45,7 @@ export function toPersistedSavedEnvironmentRecord(
   record: SavedEnvironmentRecord,
 ): PersistedSavedEnvironmentRecord {
   return {
+    ...(record.transport ? { transport: record.transport } : {}),
     environmentId: record.environmentId,
     label: record.label,
     httpBaseUrl: record.httpBaseUrl,
@@ -262,6 +265,14 @@ export async function persistSavedEnvironmentRecord(record: SavedEnvironmentReco
 }
 
 export async function readSavedEnvironmentBearerToken(
+  environmentId: EnvironmentId,
+): Promise<string | null> {
+  const secret = await readSavedEnvironmentSecret(environmentId);
+  if (secret && getSavedEnvironmentRecord(environmentId)?.transport === "relay")
+    return decodeSavedRelaySecret(secret, environmentId).target.bearerToken;
+  return secret;
+}
+export async function readSavedEnvironmentSecret(
   environmentId: EnvironmentId,
 ): Promise<string | null> {
   return ensureLocalApi().persistence.getSavedEnvironmentSecret(environmentId);

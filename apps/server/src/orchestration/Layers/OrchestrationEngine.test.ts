@@ -148,6 +148,35 @@ function now() {
   return "2026-01-01T00:00:00.000Z";
 }
 
+it("rejects unprepared Cafe Secrets before queue and event admission", async (test) => {
+  let acquisition: ReturnType<typeof createOrchestrationSystem> | undefined;
+  test.onTestFinished(async () => {
+    if (acquisition) await (await acquisition).dispose();
+  });
+  acquisition = createOrchestrationSystem();
+  const system = await acquisition;
+  const before = await system.readModel();
+  await expect(
+    system.run(
+      system.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("unprepared-secret"),
+        threadId: ThreadId.make("secret-chat"),
+        message: {
+          messageId: MessageId.make("unprepared-secret-message"),
+          role: "user",
+          text: "[sec:must-not-journal]",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: "2026-11-10T00:00:00.000Z",
+      }),
+    ),
+  ).rejects.toThrow("must be prepared");
+  expect((await system.readModel()).snapshotSequence).toBe(before.snapshotSequence);
+});
+
 describe("durable inline question handling", () => {
   async function seedQuestions(
     system: Pick<Awaited<ReturnType<typeof createOrchestrationSystem>>, "run" | "engine">,

@@ -22,6 +22,14 @@ import { retainFileAttachmentUpload } from "../fileAttachmentLifecycle.ts";
 import { parseBase64DataUrl } from "../imageMime.ts";
 import { WorkspacePaths } from "../workspace/Services/WorkspacePaths.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
+import {
+  containsCafeSecrets,
+  hasCafeSecretReference,
+  redactCafeSecretText,
+  supportsCafeSecrets,
+} from "@cafecode/shared/cafeSecrets";
+import { getThreadSecretsStore } from "../secrets/store.ts";
+import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 
 export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
   Effect.gen(function* () {
@@ -149,8 +157,71 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       } satisfies OrchestrationCommand;
     }
 
+    if (command.type === "thread.create") {
+      // Provenance is server-resolved: whatever the client sent is replaced by
+      // the one creation path this authenticated owner transport can attest.
+      // "cafe-ui" is a recorded default (browser automation can drive the UI);
+      // people may correct the editable label, never this record.
+      return {
+        ...command,
+        provenance: { creationPath: "cafe-ui", recordedAt: command.createdAt },
+      } satisfies OrchestrationCommand;
+    }
+
     if (command.type !== "thread.turn.start" && command.type !== "thread.turn.steer") {
       return command as OrchestrationCommand;
+    }
+
+    // Capture before attachment IO, command receipts or event persistence. A
+    // direct RPC/MCP sender receives the same admission as the composer.
+    let messageText = command.message.text;
+    let titleSeed = command.type === "thread.turn.start" ? command.titleSeed : undefined;
+    if (containsCafeSecrets(messageText) || hasCafeSecretReference(messageText)) {
+      const registry = yield* Effect.serviceOption(ProviderRegistry);
+      const existing = yield* projectionSnapshotQuery.getThreadShellById(command.threadId).pipe(
+        Effect.mapError(
+          () =>
+            new OrchestrationDispatchCommandError({
+              message: "Cafe Secrets chat ownership is unavailable.",
+            }),
+        ),
+      );
+      const instanceId =
+        (command.type === "thread.turn.start" ? command.modelSelection?.instanceId : undefined) ??
+        (Option.isSome(existing) ? existing.value.modelSelection.instanceId : undefined);
+      const providers = Option.isSome(registry) ? yield* registry.value.getProviders : [];
+      if (
+        !providers.some(
+          (provider) =>
+            provider.instanceId === instanceId &&
+            provider.enabled &&
+            supportsCafeSecrets(provider.driver),
+        )
+      )
+        return yield* new OrchestrationDispatchCommandError({
+          message:
+            "Cafe Secrets are not supported by the current provider. Escape literal text with a backslash: \\[sec:VALUE].",
+        });
+      const store = getThreadSecretsStore(serverConfig.secretsDir);
+      messageText = (yield* Effect.tryPromise({
+        try: () => store.prepare(command.threadId, messageText),
+        catch: () =>
+          new OrchestrationDispatchCommandError({
+            message:
+              "Cafe Secrets could not be prepared. Complete [sec:VALUE] or escape literal text with a backslash.",
+          }),
+      })).text;
+      if (titleSeed !== undefined)
+        titleSeed = redactCafeSecretText(
+          titleSeed,
+          yield* Effect.tryPromise({
+            try: () => store.snapshot(command.threadId),
+            catch: () =>
+              new OrchestrationDispatchCommandError({
+                message: "Cafe Secrets could not be prepared.",
+              }),
+          }),
+        );
     }
 
     if (
@@ -312,8 +383,10 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
 
     return {
       ...command,
+      ...(command.type === "thread.turn.start" && titleSeed !== undefined ? { titleSeed } : {}),
       message: {
         ...command.message,
+        text: messageText,
         attachments: normalizedAttachments,
       },
     } satisfies OrchestrationCommand;

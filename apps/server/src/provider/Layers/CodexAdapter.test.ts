@@ -57,6 +57,8 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { VisualizationGenerationId } from "@cafecode/contracts/visualizations";
 import { CODEX_HISTORY_RECOVERY_REQUIRED_MESSAGE } from "@cafecode/shared/codexHistorySafety";
 import { ServerConfig } from "../../config.ts";
+import { readSecretRunnerConnection } from "../../secrets/session.ts";
+import { inspectSecretRunnerInstructions } from "../../secrets/runnerInstructions.test.fixture.ts";
 import { installGlideSessionRuntime, type GlideSessionBroker } from "../../glide/sessionRuntime.ts";
 import { storeFileAttachment } from "../../fileAttachmentStore.ts";
 import { AssistantStreamTextCommitment } from "../../orchestration/providerAssistantStreamCommitment.ts";
@@ -2066,7 +2068,6 @@ it.effect(
         "homePath",
         "environment",
         "transportPolicy",
-        "customInstructions",
         "providerInstanceId",
         "threadId",
         "cwd",
@@ -2080,6 +2081,17 @@ it.effect(
         "resumeCursor",
       ] as const)
         assert.deepEqual(replacement.options[key], oldRuntime.options[key], key);
+      const oldRunner = inspectSecretRunnerInstructions(oldRuntime.options.customInstructions);
+      const nextRunner = inspectSecretRunnerInstructions(replacement.options.customInstructions);
+      assert.equal(nextRunner.withoutRunner, oldRunner.withoutRunner);
+      assert.notEqual(nextRunner.connectionPath, oldRunner.connectionPath);
+      const files = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig;
+      assert.equal(yield* files.exists(oldRunner.connectionPath), false);
+      assert.deepEqual(
+        yield* Effect.promise(() => readSecretRunnerConnection(nextRunner.connectionPath)),
+        { version: 1, threadId: fixture.threadId, secretsDir: path.resolve(config.secretsDir) },
+      );
       assert.deepEqual(replacement.options.resumeCursor, { threadId: fixture.nativeThreadId });
       assert.equal(replacement.options.maxConcurrentSubagents, 3);
       assert.equal(replacement.options.codexContextWindowOverride, 800_000);
@@ -2625,12 +2637,28 @@ it.effect(
       });
       const threadId = asThreadId("custom-instructions-chat");
       yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
-      assert.equal(factory.lastRuntime?.options.customInstructions, "Be concise.");
+      const firstRunner = inspectSecretRunnerInstructions(
+        factory.lastRuntime?.options.customInstructions,
+      );
+      assert.equal(firstRunner.withoutRunner, "Be concise.");
+      assert.deepEqual(
+        yield* Effect.promise(() => readSecretRunnerConnection(firstRunner.connectionPath)),
+        { version: 1, threadId, secretsDir: path.resolve(config.secretsDir) },
+      );
       assert.equal(Object.hasOwn(factory.lastRuntime!.options, "requireExactResume"), false);
       yield* adapter.stopSession(threadId);
+      assert.equal(yield* files.exists(firstRunner.connectionPath), false);
       yield* files.writeFileString(config.systemPromptPath, "Use metric units.");
       yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
-      assert.equal(factory.lastRuntime?.options.customInstructions, "Use metric units.");
+      const nextRunner = inspectSecretRunnerInstructions(
+        factory.lastRuntime?.options.customInstructions,
+      );
+      assert.equal(nextRunner.withoutRunner, "Use metric units.");
+      assert.notEqual(firstRunner.connectionPath, nextRunner.connectionPath);
+      assert.deepEqual(
+        yield* Effect.promise(() => readSecretRunnerConnection(nextRunner.connectionPath)),
+        { version: 1, threadId, secretsDir: path.resolve(config.secretsDir) },
+      );
       assert.equal(Object.hasOwn(factory.lastRuntime!.options, "requireExactResume"), false);
     }).pipe(
       Effect.provide(
@@ -3599,18 +3627,31 @@ validationLayer("CodexAdapterLive validation", (it) => {
       const options = validationRuntimeFactory.factory.mock.calls[0]?.[0];
       assert.equal(typeof options?.historySafety?.isBlocked, "function");
       assert.equal(typeof options?.historySafety?.markBlocked, "function");
-      assert.deepStrictEqual(options, {
-        customInstructions: undefined,
-        historySafety: options?.historySafety,
-        appServerCwd: config.stateDir,
-        binaryPath: "codex",
-        cwd: process.cwd(),
-        model: "gpt-5.3-codex",
-        providerInstanceId: ProviderInstanceId.make("codex"),
-        serviceTier: "priority",
-        threadId: asThreadId("thread-1"),
-        runtimeMode: "full-access",
-      });
+      const runner = inspectSecretRunnerInstructions(options?.customInstructions);
+      assert.equal(runner.withoutRunner, "");
+      assert.deepEqual(
+        yield* Effect.promise(() => readSecretRunnerConnection(runner.connectionPath)),
+        {
+          version: 1,
+          threadId: asThreadId("thread-1"),
+          secretsDir: path.resolve(config.secretsDir),
+        },
+      );
+      assert.deepStrictEqual(
+        { ...options, customInstructions: runner.withoutRunner },
+        {
+          customInstructions: "",
+          historySafety: options?.historySafety,
+          appServerCwd: config.stateDir,
+          binaryPath: "codex",
+          cwd: process.cwd(),
+          model: "gpt-5.3-codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          serviceTier: "priority",
+          threadId: asThreadId("thread-1"),
+          runtimeMode: "full-access",
+        },
+      );
     }),
   );
 

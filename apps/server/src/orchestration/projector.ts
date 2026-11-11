@@ -3,6 +3,13 @@ import {
   EventId,
   MessageId,
   OrchestrationCheckpointSummary,
+  ThreadGroupCreatedPayload,
+  ThreadGroupDeletedPayload,
+  ThreadGroupMetaUpdatedPayload,
+  ThreadGroupRestoredPayload,
+  ThreadOriginMetadataUpdatedPayload,
+  type OrchestrationThreadGroup,
+  type ThreadGroupId,
   OrchestrationMessage,
   OrchestrationProposedPlanId,
   OrchestrationSession,
@@ -187,6 +194,19 @@ function updateThread(
   patch: ThreadPatch,
 ): OrchestrationThread[] {
   return threads.map((thread) => (thread.id === threadId ? { ...thread, ...patch } : thread));
+}
+
+function updateThreadGroup(
+  model: OrchestrationReadModel,
+  groupId: ThreadGroupId,
+  patch: Partial<Omit<OrchestrationThreadGroup, "id" | "ownerThreadId">>,
+): OrchestrationReadModel {
+  return {
+    ...model,
+    threadGroups: (model.threadGroups ?? []).map((group) =>
+      group.id === groupId ? { ...group, ...patch } : group,
+    ),
+  };
 }
 
 function decodeForEvent<A>(
@@ -422,6 +442,10 @@ export function projectEvent(
             checkpoints: [],
             session: null,
             goal: null,
+            ...(payload.groupId !== undefined ? { groupId: payload.groupId } : {}),
+            ...(payload.description !== undefined ? { description: payload.description } : {}),
+            ...(payload.provenance !== undefined ? { provenance: payload.provenance } : {}),
+            ...(payload.origin !== undefined ? { origin: payload.origin } : {}),
           },
           event.type,
           "thread",
@@ -496,6 +520,7 @@ export function projectEvent(
           threads: updateThread(nextBase.threads, payload.threadId, {
             deletedAt: payload.deletedAt,
             updatedAt: payload.deletedAt,
+            deletionId: payload.deletionId ?? null,
           }),
         })),
       );
@@ -507,6 +532,8 @@ export function projectEvent(
           threads: updateThread(nextBase.threads, payload.threadId, {
             deletedAt: null,
             updatedAt: payload.updatedAt,
+            deletionId: null,
+            ...(payload.detachFromGroup === true ? { groupId: null } : {}),
           }),
         })),
       );
@@ -517,6 +544,7 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             archivedAt: payload.archivedAt,
+            archiveCascadeId: payload.archiveCascadeId ?? null,
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -528,6 +556,7 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             archivedAt: null,
+            archiveCascadeId: null,
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -554,6 +583,85 @@ export function projectEvent(
             updatedAt: payload.updatedAt,
           }),
         })),
+      );
+
+    case "thread.metadata-updated":
+      return decodeForEvent(
+        ThreadOriginMetadataUpdatedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            ...(payload.origin !== undefined ? { origin: payload.origin } : {}),
+            ...(payload.description !== undefined ? { description: payload.description } : {}),
+          }),
+        })),
+      );
+
+    case "thread.group-created":
+      return decodeForEvent(ThreadGroupCreatedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => {
+          const groups = nextBase.threadGroups ?? [];
+          if (groups.some((group) => group.id === payload.groupId)) return nextBase;
+          return {
+            ...nextBase,
+            threadGroups: [
+              ...groups,
+              {
+                id: payload.groupId,
+                ownerThreadId: payload.ownerThreadId,
+                title: payload.title,
+                description: payload.description,
+                provenance: payload.provenance,
+                createdAt: payload.createdAt,
+                updatedAt: payload.createdAt,
+                deletedAt: null,
+                deletionId: null,
+              },
+            ],
+          };
+        }),
+      );
+
+    case "thread.group-deleted":
+      return decodeForEvent(ThreadGroupDeletedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) =>
+          updateThreadGroup(nextBase, payload.groupId, {
+            deletedAt: payload.deletedAt,
+            deletionId: payload.deletionId,
+            updatedAt: payload.deletedAt,
+          }),
+        ),
+      );
+
+    case "thread.group-restored":
+      return decodeForEvent(ThreadGroupRestoredPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) =>
+          updateThreadGroup(nextBase, payload.groupId, {
+            deletedAt: null,
+            deletionId: null,
+            updatedAt: payload.updatedAt,
+          }),
+        ),
+      );
+
+    case "thread.group-meta-updated":
+      return decodeForEvent(
+        ThreadGroupMetaUpdatedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) =>
+          updateThreadGroup(nextBase, payload.groupId, {
+            ...(payload.title !== undefined ? { title: payload.title } : {}),
+            ...(payload.description !== undefined ? { description: payload.description } : {}),
+            updatedAt: payload.updatedAt,
+          }),
+        ),
       );
 
     case "thread.runtime-mode-set":

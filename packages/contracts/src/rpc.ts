@@ -1,5 +1,20 @@
 import { ProviderMcpInput, ProviderMcpResult } from "./providerMcp.ts";
 import {
+  ThreadSecretsCapabilitiesInput,
+  ThreadSecretsCapabilitiesResult,
+  ThreadSecretsInput,
+  ThreadSecretInput,
+  ThreadSecretsPrepareInput,
+  ThreadSecretsPrepareResult,
+  ThreadSecretsListResult,
+  ThreadSecretsSetInput,
+  ThreadSecretsSetResult,
+  ThreadSecretsRevealResult,
+  ThreadSecretsRemoveResult,
+  ThreadSecretsClearResult,
+  ThreadSecretsError,
+} from "./threadSecrets.ts";
+import {
   ProviderSecurityInput,
   ProviderSecurityRefreshInput,
   ProviderSecurityResult,
@@ -169,6 +184,13 @@ import { UsageStatsGetResult, UsageStatsSnapshot } from "./usageStats.ts";
 import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
+  threadSecretsCapabilities: "threadSecrets.capabilities",
+  threadSecretsPrepare: "threadSecrets.prepare",
+  threadSecretsList: "threadSecrets.list",
+  threadSecretsSet: "threadSecrets.set",
+  threadSecretsReveal: "threadSecrets.reveal",
+  threadSecretsRemove: "threadSecrets.remove",
+  threadSecretsClear: "threadSecrets.clear",
   glideControl: "glide.control",
   visualizationsList: "visualizations.list",
   visualizationsDetails: "visualizations.details",
@@ -753,6 +775,41 @@ export const WsSubscribeUsageStatsRpc = Rpc.make(WS_METHODS.subscribeUsageStats,
 });
 
 export const WsRpcGroup = RpcGroup.make(
+  Rpc.make(WS_METHODS.threadSecretsCapabilities, {
+    payload: ThreadSecretsCapabilitiesInput,
+    success: ThreadSecretsCapabilitiesResult,
+    error: ThreadSecretsError,
+  }),
+  Rpc.make(WS_METHODS.threadSecretsPrepare, {
+    payload: ThreadSecretsPrepareInput,
+    success: ThreadSecretsPrepareResult,
+    error: ThreadSecretsError,
+  }),
+  Rpc.make(WS_METHODS.threadSecretsList, {
+    payload: ThreadSecretsInput,
+    success: ThreadSecretsListResult,
+    error: ThreadSecretsError,
+  }),
+  Rpc.make(WS_METHODS.threadSecretsSet, {
+    payload: ThreadSecretsSetInput,
+    success: ThreadSecretsSetResult,
+    error: ThreadSecretsError,
+  }),
+  Rpc.make(WS_METHODS.threadSecretsReveal, {
+    payload: ThreadSecretInput,
+    success: ThreadSecretsRevealResult,
+    error: ThreadSecretsError,
+  }),
+  Rpc.make(WS_METHODS.threadSecretsRemove, {
+    payload: ThreadSecretInput,
+    success: ThreadSecretsRemoveResult,
+    error: ThreadSecretsError,
+  }),
+  Rpc.make(WS_METHODS.threadSecretsClear, {
+    payload: ThreadSecretsInput,
+    success: ThreadSecretsClearResult,
+    error: ThreadSecretsError,
+  }),
   Rpc.make("glide.control", {
     payload: GlideControlInput,
     success: GlideControlResult,

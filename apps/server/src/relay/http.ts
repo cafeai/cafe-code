@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { RelayError } from "@cafecode/relay/errors";
 import { Id16, Id32 } from "@cafecode/relay/protocol";
+import { RelayNetworkSettings } from "@cafecode/contracts";
 import { AuthError, ServerAuth } from "../auth/Services/ServerAuth.ts";
 import { readControlJson } from "../httpBody.ts";
 import { RelayRuntime } from "./runtime.ts";
@@ -35,6 +36,36 @@ const failure = (error: unknown) =>
     },
   );
 export const relayRoutesLayer = Layer.mergeAll(
+  HttpRouter.add(
+    "POST",
+    "/api/relay",
+    Effect.gen(function* () {
+      yield* owner;
+      const input = yield* readControlJson(Schema.Struct({ enabled: Schema.Boolean }));
+      const relay = yield* RelayRuntime;
+      yield* relay.setEnabled(input.enabled);
+      return HttpServerResponse.jsonUnsafe(yield* relay.status, {
+        headers: { "cache-control": "no-store" },
+      });
+    }).pipe(Effect.catch((error) => Effect.succeed(failure(error)))),
+  ),
+  HttpRouter.add(
+    "POST",
+    "/api/relay/networks",
+    Effect.gen(function* () {
+      yield* owner;
+      const input = yield* readControlJson(
+        Schema.Struct({
+          networks: Schema.Array(RelayNetworkSettings).check(Schema.isMaxLength(4)),
+        }),
+      );
+      const relay = yield* RelayRuntime;
+      yield* relay.setNetworks(input.networks);
+      return HttpServerResponse.jsonUnsafe(yield* relay.status, {
+        headers: { "cache-control": "no-store" },
+      });
+    }).pipe(Effect.catch((error) => Effect.succeed(failure(error)))),
+  ),
   HttpRouter.add(
     "GET",
     "/api/relay",

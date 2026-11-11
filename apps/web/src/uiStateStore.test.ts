@@ -20,6 +20,8 @@ import {
   setComposerTabCollapsed,
   setStandaloneChatsExpanded,
   setProjectsSectionExpanded,
+  setThreadGroupExpanded,
+  MAX_EXPANDED_THREAD_GROUP_KEYS,
   syncProjects,
   syncThreads,
   type UiState,
@@ -31,6 +33,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectOrder: [],
     standaloneChatsExpanded: true,
     projectsSectionExpanded: true,
+    expandedThreadGroupKeys: [],
     threadLastVisitedAtById: {},
     threadPlanSidebarOpenById: {},
     composerTabCollapsed: false,
@@ -43,6 +46,21 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
 }
 
 describe("uiStateStore pure functions", () => {
+  it("stores expanded thread groups as a bounded newest-last list", () => {
+    let state = makeUiState();
+    state = setThreadGroupExpanded(state, "g1", true);
+    state = setThreadGroupExpanded(state, "g2", true);
+    state = setThreadGroupExpanded(state, "g1", true);
+    expect(state.expandedThreadGroupKeys).toEqual(["g1", "g2"]);
+    state = setThreadGroupExpanded(state, "g1", false);
+    expect(state.expandedThreadGroupKeys).toEqual(["g2"]);
+    for (let index = 0; index < MAX_EXPANDED_THREAD_GROUP_KEYS + 5; index += 1) {
+      state = setThreadGroupExpanded(state, `bulk-${index}`, true);
+    }
+    expect(state.expandedThreadGroupKeys).toHaveLength(MAX_EXPANDED_THREAD_GROUP_KEYS);
+    expect(state.expandedThreadGroupKeys.at(-1)).toBe(`bulk-${MAX_EXPANDED_THREAD_GROUP_KEYS + 4}`);
+  });
+
   it("migrates independent legacy tab choices into one shared preference", () => {
     for (const legacy of [
       { codeReviewCollapsed: true },
