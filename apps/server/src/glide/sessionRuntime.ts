@@ -802,7 +802,11 @@ export function makeGlideSessionRuntime(options: {
           owners.delete(owner);
         }
         if (threadOwners.get(operation.threadId) === owner) threadOwners.delete(operation.threadId);
-        await publish();
+        // Exact owned cancellation above remains a prerequisite for the chat
+        // mutation. A final refresh of the optional status child cannot veto
+        // that completed retirement, including when this chat had no binding.
+        // Keep its rejection handled without waiting for a separate tray ACK.
+        void publish().catch(() => undefined);
         return null;
       }
       if (operation.kind === "control") {
