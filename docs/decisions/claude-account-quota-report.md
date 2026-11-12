@@ -6,6 +6,8 @@ Decision authority: explicit user request to implement the verified Claude Code
 `get_usage` subprocess approach. Supersedes the October 9 passive-only collection
 restriction; authentication, provider turns and usage accounting stay unchanged.
 
+The cold-selection successor [separates metadata phase budgets](claude-quota-cold-selection.md); its nine-/four-second phase bounds and fifteen-/sixteen-second stream/loading envelopes supersede the historical combined deadlines below. All source, privacy, cache and provider authority restrictions remain in force.
+
 ## Native collection
 
 `claudeAccountQuota.ts` launches the selected instance's installed Claude Code

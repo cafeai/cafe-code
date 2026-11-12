@@ -35,6 +35,53 @@ it("publishes snapshots, revalidates on reconnect and fences retired callbacks",
   expect(close).toHaveBeenCalledOnce();
   expect(vi.getTimerCount()).toBe(0);
 });
+it("keeps a longer bounded metadata read loading and renews only its active subscription deadline", () => {
+  vi.useFakeTimers();
+  const values: string[] = [];
+  const close = vi.fn();
+  let push!: (value: string) => void, reset!: () => void;
+  const dispose = subscribeMetadata({
+    loading: "loading",
+    unavailable: "unavailable",
+    loadingTimeoutMs: 16_000,
+    publish: (value) => values.push(value),
+    subscribe: (publish, awaiting) => {
+      push = publish;
+      reset = awaiting;
+      return close;
+    },
+  });
+  expect(values).toEqual(["loading"]);
+  vi.advanceTimersByTime(6_000);
+  expect(values).toEqual(["loading"]);
+  vi.advanceTimersByTime(9_999);
+  expect(values).toEqual(["loading"]);
+  vi.advanceTimersByTime(1);
+  expect(values).toEqual(["loading", "unavailable"]);
+
+  push("current");
+  reset();
+  vi.advanceTimersByTime(6_000);
+  reset();
+  // The old reconnect deadline must not make the newer attempt unavailable.
+  vi.advanceTimersByTime(10_000);
+  expect(values.at(-1)).toBe("loading");
+  vi.advanceTimersByTime(5_999);
+  expect(values.at(-1)).toBe("loading");
+  vi.advanceTimersByTime(1);
+  expect(values.at(-1)).toBe("unavailable");
+
+  push("recovered");
+  reset();
+  dispose();
+  push("retired");
+  reset();
+  vi.advanceTimersByTime(16_000);
+  expect(values.at(-1)).toBe("loading");
+  expect(values).not.toContain("retired");
+  expect(close).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});
 it("closes a subscription acquired after retirement without publishing stale data", async () => {
   vi.useFakeTimers();
   const acquired = deferred<() => void>();

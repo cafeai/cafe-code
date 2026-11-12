@@ -406,11 +406,42 @@ describe("passive session quota subscriptions", () => {
         Effect.forkScoped,
       );
       yield* Deferred.await(entered);
-      yield* TestClock.adjust(5_000);
+      yield* TestClock.adjust(15_000);
       yield* Deferred.await(failed);
       yield* PubSub.publish(changes, undefined);
       yield* Deferred.await(recovered);
       assert.deepEqual(values, [UNAVAILABLE_SESSION_QUOTA, available]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps a bounded cold account read alive through its independent phases", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const ready = yield* Deferred.make<void>();
+      const values: ProviderSessionQuotaResult[] = [];
+      yield* subscribeProviderQuota(
+        Effect.yieldNow.pipe(
+          Effect.andThen(Deferred.succeed(entered, undefined)),
+          // The reader owns source selection, then control work. Their combined
+          // valid duration may exceed the former whole-inventory envelope.
+          Effect.andThen(Effect.sleep(13_000)),
+          Effect.as(available),
+        ),
+        [],
+      ).pipe(
+        Stream.runForEach((value) =>
+          Effect.sync(() => values.push(value)).pipe(
+            Effect.andThen(Deferred.succeed(ready, undefined)),
+          ),
+        ),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(5_000);
+      assert.deepEqual(values, []);
+      yield* TestClock.adjust(8_000);
+      yield* Deferred.await(ready);
+      assert.deepEqual(values, [available]);
     }).pipe(Effect.scoped),
   );
 });

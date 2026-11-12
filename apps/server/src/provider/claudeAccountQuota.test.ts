@@ -78,6 +78,81 @@ function fixture(output?: (requestId: string) => Stream.Stream<Uint8Array>) {
 }
 
 describe("Claude control-only account allowances", () => {
+  it.effect("preserves the native quota allowance after bounded cold login selection", () =>
+    Effect.gen(function* () {
+      const selecting = yield* Deferred.make<void>();
+      const selected = yield* Deferred.make<void>();
+      const reading = yield* Deferred.make<void>();
+      const response = yield* Deferred.make<void>();
+      const peer = fixture((request_id) =>
+        Stream.fromEffect(
+          Deferred.succeed(reading, undefined).pipe(Effect.andThen(Deferred.await(response))),
+        ).pipe(
+          Stream.flatMap(() =>
+            Stream.make(
+              encoder.encode(
+                JSON.stringify({
+                  type: "control_response",
+                  response: { subtype: "success", request_id, response: native },
+                }) + "\n",
+              ),
+            ),
+          ),
+        ),
+      );
+      const reader = yield* makeClaudeAccountQuotaReader(
+        "selected-claude",
+        Deferred.succeed(selecting, undefined).pipe(
+          Effect.andThen(Deferred.await(selected)),
+          Effect.as(environment),
+        ),
+      ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, peer.spawner));
+      const pending = yield* reader.pipe(Effect.forkChild);
+      yield* Deferred.await(selecting);
+      yield* TestClock.adjust(3_000);
+      expect(peer.commands).toHaveLength(0);
+      yield* Deferred.succeed(selected, undefined);
+      yield* Deferred.await(reading);
+      yield* TestClock.adjust(2_000);
+      yield* Deferred.succeed(response, undefined);
+      expect((yield* Fiber.join(pending))?.meters?.map((meter) => meter.usedPercent)).toEqual([
+        57, 18,
+      ]);
+      expect(peer.commands).toHaveLength(1);
+      expect(peer.kills).toEqual(["SIGTERM"]);
+    }),
+  );
+
+  for (const action of ["timeout", "cancel"] as const)
+    it.effect(`never starts quota collection after login-selection ${action}`, () =>
+      Effect.gen(function* () {
+        const selecting = yield* Deferred.make<void>();
+        const retired = yield* Deferred.make<void>();
+        const peer = fixture();
+        const reader = yield* makeClaudeAccountQuotaReader(
+          "selected-claude",
+          Effect.acquireRelease(Effect.void, () => Deferred.succeed(retired, undefined)).pipe(
+            // A real auth-status child/pipe reports readiness asynchronously.
+            // Yield before notifying the test so it cannot synchronously
+            // interrupt the timeout while its cancel hook is being installed.
+            Effect.andThen(Effect.yieldNow),
+            Effect.andThen(Deferred.succeed(selecting, undefined)),
+            Effect.andThen(Effect.never),
+            Effect.scoped,
+          ),
+        ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, peer.spawner));
+        const pending = yield* reader.pipe(Effect.forkChild);
+        yield* Deferred.await(selecting);
+        if (action === "timeout") {
+          yield* TestClock.adjust(9_000);
+          expect(yield* Fiber.join(pending)).toBeNull();
+        } else yield* Fiber.interrupt(pending);
+        expect(yield* Deferred.isDone(retired)).toBe(true);
+        expect(peer.commands).toHaveLength(0);
+        expect(peer.kills).toHaveLength(0);
+      }),
+    );
+
   it.effect(
     "sends only get_usage with transcript scanning disabled and retires its exact child",
     () =>
