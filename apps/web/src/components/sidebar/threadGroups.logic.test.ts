@@ -6,6 +6,8 @@ import type { SidebarThreadSummary } from "../../types";
 import {
   buildSidebarThreadGroupIndex,
   collectSidebarGroupDescendants,
+  layoutSidebarThreadGroupRows,
+  sidebarCollapsedGroupVisibleMembers,
   sidebarGroupKeysContaining,
   sidebarRootThreadKey,
   sidebarThreadGroupKey,
@@ -34,6 +36,11 @@ function summary(id: string, fields: Partial<SidebarThreadSummary> = {}): Sideba
   };
 }
 
+const groupAt = (id: string, createdAt: string) => ({
+  id: ThreadGroupId.make(id),
+  title: id,
+  createdAt,
+});
 const key = (id: string) => scopedThreadKey(scopeThreadRef(environmentId, ThreadId.make(id)));
 const group = (id: string, title = id) => ({
   id: ThreadGroupId.make(id),
@@ -93,5 +100,70 @@ describe("sidebar thread group index", () => {
     );
     expect(sidebarRootThreadKey(index, key("c"))).toBe(key("coordinator"));
     expect(sidebarRootThreadKey(index, key("unrelated"))).toBe(key("unrelated"));
+  });
+
+  it("keeps only the open chat or its path visible in a collapsed group", () => {
+    const index = buildSidebarThreadGroupIndex([coordinator, a, b, c, unrelated]);
+    const [wave] = index.groupsByOwnerKey.get(key("coordinator"))!;
+    const visible = (active: string | null) =>
+      sidebarCollapsedGroupVisibleMembers(
+        index,
+        wave!,
+        active === null ? null : key(active),
+        sidebarGroupKeysContaining(index, active === null ? null : key(active)),
+      ).map((member) => member.id);
+    expect(visible("a")).toEqual(["a"]);
+    // c lives in bb's nested group, so bb stays visible as the path to it.
+    expect(visible("c")).toEqual(["bb"]);
+    expect(visible("coordinator")).toEqual([]);
+    expect(visible("unrelated")).toEqual([]);
+    expect(visible(null)).toEqual([]);
+  });
+
+  describe("several groups under one parent chat", () => {
+    // ownedGroups and member order deliberately disagree with creation order.
+    const orchestrator = summary("orchestrator", {
+      ownedGroups: [
+        groupAt("third", "2026-11-10T00:00:03.000Z"),
+        groupAt("first", "2026-11-10T00:00:01.000Z"),
+        groupAt("second", "2026-11-10T00:00:02.000Z"),
+      ],
+    });
+    const inThird = summary("t1", { groupId: ThreadGroupId.make("third") });
+    const inFirst = summary("f1", { groupId: ThreadGroupId.make("first") });
+    const inSecond = summary("s1", { groupId: ThreadGroupId.make("second") });
+    const index = buildSidebarThreadGroupIndex([orchestrator, inThird, inSecond, inFirst]);
+    const nodes = index.groupsByOwnerKey.get(key("orchestrator"))!;
+
+    it("renders every group in creation order", () => {
+      expect(nodes.map((node) => node.groupId)).toEqual(["first", "second", "third"]);
+    });
+
+    const layout = (expanded: boolean[], active: string | null = null) =>
+      layoutSidebarThreadGroupRows(
+        index,
+        nodes,
+        expanded,
+        active === null ? null : key(active),
+      ).map((row) => [row.node.groupId, row.attached, row.visibleMembers.length]);
+
+    it("attaches rows to the parent unless an earlier sibling shows chats", () => {
+      expect(layout([false, false, false])).toEqual([
+        ["first", true, 0],
+        ["second", true, 0],
+        ["third", true, 0],
+      ]);
+      expect(layout([true, false, false])).toEqual([
+        ["first", true, 1],
+        ["second", false, 0],
+        ["third", true, 0],
+      ]);
+      // A collapsed group that pins the open chat also separates the next row.
+      expect(layout([false, false, false], "s1")).toEqual([
+        ["first", true, 0],
+        ["second", true, 1],
+        ["third", false, 0],
+      ]);
+    });
   });
 });

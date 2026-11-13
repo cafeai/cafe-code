@@ -763,6 +763,7 @@
   "Could not copy path": "パスをコピーできませんでした",
   "Could not copy plan": "計画をコピーできませんでした",
   "Could not copy the code. Select and copy it manually.": "コードをコピーできませんでした。コードを選択して手動でコピーしてください。",
+  "Could not copy the relay invitation. Select the link and copy it manually.": "リレー招待をコピーできませんでした。リンクを選択して手動でコピーしてください。",
   "Could not copy {value0} update command": "{value0}の更新コマンドをコピーできませんでした",
   "Could not create chat": "チャットを作成できませんでした",
   "Could not create pairing URL": "ペアリングURLを作成できませんでした",
@@ -1528,7 +1529,6 @@
   "Launch arguments": "起動引数",
   "Layer": "レイヤー",
   "Leave Running": "実行を続ける",
-  "Leave the authentication code empty if this server has two-factor authentication turned off.": "このサーバーで二要素認証が無効な場合、認証コードは空欄にしてください。",
   "Leave this off for private Debug Codex, Claude and Grok homes. Other drivers require explicit sharing. Provider executable updates can affect installations shared with Production.": "Codex、Claude、Grok の Debug 専用ホームを使う場合はオフのままにしてください。他のドライバーは明示的な共有許可が必要です。プロバイダー実行ファイルの更新は、Production と共有するインストールにも影響する場合があります。",
   "Left": "左",
   "Legacy instance configuration": "旧形式のインスタンス設定",
@@ -3075,7 +3075,6 @@
   "Turn start routed to active steer": "ターンの開始を実行中のターンへの追加指示に変更しました",
   "Turn unavailable Daybreak off": "利用できないDaybreakをオフにする",
   "Two-factor authentication": "二要素認証",
-  "Two-factor code, only if enabled in Cafe": "2 段階認証コード（Cafe で有効にしている場合のみ）",
   "Type": "種類",
   "Type an answer, or leave blank to use the selection": "回答を入力するか、空欄のまま選択した回答を使用してください",
   "URL": "URL",
@@ -3799,5 +3798,8 @@
   "⌘⇧ + one key · Esc cancels": "⌘⇧ + キー1つ · Escでキャンセル",
   "⌥": "⌥",
   "♡": "♡",
-  "💙": "💙"
+  "💙": "💙",
+  "That code was not accepted. Enter a new authenticator code or an unused recovery code.": "コードが受け付けられませんでした。新しい認証コードまたは未使用のリカバリーコードを入力してください。",
+  "This server requires two-factor authentication. Enter an authenticator code or an unused recovery code.": "このサーバーでは二要素認証が必要です。認証コードまたは未使用のリカバリーコードを入力してください。",
+  "Verify and connect": "確認して接続"
 }

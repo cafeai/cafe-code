@@ -13,7 +13,7 @@ chat or why.
 ## Decision
 
 - **Groups belong to a parent thread.** A group is sidebar containment owned by
-  exactly one thread and is shown as an indented folder row directly beneath
+  exactly one thread and is shown as an indented agent row directly beneath
   it. Members are rendered only inside their group. Members can own groups of
   their own: thread → group → member → group …
 - **Only the management tool creates groups.** The renderer has no "New group"

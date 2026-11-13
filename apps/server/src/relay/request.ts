@@ -8,6 +8,7 @@ import type { RelayStream } from "@cafecode/relay/session";
 import { RelayError } from "@cafecode/relay/errors";
 import { NdjsonGuard, RELAY_RPC_MESSAGE_BYTES } from "@cafecode/relay/ndjson";
 import { Budget } from "@cafecode/relay/budget";
+import { RelayRpcTransport, type RelayRpcProtocol } from "@cafecode/relay/rpc";
 
 // Backend-wide retained-prefix lane, including closing channels. Complete
 // small commands need no prefix reservation while another stream holds a
@@ -77,13 +78,14 @@ export class RelayServerRequest implements Request.HttpServerRequest {
 }
 
 /** NDJSON framing belongs to RPC; this socket carries bounded byte chunks. */
-export function relayEffectSocket(stream: RelayStream) {
+export function relayEffectSocket(stream: RelayStream, protocol: RelayRpcProtocol = "ndjson") {
   const guard = new NdjsonGuard(rpcPrefixes, RELAY_RPC_MESSAGE_BYTES);
+  const transport = new RelayRpcTransport(stream, protocol);
   const readable = new ReadableStream<Uint8Array>(
     {
       async pull(controller) {
         try {
-          const chunk = await stream.read();
+          const chunk = await transport.read();
           if (chunk) {
             guard.admit(chunk);
             controller.enqueue(chunk);
@@ -93,30 +95,27 @@ export function relayEffectSocket(stream: RelayStream) {
           }
         } catch {
           guard.close();
-          stream.retire();
+          transport.retire();
           controller.error(new RelayError("INCOMPLETE"));
         }
       },
       cancel() {
         guard.close();
-        stream.retire();
+        transport.retire();
       },
     },
     { highWaterMark: 0 },
   );
   const writable = new WritableStream<Uint8Array>({
-    async write(bytes) {
-      for (let offset = 0; offset < bytes.byteLength; offset += 8192)
-        await stream.write(bytes.subarray(offset, offset + 8192));
-    },
-    close: () => stream.finish(),
-    abort: () => stream.retire(),
+    write: (bytes) => transport.write(bytes),
+    close: () => transport.finish(),
+    abort: () => transport.close(),
   });
   return Socket.fromTransformStream(
     Effect.acquireRelease(Effect.succeed({ readable, writable }), () =>
-      Effect.sync(() => {
+      Effect.promise(async () => {
         guard.close();
-        stream.retire();
+        await transport.close();
       }),
     ),
   );

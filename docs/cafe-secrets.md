@@ -1,6 +1,6 @@
 # Cafe Secrets
 
-Cafe Secrets keeps values explicitly marked by the user out of ordinary chat
+Cafe Secrets keeps values explicitly marked by the user out of stored chat
 history and model-facing tool results. It is a best-effort text substitution
 feature. It adds no provider permission, sandbox exception, global environment
 variable, or persistent project configuration.
@@ -20,8 +20,25 @@ Incomplete and empty markers cannot be sent. Complete/incomplete raw ranges
 are omitted from persisted composer drafts; unsent values remain only in the
 editor's memory. Ordinary text and attachments retain their existing behavior.
 
+Secret ranges, including incomplete markers and actual references, remain
+editable but skip native spellcheck. Surrounding prose keeps ordinary spelling
+checks. In your user-message history, Cafe reads the current values from that
+chat's vault and presents `[sec:VALUE]` again, including when copying the message.
+The stored message, queued sends, exports and provider input keep references.
+Assistant/tool messages do not automatically reveal values. Escaped references
+remain literal; a missing value or an unavailable vault leaves its reference.
+
+History values live only in the mounted view's memory, scoped to the exact
+chat, connection and admitted transport. A connection/owner change discards
+their presentation, and late reads cannot disclose into a replacement view.
+The current vault catalog bounds presentation to 64 values with four outstanding
+reads across view changes; editing/removing/clearing through Secrets refreshes
+the visible history without retaining the old values in browser storage.
+Expanded message text is bounded to 1,048,576 UTF-16 code units; further
+expansions keep their references without dropping the original message text.
+
 The chat context menu's **Secrets…** dialog lists safe labels and references.
-Add, reveal, copy, edit, remove and clear are explicit owner actions. Raw
+Add, reveal, copy, edit, remove and clear are explicit owner actions. Its raw
 values stay in the dialog's local state. Closing it or opening a different
 chat discards revealed values. List responses contain no values. Exports and
 duplicated chats retain references and do not copy vault contents.
@@ -100,6 +117,13 @@ a private profile-local file, not an OS keychain. Directory/file admission uses
 bounded no-follow native descriptors, single-link ownership and bigint
 namespace identities. Unknown/corrupt records fail closed. Publication is an
 atomic private-file replacement after fsync and namespace rechecks.
+
+Debug startup admits this exact nested vault namespace by bounded metadata
+inspection. It preserves private ownership, no-follow directory identity,
+single-link files, known key/ciphertext/atomic-temporary names and file-size
+limits. Its entries share the existing 4096-entry secret-directory budget;
+other nested directories remain refused. Startup does not read keys, decrypt
+values, move the vault or repair unsafe permissions.
 
 Each chat has at most 64 values, each at most 16,384 UTF-8 bytes, inside a
 2 MiB encrypted-file allowance. The transient write owner set is bounded to

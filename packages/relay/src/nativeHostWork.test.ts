@@ -42,6 +42,16 @@ function challenge(difficulty: number): HostWorkChallenge {
 }
 
 describe("native host-only work solver", () => {
+  it("completes disabled proof without any hash puzzle and still rejects retired work", async (test) => {
+    const lifetime = new Lifetime();
+    test.onTestFinished(() => lifetime.close());
+    const proof = await solveHostWork(challenge(0), lifetime);
+    expect(proof).toEqual([0, 0, 0, 0]);
+    expect(verifyHostWork(challenge(0), proof)).toBe(true);
+    expect(verifyHostWork(challenge(0), [1, 0, 0, 0])).toBe(false);
+    lifetime.retire();
+    await expect(solveHostWork(challenge(0), lifetime)).rejects.toThrow();
+  });
   it("bounds queued attempts and joins an admitted HTTP request before closing", async (test) => {
     const lifetime = new Lifetime(),
       client = new NativeHostWorkClient(),

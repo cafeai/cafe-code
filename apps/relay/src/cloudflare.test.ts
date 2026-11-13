@@ -23,7 +23,11 @@ describe("Cloudflare relay gateway policy", () => {
         new Request(`https://relay-uk.cafecode.sh/v1/host/${path}`, {
           method: "POST",
           body: '{"fixture":true}',
-          headers: { authorization: "Bearer private", cookie: "private=1" },
+          headers: {
+            authorization: "Bearer private",
+            cookie: "private=1",
+            "x-cafe-host-work-zero": "1",
+          },
         }),
         f.env,
         f.origin,
@@ -33,6 +37,7 @@ describe("Cloudflare relay gateway policy", () => {
       expect(new URL(String(url)).pathname).toBe(`/v1/host/${path}`);
       expect(new Headers(init!.headers).get("authorization")).toBeNull();
       expect(new Headers(init!.headers).get("cookie")).toBeNull();
+      expect(new Headers(init!.headers).get("x-cafe-host-work-zero")).toBe("1");
       expect(new TextDecoder().decode(init!.body as Uint8Array)).toBe('{"fixture":true}');
     }
     f.origin.mockClear();

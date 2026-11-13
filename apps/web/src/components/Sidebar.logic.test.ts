@@ -101,6 +101,51 @@ describe("hasUnseenCompletion", () => {
       }),
     ).toBe(true);
   });
+
+  it("never marks agent-created chats unread but keeps their attention states", () => {
+    const base = {
+      hasActionableProposedPlan: false,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      interactionMode: "default" as const,
+      session: null,
+    };
+    const agent = {
+      classification: "agent" as const,
+      source: "recorded" as const,
+      updatedAt: "2026-03-09T09:00:00.000Z",
+    };
+    expect(hasUnseenCompletion({ ...base, latestTurn: makeLatestTurn(), origin: agent })).toBe(
+      false,
+    );
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...base,
+          latestTurn: { ...makeLatestTurn(), state: "error" },
+          origin: agent,
+        },
+      }),
+    ).toBeNull();
+    expect(
+      resolveThreadStatusPill({
+        thread: {
+          ...base,
+          hasPendingApprovals: true,
+          latestTurn: makeLatestTurn(),
+          origin: agent,
+        },
+      })?.label,
+    ).toBe("Pending Approval");
+    // A person relabelling the chat as human restores unread completions.
+    expect(
+      hasUnseenCompletion({
+        ...base,
+        latestTurn: makeLatestTurn(),
+        origin: { ...agent, classification: "human", source: "user" },
+      }),
+    ).toBe(true);
+  });
 });
 
 describe("createThreadJumpHintVisibilityController", () => {

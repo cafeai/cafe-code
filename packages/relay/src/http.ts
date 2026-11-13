@@ -3,7 +3,7 @@ import { parseRelayUrl, RelayError, requireRelay } from "./errors.ts";
 import { Lifetime } from "./lifetime.ts";
 import { canonicalBytes, HttpMethod, readCanonical, SafeCounter } from "./protocol.ts";
 import type { RelaySession, RelayStream } from "./session.ts";
-import { RELAY_LIMITS } from "./limits.ts";
+import { RELAY_DATA_CHUNK_BYTES, RELAY_LIMITS } from "./limits.ts";
 
 const Header = Schema.Tuple([
   Schema.String.check(Schema.isMaxLength(128)),
@@ -112,8 +112,8 @@ async function writeBody(
         requireRelay(next.value.byteLength <= RELAY_HTTP_BODY_BYTES, "BUSY");
         length += next.value.byteLength;
         requireRelay(length <= RELAY_HTTP_BODY_BYTES, "BUSY");
-        for (let offset = 0; offset < next.value.byteLength; offset += RELAY_LIMITS.dataBytes)
-          await stream.write(next.value.subarray(offset, offset + RELAY_LIMITS.dataBytes));
+        for (let offset = 0; offset < next.value.byteLength; offset += RELAY_DATA_CHUNK_BYTES)
+          await stream.write(next.value.subarray(offset, offset + RELAY_DATA_CHUNK_BYTES));
       }
     requireRelay(expected === null || length === Number(expected), "INCOMPLETE");
     if (finish) await stream.finish();
@@ -136,7 +136,7 @@ function slicedBlob(blob: Blob): ReadableStream<Uint8Array> {
           controller.close();
           return;
         }
-        const end = Math.min(offset + RELAY_LIMITS.dataBytes, blob.size),
+        const end = Math.min(offset + RELAY_DATA_CHUNK_BYTES, blob.size),
           bytes = new Uint8Array(await blob.slice(offset, end).arrayBuffer());
         if (!active) return;
         offset = end;
@@ -215,7 +215,7 @@ export async function fetchRelayed(
       headers: filteredHeaders(outgoingHeaders, "request"),
     }),
   );
-  const stream = await session.open("http", metadata),
+  const stream = await session.open("http", metadata, init.signal ?? undefined),
     lifetime = new Lifetime(() => stream.retire());
   const retire = () => {
     stream.retire();

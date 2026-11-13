@@ -23,6 +23,7 @@ export const RelayNodeConfig = Schema.Struct({
   ),
   hostWork: Schema.optionalKey(
     Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
       difficulty: SafeCounter.check(
         Schema.isGreaterThanOrEqualTo(HOST_WORK.minimumDifficulty),
         Schema.isLessThanOrEqualTo(HOST_WORK.maximumDifficulty),

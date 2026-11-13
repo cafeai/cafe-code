@@ -57,6 +57,7 @@ const Denied = Schema.Struct({
   code: Schema.Literals([
     "AUTH_REJECTED",
     "SECOND_FACTOR_REQUIRED",
+    "SECOND_FACTOR_REJECTED",
     "SECOND_FACTOR_LOCKED",
     "SESSION_REVOKED",
     "ENVIRONMENT_MISMATCH",
@@ -85,6 +86,7 @@ export interface SessionHandlers {
   readonly tickets?: () => Promise<readonly ResumeTicket[]>;
 }
 interface PendingSend {
+  readonly creditStreamId?: number;
   readonly encoded: Uint8Array;
   readonly stream: RelayStream | undefined;
   readonly resolve: () => void;
@@ -120,13 +122,26 @@ export class RelaySession {
   private readonly stream: MessageStream;
   private readonly direction: "viewer" | "host";
   private readonly handlers: SessionHandlers;
-  private readonly lifetime = new Lifetime(() => this.retire());
+  private readonly lifetime: Lifetime;
   private readonly decoder = new InnerDecoder();
   private readonly receiveBudget = new Budget(RELAY_LIMITS.channelWindowBytes);
   private readonly sendBudget = new Budget(RELAY_LIMITS.channelWindowBytes);
   private readonly controlBudget = new Budget(RELAY_LIMITS.controlReserveBytes);
+  private readonly httpQueueBudget = new Budget(RELAY_LIMITS.channelWindowBytes);
+  private readonly httpQueue = new Map<
+    object,
+    {
+      payload: Uint8Array;
+      resolve: (stream: RelayStream) => void;
+      reject: (error: RelayError) => void;
+      release: () => void;
+      unlisten: () => void;
+    }
+  >();
+  private admittingHttp = false;
   private readonly sendCredit = new CreditWindow(RELAY_LIMITS.channelWindowBytes);
   private readonly controls = new TokenBucket(64, 32, epochNow());
+  private readonly outgoingControls = new TokenBucket(32, 30, epochNow());
   private readonly streams = new Map<number, RelayStream>();
   private readonly pending = new Map<number, PendingSend>();
   private readonly controlQueue: PendingSend[] = [];
@@ -146,6 +161,9 @@ export class RelaySession {
   private records = 0;
   private retired = false;
   private cancelPartial: (() => void) | undefined;
+  private cancelControlFlush: (() => void) | undefined;
+  private cancelAuthentication: (() => void) | undefined;
+  private awaitingSecondFactor = false;
 
   private constructor(
     circuit: EndpointCircuit,
@@ -154,6 +172,7 @@ export class RelaySession {
     identity: RelayIdentity,
     handlers: SessionHandlers,
   ) {
+    this.lifetime = new Lifetime(() => this.retire(), circuit.clock);
     this.circuit = circuit;
     this.direction = direction;
     this.stream = secured.stream;
@@ -204,7 +223,7 @@ export class RelaySession {
     this.lifetime.later(RELAY_LIMITS.handshakeMs, () => {
       if (!this.bindingReceived) this.retire();
     });
-    this.lifetime.later(
+    this.cancelAuthentication = this.lifetime.later(
       circuit.offer.recovery ? RELAY_LIMITS.recoveryMs : RELAY_LIMITS.handshakeMs,
       () => {
         if (!this.authenticated) this.retire();
@@ -240,9 +259,18 @@ export class RelaySession {
   private control(kind: InnerKind, value: unknown, streamId = 0): void {
     if (!this.lifetime.active) return;
     const encoded = encodeInner(kind, streamId, canonicalBytes(value));
+    const creditStreamId =
+      kind === INNER.CREDIT ? (value as typeof Credit.Type).streamId : undefined;
+    if (creditStreamId !== undefined) {
+      const previous = this.controlQueue.findIndex(
+        (entry) => entry.creditStreamId === creditStreamId,
+      );
+      if (previous !== -1) this.controlQueue.splice(previous, 1)[0]!.release();
+    }
     const release = this.controlBudget.reserve(encoded.byteLength);
     requireRelay(release, "BUSY");
     this.controlQueue.push({
+      ...(creditStreamId !== undefined ? { creditStreamId } : {}),
       encoded,
       stream: undefined,
       resolve: () => {},
@@ -277,7 +305,18 @@ export class RelaySession {
     this.flushing = true;
     try {
       while (!this.blocked && this.lifetime.active) {
-        let entry = this.controlQueue.shift();
+        let entry: PendingSend | undefined;
+        if (this.controlQueue.length) {
+          if (this.outgoingControls.take(epochNow())) entry = this.controlQueue.shift();
+          else if (!this.cancelControlFlush)
+            this.cancelControlFlush = this.lifetime.later(
+              this.outgoingControls.retryAfter(epochNow()),
+              () => {
+                this.cancelControlFlush = undefined;
+                this.flush();
+              },
+            );
+        }
         if (!entry) {
           for (const [id, candidate] of this.pending) {
             if (
@@ -516,6 +555,7 @@ export class RelaySession {
               error instanceof RelayError &&
               [
                 "SECOND_FACTOR_REQUIRED",
+                "SECOND_FACTOR_REJECTED",
                 "SECOND_FACTOR_LOCKED",
                 "SESSION_REVOKED",
                 "ENVIRONMENT_MISMATCH",
@@ -523,6 +563,8 @@ export class RelaySession {
                 ? error.code
                 : "AUTH_REJECTED";
             try {
+              if (input.operation !== "resume" && code.startsWith("SECOND_FACTOR_"))
+                this.allowSecondFactor();
               this.control(INNER.AUTH_DENIED, { code });
             } catch {
               this.retire();
@@ -543,6 +585,7 @@ export class RelaySession {
     if (frame.kind === INNER.AUTH_DENIED) {
       requireRelay(this.direction === "viewer" && this.authReply);
       const result = readCanonical(Denied, frame.payload);
+      if (result.code.startsWith("SECOND_FACTOR_")) this.allowSecondFactor();
       this.authReply.reject(new RelayError(result.code));
       this.authReply = undefined;
       return;
@@ -584,7 +627,80 @@ export class RelaySession {
     return result;
   }
 
-  async open(kind: StreamKind, metadata: unknown): Promise<RelayStream> {
+  private allowSecondFactor(): void {
+    if (this.awaitingSecondFactor || this.authenticated) return;
+    this.awaitingSecondFactor = true;
+    this.cancelAuthentication?.();
+    // Only the trusted host's verified first-factor result grants this bounded
+    // transport lease. Application streams remain forbidden until full auth.
+    if (this.direction === "host") this.circuit.authorize();
+    this.cancelAuthentication = this.lifetime.later(RELAY_LIMITS.secondFactorMs, () => {
+      if (!this.authenticated) this.retire();
+    });
+  }
+
+  async open(kind: StreamKind, metadata: unknown, signal?: AbortSignal): Promise<RelayStream> {
+    requireRelay(!signal?.aborted && this.authenticated && this.lifetime.active, "UNAVAILABLE");
+    const payload = canonicalBytes({ kind, metadata });
+    if (kind !== "http" || (this.httpQueue.size === 0 && this.canOpenHttp()))
+      return this.beginOpen(kind, payload);
+    requireRelay(this.httpQueue.size < RELAY_LIMITS.streams * 4, "BUSY");
+    const localRelease = this.httpQueueBudget.reserve(payload.byteLength);
+    requireRelay(localRelease, "BUSY");
+    const aggregateRelease = this.circuit.reserveHttpMetadata(payload.byteLength);
+    if (!aggregateRelease) {
+      localRelease();
+      throw new RelayError("BUSY");
+    }
+    const release = () => {
+      localRelease();
+      aggregateRelease();
+    };
+    const result = deferred<RelayStream>();
+    const token = {};
+    const abort = () => {
+      if (!this.httpQueue.delete(token)) return;
+      signal?.removeEventListener("abort", abort);
+      release();
+      result.reject(new RelayError("INCOMPLETE"));
+    };
+    this.httpQueue.set(token, {
+      payload,
+      resolve: result.resolve,
+      reject: result.reject,
+      release,
+      unlisten: () => signal?.removeEventListener("abort", abort),
+    });
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    return result.promise;
+  }
+
+  private canOpenHttp(): boolean {
+    return this.bulkCount < RELAY_LIMITS.bulkStreams && this.streams.size < RELAY_LIMITS.streams;
+  }
+
+  private drainHttpQueue(): void {
+    if (this.admittingHttp || !this.lifetime.active) return;
+    this.admittingHttp = true;
+    try {
+      while (this.httpQueue.size && this.canOpenHttp() && this.lifetime.active) {
+        const [token, entry] = this.httpQueue.entries().next().value!;
+        this.httpQueue.delete(token);
+        entry.unlisten();
+        entry.release();
+        // beginOpen reserves the stream synchronously before its first await;
+        // a second queued request cannot borrow that same available slot.
+        void this.beginOpen("http", entry.payload).then(entry.resolve, () =>
+          entry.reject(new RelayError("INCOMPLETE")),
+        );
+      }
+    } finally {
+      this.admittingHttp = false;
+    }
+  }
+
+  private async beginOpen(kind: StreamKind, payload: Uint8Array): Promise<RelayStream> {
     requireRelay(
       this.authenticated &&
         this.lifetime.active &&
@@ -597,7 +713,7 @@ export class RelaySession {
     this.nextId += 2;
     this.streams.set(stream.id, stream);
     try {
-      await this.send(INNER.OPEN, stream, canonicalBytes({ kind, metadata }));
+      await this.send(INNER.OPEN, stream, payload);
       return stream;
     } catch (error) {
       stream.retire(new RelayError("UNAVAILABLE"));
@@ -616,7 +732,10 @@ export class RelaySession {
     this.remove(stream);
   }
   remove(stream: RelayStream): void {
-    if (this.streams.get(stream.id) === stream) this.streams.delete(stream.id);
+    if (this.streams.get(stream.id) === stream) {
+      this.streams.delete(stream.id);
+      this.drainHttpQueue();
+    }
   }
   private get bulkCount(): number {
     let count = 0;
@@ -663,6 +782,12 @@ export class RelaySession {
     this.authReply?.reject(new RelayError("AUTH_INDETERMINATE"));
     this.authReply = undefined;
     this.rejectAuthorized(error);
+    for (const entry of this.httpQueue.values()) {
+      entry.unlisten();
+      entry.release();
+      entry.reject(error);
+    }
+    this.httpQueue.clear();
     for (const stream of [...this.streams.values()]) stream.retire(error, false);
     for (const pending of this.pending.values()) {
       pending.release();

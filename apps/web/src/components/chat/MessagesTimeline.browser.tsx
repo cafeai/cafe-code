@@ -23,6 +23,7 @@ import {
   __setEnvironmentApiOverrideForTests,
 } from "../../environmentApi";
 import { __resetLocalApiForTests } from "../../localApi";
+import { notifyCafeSecretsChanged } from "../../cafeSecrets/changes";
 
 const scrollToEndSpy = vi.fn();
 const scrollToIndexSpy = vi.fn();
@@ -139,6 +140,7 @@ afterEach(async () => {
 
 function createPublicSummaryFixture(context: TestContext, afterUnmount?: () => void) {
   const pending = new Set<Promise<unknown>>();
+  const releases = new Set<() => void>();
   let mounted: Awaited<ReturnType<typeof render>> | undefined;
   let retired = false;
   let completion: Promise<void> | undefined;
@@ -159,6 +161,7 @@ function createPublicSummaryFixture(context: TestContext, afterUnmount?: () => v
   };
   const cleanup = (): Promise<void> => {
     retired = true;
+    for (const release of releases) release();
     context.signal.removeEventListener("abort", onAbort);
     return (completion ??= Promise.resolve().then(async () => {
       // Retain late render results and native targets until the exact admitted
@@ -180,6 +183,9 @@ function createPublicSummaryFixture(context: TestContext, afterUnmount?: () => v
   return {
     assertActive,
     own,
+    releaseOnRetirement(release: () => void) {
+      releases.add(release);
+    },
     async render(...args: Parameters<typeof render>) {
       return own(async () => {
         mounted = await render(...args);
@@ -1473,6 +1479,171 @@ it("keeps idle Claude fork actions quiet until message hover or keyboard focus",
   await userEvent.keyboard("{Enter}");
   expect(onForkMessage).toHaveBeenCalledExactlyOnceWith(MessageId.make("assistant:item-1"));
   await view.unmount();
+});
+
+it("shows Cafe Secret values only in user-message presentation and refreshes edits/removal", async (context) => {
+  const fixture = createPublicSummaryFixture(context, __resetEnvironmentApiOverridesForTests);
+  await fixture.run(async () => {
+    const props = buildProps();
+    const threadId = ThreadId.make("secret-history");
+    const id = "0123456789abcdef0123456789abcdef";
+    const reference = `[CAFE_SECRET_${id}]`;
+    let value: string | null = "synthetic-history-key";
+    const reveal = vi.fn(async () => {
+      if (value === null) throw new Error("private failure text");
+      return { value };
+    });
+    __setEnvironmentApiOverrideForTests(props.activeThreadEnvironmentId, {
+      threadSecrets: { reveal, list: async () => ({ secrets: value === null ? [] : [{ id }] }) },
+    } as never);
+    const entry = buildUserTimelineEntry(
+      `use ${reference} again ${reference}; literal \\${reference}`,
+    );
+    await fixture.render(
+      <MessagesTimeline
+        {...props}
+        activeThreadId={threadId}
+        timelineEntries={[
+          entry,
+          buildAssistantTimelineEntry({ text: `Model received ${reference}` }),
+        ]}
+      />,
+    );
+    const body = () =>
+      document.querySelector('[data-message-role="user"] [data-user-message-body]')?.textContent;
+    await fixture.own(() =>
+      vi.waitFor(() =>
+        expect(body()).toBe(
+          `use [sec:synthetic-history-key] again [sec:synthetic-history-key]; literal \\${reference}`,
+        ),
+      ),
+    );
+    expect(reveal).toHaveBeenCalledExactlyOnceWith({ threadId, id });
+    expect(entry.message.text).not.toContain("synthetic-history-key");
+    expect(document.querySelector('[data-message-role="assistant"]')?.textContent).toContain(
+      reference,
+    );
+    expect(document.querySelector('[data-message-role="assistant"]')?.textContent).not.toContain(
+      "synthetic-history-key",
+    );
+
+    value = "edited-history-key";
+    notifyCafeSecretsChanged({ environmentId: props.activeThreadEnvironmentId, threadId });
+    await fixture.own(() => vi.waitFor(() => expect(body()).toContain("[sec:edited-history-key]")));
+    expect(body()).not.toContain("synthetic-history-key");
+    value = null;
+    notifyCafeSecretsChanged({ environmentId: props.activeThreadEnvironmentId, threadId });
+    await fixture.own(() => vi.waitFor(() => expect(body()).toBe(entry.message.text)));
+    expect(document.body.textContent).not.toContain("private failure text");
+  });
+});
+
+it.for(["chat", "connection"] as const)(
+  "fences delayed Cafe Secret reads across %s replacement",
+  async (change, context) => {
+    const fixture = createPublicSummaryFixture(context, __resetEnvironmentApiOverridesForTests);
+    let release!: () => void;
+    const held = new Promise<{ value: string }>((resolve) => {
+      release = () => resolve({ value: "retired-history-value" });
+    });
+    fixture.releaseOnRetirement(release);
+    await fixture.run(async () => {
+      const props = buildProps();
+      const id = "0123456789abcdef0123456789abcdef";
+      const entry = buildUserTimelineEntry(`[CAFE_SECRET_${id}]`);
+      const reveal = vi
+        .fn(async () => ({ value: "current-history-value" }))
+        .mockImplementationOnce(() => fixture.own(() => held));
+      __setEnvironmentApiOverrideForTests(props.activeThreadEnvironmentId, {
+        threadSecrets: { reveal, list: async () => ({ secrets: [{ id }] }) },
+      } as never);
+      const view = await fixture.render(
+        <MessagesTimeline
+          {...props}
+          activeThreadId={ThreadId.make("old-secret-chat")}
+          timelineEntries={[entry]}
+        />,
+      );
+      await fixture.own(() => vi.waitFor(() => expect(reveal).toHaveBeenCalledTimes(1)));
+      const replacement = vi.fn(async () => ({ value: "current-history-value" }));
+      if (change === "connection")
+        __setEnvironmentApiOverrideForTests(props.activeThreadEnvironmentId, {
+          threadSecrets: { reveal: replacement, list: async () => ({ secrets: [{ id }] }) },
+        } as never);
+      const nextThreadId = ThreadId.make(change === "chat" ? "new-secret-chat" : "old-secret-chat");
+      await fixture.own(() =>
+        view.rerender(
+          <MessagesTimeline {...props} activeThreadId={nextThreadId} timelineEntries={[entry]} />,
+        ),
+      );
+      await fixture.own(() =>
+        vi.waitFor(() =>
+          expect(document.querySelector("[data-user-message-body]")?.textContent).toBe(
+            "[sec:current-history-value]",
+          ),
+        ),
+      );
+      release();
+      await fixture.own(() => held);
+      expect(document.body.textContent).not.toContain("retired-history-value");
+      expect((change === "connection" ? replacement : reveal).mock.calls.at(-1)).toEqual([
+        { threadId: nextThreadId, id },
+      ]);
+    });
+  },
+);
+
+it("bounds Cafe Secret history reads across invalidation and skips removed references", async (context) => {
+  const fixture = createPublicSummaryFixture(context, __resetEnvironmentApiOverridesForTests);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  fixture.releaseOnRetirement(release);
+  await fixture.run(async () => {
+    const props = buildProps();
+    const threadId = ThreadId.make("bounded-secret-history");
+    const ids = Array.from({ length: 70 }, (_, index) => index.toString(16).padStart(32, "0"));
+    const entry = buildUserTimelineEntry(ids.map((id) => `[CAFE_SECRET_${id}]`).join(" "));
+    let pending = 0;
+    let maximumPending = 0;
+    const list = vi.fn(async () => ({ secrets: ids.slice(6).map((id) => ({ id })) }));
+    const reveal = vi.fn(async ({ id }: { id: string }) => {
+      pending++;
+      maximumPending = Math.max(maximumPending, pending);
+      try {
+        await fixture.own(() => gate);
+        return { value: `synthetic-${id}` };
+      } finally {
+        pending--;
+      }
+    });
+    __setEnvironmentApiOverrideForTests(props.activeThreadEnvironmentId, {
+      threadSecrets: { list, reveal },
+    } as never);
+    const content = (
+      <MessagesTimeline {...props} activeThreadId={threadId} timelineEntries={[entry]} />
+    );
+    const view = await fixture.render(content);
+    await fixture.own(() => vi.waitFor(() => expect(reveal).toHaveBeenCalledTimes(4)));
+    notifyCafeSecretsChanged({ environmentId: props.activeThreadEnvironmentId, threadId });
+    await fixture.own(() => view.rerender(content));
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(reveal).toHaveBeenCalledTimes(4);
+    release();
+    await fixture.own(() =>
+      vi.waitFor(() =>
+        expect(document.querySelector("[data-user-message-body]")?.textContent).toContain(
+          `[sec:synthetic-${ids.at(-1)}]`,
+        ),
+      ),
+    );
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(reveal).toHaveBeenCalledTimes(68);
+    expect(maximumPending).toBe(4);
+    expect(reveal.mock.calls.every(([input]) => ids.slice(6).includes(input.id))).toBe(true);
+    expect(entry.message.text).not.toContain("synthetic-");
+  });
 });
 
 function buildUserTimelineEntry(text: string) {

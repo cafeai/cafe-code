@@ -10,6 +10,7 @@ import {
   stripPairingTokenFromUrl,
   submitServerAuthCredential,
   submitServerPasswordCredential,
+  isServerSecondFactorChallenge,
 } from "../../environments/primary";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -61,6 +62,7 @@ export function PairingRouteSurface({
   const [credential, setCredential] = useState(() => autoPairTokenRef.current ?? "");
   const [password, setPassword] = useState("");
   const [secondFactor, setSecondFactor] = useState("");
+  const [secondFactorRequired, setSecondFactorRequired] = useState(false);
   const [authMode, setAuthMode] = useState<"password" | "pairing-token">(() =>
     supportsPassword && !autoPairTokenRef.current ? "password" : "pairing-token",
   );
@@ -74,12 +76,15 @@ export function PairingRouteSurface({
       setErrorMessage("");
 
       const submitError = await (
-        auth.twoFactorRequired
+        secondFactorRequired
           ? submitServerAuthCredential(nextCredential, secondFactor)
           : submitServerAuthCredential(nextCredential)
       ).then(
         () => null,
-        (error) => uiPresentation.errorMessageFromUnknown(error),
+        (error) => {
+          if (isServerSecondFactorChallenge(error)) setSecondFactorRequired(true);
+          return uiPresentation.errorMessageFromUnknown(error);
+        },
       );
 
       setIsSubmitting(false);
@@ -94,7 +99,7 @@ export function PairingRouteSurface({
         onAuthenticated();
       });
     },
-    [onAuthenticated, uiPresentation, secondFactor, auth.twoFactorRequired],
+    [onAuthenticated, uiPresentation, secondFactor, secondFactorRequired],
   );
 
   const submitPassword = useCallback(
@@ -104,10 +109,13 @@ export function PairingRouteSurface({
 
       const submitError = await submitServerPasswordCredential({
         password: nextPassword,
-        ...(auth.twoFactorRequired ? { secondFactor } : {}),
+        ...(secondFactorRequired ? { secondFactor } : {}),
       }).then(
         () => null,
-        (error) => uiPresentation.errorMessageFromUnknown(error),
+        (error) => {
+          if (isServerSecondFactorChallenge(error)) setSecondFactorRequired(true);
+          return uiPresentation.errorMessageFromUnknown(error);
+        },
       );
 
       setIsSubmitting(false);
@@ -122,7 +130,7 @@ export function PairingRouteSurface({
         onAuthenticated();
       });
     },
-    [onAuthenticated, uiPresentation, secondFactor, auth.twoFactorRequired],
+    [onAuthenticated, uiPresentation, secondFactor, secondFactorRequired],
   );
 
   const handleSubmit = useCallback(
@@ -145,9 +153,8 @@ export function PairingRouteSurface({
 
     autoSubmitAttemptedRef.current = true;
     stripPairingTokenFromUrl();
-    if (auth.twoFactorRequired) return;
     void submitCredential(token);
-  }, [submitCredential, auth.twoFactorRequired]);
+  }, [submitCredential]);
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 py-10 text-foreground sm:px-6">
@@ -170,7 +177,11 @@ export function PairingRouteSurface({
             <SegmentedControl
               aria-label={uiText("Sign-in method", undefined, undefined, uiLocale)}
               value={authMode}
-              onValueChange={setAuthMode}
+              onValueChange={(value) => {
+                setAuthMode(value);
+                setSecondFactorRequired(false);
+                setSecondFactor("");
+              }}
               options={[
                 {
                   value: "password",
@@ -227,7 +238,7 @@ export function PairingRouteSurface({
             </div>
           )}
 
-          {auth.twoFactorRequired ? (
+          {secondFactorRequired ? (
             <SecondFactorInput
               value={secondFactor}
               onChange={setSecondFactor}

@@ -1,8 +1,9 @@
 import { MAX_THREAD_GROUP_DEPTH } from "@cafecode/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import { uiText } from "@cafecode/shared/i18n";
-import { ChevronRightIcon, FolderIcon } from "lucide-react";
+import { BotIcon, ChevronRightIcon } from "lucide-react";
 import { createContext, Fragment, useCallback, useContext, useMemo, type ReactNode } from "react";
+import { useShallow } from "zustand/react/shallow";
 
 import { useUiLocale } from "~/i18n";
 import { useThreadActions } from "../../hooks/useThreadActions";
@@ -10,20 +11,23 @@ import { copyTextToClipboard } from "../../lib/copyToClipboard";
 import { readLocalApi } from "../../localApi";
 import type { SidebarThreadSummary } from "../../types";
 import { useUiStateStore } from "../../uiStateStore";
-import { ThreadStatusDot } from "../ThreadStatusIndicators";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { SidebarMenuSubItem } from "../ui/sidebar";
 import {
+  clearHoveredThreadGroupOwner,
+  setHoveredThreadGroupOwner,
+  useThreadGroupOwnerHoverStore,
+} from "./threadGroupOwnerHover";
+import {
   collectSidebarGroupDescendants,
   EMPTY_SIDEBAR_THREAD_GROUP_INDEX,
-  sidebarGroupKeysContaining,
+  layoutSidebarThreadGroupRows,
   type SidebarThreadGroupIndex,
-  type SidebarThreadGroupNode,
+  type SidebarThreadGroupRowLayout,
 } from "./threadGroups.logic";
-import { useHiddenThreadStatusSummary } from "./useHiddenThreadStatusSummary";
 
 /**
- * Agent-created thread groups, rendered as indented folder rows directly
+ * Agent-created thread groups, rendered as indented agent rows directly
  * beneath their parent chat. People browse, expand/collapse and delete whole
  * groups here; there is deliberately no "New group" or "Add to group" action
  * (groups are created through Cafe's management tool). Presentation and
@@ -59,39 +63,59 @@ export function SidebarThreadGroups({
   depth: number;
   renderRow: SidebarThreadGroupRowRenderer;
 }) {
-  const { index } = useContext(SidebarThreadGroupContext);
-  const nodes = index.groupsByOwnerKey.get(
-    scopedThreadKey(scopeThreadRef(ownerThread.environmentId, ownerThread.id)),
+  const { index, activeThreadKey } = useContext(SidebarThreadGroupContext);
+  const nodes =
+    depth >= MAX_THREAD_GROUP_DEPTH * 2
+      ? undefined
+      : index.groupsByOwnerKey.get(
+          scopedThreadKey(scopeThreadRef(ownerThread.environmentId, ownerThread.id)),
+        );
+  // Shallow-compared per-owner flags: only this parent's groups re-render when
+  // one of them is expanded or collapsed.
+  const expanded = useUiStateStore(
+    useShallow((state) =>
+      nodes ? nodes.map((node) => state.expandedThreadGroupKeys.includes(node.key)) : NO_FLAGS,
+    ),
   );
-  if (!nodes || depth >= MAX_THREAD_GROUP_DEPTH * 2) return null;
-  return nodes.map((node) => (
-    <SidebarThreadGroupRow key={node.key} node={node} depth={depth + 1} renderRow={renderRow} />
+  // Collapsing always works, even from inside a group. Like a collapsed
+  // project, a collapsed group keeps only the routed chat (or the path to it
+  // through nested groups) visible, so the open chat is never hidden.
+  const rows = useMemo(
+    () => (nodes ? layoutSidebarThreadGroupRows(index, nodes, expanded, activeThreadKey) : []),
+    [activeThreadKey, expanded, index, nodes],
+  );
+  return rows.map((row) => (
+    <SidebarThreadGroupRow key={row.node.key} row={row} depth={depth + 1} renderRow={renderRow} />
   ));
 }
 
+const NO_FLAGS: readonly boolean[] = [];
+
 function SidebarThreadGroupRow({
-  node,
+  row,
   depth,
   renderRow,
 }: {
-  node: SidebarThreadGroupNode;
+  row: SidebarThreadGroupRowLayout;
   depth: number;
   renderRow: SidebarThreadGroupRowRenderer;
 }) {
+  const { node, expanded, visibleMembers, attached } = row;
   const uiLocale = useUiLocale();
-  const { index, activeThreadKey } = useContext(SidebarThreadGroupContext);
-  const storedExpanded = useUiStateStore((state) =>
-    state.expandedThreadGroupKeys.includes(node.key),
+  const { index } = useContext(SidebarThreadGroupContext);
+  // The parent chat and its group rows are sibling list items, so hovering
+  // any of them marks the whole cluster (see threadGroupOwnerHover).
+  const clusterHovered = useThreadGroupOwnerHoverStore((state) => state.ownerKey === node.ownerKey);
+  const handleMouseEnter = useCallback(
+    () => setHoveredThreadGroupOwner(node.ownerKey),
+    [node.ownerKey],
+  );
+  const handleMouseLeave = useCallback(
+    () => clearHoveredThreadGroupOwner(node.ownerKey),
+    [node.ownerKey],
   );
   const setThreadGroupExpanded = useUiStateStore((state) => state.setThreadGroupExpanded);
-  // The routed chat is never hidden inside a collapsed group.
-  const containsActiveChat = useMemo(
-    () => sidebarGroupKeysContaining(index, activeThreadKey).has(node.key),
-    [activeThreadKey, index, node.key],
-  );
-  const expanded = storedExpanded || containsActiveChat;
   const descendants = useMemo(() => collectSidebarGroupDescendants(index, node), [index, node]);
-  const summary = useHiddenThreadStatusSummary(descendants, !expanded);
   const { deleteThreadGroup } = useThreadActions();
 
   const toggle = useCallback(() => {
@@ -195,17 +219,26 @@ function SidebarThreadGroupRow({
 
   return (
     <>
+      {/* Group rows read as attached to their parent chat: the row is one
+          step shorter (h-6) than a chat row and, when it directly follows the
+          parent, -mt-0.5 cancels the sidebar list's gap-0.5 without
+          overlapping either row's click area. Group rows show no status:
+          their members report to the agent that started them. */}
       <SidebarMenuSubItem
-        className="w-full"
+        className={attached ? "-mt-0.5 w-full" : "w-full"}
         style={sidebarNestingIndentStyle(depth)}
         data-thread-selection-safe
         data-testid={`thread-group-row-${node.groupId}`}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
       >
         <button
           type="button"
           aria-expanded={expanded}
           data-thread-selection-safe
-          className="focus-ring flex h-7 w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground transition-colors duration-(--duration-fast) hover:bg-accent hover:text-foreground"
+          data-thread-group-button
+          data-cluster-hover={clusterHovered ? "true" : undefined}
+          className="focus-ring flex h-6 w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground transition-colors duration-(--duration-fast) hover:bg-accent hover:text-foreground"
           onClick={toggle}
           onContextMenu={handleContextMenu}
         >
@@ -215,19 +248,8 @@ function SidebarThreadGroupRow({
               expanded ? "rotate-90" : ""
             }`}
           />
-          <FolderIcon aria-hidden="true" className="size-3.5 shrink-0" />
+          <BotIcon aria-hidden="true" className="size-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{node.title}</span>
-          {!expanded && summary ? (
-            <span
-              data-testid={`thread-group-status-${node.groupId}`}
-              data-status={summary.status.label}
-              title={summary.text}
-              className={`inline-flex shrink-0 items-center ${summary.status.colorClass}`}
-            >
-              <ThreadStatusDot status={summary.status} />
-              <span className="sr-only">{summary.text}</span>
-            </span>
-          ) : null}
           <span className="shrink-0 text-subtle-foreground tabular-nums">
             {uiText(
               "{count, plural, one {# chat} other {# chats}}",
@@ -238,14 +260,12 @@ function SidebarThreadGroupRow({
           </span>
         </button>
       </SidebarMenuSubItem>
-      {expanded
-        ? node.members.map((member) => (
-            <Fragment key={scopedThreadKey(scopeThreadRef(member.environmentId, member.id))}>
-              {renderRow(member, depth + 1)}
-              <SidebarThreadGroups ownerThread={member} depth={depth + 1} renderRow={renderRow} />
-            </Fragment>
-          ))
-        : null}
+      {visibleMembers.map((member) => (
+        <Fragment key={scopedThreadKey(scopeThreadRef(member.environmentId, member.id))}>
+          {renderRow(member, depth + 1)}
+          <SidebarThreadGroups ownerThread={member} depth={depth + 1} renderRow={renderRow} />
+        </Fragment>
+      ))}
     </>
   );
 }

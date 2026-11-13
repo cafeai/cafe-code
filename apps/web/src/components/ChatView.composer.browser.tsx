@@ -2272,6 +2272,20 @@ describe("ChatView full app (composer)", () => {
     const prepare = vi.spyOn(api.threadSecrets!, "prepare").mockImplementation(async (input) => ({
       text: input.text.replace("[sec:hunter2-supported]", reference),
     }));
+    const reveal = vi
+      .spyOn(api.threadSecrets!, "reveal")
+      .mockResolvedValue({ value: "hunter2-supported" });
+    const list = vi.spyOn(api.threadSecrets!, "list").mockResolvedValue({
+      secrets: [
+        {
+          id: "0123456789abcdef0123456789abcdef",
+          reference,
+          label: "",
+          createdAt: "2026-11-11T00:00:00.000Z",
+          updatedAt: "2026-11-11T00:00:00.000Z",
+        },
+      ],
+    });
     try {
       useComposerDraftStore
         .getState()
@@ -2293,10 +2307,18 @@ describe("ChatView full app (composer)", () => {
       // Escapes are retained verbatim for the server's single admission.
       expect(start.message.text).toContain("\\[sec:literal]");
       expect(JSON.stringify(wsRequests)).not.toContain("hunter2-supported");
-      expect(document.body.textContent).not.toContain("hunter2-supported");
+      await vi.waitFor(() =>
+        expect(
+          [...document.querySelectorAll('[data-message-role="user"] [data-user-message-body]')].map(
+            (body) => body.textContent,
+          ),
+        ).toContain("use [sec:hunter2-supported] and \\[sec:literal]"),
+      );
     } finally {
       capabilities.mockRestore();
       prepare.mockRestore();
+      reveal.mockRestore();
+      list.mockRestore();
       await mounted.cleanup();
     }
   });

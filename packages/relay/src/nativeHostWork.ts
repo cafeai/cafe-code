@@ -52,6 +52,10 @@ export async function solveHostWork(
   challenge: HostWorkChallenge,
   lifetime: Lifetime,
 ): Promise<HostWorkSolutions> {
+  if (challenge.difficulty === 0) {
+    requireRelay(lifetime.active, "UNAVAILABLE");
+    return [0, 0, 0, 0];
+  }
   requireRelay(
     lifetime.active &&
       challenge.difficulty >= 2 &&
@@ -139,7 +143,11 @@ async function post(
     method: "POST",
     agent: false,
     maxHeaderSize: 8192,
-    headers: { "content-type": "application/json", "content-length": body.byteLength },
+    headers: {
+      "content-type": "application/json",
+      "content-length": body.byteLength,
+      "x-cafe-host-work-zero": "1",
+    },
   });
   const requestClosed = new Promise<void>((resolve) => request.once("close", resolve));
   let response: http.IncomingMessage | undefined, responseClosed: Promise<void> | undefined;
@@ -275,11 +283,6 @@ export class NativeHostWorkClient implements HostWorkClient {
         return previous;
       }
       requireRelay((this.failures.get(key)?.retryAt ?? 0) <= monotonicMillis(), "BUSY");
-      const lastWork = this.lastWork.get(key);
-      requireRelay(
-        lastWork === undefined || monotonicMillis() - lastWork >= HOST_WORK.automaticWorkIntervalMs,
-        "BUSY",
-      );
       try {
         const claimId = randomOpaque(16),
           request = {
@@ -305,7 +308,7 @@ export class NativeHostWorkClient implements HostWorkClient {
               (request.reservationId === null &&
                 challenge.reservationId !== null &&
                 challenge.replace)) &&
-            challenge.difficulty >= 2 &&
+            (challenge.difficulty === 0 || challenge.difficulty >= 2) &&
             challenge.difficulty <= HOST_WORK.maximumDifficulty &&
             challenge.reservationMs >= RELAY_LIMITS.leaseMs &&
             challenge.reservationMs <= HOST_WORK.reservationMs &&
@@ -314,8 +317,16 @@ export class NativeHostWorkClient implements HostWorkClient {
             challenge.expiresAt > epochNow(),
           "AUTH_DENIED",
         );
-        requireRelay(this.lastWork.size < 64 || this.lastWork.has(key), "BUSY");
-        this.lastWork.set(key, monotonicMillis());
+        if (challenge.difficulty > 0) {
+          const lastWork = this.lastWork.get(key);
+          requireRelay(
+            lastWork === undefined ||
+              monotonicMillis() - lastWork >= HOST_WORK.automaticWorkIntervalMs,
+            "BUSY",
+          );
+          requireRelay(this.lastWork.size < 64 || this.lastWork.has(key), "BUSY");
+          this.lastWork.set(key, monotonicMillis());
+        }
         const solutions = await solveHostWork(challenge, lifetime),
           proof = { challenge, solutions };
         const bytes = canonicalBytes({

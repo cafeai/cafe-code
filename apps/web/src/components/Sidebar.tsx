@@ -229,6 +229,11 @@ import { SidebarHiddenProjectsToggle } from "./sidebar/SidebarHiddenProjectsTogg
 import { SidebarSectionToggle } from "./sidebar/SidebarSectionToggle";
 import { useHiddenThreadStatusSummary } from "./sidebar/useHiddenThreadStatusSummary";
 import {
+  clearHoveredThreadGroupOwner,
+  setHoveredThreadGroupOwner,
+  useThreadGroupOwnerHoverStore,
+} from "./sidebar/threadGroupOwnerHover";
+import {
   sidebarNestingIndentStyle,
   SidebarThreadGroupContext,
   SidebarThreadGroups,
@@ -639,9 +644,20 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const clearConfirmingArchive = useCallback(() => {
     setConfirmingArchiveThreadKey((current) => (current === threadKey ? null : current));
   }, [setConfirmingArchiveThreadKey, threadKey]);
+  // A chat and its agent group rows are sibling list items, so CSS hover
+  // cannot link them: hovering any of them marks the whole cluster.
+  const ownsThreadGroups = (thread.ownedGroups?.length ?? 0) > 0;
+  const clusterHovered = useThreadGroupOwnerHoverStore(
+    (state) => ownsThreadGroups && state.ownerKey === threadKey,
+  );
+  const handleMouseEnter = useCallback(() => {
+    if (ownsThreadGroups) setHoveredThreadGroupOwner(threadKey);
+  }, [ownsThreadGroups, threadKey]);
   const handleMouseLeave = useCallback(() => {
     clearConfirmingArchive();
-  }, [clearConfirmingArchive]);
+    clearHoveredThreadGroupOwner(threadKey);
+  }, [clearConfirmingArchive, threadKey]);
+  useEffect(() => () => clearHoveredThreadGroupOwner(threadKey), [threadKey]);
   const handleBlurCapture = useCallback(
     (event: React.FocusEvent<HTMLLIElement>) => {
       const currentTarget = event.currentTarget;
@@ -796,6 +812,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       className="w-full"
       data-thread-item
       style={sidebarNestingIndentStyle(nestingDepth)}
+      onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       onBlurCapture={handleBlurCapture}
     >
@@ -804,6 +821,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         size="sm"
         isActive={isActive}
         data-thread-selected={isSelected ? "true" : undefined}
+        data-cluster-hover={clusterHovered ? "true" : undefined}
         data-testid={`thread-row-${thread.id}`}
         className={`${resolveThreadRowClassName({
           isActive,

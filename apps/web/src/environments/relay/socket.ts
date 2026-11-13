@@ -1,5 +1,6 @@
 import { RELAY_RPC_MESSAGE_BYTES } from "@cafecode/relay/ndjson";
 import { RelayError } from "@cafecode/relay/errors";
+import { RelayRpcTransport, relayRpcHeaders, readRelayRpcProtocol } from "@cafecode/relay/rpc";
 import type { RelaySession, RelayStream } from "@cafecode/relay/session";
 
 /** DOM-compatible byte-stream socket used only by this target's NDJSON RPC. */
@@ -19,6 +20,7 @@ export class RelayWebSocket extends EventTarget implements WebSocket {
   onclose: ((this: WebSocket, event: CloseEvent) => unknown) | null = null;
   onmessage: ((this: WebSocket, event: MessageEvent) => unknown) | null = null;
   private stream: RelayStream | undefined;
+  private transport: RelayRpcTransport | undefined;
   private readonly pending: Uint8Array[] = [];
   private sending = false;
 
@@ -33,26 +35,29 @@ export class RelayWebSocket extends EventTarget implements WebSocket {
       .then(async (session) => {
         if (this.readyState !== this.CONNECTING) return;
         const parsed = new URL(url);
+        const headers = relayRpcHeaders();
         const stream = await session.open("rpc", {
           method: "GET",
           path: "/ws" + parsed.search,
-          headers: [],
+          headers,
         });
         if (this.readyState !== this.CONNECTING) {
           stream.retire();
           return;
         }
         this.stream = stream;
-        await stream.metadata;
+        const protocol = readRelayRpcProtocol(await stream.metadata, headers);
         if (this.readyState !== this.CONNECTING) {
           stream.retire();
           return;
         }
+        const transport = new RelayRpcTransport(stream, protocol);
+        this.transport = transport;
         this.readyState = this.OPEN;
         this.dispatchEvent(new Event("open"));
         const decoder = new TextDecoder("utf-8", { fatal: true });
         for (;;) {
-          const chunk = await stream.read();
+          const chunk = await transport.read();
           if (this.readyState !== this.OPEN) return;
           if (!chunk) {
             decoder.decode();
@@ -100,13 +105,12 @@ export class RelayWebSocket extends EventTarget implements WebSocket {
     void this.flush();
   }
   private async flush(): Promise<void> {
-    if (this.sending || !this.stream || this.readyState !== this.OPEN) return;
+    if (this.sending || !this.transport || this.readyState !== this.OPEN) return;
     this.sending = true;
     try {
       while (this.pending.length && this.readyState === this.OPEN) {
         const bytes = this.pending.shift()!;
-        for (let offset = 0; offset < bytes.byteLength; offset += 8192)
-          await this.stream.write(bytes.subarray(offset, offset + 8192));
+        await this.transport.write(bytes);
         this.bufferedAmount = Math.max(0, this.bufferedAmount - bytes.byteLength);
       }
     } catch {
@@ -130,6 +134,7 @@ export class RelayWebSocket extends EventTarget implements WebSocket {
     if (this.readyState === this.CLOSED) return;
     this.readyState = this.CLOSED;
     this.stream?.retire();
+    void this.transport?.close();
     this.pending.length = 0;
     this.bufferedAmount = 0;
     this.dispatchEvent(new CloseEvent("close", { code, wasClean: code === 1000 }));

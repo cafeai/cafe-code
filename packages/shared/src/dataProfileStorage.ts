@@ -1,6 +1,6 @@
 // Native filesystem boundary: preserve descriptor, no-follow and bigint identity operations.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
-import { constants } from "node:fs";
+import { constants, type BigIntStats } from "node:fs";
 // Native filesystem boundary: preserve descriptor, no-follow and bigint identity operations.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as fs from "node:fs/promises";
@@ -133,10 +133,72 @@ export async function prepareDebugDataProfile(
     const secretsPath = path.join(root, "userdata", "secrets");
     const secrets = await filesystem.opendir(secretsPath);
     let observed = 0;
+    const countEntry = () => {
+      if (++observed > 4096) throw new DebugDataProfileError();
+    };
+    const admitCafeSecrets = async (directory: string, before: BigIntStats) => {
+      const privateDirectory = (metadata: BigIntStats) =>
+        metadata.isDirectory() &&
+        !metadata.isSymbolicLink() &&
+        (process.platform === "win32" ||
+          (metadata.uid === BigInt(process.getuid!()) && (metadata.mode & 0o077n) === 0n));
+      const sameDirectory = (metadata: BigIntStats) =>
+        privateDirectory(metadata) && metadata.dev === before.dev && metadata.ino === before.ino;
+      if (!privateDirectory(before)) throw new DebugDataProfileError();
+      const held =
+        process.platform === "win32"
+          ? undefined
+          : await filesystem.open(
+              directory,
+              constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+            );
+      try {
+        if (held && !sameDirectory(await held.stat({ bigint: true })))
+          throw new DebugDataProfileError();
+        const entries = await filesystem.opendir(directory);
+        for await (const entry of entries) {
+          countEntry();
+          const temporary = /^\.[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}\.tmp$/.test(entry.name);
+          if (entry.name !== "key.bin" && !/^[a-f0-9]{64}\.bin$/.test(entry.name) && !temporary)
+            throw new DebugDataProfileError();
+          let metadata;
+          try {
+            metadata = await filesystem.lstat(path.join(directory, entry.name), { bigint: true });
+          } catch (error) {
+            // An exact atomic-publication temporary may disappear during the
+            // still-running owner's joined write. No target bytes are read.
+            if (temporary && error instanceof Error && "code" in error && error.code === "ENOENT")
+              continue;
+            throw error;
+          }
+          if (
+            !metadata.isFile() ||
+            metadata.isSymbolicLink() ||
+            metadata.nlink !== 1n ||
+            metadata.size > BigInt(entry.name === "key.bin" ? 32 : 2_097_152) ||
+            (process.platform !== "win32" &&
+              (metadata.uid !== BigInt(process.getuid!()) || (metadata.mode & 0o077n) !== 0n))
+          )
+            throw new DebugDataProfileError();
+        }
+        if (
+          !sameDirectory(await filesystem.lstat(directory, { bigint: true })) ||
+          (held && !sameDirectory(await held.stat({ bigint: true })))
+        )
+          throw new DebugDataProfileError();
+      } finally {
+        await held?.close();
+      }
+    };
     for await (const entry of secrets) {
-      observed += 1;
-      if (observed > 4096) throw new DebugDataProfileError();
+      countEntry();
       const metadata = await filesystem.lstat(path.join(secretsPath, entry.name), { bigint: true });
+      if (entry.name === "cafe-secrets" && metadata.isDirectory()) {
+        // This one known namespace owns private encrypted chat files. Keep
+        // ordinary secret entries file-only, and never decrypt during startup.
+        await admitCafeSecrets(path.join(secretsPath, entry.name), metadata);
+        continue;
+      }
       if (
         !metadata.isFile() ||
         metadata.isSymbolicLink() ||

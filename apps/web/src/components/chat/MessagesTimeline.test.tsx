@@ -3,12 +3,17 @@ import {
   MessageId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ThreadId,
   type ProviderTurnConfiguration,
 } from "@cafecode/contracts";
 import { createRef, type ReactNode, type Ref } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { LegendListRef } from "@legendapp/list/react";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+} from "../../environmentApi";
 
 vi.mock("@legendapp/list/react", async () => {
   const legendListTestId = "legend-list";
@@ -157,6 +162,31 @@ function buildAssistantTimelineEntry(text: string, options?: { streaming?: boole
 }
 
 describe("MessagesTimeline file open helpers", () => {
+  it("keeps secret values out of static history rendering and performs no private read", () => {
+    const { MessagesTimeline } = readMessagesTimelineModule();
+    const reference = "[CAFE_SECRET_0123456789abcdef0123456789abcdef]";
+    const reveal = vi.fn(async () => ({ value: "synthetic-static-secret" }));
+    const list = vi.fn(async () => ({ secrets: [] }));
+    __setEnvironmentApiOverrideForTests(ACTIVE_THREAD_ENVIRONMENT_ID, {
+      threadSecrets: { reveal, list },
+    } as never);
+    try {
+      const html = renderToStaticMarkup(
+        <MessagesTimeline
+          {...buildProps()}
+          activeThreadId={ThreadId.make("static-secret-history")}
+          timelineEntries={[buildUserTimelineEntry(reference)]}
+        />,
+      );
+      expect(html).toContain(reference);
+      expect(html).not.toContain("synthetic-static-secret");
+      expect(list).not.toHaveBeenCalled();
+      expect(reveal).not.toHaveBeenCalled();
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
+    }
+  });
+
   it("renders frozen accepted-turn settings inline rather than in a truncated tooltip", () => {
     const { MessagesTimeline } = readMessagesTimelineModule();
     const turnConfiguration: ProviderTurnConfiguration = {

@@ -330,11 +330,13 @@ export class RelayLeg {
 }
 
 export class EndpointCircuit {
+  readonly clock: RelayResources["clock"];
   readonly raw: RelayNoiseStream;
   readonly accepted: Promise<void>;
   readonly id: string;
   readonly offer: C.Offer;
   private readonly leg: RelayLeg;
+  private readonly resources: RelayResources;
   private readonly direction: "viewer" | "host";
   private readonly credit = new CreditWindow(RELAY_LIMITS.channelWindowBytes);
   private readonly resolveAccepted: () => void;
@@ -360,7 +362,9 @@ export class EndpointCircuit {
     direction: "viewer" | "host",
     removed: () => void,
   ) {
+    this.clock = resources.clock;
     this.leg = leg;
+    this.resources = resources;
     this.id = id;
     this.offer = offer;
     this.direction = direction;
@@ -540,6 +544,10 @@ export class EndpointCircuit {
   authorize(): void {
     requireRelay(this.direction === "host" && this.active && this.secured);
     this.leg.send(OUTER.AUTHORIZE, this.id, {});
+  }
+  reserveHttpMetadata(bytes: number): (() => void) | undefined {
+    if (!this.active) return undefined;
+    return this.resources.pending.reserve(bytes);
   }
   retire(notify = true): void {
     if (!this.active) return;

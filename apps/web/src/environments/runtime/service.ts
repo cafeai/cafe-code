@@ -2008,21 +2008,24 @@ export async function updateSavedEnvironment(
   useSavedEnvironmentRegistryStore.getState().upsert(updated);
 }
 
-export async function addSavedEnvironment(input: {
-  readonly label: string;
-  readonly pairingUrl?: string;
-  readonly relayInvitation?: string;
-  readonly host?: string;
-  readonly pairingCode?: string;
-  readonly password?: string;
-  readonly secondFactor?: string;
-}): Promise<SavedEnvironmentRecord> {
+export async function addSavedEnvironment(
+  input: {
+    readonly label: string;
+    readonly pairingUrl?: string;
+    readonly relayInvitation?: string;
+    readonly host?: string;
+    readonly pairingCode?: string;
+    readonly password?: string;
+  } & import("../remote/secondFactor").SecondFactorContinuation,
+): Promise<SavedEnvironmentRecord> {
   if (input.relayInvitation !== undefined) {
     const paired = await pairSavedRelay(
       {
         label: input.label,
         relayInvitation: input.relayInvitation,
         ...(input.secondFactor ? { secondFactor: input.secondFactor } : {}),
+        ...(input.requestSecondFactor ? { requestSecondFactor: input.requestSecondFactor } : {}),
+        ...(input.signal ? { signal: input.signal } : {}),
       },
       getPrimaryKnownEnvironment()?.environmentId,
     );
@@ -2076,17 +2079,22 @@ export async function addSavedEnvironment(input: {
 
   // Both bootstrap methods converge on the existing encrypted bearer lifecycle.
   // Reconnects mint new WebSocket tokens without retaining or replaying passwords.
-  const bearerSession = pairingTarget
-    ? await bootstrapRemoteBearerSession({
-        httpBaseUrl: resolvedTarget.httpBaseUrl,
-        credential: pairingTarget.credential,
-        ...(input.secondFactor ? { secondFactor: input.secondFactor } : {}),
-      })
-    : await bootstrapRemotePasswordBearerSession({
-        httpBaseUrl: resolvedTarget.httpBaseUrl,
-        password: password!,
-        ...(input.secondFactor ? { secondFactor: input.secondFactor } : {}),
-      });
+  const { withSecondFactor } = await import("../remote/secondFactor");
+  const bearerSession = await withSecondFactor(
+    (secondFactor) =>
+      pairingTarget
+        ? bootstrapRemoteBearerSession({
+            httpBaseUrl: resolvedTarget.httpBaseUrl,
+            credential: pairingTarget.credential,
+            ...(secondFactor ? { secondFactor } : {}),
+          })
+        : bootstrapRemotePasswordBearerSession({
+            httpBaseUrl: resolvedTarget.httpBaseUrl,
+            password: password!,
+            ...(secondFactor ? { secondFactor } : {}),
+          }),
+    input,
+  );
 
   const record: SavedEnvironmentRecord = {
     environmentId,

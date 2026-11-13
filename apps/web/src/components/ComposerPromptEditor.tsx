@@ -61,6 +61,7 @@ import {
   ComposerCafeSecretHighlightPlugin,
   type CafeSecretHighlightTone,
 } from "./composerCafeSecretHighlight";
+import { ComposerCafeSecretNode } from "./composerCafeSecretNode";
 import { basenameOfPath, getVscodeIconUrlForEntry, inferEntryKindFromPath } from "~/vscode-icons";
 import {
   COMPOSER_INLINE_CHIP_CLASS_NAME,
@@ -1594,7 +1595,7 @@ export function ComposerPromptEditor({
     () => ({
       namespace: "cafecode-composer-editor",
       editable: true,
-      nodes: [ComposerMentionNode, ComposerSkillNode],
+      nodes: [ComposerMentionNode, ComposerSkillNode, ComposerCafeSecretNode],
       editorState: () => {
         $setComposerEditorPrompt(initialValueRef.current, initialSkillMetadataRef.current);
       },

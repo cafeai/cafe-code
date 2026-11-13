@@ -26,6 +26,7 @@ async function fixture(
   clock?: Clock.Clock,
   beforeClose: () => void = () => {},
   forwardedIpKeys?: readonly string[],
+  hostWorkEnabled = true,
 ) {
   let retired = false;
   const work = new NativeHostWorkClient(),
@@ -82,7 +83,7 @@ async function fixture(
     host: "127.0.0.1",
     port: 0,
     allowLoopbackTest: true,
-    hostWork: { difficulty: 8, reservationMs: 600_000 },
+    hostWork: { enabled: hostWorkEnabled, difficulty: 8, reservationMs: 600_000 },
     ...(forwardedIpKeys ? { forwardedIpKeys } : {}),
   });
   if (retired) {
@@ -179,6 +180,20 @@ async function sessions(
 }
 
 describe("native single-hop relay", () => {
+  it("reserves and reclaims without a solver cooldown when host work is disabled", async (test) => {
+    const f = await fixture(test, undefined, () => {}, undefined, false);
+    const first = await f.reserve(),
+      second = await f.reserve();
+    expect(second.credential.id).not.toBe(first.credential.id);
+    const leg = f.connect();
+    await leg.register(f.locator, f.token, f.admission, 0, second.credential);
+    expect(f.server.stats()).toMatchObject({
+      registrations: 1,
+      hostReservations: { reservations: 1, receipts: 2 },
+    });
+    await f.close();
+  });
+
   it("lets a restarted desktop reclaim its slot with fresh work without accepting an old release", async (test) => {
     const client = new NativeHostWorkClient(),
       lifetime = new Lifetime();
@@ -447,6 +462,54 @@ describe("native single-hop relay", () => {
     await f.host.close();
   });
 
+  it("holds a verified second-factor challenge past the anonymous deadline without refreshing its fixed expiry", async (test) => {
+    const clockScope = Effect.runSync(Scope.make());
+    let f: Awaited<ReturnType<typeof sessions>> | undefined;
+    test.onTestFinished(async () => {
+      await f?.close();
+      await Effect.runPromise(Scope.close(clockScope, Exit.void));
+    });
+    const clock = await Effect.runPromise(Scope.provide(TestClock.make(), clockScope));
+    const scopedClock: Clock.Clock = {
+      ...clock,
+      sleep: (duration) => Scope.provide(clock.sleep(duration), clockScope),
+    };
+    let calls = 0;
+    f = await sessions(
+      test,
+      {
+        authenticate: async () => {
+          calls++;
+          throw new RelayError(calls === 1 ? "SECOND_FACTOR_REQUIRED" : "SECOND_FACTOR_REJECTED");
+        },
+      },
+      scopedClock,
+    );
+    const input = {
+      environmentId: "synthetic-environment",
+      operation: "pair" as const,
+      credential: randomOpaque(),
+    };
+    await expect(f.viewer.authenticate(input)).rejects.toMatchObject({
+      code: "SECOND_FACTOR_REQUIRED",
+    });
+    await expect(f.viewer.open("http", {})).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    await Effect.runPromise(Scope.provide(clock.adjust("10000 millis"), clockScope));
+    expect(f.viewer.active).toBe(true);
+    expect(f.host.active).toBe(true);
+    await expect(
+      f.viewer.authenticate({ ...input, secondFactor: "incorrect" }),
+    ).rejects.toMatchObject({ code: "SECOND_FACTOR_REJECTED" });
+    await Effect.runPromise(Scope.provide(clock.adjust("109999 millis"), clockScope));
+    expect(f.viewer.active).toBe(true);
+    expect(f.host.active).toBe(true);
+    await Effect.runPromise(Scope.provide(clock.adjust("1 millis"), clockScope));
+    await Promise.all([f.host.closed, f.viewer.closed]);
+    expect(f.host.active).toBe(false);
+    expect(f.viewer.active).toBe(false);
+    expect(calls).toBe(2);
+  });
+
   it("reports a missing authenticated FIN as incomplete", async (test) => {
     const written = Promise.withResolvers<void>();
     const f = await sessions(test, {
@@ -475,6 +538,193 @@ describe("native single-hop relay", () => {
     await f.host.close();
     await expect(finalRead).rejects.toMatchObject({ code: "INCOMPLETE" });
   });
+  it("keeps a large one-way download and its following request on the same authenticated channel", async (test) => {
+    let phase = "acquiring",
+      received = 0;
+    test.onTestFailed(() =>
+      Effect.runSync(Effect.logError("relay-download-fixture", { phase, received })),
+    );
+    const bytes = new Uint8Array(1_048_613).map((_, index) => index % 251);
+    const f = await sessions(test, {
+      authenticate: async (input) => ({
+        environmentId: input.environmentId,
+        bearerToken: "synthetic-download-bearer",
+        role: "client",
+        expiresAt: epochNow() + 60_000,
+      }),
+      open: async (stream, metadata) =>
+        serveRelayedHttp(
+          stream,
+          metadata,
+          async (request) =>
+            new Response(request.url.endsWith("/large") ? bytes : "still-connected", {
+              headers: { "content-type": "application/octet-stream" },
+            }),
+        ),
+    });
+    phase = "authenticating";
+    await f.viewer.authenticate({
+      environmentId: "synthetic-environment",
+      operation: "pair",
+      credential: randomOpaque(),
+    });
+    phase = "opening";
+    const response = await fetchRelayed(f.viewer, "/large");
+    phase = "reading";
+    const reader = response.body!.getReader();
+    const chunks: Uint8Array[] = [];
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      received += next.value.byteLength;
+      chunks.push(next.value);
+    }
+    reader.releaseLock();
+    const actual = new Uint8Array(bytes.byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      actual.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    expect(actual).toEqual(bytes);
+    phase = "following-request";
+    const next = await fetchRelayed(f.viewer, "/next");
+    expect(await next.text()).toBe("still-connected");
+    expect(f.viewer.active).toBe(true);
+    expect(f.host.active).toBe(true);
+    phase = "complete";
+  });
+
+  it("queues a third HTTP request while two admitted requests remain held", async (test) => {
+    const release = Promise.withResolvers<void>();
+    const admitted = Promise.withResolvers<void>();
+    let active = 0,
+      maximum = 0,
+      calls = 0;
+    const f = await sessions(
+      test,
+      {
+        authenticate: async (input) => ({
+          environmentId: input.environmentId,
+          bearerToken: "synthetic-queue-bearer",
+          role: "client",
+          expiresAt: epochNow() + 60_000,
+        }),
+        open: async (stream, metadata) =>
+          serveRelayedHttp(stream, metadata, async () => {
+            calls++;
+            active++;
+            maximum = Math.max(maximum, active);
+            if (calls === 2) admitted.resolve();
+            try {
+              await release.promise;
+              return new Response("queued-response");
+            } finally {
+              active--;
+            }
+          }),
+      },
+      undefined,
+      () => release.resolve(),
+    );
+    await f.viewer.authenticate({
+      environmentId: "synthetic-environment",
+      operation: "pair",
+      credential: randomOpaque(),
+    });
+    const pending = Promise.all(
+      Array.from({ length: 3 }, (_, index) =>
+        fetchRelayed(f.viewer, `/queued-${index}`).then((response) => response.text()),
+      ),
+    );
+    void pending.catch(() => {});
+    try {
+      await admitted.promise;
+      expect(calls).toBe(2);
+      release.resolve();
+      expect(await pending).toEqual(["queued-response", "queued-response", "queued-response"]);
+      expect(maximum).toBe(2);
+      expect(calls).toBe(3);
+      expect(f.viewer.active).toBe(true);
+    } finally {
+      release.resolve();
+      await Promise.allSettled([pending]);
+    }
+  });
+
+  it("keeps a burst of small HTTP responses on one authenticated connection", async (test) => {
+    const f = await sessions(test, {
+      authenticate: async (input) => ({
+        environmentId: input.environmentId,
+        bearerToken: "synthetic-burst-bearer",
+        role: "client",
+        expiresAt: epochNow() + 60_000,
+      }),
+      open: (stream, metadata) =>
+        serveRelayedHttp(stream, metadata, async () => new Response("ok")),
+    });
+    await f.viewer.authenticate({
+      environmentId: "synthetic-environment",
+      operation: "pair",
+      credential: randomOpaque(),
+    });
+    const results = await Promise.all(
+      Array.from({ length: 32 }, async () => {
+        const response = await fetchRelayed(f.viewer, "/synthetic-burst");
+        return response.text();
+      }),
+    );
+    expect(results).toEqual(Array.from({ length: 32 }, () => "ok"));
+    expect(f.viewer.active).toBe(true);
+    expect(f.host.active).toBe(true);
+  });
+
+  it("bounds queued HTTP opens and withdraws cancelled requests before native admission", async (test) => {
+    const gate = Promise.withResolvers<void>(),
+      entered = Promise.withResolvers<void>();
+    let calls = 0;
+    const f = await sessions(
+      test,
+      {
+        authenticate: async (input) => ({
+          environmentId: input.environmentId,
+          bearerToken: "synthetic-queue-bearer",
+          role: "client",
+          expiresAt: epochNow() + 60_000,
+        }),
+        open: async () => {
+          if (++calls === 2) entered.resolve();
+          await gate.promise;
+        },
+      },
+      undefined,
+      () => gate.resolve(),
+    );
+    await f.viewer.authenticate({
+      environmentId: "synthetic-environment",
+      operation: "pair",
+      credential: randomOpaque(),
+    });
+    await Promise.all([f.viewer.open("http", {}), f.viewer.open("http", {})]);
+    await entered.promise;
+    const cancellation = new AbortController();
+    const cancelled = f.viewer.open("http", { path: "/cancelled" }, cancellation.signal);
+    const cancelledCheck = expect(cancelled).rejects.toMatchObject({ code: "INCOMPLETE" });
+    cancellation.abort();
+    await cancelledCheck;
+    const queued = Array.from({ length: 64 }, () =>
+      f.viewer.open("http", {}).catch((error: unknown) => error),
+    );
+    await expect(f.viewer.open("http", {})).rejects.toMatchObject({ code: "BUSY" });
+    expect(calls).toBe(2);
+    f.viewer.retire();
+    const results = await Promise.all(queued);
+    expect(results).toHaveLength(64);
+    for (const result of results) expect(result).toMatchObject({ code: "INCOMPLETE" });
+    expect(calls).toBe(2);
+    gate.resolve();
+  });
+
   it("streams a complete bounded HTTP upload and download with native pacing", async (test) => {
     const f = await sessions(test, {
       authenticate: async (input) => ({

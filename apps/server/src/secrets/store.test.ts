@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { expect, it, type TestContext } from "vitest";
 import { cafeSecretReference, redactCafeSecretText } from "@cafecode/shared/cafeSecrets";
 import { ThreadSecretsStore } from "./store.ts";
+import { prepareDebugDataProfile } from "@cafecode/shared/dataProfileStorage";
 
 async function fixture(context: TestContext) {
   let acquiring: Promise<string> | undefined;
@@ -25,6 +26,25 @@ async function fixture(context: TestContext) {
       path.join(store.root, `${createHash("sha256").update(id).digest("hex")}.bin`),
   };
 }
+
+it("admits an encrypted Cafe Secrets vault on the next Debug profile startup without changing it", async (context) => {
+  const { root } = await fixture(context);
+  await prepareDebugDataProfile(root);
+  const secrets = path.join(root, ".debug", "userdata", "secrets");
+  const first = new ThreadSecretsStore(secrets);
+  const prepared = await first.prepare("profile-restart", "Use [sec:synthetic-profile-secret].");
+  const keyBefore = await fs.readFile(path.join(first.root, "key.bin"));
+  await prepareDebugDataProfile(root);
+  const reopened = new ThreadSecretsStore(secrets);
+  const listing = await reopened.list("profile-restart");
+  expect(listing.secrets).toHaveLength(1);
+  expect(prepared.text).toContain(listing.secrets[0]!.reference);
+  expect(await reopened.reveal("profile-restart", listing.secrets[0]!.id)).toEqual({
+    value: "synthetic-profile-secret",
+  });
+  expect(await fs.readFile(path.join(first.root, "key.bin"))).toEqual(keyBefore);
+  await expect(fs.stat(path.join(root, "userdata"))).rejects.toMatchObject({ code: "ENOENT" });
+});
 
 it("keeps plaintext out of durable ciphertext, metadata, and another chat", async (context) => {
   const { root, store, filename } = await fixture(context);

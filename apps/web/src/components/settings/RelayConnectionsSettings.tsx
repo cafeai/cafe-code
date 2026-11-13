@@ -12,6 +12,7 @@ import {
   readSavedEnvironmentBearerToken,
 } from "../../environments/runtime/catalog";
 import { useWorkspaceEnvironmentId } from "../../environments/workspace";
+import { copyTextToClipboard } from "../../lib/copyToClipboard";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
@@ -41,6 +42,8 @@ export function RelayConnectionsSettings({
   const [busy, setBusy] = useState(false);
   const [link, setLink] = useState<string>();
   const [error, setError] = useState(false);
+  const [copyStatus, setCopyStatus] = useState<"copied" | "failed" | null>(null);
+  const copyAttempt = useRef<object | undefined>(undefined);
   const [grantOwner, setGrantOwner] = useState(false);
   const [networksText, setNetworksText] = useState("");
   const networkEdited = useRef(false);
@@ -83,6 +86,8 @@ export function RelayConnectionsSettings({
     setStatus(undefined);
     setLink(undefined);
     setError(false);
+    copyAttempt.current = undefined;
+    setCopyStatus(null);
     setBusy(false);
     let polling = false;
     const refresh = async () => {
@@ -118,6 +123,8 @@ export function RelayConnectionsSettings({
     const held = owner.current;
     if (!held || busy) return;
     const revision = ++held.revision;
+    copyAttempt.current = undefined;
+    setCopyStatus(null);
     setBusy(true);
     setError(false);
     if (action === "status") {
@@ -141,6 +148,27 @@ export function RelayConnectionsSettings({
     } finally {
       if (owner.current === held && !held.controller.signal.aborted && held.revision === revision)
         setBusy(false);
+    }
+  };
+  const copyInvitation = async () => {
+    const held = owner.current;
+    const id = invitationId.current;
+    if (!held || held.controller.signal.aborted || busy || !id || !link) return;
+    const attempt = {};
+    copyAttempt.current = attempt;
+    const revision = held.revision;
+    const isCurrent = () =>
+      owner.current === held &&
+      !held.controller.signal.aborted &&
+      held.revision === revision &&
+      invitationId.current === id &&
+      copyAttempt.current === attempt;
+    setCopyStatus(null);
+    try {
+      await copyTextToClipboard(link);
+      if (isCurrent()) setCopyStatus("copied");
+    } catch {
+      if (isCurrent()) setCopyStatus("failed");
     }
   };
   const connected =
@@ -206,17 +234,8 @@ export function RelayConnectionsSettings({
                 )}
               </p>
               <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    const held = owner.current;
-                    void navigator.clipboard.writeText(link).catch(() => {
-                      if (held && owner.current === held && !held.controller.signal.aborted)
-                        setError(true);
-                    });
-                  }}
-                >
-                  {uiText("Copy invitation")}
+                <Button variant="outline" disabled={busy} onClick={() => void copyInvitation()}>
+                  {copyStatus === "copied" ? uiText("Copied") : uiText("Copy invitation")}
                 </Button>
                 <Button
                   variant="outline"
@@ -232,6 +251,13 @@ export function RelayConnectionsSettings({
                   {uiText("Revoke invitation")}
                 </Button>
               </div>
+              {copyStatus === "failed" ? (
+                <p role="status" className="text-xs text-destructive-foreground">
+                  {uiText(
+                    "Could not copy the relay invitation. Select the link and copy it manually.",
+                  )}
+                </p>
+              ) : null}
             </div>
           ) : null}
         </div>

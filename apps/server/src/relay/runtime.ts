@@ -11,6 +11,7 @@ import { createInvitationUrl } from "@cafecode/relay/invitation";
 import { RelayHost } from "@cafecode/relay/host";
 import { NativeHostWorkClient, type HostWorkTls } from "@cafecode/relay/nativeHostWork";
 import { serveRelayedHttp, HttpOpen, relativeAppPath } from "@cafecode/relay/http";
+import { relayRpcProtocol } from "@cafecode/relay/rpc";
 import { connectNative } from "@cafecode/relay/nativeWire";
 import { unopaqueBounded } from "@cafecode/relay/bytes";
 import { RelayError } from "@cafecode/relay/errors";
@@ -403,10 +404,11 @@ export const makeRelayRuntime = Effect.gen(function* () {
                       const open = readCanonical(HttpOpen, canonicalBytes(metadata));
                       if (!isRelayAppRoute(open.method, open.path, true))
                         throw new RelayError("PROTOCOL_ERROR");
-                      const socket = relayEffectSocket(stream).pipe(
+                      const protocol = relayRpcProtocol(open.headers);
+                      const socket = relayEffectSocket(stream, protocol).pipe(
                         Effect.tap(() =>
                           Effect.tryPromise({
-                            try: () => stream.accept({ protocol: "ndjson" }),
+                            try: () => stream.accept({ protocol }),
                             catch: () => new RelayError("UNAVAILABLE"),
                           }).pipe(Effect.orDie),
                         ),

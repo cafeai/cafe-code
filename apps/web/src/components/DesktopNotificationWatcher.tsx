@@ -11,6 +11,7 @@ import { buildThreadRouteParams, resolveThreadRouteTarget } from "../threadRoute
 import { readEnvironmentApi } from "../environmentApi";
 import { shouldNotifyScheduledTurn } from "../lib/scheduledNotification";
 import { desktopThreadNotificationTag, sendDesktopNotification } from "../lib/desktopNotifications";
+import { isAgentCreatedChat } from "./Sidebar.logic";
 import {
   getThreadNotificationKind,
   isThreadNotificationPending,
@@ -122,6 +123,8 @@ export function DesktopNotificationWatcher() {
       const current = next.get(key)!;
       const kind = getThreadNotificationKind(previousTurn, current, preferencesRef.current);
       if (!kind) continue;
+      // Agent-created chats report to their launching agent and never notify.
+      if (isAgentCreatedChat(thread)) continue;
       // Watching the thread with the window focused — nothing to announce.
       if (key === activeThreadKeyRef.current && document.hasFocus()) continue;
 

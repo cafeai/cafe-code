@@ -48,7 +48,11 @@ const admission = Semaphore.makeUnsafe(1);
 let admittedOperations = 0;
 
 const invalid = () =>
-  new AuthError({ message: "Invalid or already used authentication code.", status: 401 });
+  new AuthError({
+    message: "Invalid or already used authentication code.",
+    status: 401,
+    reason: "two-factor-invalid",
+  });
 const withAdmission = <A>(effect: Effect.Effect<A, AuthError>) =>
   Effect.suspend(() => {
     // Bound the lane as well as the attempt rate. Overload refuses immediately

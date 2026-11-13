@@ -216,4 +216,88 @@ describe("Debug storage admission", () => {
         expect((await step(() => fs.stat(linked))).nlink).toBe(2);
       }),
   );
+
+  it.for([
+    "alias",
+    "linked-key",
+    "linked-record",
+    "symlink-key",
+    "symlink-record",
+    "nested-directory",
+    "unknown-file",
+    "oversized-key",
+    "oversized-record",
+  ])("preserves rejected Cafe Secrets vault metadata: %s", (kind, context) =>
+    runOwned(context, async (root, step) => {
+      await step(() => prepareDebugDataProfile(root));
+      const parent = path.join(root, ".debug", "userdata", "secrets");
+      const vault = path.join(parent, "cafe-secrets");
+      const original = path.join(root, "private-sentinel");
+      await step(() => fs.writeFile(original, "synthetic-private-sentinel", { mode: 0o600 }));
+      if (kind === "alias") {
+        await step(() =>
+          fs.symlink(root, vault, process.platform === "win32" ? "junction" : "dir"),
+        );
+      } else {
+        await step(() => fs.mkdir(vault, { mode: 0o700 }));
+        const record = path.join(vault, `${"a".repeat(64)}.bin`);
+        if (kind === "linked-key" || kind === "linked-record")
+          await step(() =>
+            fs.link(original, kind === "linked-key" ? path.join(vault, "key.bin") : record),
+          );
+        if (kind === "symlink-key" || kind === "symlink-record")
+          await step(() =>
+            fs.symlink(original, kind === "symlink-key" ? path.join(vault, "key.bin") : record),
+          );
+        if (kind === "nested-directory") await step(() => fs.mkdir(record, { mode: 0o700 }));
+        if (kind === "unknown-file")
+          await step(() =>
+            fs.writeFile(path.join(vault, "unexpected"), "synthetic", { mode: 0o600 }),
+          );
+        if (kind === "oversized-key" || kind === "oversized-record") {
+          const file = kind === "oversized-key" ? path.join(vault, "key.bin") : record;
+          await step(() => fs.writeFile(file, "", { mode: 0o600 }));
+          await step(() => fs.truncate(file, kind === "oversized-key" ? 33 : 2_097_153));
+        }
+      }
+      const error = await step(() => prepareDebugDataProfile(root)).catch(
+        (error: unknown) => error,
+      );
+      expect(error).toBeInstanceOf(DebugDataProfileError);
+      expect(String(error)).not.toContain(root);
+      expect(await step(() => fs.readFile(original, "utf8"))).toBe("synthetic-private-sentinel");
+      expect(await step(() => fs.lstat(vault))).toBeDefined();
+    }),
+  );
+
+  it("continues to refuse other nested secret directories", (context) =>
+    runOwned(context, async (root, step) => {
+      await step(() => prepareDebugDataProfile(root));
+      const other = path.join(root, ".debug", "userdata", "secrets", "unrecognized-vault");
+      await step(() => fs.mkdir(other, { mode: 0o700 }));
+      await expect(step(() => prepareDebugDataProfile(root))).rejects.toBeInstanceOf(
+        DebugDataProfileError,
+      );
+      expect(await step(() => fs.readdir(other))).toEqual([]);
+    }));
+
+  it.skipIf(process.platform === "win32").for(["vault", "key"])(
+    "refuses non-private Cafe Secrets %s permissions without repairing them",
+    (kind, context) =>
+      runOwned(context, async (root, step) => {
+        await step(() => prepareDebugDataProfile(root));
+        const vault = path.join(root, ".debug", "userdata", "secrets", "cafe-secrets");
+        await step(() => fs.mkdir(vault, { mode: 0o700 }));
+        const key = path.join(vault, "key.bin");
+        await step(() => fs.writeFile(key, new Uint8Array(32), { mode: 0o600 }));
+        const target = kind === "vault" ? vault : key;
+        await step(() => fs.chmod(target, kind === "vault" ? 0o755 : 0o644));
+        await expect(step(() => prepareDebugDataProfile(root))).rejects.toBeInstanceOf(
+          DebugDataProfileError,
+        );
+        expect((await step(() => fs.lstat(target))).mode & 0o777).toBe(
+          kind === "vault" ? 0o755 : 0o644,
+        );
+      }),
+  );
 });

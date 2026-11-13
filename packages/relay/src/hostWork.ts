@@ -8,6 +8,7 @@ import { requireRelay } from "./errors.ts";
 
 /** Work buys one host slot. It grants no viewer/application authority. */
 export const HOST_WORK = Object.freeze({
+  enabled: false,
   difficulty: 17,
   minimumDifficulty: 17,
   maximumDifficulty: 24,
@@ -114,6 +115,7 @@ export function verifyHostWork(
   challenge: HostWorkChallenge,
   solutions: HostWorkSolutions,
 ): boolean {
+  if (challenge.difficulty === 0) return solutions.every((value) => value === 0);
   requireRelay(challenge.difficulty >= 2 && challenge.difficulty <= HOST_WORK.maximumDifficulty);
   const prefix = hostWorkPrefix(challenge);
   // Four domain-separated subpuzzles cost about 2^difficulty trials in total.

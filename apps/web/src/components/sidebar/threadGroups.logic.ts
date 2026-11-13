@@ -60,12 +60,14 @@ export function buildSidebarThreadGroupIndex(
   const ownerKeyByGroupKey = new Map<string, string>();
   const ownerIdByGroupKey = new Map<string, ThreadId>();
   const titleByGroupKey = new Map<string, string>();
+  const createdAtByGroupKey = new Map<string, string>();
   for (const thread of threads) {
     for (const group of thread.ownedGroups ?? []) {
       const key = sidebarThreadGroupKey(thread.environmentId, group.id);
       ownerKeyByGroupKey.set(key, threadKeyOf(thread));
       ownerIdByGroupKey.set(key, thread.id);
       titleByGroupKey.set(key, group.title);
+      createdAtByGroupKey.set(key, group.createdAt);
     }
   }
   if (ownerKeyByGroupKey.size === 0) return EMPTY_SIDEBAR_THREAD_GROUP_INDEX;
@@ -118,12 +120,20 @@ export function buildSidebarThreadGroupIndex(
     frontier = next;
   }
 
-  // Render only groups whose members were actually reached, keeping the
-  // owner's creation order of its groups.
+  // Render only groups whose members were actually reached, in the owner's
+  // group creation order. Map insertion order follows whichever member chat
+  // appears first in the (recency-sorted) sidebar list, so sort explicitly:
+  // otherwise sibling groups would reorder whenever one of their chats moves.
+  const compareGroups = (left: SidebarThreadGroupNode, right: SidebarThreadGroupNode) => {
+    const leftCreatedAt = createdAtByGroupKey.get(left.key) ?? "";
+    const rightCreatedAt = createdAtByGroupKey.get(right.key) ?? "";
+    if (leftCreatedAt !== rightCreatedAt) return leftCreatedAt < rightCreatedAt ? -1 : 1;
+    return left.key < right.key ? -1 : left.key > right.key ? 1 : 0;
+  };
   const groupsByOwnerKey = new Map<string, readonly SidebarThreadGroupNode[]>();
   for (const [ownerKey, nodes] of nodesByOwnerKey) {
     const visible: SidebarThreadGroupNode[] = [];
-    for (const node of nodes) {
+    for (const node of nodes.toSorted(compareGroups)) {
       const members = node.members.filter((member) => nestedThreadKeys.has(threadKeyOf(member)));
       if (members.length > 0) visible.push(Object.assign({}, node, { members }));
     }
@@ -174,6 +184,62 @@ export function sidebarGroupKeysContaining(
     current = node.ownerKey;
   }
   return keys;
+}
+
+/**
+ * Members a collapsed group still shows: the routed chat itself, or the member
+ * whose nested groups lead to it. Like a collapsed project, collapsing hides
+ * the other members but never the open chat. `containingGroupKeys` comes from
+ * `sidebarGroupKeysContaining` for the same routed chat.
+ */
+export function sidebarCollapsedGroupVisibleMembers(
+  index: SidebarThreadGroupIndex,
+  node: SidebarThreadGroupNode,
+  activeThreadKey: string | null,
+  containingGroupKeys: ReadonlySet<string>,
+): readonly SidebarThreadSummary[] {
+  if (!activeThreadKey || !containingGroupKeys.has(node.key)) return [];
+  return node.members.filter((member) => {
+    const key = threadKeyOf(member);
+    return (
+      key === activeThreadKey ||
+      (index.groupsByOwnerKey.get(key) ?? []).some((child) => containingGroupKeys.has(child.key))
+    );
+  });
+}
+
+export interface SidebarThreadGroupRowLayout {
+  readonly node: SidebarThreadGroupNode;
+  readonly expanded: boolean;
+  /** Member rows rendered beneath the group row (pinned path when collapsed). */
+  readonly visibleMembers: readonly SidebarThreadSummary[];
+  /**
+   * The row directly follows its parent chat or an earlier sibling group that
+   * shows no members, so it is drawn attached to the parent. A group after an
+   * open sibling group keeps the ordinary gap so it does not appear to belong
+   * to that group's last chat.
+   */
+  readonly attached: boolean;
+}
+
+/** Layout for one parent chat's group rows, in order. */
+export function layoutSidebarThreadGroupRows(
+  index: SidebarThreadGroupIndex,
+  nodes: readonly SidebarThreadGroupNode[],
+  expanded: readonly boolean[],
+  activeThreadKey: string | null,
+): SidebarThreadGroupRowLayout[] {
+  const containingGroupKeys = sidebarGroupKeysContaining(index, activeThreadKey);
+  let previousShowsMembers = false;
+  return nodes.map((node, position) => {
+    const isExpanded = expanded[position] === true;
+    const visibleMembers = isExpanded
+      ? node.members
+      : sidebarCollapsedGroupVisibleMembers(index, node, activeThreadKey, containingGroupKeys);
+    const attached = !previousShowsMembers;
+    previousShowsMembers = visibleMembers.length > 0;
+    return { node, expanded: isExpanded, visibleMembers, attached };
+  });
 }
 
 /** Top-level chat whose group tree contains `threadKey` (itself when top level). */

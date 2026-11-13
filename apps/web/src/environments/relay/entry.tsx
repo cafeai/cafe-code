@@ -55,6 +55,7 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
         : "",
     ),
     [secondFactor, setSecondFactor] = useState("");
+  const [secondFactorRequired, setSecondFactorRequired] = useState(false);
   const [savedIds, setSavedIds] = useState<readonly string[]>([]),
     [selectedId, setSelectedId] = useState("");
   const [choosing] = useState(() => initial !== undefined && "choose" in initial);
@@ -178,6 +179,29 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
             dial: (node, resources) => connectBrowser(node.url, resources),
           });
           pairNetwork.current = network;
+          const pendingConnection = connection.current;
+          void pendingConnection.session.closed.then(() => {
+            if (
+              !lifetime.active ||
+              complete.current ||
+              connection.current !== pendingConnection ||
+              !intent.current ||
+              !("invitation" in intent.current)
+            )
+              return;
+            intent.current = undefined;
+            initial = undefined;
+            pairIdentity.current = undefined;
+            pairNetwork.current = undefined;
+            setSecondFactor("");
+            setSecondFactorRequired(false);
+            setNeedsInvitation(true);
+            setMessage(
+              uiText(
+                "The relay connection could not be completed. Check connectivity or ask the host for a fresh invitation.",
+              ),
+            );
+          });
         }
         const held = connection.current,
           network = pairNetwork.current;
@@ -230,9 +254,23 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
       ready();
     } catch (error) {
       if (!lifetime.active) return;
-      if (error instanceof RelayError && error.code === "SECOND_FACTOR_REQUIRED")
-        setMessage(uiText("Enter an authenticator code or recovery code, then connect again."));
-      else if (error instanceof RelayError && error.code === "AUTH_INDETERMINATE") {
+      if (
+        error instanceof RelayError &&
+        ["SECOND_FACTOR_REQUIRED", "SECOND_FACTOR_REJECTED", "SECOND_FACTOR_LOCKED"].includes(
+          error.code,
+        )
+      ) {
+        setSecondFactorRequired(true);
+        setMessage(
+          error.code === "SECOND_FACTOR_LOCKED"
+            ? uiText("Authenticator codes are locked. Use an unused recovery code.")
+            : error.code === "SECOND_FACTOR_REJECTED"
+              ? uiText(
+                  "That code was not accepted. Enter a new authenticator code or an unused recovery code.",
+                )
+              : uiText("Enter an authenticator code or recovery code, then connect again."),
+        );
+      } else if (error instanceof RelayError && error.code === "AUTH_INDETERMINATE") {
         intent.current = undefined;
         initial = undefined;
         void connection.current?.close();
@@ -344,15 +382,16 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
                 </Select>
               </label>
             ) : null}
-            {pairing ? (
+            {pairing && secondFactorRequired ? (
               <label className="flex flex-col gap-2">
-                {uiText("Two-factor code, only if enabled in Cafe")}
+                {uiText("Authenticator or recovery code")}
                 <Input
                   value={secondFactor}
                   onChange={(event) => setSecondFactor(event.target.value)}
                   autoComplete="one-time-code"
                   maxLength={128}
                   disabled={busy}
+                  required
                   aria-describedby="relay-two-factor-help"
                 />
                 <span id="relay-two-factor-help" className="text-sm text-muted-foreground">

@@ -32,6 +32,7 @@ export const RELAY_LIMITS = Object.freeze({
   ipEntries: 4_096,
   ipIdleMs: 600_000,
   handshakeMs: 10_000,
+  secondFactorMs: 120_000,
   challengeMs: 15_000,
   partialRecordMs: 10_000,
   invitationMs: 300_000,
@@ -54,3 +55,6 @@ export const RELAY_LIMITS = Object.freeze({
 export const PADDING_BUCKETS: readonly number[] = Object.freeze([
   512, 1_024, 4_096, 16_384, 32_768,
 ]);
+
+/** Leave the inner header inside the existing 16 KiB padding bucket. */
+export const RELAY_DATA_CHUNK_BYTES = RELAY_LIMITS.dataBytes - RELAY_LIMITS.innerHeaderBytes;

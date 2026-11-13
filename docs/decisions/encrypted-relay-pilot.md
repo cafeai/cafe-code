@@ -94,6 +94,19 @@ not relay membership, machine discovery, application pairing or owner access.
 
 ### Desktop host reservation proof of work
 
+Work is temporarily disabled by default. `HOST_WORK.enabled` is false, and a
+private node's `hostWork.enabled: true` explicitly restores the retained policy
+below. Missing `enabled` also means off. Reservation enrollment, exact identity
+signatures, per-boot MACs, expiry, capacity, receipts and release remain enforced.
+An updated native host advertises `x-cafe-host-work-zero: 1` and receives difficulty
+zero; it submits four zero nonces without constructing a worker or applying the
+CPU-work cooldown. A legacy host receives difficulty two, whose four sub-puzzles
+each require zero bits and return nonce zero immediately. Disabled verification
+accepts only the fixed zero tuple and performs no puzzle hashing. This preserves
+older running hosts during a rolling node update. Enabling work retains the
+ordinary difficulty checks, bounded worker and automatic-work cooldown. The
+remaining description documents the retained enabled mode.
+
 The version-one host-only HTTP protocol has three bounded POST endpoints:
 `/v1/host/challenge`, `/v1/host/claim` and `/v1/host/release`.
 Challenge issuance checks the host's selected enrollment mode and key binding but
@@ -189,6 +202,19 @@ prefixes are charged twice their UTF-8 length against one shared 256 MiB
 backend-wide prefix budget, including closing channels. Complete small commands
 need no retained-prefix reservation and can pass while another stream holds a
 large partial message. Browser send queues stream large commands under credit.
+Relay RPC peers can negotiate independent gzip records inside Noise through an
+existing OPEN metadata header and exact OPEN_OK protocol acknowledgement. Legacy
+peers remain on plain NDJSON on that same stream; no authentication/token replay
+is used for fallback. Each record has a nine-byte encoding/raw-length/body-length
+header with both lengths capped at 64 KiB. Raw fallback avoids expanding
+incompressible data; bounded decompression, CRC/length validation and unchanged
+NDJSON/snapshot checks reject invalid data before applying it. Independent native
+codecs have no shared dictionary. A separate shared 16 MiB application-codec
+budget admits retained input/workspace before native work, and cancellation joins
+the exact codec tasks before releasing their reservations. Small writes flush
+immediately; large writes pack records into the existing DATA cells with no more
+than four records prepared between flushes. Transport padding, credit, pending
+byte and frame ceilings remain unchanged. See [relay RPC compression](../relay.md).
 Application
 schemas, roles, session checks and durable command receipts remain authoritative.
 

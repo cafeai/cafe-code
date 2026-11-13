@@ -23,6 +23,7 @@ import {
 } from "@cafecode/relay/hostWork";
 
 interface ReservationOptions {
+  readonly enabled?: boolean;
   readonly networkId: string;
   readonly nodeId: string;
   readonly grants: readonly HostCapacityGrant[];
@@ -51,7 +52,7 @@ export class HostReservations implements HostReservationAuthority {
     requireRelay(input.grants.length <= RELAY_LIMITS.registrations);
     requireRelay(
       Number.isSafeInteger(this.difficulty) &&
-        this.difficulty >= 2 &&
+        (this.difficulty === 0 || this.difficulty >= 2) &&
         this.difficulty <= HOST_WORK.maximumDifficulty,
     );
     requireRelay(
@@ -61,12 +62,14 @@ export class HostReservations implements HostReservationAuthority {
     );
   }
   private get difficulty() {
+    if (!(this.input.enabled ?? HOST_WORK.enabled)) return 0;
     return this.input.difficulty ?? HOST_WORK.difficulty;
   }
   private get duration() {
     return this.input.reservationMs ?? HOST_WORK.reservationMs;
   }
   private nextDifficulty(): number {
+    if (this.difficulty === 0) return 0;
     const slots = this.reservations.size,
       base = this.difficulty;
     let target = this.currentDifficulty;
@@ -105,7 +108,7 @@ export class HostReservations implements HostReservationAuthority {
       if (value.expiresAt <= now) this.reservations.delete(locator);
     for (const [id, value] of this.receipts) if (value.expiresAt <= now) this.receipts.delete(id);
   }
-  challenge(request: HostWorkRequest): HostWorkChallenge {
+  challenge(request: HostWorkRequest, acceptsZeroDifficulty = true): HostWorkChallenge {
     this.grant(request.locator, request.admissionPublicKey);
     requireRelay(request.networkId === this.input.networkId, "NETWORK_MISMATCH");
     authorizeHostEnrollment({
@@ -136,7 +139,9 @@ export class HostReservations implements HostReservationAuthority {
       replace: !request.reservationId && !!current,
       slots: 1 as const,
       reservationMs: this.duration,
-      difficulty: this.nextDifficulty(),
+      // Legacy hosts accept difficulty two: each of its four sub-puzzles has
+      // zero required bits and succeeds at nonce zero, without a hash search.
+      difficulty: this.difficulty === 0 && !acceptsZeroDifficulty ? 2 : this.nextDifficulty(),
       issuedAt,
       expiresAt: issuedAt + HOST_WORK.challengeMs,
       nonce: randomOpaque(),
@@ -159,8 +164,10 @@ export class HostReservations implements HostReservationAuthority {
       "AUTH_DENIED",
     );
     requireRelay(
-      challenge.difficulty >= this.difficulty &&
-        challenge.difficulty <= Math.min(this.difficulty + 2, HOST_WORK.maximumDifficulty) &&
+      (this.difficulty === 0
+        ? challenge.difficulty === 0 || challenge.difficulty === 2
+        : challenge.difficulty >= this.difficulty &&
+          challenge.difficulty <= Math.min(this.difficulty + 2, HOST_WORK.maximumDifficulty)) &&
         challenge.reservationMs === this.duration &&
         challenge.issuedAt <= this.input.now() &&
         challenge.expiresAt === challenge.issuedAt + HOST_WORK.challengeMs,
@@ -178,7 +185,12 @@ export class HostReservations implements HostReservationAuthority {
       return prior.result;
     }
     requireRelay(challenge.expiresAt > this.input.now(), "EXPIRED");
-    requireRelay(verifyHostWork(challenge, request.solutions), "AUTH_DENIED");
+    requireRelay(
+      this.difficulty === 0
+        ? request.solutions.every((value) => value === 0)
+        : verifyHostWork(challenge, request.solutions),
+      "AUTH_DENIED",
+    );
     this.checking++;
     try {
       const { signature, ...proof } = request;

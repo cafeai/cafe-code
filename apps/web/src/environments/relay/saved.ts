@@ -8,6 +8,7 @@ import { discoverNetwork, readBoundedResponse } from "@cafecode/relay/discovery"
 import { fetchRelayed } from "@cafecode/relay/http";
 import { RelayError } from "@cafecode/relay/errors";
 import { Lifetime, epochNow } from "@cafecode/relay/lifetime";
+import { withSecondFactor, type SecondFactorContinuation } from "../remote/secondFactor";
 import {
   ActiveRelay,
   installSavedRelay,
@@ -19,7 +20,7 @@ import { encodeSavedRelaySecret, decodeSavedRelaySecret } from "./savedSecret";
 import { writeSavedEnvironmentBearerToken, type SavedEnvironmentRecord } from "../runtime/catalog";
 
 export async function pairSavedRelay(
-  input: { label: string; relayInvitation: string; secondFactor?: string },
+  input: { label: string; relayInvitation: string } & SecondFactorContinuation,
   primaryEnvironmentId?: string,
 ) {
   const url = new URL(input.relayInvitation);
@@ -28,6 +29,9 @@ export async function pairSavedRelay(
   if (invitation.environmentId === primaryEnvironmentId)
     throw new RelayError("ENVIRONMENT_MISMATCH");
   const lifetime = new Lifetime();
+  const retire = () => lifetime.retire();
+  input.signal?.addEventListener("abort", retire, { once: true });
+  if (input.signal?.aborted) lifetime.retire();
   let connection: Awaited<ReturnType<typeof connectViewer>> | undefined;
   try {
     const identity = await createIdentity(),
@@ -60,13 +64,20 @@ export async function pairSavedRelay(
       dial: (node, resources) => connectBrowser(node.url, resources),
       lifetime,
     });
-    // A one-use AUTH is sent only by this explicit submission, never by resume.
-    const auth = await connection.session.authenticate({
-      environmentId: invitation.environmentId,
-      operation: "pair",
-      credential: invitation.pairingSecret,
-      ...(input.secondFactor ? { secondFactor: input.secondFactor } : {}),
-    });
+    const held = connection;
+    void held.session.closed.then(retire);
+    // Continue only a definitive 2FA challenge on this exact circuit. Its
+    // one-use admission ticket and fresh device identity are never replayed.
+    const auth = await withSecondFactor(
+      (secondFactor) =>
+        held.session.authenticate({
+          environmentId: invitation.environmentId,
+          operation: "pair",
+          credential: invitation.pairingSecret,
+          ...(secondFactor ? { secondFactor } : {}),
+        }),
+      { ...input, signal: lifetime.signal },
+    );
     const response = await fetchRelayed(connection.session, "/.well-known/cafe-code/environment");
     const descriptor = JSON.parse(
       new TextDecoder().decode(await readBoundedResponse(response, 16_384)),
@@ -109,6 +120,7 @@ export async function pairSavedRelay(
     };
     return { record, secret: encodeSavedRelaySecret(target, identity), role: auth.role };
   } finally {
+    input.signal?.removeEventListener("abort", retire);
     lifetime.retire();
     try {
       await connection?.close();

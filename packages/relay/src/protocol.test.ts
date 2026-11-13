@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as Schema from "effect/Schema";
 import { opaque, randomOpaque, unopaque, utf8 } from "./bytes.ts";
 import { Budget, CreditWindow, AdmissionLimiter, TokenBucket } from "./budget.ts";
-import { RELAY_LIMITS } from "./limits.ts";
+import { RELAY_DATA_CHUNK_BYTES, RELAY_LIMITS } from "./limits.ts";
 import {
   INNER,
   OUTER,
@@ -78,6 +78,18 @@ describe("outer framing", () => {
 });
 
 describe("encrypted inner framing", () => {
+  it("fits two complete data chunks in the existing stream window without padding away half their payload", () => {
+    const payload = new Uint8Array(RELAY_DATA_CHUNK_BYTES).fill(73);
+    const frame = encodeInner(INNER.DATA, 1, payload);
+    const credit = new CreditWindow(RELAY_LIMITS.streamWindowBytes);
+    credit.update(RELAY_LIMITS.streamWindowBytes);
+    expect(credit.take(frame.byteLength)).toBe(true);
+    expect(credit.take(frame.byteLength)).toBe(true);
+    expect(credit.take(frame.byteLength)).toBe(false);
+    expect(frame.byteLength - payload.byteLength).toBe(RELAY_LIMITS.innerHeaderBytes);
+    expect(new InnerDecoder().push(frame)[0]?.payload).toEqual(payload);
+  });
+
   it("handles bytewise fragmentation and coalesced frames", () => {
     const first = encodeInner(INNER.DATA, 1, utf8.encode("private fixture"));
     const second = encodeInner(INNER.FIN, 1, canonicalBytes({ bytes: 15 }));

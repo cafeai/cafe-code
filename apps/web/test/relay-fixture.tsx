@@ -39,29 +39,34 @@ window.relayQualification = {
       headers: { "content-type": "application/octet-stream" },
     });
     const result = new Uint8Array(await response.arrayBuffer());
-    const socket = relay.socket(relay.wsBaseUrl + "ws");
     const command =
       JSON.stringify({
-        message: "m".repeat(120_000),
+        message: "café ☕ 🌐\n".repeat(12_000),
         imageDataUrl: "data:image/png;base64," + "A".repeat(300_000),
       }) + "\n";
-    const rpc = await new Promise<boolean>((resolve, reject) => {
-      let received = "";
-      socket.onopen = () => socket.send(command);
-      socket.onmessage = (event) => {
-        received += String(event.data);
-        if (received.endsWith("\n")) {
-          resolve(received === command);
-          socket.close();
-        }
-      };
-      socket.onerror = () => reject(new Error("rpc-refused"));
-    });
+    const results = [];
+    for (const query of ["", "?legacy=1"]) {
+      const socket = relay.socket(relay.wsBaseUrl + "ws" + query);
+      results.push(
+        await new Promise<boolean>((resolve, reject) => {
+          let received = "";
+          socket.onopen = () => socket.send(command);
+          socket.onmessage = (event) => {
+            received += String(event.data);
+            if (received.endsWith("\n")) {
+              resolve(received === command);
+              socket.close();
+            }
+          };
+          socket.onerror = () => reject(new Error("rpc-refused"));
+        }),
+      );
+    }
     return {
       text,
       length: result.length,
       equal: result.every((value, index) => value === bytes[index]),
-      rpc,
+      rpc: results.every(Boolean),
     };
   },
 };

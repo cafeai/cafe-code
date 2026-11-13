@@ -182,6 +182,8 @@ export async function relayEdgeFetch(
       lookup || hostWork
         ? await bounded(request.body, hostWork ? 4096 : 8_192, controller.signal)
         : undefined;
+    if (hostWork && request.headers.get("x-cafe-host-work-zero") === "1")
+      headers.set("x-cafe-host-work-zero", "1");
     const upstream = await fetcher(new URL(url.pathname, origin), {
       method: request.method,
       headers,

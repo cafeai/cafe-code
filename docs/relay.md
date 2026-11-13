@@ -8,12 +8,17 @@ The implementation is in `packages/relay`, `apps/relay`,
 `apps/server/src/relay`, and `apps/web/src/environments/relay`. See
 [the trust and protocol decision](decisions/encrypted-relay-pilot.md).
 
-Desktop Cafe hosts solve PoW when reserving or renewing relay server slots.
-Browser viewers keep the ordinary invitation/authentication flow without work.
-The default is effective 17-bit SHA-256 work for a ten-minute reservation, with
-bounded increases under slot pressure. See [host reservation work](decisions/encrypted-relay-pilot.md#desktop-host-reservation-proof-of-work).
-New relay versions require a compatible host backend; older hosts cannot register
-without a paid reservation. Existing viewer handshakes remain compatible.
+Proof of work is disabled by default. Hosts still obtain signed, bounded
+ten-minute reservations and prove their admission identity. Updated hosts request
+zero-difficulty challenges and create no solver worker. Older hosts receive the
+compatible difficulty-two representation: all four sub-puzzles require zero
+bits and return nonce zero without searching. Relay verification skips hashing
+in either disabled representation. Browser viewers never solve work.
+The solver and adaptive 17–24-bit policy remain available: set
+`hostWork: { enabled: true, difficulty: 17, reservationMs: 600000 }` in the private
+node configuration and use a rolling restart to restore enforcement. Omitting
+`enabled` keeps work disabled, including existing configurations that specify
+only difficulty and duration. See [host reservation work](decisions/encrypted-relay-pilot.md#desktop-host-reservation-proof-of-work).
 
 ## Initial endpoints
 
@@ -51,7 +56,7 @@ Fresh profiles start with hosting off. The Cafe network's pinned public trust
 anchor and three HTTPS bootstrap endpoints are bundled; users do not need an
 operator token, a tunnel, or a private configuration file. The backend generates
 separate stable admission and Noise identity keys inside this exact data profile,
-discovers the signed network and solves host-only PoW before registering.
+discovers the signed network and obtains its host reservation before registering.
 Connection loss retries automatically; expired descriptors are rediscovered.
 Off synchronously retires the current transport owner before settings IO.
 Replacement joins old transport and solver closure; rapid preference changes
@@ -59,10 +64,69 @@ coalesce to the latest intent rather than replaying queued starts.
 
 Once connected, choose **Create relay invitation**. On another Cafe device,
 choose **Saved environments → + → Relay host**, paste the private invitation and
-add an authenticator/recovery code if required. The saved connection appears in
+connect. The authentication-code field appears only after the host explicitly
+requires a second factor; otherwise enrollment completes directly. Cancelling
+withdraws the pending attempt. Relay code entry continues on the exact encrypted
+connection and device identity, without consuming another admission ticket.
+The saved connection appears in
 the ordinary environment selector, uses encrypted HTTP/RPC, and reconnects with
 its bound device key and application session. Pairing is submitted only once by
-the explicit action; an uncertain result requires a fresh invitation.
+the explicit action; an uncertain result requires a fresh invitation. A verified
+first-factor challenge grants at most two minutes to enter a code. Incorrect
+codes do not refresh this deadline or authorize application streams; anonymous
+handshake deadlines, pending-host bounds and ordinary attempt limits remain.
+
+HTTP opens beyond the two active bulk streams wait in a cancellable FIFO, bounded
+to 64 requests and 64 KiB of encoded metadata per session. Retirement rejects the
+remaining queue. This avoids rejecting ordinary concurrent loads and socket-token
+requests with `BUSY`. Inner control sends are paced below the peer's existing
+32-per-second limit; cumulative credit updates for the same stream coalesce
+without moving an older channel ceiling after a newer one. Receive limits and
+stream/window and data/control retention ceilings are unchanged. The separate
+HTTP queue is also charged to the existing aggregate pending-byte budget. A native regression reproduces the
+old closure with 32 small concurrent HTTP requests and qualifies the surviving
+connection after this change.
+
+HTTP bodies and both RPC adapters share a payload-slice limit that includes the inner frame header inside the existing 16 KiB
+padding bucket. Previously, a 16 KiB payload plus its header padded to 32 KiB,
+using the entire per-stream window for half as much useful data. The smaller
+payload slice retains both stream and channel windows and permits two data
+frames in the same stream window. Padding buckets and the wire format remain
+compatible with existing peers. RPC previously used 8 KiB payload slices padded
+to 16 KiB; the shared limit avoids leaving that application/chat hydration path
+at half the useful bytes per window. This changes no snapshot framing, checksum,
+message-size ceiling, parser budget or authentication behavior. Large thread
+snapshots retain their existing bounded base64 framing and integrity checks.
+
+Relay RPC additionally negotiates `gzip-records-v1` in its existing encrypted
+OPEN metadata header `x-cafe-relay-rpc-encoding`. A supporting host acknowledges
+`ndjson-gzip-records-v1`; an older host acknowledges `ndjson` and the client
+continues uncompressed on that same stream. Missing browser/native codec support
+also retains NDJSON. This capability changes no authentication, one-use token,
+role, route or retry authority, and the metadata header is never forwarded to an
+application route. HTTP bodies keep their existing representation.
+
+Compression runs before Noise encryption, independently for each record, with no
+dictionary shared across records or RPC writes. A record declares its encoding,
+decoded length and encoded length in a nine-byte header; both lengths are bounded
+to 64 KiB. Incompressible records use their raw bytes. The receiver validates
+the header before allocating its body and bounds decompression to the declared
+length, rejecting truncation, corrupt gzip/checksums and excess output before
+delivering that record. The existing NDJSON parser/message budget and full
+snapshot SHA-256 checks still apply to decoded data. Codec workspace and retained
+input use a separate shared 16 MiB application budget per JavaScript runtime;
+idle reads reserve no workspace. Cancellation aborts and joins the exact native
+reader/writer before releasing its reservation. Only the affected RPC stream is
+retired on codec failure.
+
+Compressed records fill existing DATA cells within each RPC write, flushing at
+message end or after at most four records of preparation. Small commands and
+streaming updates never wait for a subsequent message. This reduces both data
+volume and the number of WAN credit round trips without increasing any stream,
+channel, frame or transport-retention ceiling. Native outer WebSocket compression
+remains disabled: compressing ciphertext would not provide this saving. Both
+endpoints must adopt this code to use compression; building a new host alone or
+publishing a viewer alone does not prove a running connection adopted it.
 
 **Advanced relay settings** is collapsed by default. It contains the optional
 owner-role grant and alternative networks' **public** configuration: label,

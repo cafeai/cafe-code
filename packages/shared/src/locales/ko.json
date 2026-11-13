@@ -763,6 +763,7 @@
   "Could not copy path": "경로를 복사하지 못했습니다.",
   "Could not copy plan": "계획을 복사하지 못했습니다.",
   "Could not copy the code. Select and copy it manually.": "코드를 복사할 수 없습니다. 코드를 선택하여 직접 복사하세요.",
+  "Could not copy the relay invitation. Select the link and copy it manually.": "릴레이 초대를 복사하지 못했습니다. 링크를 선택해 직접 복사하세요.",
   "Could not copy {value0} update command": "{value0} 업데이트 명령을 복사하지 못했습니다.",
   "Could not create chat": "대화를 만들지 못했습니다.",
   "Could not create pairing URL": "페어링 URL을 만들지 못했습니다.",
@@ -1528,7 +1529,6 @@
   "Launch arguments": "실행 인수",
   "Layer": "레이어",
   "Leave Running": "계속 실행",
-  "Leave the authentication code empty if this server has two-factor authentication turned off.": "서버의 2단계 인증이 꺼져 있다면 인증 코드를 비워 두세요.",
   "Leave this off for private Debug Codex, Claude and Grok homes. Other drivers require explicit sharing. Provider executable updates can affect installations shared with Production.": "Codex, Claude, Grok의 Debug 전용 홈을 사용하려면 이 설정을 꺼 두세요. 다른 드라이버는 명시적인 공유 허용이 필요합니다. 제공자 실행 파일 업데이트는 Production과 공유하는 설치에도 영향을 줄 수 있습니다.",
   "Left": "왼쪽",
   "Legacy instance configuration": "이전 인스턴스 설정",
@@ -3075,7 +3075,6 @@
   "Turn start routed to active steer": "턴 시작을 활성 방향 조정으로 전달함",
   "Turn unavailable Daybreak off": "사용할 수 없는 Daybreak 끄기",
   "Two-factor authentication": "2단계 인증",
-  "Two-factor code, only if enabled in Cafe": "2단계 인증 코드(Cafe에서 활성화한 경우에만)",
   "Type": "유형",
   "Type an answer, or leave blank to use the selection": "답변을 입력하거나 비워 두어 선택한 항목을 사용하세요",
   "URL": "URL",
@@ -3799,5 +3798,8 @@
   "⌘⇧ + one key · Esc cancels": "⌘⇧ + 키 하나 · Esc로 취소",
   "⌥": "⌥",
   "♡": "♡",
-  "💙": "💙"
+  "💙": "💙",
+  "That code was not accepted. Enter a new authenticator code or an unused recovery code.": "코드가 승인되지 않았습니다. 새 인증 코드 또는 사용하지 않은 복구 코드를 입력하세요.",
+  "This server requires two-factor authentication. Enter an authenticator code or an unused recovery code.": "이 서버는 2단계 인증이 필요합니다. 인증 코드 또는 사용하지 않은 복구 코드를 입력하세요.",
+  "Verify and connect": "확인 후 연결"
 }

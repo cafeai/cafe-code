@@ -479,6 +479,11 @@ const initializeWebPushNotifications = Effect.gen(function* () {
     if (Option.isNone(shell)) {
       return;
     }
+    // Agent-created chats (editable origin label `agent`) report to the agent
+    // that launched them and never push, matching the renderer's policy.
+    if (shell.value.origin?.classification === "agent") {
+      return;
+    }
     const descriptor = yield* serverEnvironment.getDescriptor;
     const branding = yield* clientSettings.getSettings.pipe(
       Effect.map(resolveWebAppBranding),

@@ -27,7 +27,8 @@ import {
   TriangleAlertIcon,
   UnplugIcon,
 } from "lucide-react";
-import { type FormEvent, useId, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useId, useMemo, useRef, useState } from "react";
+import type { SecondFactorReason } from "~/environments/remote/secondFactor";
 import { SecondFactorInput } from "../auth/SecondFactorInput";
 
 import {
@@ -681,8 +682,21 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
   const [pairingCode, setPairingCode] = useState("");
   const [password, setPassword] = useState("");
   const [secondFactor, setSecondFactor] = useState("");
+  const [factorReason, setFactorReason] = useState<SecondFactorReason | null>(null);
+  const pendingFactor = useRef<((code: string | undefined) => void) | undefined>(undefined);
+  const attempt = useRef<AbortController | undefined>(undefined);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(
+    () => () => {
+      const held = attempt.current;
+      attempt.current = undefined;
+      held?.abort();
+      pendingFactor.current?.(undefined);
+    },
+    [],
+  );
 
   const resetForm = () => {
     setTab("url");
@@ -693,6 +707,7 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
     setPairingCode("");
     setPassword("");
     setSecondFactor("");
+    setFactorReason(null);
     setError(null);
   };
 
@@ -708,15 +723,31 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
   };
 
   const handleOpenChange = (open: boolean) => {
-    if (!open && isSubmitting) return;
+    if (!open && isSubmitting) {
+      if (!pendingFactor.current) return;
+      const held = attempt.current;
+      attempt.current = undefined;
+      held?.abort();
+      pendingFactor.current?.(undefined);
+      setIsSubmitting(false);
+    }
     setIsOpen(open);
     if (!open) resetForm();
   };
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    if (isSubmitting) return;
+    if (attempt.current) {
+      if (pendingFactor.current && secondFactor.trim()) {
+        const code = secondFactor.trim();
+        setSecondFactor("");
+        pendingFactor.current(code);
+      }
+      return;
+    }
 
+    const held = new AbortController();
+    attempt.current = held;
     setIsSubmitting(true);
     setError(null);
     const submittedLabel = label;
@@ -724,7 +755,33 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
     const submittedHost = host;
     const submittedCode = pairingCode;
     const submittedPassword = password;
-    const factor = secondFactor.trim() ? { secondFactor: secondFactor.trim() } : {};
+    const factor = {
+      signal: held.signal,
+      requestSecondFactor: ({
+        reason,
+        signal,
+      }: {
+        reason: SecondFactorReason;
+        signal: AbortSignal;
+      }) =>
+        new Promise<string | undefined>((resolve) => {
+          if (attempt.current !== held || signal.aborted) {
+            resolve(undefined);
+            return;
+          }
+          const settle = (code: string | undefined) => {
+            signal.removeEventListener("abort", abort);
+            if (pendingFactor.current === settle) pendingFactor.current = undefined;
+            if (attempt.current === held) setFactorReason(null);
+            resolve(code);
+          };
+          const abort = () => settle(undefined);
+          pendingFactor.current = settle;
+          signal.addEventListener("abort", abort, { once: true });
+          setSecondFactor("");
+          setFactorReason(reason);
+        }),
+    };
     const submittedTab = tab;
     const submittedConnectionType = connectionType;
 
@@ -752,9 +809,12 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
           ...factor,
         });
       }
-      resetForm();
-      setIsOpen(false);
+      if (attempt.current === held) {
+        resetForm();
+        setIsOpen(false);
+      }
     } catch (error) {
+      if (attempt.current !== held) return;
       setError(
         uiPresentation.remoteEnvironmentErrorMessage(
           error,
@@ -774,7 +834,12 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
         ),
       );
     } finally {
-      setIsSubmitting(false);
+      if (attempt.current === held) {
+        attempt.current = undefined;
+        pendingFactor.current?.(undefined);
+        setFactorReason(null);
+        setIsSubmitting(false);
+      }
     }
   };
 
@@ -795,7 +860,10 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
         </TooltipTrigger>
         <TooltipPopup>{uiText("Add environment", undefined, undefined, uiLocale)}</TooltipPopup>
       </Tooltip>
-      <DialogPopup showCloseButton={!isSubmitting} className="max-h-[calc(100dvh-3rem)]">
+      <DialogPopup
+        showCloseButton={!isSubmitting || factorReason !== null}
+        className="max-h-[calc(100dvh-3rem)]"
+      >
         <DialogHeader className="shrink-0">
           <DialogTitle>
             {uiText("Add saved environment", undefined, undefined, uiLocale)}
@@ -935,20 +1003,27 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
                 )}
               </p>
             ) : null}
-            <SecondFactorInput
-              id="env-second-factor"
-              value={secondFactor}
-              onChange={setSecondFactor}
-              disabled={isSubmitting}
-            />
-            <p className="text-xs text-muted-foreground">
-              {uiText(
-                "Leave the authentication code empty if this server has two-factor authentication turned off.",
-                undefined,
-                undefined,
-                uiLocale,
-              )}
-            </p>
+            {factorReason !== null ? (
+              <>
+                <SecondFactorInput
+                  id="env-second-factor"
+                  value={secondFactor}
+                  onChange={setSecondFactor}
+                  required
+                />
+                <p role="status" className="text-xs text-muted-foreground">
+                  {factorReason === "locked"
+                    ? uiText("Authenticator codes are locked. Use an unused recovery code.")
+                    : factorReason === "invalid"
+                      ? uiText(
+                          "That code was not accepted. Enter a new authenticator code or an unused recovery code.",
+                        )
+                      : uiText(
+                          "This server requires two-factor authentication. Enter an authenticator code or an unused recovery code.",
+                        )}
+                </p>
+              </>
+            ) : null}
             {error ? <p className="text-sm text-destructive-foreground">{error}</p> : null}
           </DialogPanel>
 
@@ -957,13 +1032,19 @@ function AddSavedEnvironmentDialog({ actions }: { actions: SavedEnvironmentActio
               type="button"
               variant="outline"
               onClick={() => handleOpenChange(false)}
-              disabled={isSubmitting}
+              disabled={isSubmitting && factorReason === null}
             >
               {uiText("Cancel", undefined, undefined, uiLocale)}
             </Button>
-            <Button type="submit" disabled={isSubmitting} aria-busy={isSubmitting || undefined}>
-              <BusyButtonLabel busy={isSubmitting}>
-                {uiText("Add environment", undefined, undefined, uiLocale)}
+            <Button
+              type="submit"
+              disabled={isSubmitting && factorReason === null}
+              aria-busy={(isSubmitting && factorReason === null) || undefined}
+            >
+              <BusyButtonLabel busy={isSubmitting && factorReason === null}>
+                {factorReason !== null
+                  ? uiText("Verify and connect")
+                  : uiText("Add environment", undefined, undefined, uiLocale)}
               </BusyButtonLabel>
             </Button>
           </DialogFooter>

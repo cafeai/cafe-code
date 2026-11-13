@@ -27,9 +27,28 @@ import * as Predicate from "effect/Predicate";
 export class BootstrapHttpError extends Data.TaggedError("BootstrapHttpError")<{
   readonly message: string;
   readonly status: number;
+  readonly reason?: "two-factor-required" | "two-factor-invalid" | "two-factor-locked" | undefined;
 }> {}
 const isBootstrapHttpError = (u: unknown): u is BootstrapHttpError =>
   Predicate.isTagged(u, "BootstrapHttpError");
+
+export function isServerSecondFactorChallenge(error: unknown): boolean {
+  return (
+    error instanceof BootstrapHttpError &&
+    ((error.status === 401 &&
+      ["two-factor-required", "two-factor-invalid"].includes(error.reason ?? "")) ||
+      (error.status === 429 && error.reason === "two-factor-locked"))
+  );
+}
+
+function secondFactorResponseReason(response: Response): BootstrapHttpError["reason"] {
+  const reason = response.headers.get("x-cafe-auth-reason");
+  return reason === "two-factor-required" ||
+    reason === "two-factor-invalid" ||
+    reason === "two-factor-locked"
+    ? reason
+    : undefined;
+}
 
 export interface ServerPairingLinkRecord {
   readonly id: string;
@@ -184,6 +203,7 @@ async function exchangeBootstrapCredential(
           message ||
           uiText("Failed to bootstrap auth session ({status}).", { status: response.status }),
         status: response.status,
+        reason: secondFactorResponseReason(response),
       });
     }
 
@@ -237,6 +257,7 @@ async function exchangePasswordCredential(
             status: response.status,
           }),
         status: response.status,
+        reason: secondFactorResponseReason(response),
       });
     }
 

@@ -30,6 +30,7 @@ export {
   stripPairingTokenFromUrl,
   submitServerAuthCredential,
   submitServerPasswordCredential,
+  isServerSecondFactorChallenge,
   takePairingTokenFromUrl,
   type ServerClientSessionRecord,
   type ServerPairingLinkRecord,

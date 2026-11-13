@@ -23,6 +23,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from "react"
 
 import { readThreadSecretsApi, type ThreadSecretsApiHandle } from "~/cafeSecrets/cafeSecretsClient";
 import { useThreadSecretsDialogStore } from "~/cafeSecrets/threadSecretsDialogStore";
+import { notifyCafeSecretsChanged } from "~/cafeSecrets/changes";
 import { useUiLocale } from "~/i18n";
 import { copyTextToClipboard } from "~/lib/copyToClipboard";
 import { readLocalApi } from "~/localApi";
@@ -242,6 +243,7 @@ export function ThreadSecretsDialog({
         if (!confirmed) return;
         await owner.remove({ threadId: target.threadId, id: secret.id });
         fence();
+        notifyCafeSecretsChanged(target);
         forget(secret.id);
         setEditor((current) =>
           current?.mode === "edit" && current.secret.id === secret.id ? null : current,
@@ -268,6 +270,7 @@ export function ThreadSecretsDialog({
         if (!confirmed) return;
         await owner.clear({ threadId: target.threadId });
         fence();
+        notifyCafeSecretsChanged(target);
         setRevealed(new Map());
         setEditor(null);
         await refresh();
@@ -384,6 +387,7 @@ export function ThreadSecretsDialog({
                                   value: nextValue,
                                 });
                                 fence();
+                                notifyCafeSecretsChanged(target);
                                 forget(secret.id);
                                 setEditor(null);
                                 await refresh();
@@ -435,6 +439,7 @@ export function ThreadSecretsDialog({
                                 value,
                               });
                               fence();
+                              notifyCafeSecretsChanged(target);
                               setEditor(null);
                               await refresh();
                             },

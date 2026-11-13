@@ -134,7 +134,9 @@ export const makeRelayAuth = Effect.gen(function* () {
                         ? "SECOND_FACTOR_REQUIRED"
                         : error.reason === "two-factor-locked"
                           ? "SECOND_FACTOR_LOCKED"
-                          : "AUTH_REJECTED",
+                          : error.reason === "two-factor-invalid"
+                            ? "SECOND_FACTOR_REJECTED"
+                            : "AUTH_REJECTED",
                     ),
                 ),
               );
@@ -169,7 +171,9 @@ export const makeRelayAuth = Effect.gen(function* () {
                         ? "SECOND_FACTOR_REQUIRED"
                         : error.reason === "two-factor-locked"
                           ? "SECOND_FACTOR_LOCKED"
-                          : "AUTH_REJECTED",
+                          : error.reason === "two-factor-invalid"
+                            ? "SECOND_FACTOR_REJECTED"
+                            : "AUTH_REJECTED",
                     ),
                 ),
               );

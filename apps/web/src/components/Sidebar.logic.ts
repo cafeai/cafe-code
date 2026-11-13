@@ -206,6 +206,7 @@ type ThreadStatusInput = Pick<
   | "latestTurn"
   | "session"
   | "liveWork"
+  | "origin"
 > & {
   lastVisitedAt?: string | undefined;
   /** Earliest upcoming enabled scheduled follow-up (navigation presence only). */
@@ -317,7 +318,20 @@ export function useThreadJumpHintVisibility(): {
   };
 }
 
+/**
+ * Agent-created chats (origin labelled `agent`, which defaults from a Cafe
+ * management-tool launch claim and stays user-editable) report to the agent
+ * that started them. They never become unread completions or send desktop/push
+ * notifications; their live sidebar states (working, waiting for approval or
+ * input) still show. Presentation only: the label grants no authority and
+ * never changes the chat.
+ */
+export function isAgentCreatedChat(thread: Pick<SidebarThreadSummary, "origin">): boolean {
+  return thread.origin?.classification === "agent";
+}
+
 export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
+  if (isAgentCreatedChat(thread)) return false;
   if (!thread.latestTurn?.completedAt) return false;
   const completedAt = Date.parse(thread.latestTurn.completedAt);
   if (Number.isNaN(completedAt)) return false;

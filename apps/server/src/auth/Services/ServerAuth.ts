@@ -36,7 +36,7 @@ export class AuthError extends Data.TaggedError("AuthError")<{
   readonly message: string;
   readonly status?: 400 | 401 | 403 | 429 | 500;
   readonly retryAfterSeconds?: number;
-  readonly reason?: "two-factor-locked" | "two-factor-required";
+  readonly reason?: "two-factor-locked" | "two-factor-required" | "two-factor-invalid";
   readonly cause?: unknown;
 }> {}
 

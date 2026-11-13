@@ -28,7 +28,9 @@ import { RelayHost } from "@cafecode/relay/host";
 import { NativeHostWorkClient } from "@cafecode/relay/nativeHostWork";
 import { RelayError } from "@cafecode/relay/errors";
 import { epochNow, Lifetime } from "@cafecode/relay/lifetime";
-import { serveRelayedHttp } from "@cafecode/relay/http";
+import { HttpOpen, serveRelayedHttp } from "@cafecode/relay/http";
+import { readCanonical } from "@cafecode/relay/protocol";
+import { RelayRpcTransport, relayRpcProtocol } from "@cafecode/relay/rpc";
 import type { RelaySession } from "@cafecode/relay/session";
 
 const enabled = process.env.CAFE_RELAY_NATIVE_E2E === "1";
@@ -140,6 +142,7 @@ async function fixture(test: TestContext, native: "chromium" | "electron") {
   await check();
   const authOperations: string[] = [],
     sessions = new Set<RelaySession>();
+  const rpcProtocols: string[] = [];
   let pairedDevice: string | undefined,
     consumed = false;
   host = new RelayHost({
@@ -176,13 +179,24 @@ async function fixture(test: TestContext, native: "chromium" | "electron") {
       open: async (stream, metadata) => {
         sessions.add(stream.owner);
         if (stream.kind === "rpc") {
-          await stream.accept({ protocol: "ndjson" });
-          for (;;) {
-            const bytes = await stream.read();
-            if (!bytes) break;
-            await stream.write(bytes);
+          const open = readCanonical(HttpOpen, canonicalBytes(metadata));
+          // An old host ignores the offer and acknowledges ordinary NDJSON.
+          const protocol = open.path.includes("legacy=1")
+            ? "ndjson"
+            : relayRpcProtocol(open.headers);
+          rpcProtocols.push(protocol);
+          const transport = new RelayRpcTransport(stream, protocol);
+          try {
+            await stream.accept({ protocol });
+            for (;;) {
+              const bytes = await transport.read();
+              if (!bytes) break;
+              await transport.write(bytes);
+            }
+            await transport.finish();
+          } finally {
+            await transport.close();
           }
-          await stream.finish();
           return;
         }
         await serveRelayedHttp(stream, metadata, async (request) => {
@@ -331,6 +345,7 @@ async function fixture(test: TestContext, native: "chromium" | "electron") {
     host,
     server,
     authOperations,
+    rpcProtocols,
     sessions,
     close,
     secret,
@@ -442,6 +457,7 @@ for (const native of ["chromium", "electron"] as const)
         equal: true,
         rpc: true,
       });
+      expect(f.rpcProtocols).toEqual(["ndjson-gzip-records-v1", "ndjson"]);
       for (const session of f.sessions) session.retire();
       // Observe this exact viewer channel's retirement before starting a new
       // read. Mid-flight HTTP failures remain incomplete and are never replayed.
@@ -502,7 +518,7 @@ for (const native of ["chromium", "electron"] as const)
       const rejected = await fixture(test, native),
         substituted = await createIdentity();
       await rejected.page.goto(await rejected.invitation(substituted.publicKey));
-      await rejected.page.getByRole("textbox").fill("123456");
+      expect(await rejected.page.getByRole("textbox").count()).toBe(0);
       await rejected.page.getByRole("button", { name: "Connect", exact: true }).click();
       await rejected.page.getByRole("status").waitFor();
       expect(await rejected.page.getByRole("status").textContent()).toContain("fresh invitation");

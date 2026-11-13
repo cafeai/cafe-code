@@ -1,4 +1,7 @@
 import { useUiLocale, useUiPresentation } from "~/i18n";
+import { findCafeSecretRanges } from "@cafecode/shared/cafeSecrets";
+import { useCafeSecretHistory } from "../../cafeSecrets/useCafeSecretHistory";
+import { cafeSecretHistoryText } from "../../cafeSecrets/historyText";
 import { flushSync } from "react-dom";
 import { uiFormatNumber, uiText, type UiLocale } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
@@ -272,6 +275,7 @@ interface TimelineRowActivityState {
 
 const TimelineRowCtx = createContext<TimelineRowSharedState>(null!);
 const TimelineRowActivityCtx = createContext<TimelineRowActivityState>(null!);
+const CafeSecretHistoryCtx = createContext<ReadonlyMap<string, string>>(new Map());
 const TIMELINE_LIST_HEADER = <div className="h-3 sm:h-4" />;
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
@@ -432,6 +436,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   const timelineElementRef = useRef<HTMLDivElement | null>(null);
   const activeThreadId = activeThreadIdProp ?? null;
+  const userMessageTexts = useMemo(
+    () =>
+      timelineEntries.flatMap((entry) =>
+        entry.kind === "message" && entry.message.role === "user" ? [entry.message.text] : [],
+      ),
+    [timelineEntries],
+  );
+  const secretValues = useCafeSecretHistory({
+    environmentId: activeThreadEnvironmentId,
+    threadId: activeThreadId,
+    texts: userMessageTexts,
+  });
   const primarySummaryKeys = useMemo(
     () =>
       new Set(
@@ -1550,55 +1566,57 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       ref={timelineElementRef}
       className="relative h-full min-h-0 min-w-0 overflow-hidden animate-enter-fade"
     >
-      <TimelineRowCtx value={sharedState}>
-        <TimelineRowActivityCtx value={activityState}>
-          <div
-            className={cn(
-              "cafe-timeline-bottom-fade h-full min-h-0",
-              isSubagentDetailOpen && "pointer-events-none invisible",
-              !isSubagentDetailOpen && returnedFromSubagentDetail && "animate-enter-from-start",
-            )}
-            data-bottom-fade={fadeBottomEdge ? "true" : "false"}
-            aria-hidden={isSubagentDetailOpen ? true : undefined}
-            inert={isSubagentDetailOpen ? true : undefined}
-          >
-            <LegendList<MessagesTimelineRow>
-              ref={listRef}
-              data={rows}
-              keyExtractor={keyExtractor}
-              renderItem={renderItem}
-              estimatedItemSize={90}
-              {...resolveInitialTimelinePosition(initialViewPosition, rows)}
-              maintainScrollAtEnd={autoFollowTail}
-              maintainScrollAtEndThreshold={TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD}
-              maintainVisibleContentPosition={
-                autoFollowTail
-                  ? TIMELINE_FOLLOW_VISIBLE_CONTENT_POSITION
-                  : TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION
-              }
-              onItemSizeChanged={handleItemSizeChanged}
-              onLoad={handleInitialListLoad}
-              onViewableItemsChanged={
-                onVisualizationHistoryViewport ? handleHistoryViewableItems : undefined
-              }
-              {...(scheduledFollowups ? { onMetricsChange: handleItemSizeChanged } : {})}
-              onScroll={handleScroll}
-              onWheel={handleWheel}
-              onTouchStart={handleTouchStart}
-              onTouchMove={handleTouchMove}
-              onTouchEnd={handleTouchEnd}
-              onTouchCancel={handleTouchEnd}
-              onPointerDown={handlePointerDown}
-              onPointerUp={handlePointerEnd}
-              onPointerCancel={handlePointerEnd}
-              onKeyDown={handleKeyDown}
-              className="h-full overflow-x-hidden overscroll-y-contain px-3 sm:px-5"
-              ListHeaderComponent={TIMELINE_LIST_HEADER}
-              ListFooterComponent={timelineFooter}
-            />
-          </div>
-        </TimelineRowActivityCtx>
-      </TimelineRowCtx>
+      <CafeSecretHistoryCtx value={secretValues}>
+        <TimelineRowCtx value={sharedState}>
+          <TimelineRowActivityCtx value={activityState}>
+            <div
+              className={cn(
+                "cafe-timeline-bottom-fade h-full min-h-0",
+                isSubagentDetailOpen && "pointer-events-none invisible",
+                !isSubagentDetailOpen && returnedFromSubagentDetail && "animate-enter-from-start",
+              )}
+              data-bottom-fade={fadeBottomEdge ? "true" : "false"}
+              aria-hidden={isSubagentDetailOpen ? true : undefined}
+              inert={isSubagentDetailOpen ? true : undefined}
+            >
+              <LegendList<MessagesTimelineRow>
+                ref={listRef}
+                data={rows}
+                keyExtractor={keyExtractor}
+                renderItem={renderItem}
+                estimatedItemSize={90}
+                {...resolveInitialTimelinePosition(initialViewPosition, rows)}
+                maintainScrollAtEnd={autoFollowTail}
+                maintainScrollAtEndThreshold={TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD}
+                maintainVisibleContentPosition={
+                  autoFollowTail
+                    ? TIMELINE_FOLLOW_VISIBLE_CONTENT_POSITION
+                    : TIMELINE_REVIEW_VISIBLE_CONTENT_POSITION
+                }
+                onItemSizeChanged={handleItemSizeChanged}
+                onLoad={handleInitialListLoad}
+                onViewableItemsChanged={
+                  onVisualizationHistoryViewport ? handleHistoryViewableItems : undefined
+                }
+                {...(scheduledFollowups ? { onMetricsChange: handleItemSizeChanged } : {})}
+                onScroll={handleScroll}
+                onWheel={handleWheel}
+                onTouchStart={handleTouchStart}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
+                onTouchCancel={handleTouchEnd}
+                onPointerDown={handlePointerDown}
+                onPointerUp={handlePointerEnd}
+                onPointerCancel={handlePointerEnd}
+                onKeyDown={handleKeyDown}
+                className="h-full overflow-x-hidden overscroll-y-contain px-3 sm:px-5"
+                ListHeaderComponent={TIMELINE_LIST_HEADER}
+                ListFooterComponent={timelineFooter}
+              />
+            </div>
+          </TimelineRowActivityCtx>
+        </TimelineRowCtx>
+      </CafeSecretHistoryCtx>
       {resolvedSelectedSubagent ? (
         <SubagentDetailView
           key={JSON.stringify([
@@ -1925,6 +1943,8 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
 
   const ctx = use(TimelineRowCtx);
   const activity = use(TimelineRowActivityCtx);
+  const secretValues = use(CafeSecretHistoryCtx);
+  const displayText = cafeSecretHistoryText(row.message.text, secretValues);
   const failed = ctx.failedUserMessageIds?.has(row.message.id) === true;
   const resending = activity.resendingMessageId === row.message.id;
   const showResendingIndicator = useDelayedFlag(resending);
@@ -1933,7 +1953,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     row.message.attachments?.filter((attachment) => attachment.type === "image") ?? [];
   const userFiles =
     row.message.attachments?.filter((attachment) => attachment.type === "file") ?? [];
-  const copyText = row.message.text.trim().length > 0 ? row.message.text : null;
+  const copyText = displayText.trim().length > 0 ? displayText : null;
   const canRevertAgentWork = typeof row.revertTurnCount === "number";
 
   return (
@@ -1991,7 +2011,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           </div>
         ) : null}
         <CollapsibleUserMessageBody
-          text={row.message.text}
+          text={displayText}
           skills={ctx.skills}
           footer={
             <>
@@ -3827,9 +3847,34 @@ const UserMessageBody = memo(function UserMessageBody(props: {
     return null;
   }
 
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  for (const range of findCafeSecretRanges(props.text)) {
+    parts.push(
+      <SkillInlineText
+        key={`text:${cursor}`}
+        text={props.text.slice(cursor, range.start)}
+        skills={props.skills}
+      />,
+    );
+    parts.push(
+      <span key={`secret:${range.start}`} spellCheck={false}>
+        {props.text.slice(range.start, range.end)}
+      </span>,
+    );
+    cursor = range.end;
+  }
+  parts.push(
+    <SkillInlineText
+      key={`text:${cursor}`}
+      text={props.text.slice(cursor)}
+      skills={props.skills}
+    />,
+  );
+
   return (
     <div className="whitespace-pre-wrap wrap-break-word text-sm leading-relaxed text-foreground">
-      <SkillInlineText text={props.text} skills={props.skills} />
+      {parts}
     </div>
   );
 });

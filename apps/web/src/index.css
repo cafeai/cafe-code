@@ -793,8 +793,23 @@ body::after {
 .cafe-thread-sidebar [data-slot="sidebar-menu-button"]:hover,
 .cafe-thread-sidebar [data-desk-chat-row]:hover > :where([data-slot="sidebar-menu-sub-button"]),
 .cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"]:not([data-thread-selected="true"]):hover,
+.cafe-thread-sidebar [data-thread-group-button]:hover,
 .cafe-sidebar-surface [data-slot="select-item"][data-highlighted] {
   background-color: var(--sidebar-accent-surface);
+}
+
+/* An orchestrator chat and its agent group rows are sibling list items, so
+   hovering any of them sets data-cluster-hover on all of them
+   (sidebar/threadGroupOwnerHover.ts). The row under the pointer keeps the
+   full hover above; the others show it at half strength. */
+.cafe-thread-sidebar
+  [data-slot="sidebar-menu-sub-button"][data-cluster-hover="true"]:not(
+    [data-thread-selected="true"],
+    :hover
+  ),
+.cafe-thread-sidebar [data-thread-group-button][data-cluster-hover="true"]:not(:hover) {
+  background-color: color-mix(in srgb, var(--sidebar-accent-surface) 50%, transparent);
+  color: color-mix(in srgb, var(--foreground) 50%, var(--muted-foreground));
 }
 
 .cafe-thread-sidebar [data-slot="sidebar-menu-button"][data-active="true"],
@@ -828,6 +843,23 @@ body::after {
       transparent 62%
     ),
     color-mix(in srgb, var(--foreground) 9%, transparent);
+}
+
+/* The open chat as an indirectly highlighted orchestrator: halfway between
+   its resting wash (8%/8%) and its hover wash (10%/9%). */
+.cafe-thread-sidebar
+  [data-slot="sidebar-menu-sub-button"][data-active="true"][data-cluster-hover="true"]:not(
+    [data-thread-selected="true"],
+    :hover
+  ) {
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--cafe-sidebar-accent) 9%, transparent),
+      transparent 62%
+    ),
+    color-mix(in srgb, var(--foreground) 8.5%, transparent);
+  color: var(--foreground);
 }
 
 .cafe-followup-queue {

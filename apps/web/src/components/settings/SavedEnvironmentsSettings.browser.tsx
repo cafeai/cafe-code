@@ -1,6 +1,6 @@
 import "../../index.css";
 
-import { EnvironmentId } from "@cafecode/contracts";
+import { EnvironmentId, type DesktopBridge } from "@cafecode/contracts";
 import { cdp, page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { render } from "vitest-browser-react";
@@ -74,6 +74,7 @@ function ownSettingsFixture({ signal, onTestFinished }: TestContext) {
   let pendingRender: ReturnType<typeof render> | null = null;
   let cleanupPromise: Promise<void> | null = null;
   const nativeOperations = new Set<Promise<unknown>>();
+  const beforeDrain = new Set<() => void>();
   const afterUnmount = new Set<() => void | Promise<void>>();
   let releasePointer: (() => Promise<void>) | null = null;
   const host = document.createElement("div");
@@ -81,8 +82,10 @@ function ownSettingsFixture({ signal, onTestFinished }: TestContext) {
     if (retired || signal.aborted) throw new Error("Saved environment fixture retired.");
   };
   const retire = () => {
+    if (retired) return;
     retired = true;
     signal.removeEventListener("abort", retire);
+    for (const release of beforeDrain) release();
   };
   const cleanup = () => {
     retire();
@@ -100,6 +103,7 @@ function ownSettingsFixture({ signal, onTestFinished }: TestContext) {
   if (signal.aborted) retire();
   return {
     cleanup,
+    beforeDrain: (release: () => void) => beforeDrain.add(release),
     afterUnmount: (release: () => void | Promise<void>) => afterUnmount.add(release),
     async screenshot(path: string) {
       const previous = { width: window.innerWidth, height: window.innerHeight };
@@ -231,6 +235,131 @@ describe("SavedEnvironmentsSettings", () => {
     resetWorkspaceEnvironmentForTests();
     document.body.innerHTML = "";
   });
+
+  function installInvitationClipboard(copyText: (text: string) => Promise<void>) {
+    const originalBridge = window.desktopBridge;
+    const browserCopy = vi
+      .spyOn(navigator.clipboard, "writeText")
+      .mockRejectedValue(new Error("Browser clipboard permission denied"));
+    fixture.afterUnmount(() => {
+      browserCopy.mockRestore();
+      if (originalBridge) window.desktopBridge = originalBridge;
+      else Reflect.deleteProperty(window, "desktopBridge");
+    });
+    window.desktopBridge = { copyText } as DesktopBridge;
+    return browserCopy;
+  }
+
+  async function mountInvitation() {
+    const status = {
+      enabled: true,
+      phase: "connected",
+      networks: [{ networkId: randomOpaque(), serving: 1 }],
+    };
+    let issued = 0;
+    const url = (number: number) =>
+      `https://relay.cafecode.sh/relay/pair#synthetic-private-invitation-${number}`;
+    const request = vi.fn<RelaySettingsRequest>(async (path) => {
+      if (path === "/api/relay/invitations") {
+        issued++;
+        return { id: randomOpaque(16), url: url(issued), expiresAt: Date.now() + 60_000 };
+      }
+      if (path === "/api/relay/invitations/revoke") return {};
+      return status;
+    });
+    await fixture.mount(<RelayConnectionsSettings request={request} />);
+    await expect
+      .element(page.getByRole("button", { name: "Create relay invitation" }))
+      .toBeEnabled();
+    await fixture.native(() =>
+      page.getByRole("button", { name: "Create relay invitation" }).click(),
+    );
+    await expect.element(page.getByLabelText("Relay invitation link")).toHaveValue(url(1));
+    return { request, url };
+  }
+
+  it("copies a relay invitation through the native desktop bridge when browser permission is denied", async () => {
+    const copyText = vi.fn(async (_text: string) => undefined);
+    const browserCopy = installInvitationClipboard(copyText);
+    const { request, url } = await mountInvitation();
+    await fixture.native(() => page.getByRole("button", { name: "Copy invitation" }).click());
+    await expect.element(page.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    expect(copyText).toHaveBeenCalledExactlyOnceWith(url(1));
+    expect(browserCopy).not.toHaveBeenCalled();
+    expect(request.mock.calls.filter(([, init]) => init.method === "POST")).toHaveLength(1);
+    await expect.element(page.getByText("Connected", { exact: true })).toBeVisible();
+    expect(document.body.textContent).not.toContain("Relay settings could not be updated");
+  });
+
+  it("reports a clipboard failure separately, preserves the invitation, and allows another copy", async () => {
+    const copyText = vi
+      .fn<(text: string) => Promise<void>>()
+      .mockRejectedValueOnce(new Error("private clipboard failure detail"))
+      .mockResolvedValue(undefined);
+    installInvitationClipboard(copyText);
+    const { request, url } = await mountInvitation();
+    await fixture.native(() => page.getByRole("button", { name: "Copy invitation" }).click());
+    await expect
+      .element(page.getByRole("status"))
+      .toHaveTextContent(
+        "Could not copy the relay invitation. Select the link and copy it manually.",
+      );
+    expect(document.body.textContent).not.toContain("private clipboard failure detail");
+    expect(document.body.textContent).not.toContain("Relay settings could not be updated");
+    await expect.element(page.getByLabelText("Relay invitation link")).toHaveValue(url(1));
+    await expect.element(page.getByText("Connected", { exact: true })).toBeVisible();
+    await fixture.native(() => page.getByRole("button", { name: "Copy invitation" }).click());
+    await expect.element(page.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    expect(document.body.textContent).not.toContain("Could not copy the relay invitation");
+    expect(copyText.mock.calls).toEqual([[url(1)], [url(1)]]);
+    expect(request.mock.calls.filter(([, init]) => init.method === "POST")).toHaveLength(1);
+  });
+
+  it.each(["replacement", "revocation", "environment", "later copy"] as const)(
+    "ignores a delayed clipboard failure after invitation %s",
+    async (change) => {
+      let reject!: (error: Error) => void;
+      const pending = new Promise<void>((_resolve, rejectPending) => {
+        reject = rejectPending;
+      });
+      const release = () => reject(new Error("retired clipboard failure"));
+      fixture.beforeDrain(release);
+      const copyText = vi
+        .fn<(text: string) => Promise<void>>()
+        .mockImplementationOnce(() => fixture.native(() => pending))
+        .mockResolvedValue(undefined);
+      installInvitationClipboard(copyText);
+      const { url } = await mountInvitation();
+      await fixture.native(() => page.getByRole("button", { name: "Copy invitation" }).click());
+      await expect.poll(() => copyText.mock.calls.length).toBe(1);
+      if (change === "replacement") {
+        await fixture.native(() =>
+          page.getByRole("button", { name: "Create relay invitation" }).click(),
+        );
+        await expect.element(page.getByLabelText("Relay invitation link")).toHaveValue(url(2));
+      } else if (change === "revocation") {
+        await fixture.native(() => page.getByRole("button", { name: "Revoke invitation" }).click());
+        await expect.element(page.getByLabelText("Relay invitation link")).not.toBeInTheDocument();
+      } else if (change === "environment") {
+        selectWorkspaceEnvironment(EnvironmentId.make("other-copy-environment"));
+        await expect.element(page.getByLabelText("Relay invitation link")).not.toBeInTheDocument();
+      } else {
+        await fixture.native(() => page.getByRole("button", { name: "Copy invitation" }).click());
+        await expect
+          .element(page.getByRole("button", { name: "Copied", exact: true }))
+          .toBeVisible();
+      }
+      release();
+      await Promise.allSettled([copyText.mock.results[0]!.value]);
+      expect(document.body.textContent).not.toContain("Could not copy the relay invitation");
+      expect(document.body.textContent).not.toContain("Relay settings could not be updated");
+      expect(document.body.textContent).not.toContain("retired clipboard failure");
+      if (change === "later copy")
+        await expect
+          .element(page.getByRole("button", { name: "Copied", exact: true }))
+          .toBeVisible();
+    },
+  );
 
   it("hosts with one toggle, keeps network management collapsed, and issues a client invitation", async () => {
     const networkId = randomOpaque();
@@ -367,6 +496,8 @@ describe("SavedEnvironmentsSettings", () => {
     expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledExactlyOnceWith({
       label: "My Cafe",
       relayInvitation: "https://relay.cafecode.sh/relay/connect#test-owned-one-use-secret",
+      requestSecondFactor: expect.any(Function),
+      signal: expect.any(AbortSignal),
     });
     added.resolve(record);
     useSavedEnvironmentRegistryStore.getState().upsert(record);
@@ -536,11 +667,10 @@ describe("SavedEnvironmentsSettings", () => {
         .getByLabelText("Pairing URL")
         .fill("https://test.local/pair#token=secret-pairing-token"),
     );
-    await fixture.native(() =>
-      dialog.getByLabelText("Authenticator or recovery code").fill("123456"),
-    );
+    await expect
+      .element(dialog.getByLabelText("Authenticator or recovery code"))
+      .not.toBeInTheDocument();
     const nativeDialog = document.querySelector<HTMLElement>('[role="dialog"]');
-    const nativeFactorInput = nativeDialog?.querySelector<HTMLInputElement>("#env-second-factor");
     const nativePairingInput = Array.from(nativeDialog?.querySelectorAll("input") ?? []).find(
       (input) => input.value.includes("secret-pairing-token"),
     );
@@ -549,7 +679,6 @@ describe("SavedEnvironmentsSettings", () => {
 
     await vi.waitFor(() => {
       expect(nativePairingInput?.value).toBe("");
-      expect(nativeFactorInput?.value).toBe("");
       expect(submitButton.disabled).toBe(true);
       // The label keeps its width while pending; the button reports busy instead.
       expect(submitButton.getAttribute("aria-busy")).toBe("true");
@@ -578,8 +707,88 @@ describe("SavedEnvironmentsSettings", () => {
     expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledWith({
       label: "My test environment",
       pairingUrl: "https://test.local/pair#token=secret-pairing-token",
-      secondFactor: "123456",
+      requestSecondFactor: expect.any(Function),
+      signal: expect.any(AbortSignal),
     });
+  });
+
+  it("asks for a second factor only after the server challenge and continues the held submission", async () => {
+    const teardown = new AbortController();
+    fixture.beforeDrain(() => teardown.abort());
+    let submittedCode: string | undefined;
+    runtimeMocks.addSavedEnvironment.mockImplementationOnce((input) =>
+      fixture.native(async () => {
+        submittedCode = await input.requestSecondFactor({
+          reason: "required",
+          signal: AbortSignal.any([input.signal, teardown.signal]),
+        });
+        if (!submittedCode) throw new Error("cancelled");
+        return {
+          environmentId: EnvironmentId.make("two-factor-env"),
+          label: "Private server",
+          httpBaseUrl: "https://test.local/",
+          wsBaseUrl: "wss://test.local/",
+          createdAt: new Date().toISOString(),
+          lastConnectedAt: null,
+        };
+      }),
+    );
+    await fixture.mount();
+    await fixture.native(() => page.getByRole("button", { name: "Add environment" }).click());
+    const dialog = page.getByRole("dialog");
+    await expect
+      .element(dialog.getByLabelText("Authenticator or recovery code"))
+      .not.toBeInTheDocument();
+    await fixture.native(() =>
+      dialog.getByLabelText("Pairing URL").fill("https://test.local/pair#token=synthetic-token"),
+    );
+    await fixture.native(() =>
+      dialog.getByRole("button", { name: "Add environment", exact: true }).click(),
+    );
+    await expect.element(dialog.getByLabelText("Authenticator or recovery code")).toBeVisible();
+    expect(document.querySelector<HTMLInputElement>("#env-url")?.value ?? "").toBe("");
+    await fixture.native(() =>
+      dialog.getByLabelText("Authenticator or recovery code").fill("123456"),
+    );
+    await fixture.native(() => dialog.getByRole("button", { name: "Verify and connect" }).click());
+    await vi.waitFor(() => expect(submittedCode).toBe("123456"));
+    await vi.waitFor(() => expect(document.querySelector('[role="dialog"][data-open]')).toBeNull());
+    expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledOnce();
+  });
+
+  it("cancels the pending challenge without retaining the first factor or sending another attempt", async () => {
+    const teardown = new AbortController();
+    fixture.beforeDrain(() => teardown.abort());
+    let submittedCode: string | undefined = "pending";
+    runtimeMocks.addSavedEnvironment.mockImplementationOnce((input) =>
+      fixture.native(async () => {
+        submittedCode = await input.requestSecondFactor({
+          reason: "required",
+          signal: AbortSignal.any([input.signal, teardown.signal]),
+        });
+        throw new Error("cancelled");
+      }),
+    );
+    await fixture.mount();
+    await fixture.native(() => page.getByRole("button", { name: "Add environment" }).click());
+    const dialog = page.getByRole("dialog");
+    await fixture.native(() =>
+      dialog.getByLabelText("Pairing URL").fill("https://test.local/pair#token=synthetic-token"),
+    );
+    await fixture.native(() =>
+      dialog.getByRole("button", { name: "Add environment", exact: true }).click(),
+    );
+    await expect.element(dialog.getByLabelText("Authenticator or recovery code")).toBeVisible();
+    await fixture.native(() => dialog.getByRole("button", { name: "Cancel", exact: true }).click());
+    await vi.waitFor(() => expect(submittedCode).toBeUndefined());
+    expect(runtimeMocks.addSavedEnvironment).toHaveBeenCalledOnce();
+    await fixture.native(() =>
+      page.getByRole("button", { name: "Add environment" }).first().click(),
+    );
+    await expect
+      .element(page.getByRole("dialog").getByLabelText("Authenticator or recovery code"))
+      .not.toBeInTheDocument();
+    expect(document.querySelector<HTMLInputElement>("#env-url")?.value ?? "").toBe("");
   });
 
   it("does not render pairing secrets from add failures", async () => {
@@ -633,6 +842,8 @@ describe("SavedEnvironmentsSettings", () => {
       label: "",
       host: "https://pc.example:3775",
       password: "admin-secret",
+      requestSecondFactor: expect.any(Function),
+      signal: expect.any(AbortSignal),
     });
     resolveAdd({
       environmentId: EnvironmentId.make("pc"),
@@ -678,6 +889,8 @@ describe("SavedEnvironmentsSettings", () => {
       label: "",
       host: "https://pc.example",
       password: "fresh-secret",
+      requestSecondFactor: expect.any(Function),
+      signal: expect.any(AbortSignal),
     });
   });
 

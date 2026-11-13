@@ -1,8 +1,8 @@
 /**
  * Paints Cafe Secret syntax (`[sec:...]`, complete or still being typed) in
- * the composer without changing the editor model. Lexical owns the DOM text
- * nodes, so decorating through node transforms would fight the controlled
- * prompt updates; the CSS Custom Highlight API instead styles live DOM Ranges.
+ * the composer. Editable secret text nodes suppress native spellcheck, while
+ * the CSS Custom Highlight API styles live DOM Ranges without inline styles
+ * that could fight controlled prompt updates or provider-error tones.
  *
  * Every mounted editor (Desk can show several panes) contributes its ranges to
  * one shared registry, and the two document-wide highlights are rebuilt from
@@ -11,8 +11,17 @@
  */
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import { findCafeSecretRanges, findCafeSecretReferenceRanges } from "@cafecode/shared/cafeSecrets";
-import { $getRoot, $isElementNode, $isLineBreakNode, $isTextNode, type LexicalNode } from "lexical";
+import {
+  $getRoot,
+  $isElementNode,
+  $isLineBreakNode,
+  $isTextNode,
+  RootNode,
+  type LexicalNode,
+  type TextNode,
+} from "lexical";
 import { useEffect, useRef } from "react";
+import { $setComposerCafeSecret, ComposerCafeSecretNode } from "./composerCafeSecretNode";
 
 export type CafeSecretHighlightTone = "secret" | "error";
 
@@ -52,6 +61,7 @@ function publishHighlights() {
 }
 
 interface TextSegment {
+  readonly node: TextNode;
   readonly key: string;
   readonly start: number;
   readonly length: number;
@@ -63,9 +73,14 @@ interface TextSegment {
  * marker; line breaks/paragraphs become newlines.
  */
 function collectSegments(node: LexicalNode, state: { text: string; segments: TextSegment[] }) {
-  if ($isTextNode(node) && node.getType() === "text") {
+  if ($isTextNode(node) && (node.getType() === "text" || node instanceof ComposerCafeSecretNode)) {
     const text = node.getTextContent();
-    state.segments.push({ key: node.getKey(), start: state.text.length, length: text.length });
+    state.segments.push({
+      node,
+      key: node.getKey(),
+      start: state.text.length,
+      length: text.length,
+    });
     state.text += text;
     return;
   }
@@ -80,6 +95,54 @@ function collectSegments(node: LexicalNode, state: { text: string; segments: Tex
     return;
   }
   state.text += "￼";
+}
+
+/** Split only at syntax boundaries, preserving Lexical text and selection. */
+export function $normalizeComposerCafeSecrets() {
+  const state = { text: "", segments: [] as TextSegment[] };
+  for (const child of $getRoot().getChildren()) collectSegments(child, state);
+  const syntaxRanges = [
+    ...findCafeSecretRanges(state.text),
+    ...findCafeSecretReferenceRanges(state.text),
+  ].toSorted((left, right) => left.start - right.start);
+  const ranges: { start: number; end: number }[] = [];
+  for (const range of syntaxRanges) {
+    const previous = ranges.at(-1);
+    // Spelling has one state across adjoining/overlapping protected syntax.
+    // Union it before splitting so coalescing below reaches a stable model.
+    if (previous && range.start <= previous.end) previous.end = Math.max(previous.end, range.end);
+    else ranges.push({ start: range.start, end: range.end });
+  }
+  for (const segment of state.segments) {
+    const cuts = new Set<number>();
+    for (const range of ranges) {
+      for (const offset of [range.start - segment.start, range.end - segment.start]) {
+        if (offset > 0 && offset < segment.length) cuts.add(offset);
+      }
+    }
+    let offset = segment.start;
+    const parts = cuts.size ? segment.node.splitText(...cuts) : [segment.node];
+    for (const part of parts) {
+      const secret = ranges.some((range) => range.start <= offset && offset < range.end);
+      offset += part.getTextContentSize();
+      $setComposerCafeSecret(part, secret && part.getTextContentSize() > 0);
+    }
+  }
+  // Custom text nodes do not participate in Lexical's ordinary text merging.
+  // Coalesce adjacent pieces after edits/paste so fragmentation stays bounded.
+  for (const node of $getRoot().getAllTextNodes()) {
+    if (!(node instanceof ComposerCafeSecretNode) || !node.isAttached()) continue;
+    let next = node.getNextSibling();
+    while (
+      next instanceof ComposerCafeSecretNode &&
+      node.getFormat() === next.getFormat() &&
+      node.getStyle() === next.getStyle() &&
+      node.getDetail() === next.getDetail()
+    ) {
+      node.mergeWithSibling(next);
+      next = node.getNextSibling();
+    }
+  }
 }
 
 export function ComposerCafeSecretHighlightPlugin(props: { tone: CafeSecretHighlightTone }) {
@@ -119,7 +182,13 @@ export function ComposerCafeSecretHighlightPlugin(props: { tone: CafeSecretHighl
     };
     refresh();
     const unregister = editor.registerUpdateListener(refresh);
+    const unregisterTransform = editor.registerNodeTransform(
+      RootNode,
+      $normalizeComposerCafeSecrets,
+    );
+    editor.update($normalizeComposerCafeSecrets);
     return () => {
+      unregisterTransform();
       unregister();
       rangesByOwner.delete(owner);
       publishHighlights();

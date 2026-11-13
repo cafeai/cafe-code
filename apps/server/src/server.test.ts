@@ -20,6 +20,7 @@ import { connectNative as connectRelayNative } from "@cafecode/relay/nativeWire"
 import { connectViewer as connectRelayViewer } from "@cafecode/relay/client";
 import { parseInvitationUrl as parseRelayInvitation } from "@cafecode/relay/invitation";
 import { fetchRelayed as fetchRelayHttp } from "@cafecode/relay/http";
+import { relayRpcHeaders, relayRpcProtocol, readRelayRpcProtocol } from "@cafecode/relay/rpc";
 import { relayEffectSocket } from "./relay/request.ts";
 import {
   RelayRuntime,
@@ -2018,19 +2019,23 @@ const qualifyRelayRouter = (
       ),
     );
     phase = "rpc";
-    const rpc = yield* Effect.promise(() =>
-      session.open("rpc", { method: "GET", path: "/ws", headers: [] }),
-    );
-    const protocol = RpcClient.layerProtocolSocket({ retryTransientErrors: false }).pipe(
-      Layer.provide(RpcSerialization.layerNdjson),
-      Layer.provide(Layer.effect(Socket.Socket, relayEffectSocket(rpc))),
-    );
-    const result = yield* makeWsRpcClient.pipe(
-      Effect.flatMap((client) => client[WS_METHODS.serverGetConfig]({})),
-      Effect.provide(protocol),
-    );
-    assert.isDefined(result);
-    assert.isTrue(session.active);
+    for (const headers of [[], relayRpcHeaders()]) {
+      const rpc = yield* Effect.promise(() =>
+        session.open("rpc", { method: "GET", path: "/ws", headers }),
+      );
+      const mode = readRelayRpcProtocol(yield* Effect.promise(() => rpc.metadata), headers);
+      assert.equal(mode, relayRpcProtocol(headers));
+      const protocol = RpcClient.layerProtocolSocket({ retryTransientErrors: false }).pipe(
+        Layer.provide(RpcSerialization.layerNdjson),
+        Layer.provide(Layer.effect(Socket.Socket, relayEffectSocket(rpc, mode))),
+      );
+      const result = yield* makeWsRpcClient.pipe(
+        Effect.flatMap((client) => client[WS_METHODS.serverGetConfig]({})),
+        Effect.provide(protocol),
+      );
+      assert.isDefined(result);
+      assert.isTrue(session.active);
+    }
     if (browser) {
       phase = "compiled-application";
       yield* Effect.promise(() => connection!.close());

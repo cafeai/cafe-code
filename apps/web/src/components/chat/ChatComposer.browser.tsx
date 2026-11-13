@@ -533,6 +533,59 @@ async function waitForTabEntrance(owner?: ComposerOwner) {
 }
 
 describe("provider-specific composer menu actions", () => {
+  it("keeps secret text editable and excludes its complete/incomplete ranges from native spellcheck", async (context) => {
+    const owner = createComposerOwner(context, "composer-controls");
+    await owner.run(async () => {
+      await using fixture = await mountComposer(1100, { promptRef: { current: "" } }, owner);
+      const editor = fixture.host.querySelector<HTMLElement>('[data-testid="composer-editor"]')!;
+      const text = "ordinary prose [sec:synthetic-spelling-key] ordinary tail";
+      await owner.observe("keyboard", () => page.elementLocator(editor).fill(text));
+      await owner.observe("assertion", () =>
+        vi.waitFor(() => {
+          expect(editor.textContent).toBe(text);
+          expect(
+            [...editor.querySelectorAll('[spellcheck="false"]')].map(
+              (element) => element.textContent,
+            ),
+          ).toEqual(["[sec:synthetic-spelling-key]"]);
+          expect(editor.spellcheck).toBe(true);
+          expect(fixture.composerRef.current?.readSnapshot().value).toBe(text);
+        }),
+      );
+      await owner.observe("keyboard", () =>
+        page.elementLocator(editor).fill("prose [sec:still-typing"),
+      );
+      await owner.observe("assertion", () =>
+        vi.waitFor(() =>
+          expect(editor.querySelector('[spellcheck="false"]')?.textContent).toBe(
+            "[sec:still-typing",
+          ),
+        ),
+      );
+      await owner.observe("keyboard", () => userEvent.keyboard("{Backspace}{Backspace}"));
+      await owner.observe("assertion", () =>
+        vi.waitFor(() => expect(editor.textContent).toBe("prose [sec:still-typi")),
+      );
+      await owner.observe("keyboard", () =>
+        page.elementLocator(editor).fill("[sec:first][sec:second]"),
+      );
+      await owner.observe("assertion", () =>
+        vi.waitFor(() => {
+          expect(editor.textContent).toBe("[sec:first][sec:second]");
+          expect(editor.querySelector('[spellcheck="false"]')?.textContent).toBe(
+            "[sec:first][sec:second]",
+          );
+        }),
+      );
+      await owner.observe("keyboard", () =>
+        page.elementLocator(editor).fill("ordinary prose again"),
+      );
+      await owner.observe("assertion", () =>
+        vi.waitFor(() => expect(editor.querySelector('[spellcheck="false"]')).toBeNull()),
+      );
+    });
+  });
+
   it("places exact advertised Daybreak levels below Access and preserves the selected level on dispatch", async () => {
     const statuses = providers.map((entry) =>
       entry.instanceId === "codex"

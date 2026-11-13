@@ -41,7 +41,11 @@ export interface RelayServerOptions {
   readonly meshPeerUrls?: ReadonlyMap<string, string>;
   readonly manualMeshSync?: boolean;
   readonly forwardedIpKeys?: readonly string[];
-  readonly hostWork?: { readonly difficulty: number; readonly reservationMs: number };
+  readonly hostWork?: {
+    readonly enabled?: boolean;
+    readonly difficulty: number;
+    readonly reservationMs: number;
+  };
   readonly selfService?: boolean;
 }
 
@@ -263,7 +267,10 @@ export async function startRelayServer(options: RelayServerOptions) {
               respond(
                 response,
                 200,
-                reservations.challenge(readCanonical(HostWorkRequest, body, 4096)),
+                reservations.challenge(
+                  readCanonical(HostWorkRequest, body, 4096),
+                  request.headers["x-cafe-host-work-zero"] === "1",
+                ),
               );
             else if (request.url === "/v1/host/claim") {
               const result = await reservations.claim(readCanonical(HostWorkClaim, body, 4096));

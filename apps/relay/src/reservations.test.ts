@@ -43,6 +43,7 @@ async function fixture() {
     nodeId = randomOpaque();
   let now = 1000;
   const input = {
+    enabled: true,
     networkId,
     nodeId,
     grants: [
@@ -172,9 +173,10 @@ describe("work-paid host reservations", () => {
       f.authority.retire();
     }
   });
-  it("issues the 17-bit baseline and ten-minute term without an explicit host work policy", async () => {
+  it("keeps the 17-bit baseline available when proof of work is explicitly enabled", async () => {
     const f = await fixture();
     const authority = new HostReservations({
+      enabled: true,
       networkId: f.input.networkId,
       nodeId: f.input.nodeId,
       grants: f.input.grants,
@@ -197,6 +199,47 @@ describe("work-paid host reservations", () => {
       f.authority.retire();
     }
   });
+  it.each([true, false])(
+    "disables work while retaining signed admission (zero-capable host: %s)",
+    async (acceptsZero) => {
+      const f = await fixture();
+      const { enabled: _enabled, ...options } = f.input;
+      const authority = new HostReservations(options);
+      try {
+        const challenge = authority.challenge(
+          {
+            version: 1,
+            networkId: f.input.networkId,
+            locator: f.locator,
+            admissionPublicKey: f.identity.publicKey,
+            capacityToken: f.token,
+            claimId: randomOpaque(16),
+            reservationId: null,
+          },
+          acceptsZero,
+        );
+        expect(challenge.difficulty).toBe(acceptsZero ? 0 : 2);
+        const proof = { challenge, solutions: [0, 0, 0, 0] as const };
+        await expect(
+          authority.claim({
+            ...proof,
+            signature: await signBytes(await createIdentity(), hostWorkProof(proof)),
+          }),
+        ).rejects.toThrow();
+        const reservation = await authority.claim({
+          ...proof,
+          signature: await signBytes(f.identity, hostWorkProof(proof)),
+        });
+        expect(reservation.locator).toBe(f.locator);
+        expect(
+          authority.authorize(f.locator, f.identity.publicKey, reservation.credential),
+        ).toEqual(reservation);
+      } finally {
+        authority.retire();
+        f.authority.retire();
+      }
+    },
+  );
   it("reclaims a lost reservation with fresh host work and fences a delayed old release", async () => {
     const f = await fixture(),
       firstProof = await f.claim(),

@@ -46,9 +46,9 @@ export function remoteEnvironmentErrorMessage(error: unknown, fallback: string):
 
 class RemoteEnvironmentAuthHttpError extends Error {
   readonly status: number;
-  readonly reason: "two-factor-locked" | undefined;
+  readonly reason: "two-factor-locked" | "two-factor-required" | "two-factor-invalid" | undefined;
 
-  constructor(message: string, status: number, reason?: "two-factor-locked") {
+  constructor(message: string, status: number, reason?: RemoteEnvironmentAuthHttpError["reason"]) {
     super(message);
     this.name = "RemoteEnvironmentAuthHttpError";
     this.status = status;
@@ -155,8 +155,10 @@ export async function fetchRemoteJson<T>(input: {
     throw new RemoteEnvironmentAuthHttpError(
       uiText("Remote auth request failed ({status}).", { status: response.status }),
       response.status,
-      response.headers.get("x-cafe-auth-reason") === "two-factor-locked"
-        ? "two-factor-locked"
+      ["two-factor-locked", "two-factor-required", "two-factor-invalid"].includes(
+        response.headers.get("x-cafe-auth-reason") ?? "",
+      )
+        ? (response.headers.get("x-cafe-auth-reason") as RemoteEnvironmentAuthHttpError["reason"])
         : undefined,
     );
   }

@@ -164,7 +164,7 @@ describe("inspectable received Claude operation text", () => {
     await expect.element(page.getByText("Command not recorded.", { exact: true })).toBeVisible();
   });
 
-  it("always shows received public summary text in full and updates it in place", async () => {
+  it("expands a streaming summary, updates it in place and folds it once finished", async () => {
     mounted = await render(
       <div style={{ width: 430 }}>
         <ProviderSummaryWorkEntry
@@ -182,8 +182,12 @@ describe("inspectable received Claude operation text", () => {
       .element(page.getByText("Checking the repository before editing.", { exact: true }))
       .toBeVisible();
     await expect.element(page.getByText("Updating…", { exact: true })).toBeVisible();
-    // No disclosure: the summary is the row's content, not a hidden duplicate.
-    expect(document.querySelector("[data-provider-public-summary] button")).toBeNull();
+    // Streaming traces are open so they can be followed live.
+    expect(
+      document
+        .querySelector("[data-provider-public-summary] button")
+        ?.getAttribute("aria-expanded"),
+    ).toBe("true");
     await mounted.rerender(
       <div style={{ width: 430 }}>
         <ProviderSummaryWorkEntry
@@ -196,6 +200,15 @@ describe("inspectable received Claude operation text", () => {
         />
       </div>,
     );
+    // Once finished the trace folds itself away after a short pause.
+    await expect
+      .poll(() =>
+        document.querySelector("[data-provider-public-summary]")?.getAttribute("data-summary-open"),
+      )
+      .toBe("false");
+    await expect.poll(() => document.querySelector("[data-summary-text]")).toBeNull();
+    // The reader can reopen it to see the full text.
+    await page.getByRole("button", { name: /Claude summary/ }).click();
     await expect
       .element(page.getByText("Summary truncated to the retained preview.", { exact: true }))
       .toBeVisible();
@@ -232,6 +245,9 @@ describe("inspectable received Claude operation text", () => {
     await expect.element(page.getByText("OpenCode thinking", { exact: true })).toBeVisible();
     expect(document.body.textContent).not.toContain("Claude summary");
     await expect.element(page.getByText("Partial", { exact: true })).toBeVisible();
+    // Already finished on mount: starts folded, then opens on demand.
+    expect(document.querySelector("[data-summary-text]")).toBeNull();
+    await page.getByRole("button", { name: /OpenCode thinking/ }).click();
     await expect
       .element(page.getByText("Thinking truncated to the retained preview.", { exact: true }))
       .toBeVisible();
@@ -243,8 +259,8 @@ describe("inspectable received Claude operation text", () => {
     expect(document.querySelector("[data-summary-text]")?.textContent).toBe(
       "The failing test mocks the clock.\nCheck the fixture first.",
     );
-    // The trace is inert text: no disclosure, editor or action is rendered.
-    expect(document.querySelector("[data-provider-public-summary] button")).toBeNull();
+    // The trace is inert text: only the disclosure trigger, no editor or action.
+    expect(document.querySelectorAll("[data-provider-public-summary] button")).toHaveLength(1);
     const screenshotDirectory = import.meta.env.VITE_CLAUDE_OPERATION_SCREENSHOT_DIR;
     if (typeof screenshotDirectory === "string" && screenshotDirectory.length > 0) {
       document.documentElement.classList.remove("dark");

@@ -136,7 +136,7 @@ it.layer(NodeServices.layer)("durable Cafe relay auth", (it) => {
           (yield* relay
             .authenticate(binding, { ...input, secondFactor: "not-an-otp" })
             .pipe(Effect.flip)).code,
-        ).toBe("AUTH_REJECTED");
+        ).toBe("SECOND_FACTOR_REJECTED");
         expect((yield* sql`SELECT consumed_at FROM relay_invitations`)[0]?.consumed_at).toBeNull();
         yield* TestClock.adjust("30 seconds");
         const secondFactor = totpAtStep(
