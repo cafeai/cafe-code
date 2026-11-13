@@ -135,6 +135,18 @@ than filling unrelated API methods or suppressing their diagnostics.
 
 Large synthetic build-version fixtures keep every native payload write and the real publication, hashing and verification boundary. Within one fresh temporary output root, prepare a parent directory once after its successful creation rather than issuing recursive directory operations for every sibling file. Keep this directory set local to that fixture call; never turn it into a production path cache or omit native file identity checks. Retained phase counters may distinguish setup from verification, but do not attribute a whole timeout to an unmeasured native call.
 
+The five multi-snapshot native-filesystem integration cases in
+`scripts/lib/local-verification-inputs.test.ts` covering generated-output
+receipt reuse, installed Vitest output reuse, genuine nested input mutation,
+installed static-asset queries and cross-workspace ambient roots each use an
+explicit 15-second outer test guard. Their five, five, eight, three and five
+original snapshots, respectively, still execute through the real producer.
+All other test guards remain unchanged. This scoped
+outer-guard policy does not change production fingerprint/cache budgets,
+selected inputs, native byte and identity checks, assertions, CI workers or
+signal-driven cleanup. It is not a platform performance guarantee or evidence
+for an unobserved historical timeout cause.
+
 Native HTTP fixtures register their public test-signal retirement and owned
 completion cleanup before the first asynchronous acquisition. Timeout must
 fence late continuations, cancel only admitted requests and response bodies,

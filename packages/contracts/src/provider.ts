@@ -299,11 +299,19 @@ export const ProviderSendTurnInput = Schema.Struct({
   deliveryPriority: Schema.optional(ProviderDeliveryPriority),
   /** Trusted orchestration provenance; scheduled input must never gain human urgency. */
   inputOrigin: Schema.optional(Schema.Literals(["human", "scheduled"])),
-  // Cafe's durable message id is correlation metadata. ProviderService passes
-  // it only when an ordinary send is reconciled into an adapter-native live
-  // steer, allowing Codex to derive its bounded opaque client correlation id.
-  // Adapters that start a new turn do not forward this open-string value.
+  // Cafe's durable input identity stays internal to the adapter's bounded
+  // receipt lease; it is never forwarded as an open-string native policy.
+  // Together with the actual committed sequence it can correlate primary
+  // native consumption of a normal start or a send reconciled into live steer.
+  // Missing legacy metadata remains unknown, never an invented attempt.
   messageId: Schema.optional(MessageId),
+  intentSequence: Schema.optional(
+    Schema.Number.check(
+      Schema.isInt(),
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+    ),
+  ),
   // ProviderService normally reconciles a lagging projection by routing a
   // send into the adapter's active-turn steer path. Terminal-steer recovery is
   // different: its saved message is authorized only as a *new* turn after one

@@ -188,6 +188,22 @@ describe("ProviderDaemonEventJournal", () => {
             payload: { taskId: "native-task", description: "Reviewing files" },
           },
           { type: "task.completed", payload: { taskId: "native-task", status: "completed" } },
+          {
+            type: "task.progress",
+            payload: {
+              taskId: `claude-turn-steer-processing:${"a".repeat(64)}`,
+              description: "Claude began processing the submitted follow-up.",
+              visibility: "ambient",
+              usage: {
+                provider: "claudeAgent",
+                messageId: "native-initial-input",
+                intentSequence: 37,
+                deliveryKind: "turn-start",
+                providerInstanceId: "claude_history_account",
+                subagentRuntimeId: "00000000-0000-4000-8000-000000000962",
+              },
+            },
+          },
         ];
         const inputs = tasks.flatMap((task, index) => [
           { ...base, ...task, eventId: `claude-history-legacy-${index}` },
@@ -223,7 +239,7 @@ describe("ProviderDaemonEventJournal", () => {
         });
         const replayed = yield* replayJournal.replayAfter(0);
         expect(replayed).toEqual(published);
-        expect(replayed.map((record) => record.cursor)).toEqual([1, 2, 3, 4, 5, 6]);
+        expect(replayed.map((record) => record.cursor)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
         const sql = yield* SqlClient.SqlClient;
         const rows = yield* sql<{ readonly eventJson: string }>`
           SELECT event_json AS "eventJson"

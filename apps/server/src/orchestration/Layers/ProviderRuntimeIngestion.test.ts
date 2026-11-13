@@ -11431,6 +11431,49 @@ describe("ProviderRuntimeIngestion", () => {
     expect(
       thread.activities.find((activity) => activity.id === "evt-ambient-late-progress")?.payload,
     ).toMatchObject({ visibility: "ambient" });
+
+    const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000228");
+    const usage = {
+      provider: "claudeAgent",
+      messageId: "consumed-initial-input",
+      intentSequence: 37,
+      deliveryKind: "turn-start",
+      providerInstanceId: "claudeAgent",
+      subagentRuntimeId: runtimeId,
+    };
+    harness.emit({
+      type: "task.progress",
+      eventId: asEventId("evt-ambient-input-consumed"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      subagentRuntimeId: runtimeId,
+      createdAt: "2026-01-01T00:00:03.000Z",
+      threadId,
+      turnId,
+      payload: {
+        taskId: `claude-turn-steer-processing:${"a".repeat(64)}`,
+        description: "Claude began processing the submitted follow-up.",
+        visibility: "ambient",
+        usage,
+      },
+    });
+    const consumed = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.id === "evt-ambient-input-consumed"),
+    );
+    expect(consumed.session?.status).toBe("ready");
+    expect(consumed.session?.activeTurnId).toBeNull();
+    expect(
+      consumed.activities.find((activity) => activity.id === "evt-ambient-input-consumed"),
+    ).toMatchObject({
+      turnId,
+      payload: {
+        taskId: `claude-turn-steer-processing:${"a".repeat(64)}`,
+        detail: "Claude began processing the submitted follow-up.",
+        visibility: "ambient",
+        nativeWorkRuntimeId: runtimeId,
+        usage,
+      },
+    });
   });
 
   it("keeps visible Codex auth-recovery diagnostics separate from a settled turn", async () => {

@@ -5435,6 +5435,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           provider: "claudeAgent",
           messageId: "hydrated-claude-message",
           intentSequence: 31,
+          deliveryKind: "turn-start",
           providerInstanceId: "claude-retention-account",
           subagentRuntimeId: "16f7d05e-709c-4b84-9638-7f9a0484729b",
         },

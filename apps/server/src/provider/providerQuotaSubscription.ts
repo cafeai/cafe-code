@@ -152,7 +152,10 @@ export function subscribeProviderQuota(
           Effect.gen(function* () {
             const started = generation;
             const result = yield* read.pipe(
-              Effect.timeout(5_000),
+              // Cold account selection and the control-only read have separate
+              // finite allowances. Include their joined native cleanup plus
+              // both authority observations, without widening either child.
+              Effect.timeout(15_000),
               Effect.catchCause(() => Effect.succeed(UNAVAILABLE_SESSION_QUOTA)),
             );
             // No await between the final generation comparison and return.

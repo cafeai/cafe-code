@@ -1,5 +1,7 @@
 # Glide: computer use for Cafe Code
 
+Last updated: 2026-11-12 00:11:45 JST (UTC+0900).
+
 Glide provides opt-in background desktop control for Cafe chats on macOS. It
 uses the architecture reconstructed from the desktop Sky audit: model
 JavaScript → persistent ESM worker → trusted session broker → serialized native
@@ -115,8 +117,12 @@ admission and disables grants rather than permitting invisible computer use.
 Ordinary provider startup with Computer use disabled remains available when the
 status host fails. Its inert MCP catalogue cannot execute desktop operations;
 status refresh failures also do not replace successful owned cancellation or
-disposal with a provider failure. Enabling desktop authority still requires the
-native status acknowledgment and the existing permission and ownership checks.
+disposal with a provider failure. Archive, deletion and session retirement still
+join their exact owned cancellation before admitting the backend command; their
+final status refresh is best effort, including when the chat has no binding.
+An owned cancellation failure still refuses the mutation. Enabling desktop
+authority still requires the native status acknowledgment and the existing
+permission and ownership checks.
 **Open chat** uses a single server-minted navigation receipt for the local
 desktop's primary environment; stale row owners cannot open another chat.
 

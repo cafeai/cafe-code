@@ -509,10 +509,26 @@ function isChangedAxiomSteerSettingsFailure(cause: Cause.Cause<unknown>): boolea
   }
 }
 
-function isCodexNoActiveTurnToSteerFailure(cause: Cause.Cause<unknown>): boolean {
-  const providerError = findProviderAdapterRequestError(cause);
-  const detail = `${providerError?.detail ?? ""}\n${Cause.pretty(cause)}`.toLowerCase();
-  return detail.includes("turn/steer") && detail.includes("no active turn to steer");
+function isCodexNoActiveTurnToSteerFailure(
+  cause: Cause.Cause<unknown>,
+  admittedProvider: string | null | undefined,
+): boolean {
+  // The already admitted session, not error prose or an account-name prefix,
+  // determines which provider may use this resubmission recovery.
+  if (admittedProvider !== "codex") return false;
+  const error = findProviderAdapterRequestError(cause);
+  if (!error) return false;
+  const codexRequest =
+    (error.provider === "codex" && error.method === "turn/steer") ||
+    (error.provider === "provider-daemon" &&
+      error.method === "steerTurn" &&
+      error.remoteErrorTag === "ProviderAdapterRequestError" &&
+      // The authenticated RPC decoder prepends the structured error tag;
+      // preserve that exact canonical wrapper, including its method/driver.
+      error.detail.startsWith(
+        "ProviderAdapterRequestError: Provider adapter request failed (codex) for turn/steer:",
+      ));
+  return codexRequest && error.detail.toLowerCase().includes("no active turn to steer");
 }
 
 function detectCodexActiveTurnRunningStartFailure(cause: Cause.Cause<unknown>): TurnId | undefined {
@@ -2343,6 +2359,7 @@ const make = Effect.gen(function* () {
     readonly deliveryPriority?: ProviderSendTurnInput["deliveryPriority"];
     readonly inputOrigin?: ProviderSendTurnInput["inputOrigin"];
     readonly messageId?: MessageId;
+    readonly intentSequence?: ProviderSendTurnInput["intentSequence"];
     readonly allowActiveTurnSteerFallback?: boolean;
     /** A one-run schedule override must not become the next interactive default. */
     readonly rememberModelSelection?: boolean;
@@ -2493,6 +2510,7 @@ const make = Effect.gen(function* () {
         ? { codexReview: input.codexReview, allowActiveTurnSteerFallback: false }
         : {}),
       ...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
+      ...(input.intentSequence !== undefined ? { intentSequence: input.intentSequence } : {}),
       ...(input.allowActiveTurnSteerFallback !== undefined
         ? { allowActiveTurnSteerFallback: input.allowActiveTurnSteerFallback }
         : {}),
@@ -3686,6 +3704,7 @@ const make = Effect.gen(function* () {
                 : {}),
               threadId: event.payload.threadId,
               messageId: event.payload.messageId,
+              intentSequence: event.sequence,
               messageText: message.text,
               ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
               ...(event.payload.modelSelection !== undefined
@@ -3766,7 +3785,7 @@ const make = Effect.gen(function* () {
         }).pipe(
           Effect.matchCauseEffect({
             onFailure: (cause) => {
-              if (isCodexNoActiveTurnToSteerFailure(cause)) {
+              if (isCodexNoActiveTurnToSteerFailure(cause, runtimeActiveSession.provider)) {
                 return recoverNoActiveTurnSteerAsStart(cause);
               }
               const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(cause);
@@ -3854,6 +3873,7 @@ const make = Effect.gen(function* () {
           : {}),
         threadId: event.payload.threadId,
         messageId: event.payload.messageId,
+        intentSequence: event.sequence,
         ...(event.payload.codexReview !== undefined
           ? { codexReview: event.payload.codexReview, allowActiveTurnSteerFallback: false }
           : {}),
@@ -3930,7 +3950,12 @@ const make = Effect.gen(function* () {
         }).pipe(
           Effect.matchCauseEffect({
             onFailure: (steerCause) => {
-              if (isCodexNoActiveTurnToSteerFailure(steerCause)) {
+              if (
+                isCodexNoActiveTurnToSteerFailure(
+                  steerCause,
+                  sendTurnRequest.value.configuration?.provider,
+                )
+              ) {
                 return recoverTurnStartFailure(cause);
               }
               const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(steerCause);
@@ -4801,6 +4826,7 @@ const make = Effect.gen(function* () {
             : {}),
           threadId: event.payload.threadId,
           messageId: event.payload.messageId,
+          intentSequence: event.sequence,
           // Unbound input has never named an active provider turn. If one
           // appears after the final inventory check, fail closed rather than
           // silently converting this next-turn send into an unrelated steer.
@@ -4901,6 +4927,7 @@ const make = Effect.gen(function* () {
             : {}),
           threadId: event.payload.threadId,
           messageId: event.payload.messageId,
+          intentSequence: event.sequence,
           allowActiveTurnSteerFallback: false,
           messageText: message.text,
           attachments: normalizedAttachments,
@@ -5163,6 +5190,7 @@ const make = Effect.gen(function* () {
             : {}),
           threadId: event.payload.threadId,
           messageId: event.payload.messageId,
+          intentSequence: event.sequence,
           messageText: message.text,
           attachments: normalizedAttachments,
           ...(thread.modelSelection !== undefined ? { modelSelection: thread.modelSelection } : {}),
@@ -5270,7 +5298,7 @@ const make = Effect.gen(function* () {
     }).pipe(
       Effect.matchCauseEffect({
         onFailure: (cause) => {
-          if (isCodexNoActiveTurnToSteerFailure(cause)) {
+          if (isCodexNoActiveTurnToSteerFailure(cause, activeSession.providerName)) {
             return recoverStaleCodexSteerAsTurnStart();
           }
           const codexNonSteerableTurnKind = detectCodexNonSteerableTurnKind(cause);
@@ -7287,6 +7315,7 @@ const make = Effect.gen(function* () {
       const request = yield* buildSendTurnRequestForThread({
         threadId,
         messageId: message.id,
+        intentSequence: event.sequence,
         messageText: message.text,
         attachments: message.attachments ?? [],
         modelSelection: event.payload.modelSelection ?? thread.modelSelection,
@@ -7442,6 +7471,7 @@ const make = Effect.gen(function* () {
       const request = yield* buildSendTurnRequestForThread({
         threadId,
         messageId: message.id,
+        intentSequence: event.sequence,
         messageText: message.text,
         attachments: message.attachments ?? [],
         modelSelection: event.payload.modelSelection ?? thread.modelSelection,

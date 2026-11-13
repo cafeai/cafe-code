@@ -5,6 +5,9 @@
 export function subscribeMetadata<Value>(options: {
   readonly loading: Value;
   readonly unavailable: Value;
+  /** A code-owned bound for this metadata operation. Other consumers keep
+   * their existing six-second budget; received metadata never selects it. */
+  readonly loadingTimeoutMs?: number;
   readonly publish: (value: Value) => void;
   readonly subscribe: (
     publish: (value: Value) => void,
@@ -23,7 +26,7 @@ export function subscribeMetadata<Value>(options: {
   const awaiting = () => {
     if (!current) return;
     publish(options.loading);
-    timer = setTimeout(() => publish(options.unavailable), 6000);
+    timer = setTimeout(() => publish(options.unavailable), options.loadingTimeoutMs ?? 6000);
   };
   awaiting();
   const install = (value: () => void) => {

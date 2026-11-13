@@ -260,6 +260,119 @@ describe("Cafe Glide session authority", () => {
       await f.cleanup();
     }
   });
+  it.for(["no bindings", "held owned reset", "failed owned reset"] as const)(
+    "keeps chat retirement independent of failed status publication: %s",
+    async (scenario, context) => {
+      // Archive/delete share this real owner boundary. Acquire no fixture or
+      // kernel before its public timeout owner can fence and join this body.
+      const resetEntered = Promise.withResolvers<void>();
+      const releaseReset = Promise.withResolvers<void>();
+      const bodyDone = Promise.withResolvers<void>();
+      const retiredSignal = Promise.withResolvers<void>();
+      let retired = false;
+      let acquisition: ReturnType<typeof fixture> | undefined;
+      let retirement: Promise<unknown> | undefined;
+      let cleanup: Promise<void> | undefined;
+      const retire = () => {
+        retired = true;
+        retiredSignal.resolve();
+        releaseReset.resolve();
+        cleanup ??= (async () => {
+          await bodyDone.promise;
+          await retirement?.catch(() => undefined);
+          const owned = await acquisition?.catch(() => undefined);
+          await owned?.cleanup();
+        })();
+        return cleanup;
+      };
+      const onAbort = () => {
+        void retire().catch(() => undefined);
+      };
+      context.signal.addEventListener("abort", onAbort, { once: true });
+      context.onTestFinished(async () => {
+        context.signal.removeEventListener("abort", onAbort);
+        await retire();
+      });
+      try {
+        if (context.signal.aborted) return;
+        acquisition = fixture();
+        const f = await acquisition;
+        if (retired) return;
+        if (scenario === "no bindings") {
+          f.tray.publish.mockImplementationOnce(async () => {
+            f.trayFailure();
+            throw new Error("Synthetic status-host failure");
+          });
+          await expect(
+            f.runtime.operation({ kind: "control", input: { action: "status" } }),
+          ).rejects.toThrow("Synthetic status-host failure");
+          if (retired) return;
+          await f.runtime.operation({ kind: "control", input: { action: "stop-all" } });
+          if (retired) return;
+          retirement = f.runtime.operation({ kind: "retire-thread", threadId: identity.threadId });
+          await expect(retirement).resolves.toBeNull();
+          expect(f.kernels).toHaveLength(0);
+          expect(f.nativeFactory).not.toHaveBeenCalled();
+          expect(f.writePolicy).not.toHaveBeenCalled();
+          return;
+        }
+
+        f.policy({ enabled: true, apps: ["fixture.editor"] });
+        const binding = (await f.runtime.bind(identity))!;
+        if (retired) return;
+        await binding.activate();
+        if (retired) return;
+        await f.start(binding);
+        if (retired) return;
+        const token = await f.token(binding);
+        if (retired) return;
+        await f.runtime.operation({ kind: "execute", token, input: { code: "prepare" } });
+        if (retired) return;
+        const resetFailure = new Error("Synthetic exact owned reset failure");
+        f.kernels[0]!.reset.mockImplementationOnce(async () => {
+          resetEntered.resolve();
+          await releaseReset.promise;
+          if (scenario === "failed owned reset") throw resetFailure;
+        });
+        let settled = false;
+        retirement = f.runtime.operation({ kind: "retire-thread", threadId: identity.threadId });
+        void retirement.then(
+          () => {
+            settled = true;
+          },
+          () => {
+            settled = true;
+          },
+        );
+        await Promise.race([resetEntered.promise, retiredSignal.promise]);
+        if (retired) return;
+        expect(settled).toBe(false);
+        // Use the real failure callback only after the exact reset has entered.
+        // Its global stop must not substitute for joining this held operation.
+        f.trayFailure();
+        await f.runtime.operation({ kind: "control", input: { action: "stop-all" } });
+        if (retired) return;
+        expect(settled).toBe(false);
+        releaseReset.resolve();
+        if (scenario === "failed owned reset") {
+          await expect(retirement).rejects.toBe(resetFailure);
+        } else {
+          await expect(retirement).resolves.toBeNull();
+        }
+        if (retired) return;
+        binding.resume();
+        await expect(
+          f.runtime.operation({ kind: "execute", token, input: { code: "must remain revoked" } }),
+        ).rejects.toThrow("Glide");
+        expect(f.kernels[0]!.execute).toHaveBeenCalledOnce();
+        expect(f.kernels[0]!.reset).toHaveBeenCalledOnce();
+        expect(f.nativeFactory).not.toHaveBeenCalled();
+      } finally {
+        bodyDone.resolve();
+        await retire();
+      }
+    },
+  );
   it("still requires status acknowledgement when activating an enabled desktop grant", async () => {
     const f = await fixture();
     const entered = Promise.withResolvers<void>(),

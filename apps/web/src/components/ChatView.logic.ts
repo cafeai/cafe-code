@@ -766,10 +766,12 @@ export function readSteerProcessingMessageId(payloadValue: unknown): string | nu
  * Only Cafe's primary Claude UUID-lifecycle receipt acknowledges consumption.
  * Generic native task progress, a command ACK and assistant prose are not
  * evidence that this particular follow-up reached the active query. Bind the
- * receipt to both the owner captured at dispatch and the still-current owner;
- * a later account/runtime must not borrow an older receipt. The canonical
- * active turn may already have advanced when a durable receipt is hydrated:
- * only the receipt's own turn must still identify this captured input.
+ * receipt to both the captured account and the still-current native owner.
+ * Live steers retain their exact captured runtime/turn. A steer admitted as a
+ * normal start may instead carry its own explicitly typed native consumption
+ * witness for the actual new turn/query, bound to the same ACKed durable input.
+ * The current active turn may already have advanced during hydration; it is
+ * never a substitute for the receipt's own input/turn/attempt identity.
  */
 export function doesClaudeSteerProcessingActivityMatchPending(input: {
   readonly activity: OrchestrationThreadActivity;
@@ -792,9 +794,7 @@ export function doesClaudeSteerProcessingActivityMatchPending(input: {
     input.pendingSubagentRuntimeId.length === 0 ||
     input.pendingMessageId.length === 0 ||
     session.providerInstanceId !== input.pendingProviderInstanceId ||
-    session.subagentRuntimeId !== input.pendingSubagentRuntimeId ||
-    activity.kind !== "task.progress" ||
-    activity.turnId !== input.pendingTurnId
+    activity.kind !== "task.progress"
   ) {
     return false;
   }
@@ -824,16 +824,44 @@ export function doesClaudeSteerProcessingActivityMatchPending(input: {
       !/^[a-f0-9]{64}$/u.test(taskId.slice(CLAUDE_STEER_PROCESSING_TASK_PREFIX.length)) ||
       ownValue(usage, "provider") !== "claudeAgent" ||
       ownValue(usage, "messageId") !== input.pendingMessageId ||
-      ownValue(usage, "providerInstanceId") !== input.pendingProviderInstanceId ||
-      ownValue(usage, "subagentRuntimeId") !== input.pendingSubagentRuntimeId ||
-      ownValue(payload, "nativeWorkRuntimeId") !== input.pendingSubagentRuntimeId
+      ownValue(usage, "providerInstanceId") !== input.pendingProviderInstanceId
     ) {
       return false;
     }
-    const sequenceDescriptor =
-      usage !== null && typeof usage === "object"
-        ? Object.getOwnPropertyDescriptor(usage, "intentSequence")
-        : undefined;
+    // Absence preserves the existing exact live-steer contract. Received
+    // malformed or inherited kind metadata must not silently earn that legacy
+    // fallback, even when the old turn happens to match. No getter is invoked.
+    const deliveryDescriptor = Object.getOwnPropertyDescriptor(usage, "deliveryKind");
+    if (!deliveryDescriptor && Reflect.has(usage, "deliveryKind")) return false;
+    if (
+      deliveryDescriptor &&
+      (!("value" in deliveryDescriptor) || deliveryDescriptor.value !== "turn-start")
+    )
+      return false;
+    const isConsumedTurnStart = deliveryDescriptor !== undefined;
+    const receiptRuntimeId = ownValue(usage, "subagentRuntimeId");
+    const nativeWorkRuntimeId = ownValue(payload, "nativeWorkRuntimeId");
+    if (isConsumedTurnStart) {
+      const actualTurnId = ownValue(activity, "turnId");
+      const currentRuntimeId = ownValue(session, "subagentRuntimeId");
+      if (
+        typeof actualTurnId !== "string" ||
+        actualTurnId.length === 0 ||
+        typeof currentRuntimeId !== "string" ||
+        currentRuntimeId.length === 0 ||
+        receiptRuntimeId !== currentRuntimeId ||
+        nativeWorkRuntimeId !== currentRuntimeId
+      )
+        return false;
+    } else if (
+      session.subagentRuntimeId !== input.pendingSubagentRuntimeId ||
+      activity.turnId !== input.pendingTurnId ||
+      receiptRuntimeId !== input.pendingSubagentRuntimeId ||
+      nativeWorkRuntimeId !== input.pendingSubagentRuntimeId
+    ) {
+      return false;
+    }
+    const sequenceDescriptor = Object.getOwnPropertyDescriptor(usage, "intentSequence");
     // Omission is a narrow legacy shape, not permission to ignore a received
     // inherited field. Presence checks do not invoke an inherited getter.
     if (!sequenceDescriptor && Reflect.has(usage, "intentSequence")) return false;
@@ -847,6 +875,20 @@ export function doesClaudeSteerProcessingActivityMatchPending(input: {
         return false;
     } else if (input.requiresIntentSequence) {
       return false;
+    }
+    if (isConsumedTurnStart) {
+      // The adapter publishes this kind only after the exact primary native
+      // first input is consumed. That durable witness identifies the actual
+      // new turn/query; a send ACK, current turn or mere admission does not.
+      // Unlike the unique-message legacy path, a retarget always requires the
+      // explicit ACK-bound attempt, including when the native event arrives
+      // first and must remain pending until that acknowledgement catches up.
+      return (
+        input.pendingIntentSequence !== null &&
+        sequenceDescriptor !== undefined &&
+        "value" in sequenceDescriptor &&
+        sequenceDescriptor.value === input.pendingIntentSequence
+      );
     }
     // Feed the explicit native attempt through the existing shared fence.
     // Reused MessageIds cannot settle before their command ACK, nor from a

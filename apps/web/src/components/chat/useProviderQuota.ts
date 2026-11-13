@@ -59,6 +59,10 @@ export function useProviderQuota(
     return subscribeMetadata<ProviderQuotaState>({
       loading: { status: "loading", report: null },
       unavailable: { status: "unavailable", report: null },
+      // Account selection may use its bounded authentication check before the
+      // separate native allowance read. Leave the owner's fifteen-second read
+      // bound room to publish before this presentation-only loading deadline.
+      loadingTimeoutMs: 16_000,
       publish: (value) => setState({ request, value }),
       subscribe: async (publish, awaiting, active) => {
         const { requireEnvironmentConnection } = await import("../../environments/runtime");

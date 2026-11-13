@@ -12927,6 +12927,197 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  it("carries the exact converted Claude steer intent into its actual new root input", async () => {
+    const harness = await createHarness({
+      liveSteer: "supported",
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-fable-5-1",
+      },
+    });
+    const threadId = ThreadId.make("thread-1");
+    const messageId = asMessageId("claude-root-ready-follow-up");
+    const nextTurn = harness.observeNextProviderTurn(messageId, { opening: true });
+    // No active root exists. The real decider converts this same durable
+    // message into a normal start; the ACK identifies that committed intent.
+    const receipt = await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("claude-root-ready-steer"),
+        threadId,
+        message: {
+          messageId,
+          role: "user",
+          text: "continue while background work remains",
+          attachments: [],
+        },
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    const turn = await nextTurn.waitForRunning();
+    const committed = await Effect.runPromise(
+      harness.engine.readEvents(receipt.sequence - 1, 1).pipe(Stream.runHead),
+    );
+    expect(Option.getOrUndefined(committed)).toMatchObject({
+      type: "thread.turn-start-requested",
+      sequence: receipt.sequence,
+      payload: { threadId, messageId },
+    });
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId,
+      messageId,
+      intentSequence: receipt.sequence,
+      input: "continue while background work remains",
+    });
+    expect(harness.steerTurn).not.toHaveBeenCalled();
+    expect((await harness.readThreadDetail(threadId))?.session?.activeTurnId).toBe(turn.turnId);
+    // Provider acceptance is not native consumption; no synthesized processing
+    // activity may settle this input until the adapter observes its exact UUID.
+    expect(
+      (await harness.readThreadDetail(threadId))?.activities.some(
+        (activity) =>
+          activity.kind === "task.progress" &&
+          String((activity.payload as Record<string, unknown> | undefined)?.taskId).startsWith(
+            "claude-turn-steer-processing:",
+          ),
+      ),
+    ).toBe(false);
+  });
+
+  for (const input of [
+    {
+      name: "Claude direct prose",
+      driver: "claudeAgent",
+      failure: new ProviderAdapterRequestError({
+        provider: "claudeAgent",
+        method: "turn/steer",
+        detail: "no active turn to steer",
+      }),
+    },
+    {
+      name: "Claude daemon prose",
+      driver: "claudeAgent",
+      failure: toRemoteRequestError(
+        "steerTurn",
+        new ProviderDaemonRpcResponseError(
+          "ProviderAdapterRequestError",
+          "ProviderAdapterRequestError: Provider adapter request failed (claudeAgent) for turn/steer: no active turn to steer",
+        ),
+      ),
+    },
+    {
+      name: "Claude owner with Codex-looking typed envelope",
+      driver: "claudeAgent",
+      failure: toRemoteRequestError(
+        "steerTurn",
+        new ProviderDaemonRpcResponseError(
+          "ProviderAdapterRequestError",
+          "ProviderAdapterRequestError: Provider adapter request failed (codex) for turn/steer: no active turn to steer",
+        ),
+      ),
+    },
+    {
+      name: "Codex owner with untyped transport prose",
+      driver: "codex",
+      failure: toRemoteRequestError(
+        "steerTurn",
+        new Error(
+          "Provider adapter request failed (codex) for turn/steer: no active turn to steer",
+        ),
+      ),
+    },
+    {
+      name: "Codex owner with wrong RPC tag and canonical-looking prefix",
+      driver: "codex",
+      failure: toRemoteRequestError(
+        "steerTurn",
+        new ProviderDaemonRpcResponseError(
+          "Error",
+          "ProviderAdapterRequestError: Provider adapter request failed (codex) for turn/steer: no active turn to steer",
+        ),
+      ),
+    },
+  ] as const)
+    it(`does not replay an unqualified no-active-turn failure (${input.name})`, async () => {
+      const account = ProviderInstanceId.make(input.driver);
+      const harness = await createHarness({
+        liveSteer: "supported",
+        threadModelSelection: {
+          instanceId: account,
+          model: input.driver === "codex" ? "gpt-5-codex" : "claude-fable-5-1",
+        },
+      });
+      const threadId = ThreadId.make("thread-1");
+      const messageId = asMessageId("claude-no-active-prose");
+      const activeTurnId = asTurnId("claude-owned-active-root");
+      harness.steerTurn.mockImplementationOnce(() => Effect.fail(input.failure));
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("claude-prose-session"),
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: input.driver,
+            providerInstanceId: account,
+            runtimeMode: "approval-required",
+            activeTurnId,
+            lastError: null,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+          createdAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+      const receipt = await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.steer",
+          commandId: CommandId.make("claude-prose-steer"),
+          threadId,
+          message: {
+            messageId,
+            role: "user",
+            text: "preserve this input without uncertain replay",
+            attachments: [],
+          },
+          createdAt: "2026-01-01T00:00:01.000Z",
+        }),
+      );
+      await waitFor(
+        async () =>
+          (await harness.readThreadDetail(threadId))?.activities.some(
+            (activity) =>
+              (activity.kind === "provider.turn.steer.failed" &&
+                (activity.payload as Record<string, unknown> | undefined)?.messageId ===
+                  messageId) ||
+              (activity.kind === "runtime.warning" &&
+                (activity.payload as Record<string, unknown> | undefined)?.recovery ===
+                  "turn-start-after-no-active-turn"),
+          ) === true,
+      );
+      await harness.drain();
+      const thread = await harness.readThreadDetail(threadId);
+      expect(harness.steerTurn).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(thread?.messages.find((message) => message.id === messageId)?.text).toBe(
+        "preserve this input without uncertain replay",
+      );
+      expect(
+        thread?.activities.find((activity) => activity.kind === "provider.turn.steer.failed"),
+      ).toMatchObject({
+        turnId: activeTurnId,
+        payload: { messageId, intentSequence: receipt.sequence },
+      });
+      expect(
+        thread?.activities.some(
+          (activity) =>
+            (activity.payload as Record<string, unknown> | undefined)?.recovery ===
+            "turn-start-after-no-active-turn",
+        ),
+      ).toBe(false);
+    });
+
   it("retries a Codex no-active-turn steer race as the next turn", async () => {
     const harness = await createHarness({ liveSteer: "supported" });
     const now = "2026-01-01T00:00:00.000Z";
@@ -12936,11 +13127,13 @@ describe("ProviderCommandReactor", () => {
     const nextTurn = harness.observeNextProviderTurn(messageId);
     harness.steerTurn.mockImplementationOnce(() =>
       Effect.fail(
-        new ProviderAdapterRequestError({
-          provider: "provider-daemon",
-          method: "steerTurn",
-          detail: "Provider adapter request failed (codex) for turn/steer: no active turn to steer",
-        }),
+        toRemoteRequestError(
+          "steerTurn",
+          new ProviderDaemonRpcResponseError(
+            "ProviderAdapterRequestError",
+            "ProviderAdapterRequestError: Provider adapter request failed (codex) for turn/steer: no active turn to steer",
+          ),
+        ),
       ),
     );
 
@@ -13103,12 +13296,13 @@ describe("ProviderCommandReactor", () => {
           };
           input?.changeRecoveryState?.(harness);
           return yield* Effect.fail(
-            new ProviderAdapterRequestError({
-              provider: "provider-daemon",
-              method: "steerTurn",
-              detail:
-                "Provider adapter request failed (codex) for turn/steer: no active turn to steer",
-            }),
+            toRemoteRequestError(
+              "steerTurn",
+              new ProviderDaemonRpcResponseError(
+                "ProviderAdapterRequestError",
+                "ProviderAdapterRequestError: Provider adapter request failed (codex) for turn/steer: no active turn to steer",
+              ),
+            ),
           );
         }),
       );
@@ -13672,11 +13866,13 @@ describe("ProviderCommandReactor", () => {
     );
     harness.steerTurn.mockImplementationOnce(() =>
       Effect.fail(
-        new ProviderAdapterRequestError({
-          provider: "provider-daemon",
-          method: "steerTurn",
-          detail: "Provider adapter request failed (codex) for turn/steer: no active turn to steer",
-        }),
+        toRemoteRequestError(
+          "steerTurn",
+          new ProviderDaemonRpcResponseError(
+            "ProviderAdapterRequestError",
+            "ProviderAdapterRequestError: Provider adapter request failed (codex) for turn/steer: no active turn to steer",
+          ),
+        ),
       ),
     );
     harness.sendTurn.mockImplementationOnce(() =>

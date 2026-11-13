@@ -1172,7 +1172,7 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
             type: "error",
             title: uiText("Could not archive chat", undefined, undefined, uiLocale),
             description: uiText(
-              "Reconnect to the chat''s environment before trying again.",
+              "Check the chat's connection and current activity before trying again.",
               undefined,
               undefined,
               uiLocale,

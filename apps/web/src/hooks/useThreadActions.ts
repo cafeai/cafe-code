@@ -373,9 +373,20 @@ export function useThreadActions() {
   const archiveThread = useCallback(
     async (target: ScopedThreadRef) => {
       const api = readEnvironmentApi(target.environmentId);
-      if (!api) return;
+      if (!api) {
+        throw new Error(
+          uiText(
+            "Environment API not found for environment {environmentId}",
+            { environmentId: target.environmentId },
+            undefined,
+            uiLocale,
+          ),
+        );
+      }
       const resolved = resolveThreadTarget(target);
-      if (!resolved) return;
+      if (!resolved) {
+        throw new Error(uiText("Could not archive chat", undefined, undefined, uiLocale));
+      }
       const { thread, threadRef } = resolved;
       if (thread.session?.status === "running" && thread.session.activeTurnId != null) {
         throw new Error(
@@ -383,28 +394,49 @@ export function useThreadActions() {
         );
       }
 
-      const currentRouteThreadRef = getCurrentRouteThreadRef();
-      const shouldNavigateToDraft =
-        currentRouteThreadRef?.threadId === threadRef.threadId &&
-        currentRouteThreadRef.environmentId === threadRef.environmentId;
-      const archiveCommand = api.orchestration.dispatchCommand({
+      // The acknowledged archive owns this exact chat. Replacement-draft
+      // navigation separately belongs to the mounted view and its captured
+      // route/workspace incarnation, including a later away-and-back gesture.
+      const originalNavigationOwner = navigationOwner.current;
+      const originalLocation = router.state.location;
+      const originalWorkspace = useWorkspaceSelection.getState();
+      const originalRouteThreadRef = getCurrentRouteThreadRef();
+      const wasCurrentChat =
+        originalRouteThreadRef?.threadId === threadRef.threadId &&
+        originalRouteThreadRef.environmentId === threadRef.environmentId &&
+        readWorkspaceEnvironmentId() === threadRef.environmentId;
+      await api.orchestration.dispatchCommand({
         type: "thread.archive",
         commandId: newCommandId(),
         threadId: threadRef.threadId,
       });
+      refreshArchivedThreadsForEnvironment(threadRef.environmentId);
 
-      if (shouldNavigateToDraft) {
+      const currentRouteThreadRef = getCurrentRouteThreadRef();
+      if (
+        !wasCurrentChat ||
+        originalNavigationOwner === null ||
+        navigationOwner.current !== originalNavigationOwner ||
+        router.state.location !== originalLocation ||
+        useWorkspaceSelection.getState() !== originalWorkspace ||
+        readWorkspaceEnvironmentId() !== threadRef.environmentId ||
+        currentRouteThreadRef?.threadId !== threadRef.threadId ||
+        currentRouteThreadRef.environmentId !== threadRef.environmentId
+      ) {
+        return;
+      }
+      // The command has committed. A failed draft or route transition must
+      // not invite another archive or turn an observed commit into a failure.
+      // Mutation rejection above still reaches the caller without replay.
+      try {
         if (thread.projectId === null) {
           await handleNewStandaloneChatRef.current();
         } else {
           await handleNewThreadRef.current(scopeProjectRef(thread.environmentId, thread.projectId));
         }
-      }
-
-      await archiveCommand;
-      refreshArchivedThreadsForEnvironment(threadRef.environmentId);
+      } catch {}
     },
-    [getCurrentRouteThreadRef, resolveThreadTarget, uiLocale],
+    [getCurrentRouteThreadRef, resolveThreadTarget, router, uiLocale],
   );
 
   const unarchiveThread = useCallback(async (target: ScopedThreadRef) => {

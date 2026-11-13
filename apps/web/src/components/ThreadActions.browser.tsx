@@ -25,6 +25,8 @@ const mocks = vi.hoisted(() => ({
       }) => Promise<void>
     >(),
   confirm: vi.fn<(message: string) => Promise<boolean>>(),
+  newThread: vi.fn<(projectRef: unknown) => Promise<void>>(),
+  newStandaloneChat: vi.fn<() => Promise<void>>(),
   readApi: vi.fn(),
   hardDelete: vi.fn<(input: { threadId: string }) => Promise<{ deleted: boolean }>>(),
   removeWorktree: vi.fn<(input: { cwd: string; path: string; force: boolean }) => Promise<void>>(),
@@ -78,8 +80,8 @@ vi.mock("@tanstack/react-router", () => ({ useRouter: () => mocks.router }));
 vi.mock("@tanstack/react-query", () => ({ useQueryClient: () => ({}) }));
 vi.mock("../hooks/useHandleNewThread", () => ({
   useNewThreadHandler: () => ({
-    handleNewThread: vi.fn(),
-    handleNewStandaloneChat: vi.fn(),
+    handleNewThread: mocks.newThread,
+    handleNewStandaloneChat: mocks.newStandaloneChat,
   }),
 }));
 vi.mock("../hooks/useSettings", () => ({
@@ -200,6 +202,12 @@ function createDeleteActionFixture(context: TestContext) {
   let retired = false;
   let rendering: ReturnType<typeof mountActions> | undefined;
   let completion: Promise<void> | undefined;
+  let unmounting: Promise<void> | undefined;
+  const unmountRendered = () =>
+    (unmounting ??= Promise.resolve().then(async () => {
+      const mounted = await rendering?.catch(() => null);
+      await mounted?.screen.unmount();
+    }));
   const pending = new Set<Promise<unknown>>();
   const releaseHeldCleanup = new Set<() => void>();
   const assertActive = () => {
@@ -210,8 +218,7 @@ function createDeleteActionFixture(context: TestContext) {
     for (const release of releaseHeldCleanup) release();
     return (completion ??= Promise.resolve().then(async () => {
       await Promise.allSettled([...pending]);
-      const mounted = await rendering?.catch(() => null);
-      await mounted?.screen.unmount();
+      await unmountRendered();
       context.signal.removeEventListener("abort", retire);
     }));
   };
@@ -230,7 +237,12 @@ function createDeleteActionFixture(context: TestContext) {
       assertActive();
       return mounted;
     },
-    holdWorktreeCleanup() {
+    async unmount() {
+      assertActive();
+      if (!rendering) throw new Error("The action fixture has not rendered.");
+      await unmountRendered();
+    },
+    holdCompletion() {
       assertActive();
       let observeEntry!: () => void;
       let finish!: () => void;
@@ -252,8 +264,8 @@ function createDeleteActionFixture(context: TestContext) {
         entered,
         start() {
           assertActive();
-          // Only the actual synthetic VCS invocation observes entry. Cleanup
-          // releases completion, never fabricates an entered receipt.
+          // Only the actual admitted mocked service invocation observes entry.
+          // Cleanup releases completion without fabricating service admission.
           observeEntry();
           return completed;
         },
@@ -290,6 +302,8 @@ beforeEach(async () => {
   mocks.dispatch.mockReset();
   mocks.dispatch.mockResolvedValue(undefined);
   mocks.confirm.mockReset().mockResolvedValue(true);
+  mocks.newThread.mockReset().mockResolvedValue(undefined);
+  mocks.newStandaloneChat.mockReset().mockResolvedValue(undefined);
   mocks.hardDelete.mockReset().mockResolvedValue({ deleted: true });
   mocks.removeWorktree.mockReset().mockResolvedValue(undefined);
   mocks.project = null;
@@ -322,13 +336,123 @@ afterEach(async () => {
   document.body.innerHTML = "";
 });
 
+describe("archive action acknowledgement boundaries", () => {
+  it("refuses a missing exact chat even when a peer environment has the same chat ID", async (context) => {
+    const fixture = createDeleteActionFixture(context);
+    const { actions } = await fixture.mount();
+    const original = mocks.threads[0]!;
+    try {
+      mocks.threads[0] = { ...original, environmentId: "other" };
+      await expect(fixture.run(() => actions.archiveThread(target))).rejects.toThrow();
+      expect(mocks.readApi).toHaveBeenCalledExactlyOnceWith(target.environmentId);
+      expect(mocks.dispatch).not.toHaveBeenCalled();
+      expect(mocks.newThread).not.toHaveBeenCalled();
+      expect(mocks.newStandaloneChat).not.toHaveBeenCalled();
+      expect(mocks.refreshArchived).not.toHaveBeenCalled();
+    } finally {
+      await fixture.cleanup();
+      mocks.threads[0] = original;
+    }
+  });
+
+  it("waits for the exact archive acknowledgement before opening a replacement draft", async (context) => {
+    const fixture = createDeleteActionFixture(context);
+    const { actions } = await fixture.mount();
+    const acknowledgement = fixture.holdCompletion();
+    try {
+      mocks.dispatch.mockImplementationOnce(acknowledgement.start);
+      const operation = fixture.run(() => actions.archiveThread(target));
+      await acknowledgement.entered;
+      expect(mocks.dispatch).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ type: "thread.archive", threadId: target.threadId }),
+      );
+      expect(mocks.newStandaloneChat).not.toHaveBeenCalled();
+      expect(mocks.newThread).not.toHaveBeenCalled();
+      expect(mocks.refreshArchived).not.toHaveBeenCalled();
+      acknowledgement.release();
+      await operation;
+      expect(mocks.newStandaloneChat).toHaveBeenCalledOnce();
+      expect(mocks.refreshArchived).toHaveBeenCalledExactlyOnceWith(target.environmentId);
+      expect(mocks.readApi.mock.calls.every(([id]) => id === target.environmentId)).toBe(true);
+    } finally {
+      acknowledgement.release();
+      await fixture.cleanup();
+    }
+  });
+
+  it.for(["standalone rejection", "project throw"] as const)(
+    "keeps an acknowledged archive successful after a replacement-draft %s",
+    async (failure, context) => {
+      const fixture = createDeleteActionFixture(context);
+      const { actions } = await fixture.mount();
+      try {
+        if (failure === "standalone rejection") {
+          mocks.newStandaloneChat.mockRejectedValueOnce(new Error("Synthetic draft rejection"));
+        } else {
+          mocks.threads[0]!.projectId = "project-a";
+          mocks.newThread.mockImplementationOnce(() => {
+            throw new Error("Synthetic draft throw");
+          });
+        }
+        await expect(fixture.run(() => actions.archiveThread(target))).resolves.toBeUndefined();
+        expect(mocks.dispatch).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ type: "thread.archive", threadId: target.threadId }),
+        );
+        expect(mocks.refreshArchived).toHaveBeenCalledExactlyOnceWith(target.environmentId);
+        if (failure === "standalone rejection")
+          expect(mocks.newStandaloneChat).toHaveBeenCalledOnce();
+        else
+          expect(mocks.newThread).toHaveBeenCalledExactlyOnceWith({
+            environmentId: target.environmentId,
+            projectId: "project-a",
+          });
+        expect(mocks.toast).not.toHaveBeenCalled();
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  );
+
+  it.for(["another chat", "another environment", "away and back", "workspace", "unmount"] as const)(
+    "retires replacement-draft navigation after %s while the archive acknowledgement is pending",
+    async (change, context) => {
+      const fixture = createDeleteActionFixture(context);
+      const { actions } = await fixture.mount();
+      const acknowledgement = fixture.holdCompletion();
+      try {
+        mocks.dispatch.mockImplementationOnce(acknowledgement.start);
+        const operation = fixture.run(() => actions.archiveThread(target));
+        await acknowledgement.entered;
+        if (change === "another chat") navigateTo("b");
+        else if (change === "another environment") navigateTo("a", "other");
+        else if (change === "away and back") {
+          navigateTo("b");
+          navigateTo("a");
+        } else if (change === "workspace") mocks.workspace = { environmentId: "other" };
+        else await fixture.unmount();
+        acknowledgement.release();
+        await operation;
+        expect(mocks.dispatch).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ type: "thread.archive", threadId: target.threadId }),
+        );
+        expect(mocks.refreshArchived).toHaveBeenCalledExactlyOnceWith(target.environmentId);
+        expect(mocks.newStandaloneChat).not.toHaveBeenCalled();
+        expect(mocks.newThread).not.toHaveBeenCalled();
+      } finally {
+        acknowledgement.release();
+        await fixture.cleanup();
+      }
+    },
+  );
+});
+
 describe("delete action acknowledgement boundaries", () => {
   it.for(["rejects", "throws"] as const)(
     "finishes acknowledged deletion and owned cleanup when fallback navigation %s",
     async (navigationFailure, context) => {
       const fixture = createDeleteActionFixture(context);
       const { actions } = await fixture.mount();
-      const cleanup = fixture.holdWorktreeCleanup();
+      const cleanup = fixture.holdCompletion();
       try {
         mocks.threads[0]!.projectId = "project-a";
         mocks.threads[0]!.worktreePath = "/synthetic/delete-worktree";
@@ -384,8 +508,8 @@ describe("delete action acknowledgement boundaries", () => {
     },
   );
 
-  it.for(["recycle", "confirmed recycle", "permanent"] as const)(
-    "refuses a missing target environment before %s deletion can report completion",
+  it.for(["archive", "recycle", "confirmed recycle", "permanent"] as const)(
+    "refuses a missing target environment before %s can report completion",
     async (action, context) => {
       const fixture = createDeleteActionFixture(context);
       const { actions } = await fixture.mount();
@@ -406,11 +530,13 @@ describe("delete action acknowledgement boundaries", () => {
         // peer with the same chat ID is never a fallback mutation target.
         await expect(
           fixture.run(() =>
-            action === "recycle"
-              ? actions.deleteThread(target)
-              : action === "confirmed recycle"
-                ? actions.confirmAndDeleteThread(target)
-                : actions.hardDeleteThread(target, { confirm: false }),
+            action === "archive"
+              ? actions.archiveThread(target)
+              : action === "recycle"
+                ? actions.deleteThread(target)
+                : action === "confirmed recycle"
+                  ? actions.confirmAndDeleteThread(target)
+                  : actions.hardDeleteThread(target, { confirm: false }),
           ),
         ).rejects.toThrow();
         expect(mocks.dispatch).not.toHaveBeenCalled();

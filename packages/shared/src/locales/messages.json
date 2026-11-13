@@ -1898,7 +1898,7 @@
   },
   "Can't archive a chat while it's running.": {
     "message": "Can't archive a chat while it's running.",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:382"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:393"]
   },
   "Cancel": {
     "message": "Cancel",
@@ -2053,7 +2053,7 @@
   },
   "Chat deleted, but the worktree couldn't be removed": {
     "message": "Chat deleted, but the worktree couldn't be removed",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:664"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:696"]
   },
   "Chat duplicated, but could not open it": {
     "message": "Chat duplicated, but could not open it",
@@ -2191,7 +2191,10 @@
   },
   "Check the chat's connection and current activity before trying again.": {
     "message": "Check the chat's connection and current activity before trying again.",
-    "locations": ["apps/web/src/components/desk/useDeskChatActions.ts:159"]
+    "locations": [
+      "apps/web/src/components/Sidebar.tsx:1174",
+      "apps/web/src/components/desk/useDeskChatActions.ts:159"
+    ]
   },
   "Check the connection and Recently Deleted before trying again. The action was not automatically repeated.": {
     "message": "Check the connection and Recently Deleted before trying again. The action was not automatically repeated.",
@@ -3582,7 +3585,8 @@
     "message": "Could not archive chat",
     "locations": [
       "apps/web/src/components/Sidebar.tsx:1173",
-      "apps/web/src/components/Sidebar.tsx:2731"
+      "apps/web/src/components/Sidebar.tsx:2731",
+      "apps/web/src/hooks/useThreadActions.ts:388"
     ]
   },
   "Could not change Cafe management access. Refresh and try again.": {
@@ -3830,7 +3834,7 @@
   },
   "Could not remove {value1}. {message}": {
     "message": "Could not remove {value1}. {message}",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:670"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:702"]
   },
   "Could not rename chat": {
     "message": "Could not rename chat",
@@ -4628,11 +4632,11 @@
   },
   "Delete the worktree too?": {
     "message": "Delete the worktree too?",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:561"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:593"]
   },
   "Delete this chat forever?": {
     "message": "Delete this chat forever?",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:457"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:489"]
   },
   "Delete this schedule? Future runs will stop. An already running turn is not interrupted.": {
     "message": "Delete this schedule? Future runs will stop. An already running turn is not interrupted.",
@@ -5546,11 +5550,12 @@
     "message": "Environment API not found for environment {environmentId}",
     "locations": [
       "apps/web/src/environmentApi.ts:102",
-      "apps/web/src/hooks/useThreadActions.ts:442",
-      "apps/web/src/hooks/useThreadActions.ts:485",
-      "apps/web/src/hooks/useThreadActions.ts:702",
-      "apps/web/src/hooks/useThreadActions.ts:754",
-      "apps/web/src/hooks/useThreadActions.ts:802"
+      "apps/web/src/hooks/useThreadActions.ts:378",
+      "apps/web/src/hooks/useThreadActions.ts:474",
+      "apps/web/src/hooks/useThreadActions.ts:517",
+      "apps/web/src/hooks/useThreadActions.ts:734",
+      "apps/web/src/hooks/useThreadActions.ts:786",
+      "apps/web/src/hooks/useThreadActions.ts:834"
     ]
   },
   "Environment disconnected": {
@@ -6984,7 +6989,7 @@
   },
   "Its history, attachments and checkpoints are removed. This can't be undone.": {
     "message": "Its history, attachments and checkpoints are removed. This can't be undone.",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:458"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:490"]
   },
   "Jan": {
     "message": "Jan",
@@ -7799,7 +7804,7 @@
   },
   "Move \"{title}\" to the Recycle Bin?": {
     "message": "Move \"{title}\" to the Recycle Bin?",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:719"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:751"]
   },
   "Move \"{title}\" to the Recycle Bin?\nYou can review it later in Settings '>' Recently Deleted.": {
     "message": "Move \"{title}\" to the Recycle Bin?\nYou can review it later in Settings '>' Recently Deleted.",
@@ -10224,10 +10229,7 @@
   },
   "Reconnect to the chat''s environment before trying again.": {
     "message": "Reconnect to the chat''s environment before trying again.",
-    "locations": [
-      "apps/web/src/components/Sidebar.tsx:1174",
-      "apps/web/src/components/Sidebar.tsx:1202"
-    ]
+    "locations": ["apps/web/src/components/Sidebar.tsx:1202"]
   },
   "Reconnect to the project''s environment and try again.": {
     "message": "Reconnect to the project''s environment and try again.",
@@ -13755,7 +13757,7 @@
   },
   "This chat is the only one using this worktree:": {
     "message": "This chat is the only one using this worktree:",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:553"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:585"]
   },
   "This chat no longer fits in the model's context window. Run /compact, or start a new chat.": {
     "message": "This chat no longer fits in the model's context window. Run /compact, or start a new chat.",
@@ -14562,7 +14564,7 @@
   },
   "Unknown error removing worktree.": {
     "message": "Unknown error removing worktree.",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:654"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:686"]
   },
   "Unlimited": {
     "message": "Unlimited",
@@ -15587,7 +15589,7 @@
   },
   "You can restore it from Settings > Recently Deleted.": {
     "message": "You can restore it from Settings > Recently Deleted.",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:720"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:752"]
   },
   "You have no earned resets available. Your limits reset on schedule.": {
     "message": "You have no earned resets available. Your limits reset on schedule.",
@@ -16578,7 +16580,7 @@
   },
   "this chat": {
     "message": "this chat",
-    "locations": ["apps/web/src/hooks/useThreadActions.ts:716"]
+    "locations": ["apps/web/src/hooks/useThreadActions.ts:748"]
   },
   "time format": {
     "message": "time format",

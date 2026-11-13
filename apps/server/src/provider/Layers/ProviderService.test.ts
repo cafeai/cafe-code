@@ -4240,6 +4240,8 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
         const turn = yield* provider.sendTurn({
           threadId: session.threadId,
+          messageId: MessageId.make("claude-send-reconciled-to-steer"),
+          intentSequence: 37,
           input: "queue this without interrupting Claude",
           attachments: [],
         });
@@ -4254,6 +4256,8 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.deepEqual(routing.claude.steerTurn.mock.calls[0]?.[0], {
           threadId: session.threadId,
           expectedTurnId: asTurnId("turn-claude-active"),
+          messageId: MessageId.make("claude-send-reconciled-to-steer"),
+          intentSequence: 37,
           input: "queue this without interrupting Claude",
         });
       }),

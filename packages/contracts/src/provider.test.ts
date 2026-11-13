@@ -16,10 +16,19 @@ const decodeProviderSendTurnInput = Schema.decodeUnknownSync(ProviderSendTurnInp
 const decodeProviderSession = Schema.decodeUnknownSync(ProviderSession);
 const decodeProviderEvent = Schema.decodeUnknownSync(ProviderEvent);
 
-describe("ProviderSteerTurnInput", () => {
+describe.each([
+  {
+    name: "ProviderSteerTurnInput",
+    decode: Schema.decodeUnknownSync(ProviderSteerTurnInput),
+    input: { threadId: "thread-1", expectedTurnId: "turn-1", messageId: "message-1" },
+  },
+  {
+    name: "ProviderSendTurnInput",
+    decode: Schema.decodeUnknownSync(ProviderSendTurnInput),
+    input: { threadId: "thread-1", messageId: "message-1" },
+  },
+])("$name", ({ decode, input }) => {
   it("retains the exact safe delivery attempt and legacy omission", () => {
-    const decode = Schema.decodeUnknownSync(ProviderSteerTurnInput);
-    const input = { threadId: "thread-1", expectedTurnId: "turn-1", messageId: "message-1" };
     expect(decode(input)).toEqual(input);
     for (const intentSequence of [0, Number.MAX_SAFE_INTEGER])
       expect(decode({ ...input, intentSequence }).intentSequence).toBe(intentSequence);

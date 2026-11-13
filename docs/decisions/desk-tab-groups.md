@@ -5,7 +5,7 @@ repository checks and synthetic browser coverage passed on native macOS.
 
 Created: 2026-09-29 11:53:43 JST (UTC+0900).
 
-Last updated: 2026-10-07 (America/Los_Angeles).
+Last updated: 2026-11-12 00:11:45 JST (UTC+0900).
 
 ## Context and scope
 
@@ -121,6 +121,14 @@ confirmation and permanent-delete entries reject an unavailable exact
 environment API; another selected server is never a fallback, and missing
 transport cannot report successful deletion.
 
+Archive follows the same acknowledgement boundary: the exact environment/chat
+must exist, and its server acknowledgement precedes any replacement draft.
+After that acknowledgement, draft navigation requires the original mounted
+owner, immutable route location and workspace incarnation as well as the same
+chat/environment. A route or workspace change, even away and back, retires that
+presentation authority without cancelling the admitted archive. A draft failure
+does not turn an acknowledged archive into a mutation failure or invite replay.
+
 Shared menu cleanup restores the opener for Escape or selection, but never
 after an outside press/focus transfer. Replacing a menu transfers its original
 focus destination without briefly refocusing another pane; retired cleanup
@@ -225,6 +233,9 @@ unmount, cross-environment navigation, session-stop waits and normal fallback.
 It also holds synthetic worktree completion to verify that both rejected and
 synchronously refused navigation preserve cleanup-before-purge ordering, and
 checks missing-connection refusals through each public deletion entry point.
+Archive cases additionally hold the actual dispatch acknowledgement, refuse
+missing exact targets and verify post-acknowledgement draft failure and
+route/workspace/unmount retirement.
 Sidebar cases exercise the real Desk store for replacement and unchanged-group
 edits. The same browser fixtures run in the cross-platform CI subset; no native
 provider or real account is required.
