@@ -8,6 +8,7 @@ import { Radio as RadioPrimitive } from "@base-ui/react/radio";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   defaultInstanceIdForDriver,
+  DEFAULT_PROVIDER_INSTANCES,
   ProviderInstanceId,
   ProviderDriverKind,
   type ProviderInstanceConfig,
@@ -129,6 +130,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   const existingIds = useMemo(
     () =>
       new Set([
+        ...Object.keys(DEFAULT_PROVIDER_INSTANCES),
         ...Object.keys(settings.providers).map((driver) =>
           String(defaultInstanceIdForDriver(ProviderDriverKind.make(driver))),
         ),

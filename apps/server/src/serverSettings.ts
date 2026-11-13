@@ -343,6 +343,9 @@ function fallbackTextGenerationProvider(settings: ServerSettings): ServerSetting
 // Values under these keys are compared as a whole — never stripped field-by-field.
 const ATOMIC_SETTINGS_KEYS: ReadonlySet<string> = new Set([
   "automaticGitFetchInterval",
+  // Default provider envelopes must retain their driver when only a saved
+  // enabled flag or binary path differs from the built-in account.
+  "providerInstances",
   "textGenerationModelSelection",
 ]);
 

@@ -48,6 +48,43 @@ import {
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeSync(ClientSettingsSchema);
+
+describe("default Axiom account", () => {
+  it.each([{}, { providerInstances: {} }])(
+    "supplies the account for missing or empty saved instances",
+    (input) => {
+      const settings = Schema.decodeSync(ServerSettings)(input);
+      expect(settings.providerInstances).toEqual({ axiom: { driver: "axiom", enabled: true } });
+      expect(Object.hasOwn(settings.providers, "axiom")).toBe(false);
+    },
+  );
+
+  it("preserves complete saved envelopes, custom accounts, and encoding", () => {
+    const instances = {
+      axiom: {
+        driver: "axiom",
+        enabled: false,
+        displayName: "My account",
+        config: { binaryPath: "custom-axiom" },
+      },
+      personal_axiom: {
+        driver: "axiom",
+        enabled: true,
+        environment: [{ name: "FIXTURE", value: "value", sensitive: false }],
+      },
+    };
+    const settings = Schema.decodeSync(ServerSettings)({ providerInstances: instances });
+    expect(settings.providerInstances).toEqual(instances);
+    expect(Schema.encodeSync(ServerSettings)(settings).providerInstances).toEqual(instances);
+    expect(
+      Schema.decodeSync(ServerSettings)({
+        providerInstances: { axiom: { driver: "custom_driver", enabled: false } },
+      }).providerInstances,
+    ).toEqual({
+      axiom: { driver: "custom_driver", enabled: false },
+    });
+  });
+});
 const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);

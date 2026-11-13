@@ -33,6 +33,7 @@ import {
 } from "react";
 import {
   defaultInstanceIdForDriver,
+  DEFAULT_PROVIDER_INSTANCES,
   type DesktopSourceUpdateState,
   isRetiredProviderDriverKind,
   PROVIDER_DISPLAY_NAMES,
@@ -262,8 +263,8 @@ function withoutProviderInstanceFavorites(
   return favorites.filter((favorite) => favorite.provider !== instanceId);
 }
 
-// Only legacy drivers have implicit default accounts. Drivers such as Axiom
-// appear below through their explicit providerInstances entries.
+// Legacy defaults remain in providers; newer built-in accounts (Axiom) live
+// entirely in providerInstances and join the rows below without a mirror.
 const PROVIDER_SETTINGS = DRIVER_OPTIONS.filter((definition) =>
   Object.hasOwn(DEFAULT_UNIFIED_SETTINGS.providers, definition.value),
 ).map((definition) => ({ provider: definition.value }));
@@ -2139,11 +2140,12 @@ export function ProviderSettingsPanel() {
     instancesByDriver.set(driver, list);
   }
 
-  const defaultSlotIdsBySource = new Set<string>(
-    visibleProviderSettings.map((providerSettings) =>
+  const defaultSlotIdsBySource = new Set<string>([
+    ...visibleProviderSettings.map((providerSettings) =>
       String(defaultInstanceIdForDriver(providerSettings.provider)),
     ),
-  );
+    ...Object.keys(DEFAULT_PROVIDER_INSTANCES),
+  ]);
 
   const rows: InstanceRow[] = [];
   const visibleDriverKinds = new Set<ProviderDriverKind>(
@@ -2186,11 +2188,16 @@ export function ProviderSettingsPanel() {
   for (const [driver, list] of instancesByDriver) {
     if (visibleDriverKinds.has(driver)) continue;
     for (const [id, instance] of list) {
+      const builtInDefault = DEFAULT_PROVIDER_INSTANCES[id];
+      const matchesBuiltInDefault = builtInDefault?.driver === instance.driver;
       rows.push({
         instanceId: id,
         instance,
         driver: instance.driver,
-        isDefault: defaultSlotIdsBySource.has(String(id)),
+        isDefault:
+          defaultSlotIdsBySource.has(String(id)) &&
+          (builtInDefault === undefined || matchesBuiltInDefault),
+        isDirty: matchesBuiltInDefault && !Equal.equals(instance, builtInDefault),
       });
     }
   }
@@ -2272,12 +2279,20 @@ export function ProviderSettingsPanel() {
     >;
     const defaultInstanceId = defaultInstanceIdForDriver(driverKind);
     const defaultLegacyProvider = defaultLegacyProviders[driverKind];
-    if (defaultLegacyProvider === undefined) return;
+    if (
+      defaultLegacyProvider === undefined &&
+      DEFAULT_PROVIDER_INSTANCES[defaultInstanceId] === undefined
+    )
+      return;
     updateSettings({
-      providers: {
-        ...settings.providers,
-        [driverKind]: defaultLegacyProvider,
-      } as typeof settings.providers,
+      ...(defaultLegacyProvider !== undefined
+        ? {
+            providers: {
+              ...settings.providers,
+              [driverKind]: defaultLegacyProvider,
+            } as typeof settings.providers,
+          }
+        : {}),
       providerInstances: withoutProviderInstanceKey(settings.providerInstances, defaultInstanceId),
       providerModelPreferences: withoutProviderInstanceKey(
         settings.providerModelPreferences,

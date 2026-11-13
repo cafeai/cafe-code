@@ -98,6 +98,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
 
         yield* transport.notify("session/cancel", { sessionId: "session-1" });
         const outbound = yield* Queue.take(output);
+        assert.notProperty(JSON.parse(outbound), "id");
         assert.deepEqual(yield* decodeSessionCancelNotification(outbound), {
           jsonrpc: "2.0",
           method: "session/cancel",
@@ -290,7 +291,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
         {
           direction: "outgoing",
           stage: "raw",
-          payload: { byteLength: 100 },
+          payload: { byteLength: 92 },
         },
       ]);
     }),
@@ -462,36 +463,99 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
-  it.effect("preserves numeric ids for inbound extension requests", () =>
+  for (const wireId of [7, "7", "007", "1cf20920-e302-4b0d-992b-5b1426ff4a07"]) {
+    it.effect(`preserves exact ${typeof wireId} ID ${wireId} for inbound extension replies`, () =>
+      Effect.gen(function* () {
+        const { stdio, input, output } = yield* makeInMemoryStdio();
+        yield* AcpProtocol.makeAcpPatchedProtocol({
+          stdio,
+          serverRequestMethods: new Set(),
+          onExtRequest: () => Effect.succeed({ ok: true }),
+        });
+
+        yield* Queue.offer(
+          input,
+          yield* encodeJsonl(ExtRequest, {
+            jsonrpc: "2.0",
+            id: wireId,
+            method: "x/test",
+            params: {
+              hello: "world",
+            },
+            headers: [],
+          }),
+        );
+
+        const outbound = yield* Queue.take(output);
+        assert.deepEqual(yield* decodeExtResponse(outbound), {
+          jsonrpc: "2.0",
+          id: wireId,
+          result: {
+            ok: true,
+          },
+        });
+      }),
+    );
+  }
+
+  it.effect("preserves the UUID on an extension error reply", () =>
     Effect.gen(function* () {
       const { stdio, input, output } = yield* makeInMemoryStdio();
       yield* AcpProtocol.makeAcpPatchedProtocol({
         stdio,
         serverRequestMethods: new Set(),
-        onExtRequest: () => Effect.succeed({ ok: true }),
+        onExtRequest: () => Effect.fail(AcpError.AcpRequestError.invalidParams("Fixture refusal")),
       });
+      const replies: Array<{ error: unknown }> = [];
+      for (const id of [9, "28ba1cb4-bc49-4df8-b5fd-0be2a6b34de5"]) {
+        yield* Queue.offer(
+          input,
+          encoder.encode(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id,
+              method: "x/test",
+              params: {},
+            }) + "\n",
+          ),
+        );
+        const reply = JSON.parse(yield* Queue.take(output));
+        assert.equal(reply.id, id);
+        assert.property(reply, "error");
+        assert.notProperty(reply, "result");
+        replies.push(reply);
+      }
+      assert.deepEqual(replies[1]!.error, replies[0]!.error);
+    }),
+  );
 
-      yield* Queue.offer(
-        input,
-        yield* encodeJsonl(ExtRequest, {
-          jsonrpc: "2.0",
-          id: 7,
-          method: "x/test",
-          params: {
-            hello: "world",
-          },
-          headers: [],
-        }),
-      );
-
-      const outbound = yield* Queue.take(output);
-      assert.deepEqual(yield* decodeExtResponse(outbound), {
+  it.effect("keeps numeric and string identities distinct in one callback batch", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio,
+        serverRequestMethods: new Set(),
+        onExtRequest: (_method, params) => Effect.succeed(params),
+      });
+      const requests = [7, "7", -1, "007"].map((id) => ({
         jsonrpc: "2.0",
-        id: 7,
-        result: {
-          ok: true,
-        },
-      });
+        id,
+        method: "x/test",
+        params: { choice: id },
+      }));
+      yield* Queue.offer(input, encoder.encode(JSON.stringify(requests) + "\n"));
+      const replies = (yield* Queue.take(output))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      assert.deepEqual(
+        replies,
+        requests.map(({ id, params }) => ({
+          jsonrpc: "2.0",
+          id,
+          result: params,
+        })),
+      );
     }),
   );
 

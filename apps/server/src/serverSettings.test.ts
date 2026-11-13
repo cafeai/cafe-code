@@ -35,6 +35,36 @@ const makeServerSettingsLayer = () =>
 
 it.layer(NodeServices.layer)("server settings", (it) => {
   it.effect(
+    "adds the default Axiom account to existing settings and preserves saved disabling",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsService;
+        const config = yield* ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const original = JSON.stringify({ providerInstances: {} });
+        yield* fs.writeFileString(config.settingsPath, original);
+        const settings = yield* service.getSettings;
+        assert.deepEqual(settings.providerInstances, DEFAULT_SERVER_SETTINGS.providerInstances);
+        assert.strictEqual(yield* fs.readFileString(config.settingsPath), original);
+        const axiomId = ProviderInstanceId.make("axiom");
+        const disabled = {
+          driver: ProviderDriverKind.make("axiom"),
+          enabled: false,
+          config: { binaryPath: "fixture-native-axiom" },
+        };
+        const saved = yield* service.updateSettings({ providerInstances: { [axiomId]: disabled } });
+        assert.deepEqual(saved.providerInstances[axiomId], disabled);
+        const persisted = JSON.parse(yield* fs.readFileString(config.settingsPath));
+        assert.deepEqual(
+          Schema.decodeUnknownSync(ServerSettings)(persisted).providerInstances[axiomId],
+          disabled,
+        );
+        assert.notProperty(saved.providers, "axiom");
+        const unrelated = yield* service.updateSettings({ enableAssistantStreaming: false });
+        assert.deepEqual(unrelated.providerInstances[axiomId], disabled);
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+  it.effect(
     "defaults metadata helpers to Sol 6.1 Medium while preserving explicit selections",
     () =>
       Effect.sync(() => {
