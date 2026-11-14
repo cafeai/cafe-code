@@ -617,6 +617,7 @@ describe("Cafe Code MCP server", () => {
             sessionInstanceId: actualInstanceId,
           },
           project: null,
+          operationStorage: null,
           contractVersion: 2,
         });
         const status = await client.callTool({
@@ -876,6 +877,29 @@ describe("Cafe Code MCP server", () => {
           result: original,
         });
         expect(JSON.stringify(receipt)).not.toContain("PRIVATE_MESSAGE");
+        const storage = await client.callTool({
+          name: "get_cafe_context",
+          arguments: { threadId },
+        });
+        expect(storage.isError).not.toBe(true);
+        expect(storage.structuredContent).toMatchObject({
+          operationStorage: {
+            scope: "global",
+            policyVersion: 1,
+            receiptCount: 1,
+            budgetBytes: 665_600_000,
+          },
+        });
+        const ledger = (
+          storage.structuredContent as {
+            operationStorage: { chargedBytes: number; availableBytes: number };
+          }
+        ).operationStorage;
+        expect(ledger.chargedBytes).toBeGreaterThanOrEqual(1_024);
+        expect(ledger.chargedBytes).toBeLessThan(66_560);
+        expect(ledger.availableBytes + ledger.chargedBytes).toBe(665_600_000);
+        expect(JSON.stringify(ledger)).not.toContain(requestId);
+        expect(JSON.stringify(ledger)).not.toContain("PRIVATE_MESSAGE");
         const replay = await client.callTool({
           name: "send_message",
           arguments: { message: "PRIVATE_MESSAGE", requestId, threadId },
@@ -902,6 +926,30 @@ describe("Cafe Code MCP server", () => {
         });
       },
       { operations, operationOwner: { ...owner, sessionId: "other-owner" } },
+    );
+    await withClient(
+      context,
+      dependencies,
+      async (client) => {
+        const current = await client.callTool({
+          name: "get_cafe_context",
+          arguments: { threadId },
+        });
+        expect(current.isError).not.toBe(true);
+        expect(current.structuredContent).toMatchObject({
+          thread: { id: threadId },
+          operationStorage: null,
+        });
+        expect(JSON.stringify(current)).not.toContain("PRIVATE_ACCOUNTING_FAILURE");
+        expect(dispatched).toHaveLength(1);
+      },
+      {
+        operationOwner: owner,
+        operations: {
+          ...operations,
+          storageStatus: Effect.fail(new McpToolError("unavailable", "PRIVATE_ACCOUNTING_FAILURE")),
+        },
+      },
     );
     const unsettledId = "b30d5792-ccce-4025-a6a1-53c4c4fed452";
     await withClient(

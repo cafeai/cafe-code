@@ -1,6 +1,6 @@
 # Verification decision index
 
-Last updated: 2026-11-08 03:53:13 JST (UTC+0900)
+Last updated: 2026-11-15 07:06:55 JST (UTC+0900)
 
 This index covers verification decisions; independent feature decisions remain
 in this directory.
@@ -37,6 +37,10 @@ in this directory.
   cleanup for a live stranded owner without PID-only signalling.
 
 Related provider lifecycle decisions:
+
+- [MCP operation storage budget](mcp-operation-storage-budget.md): bounded
+  logical byte accounting retains every live request ID while releasing unused
+  settled result reservations; diagnostics never grant replay authority.
 
 - [Glide catalogue admission](glide-catalogue-admission.md): bounded inert
   catalogue resources, explicit desktop opt-in and finite startup guidance,
