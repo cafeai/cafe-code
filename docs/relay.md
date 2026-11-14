@@ -1,6 +1,6 @@
 # Encrypted relay access
 
-Last updated: 2026-11-14 22:06:08 JST (UTC+0900)
+Last updated: 2026-11-15 03:21:57 JST (UTC+0900)
 
 Cafe supports outbound relay hosting, relay connections in Saved environments,
 and a trusted browser viewer. Direct connections keep their existing pairing
@@ -310,11 +310,18 @@ Do not roll back an accepted membership revision or delete another owner's state
 
 ## Qualification commands and limits
 
-The POSIX three-process integration test has a 15-second test allowance for
+The POSIX three-process integration test has a 30-second test allowance for
 cold Node startup, membership reload and authenticated discovery. Its separate
 two-second native cleanup guard, production budgets and CI scheduling remain
 unchanged. Timeout diagnostics report bounded phases and counts, never private
 configuration, native output or credentials.
+
+The paced HTTP upload/download fixture compares the complete received body with
+the original bytes directly. Its payload, native pacing, full-body read,
+status/length/circuit assertions and five-second test guard remain unchanged.
+Passive failure diagnostics freeze before native retirement and include only
+fixed phases, bounded timing and the completed read's byte count. An unfinished
+read has no byte count; these observations do not explain an earlier timeout.
 
 Application-router fixtures use the private reader's native canonical-path API
 for their same scoped temporary directory. They retain the original native

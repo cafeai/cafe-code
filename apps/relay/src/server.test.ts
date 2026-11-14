@@ -761,6 +761,42 @@ describe("native single-hop relay", () => {
   });
 
   it("streams a complete bounded HTTP upload and download with native pacing", async (test) => {
+    let phase = "acquiring",
+      receivedBytes: number | null = null,
+      comparisonStartedMs: number | null = null,
+      comparisonFinishedMs: number | null = null;
+    const startedAt = performance.now();
+    const elapsedMs = () => {
+      const elapsed = performance.now() - startedAt;
+      return Number.isFinite(elapsed) ? Math.min(60_000, Math.max(0, Math.round(elapsed))) : null;
+    };
+    const observe = () => ({
+      phase,
+      receivedBytes,
+      comparisonStartedMs,
+      comparisonFinishedMs,
+      elapsedMs: elapsedMs(),
+    });
+    let failure: ReturnType<typeof observe> | undefined;
+    const freezeFailure = () => {
+      failure ??= observe();
+    };
+    // Register before sessions installs native retirement. A timeout records
+    // the actual pending phase before cleanup can settle the original read.
+    // Unknown partial delivery remains null; no body bytes enter diagnostics.
+    test.signal.addEventListener("abort", freezeFailure, { once: true });
+    test.onTestFailed(() => {
+      freezeFailure();
+      try {
+        Effect.runSync(Effect.logError("relay-paced-http-fixture", failure));
+      } catch {
+        // Passive fixed metadata must not replace the original test failure.
+      }
+    });
+    test.onTestFinished(() => {
+      freezeFailure();
+      test.signal.removeEventListener("abort", freezeFailure);
+    });
     const f = await sessions(test, {
       authenticate: async (input) => ({
         environmentId: input.environmentId,
@@ -782,22 +818,33 @@ describe("native single-hop relay", () => {
             }),
         ),
     });
+    phase = "authenticating";
     await f.viewer.authenticate({
       environmentId: "synthetic-environment",
       operation: "pair",
       credential: randomOpaque(),
     });
     const bytes = new Uint8Array(1_048_597).map((_, index) => index % 251);
+    phase = "opening";
     const response = await fetchRelayed(f.viewer, "/api/attachments", {
       method: "POST",
       body: new Blob([bytes]),
       headers: { "content-type": "application/octet-stream" },
     });
     expect(response.status).toBe(200);
+    phase = "reading";
     const received = new Uint8Array(await response.arrayBuffer());
+    receivedBytes = received.byteLength;
     expect(received.byteLength).toBe(bytes.byteLength);
-    expect(sha256(received)).toEqual(sha256(bytes));
+    phase = "comparing";
+    comparisonStartedMs = elapsedMs();
+    // Compare the complete observed body directly, without two full-body
+    // JavaScript hash passes. Length and native channel assertions stay exact.
+    deepStrictEqual(received, bytes);
+    comparisonFinishedMs = elapsedMs();
+    phase = "circuit";
     expect(f.server.stats().circuits).toBe(1);
+    phase = "complete";
   });
 
   it("bounds cancelled-but-draining handlers while an admitted stream still makes progress", async (test) => {

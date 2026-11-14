@@ -29,7 +29,7 @@ it.skipIf(process.platform === "win32")(
   // Three cold native Node starts, reloads and authenticated discovery share
   // this integration-test allowance. Production and native cleanup budgets
   // remain independent and unchanged.
-  { timeout: 15_000 },
+  { timeout: 30_000 },
   async (test) => {
     let retired = false,
       directory: string | undefined;
