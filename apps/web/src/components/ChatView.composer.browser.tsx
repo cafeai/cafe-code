@@ -5950,6 +5950,165 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
+  it("sends the selected queued Claude follow-up while an older rejected steer remains queued", async (testContext) => {
+    const owner = createChatViewCallerOwner(testContext, mountChatView, {
+      label: "pending-steer",
+    });
+    await owner.run(async () => {
+      const activeTurnId = TurnId.make("claude-selected-queued-follow-up-turn");
+      const rejectedMessageId = MessageId.make("claude-older-rejected-follow-up");
+      const rejectedText = "REVIEW 3: Preserve this earlier instruction for the next turn.";
+      const selectedText = "Answer this new question while the current work continues.";
+      const base = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("claude-selected-follow-up-original"),
+        targetText: "Keep the primary query running",
+        sessionStatus: "running",
+        provider: "claudeAgent",
+        history: "essential",
+      });
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        snapshotSequence: 43,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          messages: [
+            ...thread.messages,
+            {
+              ...createUserMessage({
+                id: rejectedMessageId,
+                text: rejectedText,
+                offsetSeconds: 2_000,
+              }),
+              turnId: activeTurnId,
+            },
+          ],
+          // Reconstruct the first row through the ordinary retained failure
+          // path. A generic rejection permits a later turn, never an automatic
+          // replay into this still-running Claude query.
+          activities: [
+            {
+              id: EventId.make("claude-older-follow-up-rejection"),
+              tone: "error",
+              kind: "provider.turn.steer.failed",
+              summary: "Provider steer queued",
+              payload: {
+                provider: "claudeAgent",
+                messageId: rejectedMessageId,
+                intentSequence: 41,
+                retryableFollowUp: true,
+              },
+              turnId: activeTurnId,
+              sequence: 42,
+              createdAt: isoAt(2_001),
+            },
+          ],
+          latestTurn: {
+            turnId: activeTurnId,
+            state: "running",
+            requestedAt: isoAt(1_900),
+            startedAt: isoAt(1_901),
+            completedAt: null,
+            assistantMessageId: null,
+          },
+          session: {
+            ...thread.session!,
+            status: "running",
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            subagentRuntimeId: "c0ac4639-c95d-4589-8919-6e4a28bc5b5a",
+            activeTurnId,
+          },
+        })),
+      };
+      const steers = () => wsRequests.filter((request) => request.type === "thread.turn.steer");
+      const requeued = () =>
+        document.querySelector('[aria-label="Follow-up requeued after provider steer rejection"]');
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        configureFixture: (fixture) => {
+          configureResponseLimitFixture(fixture);
+          fixture.serverConfig = {
+            ...fixture.serverConfig,
+            providers: fixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
+            })),
+          };
+        },
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: snapshot.snapshotSequence + 1 }
+            : undefined,
+      });
+      await owner.own("first-row", () => vi.waitFor(() => expect(requeued()).not.toBeNull()));
+      expect(steers()).toHaveLength(0);
+
+      // Queue and activate the later row through native browser input. The
+      // rejected row deliberately remains first; its wait policy must not
+      // turn this distinct row's enabled Send action into a silent no-op.
+      await owner.own("editor", () => waitForComposerEditor());
+      await owner.own("input", () => page.getByTestId("composer-editor").fill(selectedText));
+      await owner.own("send", () =>
+        page.getByRole("button", { name: "Queue message", exact: true }).click(),
+      );
+      const persistence = createFollowUpQueuePersistence();
+      let selectedMessageId: string | undefined;
+      await owner.own("second-row", () =>
+        vi.waitFor(() => {
+          expect(
+            document.querySelectorAll('button[aria-label="Remove queued message"]'),
+          ).toHaveLength(2);
+          expect(queuedSendButtons()).toHaveLength(1);
+          expect(queuedSendButtons()[0]?.disabled).toBe(false);
+          const saved = persistence.load(LOCAL_ENVIRONMENT_ID);
+          expect(saved.ok).toBe(true);
+          if (!saved.ok) return;
+          expect(saved.value.pending).toHaveLength(1);
+          expect(saved.value.pending[0]?.promptText).toBe(selectedText);
+          selectedMessageId = saved.value.pending[0]?.id;
+        }),
+      );
+      expect(selectedMessageId).toBeDefined();
+      expect(steers()).toHaveLength(0);
+      await owner.own("steer", () =>
+        page.getByRole("button", { name: "Send", exact: true }).click(),
+      );
+      await owner.own("request", () => vi.waitFor(() => expect(steers()).toHaveLength(1)));
+      expect(steers()[0]).toMatchObject({
+        threadId: THREAD_ID,
+        message: { messageId: selectedMessageId, role: "user", text: selectedText },
+      });
+      await owner.own("receipt", () =>
+        vi.waitFor(() => {
+          expect(queuedSendButtons()).toHaveLength(0);
+          expect(
+            document.querySelectorAll('button[aria-label="Remove queued message"]'),
+          ).toHaveLength(1);
+          expect(requeued()).not.toBeNull();
+          expect(
+            document.querySelector('[data-cafe-followup-queue="true"]')?.textContent,
+          ).toContain(rejectedText);
+          expect(persistence.load(LOCAL_ENVIRONMENT_ID)).toEqual({
+            ok: true,
+            value: { pending: [], claimed: [] },
+          });
+        }),
+      );
+      expect(
+        selectThreadByRef(useStore.getState(), THREAD_REF)?.messages.find(
+          (message) => message.id === rejectedMessageId,
+        ),
+      ).toMatchObject({ id: rejectedMessageId, text: rejectedText, turnId: activeTurnId });
+      expect(steers()).toHaveLength(1);
+      expect(
+        wsRequests.some(
+          (request) =>
+            request.type === "thread.turn.start" || request.type === "thread.turn.interrupt",
+        ),
+      ).toBe(false);
+    });
+  });
+
   it("keeps a steer pending when another message starts processing on the same turn", async (testContext) => {
     let releaseSteerReceipt: (() => void) | undefined;
     let steerReceiptReleased = false;

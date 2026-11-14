@@ -7105,15 +7105,34 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
 
-    // Clicking a specific queued row is explicit delivery intent and is the
-    // renderer equivalent of upstream's interrupt-and-submit path.
+    // Clicking a specific queued row selects that input, not the queue head.
+    // A rejected earlier follow-up still waits for its own safe retry boundary;
+    // it must not suppress an unrelated manual steer. Automatic dispatch above
+    // continues to use the head's FIFO/retry barriers unchanged.
     updateManualStopBarrier(item.threadId, null);
     const action = decideQueuedFollowUpAction({
       phase: followUpQueuePhase,
       liveSteerSupported: activeProviderLiveSteerAvailable,
       canDispatchNow:
         followUpQueuePhase === "running"
-          ? canActivateRunningFollowUpQueueAction
+          ? canDispatchRunningQueuedFollowUp({
+              phase: followUpQueuePhase,
+              sessionRunning: activeThread?.session?.status === "running",
+              firstItemBlocked: Boolean(item.automaticSteerRetry && item.blockedReason !== null),
+              automaticSteerRetryBlocked:
+                activeThread === undefined ||
+                resolveAutomaticSteerRetryBlocker({
+                  item,
+                  thread: activeThread,
+                  phase: followUpQueuePhase,
+                }) !== null,
+              isConnecting: isComposerConnecting,
+              isEnvironmentUnavailable: activeEnvironmentUnavailable,
+              isDispatchInFlight:
+                sendInFlightRef.current ||
+                queueDispatchInFlightRef.current ||
+                Boolean(activeQueuedFollowUpPendingDispatch),
+            })
           : followUpQueueCanStartTurn,
     });
 

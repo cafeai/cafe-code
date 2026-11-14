@@ -943,7 +943,7 @@
   },
   "An error occurred while creating the new thread.": {
     "message": "An error occurred while creating the new thread.",
-    "locations": ["apps/web/src/components/ChatView.tsx:8300"]
+    "locations": ["apps/web/src/components/ChatView.tsx:8319"]
   },
   "An error occurred while saving.": {
     "message": "An error occurred while saving.",
@@ -3969,7 +3969,7 @@
   },
   "Could not start implementation thread": {
     "message": "Could not start implementation thread",
-    "locations": ["apps/web/src/components/ChatView.tsx:8297"]
+    "locations": ["apps/web/src/components/ChatView.tsx:8316"]
   },
   "Could not start update download": {
     "message": "Could not start update download",
@@ -5881,7 +5881,7 @@
     "message": "Failed to interrupt active turn.",
     "locations": [
       "apps/web/src/components/ChatView.tsx:7051",
-      "apps/web/src/components/ChatView.tsx:7632"
+      "apps/web/src/components/ChatView.tsx:7651"
     ]
   },
   "Failed to load admin password status ({status}).": {
@@ -5981,7 +5981,7 @@
   },
   "Failed to send plan follow-up.": {
     "message": "Failed to send plan follow-up.",
-    "locations": ["apps/web/src/components/ChatView.tsx:8126"]
+    "locations": ["apps/web/src/components/ChatView.tsx:8145"]
   },
   "Failed to send queued follow-up.": {
     "message": "Failed to send queued follow-up.",
@@ -6000,11 +6000,11 @@
   },
   "Failed to submit approval decision.": {
     "message": "Failed to submit approval decision.",
-    "locations": ["apps/web/src/components/ChatView.tsx:7666"]
+    "locations": ["apps/web/src/components/ChatView.tsx:7685"]
   },
   "Failed to submit user input.": {
     "message": "Failed to submit user input.",
-    "locations": ["apps/web/src/components/ChatView.tsx:7727"]
+    "locations": ["apps/web/src/components/ChatView.tsx:7746"]
   },
   "Failed to switch ref.": {
     "message": "Failed to switch ref.",
@@ -7058,7 +7058,7 @@
   },
   "Keep this page open and free browser storage before reloading.": {
     "message": "Keep this page open and free browser storage before reloading.",
-    "locations": ["apps/web/src/components/ChatView.tsx:7291"]
+    "locations": ["apps/web/src/components/ChatView.tsx:7310"]
   },
   "Keeps this account's Claude sign-in and settings separate.": {
     "message": "Keeps this account's Claude sign-in and settings separate.",
@@ -10361,7 +10361,7 @@
   "Refresh": {
     "message": "Refresh",
     "locations": [
-      "apps/web/src/components/ChatView.tsx:9014",
+      "apps/web/src/components/ChatView.tsx:9033",
       "apps/web/src/components/OnboardingScreen.tsx:411",
       "apps/web/src/components/chat/AxiomMcpControl.tsx:165"
     ]
@@ -11142,7 +11142,7 @@
     "message": "Run /compact directly after the current turn finishes; compaction commands cannot be queued.",
     "locations": [
       "apps/web/src/components/ChatView.tsx:4942",
-      "apps/web/src/components/ChatView.tsx:7326"
+      "apps/web/src/components/ChatView.tsx:7345"
     ]
   },
   "Run Script: {script}": {
@@ -13238,11 +13238,11 @@
   },
   "The current draft could not be saved. Keep it open and retry editing the queue after freeing browser storage.": {
     "message": "The current draft could not be saved. Keep it open and retry editing the queue after freeing browser storage.",
-    "locations": ["apps/web/src/components/ChatView.tsx:7236"]
+    "locations": ["apps/web/src/components/ChatView.tsx:7255"]
   },
   "The current draft could not be saved. Queue editing was cancelled; your draft is still here.": {
     "message": "The current draft could not be saved. Queue editing was cancelled; your draft is still here.",
-    "locations": ["apps/web/src/components/ChatView.tsx:7267"]
+    "locations": ["apps/web/src/components/ChatView.tsx:7286"]
   },
   "The daemon's exit could not be confirmed. Its recovery files were preserved. Retry connection to check again.": {
     "message": "The daemon's exit could not be confirmed. Its recovery files were preserved. Retry connection to check again.",
@@ -13903,11 +13903,11 @@
   },
   "This queued message is no longer pending. Cancel editing to restore your previous draft.": {
     "message": "This queued message is no longer pending. Cancel editing to restore your previous draft.",
-    "locations": ["apps/web/src/components/ChatView.tsx:7347"]
+    "locations": ["apps/web/src/components/ChatView.tsx:7366"]
   },
   "This queued message is no longer safely editable. Reload to check its delivery status.": {
     "message": "This queued message is no longer safely editable. Reload to check its delivery status.",
-    "locations": ["apps/web/src/components/ChatView.tsx:7204"]
+    "locations": ["apps/web/src/components/ChatView.tsx:7223"]
   },
   "This removes <slot1></slot1> and its saved credential from this client.": {
     "message": "This removes <slot1></slot1> and its saved credential from this client.",
@@ -15168,7 +15168,7 @@
   },
   "Visualization history could not refresh.": {
     "message": "Visualization history could not refresh.",
-    "locations": ["apps/web/src/components/ChatView.tsx:9006"]
+    "locations": ["apps/web/src/components/ChatView.tsx:9025"]
   },
   "Visualization unavailable.": {
     "message": "Visualization unavailable.",
@@ -15649,7 +15649,7 @@
   },
   "Your restored draft could not be saved": {
     "message": "Your restored draft could not be saved",
-    "locations": ["apps/web/src/components/ChatView.tsx:7290"]
+    "locations": ["apps/web/src/components/ChatView.tsx:7309"]
   },
   "Your transcript is ready to edit…": {
     "message": "Your transcript is ready to edit…",
@@ -17348,7 +17348,7 @@
   },
   "{title} (fork)": {
     "message": "{title} (fork)",
-    "locations": ["apps/web/src/components/ChatView.tsx:8561"]
+    "locations": ["apps/web/src/components/ChatView.tsx:8580"]
   },
   "{title} started": {
     "message": "{title} started",
