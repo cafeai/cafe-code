@@ -1,5 +1,7 @@
 # Encrypted relay access
 
+Last updated: 2026-11-14 19:01:56 JST (UTC+0900)
+
 Cafe supports outbound relay hosting, relay connections in Saved environments,
 and a trusted browser viewer. Direct connections keep their existing pairing
 codes and password flow. The relay membership mesh remains operator controlled.
@@ -7,6 +9,13 @@ codes and password flow. The relay membership mesh remains operator controlled.
 The implementation is in `packages/relay`, `apps/relay`,
 `apps/server/src/relay`, and `apps/web/src/environments/relay`. See
 [the trust and protocol decision](decisions/encrypted-relay-pilot.md).
+
+Node readiness is published after its reload and retirement handlers are installed.
+Node shutdown stops both public and mesh admission before asynchronous cleanup.
+Concurrent close callers share one complete shutdown operation, including the
+actual close event of every admitted native TCP socket. Connection budgets are
+released only by those native events; a client-side close or the HTTP listener's
+close callback alone does not prove that the node has released its socket owners.
 
 Proof of work is disabled by default. Hosts still obtain signed, bounded
 ten-minute reservations and prove their admission identity. Updated hosts request
@@ -287,6 +296,12 @@ available. Preserve network identity, root/host/device keys and database history
 Do not roll back an accepted membership revision or delete another owner's state.
 
 ## Qualification commands and limits
+
+The POSIX three-process integration test has a 15-second test allowance for
+cold Node startup, membership reload and authenticated discovery. Its separate
+two-second native cleanup guard, production budgets and CI scheduling remain
+unchanged. Timeout diagnostics report bounded phases and counts, never private
+configuration, native output or credentials.
 
 ### cafecode.sh edge deployment
 

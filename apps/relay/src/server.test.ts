@@ -1,3 +1,4 @@
+import { deepStrictEqual } from "node:assert";
 import { describe, expect, it, type TestContext } from "vitest";
 import { startRelayServer, peerPrefix } from "./server.ts";
 import { createIdentity, deriveIdentityId, sha256, signBytes } from "@cafecode/relay/crypto";
@@ -316,8 +317,9 @@ describe("native single-hop relay", () => {
     hostCircuit.authorize();
     expect(f.server.stats().circuits).toBe(1);
     viewerCircuit.retire();
-    await viewerLeg.connection.close();
-    await hostLeg.connection.close();
+    // Both callers must join the same complete native shutdown while the
+    // original connections are still admitted, including their raw sockets.
+    const closing = f.server.close();
     await f.server.close();
     expect(f.server.stats()).toMatchObject({
       owners: 0,
@@ -326,6 +328,9 @@ describe("native single-hop relay", () => {
       circuits: 0,
       registrations: 0,
     });
+    await closing;
+    await viewerLeg.connection.close();
+    await hostLeg.connection.close();
     expect(f.resources.owners.current).toBe(0);
     expect(f.resources.pending.current).toBe(0);
   });
@@ -540,10 +545,35 @@ describe("native single-hop relay", () => {
   });
   it("keeps a large one-way download and its following request on the same authenticated channel", async (test) => {
     let phase = "acquiring",
-      received = 0;
-    test.onTestFailed(() =>
-      Effect.runSync(Effect.logError("relay-download-fixture", { phase, received })),
-    );
+      received = 0,
+      comparisonStartedMs: number | null = null,
+      comparisonFinishedMs: number | null = null;
+    const startedAt = performance.now();
+    const elapsedMs = () =>
+      Math.min(60_000, Math.max(0, Math.round(performance.now() - startedAt)));
+    const observe = () => ({
+      phase,
+      received,
+      comparisonStartedMs,
+      comparisonFinishedMs,
+      elapsedMs: elapsedMs(),
+    });
+    let failure: ReturnType<typeof observe> | undefined;
+    const freezeFailure = () => {
+      failure ??= observe();
+    };
+    // Freeze fixed metadata before timeout cleanup can advance the pending
+    // request. No payload, path or native error is included in this observation.
+    test.signal.addEventListener("abort", freezeFailure, { once: true });
+    test.onTestFailed(() => {
+      freezeFailure();
+      try {
+        Effect.runSync(Effect.logError("relay-download-fixture", failure));
+      } catch {
+        // Passive diagnostics must not replace the original test failure.
+      }
+    });
+    test.onTestFinished(() => test.signal.removeEventListener("abort", freezeFailure));
     const bytes = new Uint8Array(1_048_613).map((_, index) => index % 251);
     const f = await sessions(test, {
       authenticate: async (input) => ({
@@ -586,7 +616,12 @@ describe("native single-hop relay", () => {
       actual.set(chunk, offset);
       offset += chunk.byteLength;
     }
-    expect(actual).toEqual(bytes);
+    phase = "comparing";
+    comparisonStartedMs = elapsedMs();
+    // Compare every byte without constructing generic property-entry arrays
+    // for the two one-megabyte typed arrays.
+    deepStrictEqual(actual, bytes);
+    comparisonFinishedMs = elapsedMs();
     phase = "following-request";
     const next = await fetchRelayed(f.viewer, "/next");
     expect(await next.text()).toBe("still-connected");

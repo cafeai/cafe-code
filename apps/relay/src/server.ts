@@ -13,6 +13,7 @@ import { verifyNetwork, type NetworkDescriptor } from "@cafecode/relay/descripto
 import type { RelayIdentity } from "@cafecode/relay/crypto";
 import { RelayMesh } from "@cafecode/relay/mesh";
 import { RelayError, requireRelay } from "@cafecode/relay/errors";
+import { deferred } from "@cafecode/relay/deferred";
 import { epochNow, Lifetime } from "@cafecode/relay/lifetime";
 import { HostReservations } from "./reservations.ts";
 import {
@@ -74,7 +75,11 @@ export async function startRelayServer(options: RelayServerOptions) {
     selfService: options.selfService === true,
     ...options.hostWork,
   });
-  const sockets = new Set<Socket>();
+  // The HTTP server's close callback can precede a socket's close listeners.
+  // Retain each admitted native close separately so shutdown also joins the
+  // exact event that releases its connection budgets. Admission bounds this
+  // map to the same eight accepted connections, including TLS handshakes.
+  const sockets = new Map<Socket, Promise<void>>();
   const requestsHeld = new Set<Promise<void>>();
   const broker = new RelayBroker({
     network: options.network,
@@ -125,6 +130,10 @@ export async function startRelayServer(options: RelayServerOptions) {
   const acceptSocket = (socket: Socket) => {
     socket.on("error", () => socket.destroy());
     try {
+      if (!lifetime.active) {
+        socket.destroy();
+        return;
+      }
       const owner = resources.owners.reserve(),
         pendingOwner = pending.reserve();
       if (
@@ -137,13 +146,15 @@ export async function startRelayServer(options: RelayServerOptions) {
         socket.destroy();
         return;
       }
-      sockets.add(socket);
+      const closed = deferred<void>();
+      sockets.set(socket, closed.promise);
       // Deliberately conservative pilot limit: at most eight accepted native
       // connections, including TLS handshakes. No hidden unbounded TLS queue.
       socket.once("close", () => {
         sockets.delete(socket);
         owner();
         pendingOwner();
+        closed.resolve();
       });
     } catch {
       socket.destroy();
@@ -337,23 +348,40 @@ export async function startRelayServer(options: RelayServerOptions) {
       socket.destroy();
     }
   });
-  let retired = false;
-  const close = async () => {
-    if (!retired) {
-      retired = true;
+  let closing: Promise<void> | undefined;
+  const close = (): Promise<void> => {
+    if (closing) return closing;
+    // Publish the shared join before retiring any owner: synchronous retirement
+    // callbacks and concurrent callers must join this complete shutdown rather
+    // than treating an already-closing listener as an already-closed server.
+    const closed = deferred<void>();
+    closing = closed.promise;
+    void (async () => {
       lifetime.retire();
       broker.retire();
       mesh?.retire();
-      for (const socket of sockets) socket.destroy();
+      // Stop both acceptors before awaiting application cleanup. A connection
+      // callback already queued during retirement is refused by acceptSocket.
+      const listenersClosed = [server, meshServer].map(
+        (listener) =>
+          new Promise<void>((resolve) => {
+            if (listener?.listening) listener.close(() => resolve());
+            else resolve();
+          }),
+      );
+      for (const socket of sockets.keys()) socket.destroy();
       webSockets.close();
-    }
-    await broker.close();
-    if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
-    if (meshServer?.listening)
-      await new Promise<void>((resolve) => meshServer.close(() => resolve()));
-    await mesh?.close();
-    await Promise.allSettled([...requestsHeld]);
-    await lifetime.close();
+      await broker.close();
+      await Promise.all(listenersClosed);
+      // No acceptor can add another admitted owner now. Entries already removed
+      // have released their budgets; every remaining exact socket must emit its
+      // native close before any close caller may observe completed retirement.
+      await Promise.all(sockets.values());
+      await mesh?.close();
+      await Promise.allSettled([...requestsHeld]);
+      await lifetime.close();
+    })().then(closed.resolve, closed.reject);
+    return closed.promise;
   };
   try {
     await new Promise<void>((resolve, reject) => {
