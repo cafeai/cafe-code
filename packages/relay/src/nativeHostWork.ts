@@ -6,6 +6,7 @@ import { Worker } from "node:worker_threads";
 import * as http from "node:http";
 import * as https from "node:https";
 import type { LookupFunction } from "node:net";
+import * as Effect from "effect/Effect";
 import { randomOpaque } from "./bytes.ts";
 import { signBytes } from "./crypto.ts";
 import { deferred } from "./deferred.ts";
@@ -29,7 +30,7 @@ import {
 
 const solverSource = `
 const { parentPort, workerData } = require('node:worker_threads');
-const { createHash } = require('node:crypto');
+const { hash: hashBytes } = require('node:crypto');
 const bytes = Buffer.alloc(37); bytes.set(workerData.prefix);
 const start = performance.now(), solutions = []; let trials = 0;
 const bits = workerData.difficulty - 2, full = Math.floor(bits / 8), rest = bits % 8;
@@ -38,7 +39,10 @@ outer: for (let part = 0; part < 4; part++) {
  for (let nonce = 0; nonce <= 0xffffffff; nonce++) {
   if ((trials % 2048) === 0 && (trials >= workerData.trials || performance.now() - start >= workerData.budgetMs)) break outer;
   bytes.writeUInt32BE(nonce, 33); trials++;
-  const hash = createHash('sha256').update(bytes).digest();
+  // Hash the same complete 37-byte preimage synchronously without allocating
+  // a streaming Hash owner for each nonce. Explicit buffer output preserves
+  // the independent verifier's byte-level SHA-256 and work-bit checks.
+  const hash = hashBytes('sha256', bytes, 'buffer');
   let valid = true;
   for (let i = 0; i < full; i++) if (hash[i] !== 0) valid = false;
   if (valid && (rest === 0 || (hash[full] >>> (8-rest)) === 0)) { solutions.push(nonce); break; }
@@ -64,7 +68,41 @@ export async function solveHostWork(
   );
   const result = deferred<HostWorkSolutions>();
   let observed: HostWorkSolutions | undefined,
-    failed = false;
+    failed = false,
+    onlineObserved = false;
+  // Diagnostic clock refusal must never delay retirement or become a new
+  // solver failure. Unknown elapsed time stays absent rather than fabricated.
+  const observedTime = () => {
+    try {
+      const now = monotonicMillis();
+      return Number.isFinite(now) ? now : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const startedAt = observedTime();
+  const elapsedMs = () => {
+    const now = observedTime();
+    return now === undefined || startedAt === undefined
+      ? null
+      : Math.min(60_000, Math.max(0, Math.round(now - startedAt)));
+  };
+  type RetirementReason =
+    | "lifetime"
+    | "deadline"
+    | "worker-error"
+    | "message-error"
+    | "output-error"
+    | "output"
+    | "invalid-message";
+  let firstRetirement:
+    | {
+        readonly reason: RetirementReason;
+        readonly onlineObserved: boolean;
+        readonly proofObserved: boolean;
+        readonly elapsedMs: number | null;
+      }
+    | undefined;
   const worker = new Worker(solverSource, {
     eval: true,
     execArgv: [],
@@ -79,44 +117,80 @@ export async function solveHostWork(
       budgetMs: HOST_WORK.solveMs,
     },
   });
-  const retire = () => {
+  const retire = (reason: RetirementReason) => {
     failed = true;
+    // Freeze only the first exact event before requesting termination. Native
+    // online or a schema-valid message is advisory state, never proof adoption;
+    // neither replaces the independent validation after this worker's exit.
+    firstRetirement ??= {
+      reason,
+      onlineObserved,
+      proofObserved: observed !== undefined,
+      elapsedMs: elapsedMs(),
+    };
     void worker.terminate().catch(() => {});
   };
-  lifetime.signal.addEventListener("abort", retire, { once: true });
-  const cancel = lifetime.later(HOST_WORK.solveMs + 500, retire);
-  worker.on("error", retire);
-  worker.on("messageerror", retire);
-  worker.stdout.on("error", retire);
-  worker.stderr.on("error", retire);
-  worker.stdout.on("data", retire);
-  worker.stderr.on("data", retire);
+  const abort = () => retire("lifetime");
+  lifetime.signal.addEventListener("abort", abort, { once: true });
+  const cancel = lifetime.later(HOST_WORK.solveMs + 500, () => retire("deadline"));
+  worker.once("online", () => {
+    onlineObserved = true;
+  });
+  worker.on("error", () => retire("worker-error"));
+  worker.on("messageerror", () => retire("message-error"));
+  worker.stdout.on("error", () => retire("output-error"));
+  worker.stderr.on("error", () => retire("output-error"));
+  worker.stdout.on("data", () => retire("output"));
+  worker.stderr.on("data", () => retire("output"));
   worker.on("message", (value) => {
     try {
       requireRelay(!observed && lifetime.active);
       observed = readCanonical(HostWorkSolutions, canonicalBytes(value, 128), 128);
     } catch {
-      retire();
+      retire("invalid-message");
     }
   });
   worker.once("exit", (code) => {
     cancel();
-    lifetime.signal.removeEventListener("abort", retire);
+    lifetime.signal.removeEventListener("abort", abort);
+    let verification: "not-checked" | "valid" | "invalid" | "refused" = "not-checked";
     try {
-      if (
-        !failed &&
-        code === 0 &&
-        lifetime.active &&
-        observed &&
-        verifyHostWork(challenge, observed)
-      )
-        result.resolve(observed);
-      else result.reject(new RelayError("UNAVAILABLE"));
+      if (!failed && code === 0 && lifetime.active && observed) {
+        verification = verifyHostWork(challenge, observed) ? "valid" : "invalid";
+        if (verification === "valid") {
+          result.resolve(observed);
+          return;
+        }
+      }
     } catch {
-      result.reject(new RelayError("UNAVAILABLE"));
+      verification = "refused";
+    }
+    result.reject(new RelayError("UNAVAILABLE"));
+    // Unexpected failure diagnostics follow the actual native exit and never
+    // change the public code-only error. Ordinary explicit lifetime retirement
+    // is quiet. An earlier unexpected event remains visible even if cleanup
+    // subsequently retires the lifetime. Missing proof alone has no known
+    // cause: do not infer a solver deadline or trial exhaustion from its exit.
+    if (firstRetirement?.reason !== "lifetime") {
+      try {
+        Effect.runSync(
+          Effect.logError("Relay host-work solver failed", {
+            firstRetirement: firstRetirement ?? null,
+            onlineObserved,
+            proofObserved: observed !== undefined,
+            exit: code === 0 ? "zero" : "nonzero",
+            lifetimeActive: lifetime.active,
+            verification,
+            elapsedMs: elapsedMs(),
+          }),
+        );
+      } catch {
+        // Passive fixed metadata cannot replace the original refusal, retain
+        // a native exception, or authorize another worker or a replay.
+      }
     }
   });
-  if (!lifetime.active) retire();
+  if (!lifetime.active) abort();
   return result.promise;
 }
 

@@ -1,6 +1,6 @@
 # Encrypted relay access
 
-Last updated: 2026-11-14 19:01:56 JST (UTC+0900)
+Last updated: 2026-11-14 22:06:08 JST (UTC+0900)
 
 Cafe supports outbound relay hosting, relay connections in Saved environments,
 and a trusted browser viewer. Direct connections keep their existing pairing
@@ -16,6 +16,19 @@ Concurrent close callers share one complete shutdown operation, including the
 actual close event of every admitted native TCP socket. Connection budgets are
 released only by those native events; a client-side close or the HTTP listener's
 close callback alone does not prove that the node has released its socket owners.
+
+The legacy host-work solver hashes the unchanged 37-byte preimage with Node's
+[one-shot SHA-256 API](https://nodejs.org/download/release/v24.22.1/docs/api/crypto.html#cryptohashalgorithm-data-options).
+It retains the four independent subpuzzles, random challenge, trial/time bounds
+and native worker limits defined in
+[`HOST_WORK`](../packages/relay/src/hostWork.ts). A proof is still independently
+verified and admitted only after that exact worker exits successfully.
+Unexpected refusal logs contain only fixed retirement categories, bounded timing,
+and native lifecycle/verification state; they never contain challenge bytes,
+solutions, native output or raw errors. The first retirement observation is frozen
+before requesting termination and logged only after native exit. An online event
+does not prove that hashing began, and a missing proof does not identify which
+solver limit was reached. Ordinary explicit lifetime cancellation stays quiet.
 
 Proof of work is disabled by default. Hosts still obtain signed, bounded
 ten-minute reservations and prove their admission identity. Updated hosts request
@@ -302,6 +315,14 @@ cold Node startup, membership reload and authenticated discovery. Its separate
 two-second native cleanup guard, production budgets and CI scheduling remain
 unchanged. Timeout diagnostics report bounded phases and counts, never private
 configuration, native output or credentials.
+
+Application-router fixtures use the private reader's native canonical-path API
+for their same scoped temporary directory. They retain the original native
+listener/viewer acquisitions and their adoption/close joins across retirement,
+including handles that arrive after cancellation. Fixed failure phases freeze
+before cleanup. Requests, authorization assertions and enclosing test budgets
+remain unchanged; these fixture repairs grant no production file or provider
+authority.
 
 ### cafecode.sh edge deployment
 
