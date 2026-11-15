@@ -30,6 +30,12 @@ before requesting termination and logged only after native exit. An online event
 does not prove that hashing began, and a missing proof does not identify which
 solver limit was reached. Ordinary explicit lifetime cancellation stays quiet.
 
+The native solver correctness test uses one independently qualified public
+difficulty-17 challenge and checks its four exact first solutions, prefix and
+WebCrypto interoperability. Its unchanged worker and deadlines still execute;
+random search-cost sampling is separate from this deterministic correctness
+check. Production challenges remain random and retain every work bound.
+
 Proof of work is disabled by default. Hosts still obtain signed, bounded
 ten-minute reservations and prove their admission identity. Updated hosts request
 zero-difficulty challenges and create no solver worker. Older hosts receive the
