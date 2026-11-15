@@ -2716,8 +2716,13 @@ describe("ProviderDaemonServer", () => {
           }).pipe(
             Effect.ensuring(Effect.sync(owner.quiesce)),
             Effect.scoped,
-            Effect.provide(makeProviderDaemonServerTestLayer(service)),
-            Effect.provide(retirementProfileLayer),
+            // Feed and retain the Debug profile in one layer. Keep the inner
+            // server scope above this provision so it retires before SQLite.
+            Effect.provide(
+              makeProviderDaemonServerTestLayer(service).pipe(
+                Layer.provideMerge(retirementProfileLayer),
+              ),
+            ),
           );
         }).pipe(Effect.ensuring(Effect.sync(owner.quiesce)), Effect.scoped),
       );
