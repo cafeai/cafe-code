@@ -2,11 +2,13 @@ import {
   EventId,
   PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LIVENESS_PATH,
+  PROVIDER_DAEMON_STARTUP_READINESS_PATH,
   PROVIDER_DAEMON_RETIRE_PATH,
   ProviderDaemonHealth,
   ProviderDaemonLeaseRequest,
   ProviderDaemonLeaseResponse,
   ProviderDaemonLiveness,
+  ProviderDaemonStartupReadiness,
   ProviderDaemonRetirementResponse,
   type ProviderDaemonRetirementRequest,
   ProviderDaemonRpcRequest,
@@ -21,6 +23,7 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { assert, describe, expect, it, vi } from "@effect/vitest";
+import type { TestContext } from "vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Data from "effect/Data";
@@ -100,6 +103,9 @@ const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
 
 const decodeProviderDaemonHealth = Schema.decodeUnknownSync(ProviderDaemonHealth);
 const decodeProviderDaemonLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
+const decodeProviderDaemonStartupReadiness = Schema.decodeUnknownSync(
+  ProviderDaemonStartupReadiness,
+);
 const encodeProviderDaemonHealthJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonHealth),
 );
@@ -423,6 +429,132 @@ const startRetirementDaemon = (options: Partial<ProviderDaemonServerOptions> = {
     );
     return { port: yield* Deferred.await(listening), closed, fiber };
   });
+
+/** Own every new native request before admission, including hard-timeout
+ * retirement. The outer task is joined after its scoped server finalizes; a
+ * late listen finishes under an uninterruptible acquisition before that scope
+ * may close. Diagnostic gates are released before sockets are retired, so no
+ * artificial held dependency can deadlock teardown or outlive the test. */
+function makeStartupReadinessNativeOwner(test: TestContext) {
+  const controller = new AbortController();
+  const requests = new Map<http.ClientRequest, () => void>();
+  const closes = new Set<Promise<void>>();
+  const releases = new Set<() => void>();
+  let retired = false;
+  let running: Promise<void> | undefined;
+  let closing: Promise<void> | undefined;
+  const active = () => {
+    if (retired || test.signal.aborted) throw new Error("Synthetic readiness fixture retired.");
+  };
+  const quiesce = () => {
+    retired = true;
+    for (const release of releases) release();
+    for (const cancel of requests.values()) cancel();
+  };
+  const retire = () => {
+    quiesce();
+    controller.abort();
+  };
+  const close = () => {
+    closing ??= (async () => {
+      retire();
+      try {
+        if (running !== undefined) await running.catch(() => undefined);
+        await Promise.all([...closes]);
+      } finally {
+        test.signal.removeEventListener("abort", retire);
+      }
+    })();
+    return closing;
+  };
+  // This public owner exists before Effect layer/SQLite/server construction.
+  test.signal.addEventListener("abort", retire, { once: true });
+  test.onTestFinished(close);
+  const request = (
+    port: number,
+    route: string,
+    token: string | null = TEST_TOKEN,
+    body?: string,
+  ): Promise<{ readonly status: number; readonly text: string }> => {
+    active();
+    return new Promise((resolve, reject) => {
+      let closed = false;
+      let ended = false;
+      let reply: { readonly status: number; readonly text: string } | undefined;
+      const refuse = () => reject(new Error("Synthetic readiness HTTP request did not complete."));
+      const settle = () => {
+        if (closed && ended && reply !== undefined) resolve(reply);
+      };
+      const native = http.request(
+        {
+          hostname: "127.0.0.1",
+          port,
+          path: route,
+          method: body === undefined ? "GET" : "POST",
+          agent: false,
+          headers: {
+            connection: "close",
+            ...(token === null ? {} : { authorization: `Bearer ${token}` }),
+            ...(body === undefined ? {} : { "content-type": "application/json" }),
+          },
+        },
+        (response) => {
+          const chunks: Buffer[] = [];
+          let bytes = 0;
+          response.once("error", refuse);
+          response.once("aborted", refuse);
+          response.on("data", (chunk: Buffer) => {
+            bytes += chunk.length;
+            if (bytes > 128 * 1024) {
+              refuse();
+              native.destroy();
+              return;
+            }
+            chunks.push(chunk);
+          });
+          response.once("end", () => {
+            reply = {
+              status: response.statusCode ?? 0,
+              text: Buffer.concat(chunks).toString("utf8"),
+            };
+            ended = true;
+            settle();
+          });
+        },
+      );
+      native.once("error", refuse);
+      let markClosed!: () => void;
+      const joinedClose = new Promise<void>((done) => {
+        markClosed = done;
+      });
+      closes.add(joinedClose);
+      requests.set(native, () => {
+        refuse();
+        native.destroy();
+      });
+      native.once("close", () => {
+        closed = true;
+        requests.delete(native);
+        closes.delete(joinedClose);
+        markClosed();
+        settle();
+      });
+      native.end(body);
+    });
+  };
+  return {
+    active,
+    quiesce,
+    close,
+    request,
+    releaseBeforeClose: (release: () => void) => releases.add(release),
+    run: (effect: Effect.Effect<void, unknown>) => {
+      active();
+      running = Effect.runPromise(effect, { signal: controller.signal });
+      return running;
+    },
+  };
+}
 
 const retirementRequestFromHealth = (
   health: ProviderDaemonHealth,
@@ -2470,6 +2602,230 @@ describe("ProviderDaemonServer", () => {
     expect(cleanupCount).toBe(1);
     expect(unsubscribeCount).toBe(1);
     expect(response.writableEnded).toBe(true);
+  });
+
+  it("serves exact startup readiness while an admitted rich-health dependency is held", async (test) => {
+    const owner = makeStartupReadinessNativeOwner(test);
+    try {
+      await owner.run(
+        Effect.gen(function* () {
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          owner.releaseBeforeClose(() => Deferred.doneUnsafe(release, Effect.void));
+          const service: ProviderServiceShape = {
+            ...mockProviderService,
+            listSessions: () =>
+              Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.as([]),
+              ),
+          };
+          const windowsOwnershipId = "9a90b48d-868f-4614-ae9c-66d50293d52b";
+          const identity = { pid: process.pid, creationTime100ns: "134348901321234567" };
+          yield* Effect.gen(function* () {
+            const config = yield* ServerConfig;
+            owner.active();
+            const snapshot = yield* runProviderDaemonServer(
+              {
+                port: 0,
+                host: "127.0.0.1",
+                token: TEST_TOKEN,
+                version: "0.0.0-test",
+                protocolVersion: 1,
+                runtimeBuildId: "b".repeat(64),
+                windowsOwnershipId,
+              },
+              {
+                platform: "win32",
+                capture: async () => ({ status: "present", identity }),
+              },
+            ).pipe(Effect.uninterruptible);
+            const port = snapshot.port;
+            if (port === null) throw new Error("Expected synthetic readiness TCP endpoint.");
+            owner.active();
+            let richSettled = false;
+            const rich = owner.request(port, PROVIDER_DAEMON_HEALTH_PATH).then(
+              (reply) => {
+                richSettled = true;
+                return { ok: true as const, reply };
+              },
+              () => {
+                richSettled = true;
+                return { ok: false as const };
+              },
+            );
+            // Observe the real rich HTTP handler entering its real injected
+            // diagnostic dependency. Its gate stays held throughout readiness.
+            yield* Deferred.await(entered);
+            const reply = yield* Effect.promise(() =>
+              owner.request(port, PROVIDER_DAEMON_STARTUP_READINESS_PATH),
+            );
+            assert.equal(reply.status, 200);
+            const ready = decodeProviderDaemonStartupReadiness(
+              decodeProviderJsonString(reply.text),
+            );
+            assert.deepEqual(ready, {
+              readinessProtocol: 1,
+              ok: true,
+              journalState: "ready",
+              mode: "provider-daemon",
+              dataProfile: "debug",
+              dataProfileId: dataProfileIdentity("debug", config.baseDir),
+              protocolVersion: 1,
+              pid: process.pid,
+              ppid: process.ppid,
+              version: "0.0.0-test",
+              runtimeBuildId: "b".repeat(64),
+              startedAt: snapshot.startedAt,
+              transport: "tcp",
+              windowsProcessIdentity: identity,
+              windowsOwnershipId,
+            });
+            assert.isFalse(richSettled);
+            assert.notInclude(reply.text, TEST_TOKEN);
+            for (const token of [null, "wrong-synthetic-owner-token"]) {
+              const refused = yield* Effect.promise(() =>
+                owner.request(port, PROVIDER_DAEMON_STARTUP_READINESS_PATH, token),
+              );
+              assert.equal(refused.status, 401);
+              assert.deepEqual(decodeProviderJsonString(refused.text), { error: "unauthorized" });
+            }
+            const leaseReply = yield* Effect.promise(() =>
+              owner.request(
+                port,
+                "/api/provider-daemon/leases",
+                TEST_TOKEN,
+                encodeProviderDaemonLeaseRequestJson({
+                  clientKind: "test",
+                  capabilities: ["rpc"],
+                }),
+              ),
+            );
+            assert.equal(leaseReply.status, 200);
+            const lease = decodeProviderDaemonLeaseResponseJson(leaseReply.text);
+            const refusedLease = yield* Effect.promise(() =>
+              owner.request(port, PROVIDER_DAEMON_STARTUP_READINESS_PATH, lease.token),
+            );
+            assert.equal(refusedLease.status, 401);
+            yield* Deferred.succeed(release, undefined);
+            const richReply = yield* Effect.promise(() => rich);
+            assert.isTrue(richReply.ok);
+            if (!richReply.ok) throw new Error("Synthetic rich health failed after release.");
+            assert.equal(richReply.reply.status, 200);
+            decodeProviderDaemonHealth(decodeProviderJsonString(richReply.reply.text));
+          }).pipe(
+            Effect.ensuring(Effect.sync(owner.quiesce)),
+            Effect.scoped,
+            Effect.provide(makeProviderDaemonServerTestLayer(service)),
+            Effect.provide(retirementProfileLayer),
+          );
+        }).pipe(Effect.ensuring(Effect.sync(owner.quiesce)), Effect.scoped),
+      );
+    } finally {
+      await owner.close();
+    }
+  });
+
+  it("refuses startup readiness when the real durable journal lane is blocked", async (test) => {
+    const owner = makeStartupReadinessNativeOwner(test);
+    try {
+      await owner.run(
+        Effect.gen(function* () {
+          const events = yield* Deferred.make<ReadonlyArray<ProviderRuntimeEvent>>();
+          const blocked = yield* Deferred.make<void>();
+          const service: ProviderServiceShape = {
+            ...mockProviderService,
+            streamEvents: Stream.fromEffect(Deferred.await(events)).pipe(
+              Stream.flatMap(Stream.fromIterable),
+              Stream.concat(Stream.never),
+            ),
+          };
+          const logger = Logger.make<unknown, void>(({ message }) => {
+            if (
+              Array.isArray(message) &&
+              message[0] === "durable write blocked; storage repair is required" &&
+              typeof message[1] === "object" &&
+              message[1] !== null &&
+              "component" in message[1] &&
+              message[1].component === "provider-journal"
+            ) {
+              // The production lane sets its blocked state before this event.
+              Deferred.doneUnsafe(blocked, Effect.void);
+            }
+          });
+          yield* Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            const faultSql = new Proxy(sql, {
+              apply(target, thisArg, args) {
+                const template = args[0] as TemplateStringsArray;
+                if (
+                  Array.isArray(template) &&
+                  template.join("?").includes("INSERT INTO provider_daemon_events")
+                ) {
+                  return Effect.fail(
+                    new SqlError.SqlError({
+                      reason: new SqlError.UnknownError({
+                        operation: "execute",
+                        cause: "synthetic journal write refusal",
+                      }),
+                    }),
+                  );
+                }
+                return Reflect.apply(target, thisArg, args);
+              },
+            });
+            owner.active();
+            const port = yield* startProviderDaemonServerOnEphemeralPort({
+              host: "127.0.0.1",
+              token: TEST_TOKEN,
+              version: "0.0.0-test",
+            }).pipe(
+              Effect.provideService(SqlClient.SqlClient, faultSql),
+              Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+              Effect.uninterruptible,
+            );
+            owner.active();
+            yield* Deferred.succeed(events, [
+              {
+                type: "turn.completed",
+                eventId: asEventId("startup-readiness-blocked-journal"),
+                provider: ProviderDriverKind.make("codex"),
+                threadId: ThreadId.make("startup-readiness-synthetic-thread"),
+                createdAt: "2026-01-01T00:00:00.000Z",
+                payload: { state: "completed" },
+              },
+            ]);
+            yield* Deferred.await(blocked);
+            const readiness = yield* Effect.promise(() =>
+              owner.request(port, PROVIDER_DAEMON_STARTUP_READINESS_PATH),
+            );
+            assert.equal(readiness.status, 503);
+            assert.deepEqual(decodeProviderJsonString(readiness.text), {
+              error: "provider-journal-unavailable",
+              state: "blocked",
+            });
+            const unauthenticated = yield* Effect.promise(() =>
+              owner.request(port, PROVIDER_DAEMON_STARTUP_READINESS_PATH, null),
+            );
+            assert.equal(unauthenticated.status, 401);
+            const live = yield* Effect.promise(() =>
+              owner.request(port, PROVIDER_DAEMON_LIVENESS_PATH),
+            );
+            assert.equal(live.status, 200);
+            const health = yield* Effect.promise(() =>
+              owner.request(port, PROVIDER_DAEMON_HEALTH_PATH),
+            );
+            assert.equal(health.status, 503);
+          }).pipe(
+            Effect.ensuring(Effect.sync(owner.quiesce)),
+            Effect.scoped,
+            Effect.provide(makeProviderDaemonServerTestLayer(service)),
+          );
+        }).pipe(Effect.ensuring(Effect.sync(owner.quiesce)), Effect.scoped),
+      );
+    } finally {
+      await owner.close();
+    }
   });
 
   it.effect("serves authenticated liveness without reading provider diagnostics", () => {

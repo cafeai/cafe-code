@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import * as Effect from "effect/Effect";
 import { createIdentity, deriveIdentityId, sha256, signBytes } from "@cafecode/relay/crypto";
 import { randomOpaque, opaque, unopaque } from "@cafecode/relay/bytes";
 import {
@@ -505,29 +506,154 @@ describe("work-paid host reservations", () => {
     f.authority.retire();
   });
 
-  it("bounds concurrent verifiers and retained receipts without evicting live replay protection", async () => {
-    const f = await fixture(),
-      challenges = Array.from({ length: 5 }, () => f.challenge());
-    const claims = await Promise.all(challenges.map((value) => f.claim(value)));
-    const pending = claims.slice(0, 4).map((value) => f.authority.claim(value));
-    await expect(f.authority.claim(claims[4]!)).rejects.toThrow();
-    const first = await Promise.allSettled(pending);
-    expect(first.filter((value) => value.status === "fulfilled")).toHaveLength(1);
-    let paid = f.authority.authorize(
-      f.locator,
-      f.identity.publicKey,
-      first.find((value) => value.status === "fulfilled")!.value.credential,
-    );
-    for (let index = 1; index < HOST_WORK.receipts; index++)
-      paid = await f.authority.claim(await f.claim(f.challenge(paid)));
-    await expect(f.authority.claim(await f.claim(f.challenge(paid)))).rejects.toThrow();
-    expect(f.authority.stats()).toEqual({
-      reservations: 1,
-      receipts: HOST_WORK.receipts,
-      checking: 0,
-    });
-    f.advance(HOST_WORK.challengeMs + HOST_WORK.receiptMs + 1);
-    expect(f.authority.stats()).toEqual({ reservations: 0, receipts: 0, checking: 0 });
-    f.authority.retire();
-  });
+  it(
+    "bounds concurrent verifiers and retained receipts without evicting live replay protection",
+    // This test-only allowance covers all 256 real signed receipt claims.
+    // Production work/verification limits and native cleanup stay unchanged.
+    { timeout: 15_000 },
+    async (test) => {
+      let retired = false,
+        phase = "fixture",
+        completedProofs = 0,
+        completedRenewals = 0,
+        settledInitialVerifiers = 0,
+        f: Awaited<ReturnType<typeof fixture>> | undefined;
+      const startedAt = performance.now();
+      const held = new Set<Promise<unknown>>();
+      const hold = <A>(task: Promise<A>): Promise<A> => {
+        held.add(task);
+        void task.then(
+          () => held.delete(task),
+          () => held.delete(task),
+        );
+        return task;
+      };
+      const active = () => {
+        if (retired || test.signal.aborted) throw new Error("Reservation fixture retired.");
+      };
+      const observe = () => {
+        const elapsed = performance.now() - startedAt;
+        return {
+          phase,
+          completedProofs: Math.min(HOST_WORK.receipts + 5, completedProofs),
+          completedRenewals: Math.min(HOST_WORK.receipts - 1, completedRenewals),
+          settledInitialVerifiers: Math.min(4, settledInitialVerifiers),
+          heldTasks: Math.min(8, held.size),
+          elapsedMs: Number.isFinite(elapsed)
+            ? Math.min(60_000, Math.max(0, Math.round(elapsed)))
+            : null,
+        };
+      };
+      let failure: ReturnType<typeof observe> | undefined;
+      const freezeFailure = () => {
+        failure ??= observe();
+      };
+      const retire = () => {
+        retired = true;
+        f?.authority.retire();
+      };
+      const abort = () => {
+        freezeFailure();
+        retire();
+      };
+      let closing: Promise<void> | undefined;
+      const close = () => {
+        retire();
+        closing ??= (async () => {
+          try {
+            // No process, socket or timer belongs to this fixture. Join the
+            // original identity/signature/verification promises; never invent
+            // native close evidence or allow late work to keep filling receipts.
+            while (held.size > 0) await Promise.allSettled([...held]);
+          } finally {
+            test.signal.removeEventListener("abort", abort);
+          }
+        })();
+        return closing;
+      };
+      // Public timeout retirement owns cleanup before the first async identity
+      // acquisition. Freeze before retire clears the in-memory authority maps.
+      test.signal.addEventListener("abort", abort, { once: true });
+      test.onTestFinished(close);
+      test.onTestFailed(() => {
+        freezeFailure();
+        try {
+          Effect.runSync(Effect.logError("relay-reservation-capacity-fixture", failure));
+        } catch {
+          // Fixed, bounded observations must not replace the original failure.
+        }
+      });
+      try {
+        const acquired = await hold(
+          fixture().then((value) => {
+            f = value;
+            if (retired || test.signal.aborted) value.authority.retire();
+            return value;
+          }),
+        );
+        active();
+        const prove = async (value: HostWorkChallenge) => {
+          active();
+          const proof = await hold(acquired.claim(value));
+          active();
+          completedProofs++;
+          return proof;
+        };
+        const claim = (value: HostWorkClaim) => {
+          active();
+          return hold(acquired.authority.claim(value));
+        };
+        const challenges = Array.from({ length: 5 }, () => acquired.challenge());
+        phase = "initial-proofs";
+        const claims = await Promise.all(challenges.map(prove));
+        active();
+        phase = "initial-verifiers";
+        const pending = claims.slice(0, 4).map(claim);
+        phase = "verifier-capacity-refusal";
+        await expect(claim(claims[4]!)).rejects.toThrow();
+        active();
+        phase = "joining-initial-verifiers";
+        const first = await Promise.allSettled(pending);
+        active();
+        settledInitialVerifiers = first.length;
+        expect(first.filter((value) => value.status === "fulfilled")).toHaveLength(1);
+        let paid = acquired.authority.authorize(
+          acquired.locator,
+          acquired.identity.publicKey,
+          first.find((value) => value.status === "fulfilled")!.value.credential,
+        );
+        for (let index = 1; index < HOST_WORK.receipts; index++) {
+          active();
+          phase = "renewal-proof";
+          const proof = await prove(acquired.challenge(paid));
+          active();
+          phase = "renewal-claim";
+          paid = await claim(proof);
+          active();
+          completedRenewals++;
+        }
+        phase = "full-receipt-proof";
+        const finalClaim = await prove(acquired.challenge(paid));
+        active();
+        phase = "receipt-capacity-refusal";
+        await expect(claim(finalClaim)).rejects.toThrow();
+        active();
+        phase = "retained-receipts";
+        expect(acquired.authority.stats()).toEqual({
+          reservations: 1,
+          receipts: HOST_WORK.receipts,
+          checking: 0,
+        });
+        acquired.advance(HOST_WORK.challengeMs + HOST_WORK.receiptMs + 1);
+        phase = "expired-receipts";
+        expect(acquired.authority.stats()).toEqual({ reservations: 0, receipts: 0, checking: 0 });
+        phase = "complete";
+      } catch (error) {
+        freezeFailure();
+        throw error;
+      } finally {
+        await close();
+      }
+    },
+  );
 });

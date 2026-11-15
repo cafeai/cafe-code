@@ -63,6 +63,7 @@ import { ProviderSupervisorHealthSummary } from "./providerSupervisor.ts";
 
 export const PROVIDER_DAEMON_HEALTH_PATH = "/api/provider-daemon/health";
 export const PROVIDER_DAEMON_LIVENESS_PATH = "/api/provider-daemon/liveness";
+export const PROVIDER_DAEMON_STARTUP_READINESS_PATH = "/api/provider-daemon/startup-readiness";
 export const PROVIDER_DAEMON_RPC_PATH = "/api/provider-daemon/rpc";
 export const PROVIDER_DAEMON_EVENTS_PATH = "/api/provider-daemon/events";
 export const PROVIDER_DAEMON_LEASES_PATH = "/api/provider-daemon/leases";
@@ -540,6 +541,31 @@ export const ProviderDaemonLiveness = Schema.Struct({
   transport: Schema.optional(ProviderDaemonTransport),
 });
 export type ProviderDaemonLiveness = typeof ProviderDaemonLiveness.Type;
+
+/**
+ * Fresh owned-child startup admission, distinct from rich operational health.
+ * This authenticated receipt attests only the answering identity and its
+ * current durable event-writer readiness. It carries no invented inventory or
+ * history counts, and cannot authorize adoption, retirement or paid-input replay.
+ */
+export const ProviderDaemonStartupReadiness = Schema.Struct({
+  readinessProtocol: Schema.Literal(1),
+  ok: Schema.Literal(true),
+  journalState: Schema.Literal("ready"),
+  mode: ProviderRuntimeProcessMode,
+  dataProfile: Schema.optional(Schema.Literals(["production", "debug"])),
+  dataProfileId: Schema.optional(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))),
+  protocolVersion: Schema.optional(NonNegativeInt),
+  pid: NonNegativeInt,
+  ppid: NonNegativeInt,
+  version: Schema.String,
+  runtimeBuildId: Schema.optional(Schema.String),
+  windowsProcessIdentity: Schema.optional(WindowsProcessIdentity),
+  windowsOwnershipId: Schema.optional(WindowsOwnershipId),
+  startedAt: IsoDateTime,
+  transport: Schema.optional(ProviderDaemonTransport),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type ProviderDaemonStartupReadiness = typeof ProviderDaemonStartupReadiness.Type;
 
 export const ProviderDaemonLeaseRequest = Schema.Struct({
   clientKind: Schema.Literals(["desktop-main", "provider-daemon", "debug", "test"]),

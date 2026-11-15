@@ -1,6 +1,6 @@
 # Verification decision index
 
-Last updated: 2026-11-15 07:06:55 JST (UTC+0900)
+Last updated: 2026-11-15 10:56:47 JST (UTC+0900)
 
 This index covers verification decisions; independent feature decisions remain
 in this directory.
@@ -37,6 +37,10 @@ in this directory.
   cleanup for a live stranded owner without PID-only signalling.
 
 Related provider lifecycle decisions:
+
+- [Provider daemon startup readiness](provider-daemon-startup-readiness.md):
+  authenticated exact-child/journal readiness independent of rich diagnostics,
+  exact request cancellation and finite failure observations.
 
 - [MCP operation storage budget](mcp-operation-storage-budget.md): bounded
   logical byte accounting retains every live request ID while releasing unused

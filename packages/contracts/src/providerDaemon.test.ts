@@ -8,6 +8,7 @@ import {
   ProviderDaemonAdapterCapabilities,
   ProviderDaemonEventRecord,
   ProviderDaemonLiveness,
+  ProviderDaemonStartupReadiness,
   ProviderDaemonHealth,
   ProviderDaemonGlideStartupDiagnostics,
   ProviderDaemonCapability,
@@ -22,6 +23,36 @@ import {
   ProviderDaemonRpcResultByMethod,
   WindowsProcessIdentity,
 } from "./providerDaemon.ts";
+
+it("keeps startup readiness versioned and separate from rich diagnostic health", () => {
+  const codec = Schema.fromJsonString(ProviderDaemonStartupReadiness);
+  const decode = Schema.decodeUnknownSync(ProviderDaemonStartupReadiness);
+  const receipt = {
+    readinessProtocol: 1,
+    ok: true,
+    journalState: "ready",
+    mode: "provider-daemon",
+    dataProfile: "debug",
+    dataProfileId: "a".repeat(64),
+    protocolVersion: 1,
+    pid: 27,
+    ppid: 1,
+    version: "0.2.5",
+    runtimeBuildId: "b".repeat(64),
+    startedAt: "2026-11-15T00:00:00.000Z",
+    transport: "ipc",
+  } as const;
+  assert.deepEqual(Schema.decodeUnknownSync(codec)(Schema.encodeSync(codec)(receipt)), receipt);
+  const { journalState: _omitted, ...withoutJournalState } = receipt;
+  for (const invalid of [
+    withoutJournalState,
+    { ...receipt, journalState: "failed" },
+    { ...receipt, readinessProtocol: 2 },
+    { ...receipt, activeSessionCount: 0 },
+    { ...receipt, token: "synthetic-private-value-must-not-cross-readiness" },
+  ])
+    assert.throws(() => decode(invalid));
+});
 
 it("keeps optional desktop-tools failure observations numeric and finite in JSON health", () => {
   const decode = Schema.decodeUnknownSync(ProviderDaemonGlideStartupDiagnostics);

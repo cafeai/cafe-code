@@ -34,6 +34,7 @@ import {
   PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LEASES_PATH,
   PROVIDER_DAEMON_LIVENESS_PATH,
+  PROVIDER_DAEMON_STARTUP_READINESS_PATH,
   PROVIDER_DAEMON_RETIRE_PATH,
   PROVIDER_DAEMON_RPC_PATH,
   ProviderDaemonEventRecord,
@@ -41,6 +42,7 @@ import {
   ProviderDaemonRetirementRequest,
   ProviderDaemonSubagentDetail,
   type ProviderDaemonProcessDiagnostic,
+  type ProviderDaemonStartupReadiness,
   ProviderDaemonRpcRequest,
   ProviderDaemonSessionReconfigurationRefusal,
   ProviderDaemonFailedRootRetirementRefusal,
@@ -1867,7 +1869,8 @@ const runProviderDaemonServerInternal = (
         if (
           retirementReserved &&
           url.pathname !== PROVIDER_DAEMON_HEALTH_PATH &&
-          url.pathname !== PROVIDER_DAEMON_LIVENESS_PATH
+          url.pathname !== PROVIDER_DAEMON_LIVENESS_PATH &&
+          url.pathname !== PROVIDER_DAEMON_STARTUP_READINESS_PATH
         ) {
           writeJson(response, 503, { error: "Provider daemon is retiring." });
           return;
@@ -1983,6 +1986,48 @@ const runProviderDaemonServerInternal = (
             transport,
             ...processIdentity,
           });
+          return;
+        }
+
+        if (url.pathname === PROVIDER_DAEMON_STARTUP_READINESS_PATH && method === "GET") {
+          if (!hasCapability(request, "health")) {
+            writeJson(response, 401, { error: "unauthorized" });
+            return;
+          }
+          if (retirementReserved) {
+            writeJson(response, 503, { error: "Provider daemon is retiring." });
+            return;
+          }
+          if (journalWriteState !== "ready") {
+            writeJson(response, 503, {
+              error: "provider-journal-unavailable",
+              state: journalWriteState,
+            });
+            return;
+          }
+
+          // Startup needs this exact authenticated child's captured identity
+          // and a usable durable event lane. Rich health remains a separate
+          // diagnostic operation: provider/session/history/inventory queries
+          // must never make a ready child fail its ordinary startup deadline.
+          // No await separates these live state checks from the finite reply.
+          writeJson(response, 200, {
+            readinessProtocol: 1,
+            ok: true,
+            journalState: "ready",
+            mode,
+            ...profileIdentity,
+            ...(options.protocolVersion === undefined
+              ? {}
+              : { protocolVersion: options.protocolVersion }),
+            pid: process.pid,
+            ppid: process.ppid,
+            version: options.version,
+            ...(runtimeBuildId !== undefined ? { runtimeBuildId } : {}),
+            startedAt,
+            transport,
+            ...processIdentity,
+          } satisfies ProviderDaemonStartupReadiness);
           return;
         }
 
