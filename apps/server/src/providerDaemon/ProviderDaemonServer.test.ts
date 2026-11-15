@@ -548,7 +548,7 @@ function makeStartupReadinessNativeOwner(test: TestContext) {
     close,
     request,
     releaseBeforeClose: (release: () => void) => releases.add(release),
-    run: (effect: Effect.Effect<void, unknown>) => {
+    run: <E>(effect: Effect.Effect<void, E>) => {
       active();
       running = Effect.runPromise(effect, { signal: controller.signal });
       return running;
