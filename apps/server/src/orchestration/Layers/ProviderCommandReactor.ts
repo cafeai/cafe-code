@@ -9,6 +9,7 @@ import {
   type OrchestrationEvent,
   type OrchestrationProjectShell,
   ProviderDriverKind,
+  MaxConcurrentSubagents,
   type ProjectId,
   type OrchestrationSession,
   type OrchestrationThread,
@@ -203,6 +204,8 @@ interface PreparedProviderTurn {
   readonly activeTurnId: TurnId | undefined;
   /** This exact ordinary request carried a duplicate's visible context. */
   readonly copiedContextBootstrap?: boolean;
+  /** Saved intent was retained, but this submission did not apply its override. */
+  readonly subagentLimitNotApplied?: number;
 }
 const isRuntimeLossEvent = (event: OrchestrationEvent): event is RuntimeLossEvent =>
   event.type === "thread.activity-appended" &&
@@ -996,6 +999,71 @@ const make = Effect.gen(function* () {
       },
       createdAt: input.createdAt,
     });
+
+  const recordSubagentLimitNotApplied = Effect.fn("recordSubagentLimitNotApplied")(
+    function* (input: {
+      readonly threadId: ThreadId;
+      readonly messageId: MessageId | undefined;
+      readonly intentSequence: number | undefined;
+      readonly requestedLimit: number | undefined;
+    }) {
+      if (
+        input.messageId === undefined ||
+        input.intentSequence === undefined ||
+        !Number.isSafeInteger(input.intentSequence) ||
+        input.intentSequence <= 0 ||
+        !Schema.is(MaxConcurrentSubagents)(input.requestedLimit)
+      )
+        return;
+      const createdAt = DateTime.formatIso(yield* DateTime.now);
+      const identity = createHash("sha256")
+        .update(
+          encodeJsonString([
+            "provider.subagent-limit.not-applied",
+            1,
+            input.threadId,
+            input.messageId,
+            input.intentSequence,
+          ]),
+        )
+        .digest("hex");
+      // This is an intent-bound presentation fact after native acceptance, not
+      // input-consumption, permission, retry, or numeric-policy adoption proof.
+      // Keep it independent of later turn-id assignment and idempotent across
+      // accepted bookkeeping paths. Never let its persistence replay inference.
+      yield* orchestrationEngine
+        .dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`subagent-limit-not-applied:${identity}`),
+          threadId: input.threadId,
+          activity: {
+            id: EventId.make(`subagent-limit-not-applied:${identity}`),
+            kind: "provider.subagent-limit.not-applied",
+            tone: "info",
+            summary: "Subagent limit not applied",
+            payload: {
+              version: 1,
+              reason: "support-unconfirmed",
+              fallback: "current-provider-policy",
+              requestedLimit: input.requestedLimit,
+              messageId: input.messageId,
+              intentSequence: input.intentSequence,
+            },
+            turnId: null,
+            createdAt,
+          },
+          createdAt,
+        })
+        .pipe(
+          Effect.catchCause(() =>
+            Effect.logWarning("subagent limit fallback notice could not be recorded"),
+          ),
+          // Callers reach this only after their critical accepted-send/steer
+          // receipts. The server scope owns the remaining presentation write.
+          Effect.forkIn(reactorScope),
+        );
+    },
+  );
 
   const queueGuardedTerminalSteerRecovery = (input: {
     readonly threadId: ThreadId;
@@ -1870,17 +1938,15 @@ const make = Effect.gen(function* () {
           )
         : Effect.void,
     );
-    const assertRequestedSubagentSupport = Effect.suspend(() =>
-      concurrencyPolicy.requested !== undefined && desiredCapabilities.subagentConcurrency !== true
-        ? Effect.fail(
-            new ProviderAdapterRequestError({
-              provider: providerErrorLabel(desiredDriverKind),
-              method: "thread.turn.start",
-              detail: "This provider runtime does not support configured subagent limits.",
-            }),
-          )
-        : Effect.void,
-    );
+    // A numeric preference is optional execution intent, never permission to
+    // replace a working owner or to block an otherwise valid submission. An
+    // unqualified runtime keeps its current policy; a legitimate new opening
+    // receives explicit native inheritance below. Keep the saved chat/account
+    // value intact so a later qualified opening can still apply it.
+    const subagentLimitNotApplied =
+      applySubagentPolicyForTurn && desiredCapabilities.subagentConcurrency !== true
+        ? (concurrencyPolicy.requested ?? concurrencyPolicy.configured ?? undefined)
+        : undefined;
     // Older authenticated owners may support only the context key, not its
     // companion compaction request. That old capability is not permission to
     // reopen repeatedly and claim the pairing was applied. Require both exact
@@ -1906,6 +1972,7 @@ const make = Effect.gen(function* () {
     // a former Codex process limit across an account/driver switch.
     const concurrencyChanged =
       applySubagentPolicyForTurn &&
+      desiredCapabilities.subagentConcurrency === true &&
       activeSession !== undefined &&
       activeSession.providerInstanceId === desiredInstanceId &&
       activeSession.provider === desiredDriverKind &&
@@ -1982,9 +2049,11 @@ const make = Effect.gen(function* () {
           ? thread.session.maxConcurrentSubagents
           : null;
     const maxConcurrentSubagents = applySubagentPolicyForTurn
-      ? sessionPolicyPending
-        ? (activeSession?.maxConcurrentSubagents ?? null)
-        : concurrencyPolicy.configured
+      ? subagentLimitNotApplied !== undefined
+        ? null
+        : sessionPolicyPending
+          ? (activeSession?.maxConcurrentSubagents ?? null)
+          : concurrencyPolicy.configured
       : retainedControlSubagentPolicy;
     const retainedControlContextWindowPolicy =
       preferredProvider === "codex"
@@ -2007,12 +2076,25 @@ const make = Effect.gen(function* () {
           : retainedControlContextWindowPolicy
         : undefined;
 
+    const withSubagentLimitFallback = (
+      session: ProviderSession,
+      expectedSubagentPolicySession?: ProviderSubagentPolicySession,
+    ) => ({
+      session,
+      expectedSubagentPolicySession,
+      // Exact native evidence can already establish that an unchanged request
+      // is in force. Do not falsely warn that this existing policy was lost.
+      subagentLimitNotApplied:
+        expectedSubagentPolicySession?.maxConcurrentSubagents === subagentLimitNotApplied
+          ? undefined
+          : subagentLimitNotApplied,
+    });
+
     const startProviderSession = (input?: {
       readonly resumeCursor?: unknown;
       readonly provider?: ProviderDriverKind;
     }) =>
-      assertRequestedSubagentSupport.pipe(
-        Effect.andThen(assertRequestedContextWindowSupport),
+      assertRequestedContextWindowSupport.pipe(
         Effect.andThen(assertCompactionMaterializationSupport),
         Effect.andThen(
           Effect.suspend(() =>
@@ -2184,10 +2266,7 @@ const make = Effect.gen(function* () {
         (!sessionPolicyChanged || sessionPolicyPending)
       ) {
         yield* assertRequestedContextWindowSupport;
-        if (
-          concurrencyPolicy.requested !== undefined &&
-          desiredCapabilities.subagentConcurrency !== true
-        ) {
+        if (subagentLimitNotApplied !== undefined) {
           const expected: ProviderSubagentPolicySession | undefined =
             options?.allowSubagentPolicyContinuation === true &&
             desiredCapabilities.subagentPolicyContinuation === true &&
@@ -2200,12 +2279,12 @@ const make = Effect.gen(function* () {
             activeSession.subagentRuntimeId !== undefined &&
             activeThreadSession?.providerInstanceId === desiredInstanceId &&
             activeThreadSession.subagentRuntimeId === activeSession.subagentRuntimeId &&
-            concurrencyPolicy.configured === activeSession.maxConcurrentSubagents
+            typeof activeSession.maxConcurrentSubagents === "number"
               ? {
                   threadId,
                   providerInstanceId: desiredInstanceId,
                   subagentRuntimeId: activeSession.subagentRuntimeId,
-                  maxConcurrentSubagents: concurrencyPolicy.requested,
+                  maxConcurrentSubagents: activeSession.maxConcurrentSubagents,
                 }
               : undefined;
           if (expected !== undefined && matchesSubagentPolicySession(activeSession, expected)) {
@@ -2213,11 +2292,10 @@ const make = Effect.gen(function* () {
             // occurs here, and delivery must retain this exact tuple through
             // the authenticated owner and native lifecycle admission. Missing
             // inventory refuses rather than resuming a replacement process.
-            return { session: activeSession, expectedSubagentPolicySession: expected };
+            return withSubagentLimitFallback(activeSession, expected);
           }
-          yield* assertRequestedSubagentSupport;
         }
-        return { session: activeSession, expectedSubagentPolicySession: undefined };
+        return withSubagentLimitFallback(activeSession);
       }
 
       // Provider resume state is only meaningful inside the same provider
@@ -2286,7 +2364,7 @@ const make = Effect.gen(function* () {
             provider: activeSession.provider,
           },
         );
-        return { session: activeSession, expectedSubagentPolicySession: undefined };
+        return withSubagentLimitFallback(activeSession);
       }
       yield* Effect.logInfo("provider command reactor restarted provider session", {
         threadId,
@@ -2298,12 +2376,12 @@ const make = Effect.gen(function* () {
         additionalDirectories: restartedSession.additionalDirectories,
       });
       yield* bindSessionToThread(restartedSession);
-      return { session: restartedSession, expectedSubagentPolicySession: undefined };
+      return withSubagentLimitFallback(restartedSession);
     }
 
     const startedSession = yield* startProviderSession(undefined);
     yield* bindSessionToThread(startedSession);
-    return { session: startedSession, expectedSubagentPolicySession: undefined };
+    return withSubagentLimitFallback(startedSession);
   });
 
   const shouldBootstrapProviderContinuationContext = Effect.fn(
@@ -2424,18 +2502,21 @@ const make = Effect.gen(function* () {
             activeSession,
           })
         : false);
-    const { session: ensuredSession, expectedSubagentPolicySession } =
-      yield* ensureSessionForThread(input.threadId, input.createdAt, {
-        ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-        thread,
-        ...(input.project !== undefined ? { project: input.project } : {}),
-        activeSession,
-        activeSessionResolved: true,
-        applySubagentPolicyForTurn: true,
-        allowSubagentPolicyContinuation:
-          input.codexReview === undefined && !shouldBootstrapProviderContext,
-        ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
-      });
+    const {
+      session: ensuredSession,
+      expectedSubagentPolicySession,
+      subagentLimitNotApplied,
+    } = yield* ensureSessionForThread(input.threadId, input.createdAt, {
+      ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+      thread,
+      ...(input.project !== undefined ? { project: input.project } : {}),
+      activeSession,
+      activeSessionResolved: true,
+      applySubagentPolicyForTurn: true,
+      allowSubagentPolicyContinuation:
+        input.codexReview === undefined && !shouldBootstrapProviderContext,
+      ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+    });
     if (input.modelSelection !== undefined && input.rememberModelSelection !== false) {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
@@ -2547,6 +2628,7 @@ const make = Effect.gen(function* () {
             settingsSource: "submitted",
           }),
       activeTurnId: ensuredSession.status === "running" ? ensuredSession.activeTurnId : undefined,
+      ...(subagentLimitNotApplied !== undefined ? { subagentLimitNotApplied } : {}),
     } satisfies PreparedProviderTurn;
   });
 
@@ -2573,68 +2655,79 @@ const make = Effect.gen(function* () {
    */
   const steerProviderTurn = Effect.fn("steerProviderTurn")(function* (
     input: ProviderSteerTurnInput,
+    retainedFallbackLimit?: number,
   ) {
     let request = input;
+    let subagentLimitNotApplied = retainedFallbackLimit;
     if (request.expectedSubagentPolicySession === undefined) {
       const thread = yield* resolveThread(input.threadId);
-      if (thread?.session?.providerName === "codex") {
+      if (
+        thread?.session?.providerName === "codex" ||
+        thread?.session?.providerName === "claudeAgent"
+      ) {
+        const driver = thread.session.providerName;
         const instanceId = thread.session.providerInstanceId ?? thread.modelSelection.instanceId;
         const settings = yield* serverSettingsService.getSettings;
         const instance = settings.providerInstances[instanceId];
-        const contextPolicy = resolveCodexContextWindowPolicy({
-          driver: "codex",
-          chatOverride: thread.codexContextWindowOverride,
-          accountDefault:
-            instance?.driver === "codex" && instance.enabled !== false
-              ? instance.defaultCodexContextWindowOverride
-              : undefined,
-        });
-        if (contextPolicy.requested !== undefined) {
-          const capabilities = yield* providerService.getCapabilities(instanceId);
-          if (capabilities.codexContextWindow !== true)
-            return yield* new ProviderAdapterRequestError({
-              provider: "Codex",
-              method: "turn/steer",
-              detail: "This Codex runtime does not support configured context-window overrides.",
-            });
+        if (driver === "codex") {
+          const contextPolicy = resolveCodexContextWindowPolicy({
+            driver: "codex",
+            chatOverride: thread.codexContextWindowOverride,
+            accountDefault:
+              instance?.driver === "codex" && instance.enabled !== false
+                ? instance.defaultCodexContextWindowOverride
+                : undefined,
+          });
+          if (contextPolicy.requested !== undefined) {
+            const capabilities = yield* providerService.getCapabilities(instanceId);
+            if (capabilities.codexContextWindow !== true)
+              return yield* new ProviderAdapterRequestError({
+                provider: "Codex",
+                method: "turn/steer",
+                detail: "This Codex runtime does not support configured context-window overrides.",
+              });
+          }
         }
         const policy = resolveSubagentConcurrencyPolicy({
-          driver: "codex",
+          driver,
           ...(thread.subagentLimits !== undefined ? { limits: thread.subagentLimits } : {}),
           instanceDefaultMaxConcurrentSubagents:
-            instance?.driver === "codex" ? instance.defaultMaxConcurrentSubagents : undefined,
-          instanceConfig: instance?.driver === "codex" ? instance.config : undefined,
+            instance?.driver === driver ? instance.defaultMaxConcurrentSubagents : undefined,
+          instanceConfig: instance?.driver === driver ? instance.config : undefined,
         });
-        if (policy.requested !== undefined) {
+        if (policy.requested !== undefined || policy.configured !== null) {
           const capabilities = yield* providerService.getCapabilities(instanceId);
           if (capabilities.subagentConcurrency !== true) {
+            subagentLimitNotApplied = policy.requested ?? policy.configured ?? undefined;
             const live = yield* getProviderSessionForThread(input.threadId);
             const expected =
-              live?.subagentRuntimeId === undefined
+              driver !== "codex" ||
+              capabilities.subagentPolicyContinuation !== true ||
+              live?.subagentRuntimeId === undefined ||
+              typeof live.maxConcurrentSubagents !== "number"
                 ? undefined
                 : {
                     threadId: input.threadId,
                     providerInstanceId: instanceId,
                     subagentRuntimeId: live.subagentRuntimeId,
-                    maxConcurrentSubagents: policy.requested,
+                    maxConcurrentSubagents: live.maxConcurrentSubagents,
                   };
+            // Retain an available exact-current-process fence using its real
+            // adopted count. A different optional preference does not authorize
+            // changing that count, retiring the owner, or inventing adoption.
             if (
-              capabilities.subagentPolicyContinuation !== true ||
-              expected === undefined ||
-              !matchesSubagentPolicySession(live, expected) ||
-              thread.session.providerInstanceId !== instanceId ||
-              thread.session.subagentRuntimeId !== expected.subagentRuntimeId ||
-              thread.modelSelection.instanceId !== instanceId ||
-              thread.modelSelection.model !== live?.model ||
-              thread.runtimeMode !== live.runtimeMode ||
-              policy.configured !== live.maxConcurrentSubagents
-            )
-              return yield* new ProviderAdapterRequestError({
-                provider: "Codex",
-                method: "turn/steer",
-                detail: "This provider runtime does not support configured subagent limits.",
-              });
-            request = { ...request, expectedSubagentPolicySession: expected };
+              expected !== undefined &&
+              matchesSubagentPolicySession(live, expected) &&
+              thread.session.providerInstanceId === instanceId &&
+              thread.session.subagentRuntimeId === expected.subagentRuntimeId &&
+              thread.modelSelection.instanceId === instanceId &&
+              thread.modelSelection.model === live?.model &&
+              thread.runtimeMode === live.runtimeMode
+            ) {
+              request = { ...request, expectedSubagentPolicySession: expected };
+              if (expected.maxConcurrentSubagents === subagentLimitNotApplied)
+                subagentLimitNotApplied = undefined;
+            }
           }
         }
       }
@@ -2643,9 +2736,10 @@ const make = Effect.gen(function* () {
     // session-loss classifier to replay it through fresh-start recovery. The
     // immutable message/receipt path retains it; no owner is replaced here.
     const effect = providerService.steerTurn(request);
-    return yield* request.expectedSubagentPolicySession === undefined
+    const turn = yield* request.expectedSubagentPolicySession === undefined
       ? effect
       : effect.pipe(Effect.mapError(fencedContinuationFailure));
+    return { ...turn, subagentLimitNotApplied };
   });
 
   const recordAcceptedTurnConfiguration = Effect.fn("recordAcceptedTurnConfiguration")(function* (
@@ -2730,6 +2824,12 @@ const make = Effect.gen(function* () {
           Effect.forkIn(reactorScope),
         );
     }
+    yield* recordSubagentLimitNotApplied({
+      threadId: prepared.request.threadId,
+      messageId: prepared.request.messageId,
+      intentSequence: prepared.request.intentSequence,
+      requestedLimit: prepared.subagentLimitNotApplied,
+    });
   });
 
   const markThreadRunningFromSendTurnResult = Effect.fn("markThreadRunningFromSendTurnResult")(
@@ -3849,13 +3949,18 @@ const make = Effect.gen(function* () {
                         acceptedAt: updatedAt,
                       })
                     : ({ mayMarkAcceptedTurnRunning: true } as const);
-                if (!steerAcceptance.mayMarkAcceptedTurnRunning) {
-                  return;
+                if (steerAcceptance.mayMarkAcceptedTurnRunning) {
+                  yield* markThreadRunningFromSendTurnResult({
+                    threadId: event.payload.threadId,
+                    turnId: turn.turnId,
+                    createdAt: event.payload.createdAt,
+                  });
                 }
-                yield* markThreadRunningFromSendTurnResult({
+                yield* recordSubagentLimitNotApplied({
                   threadId: event.payload.threadId,
-                  turnId: turn.turnId,
-                  createdAt: event.payload.createdAt,
+                  messageId: event.payload.messageId,
+                  intentSequence: event.sequence,
+                  requestedLimit: turn.subagentLimitNotApplied,
                 });
               }),
           }),
@@ -3925,29 +4030,32 @@ const make = Effect.gen(function* () {
           return recoverTurnStartFailure(cause);
         }
 
-        return steerProviderTurn({
-          ...(event.payload.axiomWebEnabled !== undefined
-            ? { axiomWebEnabled: event.payload.axiomWebEnabled }
-            : {}),
-          ...(event.payload.axiomMcpRevision !== undefined
-            ? { axiomMcpRevision: event.payload.axiomMcpRevision }
-            : {}),
-          threadId: event.payload.threadId,
-          ...(sendTurnRequest.value.request.expectedSubagentPolicySession !== undefined
-            ? {
-                expectedSubagentPolicySession:
-                  sendTurnRequest.value.request.expectedSubagentPolicySession,
-              }
-            : {}),
-          expectedTurnId: activeTurnId,
-          messageId: event.payload.messageId,
-          intentSequence: event.sequence,
-          ...(event.payload.deliveryPriority !== undefined
-            ? { deliveryPriority: event.payload.deliveryPriority }
-            : {}),
-          ...(normalizedInput ? { input: normalizedInput } : {}),
-          ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
-        }).pipe(
+        return steerProviderTurn(
+          {
+            ...(event.payload.axiomWebEnabled !== undefined
+              ? { axiomWebEnabled: event.payload.axiomWebEnabled }
+              : {}),
+            ...(event.payload.axiomMcpRevision !== undefined
+              ? { axiomMcpRevision: event.payload.axiomMcpRevision }
+              : {}),
+            threadId: event.payload.threadId,
+            ...(sendTurnRequest.value.request.expectedSubagentPolicySession !== undefined
+              ? {
+                  expectedSubagentPolicySession:
+                    sendTurnRequest.value.request.expectedSubagentPolicySession,
+                }
+              : {}),
+            expectedTurnId: activeTurnId,
+            messageId: event.payload.messageId,
+            intentSequence: event.sequence,
+            ...(event.payload.deliveryPriority !== undefined
+              ? { deliveryPriority: event.payload.deliveryPriority }
+              : {}),
+            ...(normalizedInput ? { input: normalizedInput } : {}),
+            ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
+          },
+          sendTurnRequest.value.subagentLimitNotApplied,
+        ).pipe(
           Effect.matchCauseEffect({
             onFailure: (steerCause) => {
               if (
@@ -4024,6 +4132,12 @@ const make = Effect.gen(function* () {
                     createdAt: event.payload.createdAt,
                   });
                 }
+                yield* recordSubagentLimitNotApplied({
+                  threadId: event.payload.threadId,
+                  messageId: event.payload.messageId,
+                  intentSequence: event.sequence,
+                  requestedLimit: turn.subagentLimitNotApplied,
+                });
 
                 yield* appendProviderDiagnosticActivity({
                   threadId: event.payload.threadId,
@@ -5350,21 +5464,26 @@ const make = Effect.gen(function* () {
           });
         },
         onSuccess: (turn) => {
-          if (activeSession.providerName !== "codex") {
-            return Effect.void;
-          }
           return Effect.gen(function* () {
-            const acceptedAt = DateTime.formatIso(yield* DateTime.now);
-            yield* recordAcceptedCodexSteer({
+            if (activeSession.providerName === "codex") {
+              const acceptedAt = DateTime.formatIso(yield* DateTime.now);
+              yield* recordAcceptedCodexSteer({
+                threadId: event.payload.threadId,
+                turnId: turn.turnId,
+                messageId: event.payload.messageId,
+                intentSequence: event.sequence,
+                ...(turn.clientCorrelationId !== undefined
+                  ? { clientCorrelationId: turn.clientCorrelationId }
+                  : {}),
+                intentCreatedAt: event.payload.createdAt,
+                acceptedAt,
+              });
+            }
+            yield* recordSubagentLimitNotApplied({
               threadId: event.payload.threadId,
-              turnId: turn.turnId,
               messageId: event.payload.messageId,
               intentSequence: event.sequence,
-              ...(turn.clientCorrelationId !== undefined
-                ? { clientCorrelationId: turn.clientCorrelationId }
-                : {}),
-              intentCreatedAt: event.payload.createdAt,
-              acceptedAt,
+              requestedLimit: turn.subagentLimitNotApplied,
             });
           });
         },

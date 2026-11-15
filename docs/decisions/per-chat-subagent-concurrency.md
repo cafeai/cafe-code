@@ -1,7 +1,10 @@
 # Per-chat subagent concurrency
 
+Partially superseded by: [Nonblocking subagent-limit preferences](nonblocking-subagent-limit-preferences.md) for delivery when native numeric support is unconfirmed; historical rationale below is retained.
+
 Status: Accepted design; implemented with synthetic regression coverage
-Last updated: 2026-10-11 10:54:53 JST (UTC+0900)
+Last updated: 2026-11-15 16:01:39 JST (UTC+0900)
+Historical implementation checkpoint: 2026-10-11 10:54:53 JST (UTC+0900)
 Partially superseded by: [Live account subagent-default inheritance](live-account-subagent-default.md)
 for new-chat-only seeding, account fallback resolution and saved-only label presentation. The accepted history
 below is retained; requested/materialized evidence and safety rules remain in force.

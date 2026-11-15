@@ -72,3 +72,5 @@ Related provider lifecycle decisions:
 - [Initial Claude input consumption](claude-initial-input-consumption.md): narrow
   successor for a committed initial input mapped by its exact native-consumption
   receipt to the actual new turn, without ACK settlement or old-turn aliases.
+
+- [Nonblocking subagent-limit preferences](nonblocking-subagent-limit-preferences.md): apply qualified overrides; otherwise warn in primary chat and retain ordinary delivery.

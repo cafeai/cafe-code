@@ -3578,14 +3578,19 @@ describe("ClaudeAdapterLive", () => {
           runtimeMode: "full-access",
           maxConcurrentSubagents: null,
         });
+        const legacy = yield* adapter.startSession({
+          threadId: ThreadId.make("claude-limit-legacy-config"),
+          runtimeMode: "full-access",
+        });
         assert.equal(first.maxConcurrentSubagents, 1);
         assert.equal(second.maxConcurrentSubagents, 64);
-        assert.equal(inherited.maxConcurrentSubagents, 20);
+        assert.equal(inherited.maxConcurrentSubagents, null);
+        assert.equal(legacy.maxConcurrentSubagents, 20);
         assert.deepEqual(
           harness.createInputs.map(
             (input) => input.options.env?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS,
           ),
-          ["1", "64", "20"],
+          ["1", "64", "128", "20"],
         );
         assert.equal(firstEnvironment?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, "1");
         assert.notEqual(firstEnvironment, harness.createInputs[1]?.options.env);

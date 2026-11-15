@@ -39,6 +39,7 @@ import {
 import { scopeThreadRef } from "@cafecode/client-runtime";
 import {
   CheckpointRef,
+  ClientOrchestrationCommand,
   EnvironmentId,
   EventId,
   MessageId,
@@ -52,6 +53,7 @@ import {
   WS_METHODS,
 } from "@cafecode/contracts";
 import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
+import * as Schema from "effect/Schema";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
@@ -408,7 +410,7 @@ describe("ChatView full app (standalone)", () => {
         }
       },
     );
-    it("does not lend an applied numeric session limit without Cafe continuation availability", async () => {
+    it("sends without clearing saved policy when runtime limit support is unconfirmed", async () => {
       const mounted = await mountChatView({
         viewport: WIDE_FOOTER_VIEWPORT,
         snapshot: continuationSnapshot(false),
@@ -430,8 +432,10 @@ describe("ChatView full app (standalone)", () => {
             ),
           };
         },
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
       });
-      const prompt = "Do not consume this unsupported fresh-start policy";
+      const prompt = "Continue without clearing the saved subagent policy";
       try {
         await waitForServerConfigToApply();
         useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
@@ -440,17 +444,21 @@ describe("ChatView full app (standalone)", () => {
         );
         (await waitForSendButton()).click();
         await vi.waitFor(() =>
-          expect(document.body.textContent).toContain(
-            "This provider runtime does not support the account subagent limit.",
-          ),
+          expect(wsRequests.filter((body) => body.type === "thread.turn.start")).toHaveLength(1),
         );
-        expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
-        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(prompt);
+        expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+          threadId: THREAD_ID,
+          message: { text: prompt, attachments: [] },
+        });
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({});
+        expect(
+          getServerConfig()?.settings.providerInstances[account]?.defaultMaxConcurrentSubagents,
+        ).toBe(12);
       } finally {
         await mounted.cleanup();
       }
     });
-    it("delivers a queued follow-up only through the exact existing-process continuation guarantee", async () => {
+    it("delivers a queued follow-up without rewriting the existing process's numeric policy", async () => {
       const queue = createFollowUpQueuePersistence();
       const snapshot = continuationSnapshot(false);
       const thread = snapshot.threads[0]!;
@@ -511,7 +519,7 @@ describe("ChatView full app (standalone)", () => {
       }
     });
     it.for(["send", "steer"] as const)(
-      "rechecks exact continuation authority after deferred %s attachment preparation",
+      "keeps deferred %s attachment bytes and saved policy when continuation support becomes unconfirmed",
       async (action, context) => {
         const originalRead = FileReader.prototype.readAsDataURL;
         const prepared: { reader: FileReader; blob: Blob }[] = [];
@@ -588,6 +596,8 @@ describe("ChatView full app (standalone)", () => {
           viewport: WIDE_FOOTER_VIEWPORT,
           snapshot: continuationSnapshot(action === "steer"),
           configureFixture: configureExistingContinuation,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
         });
         const prompt = "Preserve this exact continuation-race draft";
         try {
@@ -714,10 +724,9 @@ describe("ChatView full app (standalone)", () => {
             sendButton.click();
           }
           await caller.own("attachments", () => vi.waitFor(() => expect(prepared).toHaveLength(1)));
-          // The fleet revokes Cafe continuation availability while bytes
-          // are being prepared. Numeric history is insufficient at this
-          // advisory boundary, even though the policy remains unchanged;
-          // actual owner qualification is additionally required server-side.
+          // Optional support changes while the original image read is held.
+          // The server still owns actual policy admission; this observation
+          // must neither consume different bytes nor block the user's send.
           chatViewFixture.fixture.serverConfig = {
             ...chatViewFixture.fixture.serverConfig,
             providers: chatViewFixture.fixture.serverConfig.providers.map((provider) =>
@@ -748,25 +757,43 @@ describe("ChatView full app (standalone)", () => {
           releaseReaders();
           await caller.own("receipt", () =>
             vi.waitFor(() =>
-              expect(document.body.textContent).toContain(
-                "This provider runtime does not support the account subagent limit.",
-              ),
+              expect(
+                wsRequests.filter(
+                  (body) =>
+                    body.type === (action === "steer" ? "thread.turn.steer" : "thread.turn.start"),
+                ),
+              ).toHaveLength(1),
             ),
           );
           expect(
-            wsRequests.some(
+            wsRequests.find(
+              (body) =>
+                body.type === (action === "steer" ? "thread.turn.steer" : "thread.turn.start"),
+            ),
+          ).toMatchObject({
+            threadId: THREAD_ID,
+            message: {
+              text: prompt,
+              attachments: [
+                {
+                  type: "image",
+                  name: "draft.png",
+                  mimeType: "image/png",
+                  sizeBytes: 1,
+                  dataUrl: "data:image/png;base64,eA==",
+                },
+              ],
+            },
+          });
+          expect(
+            wsRequests.filter(
               (body) => body.type === "thread.turn.start" || body.type === "thread.turn.steer",
             ),
-          ).toBe(false);
-          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
-            prompt,
-          );
+          ).toHaveLength(1);
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({});
           expect(
-            useComposerDraftStore
-              .getState()
-              .getComposerDraft(THREAD_REF)
-              ?.images.map((image) => image.id),
-          ).toEqual(["continuation-race-image"]);
+            selectThreadByRef(useStore.getState(), THREAD_REF)?.session?.maxConcurrentSubagents,
+          ).toBe(12);
           const persisted = createFollowUpQueuePersistence().load(LOCAL_ENVIRONMENT_ID);
           expect(persisted.ok).toBe(true);
           if (persisted.ok) expect(persisted.value.claimed).toHaveLength(0);
@@ -776,7 +803,7 @@ describe("ChatView full app (standalone)", () => {
       },
     );
     it.each(["plan follow-up", "native review"] as const)(
-      "refuses unsupported inherited account policy in direct %s actions before dispatch or consuming work",
+      "dispatches direct %s actions without clearing unconfirmed inherited account policy",
       async (action) => {
         const original = createSnapshotWithPlanFollowUpPrompt();
         const base = {
@@ -804,6 +831,8 @@ describe("ChatView full app (standalone)", () => {
               })),
             };
           },
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
         });
         try {
           await waitForServerConfigToApply();
@@ -815,26 +844,35 @@ describe("ChatView full app (standalone)", () => {
             useComposerDraftStore.getState().setPrompt(THREAD_REF, prompt);
             await page.getByRole("button", { name: "Code review", exact: true }).click();
             await page.getByRole("button", { name: "Start review", exact: true }).click();
-            await expect
-              .element(page.getByRole("dialog", { name: "Start a Codex review" }))
-              .toBeVisible();
             expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
               prompt,
             );
           }
           await vi.waitFor(() =>
-            expect(document.body.textContent).toContain(
-              "This provider runtime does not support the account subagent limit.",
-            ),
+            expect(wsRequests.filter((body) => body.type === "thread.turn.start")).toHaveLength(1),
           );
+          expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+            threadId: THREAD_ID,
+            message: {
+              text:
+                action === "native review"
+                  ? "Code review: uncommitted changes"
+                  : "PLEASE IMPLEMENT THIS PLAN:\n# Follow-up plan\n\n- Keep the composer footer stable on resize.",
+              attachments: [],
+            },
+            ...(action === "native review" ? { codexReview: { type: "uncommittedChanges" } } : {}),
+          });
           expect(
             wsRequests.some(
-              (body) =>
-                body.type === "thread.turn.start" ||
-                body.type === "thread.create" ||
-                body.type === "thread.meta.update",
+              (body) => body.type === "thread.create" || body.type === "thread.session.stop",
             ),
           ).toBe(false);
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual(
+            base.threads[0]!.subagentLimits,
+          );
+          expect(
+            getServerConfig()?.settings.providerInstances[account]?.defaultMaxConcurrentSubagents,
+          ).toBe(12);
           expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.proposedPlans).toEqual(
             originalPlan,
           );
@@ -844,7 +882,7 @@ describe("ChatView full app (standalone)", () => {
       },
     );
     it.for(["ordinary send", "plan follow-up", "plan new chat"] as const)(
-      "rechecks live account policy after deferred preparation for %s and preserves unsent work",
+      "dispatches %s exactly once after optional policy support changes during preparation",
       async (action, context) => {
         const original =
           action === "ordinary send"
@@ -886,12 +924,29 @@ describe("ChatView full app (standalone)", () => {
           viewport: WIDE_FOOTER_VIEWPORT,
           snapshot: base,
           configureFixture: configureLiveDefaults,
-          resolveRpc: (body) =>
-            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
-              ? body.type === blockedType
-                ? pending
-                : { sequence: 2 }
-              : undefined,
+          resolveRpc: (body) => {
+            if (body._tag !== ORCHESTRATION_WS_METHODS.dispatchCommand) return undefined;
+            if (body.type === "thread.create") {
+              const command = Schema.decodeUnknownSync(ClientOrchestrationCommand)(body);
+              if (command.type !== "thread.create") {
+                throw new Error("Expected the exact synthetic thread-create command.");
+              }
+              const snapshotSequence = chatViewFixture.fixture.snapshot.snapshotSequence + 1;
+              chatViewFixture.fixture.snapshot = {
+                ...addThreadToSnapshot(chatViewFixture.fixture.snapshot, command.threadId),
+                snapshotSequence,
+              };
+              const created = chatViewFixture.fixture.snapshot.threads.find(
+                (thread) => thread.id === command.threadId,
+              )!;
+              rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeShell, {
+                kind: "thread-upserted",
+                sequence: snapshotSequence,
+                thread: toShellThread(created),
+              });
+            }
+            return body.type === blockedType ? pending : { sequence: 2 };
+          },
         });
         const prompt = "Keep this exact unsent policy-race draft";
         try {
@@ -944,46 +999,49 @@ describe("ChatView full app (standalone)", () => {
           caller.mark("ack");
           await caller.own("receipt", () =>
             vi.waitFor(() =>
-              expect(document.body.textContent).toContain(
-                "This provider runtime does not support the account subagent limit.",
+              expect(wsRequests.filter((body) => body.type === "thread.turn.start")).toHaveLength(
+                1,
               ),
             ),
           );
-          expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
+          const submitted = wsRequests.find((body) => body.type === "thread.turn.start")!;
+          expect(submitted).toMatchObject({
+            message: {
+              text:
+                action === "ordinary send"
+                  ? prompt
+                  : "PLEASE IMPLEMENT THIS PLAN:\n# Follow-up plan\n\n- Keep the composer footer stable on resize.",
+              attachments: [],
+            },
+          });
           expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.proposedPlans).toEqual(
             originalPlan,
           );
-          if (action === "ordinary send") {
-            expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
-              prompt,
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({});
+          expect(
+            getServerConfig()?.settings.providerInstances[account]?.defaultMaxConcurrentSubagents,
+          ).toBe(24);
+          if (action === "plan new chat") {
+            const created = wsRequests.find((body) => body.type === "thread.create")!;
+            expect(submitted).toMatchObject({ threadId: created.threadId });
+            await caller.own("snapshot", () =>
+              startPromotedServerThreadViaDomainEvent(created.threadId as ThreadId),
             );
-            await caller.own("prompt", () =>
+            await caller.own("closed", () =>
               vi.waitFor(() =>
-                expect(document.querySelector('[contenteditable="true"]')?.textContent).toContain(
-                  prompt,
+                expect(mounted.router.state.location.pathname).toBe(
+                  serverThreadPath(created.threadId as ThreadId),
                 ),
               ),
             );
-          } else if (action === "plan follow-up") {
-            await caller.own("send-target", () =>
-              expect
-                .element(page.getByRole("button", { name: "Implement", exact: true }))
-                .toBeEnabled(),
-            );
-          } else {
-            await caller.own("closed", () =>
-              vi.waitFor(() =>
-                expect(wsRequests.some((body) => body.type === "thread.delete")).toBe(true),
-              ),
-            );
-            expect(mounted.router.state.location.pathname).toBe(serverThreadPath(THREAD_ID));
-          }
+          } else expect(submitted).toMatchObject({ threadId: THREAD_ID });
+          expect(wsRequests.some((body) => body.type === "thread.delete")).toBe(false);
         } finally {
           await caller.cleanup();
         }
       },
     );
-    it("leaves a deferred queued send definitely unclaimed when the live account policy becomes unsupported", async (context) => {
+    it("settles one deferred queued send when optional live account policy support changes", async (context) => {
       const queue = createFollowUpQueuePersistence();
       const base = policySnapshot(undefined, 12);
       const queuedRuntime =
@@ -1050,29 +1108,32 @@ describe("ChatView full app (standalone)", () => {
         caller.mark("ack");
         await caller.own("receipt", () =>
           vi.waitFor(() =>
-            expect(document.body.textContent).toContain(
-              "This provider runtime does not support the account subagent limit.",
-            ),
+            expect(wsRequests.filter((body) => body.type === "thread.turn.start")).toHaveLength(1),
           ),
         );
-        expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
-        const persisted = queue.load(LOCAL_ENVIRONMENT_ID);
-        expect(persisted.ok).toBe(true);
-        if (persisted.ok) {
-          expect(persisted.value.claimed).toHaveLength(0);
-          expect(persisted.value.pending).toHaveLength(1);
-          // Durable storage intentionally records only a blocked bit, not
-          // arbitrary error text; hydration uses this exact review label.
-          expect(persisted.value.pending[0]).toMatchObject({
-            promptText: "Preserve this exact queued input",
-            blockedReason: "Review this queued follow-up before sending.",
-          });
-        }
+        expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
+          threadId: THREAD_ID,
+          message: { text: "Preserve this exact queued input", attachments: [] },
+        });
+        await caller.own("receipt", () =>
+          vi.waitFor(() => {
+            const persisted = queue.load(LOCAL_ENVIRONMENT_ID);
+            expect(persisted.ok).toBe(true);
+            if (persisted.ok) {
+              expect(persisted.value.claimed).toHaveLength(0);
+              expect(persisted.value.pending).toHaveLength(0);
+            }
+          }),
+        );
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({});
+        expect(
+          getServerConfig()?.settings.providerInstances[account]?.defaultMaxConcurrentSubagents,
+        ).toBe(24);
       } finally {
         await caller.cleanup();
       }
     });
-    it("rechecks the actual steer session's account after deferred image preparation without claiming or consuming input", async (context) => {
+    it("dispatches the exact prepared steer image when optional account policy support changes", async (context) => {
       const originalRead = FileReader.prototype.readAsDataURL;
       const prepared: { reader: FileReader; blob: Blob }[] = [];
       const nativeReads = new Set<{ reader: FileReader; done: Promise<void> }>();
@@ -1204,6 +1265,8 @@ describe("ChatView full app (standalone)", () => {
             })),
           };
         },
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
       });
       const prompt = "Keep this exact unsent steer input";
       try {
@@ -1310,23 +1373,32 @@ describe("ChatView full app (standalone)", () => {
         releaseReaders();
         await caller.own("snapshot", () =>
           vi.waitFor(() =>
-            expect(document.body.textContent).toContain(
-              "This provider runtime does not support the account subagent limit.",
-            ),
+            expect(wsRequests.filter((body) => body.type === "thread.turn.steer")).toHaveLength(1),
           ),
         );
+        const submitted = wsRequests.find((body) => body.type === "thread.turn.steer")!;
+        expect(submitted).toMatchObject({
+          threadId: THREAD_ID,
+          message: {
+            text: prompt,
+            attachments: [
+              {
+                type: "image",
+                name: "draft.png",
+                mimeType: "image/png",
+                sizeBytes: 1,
+                dataUrl: "data:image/png;base64,eA==",
+              },
+            ],
+          },
+        });
+        expect(submitted).not.toHaveProperty("modelSelection");
+        expect(submitted).not.toHaveProperty("subagentLimits");
+        expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({});
         expect(
-          wsRequests.some(
-            (body) => body.type === "thread.turn.steer" || body.type === "thread.turn.start",
-          ),
-        ).toBe(false);
-        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(prompt);
-        expect(
-          useComposerDraftStore
-            .getState()
-            .getComposerDraft(THREAD_REF)
-            ?.images.map((image) => image.id),
-        ).toEqual(["live-steer-image"]);
+          getServerConfig()?.settings.providerInstances[account]?.defaultMaxConcurrentSubagents,
+        ).toBe(24);
         const persisted = createFollowUpQueuePersistence().load(LOCAL_ENVIRONMENT_ID);
         expect(persisted.ok).toBe(true);
         if (persisted.ok) expect(persisted.value.claimed).toHaveLength(0);
@@ -1334,7 +1406,7 @@ describe("ChatView full app (standalone)", () => {
         await caller.cleanup();
       }
     });
-    it("does not borrow an unsent supported account's capability when the active steer owner is unrecorded", async () => {
+    it("routes legacy-owner steer by chat without transmitting an unsent picker account as authority", async () => {
       const original = createSnapshotForTargetUser({
         targetMessageId: MessageId.make("legacy-steer-owner"),
         targetText: "Legacy session owner fixture",
@@ -1393,6 +1465,8 @@ describe("ChatView full app (standalone)", () => {
             })),
           };
         },
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
       });
       const prompt = "Preserve my unsent owner-bound steer";
       try {
@@ -1412,16 +1486,18 @@ describe("ChatView full app (standalone)", () => {
         (await waitForComposerEditor()).focus();
         await userEvent.keyboard("{Control>}{Enter}{/Control}");
         await vi.waitFor(() =>
-          expect(document.body.textContent).toContain(
-            "The active session’s account is not recorded.",
-          ),
+          expect(wsRequests.filter((body) => body.type === "thread.turn.steer")).toHaveLength(1),
         );
-        expect(
-          wsRequests.some(
-            (body) => body.type === "thread.turn.steer" || body.type === "thread.turn.start",
-          ),
-        ).toBe(false);
-        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(prompt);
+        const submitted = wsRequests.find((body) => body.type === "thread.turn.steer")!;
+        expect(submitted).toMatchObject({
+          threadId: THREAD_ID,
+          message: { text: prompt, attachments: [] },
+        });
+        expect(submitted).not.toHaveProperty("modelSelection");
+        expect(submitted).not.toHaveProperty("providerInstanceId");
+        expect(submitted).not.toHaveProperty("subagentLimits");
+        expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
+        expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({});
         const persisted = createFollowUpQueuePersistence().load(LOCAL_ENVIRONMENT_ID);
         expect(persisted.ok).toBe(true);
         if (persisted.ok) expect(persisted.value.claimed).toHaveLength(0);
@@ -3299,7 +3375,7 @@ describe("ChatView full app (standalone)", () => {
         await mounted.cleanup();
       }
     });
-    it("preserves an inherited numeric draft on an unsupported runtime and requires clearing account intent before bootstrap", async () => {
+    it("bootstraps an inherited numeric draft without clearing the saved account preference", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
         snapshot: createProjectlessSnapshot(),
@@ -3331,7 +3407,8 @@ describe("ChatView full app (standalone)", () => {
           expect(mounted.router.state.location.pathname).toMatch(UUID_ROUTE_RE),
         );
         const draftId = draftIdFromPath(mounted.router.state.location.pathname);
-        const prompt = "Retain this prompt until the unsupported request is reset";
+        const submittedId = draftThreadIdFor(draftId);
+        const prompt = "Use the current policy without clearing my saved preference";
         expect(
           useComposerDraftStore.getState().getComposerDraft(draftId)?.subagentLimits,
         ).toBeUndefined();
@@ -3339,58 +3416,20 @@ describe("ChatView full app (standalone)", () => {
         await waitForStandaloneComposerText(prompt);
         (await waitForSendButton()).click();
         await vi.waitFor(() =>
-          expect(document.body.textContent).toContain(
-            "This provider runtime does not support the account subagent limit. Clear it in account settings or use a supported runtime before sending.",
-          ),
+          expect(wsRequests.filter((body) => body.type === "thread.turn.start")).toHaveLength(1),
         );
-        expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
-        expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(prompt);
-        await openPolicyEditor();
-        await expect
-          .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
-          .toBeDisabled();
-        await expect.element(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
-        await expect
-          .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
-          .toHaveValue(null);
-        await page.getByRole("button", { name: "Reset", exact: true }).click();
-        await vi.waitFor(() =>
-          expect(
-            useComposerDraftStore.getState().getComposerDraft(draftId)?.subagentLimits,
-          ).toEqual({}),
-        );
-        (await waitForSendButton()).click();
-        // Reset clears only chat intent. The same live account default must
-        // still block an unsupported runtime without consuming this prompt.
-        await vi.waitFor(() =>
-          expect(document.body.textContent).toContain(
-            "This provider runtime does not support the account subagent limit.",
-          ),
-        );
-        expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
-        expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toBe(prompt);
-        chatViewFixture.fixture.serverConfig = {
-          ...chatViewFixture.fixture.serverConfig,
-          settings: {
-            ...chatViewFixture.fixture.serverConfig.settings,
-            providerInstances: {
-              ...chatViewFixture.fixture.serverConfig.settings.providerInstances,
-              [ProviderInstanceId.make("codex")]: {
-                driver: ProviderDriverKind.make("codex"),
-                defaultModel: "gpt-5",
-              },
-            },
-          },
-        };
-        applySettingsUpdated(chatViewFixture.fixture.serverConfig.settings);
-        (await waitForSendButton()).click();
-        await vi.waitFor(() =>
-          expect(wsRequests.find((body) => body.type === "thread.turn.start")).toMatchObject({
-            threadId: draftThreadIdFor(draftId),
-            subagentLimits: {},
-            bootstrap: { createThread: { projectId: null, subagentLimits: {} } },
-          }),
-        );
+        const submitted = wsRequests.find((body) => body.type === "thread.turn.start")!;
+        expect(submitted).toMatchObject({
+          threadId: submittedId,
+          message: { text: prompt, attachments: [] },
+          bootstrap: { createThread: { projectId: null } },
+        });
+        expect(submitted).not.toHaveProperty("subagentLimits");
+        expect(
+          getServerConfig()?.settings.providerInstances[ProviderInstanceId.make("codex")]
+            ?.defaultMaxConcurrentSubagents,
+        ).toBe(6);
+        expect(wsRequests.some((body) => body.type === "thread.meta.update")).toBe(false);
       } finally {
         await mounted.cleanup();
       }
@@ -3400,7 +3439,7 @@ describe("ChatView full app (standalone)", () => {
       { supported: true, projectId: PROJECT_ID },
       { supported: true, projectId: null },
     ])(
-      "admits plan implementation in a new chat only after supported policy or explicit reset (supported=$supported, projectId=$projectId)",
+      "preserves saved policy when implementing a plan in a new chat (supported=$supported, projectId=$projectId)",
       async ({ supported, projectId }) => {
         const base = createSnapshotWithPlanFollowUpPrompt();
         const requested = { codex: 6, claude: 8 };
@@ -3443,7 +3482,7 @@ describe("ChatView full app (standalone)", () => {
                 ...created,
                 projectId,
                 ...(projectId === null ? { branch: null, worktreePath: null } : {}),
-                subagentLimits: supported ? requested : { claude: 8 },
+                subagentLimits: requested,
               };
               chatViewFixture.fixture.snapshot = {
                 ...chatViewFixture.fixture.snapshot,
@@ -3484,48 +3523,39 @@ describe("ChatView full app (standalone)", () => {
               `Expected composer plan actions; thread mode=${selectThreadByRef(useStore.getState(), THREAD_REF)?.interactionMode}, draft mode=${useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.interactionMode}, prompt=${JSON.stringify(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt)}`,
             ).not.toBeNull(),
           );
-          if (!supported) {
-            await implementInNewChat();
-            await vi.waitFor(() =>
-              expect(document.body.textContent).toContain(
-                "This provider runtime does not support the saved subagent limit. Reset it in More composer controls before sending.",
-              ),
-            );
-            // Admission precedes allocation and creation: there is neither
-            // a new conversation to clean up nor a paid/native submission.
-            expect(
-              wsRequests.some(
-                (body) => body.type === "thread.create" || body.type === "thread.turn.start",
-              ),
-            ).toBe(false);
-            expect(mounted.router.state.location.pathname).toBe(
-              `/${LOCAL_ENVIRONMENT_ID}/${THREAD_ID}`,
-            );
-            await openPolicyEditor();
-            await page.getByRole("button", { name: "Reset", exact: true }).click();
-            await vi.waitFor(() =>
-              expect(
-                useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.subagentLimits,
-              ).toEqual({ claude: 8 }),
-            );
-          }
           await implementInNewChat();
           await vi.waitFor(() => {
             const create = wsRequests.find((body) => body.type === "thread.create");
             const turn = wsRequests.find((body) => body.type === "thread.turn.start");
-            const expected = supported ? requested : { claude: 8 };
+            expect(wsRequests.filter((body) => body.type === "thread.create")).toHaveLength(1);
+            expect(wsRequests.filter((body) => body.type === "thread.turn.start")).toHaveLength(1);
             expect(create).toMatchObject({
               projectId,
               runtimeMode: "full-access",
-              subagentLimits: expected,
+              subagentLimits: requested,
             });
             expect(turn).toMatchObject({
               threadId: create?.threadId,
               runtimeMode: "full-access",
-              subagentLimits: expected,
+              subagentLimits: requested,
+              message: {
+                text: "PLEASE IMPLEMENT THIS PLAN:\n# Follow-up plan\n\n- Keep the composer footer stable on resize.",
+                attachments: [],
+              },
               sourceProposedPlan: { threadId: THREAD_ID, planId: "plan-follow-up-browser-test" },
             });
           });
+          const createdId = wsRequests.find((body) => body.type === "thread.create")!
+            .threadId as ThreadId;
+          // The ordinary server-start observation completes the existing
+          // navigation waiter; a bare command ACK is not a started chat.
+          await startPromotedServerThreadViaDomainEvent(createdId);
+          await vi.waitFor(() =>
+            expect(mounted.router.state.location.pathname).toBe(serverThreadPath(createdId)),
+          );
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual(
+            requested,
+          );
         } finally {
           await mounted.cleanup();
         }
@@ -3593,32 +3623,23 @@ describe("ChatView full app (standalone)", () => {
             sequence: snapshotSequence,
             thread: { ...toShellThread(idle), subagentLimits: idle.subagentLimits },
           });
-          if (downgraded) {
-            await vi.waitFor(() =>
-              expect(
-                document.querySelector('[data-cafe-followup-queue="true"]')?.textContent,
-              ).toContain(
-                "This provider runtime does not support the saved subagent limit. Reset it in More composer controls before sending.",
-              ),
+          await vi.waitFor(() => {
+            const queued = wsRequests.find(
+              (body) =>
+                body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                body.type === "thread.turn.start",
             );
-            expect(wsRequests.some((body) => body.type === "thread.turn.start")).toBe(false);
-            expect(
-              document.querySelector('[data-cafe-followup-queue="true"]')?.textContent,
-            ).toContain("Queue before the other client changes policy");
-          } else
-            await vi.waitFor(() => {
-              const queued = wsRequests.find(
-                (body) =>
-                  body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
-                  body.type === "thread.turn.start",
-              );
-              expect(queued).toMatchObject({ threadId: THREAD_ID });
-              expect(queued).not.toHaveProperty("subagentLimits");
-              expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({
-                codex: 9,
-                claude: 8,
-              });
+            expect(wsRequests.filter((body) => body.type === "thread.turn.start")).toHaveLength(1);
+            expect(queued).toMatchObject({
+              threadId: THREAD_ID,
+              message: { text: "Queue before the other client changes policy", attachments: [] },
             });
+            expect(queued).not.toHaveProperty("subagentLimits");
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.subagentLimits).toEqual({
+              codex: 9,
+              claude: 8,
+            });
+          });
         } finally {
           await mounted.cleanup();
         }

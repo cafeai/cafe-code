@@ -259,6 +259,86 @@ it("shows Cafe MCP actions by name and retains the exact invocation in hover det
   });
 });
 
+it("shows an unconfirmed subagent limit in the primary chat while ordinary work remains folded", async (context) => {
+  const previousLocale = getUiLocale();
+  const fixture = createPublicSummaryFixture(context, () => setUiLocale(previousLocale));
+  setUiLocale("en");
+  const turnId = TurnId.make("optional-policy-turn");
+  const message = {
+    id: MessageId.make("optional-policy-message"),
+    role: "user" as const,
+    text: "Continue with the current provider",
+    turnId,
+    createdAt: MESSAGE_CREATED_AT,
+    streaming: false,
+  };
+  const notice: OrchestrationThreadActivity = {
+    id: EventId.make("optional-policy-notice"),
+    turnId: null,
+    sequence: 2,
+    createdAt: "2026-04-13T12:00:01.000Z",
+    kind: "provider.subagent-limit.not-applied",
+    tone: "info",
+    summary: "Private native startup description",
+    payload: {
+      version: 1,
+      reason: "support-unconfirmed",
+      fallback: "current-provider-policy",
+      requestedLimit: 12,
+      messageId: message.id,
+      intentSequence: 1,
+      detail: "Private provider error, configuration and diagnostic JSON",
+    },
+  };
+  const activities = [
+    notice,
+    { ...notice },
+    ...Array.from({ length: 8 }, (_, index): OrchestrationThreadActivity => ({
+      id: EventId.make(`optional-policy-work-${index}`),
+      turnId,
+      sequence: index + 3,
+      createdAt: `2026-04-13T12:00:${String(index + 2).padStart(2, "0")}.000Z`,
+      kind: "tool.completed",
+      tone: "tool",
+      summary: `Synthetic command ${index}`,
+      payload: {},
+    })),
+  ];
+  await fixture.run(async () => {
+    await fixture.render(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={deriveTimelineEntries(
+          [message],
+          [],
+          deriveWorkLogEntries(activities, turnId),
+          [],
+          activities,
+        )}
+      />,
+    );
+    await fixture.own(() =>
+      expect
+        .element(
+          page.getByText(
+            "Requested subagent limit: 12. This override was not applied because support could not be confirmed. The chat continues with the current provider policy. Your saved preference is unchanged.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible(),
+    );
+    const warnings = document.querySelectorAll('[data-primary-subagent-limit-warning="true"]');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]!.closest('[data-timeline-row-kind="work"]')).toBeNull();
+    await fixture.own(() =>
+      expect.element(page.getByRole("button", { name: /Show .* more/ })).toBeVisible(),
+    );
+    expect(document.body.textContent).not.toContain("Private");
+    expect(document.querySelector("[data-provider-diagnostic]")).toBeNull();
+    expect(document.querySelector('[data-message-role="assistant"]')).toBeNull();
+  });
+});
+
 it("shows exact MCP questions and submitted responses in the primary chat without opening the work log", async (context) => {
   const previousLocale = getUiLocale();
   const fixture = createPublicSummaryFixture(context, () => setUiLocale(previousLocale));

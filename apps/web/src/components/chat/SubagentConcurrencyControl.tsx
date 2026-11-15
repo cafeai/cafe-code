@@ -136,6 +136,7 @@ export function SubagentConcurrencyDetails({
 
 interface SubagentConcurrencyControlProps {
   readonly provider: ProviderDriverKind;
+  /** Advisory support only: saving intent never proves native application. */
   readonly supported: boolean;
   readonly override: number | undefined;
   readonly presentation: SubagentConcurrencyPresentation | null;
@@ -172,7 +173,7 @@ function SubagentConcurrencyEditor(props: SubagentConcurrencyControlProps) {
   const parsed = value.trim() === "" ? undefined : Number(value);
   const valid = parsed === undefined || validSubagentLimit(parsed);
   const commit = async (limit: number | undefined) => {
-    if (pending || (limit !== undefined && !props.supported)) return;
+    if (pending || (limit !== undefined && !validSubagentLimit(limit))) return;
     setPending(true);
     setErrorCode(false);
     try {
@@ -244,7 +245,7 @@ function SubagentConcurrencyEditor(props: SubagentConcurrencyControlProps) {
             max={64}
             step={1}
             value={value}
-            disabled={pending || !props.supported}
+            disabled={pending}
             placeholder={uiText("Account default", undefined, undefined, uiLocale)}
             onChange={(event) => setValue(event.target.value)}
             aria-invalid={!valid}
@@ -265,7 +266,7 @@ function SubagentConcurrencyEditor(props: SubagentConcurrencyControlProps) {
         {!props.supported ? (
           <p className="text-xs text-muted-foreground">
             {uiText(
-              "This account can’t apply a numeric limit. Reset clears only this chat’s override; an inherited numeric account limit must be cleared in account settings or used with a supported runtime.",
+              "Support for this override is not confirmed. You can save this preference; chats continue with the current provider policy if it cannot be applied.",
               undefined,
               undefined,
               uiLocale,
@@ -287,10 +288,7 @@ function SubagentConcurrencyEditor(props: SubagentConcurrencyControlProps) {
         <Button variant="ghost" disabled={pending} onClick={() => void commit(undefined)}>
           {uiText("Reset", undefined, undefined, uiLocale)}
         </Button>
-        <Button
-          disabled={pending || !valid || (parsed !== undefined && !props.supported)}
-          onClick={() => void commit(parsed)}
-        >
+        <Button disabled={pending || !valid} onClick={() => void commit(parsed)}>
           {uiText("Save", undefined, undefined, uiLocale)}
         </Button>
       </DialogFooter>

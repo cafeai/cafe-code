@@ -20,18 +20,21 @@ describe("qualified native subagent concurrency", () => {
 
   it("resolves chat then instance overrides without inventing native defaults", () => {
     expect(resolveConfiguredSubagentLimit(4, 20)).toBe(4);
-    expect(resolveConfiguredSubagentLimit(null, 20)).toBe(20);
-    expect(resolveConfiguredSubagentLimit(undefined, 20)).toBe(20);
     expect(resolveConfiguredSubagentLimit(null, undefined)).toBeNull();
     expect(resolveConfiguredSubagentLimit(undefined, undefined)).toBeNull();
     expect(resolveConfiguredSubagentLimit(1, undefined)).toBe(1);
     expect(resolveConfiguredSubagentLimit(64, undefined)).toBe(64);
   });
 
+  it("keeps explicit native inheritance separate from an omitted legacy override", () => {
+    expect(resolveConfiguredSubagentLimit(null, 20)).toBeNull();
+    expect(resolveConfiguredSubagentLimit(undefined, 20)).toBe(20);
+  });
+
   it("rejects malformed process overrides rather than serializing them", () => {
     for (const value of [0, 65, -1, 1.5, NaN, Infinity, "4", "4; injected"] as const) {
       expect(() => resolveConfiguredSubagentLimit(value as number, undefined)).toThrow(RangeError);
-      expect(() => resolveConfiguredSubagentLimit(null, value as number)).toThrow(RangeError);
+      expect(() => resolveConfiguredSubagentLimit(undefined, value as number)).toThrow(RangeError);
     }
   });
 });

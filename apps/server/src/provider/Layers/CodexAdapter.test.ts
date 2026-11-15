@@ -3052,12 +3052,17 @@ it.effect(
         runtimeMode: "full-access",
         maxConcurrentSubagents: null,
       });
+      const legacy = yield* adapter.startSession({
+        threadId: asThreadId("limit-legacy-config"),
+        runtimeMode: "full-access",
+      });
       assert.equal(one.maxConcurrentSubagents, 1);
       assert.equal(two.maxConcurrentSubagents, 64);
-      assert.equal(inherited.maxConcurrentSubagents, 12);
+      assert.equal(inherited.maxConcurrentSubagents, null);
+      assert.equal(legacy.maxConcurrentSubagents, 12);
       assert.deepEqual(
         factory.runtimes.map((runtime) => runtime.options.maxConcurrentSubagents),
-        [1, 64, 12],
+        [1, 64, undefined, 12],
       );
       const fork = yield* adapter.forkSession!({
         operationId: "limit-fork",

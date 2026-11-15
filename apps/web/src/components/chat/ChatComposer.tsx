@@ -1526,8 +1526,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isServerThread,
   ]);
   const saveSubagentLimit = async (value: number | undefined) => {
-    if (!concurrencyKey || (value !== undefined && !concurrencySupported))
-      throw new Error("Unsupported runtime");
+    // Saving bounded intent does not attest support or change a native owner.
+    // Keep the exact driver/ACK scope even when runtime support is unconfirmed.
+    if (!concurrencyKey) throw new Error("Unsupported provider");
     const store = useComposerDraftStore.getState();
     if (isServerThread && activeThreadId) {
       const scope = concurrencySaveScope.current;
@@ -1570,15 +1571,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const concurrencyMenuItem = concurrencyKey ? (
     <MenuItem
       inset
-      disabled={
-        !concurrencySupported &&
-        desiredSubagentLimits?.[concurrencyKey] === undefined &&
-        inheritedSubagentPolicy.limit === undefined
-      }
       title={
         !concurrencySupported
           ? uiText(
-              "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset.",
+              "Runtime support is unconfirmed. You can save a subagent limit; chats continue with the current provider policy if it cannot be applied.",
               undefined,
               undefined,
               uiLocale,

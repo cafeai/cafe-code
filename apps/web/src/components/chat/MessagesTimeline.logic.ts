@@ -22,6 +22,7 @@ export interface TimelineDurationMessage {
 }
 
 export type MessagesTimelineRow =
+  | Extract<TimelineEntry, { kind: "subagent-limit-warning" }>
   | Extract<TimelineEntry, { kind: "provider-summary" }>
   | Extract<TimelineEntry, { kind: "question-resolution" }>
   | {
@@ -440,8 +441,11 @@ export function deriveMessagesTimelineRows(input: {
     }
     pushUnanchoredWorkBefore(timelineEntry.createdAt);
 
-    if (timelineEntry.kind === "question-resolution") {
-      // A handling receipt is visible conversation metadata, not a user or
+    if (
+      timelineEntry.kind === "question-resolution" ||
+      timelineEntry.kind === "subagent-limit-warning"
+    ) {
+      // Public notices are visible conversation metadata, not a user or
       // assistant message, root completion, or a new anchor for provider work.
       nextRows.push(timelineEntry);
       continue;
@@ -602,6 +606,14 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
   if (a.kind !== b.kind || a.id !== b.id) return false;
 
   switch (a.kind) {
+    case "subagent-limit-warning": {
+      const current = b as typeof a;
+      return (
+        a.createdAt === current.createdAt &&
+        a.turnId === current.turnId &&
+        a.requestedLimit === current.requestedLimit
+      );
+    }
     case "question-resolution": {
       const current = b as typeof a;
       return (

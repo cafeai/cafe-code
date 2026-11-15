@@ -1960,7 +1960,7 @@ describe("ProviderCommandReactor", () => {
       "model replacement",
       "runtime replacement",
     ] as const)(
-      "refuses unchanged-policy exemption for %s with unknown native support",
+      "keeps optional policy separate from %s with unknown native support",
       async (reason) => {
         const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000016");
         const harness = await createHarness({
@@ -2000,21 +2000,39 @@ describe("ProviderCommandReactor", () => {
           };
         if (reason === "runtime replacement")
           harness.runtimeSessions[0] = { ...session, runtimeMode: "full-access" };
-        // Durable dispatch alone does not admit asynchronous policy checking.
-        // Observe this exact original capability effect before draining the
-        // refusal worker and starting the unchanged failure-activity poll.
-        const preparation = observeFreshFailurePreparation(harness);
         await send(
           harness,
-          `refused-follow-up-${reason}`,
-          true,
+          `native-policy-follow-up-${reason}`,
+          false,
           reason === "model replacement"
             ? { instanceId: ProviderInstanceId.make("codex"), model: "changed-model" }
             : undefined,
-          preparation,
         );
-        expect(harness.startSession).toHaveBeenCalledTimes(1);
-        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        const unrelatedReplacement = reason.endsWith("replacement");
+        expect(harness.startSession).toHaveBeenCalledTimes(unrelatedReplacement ? 2 : 1);
+        if (unrelatedReplacement) {
+          // Cwd/model/mode changes retain their ordinary replacement owner;
+          // an unqualified count must not be injected into that fresh owner.
+          expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+            maxConcurrentSubagents: null,
+          });
+        } else {
+          expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(16);
+        }
+        expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+        if (
+          reason === "legacy owner" ||
+          reason === "missing generation" ||
+          reason === "changed generation"
+        )
+          expect(harness.sendTurn.mock.calls[1]?.[0].expectedSubagentPolicySession).toBeUndefined();
+        if (reason === "changed policy")
+          expect(harness.sendTurn.mock.calls[1]?.[0].expectedSubagentPolicySession).toEqual({
+            threadId,
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            subagentRuntimeId: runtimeId,
+            maxConcurrentSubagents: 16,
+          });
         expect(harness.stopSession).not.toHaveBeenCalled();
       },
     );
@@ -2024,6 +2042,7 @@ describe("ProviderCommandReactor", () => {
       ["direct steer", "no active turn"],
       ["direct steer", "legacy owner"],
       ["direct steer", "changed generation"],
+      ["direct steer", "changed policy"],
       ["start routed to steer", "accepted"],
       ["failed start fallback", "accepted"],
       ["failed start fallback", "no active turn"],
@@ -2048,6 +2067,8 @@ describe("ProviderCommandReactor", () => {
             ...(outcome === "legacy owner" ? {} : { subagentPolicyContinuation: true }),
           });
         const native = harness.runtimeSessions[0]!;
+        if (outcome === "changed policy")
+          await change(harness, "pending-steer-seventeen", { codex: 17 });
         if (entrypoint !== "direct steer")
           await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
         if (entrypoint === "failed start fallback") {
@@ -2133,7 +2154,7 @@ describe("ProviderCommandReactor", () => {
                 },
           ),
         );
-        const refused = outcome !== "accepted";
+        const refused = outcome === "no active turn";
         if (outcome === "no active turn") {
           // This refusal occurs inside the actual fake steer effect, which
           // may run after the outer worker drains. Observe its unchanged
@@ -2168,13 +2189,19 @@ describe("ProviderCommandReactor", () => {
             threadId,
             messageId,
             expectedTurnId: activeTurnId,
-            expectedSubagentPolicySession: {
-              threadId,
-              providerInstanceId: ProviderInstanceId.make("codex"),
-              subagentRuntimeId: runtimeId,
-              maxConcurrentSubagents: 16,
-            },
+            ...(outcome === "legacy owner" || outcome === "changed generation"
+              ? {}
+              : {
+                  expectedSubagentPolicySession: {
+                    threadId,
+                    providerInstanceId: ProviderInstanceId.make("codex"),
+                    subagentRuntimeId: runtimeId,
+                    maxConcurrentSubagents: 16,
+                  },
+                }),
           });
+          if (outcome === "legacy owner" || outcome === "changed generation")
+            expect(receipt.request.expectedSubagentPolicySession).toBeUndefined();
           expect(receipt.turn).toEqual({ threadId, turnId: activeTurnId });
         }
         await waitFor(async () => {
@@ -2198,9 +2225,8 @@ describe("ProviderCommandReactor", () => {
         expect(harness.sendTurn).toHaveBeenCalledTimes(
           entrypoint === "failed start fallback" ? 2 : 1,
         );
-        const reachedNative = outcome !== "legacy owner" && outcome !== "changed generation";
-        expect(harness.steerTurn).toHaveBeenCalledTimes(reachedNative ? 1 : 0);
-        if (reachedNative)
+        expect(harness.steerTurn).toHaveBeenCalledTimes(1);
+        if (outcome !== "legacy owner" && outcome !== "changed generation")
           expect(harness.steerTurn.mock.calls[0]?.[0].expectedSubagentPolicySession).toEqual({
             threadId,
             providerInstanceId: ProviderInstanceId.make("codex"),
@@ -2209,6 +2235,34 @@ describe("ProviderCommandReactor", () => {
           });
         const detail = await harness.readThreadDetail(threadId);
         expect(detail?.messages.some((message) => message.id === messageId)).toBe(true);
+        if (outcome === "changed policy") {
+          await waitFor(
+            async () =>
+              (await harness.readThreadDetail(threadId))?.activities.some(
+                (activity) =>
+                  activity.kind === "provider.subagent-limit.not-applied" &&
+                  (activity.payload as Readonly<Record<string, unknown>> | undefined)?.messageId ===
+                    messageId,
+              ) === true,
+          );
+          const [intent] = await Effect.runPromise(harness.sql<{ readonly sequence: number }>`
+            SELECT sequence FROM orchestration_events
+            WHERE command_id = ${commonCommand.commandId} AND event_type = 'thread.turn-steer-requested'
+          `);
+          const warning = (await harness.readThreadDetail(threadId))?.activities.find(
+            (activity) => activity.kind === "provider.subagent-limit.not-applied",
+          );
+          expect(warning?.payload).toEqual({
+            version: 1,
+            reason: "support-unconfirmed",
+            fallback: "current-provider-policy",
+            requestedLimit: 17,
+            messageId,
+            intentSequence: intent!.sequence,
+          });
+          expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(16);
+          expect((await harness.readThreadDetail(threadId))?.subagentLimits).toEqual({ codex: 17 });
+        }
         expect(
           detail?.activities.some(
             (activity) =>
@@ -2479,16 +2533,84 @@ describe("ProviderCommandReactor", () => {
       expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
     });
 
-    it("rejects an inherited account default when the selected runtime is unqualified", async () => {
-      const harness = await createHarness({ standalone: true, subagentConcurrency: false });
-      await accountDefault(harness, 15);
-      const preparation = observeFreshFailurePreparation(harness);
-      await send(harness, "unsupported-inherited-account", true, undefined, preparation);
-      expect(harness.startSession).not.toHaveBeenCalled();
-      expect(harness.sendTurn).not.toHaveBeenCalled();
-      expect(harness.stopSession).not.toHaveBeenCalled();
-      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
-    });
+    it.each([
+      ["chat", false],
+      ["chat", "unknown"],
+      ["account", false],
+      ["account", "unknown"],
+    ] as const)(
+      "starts with current native policy and a correlated warning for %s intent when support is %s",
+      async (source, subagentConcurrency) => {
+        const harness = await createHarness({
+          standalone: true,
+          subagentConcurrency,
+          providerInstances: {
+            [ProviderInstanceId.make("codex")]: {
+              driver: ProviderDriverKind.make("codex"),
+              // An explicit null must also suppress this older Cafe-owned
+              // default rather than accidentally reintroducing native policy.
+              config: { maxConcurrentSubagents: 6 },
+            },
+          },
+        });
+        if (source === "chat") await change(harness, "unsupported-chat-policy", { codex: 15 });
+        else await accountDefault(harness, 15);
+        const key = `unsupported-${source}-${subagentConcurrency}`;
+        await send(harness, key);
+        // Observe the durable warning separately from inference acceptance:
+        // its presentation write is detached and grants no delivery authority.
+        await waitFor(
+          async () =>
+            (await harness.readThreadDetail(threadId))?.activities.some(
+              (activity) => activity.kind === "provider.subagent-limit.not-applied",
+            ) === true,
+        );
+        const [intent] = await Effect.runPromise(harness.sql<{ readonly sequence: number }>`
+          SELECT sequence FROM orchestration_events
+          WHERE command_id = ${key} AND event_type = 'thread.turn-start-requested'
+        `);
+        expect(intent?.sequence).toBeGreaterThan(0);
+        const detail = await harness.readThreadDetail(threadId);
+        const warnings = detail!.activities.filter(
+          (activity) => activity.kind === "provider.subagent-limit.not-applied",
+        );
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toMatchObject({
+          tone: "info",
+          turnId: null,
+          payload: {
+            version: 1,
+            reason: "support-unconfirmed",
+            fallback: "current-provider-policy",
+            requestedLimit: 15,
+            messageId: asMessageId(key),
+            intentSequence: intent!.sequence,
+          },
+        });
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+          maxConcurrentSubagents: null,
+        });
+        expect(
+          harness.startSession.mock.calls[0]?.[1].requireIdleForSubagentLimitChange,
+        ).toBeUndefined();
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBeNull();
+        expect(detail?.subagentLimits).toEqual(source === "chat" ? { codex: 15 } : undefined);
+        expect(
+          (await Effect.runPromise(harness.serverSettings.getSettings)).providerInstances[
+            ProviderInstanceId.make("codex")
+          ],
+        ).toMatchObject({
+          ...(source === "account" ? { defaultMaxConcurrentSubagents: 15 } : {}),
+          config: { maxConcurrentSubagents: 6 },
+        });
+        expect(
+          detail?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+        ).toBe(false);
+      },
+    );
 
     it("does not borrow account or legacy numeric policy across a settings/registry driver transition", async () => {
       const account = ProviderInstanceId.make("codex-transition-account");
@@ -2660,18 +2782,9 @@ describe("ProviderCommandReactor", () => {
         expect(harness.sendTurn).toHaveBeenCalledTimes(1);
         expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBeNull();
         expect((await harness.readThreadDetail(threadId))?.subagentLimits).toBeUndefined();
-        // Only an actual next turn requests account policy. Unknown/unsupported
-        // capability remains a strict turn admission failure, not a reason to
-        // prevent control-only goal cleanup or manufacture a continuation.
-        const nextTurnPreparation =
-          subagentConcurrency !== true ? observeFreshFailurePreparation(harness) : undefined;
-        await send(
-          harness,
-          "turn-after-control-only-account-edit",
-          subagentConcurrency !== true,
-          undefined,
-          nextTurnPreparation,
-        );
+        // Only an actual next turn requests account policy. An unqualified
+        // optional override keeps the current owner, with a separate notice.
+        await send(harness, "turn-after-control-only-account-edit");
         if (subagentConcurrency === true) {
           expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
             maxConcurrentSubagents: 15,
@@ -2680,7 +2793,7 @@ describe("ProviderCommandReactor", () => {
           expect(harness.sendTurn).toHaveBeenCalledTimes(2);
         } else {
           expect(harness.startSession).toHaveBeenCalledTimes(1);
-          expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+          expect(harness.sendTurn).toHaveBeenCalledTimes(2);
         }
       },
     );
@@ -2823,7 +2936,7 @@ describe("ProviderCommandReactor", () => {
       },
     );
 
-    it("leaves a fresh goal context's validated legacy config to its selected adapter rather than injecting the new account preference", async () => {
+    it("leaves a fresh goal context on native policy while retaining saved legacy and account preferences", async () => {
       const harness = await createHarness({
         standalone: true,
         threadGoals: "supported",
@@ -2857,9 +2970,8 @@ describe("ProviderCommandReactor", () => {
       await harness.drain();
       expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
         providerInstanceId: "codex",
-        // This revokes old durable override recovery. Native adapters resolve
-        // null through their own validated legacy instance config (separately
-        // qualified by Drivers/SubagentConcurrency and CodexAdapter fixtures).
+        // Control-only startup does not adopt a newly saved numeric override;
+        // explicit native inheritance suppresses durable and legacy recovery.
         maxConcurrentSubagents: null,
       });
       expect(
@@ -3758,17 +3870,25 @@ describe("ProviderCommandReactor", () => {
       expect(harness.runtimeSessions[0]?.codexContextWindowOverride).toBe(600_000);
     });
 
-    it("rejects a requested override when the configured runtime is unqualified", async () => {
-      const harness = await createHarness({ standalone: true, subagentConcurrency: false });
-      await change(harness, "unsupported-limit", { codex: 2 });
-      const preparation = observeFreshFailurePreparation(harness);
-      await send(harness, "unsupported-limit-send", true, undefined, preparation);
-      expect(harness.startSession).not.toHaveBeenCalled();
-      expect(harness.sendTurn).not.toHaveBeenCalled();
-      const thread = await harness.readThreadDetail(threadId);
-      expect(
-        thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
-      ).toBe(true);
+    it("keeps an unqualified inheritance reset pending without replacing its current numeric owner", async () => {
+      const harness = await createHarness({ standalone: true });
+      await change(harness, "twelve-before-reset", { codex: 12 });
+      await send(harness, "first-before-reset");
+      await harness.markThreadReady(threadId, "2026-01-01T00:00:02.000Z");
+      harness.getCapabilities.mockImplementation(() =>
+        Effect.succeed({
+          sessionModelSwitch: "in-session",
+          liveSteer: "supported",
+          subagentConcurrency: false,
+        }),
+      );
+      await change(harness, "unsupported-inheritance-reset", {});
+      await send(harness, "unsupported-reset-send");
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.runtimeSessions[0]?.maxConcurrentSubagents).toBe(12);
+      expect((await harness.readThreadDetail(threadId))?.subagentLimits).toEqual({});
     });
 
     it("does not restart running root work to apply a newly saved limit", async () => {
