@@ -38,9 +38,14 @@ import {
 import { truncate } from "@cafecode/shared/String";
 import {
   type CafeSecretPreparation,
+  type CafeSecretSendIssue,
+  prepareCafeSecretAnswersForSend,
   needsCafeSecretAdmission,
   prepareCafeSecretsForSend,
 } from "../cafeSecrets/cafeSecretsClient";
+import { escapeCafeSecretSyntax } from "@cafecode/shared/cafeSecrets";
+import { formatCodexAsyncQuestionAnswer } from "@cafecode/shared/codexAsyncQuestions";
+import { cafeSecretIssueMessage } from "../cafeSecrets/feedback";
 import { CLAUDE_SHORTER_CONTINUATION_PROMPT } from "@cafecode/shared/claudeResponseLimits";
 import { Debouncer } from "@tanstack/react-pacer";
 import { useInfiniteQuery } from "@tanstack/react-query";
@@ -1196,6 +1201,7 @@ export default function ChatView(props: ChatViewProps) {
   // State disables rendered controls; this synchronous reservation also covers
   // a second activation before React commits that disabled presentation.
   const userInputResponsesInFlightRef = useRef(new Set<string>());
+  const userInputEditOwnerRef = useRef<object>({});
   const snoozedUserInputRequestIdsRef = useRef<Set<string>>(new Set());
   const [snoozedUserInputRequestIds, setSnoozedUserInputRequestIds] = useState<ApprovalRequestId[]>(
     [],
@@ -1203,6 +1209,8 @@ export default function ChatView(props: ChatViewProps) {
   const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<
     Record<string, Record<string, PendingUserInputDraftAnswer>>
   >({});
+  const pendingUserInputSecretDraftsRef = useRef(pendingUserInputAnswersByRequestId);
+  pendingUserInputSecretDraftsRef.current = pendingUserInputAnswersByRequestId;
   const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] =
     useState<Record<string, number>>({});
   const [draftPlanSidebarOpenByThreadKey, setDraftPlanSidebarOpenByThreadKey] = useState<
@@ -5046,23 +5054,10 @@ export default function ChatView(props: ChatViewProps) {
     return true;
   };
 
-  const enqueueAsyncQuestionAnswer = async (text: string, messageId: string): Promise<boolean> => {
-    // Answers enter durable browser-stored queues with a stable id; they are
-    // not a secret-admission surface. Refuse raw markers instead of storing
-    // or forwarding them; escaped literal text remains allowed.
-    if (needsCafeSecretAdmission(text)) {
-      if (activeThread)
-        setThreadError(
-          activeThread.id,
-          uiText(
-            "Cafe Secrets can only be sent from the message composer. If this is literal text, escape it with a backslash: \\[sec:VALUE].",
-            undefined,
-            undefined,
-            uiLocale,
-          ),
-        );
-      return false;
-    }
+  const enqueueAsyncQuestionAnswer = async (
+    answer: string,
+    question: AsyncQuestion,
+  ): Promise<boolean | CafeSecretSendIssue> => {
     if (
       !activeThread ||
       !isServerThread ||
@@ -5071,17 +5066,80 @@ export default function ChatView(props: ChatViewProps) {
       currentRouteThreadKeyRef.current !== routeThreadKey
     )
       return false;
-    const sendCtx = readComposerHandle(composerRef)?.getSendContext();
-    if (
-      !sendCtx ||
-      sendCtx.selectedProvider !== "codex" ||
-      activeThread.session?.provider !== "codex"
-    )
-      return false;
-    // Read only provider/model choices. Do not inspect or move main-draft
-    // attachments, pending uploads, cursor state, or queue-editing state. This
-    // enters the ordinary durable queue directly, bypassing slash-command
-    // parsing; its dispatcher selects start/steer from authoritative lifecycle.
+    const threadId = activeThread.id;
+    const api = readEnvironmentApi(environmentId);
+    const readOwner = () => {
+      if (
+        !chatViewMountedRef.current ||
+        currentRouteThreadKeyRef.current !== routeThreadKey ||
+        readEnvironmentApi(environmentId) !== api
+      )
+        return null;
+      const thread = selectThreadByRef(
+        useStore.getState(),
+        scopeThreadRef(environmentId, threadId),
+      );
+      const context = readComposerHandle(composerRef)?.getSendContext();
+      if (
+        !thread ||
+        !context ||
+        context.selectedProvider !== "codex" ||
+        thread.session?.provider !== "codex" ||
+        derivePhase(thread.session) !== phase ||
+        thread.latestTurn?.turnId !== activeThread.latestTurn?.turnId ||
+        thread.session.activeTurnId !== activeThread.session?.activeTurnId
+      )
+        return null;
+      const activity = thread.activities.find((entry) => entry.id === question.activityId);
+      const payload = activity?.payload as { handledQuestionIndexes?: number[] } | undefined;
+      if (
+        !activity ||
+        activity.kind !== "provider.async-questions" ||
+        question.questionIndex === undefined ||
+        payload?.handledQuestionIndexes?.includes(question.questionIndex)
+      )
+        return null;
+      const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+      // Only finite provider/send policy enters this owner key. The independent
+      // main draft, its attachments, and the answer value never enter it.
+      const intent = JSON.stringify([
+        context.selectedProvider,
+        context.selectedModelSelection,
+        context.selectedPromptEffort,
+        draft?.runtimeMode,
+        draft?.interactionMode,
+        thread.runtimeMode,
+        thread.interactionMode,
+        thread.session.providerInstanceId,
+        thread.session.subagentRuntimeId,
+        thread.session.createdAt,
+        thread.session.status,
+        thread.session.activeTurnId,
+        thread.latestTurn?.turnId,
+        thread.latestTurn?.state,
+        manualStopGenerationByThreadIdRef.current[threadId] ?? 0,
+      ]);
+      return { context, intent };
+    };
+    const captured = readOwner();
+    if (!captured) return false;
+    const isCurrent = () => readOwner()?.intent === captured.intent;
+    const prepared = await prepareCafeSecretAnswersForSend({
+      environmentId,
+      threadId,
+      instanceId: captured.context.selectedModelSelection.instanceId,
+      driver: captured.context.selectedProvider,
+      answers: { answer },
+      isCurrent,
+    });
+    if (!isCurrent()) return false;
+    if (!prepared.ok) return "cancelled" in prepared ? false : prepared.issue;
+    const text = formatCodexAsyncQuestionAnswer(
+      escapeCafeSecretSyntax(question.title),
+      prepared.answers.answer as string,
+    );
+    if (text === null) return false;
+    const sendCtx = captured.context;
     return enqueueFollowUpSnapshot(
       {
         promptText: text,
@@ -5095,7 +5153,7 @@ export default function ChatView(props: ChatViewProps) {
         runtimeMode,
         interactionMode,
       },
-      { preserveComposer: true, id: messageId, activate: true },
+      { preserveComposer: true, id: question.id, activate: true },
     );
   };
 
@@ -7710,12 +7768,68 @@ export default function ChatView(props: ChatViewProps) {
         existing.includes(requestId) ? existing : [...existing, requestId],
       );
       try {
+        const threadRef = scopeThreadRef(environmentId, activeThreadId);
+        const source = selectThreadByRef(useStore.getState(), threadRef);
+        if (!source) return;
+        const session = source.session;
+        const instanceId = session?.providerInstanceId ?? source.modelSelection.instanceId;
+        const editOwner = userInputEditOwnerRef.current;
+        const stopGeneration = manualStopGenerationByThreadIdRef.current[activeThreadId] ?? 0;
+        const capturedRoute = routeThreadKey;
+        const isCurrent = () => {
+          const next = selectThreadByRef(useStore.getState(), threadRef);
+          const prompt = readCurrentPendingUserInput(requestId);
+          return (
+            chatViewMountedRef.current &&
+            currentRouteThreadKeyRef.current === capturedRoute &&
+            readEnvironmentApi(environmentId) === api &&
+            userInputEditOwnerRef.current === editOwner &&
+            (manualStopGenerationByThreadIdRef.current[activeThreadId] ?? 0) === stopGeneration &&
+            prompt?.createdAt === current.createdAt &&
+            next?.session?.provider === session?.provider &&
+            (next?.session?.providerInstanceId ?? next?.modelSelection.instanceId) === instanceId &&
+            next?.session?.subagentRuntimeId === session?.subagentRuntimeId &&
+            next?.session?.createdAt === session?.createdAt
+          );
+        };
+        const prepared = await prepareCafeSecretAnswersForSend({
+          environmentId,
+          threadId: activeThreadId,
+          instanceId,
+          driver: session?.provider ?? "",
+          answers: response.answers,
+          isCurrent,
+        });
+        if (!isCurrent()) return;
+        if (!prepared.ok) {
+          if (!("cancelled" in prepared)) {
+            const questionIndex = current.questions.findIndex(
+              (question) => question.id === prepared.questionId,
+            );
+            if (questionIndex >= 0)
+              setPendingUserInputQuestionIndexByRequestId((existing) => ({
+                ...existing,
+                [requestId]: questionIndex,
+              }));
+            const text = prepared.questionId ? response.answers[prepared.questionId] : undefined;
+            if (typeof text === "string")
+              composerRef.current?.reportCafeSecretIssue(
+                prepared.issue,
+                (prepared.questionId
+                  ? pendingUserInputSecretDraftsRef.current[requestId]?.[prepared.questionId]
+                      ?.customAnswer
+                  : undefined) ?? text,
+              );
+            else setThreadError(activeThreadId, cafeSecretIssueMessage(prepared.issue, uiLocale));
+          }
+          return;
+        }
         await api.orchestration.dispatchCommand({
           type: "thread.user-input.respond",
           commandId: newCommandId(),
           threadId: activeThreadId,
           requestId,
-          answers: response.answers,
+          answers: prepared.answers,
           ...(response.unanswered ? { unanswered: response.unanswered } : {}),
           createdAt: new Date().toISOString(),
         });
@@ -7732,7 +7846,15 @@ export default function ChatView(props: ChatViewProps) {
         setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
       }
     },
-    [activeThreadId, environmentId, readCurrentPendingUserInput, setThreadError, uiLocale],
+    [
+      activeThreadId,
+      composerRef,
+      environmentId,
+      readCurrentPendingUserInput,
+      routeThreadKey,
+      setThreadError,
+      uiLocale,
+    ],
   );
 
   // MCP answers can contain credentials. Send only through the authenticated
@@ -7798,6 +7920,7 @@ export default function ChatView(props: ChatViewProps) {
       if (!activePendingUserInput) {
         return;
       }
+      userInputEditOwnerRef.current = {};
       onSnoozeActivePendingUserInput();
       setPendingUserInputQuestionIndexByRequestId((existing) => ({
         ...existing,
@@ -7812,6 +7935,7 @@ export default function ChatView(props: ChatViewProps) {
       if (!activePendingUserInput) {
         return;
       }
+      userInputEditOwnerRef.current = {};
       onSnoozeActivePendingUserInput();
       setPendingUserInputAnswersByRequestId((existing) => {
         const question =
@@ -7857,6 +7981,14 @@ export default function ChatView(props: ChatViewProps) {
       if (!activePendingUserInput) {
         return;
       }
+      // Lexical reports selection/blur changes through this callback too.
+      // Only a changed answer withdraws an in-flight secret preparation.
+      if (
+        value !==
+        (pendingUserInputSecretDraftsRef.current[activePendingUserInput.requestId]?.[questionId]
+          ?.customAnswer ?? "")
+      )
+        userInputEditOwnerRef.current = {};
       onSnoozeActivePendingUserInput();
       promptRef.current = value;
       setPendingUserInputAnswersByRequestId((existing) => ({
@@ -7917,6 +8049,7 @@ export default function ChatView(props: ChatViewProps) {
         ...activePendingDraftAnswers,
         [questionId]: skipPendingUserInputQuestion(),
       };
+      userInputEditOwnerRef.current = {};
       setPendingUserInputAnswersByRequestId((existing) => ({
         ...existing,
         [requestId]: { ...existing[requestId], [questionId]: skipPendingUserInputQuestion() },

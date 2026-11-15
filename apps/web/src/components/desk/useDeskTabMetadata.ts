@@ -11,6 +11,7 @@ import { useUiStateStore } from "../../uiStateStore";
 import { resolveThreadStatusPill } from "../Sidebar.logic";
 import { readScheduledFollowUpAt, useScheduledFollowUpAt } from "../chat/scheduledFollowupPresence";
 import { canDuplicateThread } from "../../lib/threadDuplication";
+import { canMoveThread } from "../../lib/threadMove";
 
 function deriveMetadata(
   target: ThreadRouteTarget,
@@ -33,6 +34,7 @@ function deriveMetadata(
     working: thread?.session?.status === "running" || thread?.session?.status === "connecting",
     attention: thread?.hasPendingApprovals === true || thread?.hasPendingUserInput === true,
     canDuplicate: canDuplicateThread(thread),
+    canMove: canMoveThread(thread),
     exists: thread !== undefined || (target.kind === "draft" && draft !== undefined),
     status: thread
       ? resolveThreadStatusPill({ thread: { ...thread, lastVisitedAt, scheduledFollowUpAt } })

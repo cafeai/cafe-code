@@ -816,7 +816,7 @@ interface ComposerPromptEditorProps {
     nextCursor: number,
     expandedCursor: number,
     cursorAdjacentToMention: boolean,
-  ) => void;
+  ) => void | boolean;
   onCommandKeyDown?: (
     key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
     event: KeyboardEvent,
@@ -825,6 +825,9 @@ interface ComposerPromptEditorProps {
   editorRef: React.RefObject<ComposerPromptEditorHandle | null>;
   /** Paint `[sec:...]` syntax; "error" when it cannot be sent as written. */
   cafeSecretTone?: CafeSecretHighlightTone;
+  ariaLabel?: string;
+  testId?: string;
+  maxLength?: number;
 }
 
 function ComposerCommandKeyPlugin(props: {
@@ -1308,8 +1311,12 @@ function ComposerPromptEditorInner({
   onPaste,
   editorRef,
   cafeSecretTone = "secret",
+  ariaLabel,
+  testId = "composer-editor",
+  maxLength,
 }: ComposerPromptEditorProps) {
   const [editor] = useLexicalComposerContext();
+  const lastBoundedState = useRef(editor.getEditorState());
   const onChangeRef = useRef(onChange);
   const initialCursor = clampCollapsedComposerCursor(value, cursor);
   const skillsSignature = skillSignature(skills);
@@ -1496,44 +1503,72 @@ function ComposerPromptEditorInner({
     [focusAt, readDebugState, readSnapshot],
   );
 
-  const handleEditorChange = useCallback((editorState: EditorState) => {
-    editorState.read(() => {
-      const nextValue = $getRoot().getTextContent();
-      const fallbackCursor = clampCollapsedComposerCursor(nextValue, snapshotRef.current.cursor);
-      const nextCursor = clampCollapsedComposerCursor(
-        nextValue,
-        $readSelectionOffsetFromEditorState(fallbackCursor),
-      );
-      const fallbackExpandedCursor = clampExpandedCursor(
-        nextValue,
-        snapshotRef.current.expandedCursor,
-      );
-      const nextExpandedCursor = clampExpandedCursor(
-        nextValue,
-        $readExpandedSelectionOffsetFromEditorState(fallbackExpandedCursor),
-      );
-      const previousSnapshot = snapshotRef.current;
-      if (
-        previousSnapshot.value === nextValue &&
-        previousSnapshot.cursor === nextCursor &&
-        previousSnapshot.expandedCursor === nextExpandedCursor
-      ) {
+  const handleEditorChange = useCallback(
+    (editorState: EditorState) => {
+      const length = editorState.read(() => $getRoot().getTextContentSize());
+      if (maxLength !== undefined && length > maxLength) {
+        // Question editors retain the textarea's native input ceiling. Restore
+        // its exact previous text/selection before publishing an oversized edit.
+        // Update listeners run inside Lexical's commit. Queue a discrete
+        // update so the restored state is actually reconciled by that owner.
+        editor.setEditorState(lastBoundedState.current);
+        editor.update(() => undefined, { discrete: true });
         return;
       }
-      if (isApplyingControlledUpdateRef.current) {
-        return;
-      }
-      snapshotRef.current = {
-        value: nextValue,
-        cursor: nextCursor,
-        expandedCursor: nextExpandedCursor,
-      };
-      const cursorAdjacentToMention =
-        isCollapsedCursorAdjacentToInlineToken(nextValue, nextCursor, "left") ||
-        isCollapsedCursorAdjacentToInlineToken(nextValue, nextCursor, "right");
-      onChangeRef.current(nextValue, nextCursor, nextExpandedCursor, cursorAdjacentToMention);
-    });
-  }, []);
+      let refused = false;
+      editorState.read(() => {
+        const nextValue = $getRoot().getTextContent();
+        const fallbackCursor = clampCollapsedComposerCursor(nextValue, snapshotRef.current.cursor);
+        const nextCursor = clampCollapsedComposerCursor(
+          nextValue,
+          $readSelectionOffsetFromEditorState(fallbackCursor),
+        );
+        const fallbackExpandedCursor = clampExpandedCursor(
+          nextValue,
+          snapshotRef.current.expandedCursor,
+        );
+        const nextExpandedCursor = clampExpandedCursor(
+          nextValue,
+          $readExpandedSelectionOffsetFromEditorState(fallbackExpandedCursor),
+        );
+        const previousSnapshot = snapshotRef.current;
+        if (
+          previousSnapshot.value === nextValue &&
+          previousSnapshot.cursor === nextCursor &&
+          previousSnapshot.expandedCursor === nextExpandedCursor
+        ) {
+          return;
+        }
+        if (isApplyingControlledUpdateRef.current) {
+          return;
+        }
+        snapshotRef.current = {
+          value: nextValue,
+          cursor: nextCursor,
+          expandedCursor: nextExpandedCursor,
+        };
+        const cursorAdjacentToMention =
+          isCollapsedCursorAdjacentToInlineToken(nextValue, nextCursor, "left") ||
+          isCollapsedCursorAdjacentToInlineToken(nextValue, nextCursor, "right");
+        if (
+          onChangeRef.current(
+            nextValue,
+            nextCursor,
+            nextExpandedCursor,
+            cursorAdjacentToMention,
+          ) === false
+        ) {
+          snapshotRef.current = previousSnapshot;
+          refused = true;
+        }
+      });
+      if (refused) {
+        editor.setEditorState(lastBoundedState.current);
+        editor.update(() => undefined, { discrete: true });
+      } else lastBoundedState.current = editorState;
+    },
+    [editor, maxLength],
+  );
 
   return (
     <div className="relative">
@@ -1549,7 +1584,8 @@ function ComposerPromptEditorInner({
               className,
             )}
             contentEditable={!disabled}
-            data-testid="composer-editor"
+            data-testid={testId}
+            aria-label={ariaLabel}
             aria-disabled={disabled}
             aria-placeholder={placeholder}
             placeholder={<span />}
@@ -1563,7 +1599,12 @@ function ComposerPromptEditorInner({
         }
         ErrorBoundary={LexicalErrorBoundary}
       />
-      <OnChangePlugin onChange={handleEditorChange} />
+      <OnChangePlugin
+        onChange={handleEditorChange}
+        // A bounded question field must also reject edits that Lexical merges
+        // into its undo history; those updates cannot skip length admission.
+        ignoreHistoryMergeTagChange={maxLength === undefined}
+      />
       <ComposerCommandKeyPlugin {...(onCommandKeyDown ? { onCommandKeyDown } : {})} />
       <ComposerSurroundSelectionPlugin skills={skills} />
       <ComposerInlineTokenArrowPlugin />
@@ -1588,6 +1629,9 @@ export function ComposerPromptEditor({
   onPaste,
   editorRef,
   cafeSecretTone,
+  ariaLabel,
+  testId,
+  maxLength,
 }: ComposerPromptEditorProps) {
   const initialValueRef = useRef(value);
   const initialSkillMetadataRef = useRef(skillMetadataByName(skills));
@@ -1619,6 +1663,9 @@ export function ComposerPromptEditor({
         onPaste={onPaste}
         editorRef={editorRef}
         {...(cafeSecretTone ? { cafeSecretTone } : {})}
+        {...(ariaLabel ? { ariaLabel } : {})}
+        {...(testId ? { testId } : {})}
+        {...(maxLength !== undefined ? { maxLength } : {})}
         {...(onCommandKeyDown ? { onCommandKeyDown } : {})}
         {...(className ? { className } : {})}
       />

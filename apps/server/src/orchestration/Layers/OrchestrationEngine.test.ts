@@ -175,6 +175,52 @@ it("rejects unprepared Cafe Secrets before queue and event admission", async (te
     ),
   ).rejects.toThrow("must be prepared");
   expect((await system.readModel()).snapshotSequence).toBe(before.snapshotSequence);
+  for (const answers of [
+    { password: "[sec:must-not-journal-answer]" },
+    { nested: [true, { password: "[sec:must-not-journal-nested]" }] },
+    { "[sec:must-not-journal-key]": "ordinary" },
+  ]) {
+    await expect(
+      system.run(
+        system.engine.dispatch({
+          type: "thread.user-input.respond",
+          commandId: CommandId.make("unprepared-secret-answer"),
+          threadId: ThreadId.make("secret-chat"),
+          requestId: ApprovalRequestId.make("secret-request"),
+          answers,
+          createdAt: now(),
+        }),
+      ),
+    ).rejects.toThrow("must be prepared");
+    expect((await system.readModel()).snapshotSequence).toBe(before.snapshotSequence);
+  }
+  for (const command of [
+    {
+      type: "thread.async-question.answer",
+      commandId: CommandId.make("unprepared-inline-answer"),
+      threadId: ThreadId.make("secret-chat"),
+      activityId: EventId.make("secret-question"),
+      questionIndex: 0,
+      answer: "[sec:must-not-journal-inline-answer]",
+      messageId: MessageId.make("secret-inline-message"),
+      noticeMessageId: MessageId.make("secret-inline-notice"),
+      createdAt: now(),
+    },
+    {
+      type: "thread.mcp-user-input.respond",
+      commandId: CommandId.make("unprepared-mcp-answer"),
+      threadId: ThreadId.make("secret-chat"),
+      requestId: ApprovalRequestId.make("secret-request"),
+      expectedRequestCreatedAt: now(),
+      answers: { password: "[sec:must-not-journal-mcp-answer]" },
+      action: "answered",
+      noticeMessageId: MessageId.make("secret-mcp-notice"),
+      createdAt: now(),
+    },
+  ] satisfies OrchestrationCommand[]) {
+    await expect(system.run(system.engine.dispatch(command))).rejects.toThrow("must be prepared");
+    expect((await system.readModel()).snapshotSequence).toBe(before.snapshotSequence);
+  }
 });
 
 describe("durable inline question handling", () => {

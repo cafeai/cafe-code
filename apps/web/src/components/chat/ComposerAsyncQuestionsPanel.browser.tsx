@@ -77,7 +77,7 @@ describe("inline async questions", () => {
             name: uiText("Your answer", undefined, undefined, "ko"),
           }),
         )
-        .toHaveValue("Suggested route");
+        .toHaveTextContent("Suggested route");
       await expect.element(page.getByText("Which route?", { exact: true })).toBeVisible();
       expect(onAnswer).toHaveBeenCalledTimes(1);
       expect(onResolve).not.toHaveBeenCalled();
@@ -202,7 +202,7 @@ describe("inline async questions", () => {
 
   it("retains rejected answers, requires explicit send, and preserves the independent main draft", async () => {
     const onAnswer = vi
-      .fn<(_: string, id: string) => Promise<boolean>>()
+      .fn<(_: string, question: AsyncQuestion) => Promise<boolean>>()
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
     const screen = await render(
@@ -230,13 +230,14 @@ describe("inline async questions", () => {
         .toMatchTextContent("The answer was not queued.");
       await expect
         .element(page.getByLabelText("Your answer"))
-        .toHaveValue("/do-not-run-as-a-command");
+        .toHaveTextContent("/do-not-run-as-a-command");
       expect(localStorage.getItem(ASYNC_QUESTION_HANDLED_STORAGE_KEY)).toBeNull();
       await page.getByRole("button", { name: "Send answer" }).click();
       await expect.element(page.getByText("1 question from Codex")).not.toBeInTheDocument();
       expect(onAnswer).toHaveBeenCalledTimes(2);
       expect(onAnswer.mock.calls[0]).toEqual(onAnswer.mock.calls[1]);
-      expect(onAnswer.mock.calls[0]![0]).toBe("> Which route?\n\n/do-not-run-as-a-command");
+      expect(onAnswer.mock.calls[0]![0]).toBe("/do-not-run-as-a-command");
+      expect(onAnswer.mock.calls[0]![1]).toMatchObject({ title: "Which route?" });
       await expect
         .element(page.getByLabelText("Main draft"))
         .toHaveValue("Main draft and its cursor stay here");
@@ -332,7 +333,7 @@ describe("inline async questions", () => {
       };
       await screen.rerender(component([...multipleActivities, newQuestion], "local", "reload"));
       await page.getByText("1 question from Codex").click();
-      await expect.element(page.getByLabelText("Your answer")).toHaveValue("");
+      await expect.element(page.getByLabelText("Your answer")).toHaveTextContent("");
       await expect
         .element(page.getByRole("button", { name: "Skip all", exact: true }))
         .not.toBeInTheDocument();
@@ -340,7 +341,7 @@ describe("inline async questions", () => {
       // The same provider activity in a different environment is independent.
       await screen.rerender(component(multipleActivities, "remote"));
       await page.getByText("2 questions from Codex").click();
-      await expect.element(page.getByLabelText("Your answer")).toHaveValue("");
+      await expect.element(page.getByLabelText("Your answer")).toHaveTextContent("");
       expect(onAnswer).not.toHaveBeenCalled();
     } finally {
       await screen.unmount();
@@ -423,7 +424,7 @@ describe("inline async questions", () => {
       await expect.element(page.getByText("1 question from Codex")).not.toBeInTheDocument();
       await screen.rerender(component("remote"));
       await page.getByText("1 question from Codex").click();
-      await expect.element(page.getByLabelText("Your answer")).toHaveValue("");
+      await expect.element(page.getByLabelText("Your answer")).toHaveTextContent("");
       expect(onAnswer).not.toHaveBeenCalled();
     } finally {
       await screen.unmount();
@@ -448,7 +449,7 @@ describe("inline async questions", () => {
       await expect.element(page.getByRole("button", { name: "Skip" })).toBeDisabled();
       await expect
         .element(page.getByLabelText("Your answer"))
-        .toHaveValue("Draft while reconnecting");
+        .toHaveTextContent("Draft while reconnecting");
     } finally {
       await screen.unmount();
     }
@@ -485,7 +486,7 @@ describe("inline async questions", () => {
           .toMatchTextContent("Handled in another view.");
         await expect
           .element(page.getByLabelText("Your answer"))
-          .toHaveValue("Keep this alternative answer");
+          .toHaveTextContent("Keep this alternative answer");
         await expect.element(page.getByRole("button", { name: "Send answer" })).toBeDisabled();
         expect(onAnswer).not.toHaveBeenCalled();
         await page.getByRole("button", { name: "Skip" }).click();

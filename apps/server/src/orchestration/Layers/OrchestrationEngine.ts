@@ -1,5 +1,5 @@
 import type { OrchestrationEvent, OrchestrationReadModel, ProjectId } from "@cafecode/contracts";
-import { containsCafeSecrets } from "@cafecode/shared/cafeSecrets";
+import { containsCafeSecrets, mapCafeSecretAnswerTexts } from "@cafecode/shared/cafeSecrets";
 import {
   OrchestrationCommand,
   OrchestrationThreadActivity,
@@ -1322,8 +1322,29 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     Effect.gen(function* () {
       // Internal callers cannot bypass the normalizer and journal raw markers.
       if (
-        (command.type === "thread.turn.start" || command.type === "thread.turn.steer") &&
-        containsCafeSecrets(command.message.text)
+        command.type === "thread.user-input.respond" ||
+        command.type === "thread.mcp-user-input.respond"
+      ) {
+        let unsafe = false;
+        try {
+          mapCafeSecretAnswerTexts(command.answers, (text) => {
+            if (containsCafeSecrets(text)) unsafe = true;
+            return text;
+          });
+        } catch {
+          unsafe = true;
+        }
+        if (unsafe)
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail:
+              "Question answers must be valid and Cafe Secrets must be prepared before dispatch.",
+          });
+      }
+      if (
+        ((command.type === "thread.turn.start" || command.type === "thread.turn.steer") &&
+          containsCafeSecrets(command.message.text)) ||
+        (command.type === "thread.async-question.answer" && containsCafeSecrets(command.answer))
       )
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,

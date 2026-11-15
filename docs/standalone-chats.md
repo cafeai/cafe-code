@@ -29,6 +29,12 @@ not determine its project association.
   switch away from the newer editor you are using.
 - Find saved standalone conversations in **Projects → Chats** and search.
   Opening an existing conversation selects its tab rather than duplicating it.
+- Right-click a saved chat and choose **Move to project…** in Chats or Desk,
+  then select a project in the same environment and click **Move**. The chat
+  must be idle, with no pending questions, approvals or current background work.
+  Its history stays with the same conversation. Future work uses the project's
+  folder; existing workspace files stay in their original location. Project
+  chats use the same action to move to another project.
 - Right-click a saved idle Codex or Claude chat and choose **Duplicate chat**
   in either Projects or Desk to create a separate conversation with resumable
   provider history from that point. It preserves the account/settings, sends no

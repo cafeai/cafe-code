@@ -61,6 +61,7 @@ export interface SidebarThreadContextMenuItem {
 }
 
 export function buildSidebarThreadContextMenuItems(input: {
+  readonly moveDisabled?: boolean;
   readonly debugEnabled: boolean;
   readonly repairRunning: boolean;
   readonly forkDisabled?: boolean;
@@ -69,7 +70,7 @@ export function buildSidebarThreadContextMenuItems(input: {
     { id: "rename", label: uiText("Rename chat") },
     { id: "edit-metadata", label: uiText("Edit metadata…") },
     { id: "fork", label: uiText("Duplicate chat"), disabled: input.forkDisabled === true },
-    { id: "move", label: uiText("Move chat…") },
+    { id: "move", label: uiText("Move to project…"), disabled: input.moveDisabled === true },
     { id: "copy-path", label: uiText("Copy path") },
     { id: "copy-thread-id", label: uiText("Copy chat ID") },
     { id: "secrets", label: uiText("Secrets…") },

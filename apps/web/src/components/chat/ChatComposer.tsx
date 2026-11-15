@@ -89,6 +89,7 @@ import {
   type ReportedCafeSecretIssue,
   useCafeSecretsComposerState,
 } from "../../cafeSecrets/useCafeSecretsComposerState";
+import { cafeSecretIssueMessage } from "../../cafeSecrets/feedback";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
@@ -3558,11 +3559,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   const [reportedCafeSecretIssue, setReportedCafeSecretIssue] =
     useState<ReportedCafeSecretIssue | null>(null);
+  const cafeSecretInstanceId = activePendingProgress
+    ? (activeThread?.session?.providerInstanceId ??
+      activeThread?.modelSelection.instanceId ??
+      selectedInstanceId)
+    : selectedInstanceId;
+  const cafeSecretDriver = activePendingProgress
+    ? (activeThread?.session?.provider ?? selectedProvider)
+    : selectedProvider;
   const cafeSecrets = useCafeSecretsComposerState({
     environmentId,
-    instanceId: selectedInstanceId,
-    driver: selectedProvider,
-    prompt,
+    instanceId: cafeSecretInstanceId,
+    driver: cafeSecretDriver,
+    prompt: activePendingProgress?.customAnswer ?? prompt,
     reported: reportedCafeSecretIssue,
   });
 
@@ -3591,8 +3600,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           issue,
           prompt: reportedPrompt,
           environmentId,
-          instanceId: selectedInstanceId,
-          driver: selectedProvider,
+          instanceId: cafeSecretInstanceId,
+          driver: cafeSecretDriver,
           api: readThreadSecretsApi(environmentId),
         });
       },
@@ -3698,6 +3707,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedModelOptionsForDispatch,
       selectedModelSelection,
       selectedInstanceId,
+      cafeSecretInstanceId,
+      cafeSecretDriver,
       selectedPromptEffort,
       selectedProvider,
       selectedProviderModels,
@@ -4460,32 +4471,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 </div>
               ) : null}
             </div>
-            {cafeSecrets.issue && !isComposerApprovalState && !activePendingProgress ? (
+            {cafeSecrets.issue && !isComposerApprovalState ? (
               <p
                 role="alert"
                 data-testid="composer-cafe-secret-error"
                 className="mt-1.5 text-xs leading-snug text-destructive-foreground"
               >
-                {cafeSecrets.issue === "unsupported"
-                  ? uiText(
-                      "Cafe Secrets are not supported by the current provider. If this is literal text, escape it with a backslash: \\[sec:VALUE].",
-                      undefined,
-                      undefined,
-                      uiLocale,
-                    )
-                  : cafeSecrets.issue === "incomplete"
-                    ? uiText(
-                        "Finish the Cafe Secret with a closing ] or escape literal text with a backslash: \\[sec:VALUE].",
-                        undefined,
-                        undefined,
-                        uiLocale,
-                      )
-                    : uiText(
-                        "A Cafe Secret in this message could not be prepared or is no longer available in this chat, so the message was not sent. If this is literal text, escape it with a backslash.",
-                        undefined,
-                        undefined,
-                        uiLocale,
-                      )}
+                {cafeSecretIssueMessage(cafeSecrets.issue, uiLocale)}
               </p>
             ) : null}
           </div>

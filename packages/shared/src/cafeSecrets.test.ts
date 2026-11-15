@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   cafeSecretReference,
   containsCafeSecrets,
@@ -9,10 +9,67 @@ import {
   redactCafeSecretText,
   substituteCafeSecretReferences,
   supportsCafeSecrets,
+  mapCafeSecretAnswerTexts,
+  escapeCafeSecretSyntax,
 } from "./cafeSecrets.ts";
 
 const id = "0123456789abcdef0123456789abcdef";
 const otherId = "fedcba9876543210fedcba9876543210";
+
+describe("question answer secret boundaries", () => {
+  it("maps JSON string leaves with their question id and retains non-text answers", () => {
+    const values = {
+      password: "[sec:synthetic]",
+      choices: ["x", { value: "[sec:synthetic]" }],
+      enabled: true,
+      count: 3,
+      nothing: null,
+    };
+    const visit = vi.fn((text: string) => text.replace("[sec:synthetic]", cafeSecretReference(id)));
+    const mapped = mapCafeSecretAnswerTexts(values, visit);
+    expect(mapped).toEqual({
+      ...values,
+      password: cafeSecretReference(id),
+      choices: ["x", { value: cafeSecretReference(id) }],
+    });
+    expect(visit).toHaveBeenCalledWith("[sec:synthetic]", "password");
+    expect(visit).toHaveBeenCalledWith("[sec:synthetic]", "choices");
+    expect(values.password).toBe("[sec:synthetic]");
+  });
+  it("retains escapes and prototype-like keys without assigning a prototype", () => {
+    const values = JSON.parse('{"__proto__":"\\\\[sec:literal]"}');
+    const mapped = mapCafeSecretAnswerTexts(values, (text) => text);
+    expect(Object.hasOwn(mapped, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(mapped)).toBe(Object.prototype);
+    expect(mapped["__proto__"]).toBe("\\[sec:literal]");
+  });
+  it("refuses getters, cycles, unsupported values, unsafe keys and excessive work", () => {
+    const getter = vi.fn(() => "[sec:hidden]");
+    const accessor = Object.defineProperty({}, "password", { enumerable: true, get: getter });
+    const cycle: Record<string, unknown> = {};
+    cycle.value = cycle;
+    for (const answers of [
+      accessor,
+      cycle,
+      { value: () => "x" },
+      { "[sec:key]": "x" },
+      { value: new Array(4097).fill("") },
+      { first: new Array(3000), second: new Array(3000) },
+      { value: "x".repeat(1_048_577) },
+    ])
+      expect(() => mapCafeSecretAnswerTexts(answers, (text) => text)).toThrow(
+        "Question answers are too large or invalid.",
+      );
+    expect(getter).not.toHaveBeenCalled();
+  });
+  it("quotes question titles as literal context without recapturing their examples", () => {
+    const text = `[sec:EXAMPLE [sec:nested]] ${cafeSecretReference(id)} \\[sec:literal]`;
+    const escaped = escapeCafeSecretSyntax(text);
+    expect(containsCafeSecrets(escaped)).toBe(false);
+    expect(hasCafeSecretReference(escaped)).toBe(false);
+    expect(escapeCafeSecretSyntax(escaped)).toBe(escaped);
+  });
+});
 describe("Cafe Secrets syntax and substitution", () => {
   it("captures explicit markers with original offsets and retains escapes across admission", () => {
     const text = "Use [sec:alpha] and \\[sec:literal], then [sec:a\\]b\\\\c]";

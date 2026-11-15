@@ -11,6 +11,7 @@ import { copyTextToClipboard } from "../../lib/copyToClipboard";
 import { readLocalApi } from "../../localApi";
 import type { SidebarThreadSummary } from "../../types";
 import { useUiStateStore } from "../../uiStateStore";
+import { resolveThreadStatusPill } from "../Sidebar.logic";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { SidebarMenuSubItem } from "../ui/sidebar";
 import {
@@ -116,6 +117,9 @@ function SidebarThreadGroupRow({
   );
   const setThreadGroupExpanded = useUiStateStore((state) => state.setThreadGroupExpanded);
   const descendants = useMemo(() => collectSidebarGroupDescendants(index, node), [index, node]);
+  // Keep collapsed/nested work visible with the same live-work and attention
+  // precedence as the individual chat rows.
+  const isWorking = descendants.some((thread) => resolveThreadStatusPill({ thread })?.pulse);
   const { deleteThreadGroup } = useThreadActions();
 
   const toggle = useCallback(() => {
@@ -222,8 +226,8 @@ function SidebarThreadGroupRow({
       {/* Group rows read as attached to their parent chat: the row is one
           step shorter (h-6) than a chat row and, when it directly follows the
           parent, -mt-0.5 cancels the sidebar list's gap-0.5 without
-          overlapping either row's click area. Group rows show no status:
-          their members report to the agent that started them. */}
+          overlapping either row's click area. The group icon reflects work
+          across its descendants, including chats hidden by collapse. */}
       <SidebarMenuSubItem
         className={attached ? "-mt-0.5 w-full" : "w-full"}
         style={sidebarNestingIndentStyle(depth)}
@@ -248,7 +252,10 @@ function SidebarThreadGroupRow({
               expanded ? "rotate-90" : ""
             }`}
           />
-          <BotIcon aria-hidden="true" className="size-3.5 shrink-0" />
+          <BotIcon
+            aria-hidden="true"
+            className={`size-3.5 shrink-0 ${isWorking ? "animate-pulse text-primary motion-reduce:animate-none" : ""}`}
+          />
           <span className="min-w-0 flex-1 truncate">{node.title}</span>
           <span className="shrink-0 text-subtle-foreground tabular-nums">
             {uiText(

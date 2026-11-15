@@ -5,6 +5,8 @@ import * as Path from "effect/Path";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   type ClientOrchestrationCommand,
+  type ThreadId,
+  type ProviderInstanceId,
   type OrchestrationCommand,
   OrchestrationDispatchCommandError,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
@@ -27,6 +29,10 @@ import {
   hasCafeSecretReference,
   redactCafeSecretText,
   supportsCafeSecrets,
+  mapCafeSecretAnswerTexts,
+  findCafeSecretRanges,
+  parseCafeSecrets,
+  CAFE_SECRET_ANSWER_TEXT_LIMIT,
 } from "@cafecode/shared/cafeSecrets";
 import { getThreadSecretsStore } from "../secrets/store.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
@@ -39,6 +45,108 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
     const workspacePaths = yield* WorkspacePaths;
     const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
     const sql = yield* SqlClient.SqlClient;
+
+    const cafeSecretsStore = Effect.fn(function* (
+      threadId: ThreadId,
+      instanceOverride?: ProviderInstanceId,
+      nativeAnswer = false,
+    ) {
+      const registry = yield* Effect.serviceOption(ProviderRegistry);
+      const existing = yield* projectionSnapshotQuery.getThreadShellById(threadId).pipe(
+        Effect.mapError(
+          () =>
+            new OrchestrationDispatchCommandError({
+              message: "Cafe Secrets chat ownership is unavailable.",
+            }),
+        ),
+      );
+      const instanceId =
+        instanceOverride ??
+        (Option.isSome(existing)
+          ? ((nativeAnswer ? existing.value.session?.providerInstanceId : undefined) ??
+            existing.value.modelSelection.instanceId)
+          : undefined);
+      const providers = Option.isSome(registry) ? yield* registry.value.getProviders : [];
+      const provider = providers.find(
+        (provider) =>
+          provider.instanceId === instanceId &&
+          provider.enabled &&
+          supportsCafeSecrets(provider.driver),
+      );
+      if (!provider)
+        return yield* new OrchestrationDispatchCommandError({
+          message:
+            "Cafe Secrets are not supported by the current provider. Escape literal text with a backslash: \\[sec:VALUE].",
+        });
+      const session = Option.isSome(existing) ? existing.value.session : undefined;
+      return {
+        store: getThreadSecretsStore(serverConfig.secretsDir),
+        owner: {
+          instanceId,
+          driver: provider.driver,
+          runtimeId: nativeAnswer ? session?.subagentRuntimeId : undefined,
+          providerName: nativeAnswer ? session?.providerName : undefined,
+        },
+      };
+    });
+
+    if (command.type === "thread.user-input.respond") {
+      const texts = new Set<string>();
+      yield* Effect.try({
+        try: () =>
+          mapCafeSecretAnswerTexts(command.answers, (text) => {
+            if (containsCafeSecrets(text) || hasCafeSecretReference(text)) {
+              const { spans } = parseCafeSecrets(text);
+              if (
+                spans.length !== findCafeSecretRanges(text).length ||
+                spans.some(
+                  (span) => !span.value || new TextEncoder().encode(span.value).length > 16_384,
+                )
+              )
+                throw new Error("Invalid secret syntax.");
+              texts.add(text);
+              if (texts.size > CAFE_SECRET_ANSWER_TEXT_LIMIT)
+                throw new Error("Too many secret answer fields.");
+            }
+            return text;
+          }),
+        catch: () =>
+          new OrchestrationDispatchCommandError({
+            message:
+              "Question answers could not be prepared. Complete [sec:VALUE] or escape literal text with a backslash.",
+          }),
+      });
+      if (texts.size === 0) return command as OrchestrationCommand;
+      const captured = yield* cafeSecretsStore(command.threadId, undefined, true);
+      const replacements = new Map<string, string>();
+      for (const text of texts) {
+        const result = yield* Effect.tryPromise({
+          try: () => captured.store.prepare(command.threadId, text),
+          catch: () =>
+            new OrchestrationDispatchCommandError({
+              message: "Cafe Secrets could not be prepared for these question answers.",
+            }),
+        });
+        replacements.set(text, result.text);
+      }
+      const current = yield* cafeSecretsStore(command.threadId, undefined, true);
+      if (
+        current.owner.instanceId !== captured.owner.instanceId ||
+        current.owner.driver !== captured.owner.driver ||
+        current.owner.runtimeId !== captured.owner.runtimeId ||
+        current.owner.providerName !== captured.owner.providerName
+      )
+        return yield* new OrchestrationDispatchCommandError({
+          message: "The question's provider changed before its answers could be prepared.",
+        });
+      return {
+        ...command,
+        answers: mapCafeSecretAnswerTexts(
+          command.answers,
+          (text) => replacements.get(text) ?? text,
+        ),
+      } satisfies OrchestrationCommand;
+    }
 
     const normalizeProjectWorkspaceRoot = (workspaceRoot: string) =>
       workspacePaths.normalizeWorkspaceRoot(workspaceRoot).pipe(
@@ -177,32 +285,10 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
     let messageText = command.message.text;
     let titleSeed = command.type === "thread.turn.start" ? command.titleSeed : undefined;
     if (containsCafeSecrets(messageText) || hasCafeSecretReference(messageText)) {
-      const registry = yield* Effect.serviceOption(ProviderRegistry);
-      const existing = yield* projectionSnapshotQuery.getThreadShellById(command.threadId).pipe(
-        Effect.mapError(
-          () =>
-            new OrchestrationDispatchCommandError({
-              message: "Cafe Secrets chat ownership is unavailable.",
-            }),
-        ),
+      const { store } = yield* cafeSecretsStore(
+        command.threadId,
+        command.type === "thread.turn.start" ? command.modelSelection?.instanceId : undefined,
       );
-      const instanceId =
-        (command.type === "thread.turn.start" ? command.modelSelection?.instanceId : undefined) ??
-        (Option.isSome(existing) ? existing.value.modelSelection.instanceId : undefined);
-      const providers = Option.isSome(registry) ? yield* registry.value.getProviders : [];
-      if (
-        !providers.some(
-          (provider) =>
-            provider.instanceId === instanceId &&
-            provider.enabled &&
-            supportsCafeSecrets(provider.driver),
-        )
-      )
-        return yield* new OrchestrationDispatchCommandError({
-          message:
-            "Cafe Secrets are not supported by the current provider. Escape literal text with a backslash: \\[sec:VALUE].",
-        });
-      const store = getThreadSecretsStore(serverConfig.secretsDir);
       messageText = (yield* Effect.tryPromise({
         try: () => store.prepare(command.threadId, messageText),
         catch: () =>

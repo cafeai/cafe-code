@@ -22,6 +22,9 @@ import {
   type AsyncQuestion,
 } from "./asyncQuestions";
 import { Button } from "../ui/button";
+import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
+import { cafeSecretIssueMessage } from "../../cafeSecrets/feedback";
+import type { CafeSecretSendIssue } from "../../cafeSecrets/cafeSecretsClient";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 
 export interface ComposerAsyncQuestionsPanelProps {
@@ -30,7 +33,10 @@ export interface ComposerAsyncQuestionsPanelProps {
   readonly activities: readonly OrchestrationThreadActivity[];
   readonly deliveryDisabled: boolean;
   /** True only after Cafe has durably accepted the ordinary follow-up. */
-  readonly onAnswer: (text: string, messageId: string) => Promise<boolean>;
+  readonly onAnswer: (
+    answer: string,
+    question: AsyncQuestion,
+  ) => Promise<boolean | CafeSecretSendIssue>;
   readonly onResolve: (questions: readonly AsyncQuestion[]) => Promise<boolean>;
 }
 
@@ -119,6 +125,9 @@ function ScopedAsyncQuestionsPanel({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [errorCode, setErrorCode] = useState<AsyncQuestionFeedbackCode | null>(null);
+  const [secretIssue, setSecretIssue] = useState<CafeSecretSendIssue | null>(null);
+  const [answerCursor, setAnswerCursor] = useState(0);
+  const answerEditorRef = useRef<ComposerPromptEditorHandle | null>(null);
   // React may not paint disabled controls before a second click. Admission is
   // synchronous and remains tied to the original question through async save.
   const inFlight = useRef(false);
@@ -207,12 +216,14 @@ function ScopedAsyncQuestionsPanel({
     const next = updateAsyncQuestionDraft(draftsRef.current, question, text);
     if (next === null) {
       setErrorCode("draft-limit");
-      return;
+      return false;
     }
     draftsRef.current = next;
     setDrafts(next);
     setSelectedId(question.id);
     setErrorCode(null);
+    setSecretIssue(null);
+    return true;
   };
 
   const complete = (ids: readonly string[]) => {
@@ -246,6 +257,7 @@ function ScopedAsyncQuestionsPanel({
     inFlight.current = true;
     setSubmitting(true);
     setErrorCode(null);
+    setSecretIssue(null);
     try {
       // Re-read immediately before admission in case another tab handled it.
       await withAsyncQuestionLock(async () => {
@@ -254,12 +266,17 @@ function ScopedAsyncQuestionsPanel({
           // draft's exact text. Keep it available to copy or explicitly skip.
           if (mounted.current)
             setHandled((current) => new Set([...current, id].slice(-MAX_HANDLED_ASYNC_QUESTIONS)));
-        } else if (acceptedAnswers.current.get(id) === text || (await onAnswer(text, id))) {
-          acceptedAnswers.current.set(id, text);
-          if (await onResolve([question])) complete([id]);
-          else if (mounted.current) setErrorCode("state-save-failed");
-        } else if (mounted.current) {
-          setErrorCode("not-queued");
+        } else {
+          const result =
+            acceptedAnswers.current.get(id) === text ? true : await onAnswer(answer, question);
+          if (result === true) {
+            acceptedAnswers.current.set(id, text);
+            if (await onResolve([question])) complete([id]);
+            else if (mounted.current) setErrorCode("state-save-failed");
+          } else if (mounted.current) {
+            if (typeof result === "string") setSecretIssue(result);
+            else setErrorCode("not-queued");
+          }
         }
       });
     } catch {
@@ -338,6 +355,7 @@ function ScopedAsyncQuestionsPanel({
                 if (typeof next !== "string") return;
                 setSelectedId(next);
                 setErrorCode(null);
+                setSecretIssue(null);
               }}
             >
               <SelectTrigger
@@ -398,20 +416,42 @@ function ScopedAsyncQuestionsPanel({
             message={"Your answer<slot1></slot1>"}
             slots={{
               slot1: (
-                <textarea
-                  aria-label={uiText("Your answer", undefined, undefined, uiLocale)}
-                  value={answer}
-                  disabled={submitting}
-                  maxLength={PROVIDER_SEND_TURN_MAX_INPUT_CHARS}
-                  onChange={(event) => editAnswer(question, event.target.value)}
-                  rows={3}
-                  className="focus-ring block w-full resize-y rounded-lg border border-input bg-background px-2.5 py-1.5 text-sm text-foreground"
-                />
+                <div className="focus-within:ring-2 focus-within:ring-ring rounded-lg border border-input bg-background px-2.5 py-1.5">
+                  <ComposerPromptEditor
+                    key={question.id}
+                    value={answer}
+                    cursor={answerCursor}
+                    skills={[]}
+                    disabled={submitting}
+                    focusRequestRevision={0}
+                    placeholder=""
+                    ariaLabel={uiText("Your answer", undefined, undefined, uiLocale)}
+                    testId="question-answer-editor"
+                    maxLength={PROVIDER_SEND_TURN_MAX_INPUT_CHARS}
+                    cafeSecretTone={secretIssue ? "error" : "secret"}
+                    onChange={(text, cursor) => {
+                      const accepted = editAnswer(question, text);
+                      if (accepted) setAnswerCursor(cursor);
+                      return accepted;
+                    }}
+                    onPaste={() => {}}
+                    editorRef={answerEditorRef}
+                  />
+                </div>
               ),
             }}
           />
         </label>
-        {errorCode && (
+        {secretIssue && (
+          <p
+            role="alert"
+            data-testid="question-cafe-secret-error"
+            className="text-xs text-destructive-foreground"
+          >
+            {cafeSecretIssueMessage(secretIssue, uiLocale)}
+          </p>
+        )}
+        {errorCode && !secretIssue && (
           <p role="alert" className="text-xs text-destructive-foreground">
             {formatAsyncQuestionFeedback(errorCode, uiLocale)}
           </p>

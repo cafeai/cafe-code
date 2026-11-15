@@ -60,6 +60,67 @@ export const findCafeSecretReferenceRanges = (
 export const hasCafeSecretReference = (text: string): boolean =>
   findCafeSecretReferenceRanges(text).length > 0;
 
+/** Provider-authored question titles are quoted context, not user secret
+ * capture. Keep their reserved syntax literal when composing an answer. */
+export function escapeCafeSecretSyntax(text: string): string {
+  return text.replace(/\[sec:|\[CAFE_SECRET_[a-f0-9]{32}\]/g, (match: string, offset: number) =>
+    escapedAt(text, offset) ? match : `\\${match}`,
+  );
+}
+
+/** Bounded JSON answer mapping, shared by renderer preparation and the final
+ * pre-journal guard. Never stringify answers (that changes marker escapes),
+ * invoke getters/toJSON, or assign provider-authored keys through __proto__. */
+export const CAFE_SECRET_ANSWER_TEXT_LIMIT = 64;
+
+export function mapCafeSecretAnswerTexts(
+  answers: Readonly<Record<string, unknown>>,
+  transform: (text: string, questionId: string) => string,
+): Record<string, unknown> {
+  let nodes = 0;
+  let arraySlots = 0;
+  let characters = 0;
+  const ancestors = new Set<object>();
+  const invalid = () => new Error("Question answers are too large or invalid.");
+  const walk = (value: unknown, questionId: string, depth: number): unknown => {
+    if (++nodes > 4096 || depth > 16) throw invalid();
+    if (typeof value === "string") {
+      characters += value.length;
+      if (characters > 1_048_576) throw invalid();
+      return transform(value, questionId);
+    }
+    if (value === null || value === undefined || typeof value === "boolean") return value;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value !== "object" || ancestors.has(value)) throw invalid();
+    const array = Array.isArray(value);
+    if (
+      !array &&
+      Object.getPrototypeOf(value) !== Object.prototype &&
+      Object.getPrototypeOf(value) !== null
+    )
+      throw invalid();
+    if (array && (arraySlots += value.length) > 4096) throw invalid();
+    ancestors.add(value);
+    const entries: [string, unknown][] = [];
+    for (const key in value) {
+      if (!Object.hasOwn(value, key)) continue;
+      characters += key.length;
+      if (characters > 1_048_576 || containsCafeSecrets(key)) throw invalid();
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor)) throw invalid();
+      if (array && (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= value.length)) throw invalid();
+      entries.push([key, walk(descriptor.value, depth === 0 ? key : questionId, depth + 1)]);
+    }
+    ancestors.delete(value);
+    if (!array) return Object.fromEntries(entries);
+    const output = new Array<unknown>(value.length);
+    for (const [key, entry] of entries) output[Number(key)] = entry;
+    return output;
+  };
+  if (answers === null || typeof answers !== "object" || Array.isArray(answers)) throw invalid();
+  return walk(answers, "", 0) as Record<string, unknown>;
+}
+
 /** Values are string data, never replacement templates or recursively expanded code. */
 export function substituteCafeSecretReferences(
   text: string,

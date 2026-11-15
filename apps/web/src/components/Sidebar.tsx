@@ -107,6 +107,9 @@ import { useComposerDraftStore } from "../composerDraftStore";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { canDuplicateThread, isThreadDuplicationPending } from "../lib/threadDuplication";
+import { canMoveThread } from "../lib/threadMove";
+import { openThreadMoveDialog } from "../threadMoveDialogStore";
+import { ThreadMoveDialogHost } from "./ThreadMoveDialog";
 import {
   buildThreadRouteParams,
   resolveThreadRouteRef,
@@ -215,7 +218,7 @@ import {
   getProjectOrderKey,
   selectProjectGroupingSettings,
 } from "../logicalProject";
-import type { Project, SidebarThreadSummary } from "../types";
+import type { SidebarThreadSummary } from "../types";
 import {
   buildPhysicalToLogicalProjectKeyMap,
   buildSidebarProjectSnapshots,
@@ -311,15 +314,6 @@ const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> =
     return uiText("Keep separate");
   },
 };
-
-function sortThreadMoveCandidates(projects: readonly Project[]): Project[] {
-  return projects.toSorted(
-    (left, right) =>
-      left.name.localeCompare(right.name, undefined, { sensitivity: "base" }) ||
-      left.cwd.localeCompare(right.cwd, undefined, { sensitivity: "base" }) ||
-      left.id.localeCompare(right.id),
-  );
-}
 
 function clampSidebarThreadPreviewCount(value: number): SidebarThreadPreviewCount {
   return Math.min(
@@ -1249,6 +1243,11 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
             disabled: !duplicateAvailable,
           },
           {
+            id: "move",
+            label: uiText("Move to project…", undefined, undefined, uiLocale),
+            disabled: !canMoveThread(thread),
+          },
+          {
             id: "archive",
             label: uiText("Archive", undefined, undefined, uiLocale),
             disabled: running,
@@ -1266,7 +1265,10 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
       else if (action === "edit-metadata")
         useThreadMetadataDialogStore.getState().open({ threadRef, title: thread.title });
       else if (action === "secrets") openThreadSecretsDialog(threadRef, thread.title);
-      else if (
+      else if (action === "move") {
+        const current = rowsByKeyRef.current.get(scopedThreadKey(threadRef));
+        if (canMoveThread(current)) openThreadMoveDialog(threadRef);
+      } else if (
         action === "duplicate" &&
         duplicateAvailable &&
         canDuplicateThread(rowsByKeyRef.current.get(scopedThreadKey(threadRef)))
@@ -1786,7 +1788,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       ),
     ),
   );
-  const allProjects = useWorkspaceProjects();
   const { index: threadGroupIndex } = useContext(SidebarThreadGroupContext);
   // Context-menu lookups also cover group members, which can belong to any
   // project but are rendered beneath their parent chat here.
@@ -1855,9 +1856,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const [additionalDirectoryInput, setAdditionalDirectoryInput] = useState("");
   const [additionalDirectoriesError, setAdditionalDirectoriesError] = useState<string | null>(null);
   const [additionalDirectoriesSubmitting, setAdditionalDirectoriesSubmitting] = useState(false);
-  const [threadMoveTarget, setThreadMoveTarget] = useState<SidebarThreadSummary | null>(null);
-  const [threadMoveProjectId, setThreadMoveProjectId] = useState<ProjectId | null>(null);
-  const [threadMoveSubmitting, setThreadMoveSubmitting] = useState(false);
   const [threadRepairDialog, setThreadRepairDialog] = useState<ThreadRepairDialogState | null>(
     null,
   );
@@ -2935,12 +2933,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     }
   }, [additionalDirectoriesDraft, additionalDirectoriesTarget, uiLocale]);
 
-  const closeThreadMoveDialog = useCallback(() => {
-    setThreadMoveTarget(null);
-    setThreadMoveProjectId(null);
-    setThreadMoveSubmitting(false);
-  }, []);
-
   const saveProjectGroupingPreference = useCallback(() => {
     if (!projectGroupingTarget) {
       return;
@@ -2965,121 +2957,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     projectGroupingSettings.sidebarProjectGroupingOverrides,
     projectGroupingTarget,
     updateSettings,
-  ]);
-
-  const getThreadMoveCandidates = useCallback(
-    (thread: SidebarThreadSummary) =>
-      sortThreadMoveCandidates(
-        allProjects.filter(
-          (candidate) =>
-            candidate.environmentId === thread.environmentId && candidate.id !== thread.projectId,
-        ),
-      ),
-    [allProjects],
-  );
-
-  const openThreadMoveDialog = useCallback(
-    (thread: SidebarThreadSummary) => {
-      const candidates = getThreadMoveCandidates(thread);
-      if (candidates.length === 0) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: uiText("No project folder to move to", undefined, undefined, uiLocale),
-            description: uiText(
-              "Add another project in this environment first.",
-              undefined,
-              undefined,
-              uiLocale,
-            ),
-          }),
-        );
-        return;
-      }
-
-      setThreadMoveTarget(thread);
-      setThreadMoveProjectId(candidates[0]!.id);
-    },
-    [getThreadMoveCandidates, uiLocale],
-  );
-
-  const threadMoveCandidateProjects = useMemo(
-    () => (threadMoveTarget ? getThreadMoveCandidates(threadMoveTarget) : []),
-    [getThreadMoveCandidates, threadMoveTarget],
-  );
-
-  const selectedThreadMoveProject = useMemo(
-    () =>
-      threadMoveProjectId
-        ? (threadMoveCandidateProjects.find((candidate) => candidate.id === threadMoveProjectId) ??
-          null)
-        : null,
-    [threadMoveCandidateProjects, threadMoveProjectId],
-  );
-
-  const submitThreadMove = useCallback(async () => {
-    if (!threadMoveTarget || !threadMoveProjectId) {
-      return;
-    }
-
-    const targetProject = threadMoveCandidateProjects.find(
-      (candidate) => candidate.id === threadMoveProjectId,
-    );
-    if (!targetProject) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: uiText("Project folder unavailable", undefined, undefined, uiLocale),
-          description: uiText("Choose another project folder.", undefined, undefined, uiLocale),
-        }),
-      );
-      return;
-    }
-
-    const api = readEnvironmentApi(threadMoveTarget.environmentId);
-    if (!api) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: uiText("Could not move chat", undefined, undefined, uiLocale),
-          description: uiText(
-            "Reconnect to the chat''s environment and try again.",
-            undefined,
-            undefined,
-            uiLocale,
-          ),
-        }),
-      );
-      return;
-    }
-
-    setThreadMoveSubmitting(true);
-    try {
-      await api.orchestration.dispatchCommand({
-        type: "thread.meta.update",
-        commandId: newCommandId(),
-        threadId: threadMoveTarget.id,
-        projectId: targetProject.id,
-        worktreePath: null,
-      });
-      // The chat visibly moves under its new project, so no success toast.
-      closeThreadMoveDialog();
-    } catch (error) {
-      setThreadMoveSubmitting(false);
-      console.warn("Failed to move chat", { error });
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: uiText("Could not move chat", undefined, undefined, uiLocale),
-        }),
-      );
-    }
-  }, [
-    closeThreadMoveDialog,
-    threadMoveCandidateProjects,
-    threadMoveProjectId,
-    threadMoveTarget,
-    uiLocale,
   ]);
 
   const closeThreadRepairDialog = useCallback(() => {
@@ -3147,6 +3024,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           debugEnabled: desktopDebugEnabled,
           repairRunning: threadRepairDialog?.phase === "running",
           forkDisabled: !duplicateAvailable,
+          moveDisabled: !canMoveThread(thread),
         }),
         position,
       );
@@ -3173,7 +3051,8 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       }
 
       if (clicked === "move") {
-        openThreadMoveDialog(thread);
+        const current = sidebarThreadByKeyRef.current.get(threadKey);
+        if (canMoveThread(current)) openThreadMoveDialog(threadRef);
         return;
       }
       if (clicked === "copy-path") {
@@ -3232,7 +3111,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       deleteThread,
       duplicateThread,
       memberProjectByScopedKey,
-      openThreadMoveDialog,
       project.cwd,
       router,
       startThreadRepair,
@@ -3689,100 +3567,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
             </Button>
             <Button onClick={saveProjectGroupingPreference}>
               {uiText("Save", undefined, undefined, uiLocale)}
-            </Button>
-          </DialogFooter>
-        </DialogPopup>
-      </Dialog>
-
-      <Dialog
-        open={threadMoveTarget !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            closeThreadMoveDialog();
-          }
-        }}
-      >
-        <DialogPopup className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>{uiText("Move chat", undefined, undefined, uiLocale)}</DialogTitle>
-            <DialogDescription>
-              {threadMoveTarget
-                ? uiText(
-                    'Move "{value0}" to another project folder.',
-                    {
-                      value0: threadMoveTarget.title,
-                    },
-                    undefined,
-                    uiLocale,
-                  )
-                : uiText(
-                    "Move this chat to another project folder.",
-                    undefined,
-                    undefined,
-                    uiLocale,
-                  )}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogPanel className="space-y-4">
-            <div className="grid gap-1.5">
-              <span className="text-xs font-medium text-foreground">
-                {uiText("Project folder", undefined, undefined, uiLocale)}
-              </span>
-              <Select
-                value={threadMoveProjectId ?? ""}
-                onValueChange={(value) => {
-                  const nextProject = threadMoveCandidateProjects.find(
-                    (candidate) => candidate.id === value,
-                  );
-                  if (nextProject) {
-                    setThreadMoveProjectId(nextProject.id);
-                  }
-                }}
-              >
-                <SelectTrigger
-                  className="w-full"
-                  aria-label={uiText("Destination project folder", undefined, undefined, uiLocale)}
-                >
-                  <SelectValue>
-                    {selectedThreadMoveProject
-                      ? selectedThreadMoveProject.name
-                      : uiText("Choose a project folder", undefined, undefined, uiLocale)}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectPopup align="end" alignItemWithTrigger={false}>
-                  {threadMoveCandidateProjects.map((candidate) => (
-                    <SelectItem hideIndicator key={candidate.id} value={candidate.id}>
-                      <span className="flex min-w-0 flex-col">
-                        <span className="truncate">{candidate.name}</span>
-                        <span className="truncate text-xs text-subtle-foreground">
-                          {candidate.cwd}
-                        </span>
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectPopup>
-              </Select>
-            </div>
-            {selectedThreadMoveProject ? (
-              <p className="text-xs text-muted-foreground">
-                <UiMessage
-                  message={"Destination path: <slot1></slot1>"}
-                  slots={{ slot1: selectedThreadMoveProject.cwd }}
-                />
-              </p>
-            ) : null}
-          </DialogPanel>
-          <DialogFooter>
-            <Button variant="outline" onClick={closeThreadMoveDialog}>
-              {uiText("Cancel", undefined, undefined, uiLocale)}
-            </Button>
-            <Button
-              disabled={threadMoveSubmitting || !threadMoveTarget || !selectedThreadMoveProject}
-              onClick={() => void submitThreadMove()}
-            >
-              {threadMoveSubmitting
-                ? uiText("Moving…", undefined, undefined, uiLocale)
-                : uiText("Move", undefined, undefined, uiLocale)}
             </Button>
           </DialogFooter>
         </DialogPopup>
@@ -5536,6 +5320,7 @@ export default function Sidebar() {
       <SidebarChromeHeader isElectron={isElectron} />
       <WorkspaceEnvironmentSelector />
       <ThreadMetadataDialogHost />
+      <ThreadMoveDialogHost />
 
       {isOnSettings ? (
         <div className={cn("flex min-h-0 flex-1 flex-col", navSwapClassName)}>

@@ -7,7 +7,7 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { scopeThreadRef, scopedThreadKey } from "@cafecode/client-runtime";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { useState } from "react";
 import { render } from "vitest-browser-react";
@@ -20,6 +20,7 @@ import { buildSidebarThreadGroupIndex } from "./sidebar/threadGroups.logic";
 import { useThreadMetadataDialogStore } from "./ThreadMetadataDialog";
 import { useUiStateStore } from "../uiStateStore";
 import { SidebarStandaloneChats } from "./Sidebar";
+import { useThreadMoveDialogStore } from "../threadMoveDialogStore";
 
 const mocks = vi.hoisted(() => ({
   archive: vi.fn(),
@@ -100,6 +101,7 @@ function standaloneFixture(
   return { ...saved, id: ThreadId.make(id), title, latestUserMessageAt, ...extra };
 }
 const draftId = DraftId.make("unsent-standalone-draft");
+let moveFixtureCleanup: (() => Promise<void>) | null = null;
 beforeEach(async () => {
   await page.viewport(1100, 800);
   mocks.archive.mockReset();
@@ -129,7 +131,11 @@ beforeEach(async () => {
       "2026-09-03T00:00:00Z",
     );
 });
-afterEach(() => {
+afterEach(async () => {
+  await moveFixtureCleanup?.();
+  moveFixtureCleanup = null;
+  const target = useThreadMoveDialogStore.getState().target;
+  if (target) useThreadMoveDialogStore.getState().close(target);
   useThreadSelectionStore.getState().clearSelection();
   useComposerDraftStore.setState({ draftsByThreadKey: {}, draftThreadsByThreadKey: {} });
 });
@@ -171,6 +177,53 @@ async function setup(
     </div>,
   );
   return { screen, onOpen, onNewChat };
+}
+
+/** Retain late renders and native input through cancellation before the shared
+ * sidebar stores are reset. Menu admission itself never changes the chat. */
+function createStandaloneMoveFixture(context: TestContext) {
+  let retired = false;
+  let rendering: ReturnType<typeof setup> | undefined;
+  let completion: Promise<void> | undefined;
+  const pending = new Set<Promise<unknown>>();
+  const cleanup = () => {
+    retired = true;
+    return (completion ??= Promise.resolve().then(async () => {
+      await Promise.allSettled([...pending]);
+      const mounted = await rendering?.catch(() => null);
+      await mounted?.screen.unmount();
+      context.signal.removeEventListener("abort", retire);
+    }));
+  };
+  const retire = () => {
+    void cleanup();
+  };
+  context.signal.addEventListener("abort", retire, { once: true });
+  context.onTestFinished(cleanup);
+  moveFixtureCleanup = cleanup;
+  if (context.signal.aborted) retire();
+  return {
+    async mount(source: SidebarThreadSummary) {
+      if (retired) throw new Error("Move menu fixture retired");
+      rendering = setup([source]);
+      const mounted = await rendering;
+      if (retired) {
+        await cleanup();
+        throw new Error("Move menu fixture retired");
+      }
+      return mounted;
+    },
+    async input(operation: () => Promise<unknown>) {
+      if (retired) throw new Error("Move menu fixture retired");
+      const promise = operation();
+      pending.add(promise);
+      try {
+        await promise;
+      } finally {
+        pending.delete(promise);
+      }
+    },
+  };
 }
 
 function duplicableStandalone(provider: "codex" | "claudeAgent"): SidebarThreadSummary {
@@ -277,6 +330,35 @@ describe("agent-created thread groups", () => {
 });
 
 describe("standalone Chats catalog", () => {
+  it.for([false, true])(
+    "admits the exact saved chat's project chooser only when idle (busy=%s)",
+    async (busy, context) => {
+      const owner = createStandaloneMoveFixture(context);
+      const source = { ...saved, hasPendingUserInput: busy };
+      const { screen, onOpen, onNewChat } = await owner.mount(source);
+      mocks.showMenu.mockResolvedValueOnce("move");
+      await owner.input(() =>
+        screen.getByTestId(`thread-row-${source.id}`).click({ button: "right" }),
+      );
+      await owner.input(() => expect.poll(() => mocks.showMenu.mock.calls.length).toBe(1));
+      expect(mocks.showMenu.mock.calls[0]?.[0]).toContainEqual({
+        id: "move",
+        label: "Move to project…",
+        disabled: busy,
+      });
+      if (busy) expect(useThreadMoveDialogStore.getState().target).toBeNull();
+      else
+        await owner.input(() =>
+          expect
+            .poll(() => useThreadMoveDialogStore.getState().target?.threadRef)
+            .toEqual(scopeThreadRef(environmentId, source.id)),
+        );
+      expect(onOpen).not.toHaveBeenCalled();
+      expect(onNewChat).not.toHaveBeenCalled();
+      expect(mocks.archive).not.toHaveBeenCalled();
+      expect(mocks.delete).not.toHaveBeenCalled();
+    },
+  );
   it.each(["codex", "claudeAgent"] as const)(
     "duplicates the exact inactive %s standalone chat without activating or changing its source",
     async (provider) => {

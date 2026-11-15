@@ -6,12 +6,15 @@ import {
   ThreadId,
   ProviderInstanceId,
   ProviderDriverKind,
+  ApprovalRequestId,
+  type OrchestrationThreadShell,
   type ServerProvider,
 } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { computeAttachmentContentSha256 } from "../attachmentContentCommitment.ts";
@@ -30,6 +33,7 @@ import { OrchestrationProjectionSnapshotQueryLive } from "./Layers/ProjectionSna
 import { normalizeDispatchCommand } from "./Normalizer.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { getThreadSecretsStore } from "../secrets/store.ts";
+import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 
 const layer = it.layer(
   Layer.mergeAll(
@@ -55,10 +59,10 @@ layer("normalizeDispatchCommand attachment commitments", (it) => {
     interactionMode: "default" as const,
     createdAt: "2026-11-10T00:00:00.000Z",
   });
-  const registry = (driver: string) => {
+  const registry = (driver: string | (() => string)) => {
     const provider: ServerProvider = {
       instanceId: ProviderInstanceId.make("company_account"),
-      driver: ProviderDriverKind.make(driver),
+      driver: ProviderDriverKind.make(typeof driver === "string" ? driver : "codex"),
       enabled: true,
       installed: true,
       version: "1.0.0",
@@ -69,8 +73,154 @@ layer("normalizeDispatchCommand attachment commitments", (it) => {
       slashCommands: [],
       skills: [],
     };
-    return Layer.mock(ProviderRegistry)({ getProviders: Effect.succeed([provider]) });
+    return Layer.mock(ProviderRegistry)({
+      getProviders: Effect.sync(() => [
+        {
+          ...provider,
+          driver: ProviderDriverKind.make(typeof driver === "string" ? driver : driver()),
+        },
+      ]),
+    });
   };
+  const questionCommand = (answers: Record<string, unknown>) => ({
+    type: "thread.user-input.respond" as const,
+    commandId: CommandId.make("secret-question-command"),
+    threadId: ThreadId.make("secret-question-chat"),
+    requestId: ApprovalRequestId.make("secret-question"),
+    answers,
+    createdAt: "2026-11-14T00:00:00.000Z",
+  });
+  // Only canonical ownership fields are read by this reply boundary. The real
+  // private test vault remains in use; this fixture never opens a provider.
+  const questionOwner = Layer.mock(ProjectionSnapshotQuery)({
+    getThreadShellById: (threadId) =>
+      Effect.succeed(
+        Option.some({
+          id: threadId,
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("future_account"),
+            model: "test-model",
+          },
+          session: {
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("company_account"),
+            subagentRuntimeId: "question-runtime",
+          },
+        } as OrchestrationThreadShell),
+      ),
+  });
+
+  it.effect(
+    "prepares native question answers for their actual session instance before durable dispatch",
+    () =>
+      Effect.gen(function* () {
+        const command = questionCommand({
+          password: "[sec:synthetic-question-value]",
+          selections: ["[sec:synthetic-question-value]", "\\[sec:literal]"],
+          nested: { enabled: true },
+        });
+        const normalized = yield* normalizeDispatchCommand(command).pipe(
+          Effect.provide(Layer.merge(registry("codex"), questionOwner)),
+        );
+        assert.equal(normalized.type, "thread.user-input.respond");
+        if (normalized.type !== "thread.user-input.respond")
+          return assert.fail("Expected a question reply.");
+        assert.notInclude(normalized.answers.password as string, "synthetic-question-value");
+        assert.match(normalized.answers.password as string, /^\[CAFE_SECRET_[a-f0-9]{32}\]$/);
+        assert.deepEqual(normalized.answers.selections, [
+          normalized.answers.password,
+          "\\[sec:literal]",
+        ]);
+        assert.deepEqual(normalized.answers.nested, { enabled: true });
+        const config = yield* ServerConfig;
+        assert.lengthOf(
+          (yield* Effect.promise(() =>
+            getThreadSecretsStore(config.secretsDir).list(command.threadId),
+          )).secrets,
+          1,
+        );
+      }),
+  );
+
+  it.effect("blocks unsupported native question providers before capturing a raw value", () =>
+    Effect.gen(function* () {
+      const command = {
+        ...questionCommand({ password: "[sec:synthetic-unsupported-question]" }),
+        threadId: ThreadId.make("unsupported-secret-question"),
+      };
+      const error = yield* normalizeDispatchCommand(command).pipe(
+        Effect.provide(Layer.merge(registry("openCode"), questionOwner)),
+        Effect.flip,
+      );
+      assert.include(error.message, "not supported");
+      assert.notInclude(error.message, "synthetic-unsupported-question");
+      const config = yield* ServerConfig;
+      assert.deepEqual(
+        yield* Effect.promise(() =>
+          getThreadSecretsStore(config.secretsDir).list(command.threadId),
+        ),
+        { secrets: [] },
+      );
+    }),
+  );
+
+  it.effect("rechecks the configured question owner after private vault preparation", () =>
+    Effect.gen(function* () {
+      let reads = 0;
+      const error = yield* normalizeDispatchCommand(
+        questionCommand({ password: "[sec:synthetic-replaced-question-owner]" }),
+      ).pipe(
+        Effect.provide(
+          Layer.merge(
+            registry(() => (++reads === 1 ? "codex" : "openCode")),
+            questionOwner,
+          ),
+        ),
+        Effect.flip,
+      );
+      assert.equal(reads, 2);
+      assert.include(error.message, "not supported");
+      assert.notInclude(error.message, "synthetic-replaced-question-owner");
+    }),
+  );
+
+  it.effect("preflights all question fields before storing any incomplete answer", () =>
+    Effect.gen(function* () {
+      const command = {
+        ...questionCommand({
+          first: "[sec:synthetic-valid-before-incomplete]",
+          last: "[sec:unfinished",
+        }),
+        threadId: ThreadId.make("incomplete-secret-question"),
+      };
+      const error = yield* normalizeDispatchCommand(command).pipe(
+        Effect.provide(Layer.merge(registry("codex"), questionOwner)),
+        Effect.flip,
+      );
+      assert.include(error.message, "could not be prepared");
+      const config = yield* ServerConfig;
+      assert.deepEqual(
+        yield* Effect.promise(() =>
+          getThreadSecretsStore(config.secretsDir).list(command.threadId),
+        ),
+        { secrets: [] },
+      );
+    }),
+  );
+
+  it.effect(
+    "does not require vault/provider availability for reference-free question replies",
+    () =>
+      Effect.gen(function* () {
+        const command = questionCommand({
+          ordinary: "yes",
+          literal: "\\[sec:literal]",
+          choice: ["one", "two"],
+        });
+        const normalized = yield* normalizeDispatchCommand(command);
+        assert.deepEqual(normalized, command);
+      }),
+  );
   it.effect("captures secrets for a configured provider alias before durable dispatch", () =>
     Effect.gen(function* () {
       const command = secretCommand("Use [sec:synthetic-normalizer-value] and \\[sec:literal].");

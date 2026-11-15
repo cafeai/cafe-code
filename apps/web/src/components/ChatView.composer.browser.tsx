@@ -105,6 +105,27 @@ import { browserInputPoint } from "./nativeInput.browser.fixture";
 const cafeSecretSendObservation = vi.hoisted(() => ({
   capture: undefined as ((completion: void | Promise<void>) => void) | undefined,
 }));
+const cafeSecretQuestionObservation = vi.hoisted(() => ({
+  capture: undefined as ((completion: Promise<unknown>) => void) | undefined,
+}));
+vi.mock("./chat/ComposerAsyncQuestionsPanel", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./chat/ComposerAsyncQuestionsPanel")>();
+  const { createElement } = await import("react");
+  return {
+    ...original,
+    ComposerAsyncQuestionsPanel: (
+      props: import("./chat/ComposerAsyncQuestionsPanel").ComposerAsyncQuestionsPanelProps,
+    ) =>
+      createElement(original.ComposerAsyncQuestionsPanel, {
+        ...props,
+        onAnswer: (...args: Parameters<typeof props.onAnswer>) => {
+          const completion = props.onAnswer(...args);
+          cafeSecretQuestionObservation.capture?.(completion);
+          return completion;
+        },
+      }),
+  };
+});
 vi.mock("./chat/ChatComposer", async (importOriginal) => {
   const original = await importOriginal<typeof import("./chat/ChatComposer")>();
   const { createElement } = await import("react");
@@ -5741,6 +5762,349 @@ describe("ChatView full app (composer)", () => {
     } finally {
       await mounted.cleanup();
     }
+  });
+
+  function secretQuestionSnapshot(
+    kind: "inline" | "native",
+    provider: "codex" | "claudeAgent" = "codex",
+  ) {
+    const base = createSnapshotForTargetUser({
+      targetMessageId: MessageId.make("question-secret-source"),
+      targetText: "Existing conversation",
+      provider,
+      sessionStatus: kind === "native" ? "running" : "ready",
+      history: "essential",
+    });
+    return {
+      ...base,
+      threads: base.threads.map((thread) => ({
+        ...thread,
+        activities: [
+          ...thread.activities,
+          {
+            id: EventId.make(
+              kind === "inline"
+                ? "codex-async-questions:" + "d".repeat(64)
+                : "secret-native-question",
+            ),
+            createdAt: NOW_ISO,
+            tone: "info" as const,
+            kind: kind === "inline" ? "provider.async-questions" : "user-input.requested",
+            summary: "Question",
+            turnId: thread.latestTurn?.turnId ?? null,
+            payload:
+              kind === "inline"
+                ? {
+                    itemId: "secret-inline-item",
+                    questions: [{ title: "Use [sec:EXAMPLE] for this question?", options: [] }],
+                  }
+                : {
+                    requestId: "secret-native-question",
+                    isBlocking: true,
+                    questions: [
+                      {
+                        id: "credential",
+                        header: "Access",
+                        question: "Provide a credential",
+                        options: [
+                          {
+                            label: "Use another method",
+                            description: "Choose a different access method",
+                          },
+                        ],
+                        multiSelect: false,
+                      },
+                    ],
+                  },
+          },
+        ],
+      })),
+    } satisfies OrchestrationReadModel;
+  }
+
+  it.for([
+    ["inline", "supported", "codex"],
+    ["inline", "unsupported", "codex"],
+    ["inline", "incomplete", "codex"],
+    ["native", "supported", "codex"],
+    ["native", "unsupported", "codex"],
+    ["native", "incomplete", "codex"],
+    ["native", "supported", "claudeAgent"],
+  ] as const)(
+    "uses Cafe Secrets safely for %s questions (%s, %s)",
+    async ([kind, mode, provider], context) => {
+      const reference = "[CAFE_SECRET_0123456789abcdef0123456789abcdef]";
+      const raw = "[sec:synthetic-question-browser" + (mode === "incomplete" ? "" : "]");
+      let restore: (() => void) | undefined;
+      let completion: Promise<unknown> | undefined;
+      const capture = (operation: Promise<unknown>) => {
+        completion = operation;
+        void owner.own("ack", () => operation).catch(() => undefined);
+      };
+      const owner = createChatViewCallerOwner(context, mountChatView, {
+        label: "cafe-secret-preparation",
+        afterUnmount: async () => {
+          try {
+            await completion;
+          } finally {
+            if (cafeSecretQuestionObservation.capture === capture)
+              cafeSecretQuestionObservation.capture = undefined;
+            restore?.();
+            resetCafeSecretsCapabilityCacheForTests();
+          }
+        },
+      });
+      await owner.run(async () => {
+        const snapshot = secretQuestionSnapshot(kind, provider);
+        await owner.mount({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? { sequence: snapshot.snapshotSequence + 1 }
+              : undefined,
+        });
+        const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+        resetCafeSecretsCapabilityCacheForTests();
+        const capability = vi
+          .spyOn(api.threadSecrets!, "capabilities")
+          .mockResolvedValue({ supported: mode !== "unsupported" });
+        const prepare = vi
+          .spyOn(api.threadSecrets!, "prepare")
+          .mockImplementation(async (input) => ({
+            text: input.text.replace("[sec:synthetic-question-browser]", reference),
+          }));
+        const list = vi.spyOn(api.threadSecrets!, "list").mockResolvedValue({ secrets: [] });
+        restore = () => {
+          capability.mockRestore();
+          prepare.mockRestore();
+          list.mockRestore();
+        };
+        cafeSecretQuestionObservation.capture = capture;
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Keep the independent main draft");
+        if (kind === "inline")
+          await owner.own("input", () => page.getByText("1 question from Codex").click());
+        const editor =
+          kind === "inline"
+            ? page.getByRole("textbox", { name: "Your answer" })
+            : page.getByTestId("composer-editor");
+        await owner.own("input", () => editor.fill(raw));
+        expect(
+          [...editor.element().querySelectorAll('[spellcheck="false"]')]
+            .map((node) => node.textContent)
+            .join(""),
+        ).toContain(raw);
+        await owner.own("input", () =>
+          kind === "inline"
+            ? page.getByRole("button", { name: "Send answer", exact: true }).click()
+            : page.getByRole("button", { name: /^Submit(?: answers)?$/ }).click(),
+        );
+        const commandType = kind === "inline" ? "thread.turn.start" : "thread.user-input.respond";
+        if (mode === "supported") {
+          await owner.own("request", () =>
+            expect
+              .poll(() => wsRequests.filter((request) => request.type === commandType).length)
+              .toBe(1),
+          );
+          const command = wsRequests.find((request) => request.type === commandType)!;
+          if (kind === "inline") {
+            expect(command.message).toMatchObject({
+              text: "> Use \\[sec:EXAMPLE] for this question?\n\n" + reference,
+            });
+            await owner.own("receipt", () =>
+              expect
+                .poll(
+                  () =>
+                    wsRequests.filter(
+                      (request) => request.type === "thread.async-questions.resolve",
+                    ).length,
+                )
+                .toBe(1),
+            );
+          } else expect(command).toMatchObject({ answers: { credential: reference } });
+          expect(prepare).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({ threadId: THREAD_ID, text: raw }),
+          );
+        } else {
+          await owner.own("controls", () =>
+            expect
+              .poll(
+                () =>
+                  page
+                    .getByTestId(
+                      kind === "inline"
+                        ? "question-cafe-secret-error"
+                        : "composer-cafe-secret-error",
+                    )
+                    .element().textContent,
+              )
+              .toContain(
+                mode === "unsupported"
+                  ? "Cafe Secrets are not supported"
+                  : "Finish the Cafe Secret",
+              ),
+          );
+          expect(prepare).not.toHaveBeenCalled();
+          expect(
+            wsRequests.some(
+              (request) =>
+                request.type === commandType || request.type === "thread.async-questions.resolve",
+            ),
+          ).toBe(false);
+          await owner.own("value", () => expect.element(editor).toHaveTextContent(raw));
+        }
+        expect(JSON.stringify(wsRequests)).not.toContain("synthetic-question-browser");
+        expect(JSON.stringify({ ...localStorage })).not.toContain("synthetic-question-browser");
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          "Keep the independent main draft",
+        );
+      });
+    },
+  );
+
+  it.for(["connection", "main draft"] as const)(
+    "fences held question secret preparation after changing %s",
+    async (change, context) => {
+      const raw = "[sec:synthetic-held-question]";
+      const reference = "[CAFE_SECRET_0123456789abcdef0123456789abcdef]";
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const preparationEntered = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let retired = false;
+      let completion: Promise<unknown> | undefined;
+      let restore: (() => void) | undefined;
+      const capture = (operation: Promise<unknown>) => {
+        completion = operation;
+        if (!retired) void owner.own("ack", () => operation).catch(() => undefined);
+      };
+      const owner = createChatViewCallerOwner(context, mountChatView, {
+        label: "cafe-secret-preparation",
+        beforeDrain: () => {
+          retired = true;
+          release();
+        },
+        afterUnmount: async () => {
+          try {
+            await completion;
+          } finally {
+            if (cafeSecretQuestionObservation.capture === capture)
+              cafeSecretQuestionObservation.capture = undefined;
+            restore?.();
+            __resetEnvironmentApiOverridesForTests();
+            resetCafeSecretsCapabilityCacheForTests();
+          }
+        },
+      });
+      await owner.run(async () => {
+        const snapshot = secretQuestionSnapshot("inline");
+        await owner.mount({
+          viewport: DEFAULT_VIEWPORT,
+          snapshot,
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+              ? { sequence: snapshot.snapshotSequence + 1 }
+              : undefined,
+        });
+        const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+        resetCafeSecretsCapabilityCacheForTests();
+        const capability = vi
+          .spyOn(api.threadSecrets!, "capabilities")
+          .mockResolvedValue({ supported: true });
+        const prepare = vi.spyOn(api.threadSecrets!, "prepare").mockImplementation(async () => {
+          entered();
+          await gate;
+          return { text: reference };
+        });
+        const list = vi.spyOn(api.threadSecrets!, "list").mockResolvedValue({ secrets: [] });
+        restore = () => {
+          capability.mockRestore();
+          prepare.mockRestore();
+          list.mockRestore();
+        };
+        cafeSecretQuestionObservation.capture = capture;
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Initial main draft");
+        await owner.own("input", () => page.getByText("1 question from Codex").click());
+        const editor = page.getByRole("textbox", { name: "Your answer" });
+        await owner.own("input", () => editor.fill(raw));
+        await owner.own("input", () =>
+          page.getByRole("button", { name: "Send answer", exact: true }).click(),
+        );
+        await owner.own("request", () => preparationEntered);
+        expect(wsRequests.some((request) => request.type === "thread.turn.start")).toBe(false);
+        if (change === "connection")
+          __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, { ...api });
+        else useComposerDraftStore.getState().setPrompt(THREAD_REF, "New independent main draft");
+        release();
+        await owner.own("ack", () => completion!);
+        if (change === "connection") {
+          expect(
+            wsRequests.some(
+              (request) =>
+                request.type === "thread.turn.start" ||
+                request.type === "thread.async-questions.resolve",
+            ),
+          ).toBe(false);
+          await owner.own("value", () => expect.element(editor).toHaveTextContent(raw));
+        } else {
+          await owner.own("receipt", () =>
+            expect
+              .poll(
+                () =>
+                  wsRequests.filter((request) => request.type === "thread.async-questions.resolve")
+                    .length,
+              )
+              .toBe(1),
+          );
+          expect(wsRequests.filter((request) => request.type === "thread.turn.start")).toHaveLength(
+            1,
+          );
+        }
+        expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+          change === "connection" ? "Initial main draft" : "New independent main draft",
+        );
+        expect(JSON.stringify(wsRequests)).not.toContain("synthetic-held-question");
+        expect(JSON.stringify({ ...localStorage })).not.toContain("synthetic-held-question");
+      });
+    },
+  );
+
+  it("retains the last accepted inline answer when an oversized edit is refused", async (context) => {
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "cafe-secret-preparation",
+    });
+    await owner.run(async () => {
+      const snapshot = secretQuestionSnapshot("inline");
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: snapshot.snapshotSequence + 1 }
+            : undefined,
+      });
+      await owner.own("input", () => page.getByText("1 question from Codex").click());
+      const editor = page.getByRole("textbox", { name: "Your answer" });
+      await owner.own("input", () => editor.fill("Retain this answer"));
+      await owner.own("input", () => editor.fill("x".repeat(120_001)));
+      await owner.own("value", () =>
+        expect.poll(() => editor.element().textContent === "Retain this answer").toBe(true),
+      );
+      await owner.own("input", () =>
+        page.getByRole("button", { name: "Send answer", exact: true }).click(),
+      );
+      await owner.own("receipt", () =>
+        expect
+          .poll(() => wsRequests.find((request) => request.type === "thread.turn.start")?.message)
+          .toMatchObject({
+            text: "> Use \\[sec:EXAMPLE] for this question?\n\nRetain this answer",
+          }),
+      );
+    });
   });
 
   it.each(["running", "ready"] as const)(

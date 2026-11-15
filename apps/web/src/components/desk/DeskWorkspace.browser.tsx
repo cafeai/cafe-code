@@ -169,6 +169,7 @@ vi.mock("./useDeskTabMetadata", () => {
     threadRef: target.kind === "server" ? target.threadRef : null,
     working: false,
     canDuplicate: target.kind === "server",
+    canMove: target.kind === "server",
     attention: false,
     exists: true,
     status: mocks.tabStatus,

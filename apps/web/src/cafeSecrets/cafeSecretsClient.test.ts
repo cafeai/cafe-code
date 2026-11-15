@@ -8,6 +8,7 @@ import {
 import {
   hasIncompleteCafeSecret,
   prepareCafeSecretsForSend,
+  prepareCafeSecretAnswersForSend,
   resetCafeSecretsCapabilityCacheForTests,
 } from "./cafeSecretsClient";
 
@@ -31,6 +32,166 @@ afterEach(() => {
   vi.unstubAllGlobals();
   __resetEnvironmentApiOverridesForTests();
   resetCafeSecretsCapabilityCacheForTests();
+});
+
+describe("question answer preparation", () => {
+  const answers = (value: Record<string, unknown>, isCurrent = () => true, driver = "codex") =>
+    prepareCafeSecretAnswersForSend({
+      environmentId,
+      threadId,
+      instanceId,
+      driver,
+      answers: value,
+      isCurrent,
+    });
+  const reference = "[CAFE_SECRET_0123456789abcdef0123456789abcdef]";
+
+  it("prepares text and nested selections before returning a wire-safe answer object", async () => {
+    const prepareRpc = vi.fn(async ({ text }: { text: string }) => ({
+      text: text.replace("[sec:synthetic-answer]", reference),
+    }));
+    install({ capabilities: vi.fn().mockResolvedValue({ supported: true }), prepare: prepareRpc });
+    const result = await answers({
+      password: "[sec:synthetic-answer]",
+      choices: ["plain", "[sec:synthetic-answer]"],
+      literal: "\\[sec:literal]",
+      enabled: true,
+    });
+    expect(result).toEqual({
+      ok: true,
+      answers: {
+        password: reference,
+        choices: ["plain", reference],
+        literal: "\\[sec:literal]",
+        enabled: true,
+      },
+    });
+    expect(prepareRpc).toHaveBeenCalledExactlyOnceWith({
+      threadId,
+      providerInstanceId: instanceId,
+      text: "[sec:synthetic-answer]",
+    });
+    expect(JSON.stringify(result)).not.toContain("synthetic-answer");
+  });
+
+  it("keeps ordinary replies available without the optional vault", async () => {
+    install(undefined);
+    await expect(
+      answers(
+        { text: "ordinary", literal: "\\[sec:literal]", choices: [1, true, null] },
+        () => true,
+        "openCode",
+      ),
+    ).resolves.toEqual({
+      ok: true,
+      answers: { text: "ordinary", literal: "\\[sec:literal]", choices: [1, true, null] },
+    });
+  });
+
+  it("preflights every field before capturing any value", async () => {
+    const prepareRpc = vi.fn();
+    install({ capabilities: vi.fn().mockResolvedValue({ supported: true }), prepare: prepareRpc });
+    await expect(answers({ first: "[sec:valid]", last: "[sec:unfinished" })).resolves.toEqual({
+      ok: false,
+      issue: "incomplete",
+      questionId: "last",
+    });
+    await expect(answers({ key: "[sec:escaped-close\\]" })).resolves.toEqual({
+      ok: false,
+      issue: "incomplete",
+      questionId: "key",
+    });
+    expect(prepareRpc).not.toHaveBeenCalled();
+  });
+
+  it("blocks unsupported providers and unavailable references without exposing received errors", async () => {
+    const prepareRpc = vi.fn().mockRejectedValue(new Error("private-synthetic-value"));
+    install({ capabilities: vi.fn().mockResolvedValue({ supported: true }), prepare: prepareRpc });
+    await expect(answers({ password: "[sec:value]" }, () => true, "openCode")).resolves.toEqual({
+      ok: false,
+      issue: "unsupported",
+      questionId: "password",
+    });
+    expect(prepareRpc).not.toHaveBeenCalled();
+    await expect(answers({ password: reference })).resolves.toEqual({
+      ok: false,
+      issue: "failed",
+      questionId: "password",
+    });
+  });
+
+  it("withdraws a held answer when its exact question owner changes and admits no later fields", async () => {
+    let current = true;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prepareRpc = vi.fn(async () => {
+      await held;
+      return { text: reference };
+    });
+    install({ capabilities: vi.fn().mockResolvedValue({ supported: true }), prepare: prepareRpc });
+    const pending = answers({ first: "[sec:first]", second: "[sec:second]" }, () => current);
+    try {
+      await vi.waitFor(() => expect(prepareRpc).toHaveBeenCalledTimes(1));
+      current = false;
+    } finally {
+      release();
+    }
+    await expect(pending).resolves.toEqual({ ok: false, cancelled: true });
+    expect(prepareRpc).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses excessive secret-bearing fields before vault IO", async () => {
+    const prepareRpc = vi.fn();
+    install({ capabilities: vi.fn().mockResolvedValue({ supported: true }), prepare: prepareRpc });
+    await expect(
+      answers(
+        Object.fromEntries(
+          Array.from({ length: 65 }, (_, index) => [String(index), `[sec:value-${index}]`]),
+        ),
+      ),
+    ).resolves.toEqual({ ok: false, issue: "failed" });
+    expect(prepareRpc).not.toHaveBeenCalled();
+  });
+
+  it.each(["question", "connection"] as const)(
+    "does not begin capture after the %s changes during capability admission",
+    async (change) => {
+      let current = true;
+      let release!: (value: { supported: boolean }) => void;
+      const capability = new Promise<{ supported: boolean }>((resolve) => {
+        release = resolve;
+      });
+      const capabilities = vi.fn(() => capability);
+      const prepareRpc = vi.fn().mockResolvedValue({ text: reference });
+      install({ capabilities, prepare: prepareRpc });
+      const pending = answers({ password: "[sec:held-capability]" }, () => current);
+      try {
+        expect(capabilities).toHaveBeenCalledTimes(1);
+        if (change === "question") current = false;
+        else install({ capabilities: vi.fn(), prepare: vi.fn() });
+      } finally {
+        release({ supported: true });
+      }
+      await expect(pending).resolves.toEqual({ ok: false, cancelled: true });
+      expect(prepareRpc).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retains the admitted answer snapshot across private preparation", async () => {
+    const input = { password: "[sec:original-answer]", other: ["initial"] };
+    const prepareRpc = vi.fn(async () => {
+      input.password = "[sec:later-answer]";
+      input.other[0] = "[sec:later-array-value]";
+      return { text: reference };
+    });
+    install({ capabilities: vi.fn().mockResolvedValue({ supported: true }), prepare: prepareRpc });
+    await expect(answers(input)).resolves.toEqual({
+      ok: true,
+      answers: { password: reference, other: ["initial"] },
+    });
+  });
 });
 
 describe("prepareCafeSecretsForSend", () => {

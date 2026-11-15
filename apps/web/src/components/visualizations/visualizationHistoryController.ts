@@ -260,7 +260,11 @@ export function createVisualizationHistoryController(options: {
           retained.set(key, entry);
         }
       }
-      if (value.atEnd && !covered(value.newestAt)) latestRequested = true;
+      // A held read will re-evaluate the latest viewport after it settles.
+      // Requeueing latest here can duplicate that same successful request and
+      // turn the attempted-demand cycle guard into a false refresh failure.
+      // Actual live invalidations retain their independent coalesced demand.
+      if (value.atEnd && !inFlight && !covered(value.newestAt)) latestRequested = true;
       pump();
     },
     retry() {

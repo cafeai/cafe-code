@@ -18,6 +18,9 @@ import {
   findCafeSecretRanges,
   hasCafeSecretReference,
   supportsCafeSecrets,
+  parseCafeSecrets,
+  mapCafeSecretAnswerTexts,
+  CAFE_SECRET_ANSWER_TEXT_LIMIT,
 } from "@cafecode/shared/cafeSecrets";
 
 import { readEnvironmentApi } from "../environmentApi";
@@ -121,9 +124,55 @@ export const needsCafeSecretAdmission = (text: string): boolean =>
 
 /** True when a range ends without its closing bracket (still being typed). */
 export function hasIncompleteCafeSecret(text: string): boolean {
-  return findCafeSecretRanges(text).some(
-    (range) => text[range.end - 1] !== "]" || range.end - range.start <= 6,
-  );
+  const { spans } = parseCafeSecrets(text);
+  return spans.length !== findCafeSecretRanges(text).length || spans.some((span) => !span.value);
+}
+
+export type CafeSecretAnswersPreparation =
+  | { readonly ok: true; readonly answers: Record<string, unknown> }
+  | { readonly ok: false; readonly issue: CafeSecretSendIssue; readonly questionId?: string }
+  | { readonly ok: false; readonly cancelled: true };
+
+/** Prepare all answer fields before any reply/queue admission. The caller's
+ * exact question/chat owner is rechecked around each held vault operation;
+ * reference-free replies never require the optional vault or capability API. */
+export async function prepareCafeSecretAnswersForSend(input: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly instanceId: ProviderInstanceId;
+  readonly driver: string;
+  readonly answers: Readonly<Record<string, unknown>>;
+  readonly isCurrent: () => boolean;
+}): Promise<CafeSecretAnswersPreparation> {
+  const texts = new Map<string, string>();
+  try {
+    const scanned = mapCafeSecretAnswerTexts(input.answers, (text, questionId) => {
+      if (needsCafeSecretAdmission(text)) texts.set(text, questionId);
+      return text;
+    });
+    if (texts.size > CAFE_SECRET_ANSWER_TEXT_LIMIT) return { ok: false, issue: "failed" };
+    if (texts.size === 0)
+      return input.isCurrent() ? { ok: true, answers: scanned } : { ok: false, cancelled: true };
+    for (const [text, questionId] of texts)
+      if (hasIncompleteCafeSecret(text)) return { ok: false, issue: "incomplete", questionId };
+    const api = readThreadSecretsApi(input.environmentId);
+    const current = () => input.isCurrent() && readThreadSecretsApi(input.environmentId) === api;
+    const prepared = new Map<string, string>();
+    for (const [text, questionId] of texts) {
+      if (!current()) return { ok: false, cancelled: true };
+      const result = await prepareCafeSecretsForSend({ ...input, text, isCurrent: current });
+      if (!current()) return { ok: false, cancelled: true };
+      if (!result.ok) return { ok: false, issue: result.issue, questionId };
+      prepared.set(text, result.text);
+    }
+    if (!input.isCurrent()) return { ok: false, cancelled: true };
+    return {
+      ok: true,
+      answers: mapCafeSecretAnswerTexts(scanned, (text) => prepared.get(text) ?? text),
+    };
+  } catch {
+    return { ok: false, issue: "failed" };
+  }
 }
 
 /**
@@ -136,6 +185,7 @@ export async function prepareCafeSecretsForSend(input: {
   readonly instanceId: ProviderInstanceId;
   readonly driver: string | undefined;
   readonly text: string;
+  readonly isCurrent?: () => boolean;
 }): Promise<CafeSecretPreparation> {
   if (!needsCafeSecretAdmission(input.text)) return { ok: true, text: input.text, prepared: false };
   if (!supportsCafeSecrets(input.driver)) return { ok: false, issue: "unsupported" };
@@ -143,7 +193,11 @@ export async function prepareCafeSecretsForSend(input: {
   // preparation so a replaced transport cannot mix their authority.
   const api = readThreadSecretsApi(input.environmentId);
   if (!api) return { ok: false, issue: "unsupported" };
+  const current = () =>
+    readThreadSecretsApi(input.environmentId) === api && (input.isCurrent?.() ?? true);
+  if (!current()) return { ok: false, issue: "failed" };
   const supported = await loadCapabilityFromApi(api, input.environmentId, input.instanceId);
+  if (!current()) return { ok: false, issue: "failed" };
   if (!supported) return { ok: false, issue: "unsupported" };
   if (hasIncompleteCafeSecret(input.text)) return { ok: false, issue: "incomplete" };
   try {
@@ -153,7 +207,7 @@ export async function prepareCafeSecretsForSend(input: {
       text: input.text,
     });
     // Defense in depth: a prepared result must never still carry a marker.
-    if (containsCafeSecrets(result.text)) return { ok: false, issue: "failed" };
+    if (!current() || containsCafeSecrets(result.text)) return { ok: false, issue: "failed" };
     return { ok: true, text: result.text, prepared: true };
   } catch {
     return { ok: false, issue: "failed" };

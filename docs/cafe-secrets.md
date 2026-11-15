@@ -7,11 +7,24 @@ variable, or persistent project configuration.
 
 ## Entering and managing values
 
-Type `[sec:VALUE]` in the composer. Complete markers become opaque, random
+Type `[sec:VALUE]` in the composer or a text question answer. Complete markers become opaque, random
 `[CAFE_SECRET_<32 lowercase hex characters>]` references before optimistic
 messages, queued sends, steering, durable dispatch or provider input. The
 value is stored for that exact server/profile/chat. Repeating the same value
 in a chat reuses its reference. Values are never inferred from API-key shapes.
+
+Codex inline questions and native Codex/Claude text-question replies use the
+same preparation before any durable follow-up queue, response journal or
+provider submission. Unsupported, incomplete or unavailable secrets leave the
+answer editable, with highlighted ranges and literal-escape guidance. Question
+titles remain literal quoted context, rather than creating secrets from
+provider-authored examples. A changed chat, question, provider or connection
+withdraws an answer whose preparation is still pending; the independent main
+composer draft is preserved. Native question answers retain JSON shape, with
+at most 64 distinct secret-bearing text fields, 4,096 visited values/array slots,
+16 nesting levels and 1,048,576 input characters across keys/text. Values remain references
+in the reply; the provider uses its existing private runner under ordinary
+shell authorization to use them. This does not add generic MCP-tool expansion.
 
 Type `\[sec:VALUE]` for literal text. Escapes remain in the stored/wire text;
 admission and retries never decode a literal marker into a secret. A closing

@@ -68,6 +68,73 @@ const viewport = (value: VisualizationTimelineEntry, keys: readonly string[] = [
 });
 
 describe("viewport-positioned visualization history", () => {
+  it.each(["empty", "populated"] as const)(
+    "does not report a refresh failure when the tail becomes visible during a pending %s history read",
+    async (kind) => {
+      const pending = deferred<VisualizationListResult>();
+      const entries = kind === "empty" ? [] : [entry(1)];
+      const list = vi.fn(() => pending.promise);
+      const h = harness(list);
+      const tail = {
+        oldestAt: entry(0).occurredAt,
+        newestAt: "9999-12-31T23:59:59.999Z",
+        visibleEntryKeys: [],
+        atEnd: true,
+      };
+      try {
+        h.controller.invalidate();
+        await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+        h.controller.observeViewport(tail);
+        h.controller.observeViewport(tail);
+        pending.resolve({ entries });
+        await vi.waitFor(() => expect(h.state().loading).toBe(false));
+        expect(h.state()).toEqual({ entries, loading: false, failed: false });
+        h.controller.observeViewport(tail);
+        expect(list).toHaveBeenCalledTimes(1);
+        expect(h.state().failed).toBe(false);
+      } finally {
+        h.controller.close();
+        pending.resolve({ entries: [] });
+      }
+    },
+  );
+
+  it("does not turn a successful live refresh into a failure after newer invalidations retire its coverage", async () => {
+    const pending = Array.from({ length: 3 }, () => deferred<VisualizationListResult>());
+    const list = vi.fn(
+      (_input: VisualizationListInput) => pending[list.mock.calls.length - 1]!.promise,
+    );
+    const h = harness(list);
+    const tail = {
+      oldestAt: entry(0).occurredAt,
+      newestAt: "9999-12-31T23:59:59.999Z",
+      visibleEntryKeys: [],
+      atEnd: true,
+    };
+    try {
+      h.controller.invalidate();
+      await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(1));
+      h.controller.observeViewport(tail);
+      h.controller.invalidate();
+      pending[0]!.resolve({ entries: [] });
+      await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2));
+      // Streaming chat revisions invalidate absence coverage while the reader
+      // alternates between the visible boundary and the latest history page.
+      h.controller.invalidate();
+      pending[1]!.resolve({ entries: [] });
+      await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(3));
+      expect(list.mock.calls[2]?.[0]).toEqual({ threadId });
+      h.controller.observeViewport(tail);
+      pending[2]!.resolve({ entries: [] });
+      await vi.waitFor(() => expect(h.state().loading).toBe(false));
+      expect(h.state()).toEqual({ entries: [], loading: false, failed: false });
+      expect(list).toHaveBeenCalledTimes(3);
+    } finally {
+      h.controller.close();
+      for (const request of pending) request.resolve({ entries: [] });
+    }
+  });
+
   it("seeks a far-old visible message directly without walking intervening cursors", async () => {
     const newest = entry(20_000),
       old = entry(20);

@@ -7,6 +7,7 @@ import { page, userEvent } from "vitest/browser";
 
 import type { DraftId } from "../../composerDraftStore";
 import { useThreadSecretsDialogStore } from "../../cafeSecrets/threadSecretsDialogStore";
+import { useThreadMoveDialogStore } from "../../threadMoveDialogStore";
 import { createDeskState, deskTabKey, hydrateDesk } from "../../deskModel";
 import { useDeskStore } from "../../deskStore";
 import type { ThreadRouteTarget } from "../../threadRoutes";
@@ -73,6 +74,7 @@ vi.mock("./useDeskTabMetadata", () => {
     exists: true,
     working: mocks.working,
     canDuplicate: target.kind === "server" && !mocks.working && mocks.duplicateSupported,
+    canMove: target.kind === "server" && !mocks.working,
     attention: false,
     status: null,
   });
@@ -186,6 +188,8 @@ beforeEach(async () => {
 afterEach(async () => {
   await clearActionCleanup?.();
   clearActionCleanup = null;
+  const moveTarget = useThreadMoveDialogStore.getState().target;
+  if (moveTarget) useThreadMoveDialogStore.getState().close(moveTarget);
   useThreadSecretsDialogStore.getState().close();
   diagnosticPointer?.stop();
   diagnosticPointer = null;
@@ -429,6 +433,7 @@ describe("Desk sidebar", () => {
     expect(mocks.showMenu.mock.calls[0]?.[0].map((item: { id: string }) => item.id)).toEqual([
       "rename",
       "duplicate",
+      "move",
       "secrets",
       "archive",
       "delete",
@@ -448,6 +453,13 @@ describe("Desk sidebar", () => {
       ...chat.threadRef,
       title: "Chat fixture",
     });
+    mocks.showMenu.mockResolvedValueOnce("move");
+    await fixture.input(() => row.click({ button: "right" }));
+    await fixture.input(() =>
+      expect
+        .poll(() => useThreadMoveDialogStore.getState().target?.threadRef)
+        .toEqual(chat.threadRef),
+    );
     expect(onNavigate).not.toHaveBeenCalled();
     expect(useDeskStore.getState().desk).toBe(before);
   });
