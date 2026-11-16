@@ -3437,7 +3437,7 @@
   },
   "Copy group ID": {
     "message": "Copy group ID",
-    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:133"]
+    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:137"]
   },
   "Copy image": {
     "message": "Copy image",
@@ -3679,7 +3679,7 @@
     "message": "Could not delete group",
     "locations": [
       "apps/web/src/components/settings/SettingsPanels.tsx:2799",
-      "apps/web/src/components/sidebar/SidebarThreadGroups.tsx:208"
+      "apps/web/src/components/sidebar/SidebarThreadGroups.tsx:212"
     ]
   },
   "Could not delete selected chats": {
@@ -4612,7 +4612,7 @@
   },
   "Delete group…": {
     "message": "Delete group…",
-    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:136"]
+    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:140"]
   },
   "Delete its chats first, or delete the project anyway.": {
     "message": "Delete its chats first, or delete the project anyway.",
@@ -7828,7 +7828,7 @@
   },
   "Move group \"{title}\" and its {count, plural, one {# chat} other {# chats}} to the Recycle Bin?": {
     "message": "Move group \"{title}\" and its {count, plural, one {# chat} other {# chats}} to the Recycle Bin?",
-    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:164"]
+    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:168"]
   },
   "Move tab to {group}": {
     "message": "Move tab to {group}",
@@ -13298,7 +13298,7 @@
   },
   "The group may already be deleted.": {
     "message": "The group may already be deleted.",
-    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:212"]
+    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:216"]
   },
   "The keybinding was not removed.": {
     "message": "The keybinding was not removed.",
@@ -13342,7 +13342,7 @@
   },
   "The parent chat is kept. Worktrees are kept.": {
     "message": "The parent chat is kept. Worktrees are kept.",
-    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:190"]
+    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:194"]
   },
   "The project was not opened.": {
     "message": "The project was not opened.",
@@ -13847,7 +13847,7 @@
   },
   "This includes {count, plural, one {# nested group} other {# nested groups}}.": {
     "message": "This includes {count, plural, one {# nested group} other {# nested groups}}.",
-    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:173"]
+    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:177"]
   },
   "This install is using the correct architecture.": {
     "message": "This install is using the correct architecture.",
@@ -16680,7 +16680,7 @@
     "locations": [
       "apps/web/src/components/atrium/TaskAtrium.tsx:409",
       "apps/web/src/components/settings/SettingsPanels.tsx:2832",
-      "apps/web/src/components/sidebar/SidebarThreadGroups.tsx:254"
+      "apps/web/src/components/sidebar/SidebarThreadGroups.tsx:261"
     ]
   },
   "{count, plural, one {# hidden project} other {# hidden projects}}{hasSummary, select, yes {, {summary}} other {}}": {
@@ -16689,7 +16689,7 @@
   },
   "{count, plural, one {# is running and will be stopped.} other {# are running and will be stopped.}}": {
     "message": "{count, plural, one {# is running and will be stopped.} other {# are running and will be stopped.}}",
-    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:182"]
+    "locations": ["apps/web/src/components/sidebar/SidebarThreadGroups.tsx:186"]
   },
   "{count, plural, one {# message queued} other {# messages queued}}": {
     "message": "{count, plural, one {# message queued} other {# messages queued}}",
