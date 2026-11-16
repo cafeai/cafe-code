@@ -3,6 +3,13 @@ import assert from "node:assert/strict";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+// The synchronous PowerShell fixture owns this private profile until native close.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+// Construct the exact native temporary profile passed to the PowerShell child.
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import { join } from "node:path";
 
 import { describe, it } from "vitest";
 
@@ -49,6 +56,44 @@ function runPowerShell(script: string): string {
 const powerShellIt = hasPowerShell() ? it : it.skip;
 
 describe("Start-CafeCode PowerShell helpers", () => {
+  powerShellIt(
+    "preserves HTTPS without Git, OpenSSL or any executable on PATH",
+    powerShellTestOptions,
+    () => {
+      const profile = mkdtempSync(join(tmpdir(), "cafe-launcher-tls-test-"));
+      try {
+        const result = JSON.parse(
+          runPowerShell(`
+. '${toPowerShellLiteralPath(startCafeCodeScript)}'
+$env:USERPROFILE = '${toPowerShellLiteralPath(profile)}'
+$env:PATH = ''
+Remove-Item Env:CAFE_CODE_HTTPS_ENABLED -ErrorAction SilentlyContinue
+function Resolve-FirstApplicationPath {
+  param([string[]]$Names)
+  if ($Names[0] -ne 'node.exe') { throw 'Unexpected external tool prerequisite' }
+  return '${toPowerShellLiteralPath(process.execPath)}'
+}
+$script:launchCount = 0
+function Start-Process {
+  param($FilePath, $ArgumentList, $WorkingDirectory, $RedirectStandardOutput, $RedirectStandardError, $WindowStyle, [switch]$PassThru)
+  $script:launchCount += 1
+  if ($FilePath -ne '${toPowerShellLiteralPath(process.execPath)}') { throw 'Unexpected runtime' }
+  return [pscustomobject]@{ ExitCode = 0 }
+}
+Invoke-StartCafeCode
+ConvertTo-Json -InputObject ([pscustomobject]@{
+  launches = $script:launchCount
+  httpsOverride = $env:CAFE_CODE_HTTPS_ENABLED
+}) -Compress
+`),
+        ) as unknown;
+        assert.deepEqual(result, { launches: 1, httpsOverride: null });
+      } finally {
+        rmSync(profile, { recursive: true, force: true });
+      }
+    },
+  );
+
   powerShellIt(
     "selects the first Node executable when Get-Command returns multiple matches",
     powerShellTestOptions,

@@ -25,7 +25,6 @@ import { installGlobalDictationCoordinator } from "../dictation/GlobalDictationC
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
 import * as DesktopBackendManager from "../backend/DesktopBackendManager.ts";
-import { isDesktopHttpsSupported } from "../backend/DesktopHttpsPrerequisites.ts";
 import * as DesktopProviderDaemonManager from "../backend/DesktopProviderDaemonManager.ts";
 import { isPidAlive } from "../backend/DesktopProcessReaper.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
@@ -631,11 +630,9 @@ const bootstrap = Effect.gen(function* () {
   );
   const backendPort = backendPortSelection.port;
   const settings = yield* desktopSettings.get;
-  const desktopHttpsSupported = isDesktopHttpsSupported();
-  const backendHttpsPort =
-    settings.serverHttpsEnabled && desktopHttpsSupported
-      ? yield* resolveDesktopBackendHttpsPort(backendPort, environment.dataProfile)
-      : undefined;
+  const backendHttpsPort = settings.serverHttpsEnabled
+    ? yield* resolveDesktopBackendHttpsPort(backendPort, environment.dataProfile)
+    : undefined;
   yield* logBootstrapInfo(
     backendPortSelection.selectedByScan
       ? "selected backend port via sequential scan"
@@ -651,10 +648,6 @@ const bootstrap = Effect.gen(function* () {
     yield* logBootstrapInfo("selected backend HTTPS port via sequential scan", {
       port: backendHttpsPort,
     });
-  } else if (settings.serverHttpsEnabled && !desktopHttpsSupported) {
-    yield* logBootstrapWarning(
-      "backend HTTPS endpoint disabled because OpenSSL is unavailable on Windows",
-    );
   } else {
     yield* logBootstrapInfo("backend HTTPS endpoint disabled by desktop settings");
   }

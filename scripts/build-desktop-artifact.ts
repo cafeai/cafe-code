@@ -1019,7 +1019,7 @@ export function resolveLinuxDesktopBuildConfig(target: string): Record<string, u
       packageCategory: "devel",
       priority: "optional",
       // electron-builder's Debian defaults omit libraries that Electron links
-      // directly, and Cafe's local HTTPS bootstrap invokes the OpenSSL CLI.
+      // directly. Local HTTPS certificate generation uses the bundled Node runtime.
       // Keep the defaults explicit so a clean install with
       // --no-install-recommends provides every runtime dependency.
       depends: [

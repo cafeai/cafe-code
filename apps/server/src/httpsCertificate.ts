@@ -1,24 +1,26 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off
-import { execFile } from "node:child_process";
-import { X509Certificate, randomUUID } from "node:crypto";
+import { X509Certificate, randomUUID, webcrypto } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { isIP } from "node:net";
 import { networkInterfaces } from "node:os";
-import { dirname, join, win32 as win32Path } from "node:path";
-import { promisify } from "node:util";
+import { dirname, join } from "node:path";
 
+import {
+  AuthorityKeyIdentifierExtension,
+  BasicConstraintsExtension,
+  PemConverter,
+  SubjectAlternativeNameExtension,
+  SubjectKeyIdentifierExtension,
+  X509CertificateGenerator,
+} from "@peculiar/x509";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 
 import type { ServerConfigShape } from "./config.ts";
 import { isWildcardHost } from "./startupAccess.ts";
 
-const execFileAsync = promisify(execFile);
 const CERT_VALID_DAYS = 397;
 const CERT_RENEWAL_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
-const OPENSSL_EXECUTABLE_NAME = "openssl";
-const OPENSSL_GENERATION_TIMEOUT_MS = 20_000;
-const WINDOWS_OPENSSL_GENERATION_TIMEOUT_MS = 60_000;
 
 export interface HttpsCertificateMaterial {
   readonly cert: string;
@@ -62,67 +64,6 @@ const collectSubjectAltNames = (host: string | undefined): string => {
 
   return [...names].join(",");
 };
-
-interface ResolveOpenSslExecutableOptions {
-  readonly platform?: NodeJS.Platform;
-  readonly env?: NodeJS.ProcessEnv;
-  readonly access?: (path: string) => Promise<void>;
-}
-
-const windowsOpenSslCandidates = (env: NodeJS.ProcessEnv): readonly string[] => {
-  const candidates = new Set<string>();
-  const addGitCandidates = (root: string | undefined) => {
-    if (!root) {
-      return;
-    }
-
-    candidates.add(win32Path.join(root, "Git", "usr", "bin", "openssl.exe"));
-    candidates.add(win32Path.join(root, "Git", "mingw64", "bin", "openssl.exe"));
-  };
-
-  addGitCandidates(env.ProgramFiles);
-  addGitCandidates(env.ProgramW6432);
-  addGitCandidates(env["ProgramFiles(x86)"]);
-  if (env.LocalAppData) {
-    addGitCandidates(win32Path.join(env.LocalAppData, "Programs"));
-  }
-
-  candidates.add("C:\\Program Files\\Git\\usr\\bin\\openssl.exe");
-  candidates.add("C:\\Program Files\\Git\\mingw64\\bin\\openssl.exe");
-  candidates.add("C:\\Program Files (x86)\\Git\\usr\\bin\\openssl.exe");
-  candidates.add("C:\\Program Files (x86)\\Git\\mingw64\\bin\\openssl.exe");
-  candidates.add("C:\\Program Files\\OpenSSL-Win64\\bin\\openssl.exe");
-  candidates.add("C:\\Program Files\\OpenSSL-Win32\\bin\\openssl.exe");
-  candidates.add("C:\\msys64\\usr\\bin\\openssl.exe");
-  candidates.add("C:\\msys64\\mingw64\\bin\\openssl.exe");
-  candidates.add("C:\\Strawberry\\c\\bin\\openssl.exe");
-
-  return [...candidates];
-};
-
-export const resolveOpenSslExecutable = async (
-  options: ResolveOpenSslExecutableOptions = {},
-): Promise<string> => {
-  const platform = options.platform ?? process.platform;
-  if (platform !== "win32") {
-    return OPENSSL_EXECUTABLE_NAME;
-  }
-
-  const access = options.access ?? fs.access;
-  for (const candidate of windowsOpenSslCandidates(options.env ?? process.env)) {
-    try {
-      await access(candidate);
-      return candidate;
-    } catch {
-      // Keep looking; the final fallback preserves PATH-based behavior.
-    }
-  }
-
-  return OPENSSL_EXECUTABLE_NAME;
-};
-
-export const openSslGenerationTimeoutMs = (platform: NodeJS.Platform = process.platform): number =>
-  platform === "win32" ? WINDOWS_OPENSSL_GENERATION_TIMEOUT_MS : OPENSSL_GENERATION_TIMEOUT_MS;
 
 const certificateIsFresh = async (
   certPath: string,
@@ -188,42 +129,64 @@ const generateCertificate = async (input: {
   const suffix = `${process.pid}-${randomUUID()}`;
   const tempCertPath = join(dirname(input.certPath), `server-cert.${suffix}.tmp`);
   const tempKeyPath = join(dirname(input.keyPath), `server-key.${suffix}.tmp`);
+  const ownedTempPaths = new Set<string>();
+  const writeExclusive = async (path: string, content: string, mode: number) => {
+    const file = await fs.open(path, "wx", mode);
+    ownedTempPaths.add(path);
+    try {
+      await file.writeFile(content);
+    } finally {
+      await file.close();
+    }
+  };
 
   try {
-    const opensslExecutable = await resolveOpenSslExecutable();
-    await execFileAsync(
-      opensslExecutable,
-      [
-        "req",
-        "-x509",
-        "-newkey",
-        "rsa:2048",
-        "-sha256",
-        "-days",
-        String(CERT_VALID_DAYS),
-        "-nodes",
-        "-subj",
-        "/CN=Cafe Code Local HTTPS",
-        "-addext",
-        `subjectAltName=${collectSubjectAltNames(input.host)}`,
-        "-keyout",
-        tempKeyPath,
-        "-out",
-        tempCertPath,
-      ],
-      // Git for Windows OpenSSL can be substantially slower under parallel CI load.
-      { timeout: openSslGenerationTimeoutMs() },
+    const notBefore = new Date();
+    const algorithm = {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    };
+    const keys = await webcrypto.subtle.generateKey(algorithm, true, ["sign", "verify"]);
+    const certificate = await X509CertificateGenerator.createSelfSigned(
+      {
+        name: "CN=Cafe Code Local HTTPS",
+        notBefore,
+        notAfter: new Date(notBefore.getTime() + CERT_VALID_DAYS * 24 * 60 * 60 * 1000),
+        signingAlgorithm: algorithm,
+        keys,
+        extensions: [
+          // Preserve the downloadable self-signed trust certificate used by
+          // existing clients, including its ability to be installed as a root.
+          new BasicConstraintsExtension(true, undefined, true),
+          await SubjectKeyIdentifierExtension.create(keys.publicKey, false, webcrypto),
+          await AuthorityKeyIdentifierExtension.create(keys.publicKey, false, webcrypto),
+          new SubjectAlternativeNameExtension(
+            collectSubjectAltNames(input.host)
+              .split(",")
+              .map((name) =>
+                name.startsWith("IP:")
+                  ? { type: "ip", value: name.slice(3) }
+                  : { type: "dns", value: name.slice(4) },
+              ),
+          ),
+        ],
+      },
+      webcrypto,
     );
+    const privateKey = await webcrypto.subtle.exportKey("pkcs8", keys.privateKey);
 
-    await fs.chmod(tempKeyPath, 0o600);
-    await fs.chmod(tempCertPath, 0o644);
+    await writeExclusive(tempKeyPath, PemConverter.encode(privateKey, "PRIVATE KEY"), 0o600);
+    await writeExclusive(tempCertPath, certificate.toString("pem"), 0o644);
     await fs.rename(tempKeyPath, input.keyPath);
+    ownedTempPaths.delete(tempKeyPath);
     await fs.rename(tempCertPath, input.certPath);
+    ownedTempPaths.delete(tempCertPath);
   } finally {
-    await Promise.all([
-      fs.rm(tempCertPath, { force: true }).catch(() => undefined),
-      fs.rm(tempKeyPath, { force: true }).catch(() => undefined),
-    ]);
+    await Promise.all(
+      [...ownedTempPaths].map((path) => fs.rm(path, { force: true }).catch(() => undefined)),
+    );
   }
 };
 
