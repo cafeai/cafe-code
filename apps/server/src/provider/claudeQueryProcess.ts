@@ -7,6 +7,35 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { spawn } from "node:child_process";
 import { query, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { compareSemverVersions, parseSemver } from "@cafecode/shared/semver";
+
+/**
+ * SDK 0.3.326 can deliver MCP launch configuration in its private initialize
+ * exchange instead of exposing server arguments and environment on the native
+ * process command line. That protocol belongs to the selected executable, not
+ * to the imported SDK: older, unknown and prerelease binaries keep the explicit
+ * legacy transport. Do not infer support from the application version, a model
+ * label or a stale session's init message.
+ *
+ * Keep canonical stable versions bounded before parsing. The shared semver
+ * parser deliberately accepts shorthand for unrelated callers; none of those
+ * normalizations may qualify a new native protocol here.
+ */
+export function resolveClaudeMcpServersDelivery(
+  nativeVersion: string | null | undefined,
+): "initialize" | "argv" {
+  if (
+    typeof nativeVersion !== "string" ||
+    nativeVersion.length > 64 ||
+    nativeVersion.trim() !== nativeVersion ||
+    !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(nativeVersion)
+  )
+    return "argv";
+  const parsed = parseSemver(nativeVersion);
+  if (parsed === null || ![parsed.major, parsed.minor, parsed.patch].every(Number.isSafeInteger))
+    return "argv";
+  return compareSemverVersions(nativeVersion, "2.1.326") >= 0 ? "initialize" : "argv";
+}
 
 export function makeClaudeQueryProcessObserver(stderr: Options["stderr"]) {
   let resolveExit!: () => void;

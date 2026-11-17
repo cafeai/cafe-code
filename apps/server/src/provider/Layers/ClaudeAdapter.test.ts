@@ -2489,6 +2489,9 @@ describe("ClaudeAdapterLive", () => {
       () => {
         const harness = makeHarness({
           environment: {},
+          // Exercise both protocol generations at the adapter's existing
+          // account-binding boundary without adding duplicate fixture cases.
+          nativeVersion: configuredInstance ? "2.1.326" : "2.1.325",
           ...(configuredInstance ? { instanceId: configuredInstance } : {}),
         });
         return Effect.gen(function* () {
@@ -2555,6 +2558,7 @@ describe("ClaudeAdapterLive", () => {
             },
           });
           assert.deepEqual(queryOptions.settingSources, ["user", "project", "local"]);
+          assert.equal(queryOptions.mcpServersDelivery, configuredInstance ? "initialize" : "argv");
           assert.equal(queryOptions.strictMcpConfig, undefined);
           assert.equal(queryOptions.allowedTools, undefined);
           assert.equal(queryOptions.permissionMode, "default");
@@ -14066,7 +14070,7 @@ describe("ClaudeAdapterLive", () => {
       } as unknown as SDKMessage);
       yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
 
-      const progressEventsFiber = yield* Stream.take(adapter.streamEvents, 4).pipe(
+      const progressEventsFiber = yield* Stream.take(adapter.streamEvents, 5).pipe(
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -14080,6 +14084,17 @@ describe("ClaudeAdapterLive", () => {
         session_id: "sdk-session-subagent-retry",
         uuid: "00000000-0000-4000-8000-000000000221",
       } satisfies SDKMessage);
+      // SDK 0.3.323 also emits heartbeat-only hook waits. There is no native
+      // tool or task to adopt, and the parent tool identity may be omitted.
+      harness.query.emit({
+        type: "tool_progress",
+        tool_use_id: "hook-PreToolUse-fixture",
+        tool_name: "PreToolUse",
+        elapsed_time_seconds: 30,
+        heartbeat: true,
+        session_id: "sdk-session-subagent-retry",
+        uuid: "00000000-0000-4000-8000-000000000224",
+      } as SDKMessage);
       const retryMessage = {
         type: "tool_progress",
         tool_use_id: "tool-retry-1",
@@ -14106,7 +14121,7 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const progressEvents = Array.from(yield* Fiber.join(progressEventsFiber));
-      assert.equal(progressEvents.filter((event) => event.type === "tool.progress").length, 3);
+      assert.equal(progressEvents.filter((event) => event.type === "tool.progress").length, 4);
       const retryEvents = progressEvents.filter((event) => event.type === "task.progress");
       assert.equal(retryEvents.length, 1);
       const retryEvent = retryEvents[0];

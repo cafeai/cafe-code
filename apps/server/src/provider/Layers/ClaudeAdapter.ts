@@ -192,7 +192,10 @@ import { makeClaudeEnvironment, makeClaudeNonChatEnvironment } from "../Drivers/
 import { makeProviderSessionTitle } from "../providerSessionTitle.ts";
 import { awaitClaudeDecision } from "../claudeDecision.ts";
 import { recoverClaudeResume } from "../claudeResumeRecovery.ts";
-import { createObservedClaudeQuery } from "../claudeQueryProcess.ts";
+import {
+  createObservedClaudeQuery,
+  resolveClaudeMcpServersDelivery,
+} from "../claudeQueryProcess.ts";
 import {
   supportsClaudeTaskControls,
   isClaudeDetachedToolResult,
@@ -11340,6 +11343,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         runPromise(canUseToolEffect(toolName, toolInput, callbackOptions));
 
       const claudeBinaryPath = claudeSettings.binaryPath;
+      // Freeze the existing executable observation for this opening. An SDK
+      // upgrade does not qualify the configured external binary or replace it.
+      const nativeVersion = options?.getNativeVersion?.();
       const extraArgs = parseCliArgs(claudeSettings.launchArgs).flags;
       const modelSelection =
         input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
@@ -11354,7 +11360,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         modelSelection?.model && options?.getModelCapabilities
           ? yield* options.getModelCapabilities(modelSelection.model)
           : undefined,
-        options?.getNativeVersion?.(),
+        nativeVersion,
       );
       const fastMode = settings.fastMode === true;
       const permissionMode = runtimeModeToClaudePermissionMode(input.runtimeMode);
@@ -11523,7 +11529,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       secretHooks = makeClaudeSecretHooks({
         store: getThreadSecretsStore(serverConfig.secretsDir),
         threadId,
-        nativeVersion: options?.getNativeVersion?.(),
+        nativeVersion,
         runnerInvocation: secretRunner.invocation,
         isCurrent: () =>
           startedContext === undefined
@@ -11564,6 +11570,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // https://code.claude.com/docs/en/agent-sdk/mcp
         ...(providerMcpBindings.length
           ? {
+              // Keep private Cafe connection configuration off argv only when
+              // this exact selected runtime understands initialize delivery.
+              // Explicit argv preserves older/unknown executable compatibility
+              // when the SDK changes its own default in a later release.
+              mcpServersDelivery: resolveClaudeMcpServersDelivery(nativeVersion),
               mcpServers: Object.fromEntries(
                 providerMcpBindings.map((binding) => [
                   binding.name,
@@ -11679,9 +11690,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.ultracode_requested":
           getModelSelectionBooleanOptionValue(modelSelection, "ultracode") ?? "inherited",
         "claude.query.ultracode_forwarded": settings.ultracode ?? "inherited",
-        "claude.query.ultracode_runtime_qualified": supportsClaudeUltracode(
-          options?.getNativeVersion?.(),
-        ),
+        "claude.query.ultracode_runtime_qualified": supportsClaudeUltracode(nativeVersion),
         "claude.query.permission_mode": initialPermissionMode ?? "",
         "claude.query.base_permission_mode": permissionMode ?? "",
         "claude.query.allow_dangerously_skip_permissions": permissionMode === "bypassPermissions",
@@ -11761,7 +11770,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const context: ClaudeSessionContext = {
         workflowSnapshots: new Map(),
-        taskControlVersion: options?.getNativeVersion?.(),
+        taskControlVersion: nativeVersion,
         session,
         subagentRuntimeId,
         environment: sessionEnvironment,

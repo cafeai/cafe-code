@@ -314,6 +314,36 @@ describe("Claude native model metadata", () => {
     expect(caps.optionDescriptors?.some((option) => option.id === "ultracode")).toBe(false);
     expect(caps.optionDescriptors?.some((option) => option.id === "outputStyle")).toBe(true);
   });
+  it("retains an explicit empty native effort cap through discovery and session dispatch", () => {
+    const native = normalizeClaudeNativeModels([
+      {
+        value: "opus",
+        resolvedModel: "claude-opus-5-5",
+        displayName: "Account Opus",
+        supportsEffort: true,
+        supportedEffortLevels: [],
+      },
+    ]);
+    const caps = reconcileClaudeModelCapabilities(
+      getClaudeModelCapabilities("claude-opus-5-5"),
+      findClaudeNativeModel(native, "claude-opus-5-5"),
+    );
+    // Neither the static catalog nor a previously saved selection may restore
+    // a control excluded by the exact account's native discovery result.
+    expect(caps.optionDescriptors?.some((option) => option.id === "effort")).toBe(false);
+    expect(caps.optionDescriptors?.some((option) => option.id === "ultracode")).toBe(false);
+    expect(caps.optionDescriptors?.some((option) => option.id === "outputStyle")).toBe(true);
+    const session = resolveClaudeModelSessionOptions(
+      createModelSelection(ProviderInstanceId.make("claudeAgent"), "claude-opus-5-5", [
+        { id: "effort", value: "max" },
+        { id: "ultracode", value: true },
+      ]),
+      caps,
+      "2.1.326",
+    );
+    expect(session.effectiveEffort).toBeNull();
+    expect(session.settings.ultracode).toBeUndefined();
+  });
   it("preserves historical/custom entries and adds a newly discovered model once", () => {
     const fallback = createModelCapabilities({ optionDescriptors: [] });
     const original = [

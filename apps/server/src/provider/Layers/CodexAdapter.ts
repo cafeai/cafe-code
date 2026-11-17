@@ -3818,6 +3818,12 @@ function mapToRuntimeEvents(
     }
 
     const terminalInputApproval = event.requestKind === "terminal-input";
+    const humanCommandApproval =
+      event.method === "item/commandExecution/requestApproval" &&
+      readPayload(
+        EffectCodexSchema.ServerRequest__CommandExecutionRequestApprovalParams,
+        event.payload,
+      )?.kind === "humanCommand";
     const requestType =
       event.requestKind !== undefined
         ? toRequestTypeFromKind(event.requestKind)
@@ -3879,6 +3885,10 @@ function mapToRuntimeEvents(
         type: "request.opened",
         payload: {
           requestType,
+          // Codex requires a person to decide this exact action once. Existing
+          // UI hints default to decline and omit any reusable-permission action;
+          // the runtime independently enforces the one-time native callback.
+          ...(humanCommandApproval ? { defaultToNo: true, suppressAlwaysAllowRule: true } : {}),
           ...(event.method === "item/commandExecution/requestApproval" &&
           readPayload(
             ProviderNetworkApproval,

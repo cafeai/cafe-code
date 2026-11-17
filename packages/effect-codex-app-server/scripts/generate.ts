@@ -23,10 +23,10 @@ import {
   parseRequestEntries,
 } from "./protocolMethodEntries.ts";
 
-// Codex 0.166.0 release commit. Keep generation attached to an immutable
+// Codex 0.169.0 release commit. Keep generation attached to an immutable
 // upstream commit rather than a moving tag so a reinstall cannot silently
 // change Cafe's protocol boundary.
-const UPSTREAM_REF = "6ff1e1ca3b30fc8b914720681fcf5fe62e95f856";
+const UPSTREAM_REF = "d32063f96c2dff1dc96af839b3952abb6acfeda4";
 const USER_AGENT = "effect-codex-app-server-generator";
 const GITHUB_API_BASE =
   "https://api.github.com/repos/openai/codex/contents/codex-rs/app-server-protocol";
@@ -418,6 +418,7 @@ function resolveResponseTypeName(
     "account/gatewayOAuth/login": "GatewayOAuthLoginResponse",
     "account/gatewayOAuth/cancel": "GatewayOAuthCancelResponse",
     "account/logout": "LogoutAccountResponse",
+    "account/securitySetup/read": "GetAccountSecuritySetupResponse",
     "account/rateLimits/read": "GetAccountRateLimitsResponse",
     "account/usage/read": "GetAccountTokenUsageResponse",
     "account/workspaceMessages/read": "GetWorkspaceMessagesResponse",
@@ -474,13 +475,17 @@ function renderSchemaMap(
   entries: ReadonlyArray<MethodEntry>,
   typeName: (entry: MethodEntry) => string,
   isOptional: (entry: MethodEntry) => boolean = () => false,
+  isNullable: (entry: MethodEntry) => boolean = () => false,
 ) {
   return [
     `export const ${constantName} = {`,
     ...entries.map((entry) => {
       const schemaName = typeName(entry);
-      const schemaExpression =
+      const baseSchemaExpression =
         schemaName === "undefined" ? "undefined" : `CodexSchema.${schemaName}`;
+      const schemaExpression = isNullable(entry)
+        ? `Schema.Union([${baseSchemaExpression}, Schema.Null])`
+        : baseSchemaExpression;
       return `  ${JSON.stringify(entry.method)}: ${
         isOptional(entry) && schemaName !== "undefined"
           ? `Schema.UndefinedOr(${schemaExpression})`
@@ -738,6 +743,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
         renderSchemaTypeReference(
           resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
         ),
+        ...(entry.paramsNullable ? ["null"] : []),
         ...(entry.paramsOptional ? ["undefined"] : []),
       ].join(" | "),
     ),
@@ -756,6 +762,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
         renderSchemaTypeReference(
           resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
         ),
+        ...(entry.paramsNullable ? ["null"] : []),
         ...(entry.paramsOptional ? ["undefined"] : []),
       ].join(" | "),
     ),
@@ -774,6 +781,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
       clientRequestEntries,
       (entry) => resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
       (entry) => entry.paramsOptional === true,
+      (entry) => entry.paramsNullable === true,
     ),
     renderSchemaMap("CLIENT_REQUEST_RESPONSES", clientRequestEntries, (entry) =>
       resolveResponseTypeName(entry.method, entry.paramsType, generatedSchemaNames),
@@ -786,6 +794,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
       serverRequestEntries,
       (entry) => resolveSchemaTypeName(entry.paramsType ?? "undefined", generatedSchemaNames),
       (entry) => entry.paramsOptional === true,
+      (entry) => entry.paramsNullable === true,
     ),
     renderSchemaMap("SERVER_REQUEST_RESPONSES", serverRequestEntries, (entry) =>
       resolveResponseTypeName(entry.method, entry.paramsType, generatedSchemaNames),

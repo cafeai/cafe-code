@@ -9477,6 +9477,50 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("presents only native human commands as default-decline one-time approvals", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      for (const kind of ["humanCommand", "command"] as const) {
+        const next = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        yield* runtime.emit({
+          id: asEventId(`evt-human-command-${kind}`),
+          kind: "request",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "item/commandExecution/requestApproval",
+          requestKind: "command",
+          requestId: ApprovalRequestId.make(`human-command-${kind}`),
+          payload: {
+            threadId: "provider-thread-1",
+            turnId: "turn-1",
+            itemId: `command-item-${kind}`,
+            startedAtMs: 1_767_225_600_000,
+            kind,
+            command: "test-only-command",
+            reason: "A managed checkpoint requiring a fresh human decision",
+          },
+        } satisfies ProviderEvent);
+        const observed = yield* Fiber.join(next);
+        assert.equal(observed._tag, "Some");
+        if (observed._tag !== "Some" || observed.value.type !== "request.opened") {
+          return assert.fail("Expected the held native approval to reach the primary chat");
+        }
+        assert.equal(observed.value.payload.requestType, "command_execution_approval");
+        assert.equal(observed.value.payload.detail, "test-only-command");
+        assert.equal(
+          observed.value.payload.defaultToNo,
+          kind === "humanCommand" ? true : undefined,
+        );
+        assert.equal(
+          observed.value.payload.suppressAlwaysAllowRule,
+          kind === "humanCommand" ? true : undefined,
+        );
+      }
+    }),
+  );
+
   it.effect("maps terminal-input approvals without retaining command or stdin context", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

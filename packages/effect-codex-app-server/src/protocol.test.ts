@@ -611,6 +611,19 @@ it("preserves Codex 0.159 item anchors and existing thread item cursors", () => 
   }
 });
 
+it("preserves optional and explicit-null gateway selectors without widening ordinary requests", () => {
+  for (const method of ["account/gatewayOAuth/read", "account/gatewayOAuth/login"] as const) {
+    const decode = Schema.decodeUnknownSync(CodexSchema.CLIENT_REQUEST_PARAMS[method]);
+    for (const params of [undefined, null, {}, { modelProvider: "example-gateway" }]) {
+      assert.deepEqual(decode(params), params);
+    }
+    for (const params of [false, "example-gateway", { modelProvider: 42 }]) {
+      assert.equal(Schema.is(CodexSchema.CLIENT_REQUEST_PARAMS[method])(params), false);
+    }
+  }
+  assert.equal(Schema.is(CodexSchema.CLIENT_REQUEST_PARAMS["model/list"])(null), false);
+});
+
 it("keeps Codex 0.157 gateway login capability opt-in and its responses typed", () => {
   const decodeCapabilities = Schema.decodeUnknownSync(
     CodexSchema.V1InitializeParams__InitializeCapabilities,
@@ -630,7 +643,7 @@ it("keeps Codex 0.157 gateway login capability opt-in and its responses typed", 
     false,
   );
 
-  // The new methods deliberately omit the account namespace in their response
+  // Gateway methods deliberately omit the account namespace in their response
   // type names. Exercise the generated RPC map, not just standalone schemas,
   // so a future regeneration cannot silently bind an unrelated response type.
   const read = {
@@ -648,12 +661,12 @@ it("keeps Codex 0.157 gateway login capability opt-in and its responses typed", 
   );
   for (const method of ["account/gatewayOAuth/login", "account/gatewayOAuth/cancel"] as const) {
     assert.equal(CodexSchema.CLIENT_REQUEST_METHODS[method], method);
-    assert.equal(CodexSchema.CLIENT_REQUEST_PARAMS[method], undefined);
     assert.deepEqual(
       Schema.decodeUnknownSync(CodexSchema.CLIENT_REQUEST_RESPONSES[method])({}),
       {},
     );
   }
+  assert.equal(CodexSchema.CLIENT_REQUEST_PARAMS["account/gatewayOAuth/cancel"], undefined);
   const changed = {
     method: "account/gatewayOAuth/changed",
     params: {

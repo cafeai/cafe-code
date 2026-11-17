@@ -849,13 +849,19 @@ describe("Codex picker model/list refresh", () => {
     },
   );
 
-  it("offers Terra without inventing a default effort or paid tier", () => {
-    const slug = "gpt-6.1-terra";
+  it.each([
+    ["gpt-6.1-terra", "GPT-6.1-Terra"],
+    ["gpt-6.2-astra", "GPT-6.2-Astra"],
+    ["gpt-6.2-sol", "GPT-6.2-Sol"],
+  ])("offers %s without inventing a default effort or paid tier", (slug, name) => {
     const models = fallbackCodexModelsFromSettings(decodeCodexSettings({ customModels: [slug] }));
     const matching = models.filter((model) => model.slug === slug);
     expect(matching).toHaveLength(1);
     const row = matching[0]!;
-    expect(row).toMatchObject({ slug, name: "GPT-6.1-Terra", isCustom: false });
+    expect(row).toMatchObject({ slug, name, isCustom: false });
+    if (slug.startsWith("gpt-6.2-")) {
+      expect(row.capabilities?.inputModalities).toEqual(["text", "image"]);
+    }
     const descriptors = row.capabilities?.optionDescriptors ?? [];
     expect(descriptors).toMatchObject([
       {
@@ -895,7 +901,7 @@ describe("Codex picker model/list refresh", () => {
 
     // Account-native rows, including their own narrower options and tiers,
     // replace the static fallback; an explicit custom row remains conservative.
-    const live = { slug, name: "Account Terra", isCustom: false, capabilities: null };
+    const live = { slug, name: "Account model", isCustom: false, capabilities: null };
     expect(finalizeCodexModelListRefresh([live], [slug])).toEqual([live]);
     const other = { ...live, slug: "other" };
     expect(finalizeCodexModelListRefresh([other], [])).toEqual([other]);
