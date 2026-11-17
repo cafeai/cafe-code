@@ -14085,16 +14085,18 @@ describe("ClaudeAdapterLive", () => {
         uuid: "00000000-0000-4000-8000-000000000221",
       } satisfies SDKMessage);
       // SDK 0.3.323 also emits heartbeat-only hook waits. There is no native
-      // tool or task to adopt, and the parent tool identity may be omitted.
+      // tool or task to adopt; SDKToolProgressMessage represents no parent
+      // with an explicit null, rather than omitting its required field.
       harness.query.emit({
         type: "tool_progress",
         tool_use_id: "hook-PreToolUse-fixture",
         tool_name: "PreToolUse",
+        parent_tool_use_id: null,
         elapsed_time_seconds: 30,
         heartbeat: true,
         session_id: "sdk-session-subagent-retry",
         uuid: "00000000-0000-4000-8000-000000000224",
-      } as SDKMessage);
+      } satisfies SDKMessage);
       const retryMessage = {
         type: "tool_progress",
         tool_use_id: "tool-retry-1",
