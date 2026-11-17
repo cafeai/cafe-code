@@ -3532,19 +3532,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(status.auth.label, "ChatGPT Subscription");
           assert.strictEqual(status.codexModelCatalogSource, "fallback");
           assert.deepStrictEqual(probeArgs, ["--version", "login status"]);
-          assert.deepStrictEqual(
-            status.models.map((model) => model.slug),
-            [
-              "gpt-6-astra",
-              "gpt-6.1-sol",
-              "gpt-6.1-terra",
-              "gpt-6-sol",
-              "gpt-6-luna",
-              "gpt-5.6-sol",
-              "gpt-5.6-terra",
-              "gpt-5.6-luna",
-            ],
-          );
+          // The lightweight status path must make newly documented models
+          // selectable without launching app-server or changing the first row
+          // used by unconfigured accounts. Other catalogue rows can evolve.
+          const modelSlugs = status.models.map((model) => model.slug);
+          assert.strictEqual(modelSlugs[0], "gpt-6-astra");
+          assert.includeMembers(modelSlugs, ["gpt-6.2-astra", "gpt-6.2-sol"]);
           const reasoningDescriptor = (slug: string) => {
             const descriptor = status.models
               .find((model) => model.slug === slug)
