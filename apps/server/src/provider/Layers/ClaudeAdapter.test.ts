@@ -1830,6 +1830,7 @@ describe("ClaudeAdapterLive", () => {
         ? ([
             "unchanged",
             "completed",
+            "completed-current-root",
             "replaced",
             "ended",
             "pending-result",
@@ -1944,7 +1945,20 @@ describe("ClaudeAdapterLive", () => {
                 .pipe(Effect.result, Effect.forkChild);
               yield* Deferred.await(readingAttachment);
 
-              if (boundary === "completed" || boundary === "pending-result") {
+              if (boundary === "completed-current-root") {
+                // Unlike the uninitialized/uncorrelated completion negative,
+                // this exact primary owner successfully consumed the actual
+                // original input while attachment preparation was suspended.
+                emitWorkflowFixtureInit(harness.query, "2.1.321", "synthetic-priority", [
+                  "msg_lifecycle_v1",
+                ]);
+                harness.query.emit({
+                  ...makeSuccessfulClaudeResult("synthetic-priority"),
+                  user_message_uuid: first.value!.uuid,
+                });
+                yield* Deferred.await(completed);
+                assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+              } else if (boundary === "completed" || boundary === "pending-result") {
                 harness.query.emit(makeSuccessfulClaudeResult("synthetic-priority"));
                 if (boundary === "completed") {
                   yield* Deferred.await(completed);
@@ -1987,7 +2001,8 @@ describe("ClaudeAdapterLive", () => {
               const accepted =
                 boundary === "unchanged" ||
                 boundary === "pending-delta" ||
-                (priority === undefined && boundary === "pending-result");
+                (priority === undefined &&
+                  (boundary === "pending-result" || boundary === "completed-current-root"));
               assert.equal(result._tag, accepted ? "Success" : "Failure");
               if (priority === undefined && !accepted && result._tag === "Failure") {
                 assert.equal(
@@ -2001,6 +2016,27 @@ describe("ClaudeAdapterLive", () => {
                 assert.equal(delivered.done, false);
                 assert.equal(delivered.value?.priority, priority);
                 assert.equal(promptMessageText(delivered.value), "must stay bound to first turn");
+                if (boundary === "completed-current-root" && result._tag === "Success") {
+                  assert.notEqual(result.success.turnId, turn.turnId);
+                  assert.equal(delivered.value?.uuid, result.success.turnId);
+                  assert.deepEqual(delivered.value?.message.content, [
+                    { type: "text", text: "must stay bound to first turn" },
+                    {
+                      type: "image",
+                      source: {
+                        type: "base64",
+                        media_type: "image/png",
+                        data: "AQIDBA==",
+                      },
+                    },
+                  ]);
+                  assert.equal(harness.getLastCreateQueryInput(), originalInput);
+                  assert.equal(
+                    (yield* adapter.listSessions())[0]?.activeTurnId,
+                    result.success.turnId,
+                  );
+                  assert.deepEqual(harness.query.interruptCalls, []);
+                }
               } else if (boundary === "replaced") {
                 assert.equal((yield* Fiber.join(nextPrompt)).done, true);
                 const replacementPrompt = yield* Effect.promise(() =>
@@ -4872,12 +4908,14 @@ describe("ClaudeAdapterLive", () => {
           });
           const nativeSessionId = "claude-initial-input-owner";
           let oldUuid: string | undefined;
+          let completedRootTurnId: TurnId | undefined;
           if (nativeOwner === "retained-background") {
-            yield* adapter.sendTurn({
+            const warmup = yield* adapter.sendTurn({
               threadId: session.threadId,
               input: "start background work",
               attachments: [],
             });
+            completedRootTurnId = warmup.turnId;
             oldUuid = (yield* Effect.promise(() =>
               readPromptMessages(harness.getLastCreateQueryInput(), 1),
             ))[0]?.uuid;
@@ -4914,7 +4952,29 @@ describe("ClaudeAdapterLive", () => {
             input: "continue the unfinished work",
             attachments: [],
           };
-          const turn = yield* adapter.sendTurn(input);
+          // A foreground completion can beat the caller's steering snapshot.
+          // Keep this one ordinary request on the same query, with the exact
+          // successful predecessor and actual initialized native owner above.
+          const turn = yield* completedRootTurnId === undefined
+            ? adapter.sendTurn(input)
+            : adapter.steerTurn({ ...input, expectedTurnId: completedRootTurnId });
+          if (completedRootTurnId !== undefined) {
+            assert.notEqual(turn.turnId, completedRootTurnId);
+            // Completion authority is one-use and cannot retarget another
+            // message once the new user root owns this query. The remaining
+            // consumption/result checks also expose any secretly queued input.
+            const repeated = yield* adapter
+              .steerTurn({
+                ...input,
+                expectedTurnId: completedRootTurnId,
+                messageId: MessageId.make("repeated-completed-root-follow-up"),
+                intentSequence: 38,
+                input: "must not follow the old predecessor twice",
+              })
+              .pipe(Effect.result);
+            assert.equal(repeated._tag, "Failure");
+            assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+          }
           assert.equal(harness.getLastCreateQueryInput(), queryInput);
           const uuid = (yield* Effect.promise(() =>
             readPromptMessages(harness.getLastCreateQueryInput(), 1),
@@ -5081,6 +5141,7 @@ describe("ClaudeAdapterLive", () => {
           });
           yield* Deferred.await(completions[nativeOwner === "fresh-query" ? 1 : 2]!);
           assert.equal(receipts().length, 1);
+          assert.deepEqual(harness.query.interruptCalls, []);
         }).pipe(
           Effect.provideService(Random.Random, makeDeterministicRandomService()),
           Effect.provide(harness.layer),
