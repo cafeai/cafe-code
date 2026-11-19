@@ -1177,7 +1177,8 @@ export function ProviderInstanceCard({
     ? instance.driver
     : null;
 
-  const customModels = readConfigStringArray(instance.config, "customModels");
+  const customModels =
+    driverKind === "gemini" ? [] : readConfigStringArray(instance.config, "customModels");
   // Server-returned models may lag behind settings writes. Treat probe
   // models as the source for built-ins only; custom rows come directly
   // from the current instance config so add/remove reflects immediately.

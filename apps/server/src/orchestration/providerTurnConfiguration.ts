@@ -8,6 +8,7 @@ import {
   type ProviderSession,
   type ServerProviderModel,
   ProviderTurnConfiguration,
+  type ProviderTurnStartResult,
   type ThreadId,
   type TurnId,
 } from "@cafecode/contracts";
@@ -37,8 +38,35 @@ export function providerTurnAccountFallback(provider: string, instanceId: string
           ? "OpenCode"
           : provider === "grok"
             ? "Grok"
-            : provider;
+            : provider === "gemini"
+              ? "Gemini"
+              : provider;
   return instanceId === provider ? driver : `${driver} · ${instanceId}`;
+}
+
+export function withResolvedGeminiConfiguration(
+  configuration: ProviderTurnConfiguration,
+  resolved: ProviderTurnStartResult["resolvedGeminiConfiguration"],
+): ProviderTurnConfiguration {
+  if (configuration.provider !== "gemini" || resolved === undefined) return configuration;
+  const model = safeLabel(resolved.model);
+  const effort = safeLabel(resolved.effort, 80);
+  const {
+    model: submittedModel,
+    modelDisplayName,
+    effort: _submittedEffort,
+    ...account
+  } = configuration;
+  // Keep the account and same-model display name captured before provider IO.
+  // A native default did not necessarily appear in the submitted options.
+  return {
+    ...account,
+    ...(model !== undefined ? { model } : {}),
+    ...(model !== undefined && model === submittedModel && modelDisplayName !== undefined
+      ? { modelDisplayName }
+      : {}),
+    ...(effort !== undefined ? { effort } : {}),
+  };
 }
 
 /**
@@ -77,7 +105,7 @@ export function snapshotProviderTurnConfiguration(input: {
   // Provider-specific option ids are deliberately not interchangeable. In
   // particular, an OpenCode variant is not a Codex reasoning-effort override.
   const effortKey =
-    session.provider === "codex" || session.provider === "grok"
+    session.provider === "codex" || session.provider === "grok" || session.provider === "gemini"
       ? "reasoningEffort"
       : session.provider === "opencode"
         ? "variant"

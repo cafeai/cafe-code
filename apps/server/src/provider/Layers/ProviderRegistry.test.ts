@@ -2253,6 +2253,50 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         ]);
       });
 
+      it("retires models omitted by a complete Gemini account discovery", () => {
+        const previous = {
+          instanceId: ProviderInstanceId.make("gemini-account"),
+          driver: ProviderDriverKind.make("gemini"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-11-19T00:00:00.000Z",
+          version: "1.5.11",
+          models: [
+            {
+              slug: "gemini-4-neon",
+              name: "Gemini 4 Neon",
+              isCustom: false,
+              capabilities: { inputModalities: ["text"] },
+            },
+            {
+              slug: "gemini-3.8-flash",
+              name: "Gemini 3.8 Flash",
+              isCustom: false,
+              capabilities: { inputModalities: ["text"] },
+            },
+          ],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const current = {
+          ...previous,
+          checkedAt: "2026-11-19T00:01:00.000Z",
+          models: [previous.models[1]],
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(mergeProviderSnapshot(previous, current).models, current.models);
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(current, {
+            ...current,
+            auth: { status: "unauthenticated" },
+            models: [],
+          }).models,
+          [],
+        );
+      });
+
       it("persists merged provider snapshots for the providers that were refreshed", () => {
         const previousProviders = [
           {

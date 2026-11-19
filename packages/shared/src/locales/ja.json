@@ -1,4 +1,8 @@
 {
+  "Antigravity CLI permissions": "Antigravity CLI の権限",
+  "Use Antigravity CLI permissions": "Antigravity CLI の権限を使う",
+  "Gemini uses permissions from Antigravity CLI. Choose Use Antigravity CLI permissions in the composer or switch providers.": "Gemini は Antigravity CLI の権限を使います。入力欄で「Antigravity CLI の権限を使う」を選ぶか、プロバイダーを切り替えてください。",
+  "Extra": "特高",
   " (offline)": " (オフライン)",
   " (optional)": " (任意)",
   " (outside workspace)": " (ワークスペース外)",

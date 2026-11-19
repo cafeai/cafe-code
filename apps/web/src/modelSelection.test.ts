@@ -85,6 +85,24 @@ describe("model selection before provider hydration", () => {
 });
 
 describe("instance-scoped model selection", () => {
+  it("only offers Gemini models advertised by the configured CLI", () => {
+    const driver = ProviderDriverKind.make("gemini");
+    const instanceId = ProviderInstanceId.make("gemini_test");
+    const [entry] = deriveProviderInstanceEntries([
+      provider({ provider: driver, instanceId, models: ["fixture-native-model"] }),
+    ]);
+    const settings: UnifiedSettings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [instanceId]: { driver, config: { customModels: ["unadvertised-model"] } },
+      },
+    };
+
+    expect(getAppModelOptionsForInstance(settings, entry!).map((option) => option.slug)).toEqual([
+      "fixture-native-model",
+    ]);
+  });
+
   it("removes Daybreak aliases from live and custom Codex choices without changing other providers", () => {
     const aliases = ["gpt-daybreak-blue-latest", "gpt-daybreak-red-latest"];
     const providers = [

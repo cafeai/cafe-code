@@ -620,7 +620,7 @@ export function TextGenerationModelSettingsRow() {
 
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
-  const serverProviders = useServerProviders();
+  const serverProviders = useServerProviders().filter((provider) => provider.driver !== "gemini");
   const textGenerationModelSelection = uiPresentation.resolveAppModelSelectionState(
     settings,
     serverProviders,

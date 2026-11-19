@@ -29,6 +29,9 @@ const RUNTIME_MODE_LABELS: Readonly<Record<RuntimeMode, string>> = {
  * (provider default) is ambiguous, so it keeps the generic pair.
  */
 function nativePermissionModeLabel(configuration: ProviderTurnConfiguration): string | null {
+  if (configuration.provider === "gemini" && configuration.runtimeMode === "full-access") {
+    return uiText("Antigravity CLI permissions");
+  }
   if (configuration.interactionMode === undefined) return null;
   const options =
     configuration.provider === "claudeAgent"
@@ -84,6 +87,14 @@ const EFFORT_LABELS: Readonly<Record<string, string>> = {
     return uiText("Ultra");
   },
 };
+
+function presentEffortLabel(
+  provider: ProviderTurnConfiguration["provider"],
+  effort: string,
+): string {
+  if (provider === "gemini" && effort === "xhigh") return uiText("Extra");
+  return Object.hasOwn(EFFORT_LABELS, effort) ? EFFORT_LABELS[effort]! : effort;
+}
 
 function presentServiceTier(tier: string): string {
   switch (tier) {
@@ -175,9 +186,7 @@ export function presentTurnConfigurationSummary(configuration: ProviderTurnConfi
       ? isOpenCode
         ? uiText("Default variant")
         : uiText("Default effort")
-      : Object.hasOwn(EFFORT_LABELS, configuration.effort)
-        ? EFFORT_LABELS[configuration.effort]!
-        : configuration.effort;
+      : presentEffortLabel(configuration.provider, configuration.effort);
   const routedTier =
     configuration.provider === "codex"
       ? (configuration.resolvedServiceTier ?? configuration.serviceTier)
@@ -246,9 +255,7 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
         })
       : uiText("{provider, select, opencode {Variant} other {Effort}}: {effort}", {
           provider: configuration.provider,
-          effort: Object.hasOwn(EFFORT_LABELS, configuration.effort)
-            ? EFFORT_LABELS[configuration.effort]
-            : configuration.effort,
+          effort: presentEffortLabel(configuration.provider, configuration.effort),
         });
   // Prefer routing captured from the exact native start over submitted options.
   // Old snapshots stay unknown rather than borrowing today's session settings.
@@ -284,7 +291,9 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
     // This is the configured instance label, deliberately not an auth email,
     // account identifier, token, or a fresh read of the provider's credentials.
     account: uiText("Account: {account}", { account: configuration.providerDisplayName }),
-    modes: uiText("{interactionMode} · {runtimeMode}", { interactionMode, runtimeMode }),
+    modes:
+      (configuration.provider === "gemini" ? nativePermissionModeLabel(configuration) : null) ??
+      uiText("{interactionMode} · {runtimeMode}", { interactionMode, runtimeMode }),
     source:
       configuration.settingsSource === "submitted"
         ? uiText("Submitted settings")

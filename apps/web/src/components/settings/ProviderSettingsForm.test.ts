@@ -15,6 +15,29 @@ import {
 } from "./ProviderSettingsForm";
 
 describe("ProviderSettingsForm helpers", () => {
+  it("lets a Gemini account inherit agy or select an installed CLI binary", () => {
+    const gemini = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("gemini")]!;
+    const [binaryPath] = deriveProviderSettingsFields(gemini);
+    const markup = renderToStaticMarkup(
+      createElement(ProviderSettingsForm, {
+        definition: gemini,
+        value: undefined,
+        idPrefix: "provider-instance-gemini",
+        variant: "dialog",
+        onChange: () => undefined,
+      }),
+    );
+
+    expect(markup).toContain('id="provider-instance-gemini-binaryPath"');
+    expect(markup).toContain('placeholder="agy"');
+    expect(nextProviderConfigWithFieldValue({}, binaryPath!, "/test-bin/agy")).toEqual({
+      binaryPath: "/test-bin/agy",
+    });
+    expect(
+      nextProviderConfigWithFieldValue({ binaryPath: "/test-bin/agy" }, binaryPath!, ""),
+    ).toBeUndefined();
+  });
+
   it("derives visible provider config fields from the client definition schema", () => {
     const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
 

@@ -45,7 +45,10 @@ export interface AcpSessionEventStreamBarrier {
   readonly acknowledge: Deferred.Deferred<void>;
 }
 
-export type AcpSessionRuntimeEvent = AcpParsedSessionEvent | AcpSessionEventStreamBarrier;
+export type AcpSessionRuntimeEvent =
+  | AcpParsedSessionEvent
+  | AcpSessionEventStreamBarrier
+  | { readonly _tag: "SessionConfigurationChanged"; readonly modeId: string | undefined };
 
 const defaultSessionLoadTimeout = Duration.seconds(90);
 const defaultSessionLoadReplayIdleGap = Duration.seconds(2);
@@ -59,15 +62,21 @@ export interface AcpSpawnInput {
   readonly args: ReadonlyArray<string>;
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
+  /** A prepared provider environment must not be merged with process.env. */
+  readonly extendEnv?: boolean;
 }
 
 export interface AcpSessionRuntimeOptions {
   readonly spawn: AcpSpawnInput;
   readonly cwd: string;
   readonly resumeSessionId?: string;
+  /** Acknowledge an advertised resume/load RPC before adopting a native conversation. */
+  readonly resumeSessionPolicy?: "acknowledged";
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
+  /** Accept the standard option snapshot only from this exact ready session. */
+  readonly observeSessionConfigUpdates?: boolean;
   readonly clientInfo: {
     readonly name: string;
     readonly version: string;
@@ -362,7 +371,9 @@ export const make = (
       .spawn(
         ChildProcess.make(options.spawn.command, options.spawn.args, {
           ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
-          ...(options.spawn.env ? { env: options.spawn.env, extendEnv: true } : {}),
+          ...(options.spawn.env
+            ? { env: options.spawn.env, extendEnv: options.spawn.extendEnv ?? true }
+            : {}),
           // ACP is a structured stdio protocol. Shell expansion would make
           // custom paths and arguments command-injection surfaces.
           shell: false,
@@ -486,6 +497,32 @@ export const make = (
           notification.sessionId !== startState.result.sessionId
         ) {
           return;
+        }
+        if (options.observeSessionConfigUpdates) {
+          const update = notification.update;
+          if (update.sessionUpdate === "config_option_update") {
+            yield* Ref.set(configOptionsRef, update.configOptions);
+            const modes = update.configOptions.filter((option) => option.category === "mode");
+            const mode = modes.length === 1 ? modes[0] : undefined;
+            yield* Queue.offer(eventQueue, {
+              _tag: "SessionConfigurationChanged",
+              modeId: mode?.type === "select" ? mode.currentValue : undefined,
+            });
+          } else if (update.sessionUpdate === "current_mode_update") {
+            // The mode notification is live session evidence even on peers
+            // that also expose mode through their configuration selector.
+            yield* Ref.update(configOptionsRef, (current) =>
+              current.map((option) =>
+                option.category === "mode" && option.type === "select"
+                  ? { ...option, currentValue: update.currentModeId }
+                  : option,
+              ),
+            );
+            yield* Queue.offer(eventQueue, {
+              _tag: "SessionConfigurationChanged",
+              modeId: update.currentModeId,
+            });
+          }
         }
         yield* handleSessionUpdate({
           queue: eventQueue,
@@ -661,7 +698,36 @@ export const make = (
         | EffectAcpSchema.LoadSessionResponse
         | EffectAcpSchema.NewSessionResponse
         | EffectAcpSchema.ResumeSessionResponse;
-      if (options.resumeSessionId) {
+      if (options.resumeSessionId && options.resumeSessionPolicy === "acknowledged") {
+        const capabilities = initializeResult.agentCapabilities;
+        sessionId = options.resumeSessionId;
+        const payload = {
+          sessionId,
+          cwd: sessionCwd,
+          mcpServers: options.mcpServers ?? [],
+        } satisfies EffectAcpSchema.ResumeSessionRequest;
+        // Resume avoids history replay. When only load is supported, updates
+        // received while the runtime is Starting are never projected as new
+        // content. Neither silence after replay nor a failed RPC proves that
+        // the requested conversation was adopted.
+        if (capabilities?.sessionCapabilities?.resume != null) {
+          sessionSetupResult = yield* runLoggedRequest(
+            "session/resume",
+            payload,
+            acp.agent.resumeSession(payload),
+          );
+        } else if (capabilities?.loadSession === true) {
+          sessionSetupResult = yield* runLoggedRequest(
+            "session/load",
+            payload,
+            acp.agent.loadSession(payload),
+          );
+        } else {
+          return yield* EffectAcpErrors.AcpRequestError.invalidParams(
+            "The ACP provider cannot resume this conversation.",
+          );
+        }
+      } else if (options.resumeSessionId) {
         const loadPayload = {
           sessionId: options.resumeSessionId,
           cwd: sessionCwd,

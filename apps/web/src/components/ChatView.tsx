@@ -77,6 +77,7 @@ import { useWorkspaceProjects, useWorkspaceThreads } from "../environments/works
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import { getWsConnectionStatus, useWsConnectionStatus } from "../rpc/wsConnectionState";
 import { providerSkillsScopeRevision } from "./chat/useProviderSkills";
+import { usesGeminiCliPermissions } from "./chat/geminiPermissionMode";
 import type { ProviderQuotaContext } from "./chat/useProviderQuota";
 import { claudeChatQuotaScope, selectedQuotaDriver } from "../lib/claudeSessionQuota";
 import { readEnvironmentApi } from "../environmentApi";
@@ -4715,6 +4716,21 @@ export default function ChatView(props: ChatViewProps) {
     const sendCtx = composerRef.current?.getSendContext();
     if (!sendCtx || !activeThread) return null;
     if (
+      sendCtx.selectedProvider === "gemini" &&
+      !usesGeminiCliPermissions(runtimeMode, interactionMode)
+    ) {
+      setThreadError(
+        activeThread.id,
+        uiText(
+          "Gemini uses permissions from Antigravity CLI. Choose Use Antigravity CLI permissions in the composer or switch providers.",
+          undefined,
+          undefined,
+          uiLocale,
+        ),
+      );
+      return null;
+    }
+    if (
       sendCtx.images.length > 0 &&
       !modelAcceptsImages(
         getProviderModelCapabilities(
@@ -6228,7 +6244,10 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     const standaloneSlashCommand =
-      !resend && composerImages.length === 0 && snapshot.files.length === 0
+      !resend &&
+      ctxSelectedProvider !== "gemini" &&
+      composerImages.length === 0 &&
+      snapshot.files.length === 0
         ? parseStandaloneComposerSlashCommand(trimmed)
         : null;
     if (standaloneSlashCommand) {

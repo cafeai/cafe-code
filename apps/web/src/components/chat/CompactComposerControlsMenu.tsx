@@ -38,6 +38,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { threadGoalStatusLabel } from "./ThreadGoalControl";
+import { usesGeminiCliPermissions } from "./geminiPermissionMode";
 
 const RUNTIME_MODE_OPTIONS: ReadonlyArray<{
   id: RuntimeMode;
@@ -156,6 +157,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   onNativePermissionModeChange: (mode: ClaudePermissionMode) => void;
   onTogglePlanSidebar: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
+  onUseGeminiCliPermissions?: () => void;
   onOpenGoal?: () => void;
   /** Optional controlled state so explicit shortcuts can open this menu. */
   open?: boolean;
@@ -165,6 +167,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
   const isClaude = props.provider === "claudeAgent";
+  const isGemini = props.provider === "gemini";
   const usesNativePermissionModes = isClaude || props.provider === "grok";
   const permissionModeOptions = isClaude
     ? uiPresentation.CLAUDE_PERMISSION_MODE_OPTIONS
@@ -285,23 +288,35 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             <div className={MODE_GROUP_LABEL_CLASS_NAME}>
               {uiText("Access", undefined, undefined, uiLocale)}
             </div>
-            <MenuRadioGroup
-              value={props.runtimeMode}
-              onValueChange={(value) => {
-                if (!value || value === props.runtimeMode) return;
-                props.onRuntimeModeChange(value as RuntimeMode);
-              }}
-            >
-              {uiPresentation.RUNTIME_MODE_OPTIONS.map((option) => (
-                <ComposerModeRadioItem
-                  key={option.id}
-                  value={option.id}
-                  icon={option.icon}
-                  label={option.label}
-                  description={option.description}
-                />
-              ))}
-            </MenuRadioGroup>
+            {isGemini ? (
+              usesGeminiCliPermissions(props.runtimeMode, props.interactionMode) ? (
+                <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                  {uiText("Antigravity CLI permissions", undefined, undefined, uiLocale)}
+                </div>
+              ) : (
+                <MenuItem onClick={props.onUseGeminiCliPermissions}>
+                  {uiText("Use Antigravity CLI permissions", undefined, undefined, uiLocale)}
+                </MenuItem>
+              )
+            ) : (
+              <MenuRadioGroup
+                value={props.runtimeMode}
+                onValueChange={(value) => {
+                  if (!value || value === props.runtimeMode) return;
+                  props.onRuntimeModeChange(value as RuntimeMode);
+                }}
+              >
+                {uiPresentation.RUNTIME_MODE_OPTIONS.map((option) => (
+                  <ComposerModeRadioItem
+                    key={option.id}
+                    value={option.id}
+                    icon={option.icon}
+                    label={option.label}
+                    description={option.description}
+                  />
+                ))}
+              </MenuRadioGroup>
+            )}
           </>
         ) : null}
         {hasDaybreak ? (

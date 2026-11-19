@@ -1700,10 +1700,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const composerProviderControls = useMemo(
     () => ({
-      showInteractionModeToggle: getProviderInteractionModeToggle(
-        providerStatuses,
-        selectedProvider,
-      ),
+      showInteractionModeToggle:
+        selectedProvider !== "gemini" &&
+        getProviderInteractionModeToggle(providerStatuses, selectedProvider),
     }),
     [providerStatuses, selectedProvider],
   );
@@ -2118,20 +2117,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           label: uiText("/model", undefined, undefined, uiLocale),
           description: uiText("Switch the model for this chat", undefined, undefined, uiLocale),
         },
-        {
-          id: "slash:plan",
-          type: "slash-command",
-          command: "plan",
-          label: uiText("/plan", undefined, undefined, uiLocale),
-          description: uiText("Switch to Plan", undefined, undefined, uiLocale),
-        },
-        {
-          id: "slash:default",
-          type: "slash-command",
-          command: "default",
-          label: uiText("/default", undefined, undefined, uiLocale),
-          description: uiText("Switch back to Build", undefined, undefined, uiLocale),
-        },
+        ...(selectedProvider === "gemini"
+          ? []
+          : [
+              {
+                id: "slash:plan",
+                type: "slash-command" as const,
+                command: "plan" as const,
+                label: uiText("/plan", undefined, undefined, uiLocale),
+                description: uiText("Switch to Plan", undefined, undefined, uiLocale),
+              },
+              {
+                id: "slash:default",
+                type: "slash-command" as const,
+                command: "default" as const,
+                label: uiText("/default", undefined, undefined, uiLocale),
+                description: uiText("Switch back to Build", undefined, undefined, uiLocale),
+              },
+            ]),
         ...(selectedProvider === "codex" || selectedProvider === "opencode"
           ? [
               {
@@ -2889,6 +2892,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           }
           return;
         }
+        if (selectedProvider === "gemini") return;
         void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
         const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
           expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
@@ -2940,6 +2944,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       handleInteractionModeChange,
       onOpenGoalDialog,
       resolveActiveComposerTrigger,
+      selectedProvider,
     ],
   );
 
@@ -3213,6 +3218,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     event: KeyboardEvent,
   ) => {
     if (key === "Tab" && event.shiftKey) {
+      if (selectedProvider === "gemini") return false;
       cycleComposerInteractionMode();
       return true;
     }
@@ -4584,6 +4590,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   onNativePermissionModeChange={handleClaudePermissionModeChange}
                   onTogglePlanSidebar={togglePlanSidebar}
                   onRuntimeModeChange={handleRuntimeModeChange}
+                  onUseGeminiCliPermissions={() => {
+                    handleRuntimeModeChange("full-access");
+                    handleInteractionModeChange("default");
+                  }}
                   onOpenGoal={onOpenGoalDialog}
                   open={isComposerControlsMenuOpen}
                   onOpenChange={setIsComposerControlsMenuOpen}

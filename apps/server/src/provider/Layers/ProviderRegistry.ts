@@ -178,11 +178,13 @@ export const mergeProviderSnapshot = (
     ...catalogueProvider,
     // A trusted Codex producer explicitly distinguishes static fallback from
     // successful native discovery. Both are complete catalogues; a generic
-    // union would revive retired fallback rows or native omissions. Older and
-    // other-driver snapshots keep their established sparse merge behavior.
+    // union would revive retired fallback rows or native omissions. Gemini's
+    // discovery likewise reports a complete account catalogue (or no choices
+    // after failed discovery). Other snapshots retain sparse merging.
     models:
-      catalogueProvider.driver === "codex" &&
-      catalogueProvider.codexModelCatalogSource !== undefined
+      catalogueProvider.driver === "gemini" ||
+      (catalogueProvider.driver === "codex" &&
+        catalogueProvider.codexModelCatalogSource !== undefined)
         ? catalogueProvider.models
         : mergeProviderModels(previousProvider.models, catalogueProvider.models),
     // Carry forward event-sourced account rate limits when an incoming snapshot

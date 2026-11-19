@@ -92,6 +92,11 @@ export type AcpParsedSessionEvent =
       readonly modeId: string;
     }
   | {
+      readonly _tag: "ContextUsageUpdated";
+      readonly usedTokens: number;
+      readonly maxTokens: number;
+    }
+  | {
       readonly _tag: "AssistantItemStarted";
       readonly itemId: string;
     }
@@ -534,6 +539,21 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
   let modeId: string | undefined;
 
   switch (upd.sessionUpdate) {
+    case "usage_update": {
+      if (
+        Number.isSafeInteger(upd.used) &&
+        upd.used >= 0 &&
+        Number.isSafeInteger(upd.size) &&
+        upd.size > 0
+      ) {
+        events.push({
+          _tag: "ContextUsageUpdated",
+          usedTokens: upd.used,
+          maxTokens: upd.size,
+        });
+      }
+      break;
+    }
     case "current_mode_update": {
       modeId = upd.currentModeId.trim();
       if (modeId) {

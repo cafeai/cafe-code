@@ -1,4 +1,8 @@
 {
+  "Antigravity CLI permissions": "Antigravity CLI 권한",
+  "Use Antigravity CLI permissions": "Antigravity CLI 권한 사용",
+  "Gemini uses permissions from Antigravity CLI. Choose Use Antigravity CLI permissions in the composer or switch providers.": "Gemini는 Antigravity CLI의 권한을 사용합니다. 작성창에서 ‘Antigravity CLI 권한 사용’을 선택하거나 제공업체를 전환하세요.",
+  "Extra": "매우 높음",
   " (offline)": " (오프라인)",
   " (optional)": " (선택 사항)",
   " (outside workspace)": " (작업 공간 외부)",

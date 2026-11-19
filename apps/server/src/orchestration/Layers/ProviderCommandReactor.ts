@@ -148,6 +148,7 @@ import {
 import {
   providerTurnConfigurationCommand,
   snapshotProviderTurnConfiguration,
+  withResolvedGeminiConfiguration,
 } from "../providerTurnConfiguration.ts";
 const encodeJsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 class ManualCompactionUnavailableError extends Data.TaggedError(
@@ -2770,7 +2771,10 @@ const make = Effect.gen(function* () {
       : prepared.configuration === undefined
         ? undefined
         : {
-            ...prepared.configuration,
+            ...withResolvedGeminiConfiguration(
+              prepared.configuration,
+              turn.resolvedGeminiConfiguration,
+            ),
             ...(prepared.configuration.provider === "codex" &&
             turn.resolvedServiceTier !== undefined
               ? { resolvedServiceTier: turn.resolvedServiceTier }

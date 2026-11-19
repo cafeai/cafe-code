@@ -942,6 +942,25 @@ export const GrokSettings = makeProviderSettingsSchema(
 );
 export type GrokSettings = typeof GrokSettings.Type;
 
+/** Explicit providerInstances entry for Google's standalone Antigravity CLI. */
+export const GeminiSettings = makeProviderSettingsSchema(
+  {
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    binaryPath: makeBinaryPathSetting("agy").pipe(
+      Schema.annotateKey({
+        title: "Binary path",
+        description: "Path to the standalone Google Antigravity CLI.",
+        providerSettingsForm: { placeholder: "agy", clearWhenEmpty: "omit" },
+      }),
+    ),
+  },
+  { order: ["binaryPath"] },
+);
+export type GeminiSettings = typeof GeminiSettings.Type;
+
 export const OpenCodeSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(

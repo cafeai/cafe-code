@@ -468,6 +468,14 @@ export const ProviderTurnStartResult = Schema.Struct({
   resolvedServiceTier: Schema.optional(
     Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9_-]{0,63}$/)),
   ),
+  // Exact live ACP selection at Gemini prompt admission. This is turn
+  // presentation metadata, never a routing, model or permissions input.
+  resolvedGeminiConfiguration: Schema.optional(
+    Schema.Struct({
+      model: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+      effort: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+    }),
+  ),
   // Content-free routing evidence from ProviderService, not from an upstream
   // adapter. A start request can race an already-active session and be
   // accepted through native steering even when no correlation token exists.

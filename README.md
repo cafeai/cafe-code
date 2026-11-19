@@ -1,7 +1,7 @@
 # Cafe Code
 
-A calm desktop home for your coding agents. Work with Codex, Claude, OpenCode,
-Grok Build, and Axiom in one place, with project and standalone chats, tabs,
+A calm desktop home for your coding agents. Work with Codex, Claude, Gemini,
+OpenCode, Grok Build, and Axiom in one place, with project and standalone chats, tabs,
 split panes, and a clear view of what your agents are doing.
 
 Made in Japan with love. [日本語](README.ja.md)
@@ -59,6 +59,7 @@ providers you want to use; you do not need to set up every provider.
 | Claude     | Install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`.                                | Native Agent SDK integration, delivery/task controls, selected-message forks, and slash commands.                                        |
 | OpenCode   | Install [OpenCode](https://opencode.ai/docs/) and configure an upstream provider, or connect an existing OpenCode server. | Local runtimes and configured server connections; remote servers have different file-access limits.                                      |
 | Grok Build | Install [Grok Build](https://docs.x.ai/build/overview) and run `grok login`.                                              | Early Access ACP integration. See [setup and limits](docs/grok-build.md).                                                                |
+| Gemini     | Install the standalone [Antigravity CLI](https://antigravity.google/docs/install?tab=cli) and sign in on the Cafe server. | Account-advertised models and thinking levels, native approvals, and Atrium. See [setup and capabilities](docs/gemini-provider.md).      |
 | Axiom      | Install native AxiomCLI or the Axiom app, then use **Log In** in Cafe when required.                                      | Native ACP integration, account-bound history, and reply/attestation verification. See [setup and verification](docs/axiom-provider.md). |
 
 The Windows installer can prepare a reviewed offline **Node/Codex/Claude runtime
