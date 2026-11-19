@@ -2648,10 +2648,10 @@ const make = Effect.gen(function* () {
   };
 
   /**
-   * Live-steer entrypoints do not materialize turn settings, but a numeric
-   * follow-up admitted through the new Cafe exception must still use its exact
-   * current process. Repeat owner/policy reads here rather than letting a
-   * direct or failed-start steer escape the prepared-send fence.
+   * Native steering targets an active turn and carries no context/compaction
+   * configuration. Saved intent stays pending for the qualified opening path.
+   * A follow-up admitted under a retained subagent policy still needs its
+   * exact process fence, including on direct or failed-start steers.
    */
   const steerProviderTurn = Effect.fn("steerProviderTurn")(function* (
     input: ProviderSteerTurnInput,
@@ -2669,25 +2669,6 @@ const make = Effect.gen(function* () {
         const instanceId = thread.session.providerInstanceId ?? thread.modelSelection.instanceId;
         const settings = yield* serverSettingsService.getSettings;
         const instance = settings.providerInstances[instanceId];
-        if (driver === "codex") {
-          const contextPolicy = resolveCodexContextWindowPolicy({
-            driver: "codex",
-            chatOverride: thread.codexContextWindowOverride,
-            accountDefault:
-              instance?.driver === "codex" && instance.enabled !== false
-                ? instance.defaultCodexContextWindowOverride
-                : undefined,
-          });
-          if (contextPolicy.requested !== undefined) {
-            const capabilities = yield* providerService.getCapabilities(instanceId);
-            if (capabilities.codexContextWindow !== true)
-              return yield* new ProviderAdapterRequestError({
-                provider: "Codex",
-                method: "turn/steer",
-                detail: "This Codex runtime does not support configured context-window overrides.",
-              });
-          }
-        }
         const policy = resolveSubagentConcurrencyPolicy({
           driver,
           ...(thread.subagentLimits !== undefined ? { limits: thread.subagentLimits } : {}),

@@ -61,7 +61,10 @@ the accessible tooltip. The native `maxTokens` meter remains unchanged.
 
 Saving changes metadata only. A later ordinary send may reconcile a different
 effective policy under the existing exact owner, root/child, ingress and final
-lifecycle lock guard. Steers keep the current process. Unknown native child state
+lifecycle lock guard. A native steer uses its expected active turn and carries
+no context or compaction configuration. An unavailable context capability does
+not block this operation. Saved policy stays pending and future openings still
+require qualification to apply it. Unknown native child state
 or inconclusive retirement never authorizes a competing process or prompt replay.
 Context-only and combined subagent/context changes share the native guard; only
 typed refusal of a pure policy replacement can preserve the previous process.

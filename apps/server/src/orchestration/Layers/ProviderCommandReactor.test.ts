@@ -3688,7 +3688,7 @@ describe("ProviderCommandReactor", () => {
     );
 
     it.each([false, "unknown"] as const)(
-      "refuses numeric context intent before a %s-capability direct steer",
+      "steers the active Codex turn with %s context capability and keeps the saved change pending",
       async (support) => {
         const harness = await createHarness({ standalone: true, liveSteer: "supported" });
         await contextOverride(harness, "context-before-steer", 500_000);
@@ -3707,39 +3707,53 @@ describe("ProviderCommandReactor", () => {
             ...(support === "unknown" ? {} : { codexContextWindow: false }),
           }),
         );
-        const preparation = observeFreshFailurePreparation(harness);
+        const messageId = asMessageId(`context-retained-steer-${support}`);
+        harness.steerTurn.mockImplementationOnce((input) =>
+          Effect.succeed({ threadId: input.threadId, turnId: input.expectedTurnId }),
+        );
         await Effect.runPromise(
           harness.engine.dispatch({
             type: "thread.turn.steer",
-            commandId: CommandId.make(`context-refused-steer-${support}`),
+            commandId: CommandId.make(`context-retained-steer-${support}`),
             threadId,
             message: {
-              messageId: asMessageId(`context-refused-steer-${support}`),
+              messageId,
               role: "user",
-              text: "Synthetic unqualified context steer",
+              text: "Synthetic retained-turn guidance",
               attachments: [],
             },
             createdAt: "2026-01-01T00:00:03.000Z",
           }),
         );
-        // This exact successful capability read admits the policy-refusal
-        // worker; no steer operation is permitted to run for either cell.
-        expect(await harness.awaitOwnedObserver(Deferred.await(preparation.receipt))).toBe(
-          preparation.instanceId,
-        );
+        const disposition = () =>
+          harness
+            .readThreadDetail(threadId)
+            .then((detail) =>
+              detail?.activities.find(
+                (activity) =>
+                  (activity.kind === "provider.turn.steer.accepted" ||
+                    activity.kind === "provider.turn.steer.failed") &&
+                  (activity.payload as Readonly<Record<string, unknown>> | undefined)?.messageId ===
+                    messageId,
+              ),
+            );
+        await waitFor(async () => (await disposition()) !== undefined);
+        expect((await disposition())?.kind).toBe("provider.turn.steer.accepted");
         await harness.drain();
-        await waitFor(
-          async () =>
-            (await harness.readThreadDetail(threadId))?.activities.some(
-              (activity) => activity.kind === "provider.turn.steer.failed",
-            ) === true,
-        );
-        await harness.drain();
-        expect(harness.steerTurn).not.toHaveBeenCalled();
+        expect(harness.steerTurn).toHaveBeenCalledTimes(1);
+        expect(harness.steerTurn.mock.calls[0]?.[0]).toMatchObject({
+          threadId,
+          messageId,
+          expectedTurnId: activeTurnId,
+          input: "Synthetic retained-turn guidance",
+        });
         expect(harness.startSession).toHaveBeenCalledTimes(1);
         expect(harness.sendTurn).toHaveBeenCalledTimes(1);
         expect(harness.stopSession).not.toHaveBeenCalled();
         expect(harness.runtimeSessions[0]?.codexContextWindowOverride).toBe(500_000);
+        expect((await harness.readThreadDetail(threadId))?.codexContextWindowOverride).toBe(
+          600_000,
+        );
       },
     );
 
