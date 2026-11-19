@@ -10,13 +10,16 @@
       "dependsOn": ["@cafeai/cafe-code#build"],
       "persistent": true,
     },
+    // The source launcher validates the prebuilt desktop and server receipts.
+    // Keep launches separate from build tasks, which rewrite those outputs
+    // and require a current development dependency install.
     "start": {
-      "dependsOn": ["build", "@cafecode/web#build", "@cafeai/cafe-code#build"],
+      "dependsOn": [],
       "cache": false,
       "persistent": true,
     },
     "start:debug": {
-      "dependsOn": ["build", "@cafecode/web#build", "@cafeai/cafe-code#build"],
+      "dependsOn": [],
       "cache": false,
       "persistent": true,
     },
