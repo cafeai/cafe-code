@@ -12097,7 +12097,7 @@ describe("ProviderCommandReactor", () => {
     ).toHaveLength(2);
   });
 
-  it("replays a crash-before-provider-call steer only to its persisted turn", async () => {
+  it("starts a fresh chat while a saved steer replay read is parked, then replays only the exact steer", async () => {
     const harness = await createHarness({ liveSteer: "supported", startReactor: false });
     const threadId = ThreadId.make("thread-1");
     const expectedTurnId = asTurnId("turn-crash-before-steer-call");
@@ -12107,7 +12107,7 @@ describe("ProviderCommandReactor", () => {
       Effect.succeed({ threadId, turnId: expectedTurnId }),
     );
 
-    await Effect.runPromise(
+    const receipt = await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.steer",
         commandId: CommandId.make("cmd-crash-before-steer-call"),
@@ -12123,14 +12123,90 @@ describe("ProviderCommandReactor", () => {
     );
     expect(harness.steerTurn).not.toHaveBeenCalled();
 
-    await harness.startReactor();
+    // Gate the real event read at the persisted intent, without replacing any
+    // event, receipt or queue behavior. Startup and new user work must be
+    // independent of this historical read.
+    const releaseReplayRead = Effect.runSync(Deferred.make<void>());
+    const releaseReplay = Deferred.succeed(releaseReplayRead, undefined);
+    const readEvents = harness.engine.readEvents;
+    let replayParked = false;
+    const readSpy = vi.spyOn(harness.engine, "readEvents").mockImplementation((sequence, limit) => {
+      const events = readEvents(sequence, limit);
+      if (sequence !== receipt.sequence - 1) return events;
+      return Stream.unwrap(
+        Effect.sync(() => {
+          replayParked = true;
+        }).pipe(Effect.andThen(Deferred.await(releaseReplayRead)), Effect.as(events)),
+      );
+    });
+    await harness.addFixtureFinalizer(
+      releaseReplay.pipe(Effect.andThen(Effect.sync(() => readSpy.mockRestore()))),
+    );
+    let startupSettled = false;
+    const started = harness.startReactor().finally(() => {
+      startupSettled = true;
+    });
+    void started.catch(() => undefined);
+    try {
+      await waitFor(() => replayParked && startupSettled).catch((cause: unknown) => {
+        throw new Error("The reactor did not become ready while its saved steer read was parked.", {
+          cause,
+        });
+      });
+      await started;
+
+      const freshThreadId = ThreadId.make("fresh-chat-during-steer-replay");
+      const freshMessageId = asMessageId("fresh-message-during-steer-replay");
+      const createdAt = "2026-01-01T00:00:03.000Z";
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-fresh-chat-during-steer-replay"),
+          threadId: freshThreadId,
+          projectId: asProjectId("project-1"),
+          title: "Fresh chat",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          interactionMode: "default",
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+      const freshTurn = harness.observeNextProviderTurn(freshMessageId, {
+        threadId: freshThreadId,
+      });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-fresh-turn-during-steer-replay"),
+          threadId: freshThreadId,
+          message: {
+            messageId: freshMessageId,
+            role: "user",
+            text: "Fresh user input",
+            attachments: [],
+          },
+          interactionMode: "default",
+          runtimeMode: "approval-required",
+          createdAt,
+        }),
+      );
+      await freshTurn.waitForRunning();
+      expect(harness.steerTurn).not.toHaveBeenCalled();
+    } finally {
+      await Effect.runPromise(releaseReplay);
+      await started.catch(() => undefined);
+      readSpy.mockRestore();
+    }
+
     await waitFor(() => harness.steerTurn.mock.calls.length === 1);
     expect(harness.steerTurn.mock.calls[0]?.[0]).toMatchObject({
       threadId,
       expectedTurnId,
       messageId,
     });
-    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
     await waitFor(async () => {
       const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
       return (

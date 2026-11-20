@@ -198,7 +198,12 @@ type ReactorWork =
   | RuntimeLossEvent
   | RuntimeRecoveryRetry
   | CodexTransientMarkerRetry
-  | { readonly _tag: "codex-prepared-submission"; readonly run: Effect.Effect<void> };
+  | { readonly _tag: "codex-prepared-submission"; readonly run: Effect.Effect<void> }
+  | {
+      readonly _tag: "codex-startup-steer-recovery";
+      readonly event: Extract<ProviderIntentEvent, { type: "thread.turn-steer-requested" }>;
+      readonly complete: Deferred.Deferred<void>;
+    };
 interface PreparedProviderTurn {
   readonly request: ProviderSendTurnInput;
   readonly configuration: ProviderTurnConfiguration | undefined;
@@ -7693,9 +7698,13 @@ const make = Effect.gen(function* () {
     ("_tag" in event
       ? event._tag === "codex-prepared-submission"
         ? event.run
-        : event._tag === "codex-transient-marker-retry"
-          ? processCodexTransientFailure(event.event, event.attempt)
-          : processRuntimeRecoveryStart(event.event, event.attempt, event.delayElapsed)
+        : event._tag === "codex-startup-steer-recovery"
+          ? processDomainEvent(event.event).pipe(
+              Effect.ensuring(Deferred.succeed(event.complete, undefined)),
+            )
+          : event._tag === "codex-transient-marker-retry"
+            ? processCodexTransientFailure(event.event, event.attempt)
+            : processRuntimeRecoveryStart(event.event, event.attempt, event.delayElapsed)
       : isRuntimeLossEvent(event)
         ? processRuntimeLoss(event)
         : processDomainEvent(event as ProviderIntentEvent)
@@ -7739,10 +7748,12 @@ const make = Effect.gen(function* () {
     // returns the original sequence without republishing on the hot stream;
     // replay that one persisted intent into this process-local worker.
     const persistedIntent = yield* orchestrationEngine
-      .readEvents(Math.max(0, receipt.sequence - 1))
-      .pipe(Stream.take(1), Stream.runHead);
+      .readEvents(Math.max(0, receipt.sequence - 1), 1)
+      .pipe(Stream.runHead);
     if (
       Option.isSome(persistedIntent) &&
+      persistedIntent.value.sequence === receipt.sequence &&
+      persistedIntent.value.commandId === command.commandId &&
       (persistedIntent.value.type === "thread.turn-start-requested" ||
         persistedIntent.value.type === "thread.turn-steer-requested")
     ) {
@@ -7752,31 +7763,40 @@ const make = Effect.gen(function* () {
 
   const recoverUnsettledCodexSteerIntentsOnStartup = Effect.fn(
     "recoverUnsettledCodexSteerIntentsOnStartup",
-  )(function* () {
+  )(function* (upperSequence: number) {
     const candidates = yield* projectionSnapshotQuery.getUnsettledCodexSteerIntentEvents();
     let replayedCount = 0;
-    yield* Effect.forEach(
-      candidates,
-      (candidate) =>
-        Effect.gen(function* () {
-          const persistedIntent = yield* orchestrationEngine
-            .readEvents(Math.max(0, candidate.sequence - 1))
-            .pipe(Stream.take(1), Stream.runHead);
-          if (
-            Option.isNone(persistedIntent) ||
-            persistedIntent.value.sequence !== candidate.sequence ||
-            persistedIntent.value.type !== "thread.turn-steer-requested" ||
-            persistedIntent.value.payload.threadId !== candidate.threadId ||
-            persistedIntent.value.payload.messageId !== candidate.messageId ||
-            persistedIntent.value.payload.expectedTurnId !== candidate.expectedTurnId
-          ) {
-            return;
-          }
-          yield* enqueueProviderIntentEvent(persistedIntent.value);
-          replayedCount += 1;
-        }),
-      { concurrency: 1, discard: true },
-    );
+    for (const candidate of candidates) {
+      // Events committed after the startup boundary already have a live
+      // subscriber. A snapshot taken later does not grant replay authority.
+      if (candidate.sequence > upperSequence) continue;
+      yield* Effect.sleep(1);
+      // Stream truncation alone would read and decode a whole SQLite page.
+      const persistedIntent = yield* orchestrationEngine
+        .readEvents(Math.max(0, candidate.sequence - 1), 1)
+        .pipe(Stream.runHead);
+      if (
+        Option.isNone(persistedIntent) ||
+        persistedIntent.value.sequence !== candidate.sequence ||
+        persistedIntent.value.type !== "thread.turn-steer-requested" ||
+        persistedIntent.value.payload.threadId !== candidate.threadId ||
+        persistedIntent.value.payload.messageId !== candidate.messageId ||
+        persistedIntent.value.payload.expectedTurnId !== candidate.expectedTurnId ||
+        !(yield* claimProviderIntentEvent(persistedIntent.value.eventId))
+      )
+        continue;
+      const complete = yield* Deferred.make<void>();
+      // Keep only one recovered intent in the regular ordered worker. Live
+      // commands can enter between historical items, while the worker still
+      // applies every existing attempt, Stop, and ownership guard.
+      yield* worker.enqueue({
+        _tag: "codex-startup-steer-recovery",
+        event: persistedIntent.value,
+        complete,
+      });
+      yield* Deferred.await(complete);
+      replayedCount += 1;
+    }
     if (replayedCount > 0) {
       yield* Effect.logWarning("provider command reactor replayed unsettled Codex steer intents", {
         intentCount: replayedCount,
@@ -7960,6 +7980,8 @@ const make = Effect.gen(function* () {
       Stream.runForEach(orchestrationEngine.streamDomainEvents, processEvent),
     );
     yield* Effect.yieldNow;
+    const startupSteerSequence = (yield* orchestrationEngine.diagnosticsSnapshot)
+      .commandReadModelSequence;
 
     // Recover only our recent, explicitly marked losses, not every historical
     // interrupted turn. The bounded per-thread suffix avoids scanning large
@@ -8042,16 +8064,6 @@ const make = Effect.gen(function* () {
             ),
       ),
     );
-    yield* recoverUnsettledCodexSteerIntentsOnStartup().pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning(
-          "provider command reactor failed to replay unsettled Codex steers after restart",
-          {
-            outcome: Cause.hasInterruptsOnly(cause) ? "interrupted" : "failed",
-          },
-        ),
-      ),
-    );
     yield* recoverPostTerminalStaleSteerMessagesOnStartup().pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning(
@@ -8066,6 +8078,18 @@ const make = Effect.gen(function* () {
           cause: Cause.pretty(cause),
         }),
       ),
+    );
+    // Startup must accept new threads while the durable Codex backlog is
+    // reconciled. This producer retires with the same scope as the live queue.
+    yield* recoverUnsettledCodexSteerIntentsOnStartup(startupSteerSequence).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.interrupt
+          : Effect.logWarning(
+              "provider command reactor failed to replay unsettled Codex steers after restart",
+            ),
+      ),
+      Effect.forkScoped,
     );
   });
 
