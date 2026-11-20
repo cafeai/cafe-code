@@ -23,7 +23,7 @@ export class GeminiCliQualificationError extends Data.TaggedError("GeminiCliQual
   readonly message: string;
 }> {}
 
-function cliEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function geminiCliEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   // Canonicalize case aliases too: Windows may select a duplicate with a
   // different spelling before the canonical key reaches the child.
   return {
@@ -57,7 +57,7 @@ export const qualifyGeminiCli = Effect.fn("qualifyGeminiCli")(function* (
     const child = yield* spawner.spawn(
       ChildProcess.make(binaryPath, ["--version"], {
         cwd,
-        env: cliEnvironment(environment),
+        env: geminiCliEnvironment(environment),
         extendEnv: false,
         stdin: "ignore",
       }),
@@ -136,7 +136,7 @@ export function makeGeminiAcpRuntime({
       // Default in both processes and cannot establish or change Bypass.
       args: bypassPermissions === true ? ["acp", "--dangerously-skip-permissions"] : ["acp"],
       cwd: options.cwd,
-      env: cliEnvironment(environment),
+      env: geminiCliEnvironment(environment),
       extendEnv: false,
     },
     // Account setup is external. Background discovery must never launch a

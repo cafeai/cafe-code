@@ -210,7 +210,7 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
   readonly refreshAccountUsage?: (input: {
     readonly settings: Settings;
     readonly snapshot: ServerProvider;
-  }) => Effect.Effect<ServerProviderAccountRateLimits | undefined, ServerSettingsError>;
+  }) => Effect.Effect<ServerProviderAccountRateLimits | null | undefined, ServerSettingsError>;
   readonly refreshModels?: (input: {
     readonly settings: Settings;
     readonly snapshot: ServerProvider;
@@ -518,9 +518,9 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
         settings,
         snapshot: currentState.snapshot,
       }));
-    // A transient usage endpoint failure must not erase a known-good usage
-    // snapshot. Full provider health refreshes remain authoritative for
-    // clearing account-bound data after logout or account replacement.
+    // Undefined retains a known-good reading. A source without stable account
+    // identity can explicitly withdraw its reading instead of carrying it
+    // through an unavailable refresh that could reflect an account change.
     if (accountRateLimits === undefined) {
       return currentState.snapshot;
     }
@@ -535,10 +535,12 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
       return currentState.snapshot;
     }
 
-    const nextSnapshot: ServerProvider = {
-      ...currentState.snapshot,
-      accountRateLimits,
-    };
+    const { accountRateLimits: _oldRateLimits, ...snapshotWithoutRateLimits } =
+      currentState.snapshot;
+    const nextSnapshot: ServerProvider =
+      accountRateLimits === null
+        ? snapshotWithoutRateLimits
+        : { ...snapshotWithoutRateLimits, accountRateLimits };
     if (Equal.equals(currentState.snapshot, nextSnapshot)) {
       return currentState.snapshot;
     }

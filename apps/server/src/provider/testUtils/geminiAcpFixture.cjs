@@ -7,6 +7,65 @@ if (process.argv[2] === "--version") {
   console.log(`Antigravity CLI ${version}`);
   process.exit(0);
 }
+if (process.argv.includes("--print")) {
+  const output = process.argv.indexOf("--output-format");
+  if (!process.argv.includes("/usage") || output < 0 || process.argv[output + 1] !== "json") {
+    process.exit(1);
+  }
+  // A representative native structured slash-command reply. Never read a
+  // real profile, run a model prompt or expose actual account metadata.
+  console.log(
+    JSON.stringify({
+      status: "SUCCESS",
+      conversation_id: "",
+      num_turns: 0,
+      usage: { total_tokens: 0 },
+      command: {
+        name: process.env.CAFE_GEMINI_FIXTURE_REPLY_COMMAND ?? "usage",
+        data: {
+          groups: [
+            {
+              name: "Gemini Models",
+              buckets: [
+                {
+                  id: "gemini-5h",
+                  window: "5h",
+                  remaining_fraction: 0.4,
+                  reset_time: "2026-11-21T07:00:00Z",
+                },
+                {
+                  id: "gemini-weekly",
+                  window: "weekly",
+                  remaining_fraction: 0.75,
+                  reset_time: "2026-11-24T22:16:37Z",
+                },
+              ],
+            },
+            {
+              name: "Claude and GPT Models",
+              buckets: [
+                {
+                  id: "3p-5h",
+                  window: "5h",
+                  remaining_fraction: 0.15,
+                  reset_time: "2026-11-21T08:00:00Z",
+                },
+                {
+                  id: "3p-weekly",
+                  window: "weekly",
+                  disabled: true,
+                  remaining_fraction: 0,
+                  reset_time: "2026-11-25T06:00:00Z",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    }),
+  );
+  process.exit(0);
+}
 if (process.argv[2] !== "acp" || process.argv.length !== 3) process.exit(1);
 
 const sessionId = "gemini-fixture-session";

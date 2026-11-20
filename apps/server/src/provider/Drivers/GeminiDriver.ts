@@ -14,6 +14,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import { APPLICATION_VERSION } from "../../applicationVersion.ts";
 import { ServerConfig } from "../../config.ts";
 import type { TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
+import { readGeminiAccountRateLimits } from "../acp/GeminiAcpQuota.ts";
 import { buildGeminiAcpModels } from "../acp/GeminiAcpSupport.ts";
 import { makeGeminiAcpRuntime, qualifyGeminiCli } from "../acp/GeminiAcpRuntime.ts";
 import { ProviderDriverError } from "../Errors.ts";
@@ -52,19 +53,25 @@ const textGeneration = {
   generateThreadMetadata: unsupportedTextGeneration("generateThreadMetadata"),
 } satisfies TextGenerationShape;
 
-function discoverGeminiModels(input: {
+interface GeminiProbeOptions {
   readonly settings: GeminiSettings;
   readonly environment: NodeJS.ProcessEnv;
   readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly fs: FileSystem.FileSystem;
-}) {
+}
+
+function qualifyConfiguredGeminiCli(input: GeminiProbeOptions, cwd: string) {
+  return qualifyGeminiCli(input.settings.binaryPath, cwd, input.environment).pipe(
+    Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, input.spawner),
+  );
+}
+
+function discoverGeminiModels(input: GeminiProbeOptions) {
   return Effect.gen(function* () {
     // No project cwd, workspace material or prompt enters a catalogue
     // discovery session. Register scratch cleanup before the exact child.
     const cwd = yield* input.fs.makeTempDirectoryScoped({ prefix: "cafecode-gemini-catalog-" });
-    const cli = yield* qualifyGeminiCli(input.settings.binaryPath, cwd, input.environment).pipe(
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, input.spawner),
-    );
+    const cli = yield* qualifyConfiguredGeminiCli(input, cwd);
     const runtime = yield* makeGeminiAcpRuntime({
       binaryPath: cli.binaryPath,
       environment: input.environment,
@@ -83,7 +90,7 @@ function discoverGeminiModels(input: {
         .request("session/close", { sessionId: started.sessionId })
         .pipe(Effect.timeoutOption("1 second"), Effect.ignore);
     }
-    return { version: cli.version, models };
+    return { cli, models };
   }).pipe(Effect.scoped, Effect.timeout("20 seconds"));
 }
 
@@ -99,6 +106,7 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
       const settings = { ...input.config, enabled: input.enabled };
       const environment =
         input.processEnvironment ?? mergeProviderInstanceEnvironment(input.environment);
+      const probeOptions = { settings, environment, spawner, fs };
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER,
         instanceId: input.instanceId,
@@ -132,17 +140,22 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
       const checkProvider = Effect.gen(function* () {
         const checkedAt = DateTime.formatIso(yield* DateTime.now);
         if (!input.enabled) return snapshotFor(checkedAt, pending);
-        const result = yield* Effect.result(
-          discoverGeminiModels({ settings, environment, spawner, fs }),
-        );
+        const result = yield* Effect.result(discoverGeminiModels(probeOptions));
         if (result._tag === "Success") {
+          const accountRateLimits = yield* readGeminiAccountRateLimits({
+            ...result.success.cli,
+            environment,
+            spawner,
+            fs,
+          });
           return snapshotFor(
             checkedAt,
             {
               installed: true,
-              version: result.success.version,
+              version: result.success.cli.version,
               status: result.success.models.length ? "ready" : "warning",
               auth: { status: "authenticated" },
+              ...(accountRateLimits ? { accountRateLimits } : {}),
               ...(result.success.models.length
                 ? {}
                 : { message: "Antigravity CLI did not advertise any selectable Gemini models." }),
@@ -165,6 +178,18 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
                 : "Cafe Code could not discover Gemini models from the configured Antigravity CLI.",
         });
       });
+      const refreshAccountUsage = Effect.gen(function* () {
+        // Antigravity can be updated or replaced independently of Cafe. Recheck
+        // this exact configuration without reopening an ACP catalog session.
+        const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "cafecode-gemini-usage-version-" });
+        const cli = yield* qualifyConfiguredGeminiCli(probeOptions, cwd);
+        return (yield* readGeminiAccountRateLimits({ ...cli, environment, spawner, fs })) ?? null;
+      }).pipe(
+        Effect.scoped,
+        // The configured login is external and may change without a stable
+        // account identifier. Unavailable observations withdraw older quota.
+        Effect.catch(() => Effect.succeed(null)),
+      );
       const adapter = yield* makeGeminiAdapter(settings, {
         instanceId: input.instanceId,
         environment,
@@ -180,6 +205,10 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
         initialSnapshot: () =>
           DateTime.now.pipe(Effect.map((now) => snapshotFor(DateTime.formatIso(now), pending))),
         checkProvider,
+        refreshAccountUsage: ({ snapshot }) =>
+          settings.enabled && snapshot.auth.status === "authenticated"
+            ? refreshAccountUsage
+            : Effect.succeed(null),
         // Discovery needs an empty session. Use normal registry admission and
         // explicit refreshes instead of creating native sessions on a timer.
         probePolicy: { initialRefresh: "external" },

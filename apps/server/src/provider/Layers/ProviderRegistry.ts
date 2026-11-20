@@ -195,14 +195,14 @@ export const mergeProviderSnapshot = (
     // Codex has both full probe snapshots and sparse live updates. Preserve the
     // latest redacted usage when the same authenticated account suffers a transient
     // probe failure, but clear it on auth/account churn so a percentage from one
-    // account can never be presented as another account's quota. Grok's ACP auth
-    // response does not currently expose a stable account identity, so an omitted
-    // full-probe usage result must clear instead of guessing that cached-token auth
-    // still represents the same person. Its usage-only prompt refresh independently
-    // preserves a known-good snapshot on transient endpoint failure.
+    // account can never be presented as another account's quota. The Grok and
+    // Gemini ACP checks do not expose a stable account identity. Their omitted
+    // full-probe results cannot prove that an earlier quota still belongs to
+    // the active login. A Gemini usage-only withdrawal follows the same rule.
     ...(reconciledProvider.accountRateLimits === undefined &&
     previousProvider.accountRateLimits !== undefined &&
     reconciledProvider.driver !== ProviderDriverKind.make("grok") &&
+    reconciledProvider.driver !== ProviderDriverKind.make("gemini") &&
     (reconciledProvider.driver !== ProviderDriverKind.make("codex") ||
       isSameAuthenticatedProviderAccount(previousProvider, reconciledProvider))
       ? { accountRateLimits: previousProvider.accountRateLimits }

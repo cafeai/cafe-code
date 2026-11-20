@@ -18,7 +18,10 @@ export function shouldSurfaceProviderAccountRateLimits(
 ): boolean {
   return (
     provider?.auth.status === "authenticated" &&
-    (provider.driver === "codex" || provider.driver === "claudeAgent" || provider.driver === "grok")
+    (provider.driver === "codex" ||
+      provider.driver === "claudeAgent" ||
+      provider.driver === "grok" ||
+      provider.driver === "gemini")
   );
 }
 

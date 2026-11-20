@@ -272,7 +272,7 @@ function isInsideComposerFloatingLayer(element: Element): boolean {
 const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(props: {
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
-  codexRateLimits: ServerProvider["accountRateLimits"] | null;
+  accountRateLimits: ServerProvider["accountRateLimits"] | null;
   quotaContext?: ProviderQuotaContext | undefined;
   usageResetAction: ReactNode;
   subagentConcurrency?: SubagentConcurrencyPresentation | null;
@@ -310,10 +310,11 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 }) {
   return (
     <>
-      {(props.activeContextWindow || props.quotaContext) && !props.sessionRailVisible ? (
+      {(props.activeContextWindow || props.accountRateLimits || props.quotaContext) &&
+      !props.sessionRailVisible ? (
         <ContextWindowMeter
           usage={props.activeContextWindow}
-          codexRateLimits={props.codexRateLimits}
+          accountRateLimits={props.accountRateLimits}
           quotaContext={props.quotaContext}
           subagentConcurrency={props.subagentConcurrency}
           codexContextWindow={props.codexContextWindow}
@@ -1407,7 +1408,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       disabled={isSendBusy || isConnecting || environmentUnavailable !== null}
     />
   ) : null;
-  const selectedCodexRateLimits = shouldSurfaceProviderAccountRateLimits(selectedProviderStatus)
+  const selectedAccountRateLimits = shouldSurfaceProviderAccountRateLimits(selectedProviderStatus)
     ? (selectedProviderStatus?.accountRateLimits ?? null)
     : null;
   const requestProviderModelsRefresh = useCallback(
@@ -4698,7 +4699,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 <ComposerFooterPrimaryActions
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
-                  codexRateLimits={selectedCodexRateLimits}
+                  accountRateLimits={selectedAccountRateLimits}
                   quotaContext={quotaContext}
                   usageResetAction={
                     <ProviderUsageResetButton

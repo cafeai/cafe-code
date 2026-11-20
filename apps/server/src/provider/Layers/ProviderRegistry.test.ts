@@ -2036,14 +2036,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         );
       });
 
-      it("does not preserve Grok usage when a full refresh omits account identity and quota", () => {
+      it.each(["grok", "gemini"])("withdraws unavailable quota for the %s login", (provider) => {
         const previousProvider = {
-          instanceId: ProviderInstanceId.make("grok"),
-          driver: ProviderDriverKind.make("grok"),
+          instanceId: ProviderInstanceId.make(provider),
+          driver: ProviderDriverKind.make(provider),
           status: "ready",
           enabled: true,
           installed: true,
-          auth: { status: "authenticated", type: "cached-token" },
+          auth: {
+            status: "authenticated",
+            ...(provider === "grok" ? { type: "cached-token" } : {}),
+          },
           checkedAt: "2026-08-16T00:00:00.000Z",
           version: "1.0.4",
           models: [],
@@ -2051,7 +2054,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           skills: [],
           accountRateLimits: {
             rateLimits: {
-              limitId: "grok",
+              limitId: provider,
               primary: { usedPercent: 1, windowDurationMins: 10_080 },
             },
             checkedAt: "2026-08-16T00:00:00.000Z",
