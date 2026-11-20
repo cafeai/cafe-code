@@ -2,13 +2,12 @@ import type {
   ProviderSession,
   ProviderSessionQuotaInput,
   ProviderSessionQuotaResult,
-  ProviderSessionQuotaReport,
   ThreadId,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
-import type { ProviderInstance } from "./ProviderDriver.ts";
+import type { ProviderAccountQuotaReading, ProviderInstance } from "./ProviderDriver.ts";
 
 export const UNAVAILABLE_SESSION_QUOTA: ProviderSessionQuotaResult = { report: null };
 
@@ -17,13 +16,13 @@ export const readBoundInstanceQuota = (
   resolveInstance: Effect.Effect<
     Pick<ProviderInstance, "enabled" | "driverKind" | "readAccountQuota"> | undefined
   >,
-): Effect.Effect<ProviderSessionQuotaReport | null> =>
+): Effect.Effect<ProviderAccountQuotaReading> =>
   Effect.gen(function* () {
     const instance = yield* resolveInstance;
     if (!instance?.enabled || instance.driverKind !== "claudeAgent" || !instance.readAccountQuota)
-      return null;
-    const report = yield* instance.readAccountQuota;
-    return (yield* resolveInstance) === instance ? report : null;
+      return UNAVAILABLE_SESSION_QUOTA;
+    const reading = yield* instance.readAccountQuota;
+    return (yield* resolveInstance) === instance ? reading : UNAVAILABLE_SESSION_QUOTA;
   });
 
 /** Denial is an inert subscription, not successful stream completion. The
@@ -68,15 +67,15 @@ export function sameProviderQuotaAuthority(
 }
 
 /** Revalidate saved shell/configuration around the selected instance's bounded
- * native allowance read. Without that capability, use only the same admitted
- * instance's current passive session reports. Exact-chat requests retain their
- * binding; Settings may read native account allowances before any chat exists. */
+ * native allowance read. If there is no usable native reading, use only the
+ * same admitted instance's current passive reports. Exact-chat requests retain
+ * their binding, and Settings can read native allowances before any chat exists. */
 export const readBoundProviderQuota = (
   input: ProviderSessionQuotaInput,
   resolveAuthority: Effect.Effect<ProviderQuotaAuthority | undefined>,
   readSessions: Effect.Effect<ReadonlyArray<ProviderSession>>,
-  readAccountQuota?: Effect.Effect<ProviderSessionQuotaReport | null>,
-): Effect.Effect<ProviderSessionQuotaResult> =>
+  readAccountQuota?: Effect.Effect<ProviderAccountQuotaReading>,
+): Effect.Effect<ProviderAccountQuotaReading> =>
   Effect.gen(function* () {
     const before = yield* resolveAuthority;
     if (!before || (before.sessions.length === 0 && (input.session || !readAccountQuota)))
@@ -89,10 +88,10 @@ export const readBoundProviderQuota = (
     )
       return UNAVAILABLE_SESSION_QUOTA;
     if (readAccountQuota) {
-      const report = yield* readAccountQuota;
+      const reading = yield* readAccountQuota;
       const after = yield* resolveAuthority;
       if (!after || !sameProviderQuotaAuthority(before, after)) return UNAVAILABLE_SESSION_QUOTA;
-      if (report) return { report };
+      if (reading.report) return reading;
     }
     const sessions = yield* readSessions;
     const after = yield* resolveAuthority;
@@ -131,7 +130,7 @@ export const readBoundProviderQuota = (
  * ABA changes). A cancelled subscriber never cancels or changes a provider.
  * Timeout/failure is deliberately unavailable and never retimestamps a report. */
 export function subscribeProviderQuota(
-  read: Effect.Effect<ProviderSessionQuotaResult>,
+  read: Effect.Effect<ProviderAccountQuotaReading>,
   invalidations: ReadonlyArray<Stream.Stream<unknown>>,
 ): Stream.Stream<ProviderSessionQuotaResult> {
   return Stream.unwrap(
@@ -147,23 +146,34 @@ export function subscribeProviderQuota(
         ).pipe(Effect.forkScoped({ startImmediately: true }));
       }
       yield* Queue.offer(queue, undefined);
-      return Stream.fromQueue(queue).pipe(
-        Stream.mapEffect(() =>
-          Effect.gen(function* () {
-            const started = generation;
-            const result = yield* read.pipe(
-              // Cold account selection and the control-only read have separate
-              // finite allowances. Include their joined native cleanup plus
-              // both authority observations, without widening either child.
-              Effect.timeout(15_000),
-              Effect.catchCause(() => Effect.succeed(UNAVAILABLE_SESSION_QUOTA)),
-            );
-            // No await between the final generation comparison and return.
-            return started === generation ? result : UNAVAILABLE_SESSION_QUOTA;
-          }),
+      return Stream.fromEffectRepeat(
+        Queue.take(queue).pipe(
+          // The shared cache expires one minute after native lookup completion.
+          // Wait from the completed read, so a slow first lookup cannot make a
+          // fixed subscription tick miss its expiry and double the interval.
+          Effect.timeoutOption("60 seconds"),
+          Effect.andThen(
+            Effect.gen(function* () {
+              const started = generation;
+              const result = yield* read.pipe(
+                // Cold account selection and the control-only read have separate
+                // finite allowances. Include their joined native cleanup plus
+                // both authority observations, without widening either child.
+                Effect.timeout(15_000),
+                Effect.catchCause(() =>
+                  Effect.succeed<ProviderAccountQuotaReading>(UNAVAILABLE_SESSION_QUOTA),
+                ),
+              );
+              // No await between the final generation checks and publication.
+              // The reader's private guard must never enter the public stream.
+              const { isCurrent, ...reading } = result;
+              return started === generation && (!isCurrent || isCurrent())
+                ? reading
+                : UNAVAILABLE_SESSION_QUOTA;
+            }),
+          ),
         ),
-        Stream.changesWith((left, right) => JSON.stringify(left) === JSON.stringify(right)),
-      );
+      ).pipe(Stream.changesWith((left, right) => JSON.stringify(left) === JSON.stringify(right)));
     }),
   );
 }

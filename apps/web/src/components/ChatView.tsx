@@ -158,7 +158,10 @@ import { buildTemporaryWorktreeBranchName } from "@cafecode/shared/git";
 import { useHasOnScreenKeyboard, useIsMobile, useMediaQuery } from "../hooks/useMediaQuery";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import { deriveLatestContextWindowSnapshot } from "../lib/contextWindow";
-import { shouldSurfaceProviderAccountRateLimits } from "../lib/codexRateLimits";
+import {
+  shouldShowAntigravityQuotaStatus,
+  shouldSurfaceProviderAccountRateLimits,
+} from "../lib/codexRateLimits";
 import { resolveShortcutCommand } from "../keybindings";
 import PlanSidebar from "./PlanSidebar";
 import { ResizableRightPanel } from "./ResizableRightPanel";
@@ -9152,6 +9155,7 @@ export default function ChatView(props: ChatViewProps) {
                 onOpenSubagentDetail={openSubagentDetail}
                 usage={sessionRailUsage}
                 rateLimits={sessionRailRateLimits}
+                showAntigravityQuotaStatus={shouldShowAntigravityQuotaStatus(activeProviderStatus)}
                 quotaContext={sessionRailQuotaContext}
                 subagentConcurrency={sessionRailSubagentConcurrency}
                 codexContextWindow={sessionRailContextOverride}

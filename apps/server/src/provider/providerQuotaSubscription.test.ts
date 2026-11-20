@@ -57,7 +57,7 @@ describe("passive session quota subscriptions", () => {
       let calls = 0;
       const native = Effect.sync(() => {
         calls++;
-        return nativeReport;
+        return { report: nativeReport };
       });
       assert.deepEqual(
         yield* readBoundProviderQuota(
@@ -79,7 +79,7 @@ describe("passive session quota subscriptions", () => {
           input,
           Effect.succeed(authority),
           Effect.succeed([session]),
-          Effect.succeed(null),
+          Effect.succeed(UNAVAILABLE_SESSION_QUOTA),
         ),
         available,
       );
@@ -93,7 +93,7 @@ describe("passive session quota subscriptions", () => {
       const read = Effect.sync(() => {
         calls++;
         current = { ...authority, configuration: "changed" };
-        return { ...report, source: "claude-cli" as const };
+        return { report: { ...report, source: "claude-cli" as const }, stale: true as const };
       });
       assert.deepEqual(
         yield* readBoundProviderQuota(
@@ -122,12 +122,16 @@ describe("passive session quota subscriptions", () => {
   it.effect("binds native reads to the exact enabled Claude instance generation", () =>
     Effect.gen(function* () {
       let calls = 0;
+      const previous = {
+        report: { ...report, source: "claude-cli" as const },
+        stale: true as const,
+      };
       const original = {
         enabled: true,
         driverKind: ProviderDriverKind.make("claudeAgent"),
         readAccountQuota: Effect.sync(() => {
           calls++;
-          return report;
+          return previous;
         }),
       };
       const { readAccountQuota: _read, ...unsupported } = original;
@@ -137,15 +141,18 @@ describe("passive session quota subscriptions", () => {
         { ...original, driverKind: ProviderDriverKind.make("codex") },
         unsupported,
       ])
-        assert.equal(yield* readBoundInstanceQuota(Effect.succeed(instance)), null);
+        assert.deepEqual(
+          yield* readBoundInstanceQuota(Effect.succeed(instance)),
+          UNAVAILABLE_SESSION_QUOTA,
+        );
       assert.equal(calls, 0);
-      assert.deepEqual(yield* readBoundInstanceQuota(Effect.succeed(original)), report);
+      assert.deepEqual(yield* readBoundInstanceQuota(Effect.succeed(original)), previous);
       let reads = 0;
-      assert.equal(
+      assert.deepEqual(
         yield* readBoundInstanceQuota(
           Effect.sync(() => (++reads === 1 ? original : { ...original })),
         ),
-        null,
+        UNAVAILABLE_SESSION_QUOTA,
       );
       assert.equal(calls, 2);
     }),
@@ -414,25 +421,32 @@ describe("passive session quota subscriptions", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("keeps a bounded cold account read alive through its independent phases", () =>
+  it.effect("refreshes one minute after a cold read completes its independent phases", () =>
     Effect.gen(function* () {
       const entered = yield* Deferred.make<void>();
       const ready = yield* Deferred.make<void>();
+      const refreshed = yield* Deferred.make<void>();
       const values: ProviderSessionQuotaResult[] = [];
+      const newer = { report: { ...report, observedAt: "2026-10-09T00:01:13.000Z" } };
+      let reads = 0;
       yield* subscribeProviderQuota(
-        Effect.yieldNow.pipe(
-          Effect.andThen(Deferred.succeed(entered, undefined)),
-          // The reader owns source selection, then control work. Their combined
-          // valid duration may exceed the former whole-inventory envelope.
-          Effect.andThen(Effect.sleep(13_000)),
-          Effect.as(available),
+        Effect.suspend(() =>
+          ++reads === 1
+            ? Effect.yieldNow.pipe(
+                Effect.andThen(Deferred.succeed(entered, undefined)),
+                // Cold selection and native control work have independent bounds.
+                Effect.andThen(Effect.sleep(13_000)),
+                Effect.as(available),
+              )
+            : Effect.succeed(newer),
         ),
         [],
       ).pipe(
         Stream.runForEach((value) =>
-          Effect.sync(() => values.push(value)).pipe(
-            Effect.andThen(Deferred.succeed(ready, undefined)),
-          ),
+          Effect.gen(function* () {
+            values.push(value);
+            yield* Deferred.succeed(values.length === 1 ? ready : refreshed, undefined);
+          }),
         ),
         Effect.forkScoped,
       );
@@ -442,6 +456,11 @@ describe("passive session quota subscriptions", () => {
       yield* TestClock.adjust(8_000);
       yield* Deferred.await(ready);
       assert.deepEqual(values, [available]);
+      yield* TestClock.adjust(59_999);
+      assert.equal(reads, 1);
+      yield* TestClock.adjust(1);
+      yield* Deferred.await(refreshed);
+      assert.deepEqual(values, [available, newer]);
     }).pipe(Effect.scoped),
   );
 });

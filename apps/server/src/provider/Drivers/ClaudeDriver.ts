@@ -157,13 +157,16 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         binaryPath: runtime.binaryPath,
       } satisfies ClaudeSettings;
       const effectiveEnvironment = runtime.env;
-      const resolveEnvironment = yield* makeClaudeAuthenticationEnvironment(
+      const resolveAuthenticationEnvironment = yield* makeClaudeAuthenticationEnvironment(
         effectiveConfig,
         effectiveEnvironment,
       );
-      const readAccountQuota = yield* makeClaudeAccountQuotaReader(
+      const accountQuota = yield* makeClaudeAccountQuotaReader(
         effectiveConfig.binaryPath,
-        resolveEnvironment,
+        resolveAuthenticationEnvironment,
+      );
+      const resolveEnvironment = resolveAuthenticationEnvironment.pipe(
+        Effect.tap(accountQuota.observeEnvironment),
       );
       const maintenanceCapabilities =
         effectiveConfig.runtimeSource === "bundled"
@@ -206,8 +209,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
       const scope = yield* Effect.scope;
       const onAuthStatusChanged = (failed: boolean): Effect.Effect<void> =>
         Effect.gen(function* () {
-          const previous = yield* Ref.getAndSet(authFailureRef, failed);
-          if (previous === failed) {
+          const changed = yield* Ref.modify(authFailureRef, (previous) => {
+            if (previous === failed) return [false, previous] as const;
+            // Retire the exact prior reading with the auth transition, before
+            // any further effect can publish an old result under the new state.
+            accountQuota.retireReading();
+            return [true, failed] as const;
+          });
+          if (!changed) {
             return;
           }
           const refreshSnapshot = yield* Ref.get(snapshotRefreshRef);
@@ -279,6 +288,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
             Ref.get(authFailureRef),
           ),
         ),
+        Effect.tap((snapshot) => accountQuota.observeAuthentication(snapshot.auth)),
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(Path.Path, path),
@@ -337,7 +347,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
         snapshot,
         adapter,
         textGeneration,
-        readAccountQuota,
+        readAccountQuota: accountQuota.read,
       } satisfies ProviderInstance;
     }),
 };

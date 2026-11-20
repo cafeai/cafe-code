@@ -137,8 +137,12 @@ export function registerThreadUsageTool(
           // A legacy session without an instance can only identify configuration.
           const source =
             sessionInstanceId !== undefined ? ("session" as const) : ("configured" as const);
+          // Historical snapshots can remain useful in the UI while a login
+          // cannot be revalidated. This endpoint describes the current account.
           const account =
-            provider?.auth.status === "authenticated" ? provider.accountRateLimits : undefined;
+            provider?.auth.status === "authenticated" && !provider.accountRateLimits?.stale
+              ? provider.accountRateLimits
+              : undefined;
           const buckets = account ? deriveCodexRateLimitBuckets(account) : [];
           return {
             threadId: selectedThreadId,

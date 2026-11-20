@@ -16,11 +16,13 @@ const configLayer = ServerConfig.layerTest(process.cwd(), {
 }).pipe(Layer.provideMerge(NodeServices.layer));
 const fixture = fileURLToPath(new URL("../testUtils/geminiAcpFixture.cjs", import.meta.url));
 
-it.live("publishes the native Gemini catalogue and withdraws unavailable account quota", () =>
+it.live("preserves historical Gemini quota until fresh usage or a conclusive sign-in refusal", () =>
   Effect.gen(function* () {
     const native = yield* ChildProcessSpawner.ChildProcessSpawner;
     let ide = false;
+    let catalogErrorCode: number | undefined;
     let usageReplyCommand = "usage";
+    let remainingFraction = 0.4;
     let startedAcp = 0;
     const spawner = ChildProcessSpawner.make((command) => {
       if (command._tag !== "StandardCommand" || command.command !== process.execPath) {
@@ -37,6 +39,10 @@ it.live("publishes the native Gemini catalogue and withdraws unavailable account
           env: {
             ...command.options.env,
             CAFE_GEMINI_FIXTURE_REPLY_COMMAND: usageReplyCommand,
+            CAFE_GEMINI_FIXTURE_QUOTA_FRACTION: String(remainingFraction),
+            ...(catalogErrorCode === undefined
+              ? {}
+              : { CAFE_GEMINI_FIXTURE_CATALOG_ERROR_CODE: String(catalogErrorCode) }),
           },
         }),
       );
@@ -86,15 +92,38 @@ it.live("publishes the native Gemini catalogue and withdraws unavailable account
 
     usageReplyCommand = "stats";
     assert.isDefined(instance.snapshot.refreshAccountUsage);
-    const withoutQuota = yield* instance.snapshot.refreshAccountUsage!;
-    assert.equal(withoutQuota.auth.status, "authenticated");
-    assert.isUndefined(withoutQuota.accountRateLimits);
+    const staleQuota = yield* instance.snapshot.refreshAccountUsage!;
+    assert.equal(staleQuota.auth.status, "authenticated");
+    assert.deepEqual(staleQuota.accountRateLimits, { ...ready.accountRateLimits!, stale: true });
     assert.equal(startedAcp, 1, "an account usage refresh must not open a new ACP session");
+
+    catalogErrorCode = -32603;
+    const inconclusiveStatus = yield* instance.snapshot.refresh;
+    assert.equal(inconclusiveStatus.auth.status, "unknown");
+    assert.deepEqual(inconclusiveStatus.accountRateLimits, staleQuota.accountRateLimits);
+
+    catalogErrorCode = undefined;
+    usageReplyCommand = "usage";
+    remainingFraction = 0.5;
+    const recovered = yield* instance.snapshot.refresh;
+    assert.isUndefined(recovered.accountRateLimits?.stale);
+    assert.equal(recovered.accountRateLimits?.rateLimits.primary?.usedPercent, 50);
+
+    catalogErrorCode = -32000;
+    const signedOut = yield* instance.snapshot.refresh;
+    assert.equal(signedOut.auth.status, "unauthenticated");
+    assert.isUndefined(signedOut.accountRateLimits);
+
+    catalogErrorCode = undefined;
+    usageReplyCommand = "stats";
+    const signedInAgain = yield* instance.snapshot.refresh;
+    assert.equal(signedInAgain.auth.status, "authenticated");
+    assert.isUndefined(signedInAgain.accountRateLimits);
 
     ide = true;
     const unavailable = yield* instance.snapshot.refresh;
     assert.equal(unavailable.status, "error");
     assert.deepEqual(unavailable.models, []);
-    assert.equal(startedAcp, 1);
+    assert.equal(startedAcp, 5);
   }).pipe(Effect.provide(configLayer)),
 );

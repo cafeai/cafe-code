@@ -408,60 +408,61 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
-  it.effect("correlates extension response errors with the originating request", () =>
-    Effect.gen(function* () {
-      const { stdio, input, output } = yield* makeInMemoryStdio();
-      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
-        stdio,
-        serverRequestMethods: new Set(),
-      });
+  for (const wireFormat of ["native", "native batch", "Effect cause"] as const) {
+    it.effect(`correlates ${wireFormat} extension errors with the originating request`, () =>
+      Effect.gen(function* () {
+        const { stdio, input, output } = yield* makeInMemoryStdio();
+        const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+          stdio,
+          serverRequestMethods: new Set(),
+        });
 
-      const response = yield* transport
-        .request("x/private", { hello: "world" })
-        .pipe(Effect.forkScoped);
-      yield* Queue.take(output);
-      yield* Queue.offer(
-        input,
-        encoder.encode(
-          `${encodeUnknownJsonString({
-            jsonrpc: "2.0",
-            id: 1,
-            error: {
-              _tag: "Cause",
-              code: -32602,
-              message: "Invalid params",
-              data: [
-                {
-                  _tag: "Fail",
-                  error: {
-                    code: -32602,
-                    message: "Invalid params",
-                    data: { field: "hello" },
-                  },
-                },
-              ],
-            },
-          })}\n`,
-        ),
-      );
+        const response = yield* transport
+          .request("x/private", { hello: "world" })
+          .pipe(Effect.forkScoped);
+        yield* Queue.take(output);
+        const nativeError = {
+          code: -32602,
+          message: "Synthetic private message",
+          data: { field: "hello" },
+        };
+        const wireResponse = {
+          jsonrpc: "2.0",
+          id: 1,
+          error:
+            wireFormat === "Effect cause"
+              ? {
+                  ...nativeError,
+                  _tag: "Cause",
+                  data: [{ _tag: "Fail", error: nativeError }],
+                }
+              : nativeError,
+        };
+        yield* Queue.offer(
+          input,
+          encoder.encode(
+            `${encodeUnknownJsonString(wireFormat === "native batch" ? [wireResponse] : wireResponse)}\n`,
+          ),
+        );
 
-      const error = yield* Fiber.join(response).pipe(
-        Effect.match({
-          onFailure: (error) => error,
-          onSuccess: () => assert.fail("Expected extension request to fail"),
-        }),
-      );
-      assert.instanceOf(error, AcpError.AcpRequestError);
-      assert.deepInclude(error, {
-        code: -32602,
-        errorMessage: "ACP method 'x/private' failed with code -32602.",
-        method: "x/private",
-        requestId: "1",
-        operation: "receive-response",
-      });
-      assert.notProperty(error, "data");
-    }),
-  );
+        const error = yield* Fiber.join(response).pipe(
+          Effect.match({
+            onFailure: (error) => error,
+            onSuccess: () => assert.fail("Expected extension request to fail"),
+          }),
+        );
+        assert.instanceOf(error, AcpError.AcpRequestError);
+        assert.deepInclude(error, {
+          code: -32602,
+          errorMessage: "ACP method 'x/private' failed with code -32602.",
+          method: "x/private",
+          requestId: "1",
+          operation: "receive-response",
+        });
+        assert.notProperty(error, "data");
+      }),
+    );
+  }
 
   for (const wireId of [7, "7", "007", "1cf20920-e302-4b0d-992b-5b1426ff4a07"]) {
     it.effect(`preserves exact ${typeof wireId} ID ${wireId} for inbound extension replies`, () =>

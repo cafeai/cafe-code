@@ -773,7 +773,7 @@ const buildAppUnderTest = (options?: {
         Layer.provide(
           Layer.mock(ProviderRegistry)({
             getProviders: Effect.succeed([]),
-            readInstanceAccountQuota: () => Effect.succeed(null),
+            readInstanceAccountQuota: () => Effect.succeed({ report: null }),
             refresh: () => Effect.succeed([]),
             refreshInstance: () => Effect.succeed([]),
             refreshInstanceAccountUsage: () => Effect.succeed([]),
@@ -4326,11 +4326,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         observedAt: "2026-10-16T00:00:00.000Z",
         meters: [],
       };
+      const reading = { report, stale: true as const };
       let calls = 0;
       let enabled = true;
       let replaceDuringRead = false;
       let sequence = 0;
       let disableDuringAssembly = false;
+      let retireDuringRecheck = false;
+      let nativeReadingCurrent = true;
       yield* buildAppUnderTest({
         layers: {
           providerRegistry: {
@@ -4339,7 +4342,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 assert.equal(selected, instanceId);
                 calls++;
                 if (replaceDuringRead) enabled = false;
-                return report;
+                return { ...reading, isCurrent: () => nativeReadingCurrent };
               }),
             refresh: () => Effect.die("quota must not refresh health"),
             refreshInstance: () => Effect.die("quota must not refresh health"),
@@ -4374,6 +4377,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   disableDuringAssembly = false;
                   enabled = false;
                 }
+                if (retireDuringRecheck && calls === 3) nativeReadingCurrent = false;
                 return snapshot;
               }),
             getSnapshotSequence: () => Effect.sync(() => ({ snapshotSequence: sequence })),
@@ -4401,7 +4405,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             ),
           ),
         );
-      assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report }]);
+      assert.deepEqual(yield* first(wsUrl, { instanceId }), [reading]);
       assert.equal(calls, 1);
       disableDuringAssembly = true;
       assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report: null }]);
@@ -4432,6 +4436,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(calls, 2);
       assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report: null }]);
       assert.equal(calls, 2);
+      replaceDuringRead = false;
+      enabled = true;
+      retireDuringRecheck = true;
+      assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report: null }]);
+      assert.equal(calls, 3);
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 

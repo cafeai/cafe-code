@@ -6,6 +6,31 @@ type Message = RpcMessage.FromClientEncoded | RpcMessage.FromServerEncoded;
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+function normalizeNativeError(value: unknown): unknown {
+  if (
+    !isRecord(value) ||
+    value.jsonrpc !== "2.0" ||
+    (typeof value.id !== "string" && !Number.isSafeInteger(value.id)) ||
+    "method" in value ||
+    "result" in value ||
+    !isRecord(value.error) ||
+    "_tag" in value.error ||
+    !Number.isSafeInteger(value.error.code) ||
+    typeof value.error.message !== "string"
+  ) {
+    return value;
+  }
+  // Effect's generic JSON-RPC codec treats untagged error objects as
+  // defects. Native ACP sends standard JSON-RPC errors and expects the
+  // caller to handle their code as a request failure. Keep the code only.
+  const error = { code: value.error.code, message: "Native ACP request failed." };
+  return {
+    jsonrpc: value.jsonrpc,
+    id: value.id,
+    error: { ...error, _tag: "Cause", data: [{ _tag: "Fail", error }] },
+  };
+}
+
 /** Effect's JSON-RPC codec requires numeric internal IDs. ACP peers may use
  * strings (Axiom uses UUIDs), so keep their wire identity private to this codec.
  * Callback requests/replies preserve their IDs, and outgoing notifications omit
@@ -52,10 +77,26 @@ export function makeAcpRequestIdParser(maxPendingRequests: number) {
       // Normalize before Effect registers a batch's response correlation.
       if (line.trimStart().startsWith("[")) {
         const batch = JSON.parse(line) as unknown[];
-        return parser.decode(`${JSON.stringify(batch.map(admit))}\n`) as ReadonlyArray<Message>;
+        return parser.decode(
+          `${JSON.stringify(batch.map((value) => normalizeNativeError(admit(value))))}\n`,
+        ) as ReadonlyArray<Message>;
       }
       const messages = parser.decode(line) as ReadonlyArray<Message>;
       const request = messages[0];
+      if (
+        request?._tag === "Exit" &&
+        request.exit._tag === "Failure" &&
+        request.exit.cause.length === 1 &&
+        request.exit.cause[0]?._tag === "Die"
+      ) {
+        // Leave existing Effect-branded failures and all ordinary traffic on
+        // their original path. Only candidate native errors need a second read.
+        const wire = JSON.parse(line) as unknown;
+        const normalized = normalizeNativeError(wire);
+        return normalized === wire
+          ? messages
+          : (parser.decode(`${JSON.stringify(normalized)}\n`) as ReadonlyArray<Message>);
+      }
       if (request?._tag !== "Request" || request.id === "") return messages;
       const admitted = admit(JSON.parse(line));
       if (!isRecord(admitted)) throw new Error("Invalid ACP request.");

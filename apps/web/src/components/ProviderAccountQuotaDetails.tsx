@@ -10,6 +10,7 @@ import type { ProviderQuotaState } from "./chat/useProviderQuota";
 import type { ClaudeSessionQuotaPresentation } from "../lib/claudeSessionQuota";
 
 type ClaudeQuotaMeter = NonNullable<ClaudeSessionQuotaPresentation["meters"]>[number];
+const QUOTA_VERY_STALE_AFTER_MS = 30 * 60_000;
 
 function ClaudeQuotaMeterRow({
   meter,
@@ -69,6 +70,7 @@ export function UsageMeterBar(props: { readonly percent: number; readonly testId
  * the bottom outside that scroll region so account-wide availability is clear. */
 export function ProviderAccountQuotaDetails(props: {
   readonly presentation?: CodexRateLimitPresentation | null;
+  readonly showAntigravityQuotaStatus?: boolean | undefined;
   readonly sessionQuota?: ProviderQuotaState | undefined;
   readonly selectedModel?: string | null | undefined;
   readonly layout?: "compact" | "popover" | "panel" | "settings";
@@ -79,32 +81,46 @@ export function ProviderAccountQuotaDetails(props: {
   const presentation = props.presentation;
   const layout = props.layout ?? "compact";
   const report = props.sessionQuota?.report;
+  // Scoped Claude status suppresses the legacy unbound event windows.
+  const legacy = props.sessionQuota ? null : presentation;
+  const now = Date.now();
+  const observedAt = report?.observedAt ?? legacy?.lastReading?.observedAt;
+  const received = observedAt === undefined ? NaN : Date.parse(observedAt);
+  const resetTimes = report
+    ? (report.meters ?? []).flatMap((meter) => (meter.resetsAt ? [Date.parse(meter.resetsAt)] : []))
+    : (legacy?.lastReading?.resetTimes ?? []);
+  const stale =
+    props.sessionQuota?.stale === true ||
+    legacy?.lastReading?.stale === true ||
+    (observedAt !== undefined && !Number.isFinite(received)) ||
+    now < received ||
+    now - received >= CLAUDE_QUOTA_STALE_AFTER_MS ||
+    legacy?.lastReading?.resetTimes.some((reset) => reset <= now) === true;
+  const nextDeadline = Math.min(
+    ...[
+      received + CLAUDE_QUOTA_STALE_AFTER_MS,
+      received + QUOTA_VERY_STALE_AFTER_MS,
+      ...resetTimes,
+    ].filter((deadline) => Number.isFinite(deadline) && deadline > now),
+  );
   const [clock, setClock] = useState(0);
   useEffect(() => {
-    if (!report) return;
-    const now = Date.now();
-    const deadlines = [
-      Date.parse(report.observedAt) + CLAUDE_QUOTA_STALE_AFTER_MS,
-      ...(report.meters ?? []).flatMap((meter) =>
-        meter.resetsAt ? [Date.parse(meter.resetsAt)] : [],
-      ),
-    ].filter((deadline) => Number.isFinite(deadline) && deadline > now);
-    if (!deadlines.length) return;
+    if (!Number.isFinite(nextDeadline)) return;
     // A display-only deadline, never provider polling. Each reset/receipt age
     // boundary updates all rows together without guessing replenished usage.
     const timer = setTimeout(
       () => setClock((value) => value + 1),
-      Math.min(2_147_483_647, Math.min(...deadlines) - now + 1),
+      Math.max(1, Math.min(2_147_483_647, nextDeadline - Date.now() + 1)),
     );
     return () => clearTimeout(timer);
-  }, [report, clock]);
+  }, [nextDeadline, clock]);
   const session = report
-    ? formatClaudeSessionQuota(report, { selectedModel: props.selectedModel })
+    ? formatClaudeSessionQuota(report, {
+        now,
+        selectedModel: props.selectedModel,
+        stale: props.sessionQuota?.stale === true,
+      })
     : null;
-  // Anonymous historical event windows have no current query/config binding.
-  // They must not reappear beneath a newly scoped unavailable/offline report.
-  // Existing unscoped consumers and other provider drivers remain unchanged.
-  const legacy = props.sessionQuota ? null : presentation;
   const inlineCredits =
     (layout === "panel" || layout === "popover") &&
     legacy?.resetAvailability &&
@@ -124,6 +140,13 @@ export function ProviderAccountQuotaDetails(props: {
         // An ineligible reset action renders no button. Display contents avoids
         // leaving an empty heading row (and flex gap) in that case.
         <div className="contents [&>button]:self-end">{props.action}</div>
+      ) : null}
+      {observedAt !== undefined && stale ? (
+        <p>
+          {now - received >= QUOTA_VERY_STALE_AFTER_MS
+            ? uiText("Last reported quota is very out of date.", undefined, undefined, uiLocale)
+            : uiText("Showing last reported quota.", undefined, undefined, uiLocale)}
+        </p>
       ) : null}
       {props.sessionQuota ? (
         <section
@@ -182,6 +205,9 @@ export function ProviderAccountQuotaDetails(props: {
             </p>
           )}
         </section>
+      ) : null}
+      {!props.sessionQuota && !legacy && props.showAntigravityQuotaStatus ? (
+        <p>{uiText("Antigravity quota is unavailable.", undefined, undefined, uiLocale)}</p>
       ) : null}
       {legacy?.buckets.length ? (
         <div

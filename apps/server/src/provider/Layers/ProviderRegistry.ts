@@ -195,10 +195,10 @@ export const mergeProviderSnapshot = (
     // Codex has both full probe snapshots and sparse live updates. Preserve the
     // latest redacted usage when the same authenticated account suffers a transient
     // probe failure, but clear it on auth/account churn so a percentage from one
-    // account can never be presented as another account's quota. The Grok and
-    // Gemini ACP checks do not expose a stable account identity. Their omitted
-    // full-probe results cannot prove that an earlier quota still belongs to
-    // the active login. A Gemini usage-only withdrawal follows the same rule.
+    // account can never be presented as another account's quota. The Gemini
+    // driver's historical readings come only from its exact live owner.
+    // The registry must not revive an omitted reading after the driver
+    // withdraws it. Grok also has no stable account identity.
     ...(reconciledProvider.accountRateLimits === undefined &&
     previousProvider.accountRateLimits !== undefined &&
     reconciledProvider.driver !== ProviderDriverKind.make("grok") &&
@@ -1009,22 +1009,27 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
               // was itself replaced while waiting for a preceding publication.
               if ((yield* instanceRegistry.getInstance(instanceId)) !== instance) return;
               if (catalogueOwners.get(instanceId) === instance) return;
-              // Replacement itself retires native proof, even if the new
-              // owner's initial health probe later fails. Historical rows may
-              // remain visible, but they cannot qualify the new scope.
+              // Replacement retires exact-owner metadata even if the new
+              // owner's initial health probe later fails.
               catalogueOwners.delete(instanceId);
               const [changed, providers] = yield* Ref.modify(providersRef, (previous) => {
                 let changed = false;
                 const providers = previous.map((provider) => {
+                  if (provider.instanceId !== instanceId) return provider;
                   if (
-                    provider.instanceId !== instanceId ||
-                    provider.driver !== "codex" ||
-                    provider.codexModelCatalogSource !== "native"
-                  )
-                    return provider;
-                  changed = true;
-                  const { codexModelCatalogSource: _retiredSource, ...historical } = provider;
-                  return historical;
+                    provider.driver === "codex" &&
+                    provider.codexModelCatalogSource === "native"
+                  ) {
+                    changed = true;
+                    const { codexModelCatalogSource: _retiredSource, ...historical } = provider;
+                    return historical;
+                  }
+                  if (provider.driver === "gemini" && provider.accountRateLimits !== undefined) {
+                    changed = true;
+                    const { accountRateLimits: _retiredQuota, ...current } = provider;
+                    return current;
+                  }
+                  return provider;
                 });
                 return [[changed, providers] as const, providers] as const;
               });

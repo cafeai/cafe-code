@@ -180,7 +180,10 @@ import type {
 } from "../../session-logic";
 import { deriveLatestContextWindowSnapshot } from "../../lib/contextWindow";
 import { deriveGenerationRate } from "../../lib/generationRate";
-import { shouldSurfaceProviderAccountRateLimits } from "../../lib/codexRateLimits";
+import {
+  shouldShowAntigravityQuotaStatus,
+  shouldSurfaceProviderAccountRateLimits,
+} from "../../lib/codexRateLimits";
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useHasOnScreenKeyboard } from "../../hooks/useMediaQuery";
@@ -273,6 +276,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   accountRateLimits: ServerProvider["accountRateLimits"] | null;
+  showAntigravityQuotaStatus: boolean;
   quotaContext?: ProviderQuotaContext | undefined;
   usageResetAction: ReactNode;
   subagentConcurrency?: SubagentConcurrencyPresentation | null;
@@ -310,11 +314,15 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 }) {
   return (
     <>
-      {(props.activeContextWindow || props.accountRateLimits || props.quotaContext) &&
+      {(props.activeContextWindow ||
+        props.accountRateLimits ||
+        props.showAntigravityQuotaStatus ||
+        props.quotaContext) &&
       !props.sessionRailVisible ? (
         <ContextWindowMeter
           usage={props.activeContextWindow}
           accountRateLimits={props.accountRateLimits}
+          showAntigravityQuotaStatus={props.showAntigravityQuotaStatus}
           quotaContext={props.quotaContext}
           subagentConcurrency={props.subagentConcurrency}
           codexContextWindow={props.codexContextWindow}
@@ -4700,6 +4708,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
                   accountRateLimits={selectedAccountRateLimits}
+                  showAntigravityQuotaStatus={shouldShowAntigravityQuotaStatus(
+                    selectedProviderStatus,
+                  )}
                   quotaContext={quotaContext}
                   usageResetAction={
                     <ProviderUsageResetButton

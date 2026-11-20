@@ -13,15 +13,23 @@ import {
   type ProviderRateLimitWindowUsage,
 } from "@cafecode/shared/threadResourceUsage";
 
-export function shouldSurfaceProviderAccountRateLimits(
-  provider: Pick<ServerProvider, "auth" | "driver"> | null | undefined,
-): boolean {
+type QuotaProvider = Pick<ServerProvider, "auth" | "driver"> &
+  Partial<Pick<ServerProvider, "enabled" | "accountRateLimits">>;
+
+export function shouldSurfaceProviderAccountRateLimits(provider: QuotaProvider | null | undefined) {
+  if (provider?.driver === "gemini") return shouldShowAntigravityQuotaStatus(provider);
   return (
     provider?.auth.status === "authenticated" &&
-    (provider.driver === "codex" ||
-      provider.driver === "claudeAgent" ||
-      provider.driver === "grok" ||
-      provider.driver === "gemini")
+    (provider.driver === "codex" || provider.driver === "claudeAgent" || provider.driver === "grok")
+  );
+}
+
+export function shouldShowAntigravityQuotaStatus(provider: QuotaProvider | null | undefined) {
+  return (
+    provider?.driver === "gemini" &&
+    provider.enabled === true &&
+    (provider.auth.status === "authenticated" ||
+      (provider.auth.status === "unknown" && provider.accountRateLimits?.stale === true))
   );
 }
 
@@ -58,12 +66,18 @@ export interface CodexRateLimitBucketSummary extends CodexRateLimitSummary {
 export interface CodexRateLimitPresentation {
   readonly buckets: readonly CodexRateLimitBucketSummary[];
   readonly resetAvailability: string | null;
+  readonly lastReading?: {
+    readonly observedAt: string;
+    readonly stale: boolean;
+    readonly resetTimes: readonly number[];
+  };
 }
 
 interface FormatOptions {
   readonly locale?: string;
   readonly timeZone?: string;
   readonly compactDetails?: boolean;
+  readonly trackQuotaAge?: boolean | undefined;
 }
 
 function clampPercentage(value: number): number {
@@ -385,7 +399,22 @@ export function formatCodexRateLimitPresentation(
     rateLimits,
     options.compactDetails,
   );
-  return buckets.length || resetAvailability ? { buckets, resetAvailability } : null;
+  if (buckets.length === 0 && !resetAvailability) return null;
+  if (!options.trackQuotaAge || !rateLimits) return { buckets, resetAvailability };
+  const resetTimes = selectCodexRateLimitBuckets(rateLimits).flatMap(({ snapshot }) =>
+    [snapshot.primary?.resetsAt, snapshot.secondary?.resetsAt].flatMap((reset) =>
+      typeof reset === "number" ? [reset * 1_000] : [],
+    ),
+  );
+  return {
+    buckets,
+    resetAvailability,
+    lastReading: {
+      observedAt: rateLimits.checkedAt,
+      stale: rateLimits.stale === true,
+      resetTimes,
+    },
+  };
 }
 
 export function formatCodexRateLimitInlineText(

@@ -20,6 +20,9 @@ import { geminiCliEnvironment } from "./GeminiAcpRuntime.ts";
 
 const QUALIFIED_USAGE_VERSION = "1.5.13";
 const OUTPUT_LIMIT_BYTES = 64 * 1024;
+// Native /usage starts a process and reads the account over the network. Its
+// deadline is separate from ACP session discovery and keeps cold reads bounded.
+const USAGE_REPORT_TIMEOUT = "15 seconds";
 const RESET_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u;
 const BUCKET_ID = /^[a-z0-9][a-z0-9_-]{0,79}$/u;
 
@@ -85,9 +88,12 @@ function readWindow(
 function readUsageOutput(
   text: string,
   checkedAt: string,
-): ServerProviderAccountRateLimits | undefined {
+): ServerProviderAccountRateLimits | null | undefined {
   const report = Option.getOrUndefined(decodeUsageReport(text));
   if (!report) return undefined;
+  // An explicit empty native report withdraws prior quota. A malformed
+  // report is inconclusive and cannot establish that distinction.
+  if (report.command.data.groups.length === 0) return null;
 
   const limits = new Map<string, ServerProviderAccountRateLimitSnapshot>();
   const seenBuckets = new Set<string>();
@@ -138,7 +144,7 @@ export function readGeminiAccountRateLimits(input: {
   readonly environment: NodeJS.ProcessEnv;
   readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly fs: FileSystem.FileSystem;
-}): Effect.Effect<ServerProviderAccountRateLimits | undefined> {
+}): Effect.Effect<ServerProviderAccountRateLimits | null | undefined> {
   // Keep automatic reads on the release we have qualified for headless
   // dispatch. Older or changed runtimes can keep using ACP without quotas.
   if (input.version !== QUALIFIED_USAGE_VERSION) return Effect.succeed(undefined);
@@ -172,8 +178,23 @@ export function readGeminiAccountRateLimits(input: {
     return readUsageOutput(stdout.text, DateTime.formatIso(yield* DateTime.now));
   }).pipe(
     Effect.scoped,
-    Effect.timeoutOption("8 seconds"),
+    Effect.timeoutOption(USAGE_REPORT_TIMEOUT),
+    // Record only the outcome. The native report and process errors can contain
+    // account data and must stay outside diagnostic output.
+    Effect.tap((result) =>
+      Effect.annotateCurrentSpan(
+        "outcome",
+        Option.isNone(result)
+          ? "timeout"
+          : result.value === null
+            ? "empty"
+            : result.value
+              ? "reported"
+              : "unavailable",
+      ),
+    ),
     Effect.map(Option.getOrUndefined),
-    Effect.catch(() => Effect.succeed(undefined)),
+    Effect.catch(() => Effect.annotateCurrentSpan("outcome", "failed").pipe(Effect.as(undefined))),
+    Effect.withSpan("gemini.readAccountQuota"),
   );
 }

@@ -188,6 +188,9 @@ export const ServerProviderAccountRateLimits = Schema.Struct({
     Schema.NullOr(ServerProviderAccountRateLimitResetCredits),
   ),
   checkedAt: IsoDateTime,
+  // An explicit last reading after an inconclusive refresh; checkedAt stays
+  // the original receipt time. This flag never grants reset or billing authority.
+  stale: Schema.optionalKey(Schema.Literal(true)),
 });
 export type ServerProviderAccountRateLimits = typeof ServerProviderAccountRateLimits.Type;
 

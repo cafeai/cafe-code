@@ -1952,9 +1952,9 @@ const makeWsRpcLayer = (
               providerRegistry.readInstanceAccountQuota?.(input.instanceId),
             ),
             [
-              // Only visible subscriptions refresh. The owning instance shares
-              // one cached control-only read across settings/rail/popovers.
-              Stream.tick("60 seconds"),
+              // The subscription schedules the next check from the completed
+              // read. The owning instance still shares one cached control read
+              // across settings, rail and popovers.
               providerService.streamEvents.pipe(
                 Stream.filter(
                   (event) =>

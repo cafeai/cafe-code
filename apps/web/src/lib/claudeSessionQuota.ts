@@ -101,6 +101,7 @@ export interface ClaudeSessionQuotaPresentation {
 
 interface FormatOptions {
   readonly now?: number;
+  readonly stale?: boolean;
   readonly locale?: string;
   readonly timeZone?: string;
   readonly selectedModel?: string | null | undefined;
@@ -183,7 +184,10 @@ export function formatClaudeSessionQuota(
   const received = Date.parse(report.observedAt);
   const fableSelected = /^(?:claude-)?fable(?:$|-|\[|:)/i.test(options.selectedModel?.trim() ?? "");
   const stale =
-    !Number.isFinite(received) || now < received || now - received >= CLAUDE_QUOTA_STALE_AFTER_MS;
+    options.stale === true ||
+    !Number.isFinite(received) ||
+    now < received ||
+    now - received >= CLAUDE_QUOTA_STALE_AFTER_MS;
   return {
     observed: uiText("Received: {time}", {
       time: localTime(report.observedAt, options) ?? uiText("time unavailable"),

@@ -1,5 +1,8 @@
 {
   "Antigravity CLI permissions": "Antigravity CLI 권한",
+  "Antigravity quota is unavailable.": "Antigravity 사용 한도를 확인할 수 없습니다.",
+  "Last reported quota is very out of date.": "마지막으로 확인한 사용 한도 정보가 매우 오래되었습니다.",
+  "Showing last reported quota.": "마지막으로 확인한 사용 한도를 표시하고 있습니다.",
   "Gemini thinking": "Gemini 사고 과정",
   "Run autonomously with Antigravity CLI's Auto permission mode.": "Antigravity CLI의 자동 권한 모드로 자율 실행합니다.",
   "Gemini permission mode can be changed when the session is idle.": "Gemini 세션이 유휴 상태일 때 권한 모드를 변경할 수 있습니다.",

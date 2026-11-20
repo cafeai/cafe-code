@@ -25,6 +25,7 @@ function formatPercentage(value: number | null): string | null {
 export function ContextWindowMeter(props: {
   usage: ContextWindowSnapshot | null;
   accountRateLimits?: ServerProviderAccountRateLimits | null | undefined;
+  showAntigravityQuotaStatus?: boolean | undefined;
   quotaContext?: ProviderQuotaContext | undefined;
   onShowOnSide?: () => void;
   subagentConcurrency?: SubagentConcurrencyPresentation | null | undefined;
@@ -121,6 +122,7 @@ export function ContextWindowMeter(props: {
         <ContextWindowDetails
           usage={usage}
           rateLimits={props.accountRateLimits}
+          showAntigravityQuotaStatus={props.showAntigravityQuotaStatus}
           sessionQuota={sessionQuota}
           selectedModel={props.quotaContext?.selectedModel}
           layout="popover"

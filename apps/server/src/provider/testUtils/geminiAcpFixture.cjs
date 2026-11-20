@@ -30,7 +30,7 @@ if (process.argv.includes("--print")) {
                 {
                   id: "gemini-5h",
                   window: "5h",
-                  remaining_fraction: 0.4,
+                  remaining_fraction: Number(process.env.CAFE_GEMINI_FIXTURE_QUOTA_FRACTION ?? 0.4),
                   reset_time: "2026-11-21T07:00:00Z",
                 },
                 {
@@ -184,10 +184,16 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         authMethods: [],
       });
       break;
-    case "session/new":
+    case "session/new": {
       validateMcpServers(params.mcpServers, 1);
+      const errorCode = process.env.CAFE_GEMINI_FIXTURE_CATALOG_ERROR_CODE;
+      if (errorCode !== undefined) {
+        write({ id, error: { code: Number(errorCode), message: "Fixture catalog error" } });
+        break;
+      }
       result(id, { sessionId, configOptions: config() });
       break;
+    }
     case "session/resume":
       if (params.sessionId !== sessionId) process.exit(1);
       validateMcpServers(params.mcpServers, 2);

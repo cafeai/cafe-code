@@ -3,10 +3,12 @@ import {
   ProviderDriverKind,
   TextGenerationError,
   type ServerProvider,
+  type ServerProviderAccountRateLimits,
 } from "@cafecode/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -60,38 +62,74 @@ interface GeminiProbeOptions {
   readonly fs: FileSystem.FileSystem;
 }
 
+type QualifiedGeminiCli = Effect.Success<ReturnType<typeof qualifyGeminiCli>>;
+
 function qualifyConfiguredGeminiCli(input: GeminiProbeOptions, cwd: string) {
   return qualifyGeminiCli(input.settings.binaryPath, cwd, input.environment).pipe(
     Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, input.spawner),
   );
 }
 
+function geminiQuotaSource(fs: FileSystem.FileSystem, cli: QualifiedGeminiCli) {
+  // This detects observed executable replacement. The stat and printed
+  // version identify a source for a historical display, never a login.
+  return fs.stat(cli.binaryPath).pipe(
+    Effect.map((info) => {
+      const inode = Option.getOrUndefined(info.ino);
+      const modified = Option.getOrUndefined(info.mtime)?.getTime();
+      return info.type === "File" &&
+        typeof inode === "number" &&
+        Number.isSafeInteger(inode) &&
+        inode > 0 &&
+        Number.isFinite(modified)
+        ? JSON.stringify([
+            cli.binaryPath,
+            cli.version,
+            info.dev,
+            inode,
+            modified,
+            String(info.size),
+          ])
+        : null;
+    }),
+    Effect.orElseSucceed(() => null),
+  );
+}
+
 function discoverGeminiModels(input: GeminiProbeOptions) {
   return Effect.gen(function* () {
-    // No project cwd, workspace material or prompt enters a catalogue
-    // discovery session. Register scratch cleanup before the exact child.
-    const cwd = yield* input.fs.makeTempDirectoryScoped({ prefix: "cafecode-gemini-catalog-" });
-    const cli = yield* qualifyConfiguredGeminiCli(input, cwd);
-    const runtime = yield* makeGeminiAcpRuntime({
-      binaryPath: cli.binaryPath,
-      environment: input.environment,
-      childProcessSpawner: input.spawner,
-      cwd,
-      clientInfo: { name: "cafe-code", version: APPLICATION_VERSION },
-    });
-    const started = yield* runtime.start();
-    const capabilities = started.initializeResult.agentCapabilities;
-    const models = buildGeminiAcpModels(
-      yield* runtime.getConfigOptions,
-      capabilities?.promptCapabilities,
-    );
-    if (capabilities?.sessionCapabilities?.close != null) {
-      yield* runtime
-        .request("session/close", { sessionId: started.sessionId })
-        .pipe(Effect.timeoutOption("1 second"), Effect.ignore);
-    }
-    return { cli, models };
-  }).pipe(Effect.scoped, Effect.timeout("20 seconds"));
+    // A catalogue may fail after executable qualification. Retain that
+    // observed identity across the native child's joined cleanup, without
+    // re-running discovery or inferring the login from its output.
+    const observation: { cli?: QualifiedGeminiCli } = {};
+    const result = yield* Effect.gen(function* () {
+      // No project cwd, workspace material or prompt enters a catalogue
+      // discovery session. Register scratch cleanup before the exact child.
+      const cwd = yield* input.fs.makeTempDirectoryScoped({ prefix: "cafecode-gemini-catalog-" });
+      const cli = yield* qualifyConfiguredGeminiCli(input, cwd);
+      observation.cli = cli;
+      const runtime = yield* makeGeminiAcpRuntime({
+        binaryPath: cli.binaryPath,
+        environment: input.environment,
+        childProcessSpawner: input.spawner,
+        cwd,
+        clientInfo: { name: "cafe-code", version: APPLICATION_VERSION },
+      });
+      const started = yield* runtime.start();
+      const capabilities = started.initializeResult.agentCapabilities;
+      const models = buildGeminiAcpModels(
+        yield* runtime.getConfigOptions,
+        capabilities?.promptCapabilities,
+      );
+      if (capabilities?.sessionCapabilities?.close != null) {
+        yield* runtime
+          .request("session/close", { sessionId: started.sessionId })
+          .pipe(Effect.timeoutOption("1 second"), Effect.ignore);
+      }
+      return { cli, models };
+    }).pipe(Effect.scoped, Effect.timeout("20 seconds"), Effect.result);
+    return { result, qualifiedCli: observation.cli };
+  });
 }
 
 export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
@@ -107,6 +145,36 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
       const environment =
         input.processEnvironment ?? mergeProviderInstanceEnvironment(input.environment);
       const probeOptions = { settings, environment, spawner, fs };
+      // Both probe paths run under this exact managed owner's snapshot
+      // mutation permit. Keep only one observed report in memory. A rebuilt
+      // owner cannot borrow it, even when it reuses the configured id.
+      let lastQuota: {
+        readonly source: string;
+        readonly report: ServerProviderAccountRateLimits;
+      } | null = null;
+      const historicalQuota = (source: string | null) => {
+        if (!lastQuota || lastQuota.source !== source) {
+          lastQuota = null;
+          return null;
+        }
+        // The CLI report has no account identifier. On an inconclusive read
+        // offer the last observation only as historical for this instance.
+        return { ...lastQuota.report, stale: true as const };
+      };
+      const readQuota = Effect.fn("readGeminiQuotaForOwner")(function* (cli: QualifiedGeminiCli) {
+        const source = yield* geminiQuotaSource(fs, cli);
+        const report = yield* readGeminiAccountRateLimits({ ...cli, environment, spawner, fs });
+        const currentSource = yield* geminiQuotaSource(fs, cli);
+        if (source !== currentSource || report === null) {
+          lastQuota = null;
+          return null;
+        }
+        if (report) {
+          lastQuota = source === null ? null : { source, report };
+          return report;
+        }
+        return historicalQuota(source);
+      });
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER,
         instanceId: input.instanceId,
@@ -140,14 +208,9 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
       const checkProvider = Effect.gen(function* () {
         const checkedAt = DateTime.formatIso(yield* DateTime.now);
         if (!input.enabled) return snapshotFor(checkedAt, pending);
-        const result = yield* Effect.result(discoverGeminiModels(probeOptions));
+        const { result, qualifiedCli } = yield* discoverGeminiModels(probeOptions);
         if (result._tag === "Success") {
-          const accountRateLimits = yield* readGeminiAccountRateLimits({
-            ...result.success.cli,
-            environment,
-            spawner,
-            fs,
-          });
+          const accountRateLimits = yield* readQuota(result.success.cli);
           return snapshotFor(
             checkedAt,
             {
@@ -165,11 +228,15 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
         }
         const error = result.failure;
         const unauthenticated = error._tag === "AcpRequestError" && error.code === -32000;
+        const historicalSource =
+          !unauthenticated && qualifiedCli ? yield* geminiQuotaSource(fs, qualifiedCli) : null;
+        const accountRateLimits = historicalQuota(historicalSource);
         return snapshotFor(checkedAt, {
           installed: error._tag !== "GeminiCliQualificationError" || error.reason !== "missing",
           version: null,
           status: unauthenticated ? "warning" : "error",
           auth: { status: unauthenticated ? "unauthenticated" : "unknown" },
+          ...(accountRateLimits ? { accountRateLimits } : {}),
           message:
             error._tag === "GeminiCliQualificationError"
               ? error.message
@@ -183,12 +250,15 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
         // this exact configuration without reopening an ACP catalog session.
         const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "cafecode-gemini-usage-version-" });
         const cli = yield* qualifyConfiguredGeminiCli(probeOptions, cwd);
-        return (yield* readGeminiAccountRateLimits({ ...cli, environment, spawner, fs })) ?? null;
+        return yield* readQuota(cli);
       }).pipe(
         Effect.scoped,
-        // The configured login is external and may change without a stable
-        // account identifier. Unavailable observations withdraw older quota.
-        Effect.catch(() => Effect.succeed(null)),
+        Effect.catch(() =>
+          Effect.sync(() => {
+            lastQuota = null;
+            return null;
+          }),
+        ),
       );
       const adapter = yield* makeGeminiAdapter(settings, {
         instanceId: input.instanceId,
@@ -205,10 +275,17 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
         initialSnapshot: () =>
           DateTime.now.pipe(Effect.map((now) => snapshotFor(DateTime.formatIso(now), pending))),
         checkProvider,
-        refreshAccountUsage: ({ snapshot }) =>
-          settings.enabled && snapshot.auth.status === "authenticated"
+        refreshAccountUsage: ({ snapshot }) => {
+          if (!settings.enabled || snapshot.auth.status === "unauthenticated") {
+            return Effect.succeed(null);
+          }
+          // A transient catalogue failure can leave an explicit historical
+          // reading without a current auth determination. Only a full status
+          // read can re-establish the authorization to request native usage.
+          return snapshot.auth.status === "authenticated"
             ? refreshAccountUsage
-            : Effect.succeed(null),
+            : Effect.succeed(undefined);
+        },
         // Discovery needs an empty session. Use normal registry admission and
         // explicit refreshes instead of creating native sessions on a timer.
         probePolicy: { initialRefresh: "external" },

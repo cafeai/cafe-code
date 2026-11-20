@@ -830,7 +830,7 @@ describe("provider-specific composer menu actions", () => {
     },
   );
 
-  it("opens the selected Gemini account allowance from the composer before any context usage", async (context) => {
+  it("shows the selected Gemini account quota before context usage and retains an out-of-date reading", async (context) => {
     const owner = createComposerOwner(context, "composer-controls");
     await owner.run(async () => {
       const accounts = [
@@ -876,6 +876,40 @@ describe("provider-specific composer menu actions", () => {
         await expect.element(page.getByText("Gemini models", { exact: true })).toBeVisible();
         await expect.element(page.getByText("75% left", { exact: true })).toBeVisible();
         await expect.element(page.getByText(/^5h reset:/u)).toBeVisible();
+        await expect.element(page.getByText("15% left", { exact: true })).not.toBeInTheDocument();
+      });
+
+      await fixture.update({
+        providerStatuses: accounts.map((account) =>
+          account.instanceId === modelSelection.instanceId && account.accountRateLimits
+            ? {
+                ...account,
+                auth: { status: "unknown" },
+                accountRateLimits: { ...account.accountRateLimits, stale: true },
+              }
+            : account,
+        ),
+      });
+      await owner.observe("assertion", async () => {
+        await expect
+          .element(page.getByText("Showing last reported quota.", { exact: true }))
+          .toBeVisible();
+        await expect.element(page.getByText("75% left", { exact: true })).toBeVisible();
+        await expect.element(page.getByText(/^5h reset:/u)).toBeVisible();
+      });
+
+      await fixture.update({
+        providerStatuses: accounts.map((account) =>
+          account.instanceId === modelSelection.instanceId
+            ? provider("gemini", account.instanceId, "Gemini work")
+            : account,
+        ),
+      });
+      await owner.observe("assertion", async () => {
+        await expect
+          .element(page.getByText("Antigravity quota is unavailable.", { exact: true }))
+          .toBeVisible();
+        await expect.element(page.getByText("75% left", { exact: true })).not.toBeInTheDocument();
         await expect.element(page.getByText("15% left", { exact: true })).not.toBeInTheDocument();
         expect(fixture.onSend).not.toHaveBeenCalled();
         expect(subscribeQuota).not.toHaveBeenCalled();

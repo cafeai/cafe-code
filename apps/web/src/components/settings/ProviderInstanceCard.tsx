@@ -37,6 +37,7 @@ import { useProviderQuota, type ProviderQuotaContext } from "../chat/useProvider
 import { ensureWorkspaceApi } from "../../environments/workspaceApi";
 import {
   formatCodexRateLimitPresentation,
+  shouldShowAntigravityQuotaStatus,
   shouldSurfaceProviderAccountRateLimits,
 } from "../../lib/codexRateLimits";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
@@ -1135,8 +1136,11 @@ export function ProviderInstanceCard({
   const authenticatedDetail = hasAuthenticatedEmail
     ? (liveProvider?.auth.label ?? liveProvider?.auth.type ?? null)
     : null;
+  const showAntigravityQuotaStatus = shouldShowAntigravityQuotaStatus(liveProvider);
   const accountQuota = shouldSurfaceProviderAccountRateLimits(liveProvider)
-    ? uiPresentation.formatCodexRateLimitPresentation(liveProvider?.accountRateLimits)
+    ? uiPresentation.formatCodexRateLimitPresentation(liveProvider?.accountRateLimits, {
+        trackQuotaAge: showAntigravityQuotaStatus,
+      })
     : null;
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
   const versionAdvisory = uiPresentation.getProviderVersionAdvisoryPresentation(
@@ -1668,10 +1672,11 @@ export function ProviderInstanceCard({
             driver={instance.driver}
             provider={liveProvider}
           />
-          {accountQuota || sessionQuota ? (
+          {accountQuota || sessionQuota || showAntigravityQuotaStatus ? (
             <div className="w-full [&_[data-account-quota-scroll]]:[scrollbar-gutter:stable]">
               <ProviderAccountQuotaDetails
                 presentation={accountQuota}
+                showAntigravityQuotaStatus={showAntigravityQuotaStatus}
                 sessionQuota={sessionQuota}
                 selectedModel={quotaContext?.selectedModel}
                 layout="settings"
