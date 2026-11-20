@@ -1534,6 +1534,7 @@ function normalizePersistedDraftThreads(
         interactionMode:
           candidateDraftThread.interactionMode === "plan" ||
           candidateDraftThread.interactionMode === "auto" ||
+          candidateDraftThread.interactionMode === "gemini-bypass" ||
           candidateDraftThread.interactionMode === "default"
             ? candidateDraftThread.interactionMode
             : DEFAULT_INTERACTION_MODE,
@@ -1662,6 +1663,7 @@ function normalizePersistedDraftsByThreadId(
     const interactionMode =
       draftCandidate.interactionMode === "plan" ||
       draftCandidate.interactionMode === "auto" ||
+      draftCandidate.interactionMode === "gemini-bypass" ||
       draftCandidate.interactionMode === "default"
         ? draftCandidate.interactionMode
         : null;
@@ -2969,6 +2971,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           const nextInteractionMode =
             interactionMode === "plan" ||
             interactionMode === "auto" ||
+            interactionMode === "gemini-bypass" ||
             interactionMode === "default"
               ? interactionMode
               : null;

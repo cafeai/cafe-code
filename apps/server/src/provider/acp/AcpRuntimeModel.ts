@@ -113,6 +113,7 @@ export type AcpParsedSessionEvent =
       readonly _tag: "ToolCallUpdated";
       readonly toolCall: AcpToolCallState;
       readonly rawPayload: unknown;
+      readonly started?: true;
     }
   | {
       readonly _tag: "AvailableCommandsChanged";
@@ -122,6 +123,7 @@ export type AcpParsedSessionEvent =
   | {
       readonly _tag: "ContentDelta";
       readonly itemId?: string;
+      readonly nativeMessageId?: string;
       readonly streamKind: "assistant_text" | "reasoning_text";
       readonly text: string;
       readonly rawPayload: unknown;
@@ -631,6 +633,7 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
           _tag: "ContentDelta",
           streamKind: "assistant_text",
           ...(upd.messageId ? { itemId: upd.messageId } : {}),
+          ...(upd.messageId ? { nativeMessageId: upd.messageId } : {}),
           text: upd.content.text,
           rawPayload: params,
         });

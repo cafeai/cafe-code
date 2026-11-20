@@ -1,7 +1,9 @@
 {
   "Antigravity CLI permissions": "Antigravity CLI の権限",
-  "Use Antigravity CLI permissions": "Antigravity CLI の権限を使う",
-  "Gemini uses permissions from Antigravity CLI. Choose Use Antigravity CLI permissions in the composer or switch providers.": "Gemini は Antigravity CLI の権限を使います。入力欄で「Antigravity CLI の権限を使う」を選ぶか、プロバイダーを切り替えてください。",
+  "Gemini thinking": "Gemini の思考",
+  "Run autonomously with Antigravity CLI's Auto permission mode.": "Antigravity CLI の Auto 権限モードで自律的に実行します。",
+  "Gemini permission mode can be changed when the session is idle.": "Gemini のセッションがアイドル状態のときに権限モードを変更できます。",
+  "Choose a permission mode in the composer before sending.": "送信する前に、入力欄で権限モードを選択してください。",
   "Extra": "特高",
   " (offline)": " (オフライン)",
   " (optional)": " (任意)",

@@ -115,21 +115,26 @@ type GeminiRuntimeOptions = Omit<
   "spawn" | "authMethodId" | "beforeSession" | "mcpServers"
 > & {
   readonly binaryPath: string;
+  readonly bypassPermissions?: boolean;
   readonly environment: NodeJS.ProcessEnv;
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
 };
 
 export function makeGeminiAcpRuntime({
   binaryPath,
+  bypassPermissions,
   environment,
   childProcessSpawner,
   ...options
 }: GeminiRuntimeOptions) {
   return AcpSessionRuntime.make({
     ...options,
+    allowOverlappingPrompts: true,
     spawn: {
       command: binaryPath,
-      args: ["acp"],
+      // This is a process startup setting. The native mode selector exposes
+      // Default in both processes and cannot establish or change Bypass.
+      args: bypassPermissions === true ? ["acp", "--dangerously-skip-permissions"] : ["acp"],
       cwd: options.cwd,
       env: cliEnvironment(environment),
       extendEnv: false,

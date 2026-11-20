@@ -1964,6 +1964,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId,
           provider: resolvedProvider,
         };
+        if (input.interactionMode === "gemini-bypass" && resolvedProvider !== "gemini") {
+          return yield* toValidationError(
+            "ProviderService.startSession",
+            "Gemini Bypass permissions require a Gemini provider.",
+          );
+        }
         if (input.codexContextWindowOverride !== undefined && resolvedProvider !== "codex") {
           return yield* toValidationError(
             "ProviderService.startSession",
@@ -2517,6 +2523,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           : {}),
       });
       metricProvider = routed.adapter.provider;
+      if (input.interactionMode === "gemini-bypass" && routed.adapter.provider !== "gemini") {
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "Gemini Bypass permissions require a Gemini provider.",
+        );
+      }
       if (input.deliveryPriority !== undefined && routed.adapter.provider !== "claudeAgent") {
         return yield* toValidationError(
           "ProviderService.sendTurn",
@@ -2643,8 +2655,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       // from the live adapter inventory, never the durable binding. Pin it
       // through native admission so a later root cannot become the recipient.
       const completedRoot = getCodexRootTurnCompletion(activeSession);
+      const admitsGeminiFollowUp =
+        routed.adapter.provider !== "gemini" ||
+        ((input.interactionMode ?? "default") === (activeSession?.interactionMode ?? "default") &&
+          (input.modelSelection === undefined ||
+            (input.modelSelection.instanceId === routed.instanceId &&
+              input.modelSelection.model === activeSession?.model &&
+              (input.modelSelection.options?.length ?? 0) === 0)));
       if (
         routed.adapter.capabilities.liveSteer === "supported" &&
+        admitsGeminiFollowUp &&
         input.allowActiveTurnSteerFallback !== false &&
         input.expectedCompletedRootTurnId === undefined &&
         input.expectedFailedRoot === undefined &&

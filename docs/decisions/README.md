@@ -71,6 +71,7 @@ Related provider lifecycle decisions:
 - [Claude steer consumption](claude-steer-consumption.md): exact native input, message, attempt and runtime ownership for steering presentation.
 - [Claude steering after foreground completion](claude-completed-foreground-steer.md): same-query admission of an ordinary steer that missed its completed foreground turn.
 - [Gemini via Antigravity ACP](gemini-antigravity-acp.md) records native model discovery, effort, permissions, and session ownership.
+- [Gemini ACP follow-ups and background work](gemini-acp-follow-ups.md) describes native request settlement and the limits of background observation.
 - [Initial Claude input consumption](claude-initial-input-consumption.md): narrow
   successor for a committed initial input mapped by its exact native-consumption
   receipt to the actual new turn, without ACK settlement or old-turn aliases.

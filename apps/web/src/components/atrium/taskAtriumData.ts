@@ -484,7 +484,14 @@ export function selectAtriumSnapshot(
       const holding = summary.hasPendingApprovals || summary.hasPendingUserInput;
       const latestTurn =
         environment.threadTurnStateById[threadId]?.latestTurn ?? summary.latestTurn ?? null;
-      const live = status !== null && LIVE_STATUSES.has(status);
+      const liveWork = summary.liveWork;
+      // A detached task can outlive the foreground turn. Only a positive
+      // snapshot bound to this exact current runtime keeps its card live.
+      const hasNativeWork =
+        liveWork !== undefined &&
+        (liveWork.taskCount > 0 || liveWork.agentCount > 0) &&
+        isLiveWorkRuntimeCurrent(liveWork.runtimeId, session);
+      const live = hasNativeWork || (status !== null && LIVE_STATUSES.has(status));
 
       let cardState: AtriumCardState;
       if (holding) cardState = "holding";
@@ -517,25 +524,25 @@ export function selectAtriumSnapshot(
         latestTurn?.turnId ?? null,
         cardState === "done" || cardState === "error",
         session,
-        summary.liveWork,
+        liveWork,
       );
       // Root failure and native context failure are independent. An exact
       // current-generation worker remains discoverable even if its failed
       // root's presentation-only failure was dismissed or became historical.
       // The shared liveness overlay has already refused missing/replaced/
       // stopped/error runtime evidence; raw saved Working text is not enough.
-      const hasLiveSubagents = rows.some((row) => row.running);
+      const hasLiveWork = hasNativeWork || rows.some((row) => row.running);
 
       // Age stale failures off the board entirely. Without this, one old
       // crashed thread sits on the wall forever and the only way to clear it is
       // to dismiss it by hand. Live native children are current work, not an
       // old failure, and must not vanish with that independent root clock.
-      if (errorDismissal !== null && !hasLiveSubagents) {
+      if (errorDismissal !== null && !hasLiveWork) {
         const failedAt = toEpoch(errorDismissal.observedAt);
         if (failedAt !== null && now - failedAt > RECENTLY_ERRORED_MS) continue;
       }
 
-      if (errorDismissal !== null && !hasLiveSubagents) {
+      if (errorDismissal !== null && !hasLiveWork) {
         const dismissed = dismissedErrorByScope.get(errorDismissalScopeKey(errorDismissal));
         if (dismissed !== undefined && isSameErrorDismissal(dismissed, errorDismissal)) {
           continue;

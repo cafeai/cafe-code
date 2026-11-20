@@ -185,13 +185,17 @@ export function makeAcpToolCallEvent(input: {
   readonly turnId: TurnId | undefined;
   readonly toolCall: AcpToolCallState;
   readonly rawPayload: unknown;
+  readonly started?: boolean;
+  readonly geminiDetachedTool?: boolean;
 }): ProviderRuntimeEvent {
   const runtimeStatus = runtimeItemStatusFromAcpToolStatus(input.toolCall.status);
   return {
     type:
       input.toolCall.status === "completed" || input.toolCall.status === "failed"
         ? "item.completed"
-        : "item.updated",
+        : input.started === true
+          ? "item.started"
+          : "item.updated",
     ...input.stamp,
     provider: input.provider,
     threadId: input.threadId,
@@ -206,7 +210,9 @@ export function makeAcpToolCallEvent(input: {
       // previews that Cafe's existing work-log presentation understands. The
       // ingestion boundary sanitizes this value before persistence, so retain
       // the structured data here instead of reducing Grok to a generic title.
-      data: input.toolCall.data,
+      data: input.geminiDetachedTool
+        ? { ...input.toolCall.data, geminiDetachedToolVersion: 1 }
+        : input.toolCall.data,
     },
     raw: {
       source: "acp.jsonrpc",

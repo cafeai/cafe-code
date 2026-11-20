@@ -1,7 +1,9 @@
 {
   "Antigravity CLI permissions": "Antigravity CLI 권한",
-  "Use Antigravity CLI permissions": "Antigravity CLI 권한 사용",
-  "Gemini uses permissions from Antigravity CLI. Choose Use Antigravity CLI permissions in the composer or switch providers.": "Gemini는 Antigravity CLI의 권한을 사용합니다. 작성창에서 ‘Antigravity CLI 권한 사용’을 선택하거나 제공업체를 전환하세요.",
+  "Gemini thinking": "Gemini 사고 과정",
+  "Run autonomously with Antigravity CLI's Auto permission mode.": "Antigravity CLI의 자동 권한 모드로 자율 실행합니다.",
+  "Gemini permission mode can be changed when the session is idle.": "Gemini 세션이 유휴 상태일 때 권한 모드를 변경할 수 있습니다.",
+  "Choose a permission mode in the composer before sending.": "메시지를 보내기 전에 작성창에서 권한 모드를 선택하세요.",
   "Extra": "매우 높음",
   " (offline)": " (오프라인)",
   " (optional)": " (선택 사항)",

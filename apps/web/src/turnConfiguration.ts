@@ -1,5 +1,9 @@
 import { uiText } from "@cafecode/shared/i18n";
-import { ProviderTurnConfiguration, type RuntimeMode } from "@cafecode/contracts";
+import {
+  type ProviderInteractionMode,
+  ProviderTurnConfiguration,
+  type RuntimeMode,
+} from "@cafecode/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import {
@@ -7,6 +11,10 @@ import {
   deriveClaudePermissionMode,
   GROK_PERMISSION_MODE_OPTIONS,
 } from "./components/chat/claudePermissionMode";
+import {
+  deriveGeminiPermissionMode,
+  GEMINI_PERMISSION_MODE_OPTIONS,
+} from "./components/chat/geminiPermissionMode";
 
 /** Access names shared with the composer's access control. */
 const RUNTIME_MODE_LABELS: Readonly<Record<RuntimeMode, string>> = {
@@ -21,18 +29,38 @@ const RUNTIME_MODE_LABELS: Readonly<Record<RuntimeMode, string>> = {
   },
 };
 
+const INTERACTION_MODE_LABELS: Readonly<Record<ProviderInteractionMode, string>> = {
+  get default() {
+    return uiText("Build");
+  },
+  get plan() {
+    return uiText("Plan");
+  },
+  get auto() {
+    return uiText("Auto");
+  },
+  get "gemini-bypass"() {
+    return uiText("Bypass permissions");
+  },
+};
+
 /**
- * Claude and Grok present one native permission mode (Ask permissions,
- * Accept edits, Plan, Auto, Bypass permissions) rather than Cafe's
- * interaction/access pair. Reuse the composer's own mapping so the work log
- * names the mode exactly as it was selected. An omitted interaction mode
- * (provider default) is ambiguous, so it keeps the generic pair.
+ * Use the same native permission labels as the composer. Leave omitted
+ * settings generic and preserve the label from earlier Gemini settings.
  */
 function nativePermissionModeLabel(configuration: ProviderTurnConfiguration): string | null {
-  if (configuration.provider === "gemini" && configuration.runtimeMode === "full-access") {
-    return uiText("Antigravity CLI permissions");
-  }
   if (configuration.interactionMode === undefined) return null;
+  const state = {
+    interactionMode: configuration.interactionMode,
+    runtimeMode: configuration.runtimeMode,
+  };
+  if (configuration.provider === "gemini") {
+    if (state.runtimeMode === "full-access" && state.interactionMode === "default") {
+      return uiText("Antigravity CLI permissions");
+    }
+    const mode = deriveGeminiPermissionMode(state);
+    return GEMINI_PERMISSION_MODE_OPTIONS.find((option) => option.id === mode)?.label ?? null;
+  }
   const options =
     configuration.provider === "claudeAgent"
       ? CLAUDE_PERMISSION_MODE_OPTIONS
@@ -40,10 +68,7 @@ function nativePermissionModeLabel(configuration: ProviderTurnConfiguration): st
         ? GROK_PERMISSION_MODE_OPTIONS
         : null;
   if (options === null) return null;
-  const mode = deriveClaudePermissionMode({
-    interactionMode: configuration.interactionMode,
-    runtimeMode: configuration.runtimeMode,
-  });
+  const mode = deriveClaudePermissionMode(state);
   return options.find((option) => option.id === mode)?.label ?? null;
 }
 
@@ -205,9 +230,7 @@ export function presentTurnConfigurationSummary(configuration: ProviderTurnConfi
   const interactionMode =
     configuration.interactionMode === undefined
       ? uiText("Default mode")
-      : { default: uiText("Build"), plan: uiText("Plan"), auto: uiText("Auto") }[
-          configuration.interactionMode
-        ];
+      : INTERACTION_MODE_LABELS[configuration.interactionMode];
   const nativeMode = nativePermissionModeLabel(configuration);
   const modes = nativeMode
     ? [nativeMode]
@@ -275,9 +298,7 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
   const interactionMode =
     configuration.interactionMode === undefined
       ? uiText("Mode: provider default")
-      : { default: uiText("Build"), plan: uiText("Plan"), auto: uiText("Auto") }[
-          configuration.interactionMode
-        ];
+      : INTERACTION_MODE_LABELS[configuration.interactionMode];
   return {
     settings: [
       model,

@@ -483,6 +483,13 @@ function sanitizeProviderFailureDetail(detail: string, processFailure = false): 
 
 function isUnsupportedLiveSteerFailure(cause: Cause.Cause<unknown>): boolean {
   const providerError = findProviderAdapterRequestError(cause);
+  if (providerError?.remoteErrorTag === "gemini-follow-up-not-admitted") {
+    return (
+      (providerError.provider === "gemini" && providerError.method === "steerTurn") ||
+      (providerError.provider === "provider-daemon" &&
+        (providerError.method === "steerTurn" || providerError.method === "sendTurn"))
+    );
+  }
   const detail = `${providerError?.detail ?? ""}\n${Cause.pretty(cause)}`.toLowerCase();
   return detail.includes("does not support live steering");
 }
@@ -1893,6 +1900,13 @@ const make = Effect.gen(function* () {
       });
     }
     const preferredProvider: ProviderDriverKind = desiredDriverKind;
+    if (desiredInteractionMode === "gemini-bypass" && preferredProvider !== "gemini") {
+      return yield* new ProviderAdapterRequestError({
+        provider: providerErrorLabel(preferredProvider),
+        method: "thread.turn.start",
+        detail: "Gemini Bypass permissions require a Gemini provider.",
+      });
+    }
     const applySubagentPolicyForTurn = options?.applySubagentPolicyForTurn === true;
     const settingsForConcurrency = applySubagentPolicyForTurn
       ? yield* serverSettingsService.getSettings
@@ -2222,8 +2236,8 @@ const make = Effect.gen(function* () {
       const runtimeModeChanged =
         desiredRuntimeMode !== thread.session?.runtimeMode ||
         desiredRuntimeMode !== activeSession.runtimeMode;
-      const grokInteractionModeChanged =
-        activeSession.provider === ProviderDriverKind.make("grok") &&
+      const processInteractionModeChanged =
+        (activeSession.provider === "grok" || activeSession.provider === "gemini") &&
         (activeSession.interactionMode ?? "default") !== desiredInteractionMode;
       const cwdChanged = effectiveCwd !== activeSession?.cwd;
       const additionalDirectoriesChanged = !areStringArraysEqual(
@@ -2252,7 +2266,7 @@ const make = Effect.gen(function* () {
       const concurrencyOnlyReplacement =
         sessionPolicyChanged &&
         !runtimeModeChanged &&
-        !grokInteractionModeChanged &&
+        !processInteractionModeChanged &&
         !cwdChanged &&
         !additionalDirectoriesChanged &&
         !instanceChanged &&
@@ -2262,7 +2276,7 @@ const make = Effect.gen(function* () {
 
       if (
         !runtimeModeChanged &&
-        !grokInteractionModeChanged &&
+        !processInteractionModeChanged &&
         !cwdChanged &&
         !additionalDirectoriesChanged &&
         !instanceChanged &&
@@ -2323,7 +2337,7 @@ const make = Effect.gen(function* () {
         currentNativeRuntimeMode: activeSession.runtimeMode,
         desiredRuntimeMode: thread.runtimeMode,
         runtimeModeChanged,
-        grokInteractionModeChanged,
+        processInteractionModeChanged,
         currentInteractionMode: activeSession.interactionMode ?? "default",
         desiredInteractionMode,
         previousCwd: activeSession?.cwd,
@@ -3730,7 +3744,14 @@ const make = Effect.gen(function* () {
           return;
         }
 
-        if (capabilities.value.liveSteer !== "supported") {
+        if (
+          capabilities.value.liveSteer !== "supported" ||
+          (runtimeActiveSession.provider === "gemini" &&
+            (runtimeActiveSession.runtimeMode !== event.payload.runtimeMode ||
+              (runtimeActiveSession.interactionMode ?? "default") !==
+                event.payload.interactionMode ||
+              runtimeActiveSession.model !== desiredModelSelection.model))
+        ) {
           yield* appendProviderFailureActivity({
             threadId: event.payload.threadId,
             kind: "provider.turn.steer.failed",
@@ -5211,7 +5232,15 @@ const make = Effect.gen(function* () {
       });
     }
     const capabilities = yield* providerService.getCapabilities(providerInstanceId);
-    if (capabilities.liveSteer !== "supported") {
+    if (
+      capabilities.liveSteer !== "supported" ||
+      (activeSession.providerName === "gemini" &&
+        (runtimeActiveSession?.activeTurnId !== activeSession.activeTurnId ||
+          runtimeActiveSession.providerInstanceId !== thread.modelSelection.instanceId ||
+          runtimeActiveSession.runtimeMode !== thread.runtimeMode ||
+          (runtimeActiveSession.interactionMode ?? "default") !== thread.interactionMode ||
+          runtimeActiveSession.model !== thread.modelSelection.model))
+    ) {
       return yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.steer.failed",

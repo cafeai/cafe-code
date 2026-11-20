@@ -198,6 +198,7 @@ import {
   deriveClaudePermissionMode,
   getNextClaudePermissionMode,
 } from "./claudePermissionMode";
+import { applyGeminiPermissionMode } from "./geminiPermissionMode";
 
 function getIMAGE_SIZE_LIMIT_LABEL() {
   return uiText("{value0}MB", {
@@ -927,6 +928,7 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   // Mode
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
+  geminiBypassInstanceId?: ProviderInstanceId | null;
 
   // Provider / model
   lockedProvider: ProviderDriverKind | null;
@@ -1063,6 +1065,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     goalControlsSupported,
     runtimeMode,
     interactionMode,
+    geminiBypassInstanceId,
     lockedProvider,
     providerStatuses,
     activeProjectDefaultModelSelection,
@@ -1691,7 +1694,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const selectedPromptEffort = composerProviderState.promptEffort;
   const selectedModelOptionsForDispatch = composerProviderState.modelOptionsForDispatch;
   const selectedProviderUsesNativePermissionModes =
-    selectedProvider === "claudeAgent" || selectedProvider === "grok";
+    selectedProvider === "claudeAgent" ||
+    selectedProvider === "grok" ||
+    selectedProvider === "gemini";
+  const geminiPermissionModeBusy =
+    selectedProvider === "gemini" &&
+    (phase === "running" ||
+      isSendBusy ||
+      isConnecting ||
+      activeThread?.session?.status === "running");
   // Ambiance composer surface: tint the frame ring with the current weather
   // state color (via CSS variables owned by AmbianceLayer). Ultrathink's
   // rainbow frame intentionally wins when both want the frame.
@@ -1706,9 +1717,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }),
     [providerStatuses, selectedProvider],
   );
-  const handleClaudePermissionModeChange = useCallback(
+  const handleNativePermissionModeChange = useCallback(
     (mode: ClaudePermissionMode) => {
-      const mapped = applyClaudePermissionMode({ interactionMode, runtimeMode }, mode);
+      if (geminiPermissionModeBusy) return;
+      if (selectedProvider === "gemini" && mode === "bypassPermissions") {
+        if (selectedProviderEntry?.driverKind !== "gemini" || !selectedModel) return;
+        // Keep explicit consent with the selected account even if that
+        // account was chosen through a default that later changes.
+        const drafts = useComposerDraftStore.getState();
+        drafts.setModelSelection(
+          composerDraftTarget,
+          createModelSelection(selectedInstanceId, selectedModel),
+        );
+        if (interactionMode === "gemini-bypass" && geminiBypassInstanceId !== selectedInstanceId) {
+          drafts.setInteractionMode(composerDraftTarget, "gemini-bypass");
+        }
+      }
+      const mapped =
+        selectedProvider === "gemini"
+          ? applyGeminiPermissionMode(mode)
+          : applyClaudePermissionMode({ interactionMode, runtimeMode }, mode);
       const next =
         selectedProvider === "grok" && mode === "auto"
           ? { ...mapped, runtimeMode: "auto-accept-edits" as const }
@@ -1725,22 +1753,28 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
     },
     [
+      composerDraftTarget,
+      geminiBypassInstanceId,
+      geminiPermissionModeBusy,
       handleInteractionModeChange,
       handleRuntimeModeChange,
       interactionMode,
       runtimeMode,
+      selectedInstanceId,
+      selectedModel,
       selectedProvider,
+      selectedProviderEntry?.driverKind,
     ],
   );
   const cycleComposerInteractionMode = useCallback(() => {
     if (selectedProvider === "claudeAgent" || selectedProvider === "grok") {
       const currentMode = deriveClaudePermissionMode({ interactionMode, runtimeMode });
-      handleClaudePermissionModeChange(getNextClaudePermissionMode(currentMode));
+      handleNativePermissionModeChange(getNextClaudePermissionMode(currentMode));
       return;
     }
     toggleInteractionMode();
   }, [
-    handleClaudePermissionModeChange,
+    handleNativePermissionModeChange,
     interactionMode,
     runtimeMode,
     selectedProvider,
@@ -4587,13 +4621,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       : null
                   }
                   onToggleInteractionMode={cycleComposerInteractionMode}
-                  onNativePermissionModeChange={handleClaudePermissionModeChange}
+                  onNativePermissionModeChange={handleNativePermissionModeChange}
                   onTogglePlanSidebar={togglePlanSidebar}
                   onRuntimeModeChange={handleRuntimeModeChange}
-                  onUseGeminiCliPermissions={() => {
-                    handleRuntimeModeChange("full-access");
-                    handleInteractionModeChange("default");
-                  }}
+                  geminiPermissionModeBusy={geminiPermissionModeBusy}
+                  geminiBypassMatchesAccount={geminiBypassInstanceId === selectedInstanceId}
                   onOpenGoal={onOpenGoalDialog}
                   open={isComposerControlsMenuOpen}
                   onOpenChange={setIsComposerControlsMenuOpen}

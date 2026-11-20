@@ -956,6 +956,13 @@ function toRpcError(
     error instanceof ProviderAdapterRequestError
       ? Object.getOwnPropertyDescriptor(error, "method")
       : undefined;
+  // Only this exact Cafe-owned pre-admission refusal may requeue Gemini
+  // input. A native response or a missing RPC acknowledgement is ambiguous.
+  const geminiSteerNotAdmitted =
+    (request?.method === "steerTurn" || request?.method === "sendTurn") &&
+    providerDescriptor?.value === "gemini" &&
+    methodDescriptor?.value === "steerTurn" &&
+    refusalDescriptor?.value === "gemini-follow-up-not-admitted";
   // Only the exact local error class may authorize a native retirement witness; Schema decoding must not mint provenance.
   // @effect-diagnostics-next-line instanceOfSchema:off
   const refusal =
@@ -1005,7 +1012,11 @@ function toRpcError(
   return {
     ok: false,
     error: {
-      tag,
+      tag: geminiSteerNotAdmitted
+        ? "gemini-follow-up-not-admitted"
+        : tag === "gemini-follow-up-not-admitted"
+          ? "ProviderAdapterRequestError"
+          : tag,
       message,
       diagnostics,
       ...(refusal !== undefined ? { sessionReconfigurationRefusal: refusal } : {}),

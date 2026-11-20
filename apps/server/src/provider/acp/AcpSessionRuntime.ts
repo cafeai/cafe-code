@@ -10,6 +10,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Random from "effect/Random";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -17,7 +18,7 @@ import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as EffectAcpClient from "effect-acp/client";
 import * as EffectAcpErrors from "effect-acp/errors";
-import type * as EffectAcpSchema from "effect-acp/schema";
+import * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 
 import {
@@ -35,6 +36,14 @@ import {
   type AcpSessionModeState,
   type AcpToolCallState,
 } from "./AcpRuntimeModel.ts";
+
+const decodeGroupedPrompt = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    stopReason: EffectAcpSchema.PromptResponse.fields.stopReason,
+    usage: Schema.optionalKey(Schema.Unknown),
+  }),
+);
+const decodeGroupedUsage = Schema.decodeUnknownOption(EffectAcpSchema.Usage);
 
 function formatConfigOptionValue(value: string | boolean): string {
   return JSON.stringify(value);
@@ -77,6 +86,10 @@ export interface AcpSessionRuntimeOptions {
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
   /** Accept the standard option snapshot only from this exact ready session. */
   readonly observeSessionConfigUpdates?: boolean;
+  /** Preserve exact ACP tool creation and status changes for live work logs. */
+  readonly observeToolLifecycle?: boolean;
+  /** Antigravity joins the results of overlapping prompt requests in one session. */
+  readonly allowOverlappingPrompts?: boolean;
   readonly clientInfo: {
     readonly name: string;
     readonly version: string;
@@ -237,6 +250,13 @@ export class AcpSessionRuntime extends Context.Service<
      */
     readonly prompt: (
       payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">,
+    ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
+    /** The adapter owns grouped settlement and the assistant segment boundary. */
+    readonly promptInGroup?: (
+      payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">,
+      admission: EffectAcpProtocol.AcpRequestQueueAdmission & {
+        readonly configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+      },
     ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
     /**
      * Sends a real ACP `session/cancel` notification for the active session.
@@ -530,6 +550,7 @@ export const make = (
           toolCallsRef,
           assistantSegmentRef,
           assistantItemRuntimeId,
+          observeToolLifecycle: options.observeToolLifecycle === true,
           params: notification,
         });
       }),
@@ -945,6 +966,45 @@ export const make = (
       }).pipe(Effect.andThen(drainEvents)),
       getModeState: Ref.get(modeStateRef),
       getConfigOptions: Ref.get(configOptionsRef),
+      ...(options.allowOverlappingPrompts === true
+        ? {
+            promptInGroup: (payload, admission) =>
+              Effect.gen(function* () {
+                const started = yield* getStartedState;
+                const request = { ...payload, sessionId: started.sessionId };
+                return yield* acp.raw
+                  .request("session/prompt", request, {
+                    onQueued: admission.onQueued,
+                    // Native mode notifications update this ref ahead of the
+                    // adapter's event consumer. Fence that gap at queue admission.
+                    isCurrent: () =>
+                      admission.configOptions === Ref.getUnsafe(configOptionsRef) &&
+                      admission.isCurrent(),
+                  })
+                  .pipe(
+                    Effect.flatMap((value) =>
+                      decodeGroupedPrompt(value).pipe(
+                        Effect.mapError((cause) =>
+                          EffectAcpErrors.AcpProtocolParseError.fromSchemaError(
+                            "decode-wire-message",
+                            "session/prompt",
+                            cause,
+                          ),
+                        ),
+                        Effect.map(({ stopReason, usage }) => {
+                          // Optional usage is telemetry. A malformed sample must
+                          // not turn a successful prompt into a delivery failure.
+                          const tokens = decodeGroupedUsage(usage);
+                          return Option.isSome(tokens)
+                            ? { stopReason, usage: tokens.value }
+                            : { stopReason };
+                        }),
+                      ),
+                    ),
+                  );
+              }),
+          }
+        : {}),
       getAvailableCommands: Ref.get(availableCommandsRef),
       prompt: (payload) =>
         promptSerializationSemaphore.withPermit(
@@ -1092,6 +1152,7 @@ const handleSessionUpdate = ({
   toolCallsRef,
   assistantSegmentRef,
   assistantItemRuntimeId,
+  observeToolLifecycle,
   params,
 }: {
   readonly queue: Queue.Queue<AcpSessionRuntimeEvent>;
@@ -1099,6 +1160,7 @@ const handleSessionUpdate = ({
   readonly toolCallsRef: Ref.Ref<Map<string, AcpToolCallState>>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
   readonly assistantItemRuntimeId: string;
+  readonly observeToolLifecycle: boolean;
   readonly params: EffectAcpSchema.SessionNotification;
 }): Effect.Effect<void> =>
   Effect.gen(function* () {
@@ -1125,13 +1187,20 @@ const handleSessionUpdate = ({
           }
           return [{ previous, merged: nextToolCall }, next] as const;
         });
-        if (!shouldEmitToolCallUpdate(previous, merged)) {
+        const started =
+          observeToolLifecycle && params.update.sessionUpdate === "tool_call" && !previous;
+        if (
+          !started &&
+          !(observeToolLifecycle && merged.status !== previous?.status) &&
+          !shouldEmitToolCallUpdate(previous, merged)
+        ) {
           continue;
         }
         yield* Queue.offer(queue, {
           _tag: "ToolCallUpdated",
           toolCall: merged,
           rawPayload: event.rawPayload,
+          ...(started ? { started: true } : {}),
         });
         continue;
       }

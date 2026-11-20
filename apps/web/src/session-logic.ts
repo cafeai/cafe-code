@@ -53,6 +53,7 @@ import {
 import {
   readClaudeCommandInspection,
   readProviderPublicSummary,
+  providerPublicSummaryLabel,
   mergeClaudeCommandInspections,
   type ClaudeCommandInspection,
   type ProviderPublicSummary,
@@ -1550,13 +1551,8 @@ function toDerivedWorkLogEntry(
     activity.kind === "reasoning.summary" ? readProviderPublicSummary(payload) : undefined;
   if (publicSummary) {
     // The plain label stays canonical English for transcript copy/search.
-    if (publicSummary.provider === "opencode") {
-      entry.label = "OpenCode thinking";
-      entry.displayLabel = uiText("OpenCode thinking");
-    } else {
-      entry.label = "Claude summary";
-      entry.displayLabel = uiText("Claude summary");
-    }
+    entry.label = providerPublicSummaryLabel(publicSummary.provider, "en");
+    entry.displayLabel = providerPublicSummaryLabel(publicSummary.provider);
     entry.tone = "info";
     entry.publicSummary = publicSummary;
     entry.detail = publicSummary.text;

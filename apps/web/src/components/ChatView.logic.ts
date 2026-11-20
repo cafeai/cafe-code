@@ -212,6 +212,10 @@ export function shouldResolvePendingSteerDispatch(input: {
     return true;
   }
 
+  // Gemini groups the original RPC and its one-shot follow-ups. A reply
+  // fragment can precede follow-up delivery, so wait for grouped settlement.
+  if (input.provider === "gemini") return input.terminalTurnAfterSteer;
+
   if (input.provider === "codex" || input.provider === "claudeAgent") {
     // Upstream Codex owns the active-turn race inside one UserTurn command:
     // `turn/steer` falls through to exactly one `turn/start` only after

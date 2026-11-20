@@ -77,7 +77,7 @@ import { useWorkspaceProjects, useWorkspaceThreads } from "../environments/works
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import { getWsConnectionStatus, useWsConnectionStatus } from "../rpc/wsConnectionState";
 import { providerSkillsScopeRevision } from "./chat/useProviderSkills";
-import { usesGeminiCliPermissions } from "./chat/geminiPermissionMode";
+import { deriveGeminiPermissionMode } from "./chat/geminiPermissionMode";
 import type { ProviderQuotaContext } from "./chat/useProviderQuota";
 import { claudeChatQuotaScope, selectedQuotaDriver } from "../lib/claudeSessionQuota";
 import { readEnvironmentApi } from "../environmentApi";
@@ -1548,6 +1548,10 @@ export default function ChatView(props: ChatViewProps) {
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode =
     composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
+  const geminiBypassInstanceId =
+    composerInteractionMode === "gemini-bypass"
+      ? composerActiveProvider
+      : (activeThread?.modelSelection.instanceId ?? null);
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   // Catalog and diagnostics belong to this pane's server, including when
   // another server has imported the same project or thread IDs.
@@ -4716,13 +4720,16 @@ export default function ChatView(props: ChatViewProps) {
     const sendCtx = composerRef.current?.getSendContext();
     if (!sendCtx || !activeThread) return null;
     if (
-      sendCtx.selectedProvider === "gemini" &&
-      !usesGeminiCliPermissions(runtimeMode, interactionMode)
+      (interactionMode === "gemini-bypass" &&
+        (sendCtx.selectedProvider !== "gemini" ||
+          sendCtx.selectedModelSelection.instanceId !== geminiBypassInstanceId)) ||
+      (sendCtx.selectedProvider === "gemini" &&
+        deriveGeminiPermissionMode({ runtimeMode, interactionMode }) === undefined)
     ) {
       setThreadError(
         activeThread.id,
         uiText(
-          "Gemini uses permissions from Antigravity CLI. Choose Use Antigravity CLI permissions in the composer or switch providers.",
+          "Choose a permission mode in the composer before sending.",
           undefined,
           undefined,
           uiLocale,
@@ -5597,6 +5604,25 @@ export default function ChatView(props: ChatViewProps) {
       scopeThreadRef(activeThread.environmentId, activeThread.id),
     );
     const currentSteerSession = currentSteerThread?.session;
+    if (
+      (snapshot.provider === "gemini" || currentSteerSession?.provider === "gemini") &&
+      (snapshot.provider !== "gemini" ||
+        currentSteerSession?.provider !== "gemini" ||
+        currentSteerSession.status !== "running" ||
+        currentSteerSession.providerInstanceId !== snapshot.modelSelection.instanceId ||
+        currentSteerThread?.runtimeMode !== snapshot.runtimeMode ||
+        currentSteerThread.interactionMode !== snapshot.interactionMode ||
+        currentSteerThread.modelSelection.model !== snapshot.modelSelection.model)
+    ) {
+      // A steer inherits the existing native policy. Preserve any different
+      // composer choice as an immutable follow-up for an idle turn.
+      setSendInFlight(false);
+      if (!options?.queuedItem) {
+        const queued = await enqueueFollowUpSnapshot(snapshot, { preserveComposer: true });
+        if (queued) clearActiveComposerContent(composerContentAtAdmission);
+      }
+      return;
+    }
     if (claim) {
       const claimed = queuePersistence.claim(claim, options!.queuedItem!);
       if (!claimed.ok) {
@@ -8203,6 +8229,18 @@ export default function ChatView(props: ChatViewProps) {
         scheduleComposerFocus();
         return;
       }
+      const previous = composerRef.current?.getSendContext();
+      if (
+        (previous?.selectedModelSelection.instanceId !== instanceId &&
+          (previous?.selectedProvider === "gemini" || resolvedDriverKind === "gemini")) ||
+        (interactionMode === "gemini-bypass" &&
+          (resolvedDriverKind !== "gemini" || geminiBypassInstanceId !== instanceId))
+      ) {
+        // Gemini's carrier modes belong to one account. Changing the account
+        // must not transfer an explicit bypass or interpret a carrier as Full access.
+        handleInteractionModeChange("default");
+        handleRuntimeModeChange("approval-required");
+      }
       const nextModelSelection: ModelSelection = {
         instanceId,
         model: resolvedModel,
@@ -8217,6 +8255,11 @@ export default function ChatView(props: ChatViewProps) {
     },
     [
       activeThread,
+      composerRef,
+      geminiBypassInstanceId,
+      handleInteractionModeChange,
+      handleRuntimeModeChange,
+      interactionMode,
       lockedProvider,
       scheduleComposerFocus,
       setComposerDraftModelSelection,
@@ -9013,6 +9056,7 @@ export default function ChatView(props: ChatViewProps) {
                   goalControlsSupported={goalControlsSupported}
                   runtimeMode={runtimeMode}
                   interactionMode={interactionMode}
+                  geminiBypassInstanceId={geminiBypassInstanceId}
                   lockedProvider={lockedProvider}
                   providerStatuses={providerStatuses as ServerProvider[]}
                   activeProjectDefaultModelSelection={activeProject?.defaultModelSelection}

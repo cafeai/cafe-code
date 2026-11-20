@@ -113,7 +113,7 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
           enabled: input.enabled,
           checkedAt,
           models,
-          runtimeCapabilities: { liveSteer: "unsupported", threadGoals: "unsupported" },
+          runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
           probe,
         }),
         driver: DRIVER,

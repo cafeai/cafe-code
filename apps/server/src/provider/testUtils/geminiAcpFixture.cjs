@@ -1,9 +1,10 @@
 // Synthetic Antigravity ACP peer. The test starts it through the ordinary
 // native process boundary, with no provider profile or network access.
 const { createInterface } = require("node:readline");
+const version = process.env.CAFE_GEMINI_FIXTURE_NATIVE_VERSION ?? "1.5.11";
 
 if (process.argv[2] === "--version") {
-  console.log("Antigravity CLI 1.5.11");
+  console.log(`Antigravity CLI ${version}`);
   process.exit(0);
 }
 if (process.argv[2] !== "acp" || process.argv.length !== 3) process.exit(1);
@@ -13,6 +14,25 @@ let resumed = false;
 let mode = "auto";
 let effort = "high";
 let permissionPromptId;
+let steeringRootId;
+let steeringFollowUpId;
+let steeringCompleted = false;
+const initialUsage = {
+  inputTokens: 9_230,
+  outputTokens: 509,
+  thoughtTokens: 393,
+  cachedReadTokens: 0,
+  cachedWriteTokens: 0,
+  totalTokens: 9_739,
+};
+const continuedUsage = {
+  inputTokens: 2_666,
+  outputTokens: 29,
+  thoughtTokens: 27,
+  cachedReadTokens: 7_173,
+  cachedWriteTokens: 0,
+  totalTokens: 9_868,
+};
 const options = (id, category, currentValue, values) => ({
   id,
   name: category,
@@ -31,8 +51,34 @@ const write = (message) =>
 const result = (id, value) => write({ id, result: value });
 const update = (message, owner = sessionId) =>
   write({ method: "session/update", params: { sessionId: owner, update: message } });
-const text = (value, owner) =>
-  update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: value } }, owner);
+const text = (value, owner, messageId) =>
+  update(
+    {
+      sessionUpdate: "agent_message_chunk",
+      ...(messageId ? { messageId } : {}),
+      content: { type: "text", text: value },
+    },
+    owner,
+  );
+const requestPermission = (id) =>
+  write({
+    id,
+    method: "session/request_permission",
+    params: {
+      sessionId,
+      toolCall: {
+        toolCallId: id,
+        title: "List the fixture directory",
+        kind: "execute",
+        rawInput: { command: "ls" },
+      },
+      options: [
+        { optionId: "fixture-once", kind: "allow_once", name: "Allow once" },
+        { optionId: "fixture-always", kind: "allow_always", name: "Always allow" },
+        { optionId: "fixture-reject", kind: "reject_once", name: "Reject once" },
+      ],
+    },
+  });
 
 createInterface({ input: process.stdin }).on("line", (line) => {
   const { id, method, params, result: clientResult } = JSON.parse(line);
@@ -40,7 +86,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     if (clientResult.outcome?.optionId !== "fixture-once") process.exit(1);
     text(`Using ${effort} effort and one-time approval.`);
     update({ sessionUpdate: "usage_update", used: 23, size: 1_000 });
-    result(permissionPromptId, { stopReason: "end_turn" });
+    result(permissionPromptId, { stopReason: "end_turn", usage: initialUsage });
+    return;
+  }
+  if (id === "fixture-steering-approval" && clientResult) {
+    if (clientResult.outcome?.optionId !== "fixture-once") process.exit(1);
+    steeringCompleted = true;
+    result(steeringFollowUpId, { stopReason: "end_turn", usage: continuedUsage });
     return;
   }
 
@@ -48,7 +100,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     case "initialize":
       result(id, {
         protocolVersion: 1,
-        agentInfo: { name: "antigravity-acp", version: "1.5.11" },
+        agentInfo: { name: "antigravity-acp", version },
         agentCapabilities: { sessionCapabilities: { resume: {} } },
         authMethods: [],
       });
@@ -67,6 +119,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         mode = "default";
       } else if (params.configId === "native-thinking" && mode === "default") {
         effort = params.value;
+        // The next native config request gives the fixture a deterministic
+        // idle window on the same child following the first foreground turn.
+        if (steeringCompleted && effort === "high") {
+          text("Background task finished.", sessionId, "fixture-detached-reply");
+        }
       } else {
         process.exit(1);
       }
@@ -78,26 +135,36 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         text("Resumed foreground turn is running.");
         return;
       }
+      const input = params.prompt[0]?.text;
+      if (input === "Start the steering fixture" && steeringRootId === undefined) {
+        steeringRootId = id;
+        text("Initial foreground output.");
+        return;
+      }
+      if (
+        input === "Deliver this follow-up" &&
+        steeringRootId !== undefined &&
+        steeringFollowUpId === undefined
+      ) {
+        steeringFollowUpId = id;
+        // Native Antigravity may finish the original RPC before producing
+        // follow-up output. The second RPC keeps the foreground turn alive.
+        result(steeringRootId, { stopReason: "cancelled", usage: initialUsage });
+        text("Follow-up reached the agent.");
+        requestPermission("fixture-steering-approval");
+        return;
+      }
+      if (input === "Start the next foreground" && steeringCompleted) {
+        result(id, {
+          stopReason: "end_turn",
+          usage: { ...continuedUsage, cachedWriteTokens: 1 },
+        });
+        return;
+      }
+      if (input !== "Hello Gemini") process.exit(1);
       permissionPromptId = id;
       text("Foreign conversation", "foreign-session");
-      write({
-        id: "fixture-approval",
-        method: "session/request_permission",
-        params: {
-          sessionId,
-          toolCall: {
-            toolCallId: "fixture-tool",
-            title: "List the fixture directory",
-            kind: "execute",
-            rawInput: { command: "ls" },
-          },
-          options: [
-            { optionId: "fixture-once", kind: "allow_once", name: "Allow once" },
-            { optionId: "fixture-always", kind: "allow_always", name: "Always allow" },
-            { optionId: "fixture-reject", kind: "reject_once", name: "Reject once" },
-          ],
-        },
-      });
+      requestPermission("fixture-approval");
       break;
     case "session/cancel":
       if (params.sessionId !== sessionId) process.exit(1);

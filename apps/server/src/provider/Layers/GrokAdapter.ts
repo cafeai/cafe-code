@@ -1307,6 +1307,13 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
 
           const cwd = path.resolve(input.cwd.trim());
           const interactionMode = input.interactionMode ?? "default";
+          if (interactionMode === "gemini-bypass") {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue: "Gemini Bypass permissions require a Gemini provider.",
+            });
+          }
           const sandboxProfile = grokSandboxProfileForRuntimeMode(
             input.runtimeMode,
             interactionMode,

@@ -590,6 +590,25 @@ function runtimeToolPresentationData(
   return data;
 }
 
+function geminiDetachedToolPresentation(
+  event: Extract<
+    ProviderRuntimeEvent,
+    { type: "item.started" | "item.updated" | "item.completed" }
+  >,
+) {
+  // This marker is minted only by the adapter after a live same-session tool
+  // observation. Provider raw input/output never becomes liveness evidence.
+  return event.provider === "gemini" &&
+    event.raw?.source === "acp.jsonrpc" &&
+    event.raw.method === "session/update" &&
+    Schema.is(SubagentRuntimeId)(event.subagentRuntimeId) &&
+    event.itemId !== undefined &&
+    event.turnId !== undefined &&
+    readUnknownRecord(event.payload.data)?.geminiDetachedToolVersion === 1
+    ? { geminiDetachedToolVersion: 1 }
+    : {};
+}
+
 function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
 ): ReadonlyArray<OrchestrationThreadActivity> {
@@ -674,9 +693,8 @@ function runtimeEventToActivities(
     const data = readUnknownRecord(event.payload.data);
     const status = event.payload.status ?? "inProgress";
     // Only an admitted adapter's bounded disclosed-summary contract is
-    // promoted (Claude public summaries and OpenCode primary-session reasoning
-    // parts). Generic reasoning/content deltas and other providers remain
-    // unchanged, so a raw provider structure never becomes a summary by shape.
+    // promoted. Generic reasoning/content deltas and other providers stay
+    // unpromoted, so a raw provider structure cannot become a summary by shape.
     if (
       data?.summaryVersion !== PUBLIC_REASONING_SUMMARY_VERSION ||
       data.streamKind !== PUBLIC_REASONING_SUMMARY_STREAM_KIND ||
@@ -701,7 +719,12 @@ function runtimeEventToActivities(
         createdAt: event.createdAt,
         tone: "info",
         kind: "reasoning.summary",
-        summary: provider === "claudeAgent" ? "Claude summary" : "OpenCode thinking",
+        summary:
+          provider === "claudeAgent"
+            ? "Claude summary"
+            : provider === "gemini"
+              ? "Gemini thinking"
+              : "OpenCode thinking",
         payload: {
           summaryVersion: PUBLIC_REASONING_SUMMARY_VERSION,
           provider,
@@ -1120,6 +1143,7 @@ function runtimeEventToActivities(
           kind: "tool.updated",
           summary: event.payload.title ?? "Tool updated",
           payload: {
+            ...geminiDetachedToolPresentation(event),
             ...(taskOwner ? { taskOwner } : {}),
             ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             ...(event.payload.individualTaskControl
@@ -1176,6 +1200,7 @@ function runtimeEventToActivities(
           summary: itemLifecycleActivitySummary(event.payload, "completed"),
           payload: {
             ...compactionMetadata,
+            ...geminiDetachedToolPresentation(event),
             ...(taskOwner ? { taskOwner } : {}),
             ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             itemType: event.payload.itemType,
@@ -1222,6 +1247,7 @@ function runtimeEventToActivities(
           summary: itemLifecycleActivitySummary(event.payload, "started"),
           payload: {
             ...compactionMetadata,
+            ...geminiDetachedToolPresentation(event),
             ...(taskOwner ? { taskOwner } : {}),
             ...(event.subagentRuntimeId ? { nativeWorkRuntimeId: event.subagentRuntimeId } : {}),
             ...(event.payload.individualTaskControl
@@ -2681,6 +2707,49 @@ const make = Effect.gen(function* () {
                   Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(false),
                 ),
               ));
+
+      if (
+        event.type === "item.updated" &&
+        event.provider === "gemini" &&
+        event.payload.itemType === "assistant_message" &&
+        readUnknownRecord(event.payload.data)?.geminiBackgroundReplyVersion === 1
+      ) {
+        const text = event.payload.detail;
+        if (
+          sameRuntimeBinding &&
+          runtimeGenerationVerified &&
+          incomingRuntimeId !== undefined &&
+          eventTurnId !== undefined &&
+          event.itemId?.startsWith("gemini-background:") &&
+          typeof text === "string" &&
+          text.length <= PUBLIC_REASONING_SUMMARY_CHARS &&
+          text.trim().length > 0 &&
+          publicReasoningSummaryDisplayText(text) === text
+        ) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: providerCommandId(event, "gemini-background-reply"),
+            threadId: thread.id,
+            activity: {
+              id: EventId.make(
+                `gemini-background-reply:${Crypto.createHash("sha256")
+                  .update(encodeJsonString([incomingRuntimeId, event.itemId]), "utf8")
+                  .digest("hex")}`,
+              ),
+              createdAt: now,
+              tone: "info",
+              kind: "gemini.background.reply",
+              summary: "Gemini background reply",
+              payload: { detail: text },
+              turnId: eventTurnId,
+            },
+            createdAt: now,
+          });
+        }
+        // A background snapshot never enters foreground message buffers or
+        // replaces the current turn/session status.
+        return;
+      }
 
       if (event.type === "thread.goal.updated" || event.type === "thread.goal.cleared") {
         yield* orchestrationEngine.dispatch({

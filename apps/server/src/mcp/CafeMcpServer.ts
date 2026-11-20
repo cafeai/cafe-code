@@ -20,7 +20,6 @@ import * as NodePath from "node:path";
 
 import {
   CommandId,
-  DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   MessageId,
   ProjectId,
@@ -966,7 +965,7 @@ function registerThreadTools(
         model: nonEmptyString.optional(),
         providerOptions: z.array(providerOption).optional(),
         runtimeMode: runtimeMode.default(DEFAULT_RUNTIME_MODE),
-        interactionMode: interactionMode.default(DEFAULT_PROVIDER_INTERACTION_MODE),
+        interactionMode: interactionMode.default("default"),
         branch: nonEmptyString.nullable().default(null),
         worktreePath: nonEmptyString.nullable().default(null),
       },
