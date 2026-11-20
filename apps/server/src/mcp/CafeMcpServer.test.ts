@@ -2176,6 +2176,32 @@ describe("Cafe MCP thread groups and origin", () => {
       context,
       dependencies,
       async (client) => {
+        const { tools } = await client.listTools();
+        const descriptionSchema = tools.find((tool) => tool.name === "create_thread")?.inputSchema
+          .properties?.description;
+        const titleSchema = tools.find((tool) => tool.name === "create_thread_group")?.inputSchema
+          .properties?.title;
+        for (const inputSchema of [descriptionSchema, titleSchema]) {
+          expect(inputSchema).toMatchObject({ type: "string" });
+          expect(JSON.stringify(inputSchema)).not.toContain("\\p{Bidi_Control}");
+        }
+
+        // Consumers that cannot compile ECMAScript Unicode property escapes
+        // still get a usable catalog. Cafe enforces both rules at invocation.
+        for (const unsafe of ["a\u0007b", "a\u202eb"]) {
+          const invalidDescription = await client.callTool({
+            name: "create_thread",
+            arguments: { title: "Worker", description: unsafe },
+          });
+          const invalidTitle = await client.callTool({
+            name: "create_thread_group",
+            arguments: { title: unsafe },
+          });
+          expect(invalidDescription.isError).toBe(true);
+          expect(invalidTitle.isError).toBe(true);
+        }
+        expect(dispatched).toHaveLength(0);
+
         const group = await client.callTool({
           name: "create_thread_group",
           arguments: { title: "Audit workers" },
@@ -2186,7 +2212,7 @@ describe("Cafe MCP thread groups and origin", () => {
           arguments: {
             title: "Worker",
             groupId: (group.structuredContent as { groupId: string }).groupId,
-            description: "Check relay PoW",
+            description: "Check relay PoW\nReport the result",
             provenance: { creationPath: "cafe-ui" },
           },
         });
@@ -2206,7 +2232,7 @@ describe("Cafe MCP thread groups and origin", () => {
     expect(launched).toMatchObject({
       type: "thread.create",
       groupId: (groupCommand as { groupId: string }).groupId,
-      description: "Check relay PoW",
+      description: "Check relay PoW\nReport the result",
       // The launch claim names a Cafe chat; caller-supplied provenance is ignored.
       provenance: { creationPath: "mcp-launch", originThreadId: threadId },
     });
