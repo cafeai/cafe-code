@@ -30,4 +30,6 @@ The composer offers **Ask permissions**, **Accept edits**, **Plan**, **Auto**, a
 
 Bypass permissions starts a separate Antigravity process with its native tool-approval bypass flag. It applies to the selected chat and lets that process run tools without asking. Use it only in a workspace you trust. Changing modes takes effect with the next idle session, using the same native conversation when the CLI supports resume. [Antigravity execution modes](https://antigravity.google/docs/cli/modes/) · [ACP launch flags](https://antigravity.google/docs/ide/extensions/acp/)
 
+Cafe attaches its management MCP when it opens or resumes a Gemini session. The connection uses the chat’s exact provider instance and follows **Settings → Cafe tools → Enable Cafe management tools**. An already running native session gets the connection on its next stop and resume. [Cafe Code MCP](cafe-mcp.md) · [ACP session setup](https://agentclientprotocol.com/protocol/v1/session-setup)
+
 Gemini uses one workspace per session. Cafe sandbox overrides, thread goals, computer use, and Cafe Secrets are unavailable for this provider.

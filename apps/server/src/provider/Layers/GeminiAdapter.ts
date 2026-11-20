@@ -46,7 +46,9 @@ import {
 } from "../../attachmentStore.ts";
 import { APPLICATION_VERSION } from "../../applicationVersion.ts";
 import { ServerConfig } from "../../config.ts";
+import { makeManagementMcpSession } from "../../mcp/sessionConnection.ts";
 import {
+  ProviderAdapterProcessError,
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
@@ -967,6 +969,26 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
         yield* Effect.addFinalizer(() =>
           transferred ? Effect.void : Scope.close(scope, Exit.void),
         );
+        // The bridge and its scoped owner credential belong to this exact
+        // opening. Scope cleanup revokes them after a rejected or interrupted
+        // startup as well as after the admitted Gemini session retires.
+        const managementMcp = yield* Effect.acquireRelease(
+          makeManagementMcpSession({
+            threadId: input.threadId,
+            providerInstanceId: instanceId,
+          }).pipe(
+            Effect.provideService(ServerConfig, config),
+            Effect.mapError(
+              () =>
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  detail: "Could not attach Cafe management tools.",
+                }),
+            ),
+          ),
+          (binding) => binding?.dispose ?? Effect.void,
+        ).pipe(Effect.provideService(Scope.Scope, scope));
         const runtime = yield* native(
           input.threadId,
           "process/spawn",
@@ -979,6 +1001,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
             clientInfo: { name: "cafe-code", version: APPLICATION_VERSION },
             observeSessionConfigUpdates: true,
             observeToolLifecycle: true,
+            ...(managementMcp ? { managementMcp } : {}),
             ...(resume
               ? { resumeSessionId: resume.sessionId, resumeSessionPolicy: "acknowledged" }
               : {}),

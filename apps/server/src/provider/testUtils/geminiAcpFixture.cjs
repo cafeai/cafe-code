@@ -68,6 +68,26 @@ if (process.argv.includes("--print")) {
 }
 if (process.argv[2] !== "acp" || process.argv.length !== 3) process.exit(1);
 
+const expectManagementMcp = process.env.CAFE_GEMINI_FIXTURE_EXPECT_MANAGEMENT_MCP === "true";
+function validateMcpServers(servers, generation) {
+  if (!Array.isArray(servers) || servers.length !== (expectManagementMcp ? 1 : 0)) process.exit(1);
+  if (!expectManagementMcp) return;
+  const [bridge] = servers;
+  if (
+    bridge.name !== `cafe-code-fixture-${generation}` ||
+    bridge.command !== process.execPath ||
+    bridge.args?.length !== 2 ||
+    bridge.args[0] !== `fixture-bridge-${generation}` ||
+    bridge.args[1] !== `fixture-connection-${generation}` ||
+    bridge.env?.length !== 1 ||
+    bridge.env[0].name !== "ELECTRON_RUN_AS_NODE" ||
+    bridge.env[0].value !== "1" ||
+    bridge.headers !== undefined
+  ) {
+    process.exit(1);
+  }
+}
+
 const sessionId = "gemini-fixture-session";
 let resumed = false;
 let mode = "auto";
@@ -165,10 +185,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       });
       break;
     case "session/new":
+      validateMcpServers(params.mcpServers, 1);
       result(id, { sessionId, configOptions: config() });
       break;
     case "session/resume":
       if (params.sessionId !== sessionId) process.exit(1);
+      validateMcpServers(params.mcpServers, 2);
       resumed = true;
       result(id, { configOptions: config() });
       break;

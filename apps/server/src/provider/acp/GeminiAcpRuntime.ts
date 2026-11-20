@@ -8,6 +8,7 @@ import { AcpRequestError } from "effect-acp/errors";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { isAbsolute } from "node:path";
 
+import type { ManagementMcpBinding } from "../../mcp/sessionConnection.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { collectUint8StreamText } from "../../stream/collectUint8StreamText.ts";
 import { terminateProbeChild } from "../providerSnapshot.ts";
@@ -118,6 +119,7 @@ type GeminiRuntimeOptions = Omit<
   readonly bypassPermissions?: boolean;
   readonly environment: NodeJS.ProcessEnv;
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
+  readonly managementMcp?: ManagementMcpBinding;
 };
 
 export function makeGeminiAcpRuntime({
@@ -125,10 +127,28 @@ export function makeGeminiAcpRuntime({
   bypassPermissions,
   environment,
   childProcessSpawner,
+  managementMcp,
   ...options
 }: GeminiRuntimeOptions) {
   return AcpSessionRuntime.make({
     ...options,
+    // Session setup receives only the bridge's structured launch. Credentials
+    // stay in its private connection file, outside ACP frames and profile config.
+    ...(managementMcp
+      ? {
+          mcpServers: [
+            {
+              name: managementMcp.name,
+              command: managementMcp.launch.command,
+              args: [...managementMcp.launch.args],
+              env: Object.entries(managementMcp.launch.env).map(([name, value]) => ({
+                name,
+                value,
+              })),
+            },
+          ],
+        }
+      : {}),
     allowOverlappingPrompts: true,
     spawn: {
       command: binaryPath,

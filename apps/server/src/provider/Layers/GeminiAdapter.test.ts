@@ -11,7 +11,7 @@ import {
   type UsageAccountingSnapshot,
 } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, it, vi } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -20,6 +20,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { ServerConfig } from "../../config.ts";
+import * as ManagementMcp from "../../mcp/sessionConnection.ts";
 import { makeGeminiAdapter } from "./GeminiAdapter.ts";
 
 const configLayer = ServerConfig.layerTest(process.cwd(), {
@@ -27,7 +28,7 @@ const configLayer = ServerConfig.layerTest(process.cwd(), {
 }).pipe(Layer.provideMerge(NodeServices.layer));
 const fixtureFile = fileURLToPath(new URL("../testUtils/geminiAcpFixture.cjs", import.meta.url));
 
-const makeFixtureAdapter = Effect.gen(function* () {
+const makeFixtureAdapter = Effect.fnUntraced(function* (environment: NodeJS.ProcessEnv = {}) {
   const config = yield* ServerConfig;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   // Exercise the real stdio transport even on Windows, without relying on
@@ -39,7 +40,11 @@ const makeFixtureAdapter = Effect.gen(function* () {
     return spawner.spawn(
       ChildProcess.make(process.execPath, [fixtureFile, ...command.args], {
         ...command.options,
-        env: { ...command.options.env, CAFE_GEMINI_FIXTURE_NATIVE_VERSION: "1.5.13" },
+        env: {
+          ...command.options.env,
+          ...environment,
+          CAFE_GEMINI_FIXTURE_NATIVE_VERSION: "1.5.13",
+        },
       }),
     );
   });
@@ -64,10 +69,56 @@ const makeFixtureAdapter = Effect.gen(function* () {
 });
 
 it.live(
+  "mounts a distinct Cafe MCP bridge on Gemini open and resume and retires both bindings",
+  () =>
+    Effect.gen(function* () {
+      const retired: string[] = [];
+      let nextBinding = 1;
+      const bind = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          vi.spyOn(ManagementMcp, "makeManagementMcpSession").mockImplementation(() => {
+            const generation = nextBinding++;
+            const name = `cafe-code-fixture-${generation}`;
+            return Effect.succeed({
+              name,
+              launch: {
+                command: process.execPath,
+                args: [`fixture-bridge-${generation}`, `fixture-connection-${generation}`],
+                env: { ELECTRON_RUN_AS_NODE: "1" },
+              },
+              dispose: Effect.sync(() => {
+                retired.push(name);
+              }),
+            });
+          }),
+        ),
+        (spy) => Effect.sync(() => void spy.mockRestore()),
+      );
+      const { adapter, threadId, instanceId, start } = yield* makeFixtureAdapter({
+        CAFE_GEMINI_FIXTURE_EXPECT_MANAGEMENT_MCP: "true",
+      });
+      const opened = yield* adapter.startSession(start);
+      assert.isDefined(opened.resumeCursor);
+      assert.deepEqual(retired, []);
+      yield* adapter.stopSession(threadId);
+      assert.deepEqual(retired, ["cafe-code-fixture-1"]);
+
+      yield* adapter.startSession({ ...start, resumeCursor: opened.resumeCursor });
+      assert.deepEqual(bind.mock.calls, [
+        [{ threadId, providerInstanceId: instanceId }],
+        [{ threadId, providerInstanceId: instanceId }],
+      ]);
+      assert.deepEqual(retired, ["cafe-code-fixture-1"]);
+      yield* adapter.stopSession(threadId);
+      assert.deepEqual(retired, ["cafe-code-fixture-1", "cafe-code-fixture-2"]);
+    }).pipe(Effect.provide(configLayer)),
+);
+
+it.live(
   "delivers a qualified Gemini prompt, permits only its one-time approval, and stops the resumed owner",
   () =>
     Effect.gen(function* () {
-      const { adapter, threadId, instanceId, modelSelection, start } = yield* makeFixtureAdapter;
+      const { adapter, threadId, instanceId, modelSelection, start } = yield* makeFixtureAdapter();
 
       const approval = yield* Deferred.make<ApprovalRequestId>();
       const completed = yield* Deferred.make<void>();
@@ -155,7 +206,7 @@ it.live(
   "keeps a Gemini turn active until its admitted follow-up and separates background output",
   () =>
     Effect.gen(function* () {
-      const { adapter, threadId, modelSelection, start } = yield* makeFixtureAdapter;
+      const { adapter, threadId, modelSelection, start } = yield* makeFixtureAdapter();
       const initialOutput = yield* Deferred.make<void>();
       const approval = yield* Deferred.make<ApprovalRequestId>();
       const terminal = yield* Deferred.make<void>();
