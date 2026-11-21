@@ -148,6 +148,8 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
+const CODEX_TURN_INTERRUPT_TIMEOUT = "10 seconds" as const;
+const CODEX_INTERRUPT_GOAL_PAUSE_TIMEOUT = "5 seconds" as const;
 const CODEX_LOCAL_ENVIRONMENT_ID = "local";
 // Codex TUI 0.147 uses a 60-second hidden grace followed by a 60-second
 // visible countdown for non-blocking request_user_input calls. The runtime
@@ -821,8 +823,18 @@ export type CodexSessionRuntimeError =
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
+  | CodexSessionRuntimeInterruptUnconfirmedError
   | CodexSessionRuntimeThreadIdMissingError
   | CodexSessionRuntimeInvalidSubagentThreadError;
+
+class CodexSessionRuntimeInterruptUnconfirmedError extends Schema.TaggedErrorClass<CodexSessionRuntimeInterruptUnconfirmedError>()(
+  "CodexSessionRuntimeInterruptUnconfirmedError",
+  {},
+) {
+  override get message(): string {
+    return "Codex did not acknowledge the turn interrupt. Its status is unknown.";
+  }
+}
 
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedErrorClass<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
@@ -10779,6 +10791,13 @@ export const makeCodexSessionRuntime = (
                 return yield* requestInterrupt(actualTurnId);
               }),
             ),
+            // The initial request and its exact mismatch retarget share one
+            // deadline. Losing either ACK leaves native turn state unknown.
+            // Do not replay, clear its ownership, or report an accepted Stop.
+            Effect.timeoutOrElse({
+              duration: CODEX_TURN_INTERRUPT_TIMEOUT,
+              orElse: () => Effect.fail(new CodexSessionRuntimeInterruptUnconfirmedError()),
+            }),
           );
           // Upstream Codex TUI pauses an active goal when the user interrupts
           // the current task. Cafe awaits this update before its adapter may
@@ -10799,6 +10818,9 @@ export const makeCodexSessionRuntime = (
               status: "paused",
             });
           }).pipe(
+            // This optional follow-up must not strand a Stop that Codex already
+            // acknowledged. The existing warning preserves pause uncertainty.
+            Effect.timeout(CODEX_INTERRUPT_GOAL_PAUSE_TIMEOUT),
             Effect.catchCause((cause) =>
               Effect.logWarning("codex.goal.pause-after-interrupt-failed", {
                 threadId: options.threadId,

@@ -83,6 +83,7 @@ import { makeSqlitePersistenceLive } from "../../persistence/Layers/Sqlite.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 import { normalizeClaudeSubagentHistoryRoot } from "../claudeSubagentHistoryRoot.ts";
+import { PROVIDER_RUNTIME_OWNER_HEARTBEAT_INTERVAL_MS } from "../providerRuntimeOwnerEvidence.ts";
 
 const decodeProviderJsonString = ProviderJsonSchema.decodeUnknownSync(
   ProviderJsonSchema.fromJsonString(
@@ -1361,6 +1362,71 @@ it.effect(
     }).pipe(Effect.provide(fixture.layer));
   },
 );
+
+it.effect("ProviderService lists live sessions while another chat is stopping", () => {
+  const fixture = makeReloadableProviderServiceFixture();
+  return Effect.gen(function* () {
+    const provider = yield* ProviderService;
+    const directory = yield* ProviderSessionDirectory;
+    const stoppingThread = asThreadId("heartbeat-inventory-a");
+    const availableThread = asThreadId("heartbeat-inventory-b");
+    const threadIds = [stoppingThread, availableThread];
+    for (const threadId of threadIds) {
+      yield* provider.startSession(threadId, {
+        threadId,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+      });
+      const { turnId } = yield* provider.sendTurn({
+        threadId,
+        input: "Work until stopped",
+        attachments: [],
+      });
+      fixture.codex.updateSession(threadId, (session) => ({
+        ...session,
+        status: "running",
+        activeTurnId: turnId,
+      }));
+    }
+    const initialBinding = Option.getOrThrow(yield* directory.getBinding(availableThread));
+    const initialHeartbeat = (initialBinding.runtimePayload as Record<string, unknown>)
+      .runtimeOwnerHeartbeatAt;
+
+    const stopEntered = yield* Deferred.make<void>();
+    const releaseStop = yield* Deferred.make<void>();
+    const stopSession = fixture.codex.stopSession.getMockImplementation()!;
+    fixture.codex.stopSession.mockImplementationOnce((threadId) =>
+      Deferred.succeed(stopEntered, undefined).pipe(
+        Effect.andThen(Deferred.await(releaseStop)),
+        Effect.andThen(stopSession(threadId)),
+      ),
+    );
+    const stop = yield* provider.stopSession({ threadId: stoppingThread }).pipe(Effect.forkChild);
+    yield* Deferred.await(stopEntered);
+    // Both leases are due while the exact native Stop still holds one chat's
+    // lifecycle lock. Inventory and the other live lease can make progress.
+    yield* advanceTestClock(PROVIDER_RUNTIME_OWNER_HEARTBEAT_INTERVAL_MS);
+    const inventory = yield* provider
+      .listSessions()
+      .pipe(Effect.timeoutOption("1 second"), Effect.forkChild);
+    yield* advanceTestClock(1_001);
+    const observed = yield* Fiber.join(inventory);
+    const refreshed = Option.getOrThrow(yield* directory.getBinding(availableThread));
+    const refreshedHeartbeat = (refreshed.runtimePayload as Record<string, unknown>)
+      .runtimeOwnerHeartbeatAt;
+    yield* Deferred.succeed(releaseStop, undefined);
+    yield* Fiber.join(stop);
+
+    assert.isTrue(Option.isSome(observed), "inventory timed out behind Stop");
+    assert.sameMembers(
+      Option.getOrThrow(observed).map((session) => session.threadId),
+      threadIds,
+    );
+    assert.isString(initialHeartbeat);
+    assert.isString(refreshedHeartbeat);
+    assert.isAbove(Date.parse(String(refreshedHeartbeat)), Date.parse(String(initialHeartbeat)));
+  }).pipe(Effect.provide(fixture.layer));
+});
 
 for (const terminalBoundary of ["reload", "stop"] as const) {
   it.effect(

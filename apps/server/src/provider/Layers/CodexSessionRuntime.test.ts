@@ -219,6 +219,7 @@ for (const request of [
   { label: "failed-opening", context: 800_000, failed: true, expected: 800_000 },
   { label: "native-question-response-winner", questionRace: true, expected: null },
   { label: "native-human-command-approval", humanApproval: true, expected: null },
+  { label: "interrupt-mismatch-retry-lost", interruptRetryLost: true, expected: null },
   {
     label: "diagnostic-source",
     context: 800_000,
@@ -232,7 +233,9 @@ for (const request of [
       ? "accepts only one concurrent answer for an exact native question and emits one acknowledgement"
       : "humanApproval" in request
         ? "keeps a native human command pending until an explicit one-time decision"
-        : `records ${request.label} opening request before retaining explicit goal controls`,
+        : "interruptRetryLost" in request
+          ? "bounds the interrupt exchange when the exact mismatch retry loses its acknowledgement"
+          : `records ${request.label} opening request before retaining explicit goal controls`,
     () =>
       Effect.gen(function* () {
         // The real runtime and typed JSONL client run against a scoped in-memory
@@ -244,12 +247,18 @@ for (const request of [
         const openingWillBeRejected = "failed" in request;
         const resumeWillFailRecoverably = "recoverable" in request;
         const responseWillBeMismatched = "mismatched" in request;
+        const interruptRetryLost = "interruptRetryLost" in request;
         const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
         const nativeQuestionReplies: unknown[] = [];
         const nativeQuestionReturned = yield* Deferred.make<{
           readonly result?: unknown;
           readonly error?: unknown;
         }>();
+        const interruptEntered = yield* Deferred.make<void>();
+        const releaseInterruptMismatch = yield* Deferred.make<void>();
+        const interruptRetryEntered = yield* Deferred.make<void>();
+        const previousTurn = TurnId.make("synthetic-stale-interrupt-turn");
+        const currentTurn = TurnId.make("synthetic-current-interrupt-turn");
         const nativeThreadId = "synthetic-goal-thread";
         const goal = {
           threadId: nativeThreadId,
@@ -322,6 +331,29 @@ for (const request of [
                       ...(request.params ? { params: request.params } : {}),
                     });
                     if (request.id === undefined) continue;
+                    if (interruptRetryLost && request.method === "turn/interrupt") {
+                      if (request.params?.turnId === previousTurn) {
+                        yield* Deferred.succeed(interruptEntered, undefined);
+                        yield* Deferred.await(releaseInterruptMismatch);
+                        yield* Queue.offer(
+                          output,
+                          encoder.encode(
+                            `${encodeProviderJsonString({
+                              id: request.id,
+                              error: {
+                                code: -32602,
+                                message: `expected active turn id ${previousTurn} but found ${currentTurn}`,
+                              },
+                            })}\n`,
+                          ),
+                        );
+                      } else {
+                        // The same native owner stays alive and never sends the
+                        // second ACK. No fake process exit can unblock it.
+                        yield* Deferred.succeed(interruptRetryEntered, undefined);
+                      }
+                      continue;
+                    }
                     const result =
                       request.method === "initialize"
                         ? {
@@ -446,6 +478,41 @@ for (const request of [
           return;
         }
         yield* runtime.start();
+        if (interruptRetryLost) {
+          const beforeInterrupt = calls.length;
+          const interrupt = yield* runtime
+            .interruptTurn(previousTurn)
+            .pipe(Effect.flip, Effect.timeout("11 seconds"), Effect.forkChild);
+          yield* Deferred.await(interruptEntered);
+          // Spend most of the deadline on the initial request. A fresh 10
+          // seconds on retargeting would hit the outer guard instead.
+          yield* TestClock.adjust("8 seconds");
+          yield* Deferred.succeed(releaseInterruptMismatch, undefined);
+          yield* Deferred.await(interruptRetryEntered);
+          yield* TestClock.adjust("3 seconds");
+          const failure = yield* Fiber.join(interrupt);
+          assert.equal(failure._tag, "CodexSessionRuntimeInterruptUnconfirmedError");
+          assert.equal(
+            failure.message,
+            "Codex did not acknowledge the turn interrupt. Its status is unknown.",
+          );
+          assert.deepEqual(
+            calls
+              .slice(beforeInterrupt)
+              .filter(
+                (call) =>
+                  call.method === "turn/interrupt" || call.method.startsWith("thread/goal/"),
+              ),
+            [previousTurn, currentTurn].map((turnId) => ({
+              method: "turn/interrupt",
+              params: { threadId: nativeThreadId, turnId },
+            })),
+          );
+          const interruptedSession = yield* runtime.getSession;
+          assert.equal(interruptedSession.status, "running");
+          assert.equal(interruptedSession.activeTurnId, currentTurn);
+          return;
+        }
         const session = yield* runtime.getSession;
         assert.equal(accessorReads, 0);
         assert.equal(
