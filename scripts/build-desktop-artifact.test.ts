@@ -8,6 +8,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { getUiTranslator } from "@cafecode/shared/i18n";
 import {
   APPLICATION_BUILD_VERSION_MANIFEST_FILENAME,
@@ -39,6 +40,8 @@ import {
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { REPOSITORY_NODE_VERSION } from "./lib/node-version.ts";
 
+const windowsArchiveInvocationPrefix = String.raw`$ErrorActionPreference = 'Stop'; $env:PSModulePath = $PSHOME + '\Modules'; Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Archive\Microsoft.PowerShell.Archive.psd1'); Microsoft.PowerShell.Archive\Expand-Archive `;
+
 // The extractor is replaced at the process service boundary. These fixtures
 // exercise the production byte verification, private snapshot, resource scope
 // and staging reads without downloading an archive or launching any process.
@@ -53,25 +56,30 @@ function extractionPaths(
     assert.equal(command.args[2], "-d");
     return { archivePath: command.args[1]!, destination: command.args[3]! };
   }
-  assert.equal(command.command, "powershell.exe");
-  assert.deepEqual(command.args.slice(0, 4), [
+  assert.match(
+    command.command,
+    /^(?:[a-z]:\\|\\\\).+\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe$/iu,
+  );
+  assert.deepEqual(command.args.slice(0, 5), [
     "-NoProfile",
+    "-NonInteractive",
     "-ExecutionPolicy",
     "Bypass",
     "-Command",
   ]);
-  assert.lengthOf(command.args, 5);
-  const invocation = command.args[4]!;
+  assert.lengthOf(command.args, 6);
+  const invocation = command.args[5]!;
   // This fixture admits precisely the production invocation, not PowerShell
   // syntax in general. A word boundary before '-LiteralPath' is impossible
   // after the preceding space: both the space and '-' are non-word characters.
   // An anchored command prefix validates it directly and stays fail-closed.
-  const literals =
-    /^Expand-Archive -LiteralPath '((?:[^']|'')*)' -DestinationPath '((?:[^']|'')*)' -Force$/u.exec(
-      invocation,
-    );
+  assert.isTrue(invocation.startsWith(windowsArchiveInvocationPrefix));
+  const archiveArguments = invocation.slice(windowsArchiveInvocationPrefix.length);
+  const literals = /^-LiteralPath '((?:[^']|'')*)' -DestinationPath '((?:[^']|'')*)' -Force$/u.exec(
+    archiveArguments,
+  );
   assert.isNotNull(literals);
-  assert.equal(literals![0], invocation);
+  assert.equal(literals![0], archiveArguments);
   return {
     archivePath: literals![1]!.replaceAll("''", "'"),
     destination: literals![2]!.replaceAll("''", "'"),
@@ -160,22 +168,28 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   );
 
   it("parses the Windows extraction fixture on every host with exact structured arguments and literal quoted paths", () => {
+    const powerShell = String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`;
     const archivePath = "C:\\cache with spaces and ' quotes\\verified-extract-123\\node.zip";
     const destination = "C:\\cache with spaces and ' quotes\\verified-extract-123";
-    const invocation = `Expand-Archive -LiteralPath '${archivePath.replaceAll("'", "''")}' -DestinationPath '${destination.replaceAll("'", "''")}' -Force`;
-    const args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", invocation];
-    assert.deepEqual(extractionPaths(ChildProcess.make("powershell.exe", args), "win32"), {
+    const invocation = `${windowsArchiveInvocationPrefix}-LiteralPath '${archivePath.replaceAll("'", "''")}' -DestinationPath '${destination.replaceAll("'", "''")}' -Force`;
+    const args = [
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      invocation,
+    ];
+    assert.deepEqual(extractionPaths(ChildProcess.make(powerShell, args), "win32"), {
       archivePath,
       destination,
     });
     // These assertions run on macOS/Linux too; no native command or platform
     // mutation is needed to catch regressions in the Windows fixture branch.
     assert.throws(() => extractionPaths(ChildProcess.make("other.exe", args), "win32"));
+    assert.throws(() => extractionPaths(ChildProcess.make(powerShell, args.slice(1)), "win32"));
     assert.throws(() =>
-      extractionPaths(ChildProcess.make("powershell.exe", args.slice(1)), "win32"),
-    );
-    assert.throws(() =>
-      extractionPaths(ChildProcess.make("powershell.exe", [...args, "extra"]), "win32"),
+      extractionPaths(ChildProcess.make(powerShell, [...args, "extra"]), "win32"),
     );
     for (const invalidInvocation of [
       invocation.replace("Expand-Archive ", ""),
@@ -187,7 +201,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ]) {
       assert.throws(() =>
         extractionPaths(
-          ChildProcess.make("powershell.exe", [...args.slice(0, 4), invalidInvocation]),
+          ChildProcess.make(powerShell, [...args.slice(0, 5), invalidInvocation]),
           "win32",
         ),
       );
@@ -539,6 +553,80 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           "modified cached shim",
         );
       }),
+  );
+
+  it.effect.skipIf(process.platform !== "win32")(
+    "extracts the verified archive even with a competing inherited PowerShell Archive module",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "cafe-native-archive-" });
+        const cache = path.join(root, "cache with spaces and ' quotes");
+        const foreignModules = path.join(root, "foreign-modules");
+        const foreignArchive = path.join(foreignModules, "Microsoft.PowerShell.Archive");
+        yield* fs.makeDirectory(foreignArchive, { recursive: true });
+        yield* fs.writeFileString(
+          path.join(foreignArchive, "Microsoft.PowerShell.Archive.psm1"),
+          "function Expand-Archive { throw 'The foreign Archive module was executed.' }\n" +
+            "Export-ModuleMember -Function Expand-Archive\n",
+        );
+        // This ZIP contains exactly test-node/node.exe and test-node/npm.cmd,
+        // with inert text bytes. The real extractor needs no network or process mock.
+        const zip = Buffer.from(
+          "UEsDBBQAAAAAAAAAIQAItxexFgAAABYAAAASAAAAdGVzdC1ub2RlL25vZGUuZXhlaW5lcnQgZXhlY3V0YW" +
+            "JsZSBieXRlc1BLAwQUAAAAAAAAACEAOrLdexAAAAAQAAAAEQAAAHRlc3Qtbm9kZS9ucG0uY21kaW5lcnQg" +
+            "c2hpbSBieXRlc1BLAQIUAxQAAAAAAAAAIQAItxexFgAAABYAAAASAAAAAAAAAAAAAACAAQAAAAB0ZXN0LW" +
+            "5vZGUvbm9kZS5leGVQSwECFAMUAAAAAAAAACEAOrLdexAAAAAQAAAAEQAAAAAAAAAAAAAAgAFGAAAAdGVz" +
+            "dC1ub2RlL25wbS5jbWRQSwUGAAAAAAIAAgB/AAAAhQAAAAAA",
+          "base64",
+        );
+        const archive = {
+          ...resolveManagedWindowsNodeArchive("x64")!,
+          fileName: "test-node.zip",
+          sourceDirectoryName: "test-node",
+          sha256: createHash("sha256").update(zip).digest("hex"),
+        };
+        const archivePath = path.join(cache, archive.fileName);
+        yield* fs.makeDirectory(cache);
+        yield* fs.writeFile(archivePath, zip);
+        // Mirror the runner's inherited foreign module directory. The original
+        // command autoloads from here, while the production child must use inbox
+        // Windows PowerShell. Restore the worker environment on exit or timeout.
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            const saved = {
+              PSModulePath: process.env.PSModulePath,
+              PSModuleAnalysisCachePath: process.env.PSModuleAnalysisCachePath,
+            };
+            process.env.PSModulePath = foreignModules;
+            process.env.PSModuleAnalysisCachePath = path.join(root, "foreign-module-analysis");
+            return saved;
+          }),
+          (saved) =>
+            Effect.sync(() => {
+              for (const [key, value] of Object.entries(saved)) {
+                if (value === undefined) delete process.env[key];
+                else process.env[key] = value;
+              }
+            }),
+        );
+        const extractedRoot = yield* extractManagedWindowsNodeArchive(
+          archive,
+          archivePath,
+          cache,
+          false,
+        ).pipe(Effect.timeout("30 seconds"), TestClock.withLive);
+        assert.equal(
+          yield* fs.readFileString(path.join(extractedRoot, "node.exe")),
+          "inert executable bytes",
+        );
+        assert.equal(
+          yield* fs.readFileString(path.join(extractedRoot, "npm.cmd")),
+          "inert shim bytes",
+        );
+      }),
+    35_000,
   );
 
   it.effect("rejects a replaced ZIP before the extractor can stage any files", () =>

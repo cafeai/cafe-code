@@ -706,8 +706,23 @@ export const extractManagedWindowsNodeArchive = Effect.fn("extractManagedWindows
 
     yield* Effect.log(`[desktop-artifact] Extracting managed Node runtime ${archive.fileName}...`);
     if (process.platform === "win32") {
+      const systemRoot = process.env.SystemRoot;
+      if (!systemRoot || !path.isAbsolute(systemRoot)) {
+        return yield* new BuildScriptError({
+          message:
+            "An absolute Windows SystemRoot is required to extract the managed Node archive.",
+        });
+      }
+      const powerShellHome = path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0");
+      // A PowerShell 7 parent can leave its edition's modules in a Node child's
+      // environment. Windows PowerShell may also add module paths at startup,
+      // so reset module discovery inside the child before importing its inbox
+      // Archive module. Escalate nonterminating extraction errors to child exit.
       const expandArchiveCommand = [
-        "Expand-Archive",
+        "$ErrorActionPreference = 'Stop';",
+        String.raw`$env:PSModulePath = $PSHOME + '\Modules';`,
+        String.raw`Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Archive\Microsoft.PowerShell.Archive.psd1');`,
+        String.raw`Microsoft.PowerShell.Archive\Expand-Archive`,
         "-LiteralPath",
         quotePowerShellString(privateArchivePath),
         "-DestinationPath",
@@ -716,10 +731,29 @@ export const extractManagedWindowsNodeArchive = Effect.fn("extractManagedWindows
       ].join(" ");
       yield* runCommand(
         ChildProcess.make(
-          "powershell.exe",
-          ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", expandArchiveCommand],
+          path.join(powerShellHome, "powershell.exe"),
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            expandArchiveCommand,
+          ],
           {
             ...commandOutputOptions(verbose),
+            // Keep module discovery, cache writes and temp files local to the
+            // selected Windows installation and this owned extraction scope.
+            shell: false,
+            extendEnv: false,
+            env: {
+              SystemRoot: systemRoot,
+              WINDIR: systemRoot,
+              PSModulePath: path.join(powerShellHome, "Modules"),
+              PSModuleAnalysisCachePath: path.join(extractionRoot, "PowerShellModuleAnalysisCache"),
+              TEMP: extractionRoot,
+              TMP: extractionRoot,
+            },
           },
         ),
       );
