@@ -104,6 +104,32 @@ describe("Antigravity ACP model catalogue and selection", () => {
     });
   });
 
+  it.each(["claude-opus-5-5", "claude-sonnet-5-5"])(
+    "offers the Antigravity thinking tiers for %s before it is selected",
+    (claudeModel) => {
+      // Discovery opens on Gemini Neon, whose Extra option must not leak
+      // into the Claude entry. An inactive model inherits the native default.
+      const models = buildGeminiAcpModels([
+        modelSelector(neon, [neon, claudeModel]),
+        effortSelector("thought_level", "xhigh", ["low", "medium", "high", "xhigh"]),
+      ]);
+      expect(
+        models.find(({ slug }) => slug === claudeModel)?.capabilities?.optionDescriptors,
+      ).toEqual([
+        {
+          id: "reasoningEffort",
+          type: "select",
+          label: "Thinking",
+          options: [
+            { id: "low", label: "Low" },
+            { id: "medium", label: "Medium" },
+            { id: "high", label: "High" },
+          ],
+        },
+      ]);
+    },
+  );
+
   it.effect("sets the newly advertised effort after the model acknowledges a switch", () =>
     Effect.gen(function* () {
       const { calls, runtime } = fixture(

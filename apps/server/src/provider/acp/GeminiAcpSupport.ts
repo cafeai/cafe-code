@@ -105,9 +105,8 @@ const STANDARD_EFFORTS = [
   { id: "high", label: "High" },
 ] as const;
 
-// Google's Antigravity model guide and Gemini API thinking table document
-// these exact levels. This catalogue hint is only for a model already offered
-// by ACP, when its active selector is not observable. No default is marked:
+// These catalogue previews apply only to models already advertised by ACP
+// whose active selectors are not observable. No default is marked:
 // the composer submits marked defaults, and native openings choose their own.
 // https://antigravity.google/docs/models
 // https://aistudio.google.com/docs/thinking#thinking-levels
@@ -119,6 +118,11 @@ function documentedEfforts(model: string): ReadonlyArray<ProviderOptionChoice> {
     case "gemini-4-carbon":
     case "gemini-4-argon":
     case "gemini-3.8-flash":
+    // Antigravity exposes these Claude models under their base IDs in ACP.
+    // Offer the standard tiers confirmed by its consumer CLI. Any additional
+    // tiers or restrictions come from the selected model's own live selector.
+    case "claude-opus-5-5":
+    case "claude-sonnet-5-5":
       return STANDARD_EFFORTS;
     default:
       return [];
