@@ -625,6 +625,8 @@ interface PendingSteerDispatch {
   readonly commandId: CommandId;
   readonly requiresIntentSequence: boolean;
   readonly turnId: TurnId | null;
+  /** Stop settlement requires the active Claude turn observed at admission. */
+  readonly claudeActiveTurnId: TurnId | null;
   /** Exact native owner observed at the final steer admission boundary. */
   readonly providerInstanceId: string | null;
   readonly subagentRuntimeId: string | null;
@@ -866,7 +868,42 @@ function threadHasSteerProcessingStarted(thread: Thread, pending: PendingSteerDi
   });
 }
 
+function threadHasConfirmedStopForPendingClaudeSteer(
+  thread: Thread,
+  pending: PendingSteerDispatch,
+) {
+  const { intentSequence, claudeActiveTurnId } = pending;
+  if (claudeActiveTurnId === null || intentSequence === null) {
+    return false;
+  }
+
+  // A successful Stop settles the shelf for the interrupted turn, even when
+  // the next turn is already live. It gives no evidence of native consumption
+  // and grants no authority to replay the message. The Stop intent, rather
+  // than its later completion activity, must follow this exact steer attempt.
+  return thread.activities.some((activity) => {
+    if (
+      activity.kind !== "provider.turn.interrupt.completed" ||
+      activity.turnId !== claudeActiveTurnId
+    ) {
+      return false;
+    }
+    const payload = readDebugRecord(activity.payload);
+    if (payload === null) return false;
+    const stopSequence: unknown = Object.getOwnPropertyDescriptor(
+      payload,
+      "interruptIntentSequence",
+    )?.value;
+    return (
+      typeof stopSequence === "number" &&
+      Number.isSafeInteger(stopSequence) &&
+      stopSequence > intentSequence
+    );
+  });
+}
+
 function threadHasResolvedPendingSteer(thread: Thread, pending: PendingSteerDispatch) {
+  if (threadHasConfirmedStopForPendingClaudeSteer(thread, pending)) return true;
   return shouldResolvePendingSteerDispatch({
     provider: thread.session?.provider,
     terminalTurnAfterSteer: threadHasTerminalTurnAfterSteer(thread, pending),
@@ -1991,7 +2028,7 @@ export default function ChatView(props: ChatViewProps) {
         ) {
           continue;
         }
-        if (thread === undefined) {
+        if (thread === undefined || thread.environmentId !== pending.environmentId) {
           continue;
         }
         if (!threadHasResolvedPendingSteer(thread, pending)) {
@@ -5650,6 +5687,12 @@ export default function ChatView(props: ChatViewProps) {
           requiresIntentSequence: options?.queuedItem?.automaticSteerRetry != null,
           turnId:
             currentSteerSession?.activeTurnId ?? currentSteerThread?.latestTurn?.turnId ?? null,
+          // The latest completed turn can be a useful presentation fallback,
+          // but it was not the active target of a steer admitted as a new start.
+          claudeActiveTurnId:
+            currentSteerSession?.provider === "claudeAgent"
+              ? (currentSteerSession.activeTurnId ?? null)
+              : null,
           providerInstanceId: currentSteerSession?.providerInstanceId ?? null,
           subagentRuntimeId: currentSteerSession?.subagentRuntimeId ?? null,
           snapshot,

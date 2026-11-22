@@ -4520,6 +4520,9 @@ const make = Effect.gen(function* () {
               createdAt: interruptedAt,
               payload: {
                 requestedAt: event.payload.createdAt,
+                // Completion can arrive after a newer send. Preserve the
+                // durable ordering of the Stop request itself.
+                interruptIntentSequence: event.sequence,
               },
             });
           }),

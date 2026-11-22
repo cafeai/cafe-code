@@ -11639,7 +11639,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    const interruptReceipt = await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.interrupt",
         commandId: CommandId.make("cmd-turn-interrupt"),
@@ -11657,13 +11657,15 @@ describe("ProviderCommandReactor", () => {
     await waitFor(async () => {
       const readModel = await harness.readModel();
       const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-      return (
-        thread?.activities.some(
-          (activity) =>
-            activity.kind === "provider.turn.interrupt.completed" &&
-            activity.turnId === asTurnId("turn-1"),
-        ) ?? false
+      const activity = thread?.activities.find(
+        (activity) => activity.kind === "provider.turn.interrupt.completed",
       );
+      if (!activity) return false;
+      expect(activity).toMatchObject({
+        turnId: asTurnId("turn-1"),
+        payload: { requestedAt: now, interruptIntentSequence: interruptReceipt.sequence },
+      });
+      return true;
     });
   });
 
