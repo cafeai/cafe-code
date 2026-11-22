@@ -195,7 +195,15 @@ function owner(test: TestContext) {
 }
 
 describe("native three-node private mesh", () => {
-  it("adds nodes under one root, redirects discovery, and resumes on a survivor with fresh Noise", async (test) => {
+  // One deadline covers native startup, failover, and close. Hosted macOS
+  // runs have hit the default deadline during reconnect and resumed RPC.
+  it(
+    "adds nodes under one root, redirects discovery, and resumes on a survivor with fresh Noise",
+    { timeout: 15_000 },
+    exerciseMeshFailover,
+  );
+
+  async function exerciseMeshFailover(test: TestContext) {
     const fixture = owner(test);
     const [root, nodeA, nodeB, nodeC, admission, hostIdentity, device, viewerAdmission] =
       await fixture.run("identities", () =>
@@ -440,5 +448,5 @@ describe("native three-node private mesh", () => {
         nativeSockets: 0,
         circuits: 0,
       });
-  });
+  }
 });
