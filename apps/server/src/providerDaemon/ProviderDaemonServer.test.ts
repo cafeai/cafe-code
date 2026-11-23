@@ -92,6 +92,7 @@ import * as McpAppOwner from "../mcpApps/owner.ts";
 import { privateVisualizationDaemonRequestCount } from "../visualizations/privateDaemonBody.ts";
 import { MCP_APP_JSON_MAX_TRANSPORT_BYTES } from "@cafecode/shared/mcpAppJson";
 import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
+import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
 
 const decodeProviderJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 const decodeErrorKeysJsonString = Schema.decodeUnknownSync(
@@ -475,13 +476,16 @@ function makeStartupReadinessNativeOwner(test: TestContext) {
     route: string,
     token: string | null = TEST_TOKEN,
     body?: string,
+    stopAfterText?: (text: string) => boolean,
   ): Promise<{ readonly status: number; readonly text: string }> => {
     active();
     return new Promise((resolve, reject) => {
       let closed = false;
       let ended = false;
       let reply: { readonly status: number; readonly text: string } | undefined;
-      const refuse = () => reject(new Error("Synthetic readiness HTTP request did not complete."));
+      const refuse = () => {
+        if (!ended) reject(new Error("Synthetic readiness HTTP request did not complete."));
+      };
       const settle = () => {
         if (closed && ended && reply !== undefined) resolve(reply);
       };
@@ -511,6 +515,17 @@ function makeStartupReadinessNativeOwner(test: TestContext) {
               return;
             }
             chunks.push(chunk);
+            if (stopAfterText !== undefined) {
+              const text = Buffer.concat(chunks).toString("utf8");
+              if (stopAfterText(text)) {
+                // An event subscription is intentionally open-ended. After a
+                // complete terminal record, close this exact native request
+                // and wait for its close just as for a finite response.
+                reply = { status: response.statusCode ?? 0, text };
+                ended = true;
+                native.destroy();
+              }
+            }
           });
           response.once("end", () => {
             reply = {
@@ -537,6 +552,7 @@ function makeStartupReadinessNativeOwner(test: TestContext) {
         requests.delete(native);
         closes.delete(joinedClose);
         markClosed();
+        if (stopAfterText !== undefined) refuse();
         settle();
       });
       native.end(body);
@@ -2359,11 +2375,13 @@ describe("ProviderDaemonServer", () => {
       }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer));
     },
   );
-  it("waits for drain and rejects close for a slow daemon event response", async () => {
+  it("joins the exact backpressured write and rejects an early response close", async () => {
     class FakeSlowResponse extends EventEmitter {
       writes: string[] = [];
-      write(line: string): boolean {
+      complete: (() => void) | undefined;
+      write(line: string, complete: () => void): boolean {
         this.writes.push(line);
+        this.complete = complete;
         return false;
       }
     }
@@ -2379,7 +2397,7 @@ describe("ProviderDaemonServer", () => {
     });
     await Promise.resolve();
     assert.isFalse(settled);
-    draining.emit("drain");
+    draining.complete?.();
     await drainPromise;
     assert.deepEqual(draining.writes, ["record\n"]);
 
@@ -2395,7 +2413,7 @@ describe("ProviderDaemonServer", () => {
     closing.emit("close");
     const closeError = await closeResult;
     assert.instanceOf(closeError, Error);
-    assert.match(closeError.message, /closed before drain/u);
+    assert.match(closeError.message, /closed before the write completed/u);
   });
 
   it("filters replay/live overlap before it can overflow the finite live queue", async () => {
@@ -2480,6 +2498,148 @@ describe("ProviderDaemonServer", () => {
     ).toEqual(Array.from({ length: 305 }, (_, index) => index + 1));
     expect(cleanupCount).toBe(1);
     expect(liveListener).toBeNull();
+  });
+
+  it("delivers live overflow through bounded journal replay on the same HTTP connection", async (test) => {
+    const owner = makeStartupReadinessNativeOwner(test);
+    try {
+      await owner.run(
+        Effect.gen(function* () {
+          const initialBoundary = PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords + 1;
+          const terminalCursor =
+            initialBoundary + PROVIDER_PIPELINE_POLICY.daemonWriterMaxRecords + 2;
+          const retained = Array.from({ length: initialBoundary }, (_, index) =>
+            makeDaemonRecord(index + 1),
+          );
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          owner.releaseBeforeClose(() => Deferred.doneUnsafe(release, Effect.void));
+          let listener: ((record: ProviderDaemonEventRecord) => void) | undefined;
+          const snapshot = Effect.sync(() => ({
+            eventCursor: retained.length,
+            retainedEventCount: retained.length,
+            oldestCursor: 1,
+            newestCursor: retained.length,
+          }));
+          const journal = {
+            publish: (event: ProviderRuntimeEvent) =>
+              Effect.sync(() => {
+                owner.active();
+                const record = { ...makeDaemonRecord(retained.length + 1), event };
+                retained.push(record);
+                listener?.(record);
+                return record;
+              }),
+            replayAfter: () => Effect.die("expected a bounded replay page"),
+            replayPageAfter: () => Effect.die("expected a bounded replay high-water mark"),
+            replayPageThrough: (cursor, throughCursor, limit) =>
+              Effect.gen(function* () {
+                const pageSize = limit ?? Infinity;
+                assert.isAtMost(pageSize, PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords);
+                if (cursor === 0) {
+                  yield* Deferred.succeed(entered, undefined);
+                  yield* Deferred.await(release);
+                }
+                return retained.slice(cursor, Math.min(throughCursor, cursor + pageSize));
+              }),
+            subscribe: () => () => undefined,
+            subscribeWithReplayBoundary: (onRecord) =>
+              Effect.sync(() => {
+                listener = onRecord;
+                return {
+                  replayBoundaryCursor: retained.length,
+                  unsubscribe: () => {
+                    listener = undefined;
+                  },
+                };
+              }),
+            snapshot,
+            startupMaintenance: Effect.void,
+          } satisfies ProviderDaemonPersistentEventJournal;
+          let stream: Promise<void> | undefined;
+          let requestCount = 0;
+          const server = yield* Effect.acquireRelease(
+            Effect.promise(
+              () =>
+                new Promise<http.Server>((resolve, reject) => {
+                  const server = http.createServer((request, response) => {
+                    if (test.signal.aborted) {
+                      response.end();
+                      return;
+                    }
+                    requestCount += 1;
+                    // Keep native transport error ownership when qualifying
+                    // this handler without the full daemon authentication layer.
+                    response.on("error", () => undefined);
+                    stream = handleProviderDaemonEventStream(
+                      request,
+                      response,
+                      journal,
+                      0,
+                      Effect.runPromise,
+                      () => undefined,
+                    );
+                  });
+                  server.once("error", reject);
+                  server.listen(0, "127.0.0.1", () => resolve(server));
+                }),
+            ),
+            (server) =>
+              Effect.promise(async () => {
+                owner.quiesce();
+                await new Promise<void>((resolve) => server.close(() => resolve()));
+                await stream;
+              }),
+          );
+          const address = server.address();
+          if (address === null || typeof address === "string") {
+            throw new Error("Expected a loopback HTTP test server.");
+          }
+          const request = owner.request(
+            address.port,
+            "/events",
+            null,
+            undefined,
+            (text) => text.endsWith("\n") && text.includes('"type":"turn.completed"'),
+          );
+          // Own a failure that closes the transport before the held page gate.
+          const result = request.then(
+            (value) => ({ value, error: null }),
+            (error: unknown) => ({ value: null, error }),
+          );
+          yield* Deferred.await(entered);
+          for (let cursor = initialBoundary + 1; cursor <= terminalCursor; cursor += 1) {
+            const { event } = makeDaemonRecord(cursor);
+            yield* journal.publish(
+              cursor === terminalCursor
+                ? {
+                    ...event,
+                    type: "turn.completed",
+                    turnId: TurnId.make("stream-overflow-terminal"),
+                    payload: { state: "completed" },
+                  }
+                : event,
+            );
+          }
+          yield* Deferred.succeed(release, undefined);
+          const reply = yield* Effect.promise(() => result);
+          if (!reply.value) throw reply.error;
+          assert.equal(reply.value.status, 200);
+          const records = reply.value.text
+            .trimEnd()
+            .split("\n")
+            .map((line) => JSON.parse(line) as ProviderDaemonEventRecord);
+          assert.deepEqual(
+            records.map((record) => record.cursor),
+            retained.map((record) => record.cursor),
+          );
+          assert.equal(records.at(-1)?.event.type, "turn.completed");
+          assert.equal(requestCount, 1);
+        }).pipe(Effect.scoped),
+      );
+    } finally {
+      await owner.close();
+    }
   });
 
   it("cleans up the HTTP stream when replay-boundary acquisition fails", async () => {

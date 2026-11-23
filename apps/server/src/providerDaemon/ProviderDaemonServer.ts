@@ -1268,40 +1268,40 @@ function parseAfterCursor(raw: string | null): number {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
-function waitForResponseDrain(response: http.ServerResponse): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const cleanup = (): void => {
-      response.off("drain", onDrain);
-      response.off("close", onClose);
-      response.off("error", onError);
-    };
-    const onDrain = (): void => {
-      cleanup();
-      resolve();
-    };
-    const onClose = (): void => {
-      cleanup();
-      reject(new Error("provider daemon event response closed before drain"));
-    };
-    const onError = (cause: Error): void => {
-      cleanup();
-      reject(cause);
-    };
-    response.once("drain", onDrain);
-    response.once("close", onClose);
-    response.once("error", onError);
-  });
-}
-
-/** Public test seam for the serialized daemon writer's Node drain contract. */
-export async function writeProviderDaemonStreamLine(
+/** Serialize backpressure at the exact native response write. */
+export function writeProviderDaemonStreamLine(
   response: http.ServerResponse,
   line: string,
 ): Promise<void> {
-  if (!response.write(line)) {
-    addProviderDaemonStreamDiagnostics({ drainWaitCount: 1 });
-    await waitForResponseDrain(response);
-  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (error?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      response.off("close", onClose);
+      response.off("error", settle);
+      if (error == null) resolve();
+      else reject(error);
+    };
+    const onClose = (): void =>
+      settle(new Error("provider daemon event response closed before the write completed"));
+    if (response.destroyed || response.writableEnded) {
+      onClose();
+      return;
+    }
+    response.once("close", onClose);
+    response.once("error", settle);
+    try {
+      // A backpressured HTTP write may flush completely without an observed
+      // response-level drain. Join the callback for this exact frame instead,
+      // while still fast-pathing writes accepted below the native watermark.
+      const accepted = response.write(line, (error) => settle(error));
+      if (accepted) settle();
+      else addProviderDaemonStreamDiagnostics({ drainWaitCount: 1 });
+    } catch (error) {
+      settle(error);
+    }
+  });
 }
 
 function yieldProviderStreamTurn(): Promise<void> {
@@ -1335,6 +1335,20 @@ export async function handleProviderDaemonEventStream(
   let wakeWriter: (() => void) | null = null;
   let unsubscribe: (() => void) | null = null;
   let replayBoundaryCursor: number | null = null;
+  let readLiveFromJournal = false;
+  let liveHighWaterCursor = 0;
+
+  const publishLiveQueueSize = (): void => {
+    setProviderDaemonStreamDiagnostics({
+      queuedLiveRecords: liveQueue.length,
+      queuedLiveBytes: liveQueueBytes,
+    });
+  };
+
+  const signalWriter = (): void => {
+    wakeWriter?.();
+    wakeWriter = null;
+  };
 
   const cleanup = (cause?: unknown): void => {
     if (cleaned) return;
@@ -1343,8 +1357,7 @@ export async function handleProviderDaemonEventStream(
     unsubscribe?.();
     setProviderDaemonStreamDiagnostics({ queuedLiveRecords: 0, queuedLiveBytes: 0 });
     onCleanup();
-    wakeWriter?.();
-    wakeWriter = null;
+    signalWriter();
     if (cause !== undefined && !response.destroyed) {
       response.destroy(cause instanceof Error ? cause : new Error(String(cause)));
     } else if (!response.destroyed && !response.writableEnded) {
@@ -1373,24 +1386,28 @@ export async function handleProviderDaemonEventStream(
     if (replayBoundaryCursor !== null && record.cursor <= replayBoundaryCursor) {
       return;
     }
+    liveHighWaterCursor = Math.max(liveHighWaterCursor, record.cursor);
+    if (readLiveFromJournal) {
+      signalWriter();
+      return;
+    }
     try {
       const queued = encodeRecord(record);
       if (
         liveQueue.length >= PROVIDER_PIPELINE_POLICY.daemonWriterMaxRecords ||
         liveQueueBytes + queued.bytes > PROVIDER_PIPELINE_POLICY.daemonWriterMaxBytes
       ) {
-        addProviderDaemonStreamDiagnostics({ laggingDisconnectCount: 1 });
-        cleanup(new Error("provider daemon event stream live queue exceeded its finite limit"));
-        return;
+        // The listener only observes committed records. Keep the already
+        // buffered prefix, then read the rest from the journal on this socket.
+        // Closing during a burst can repeatedly abort replay before the reader
+        // consumes it. The overflowing record and later events need no copies.
+        readLiveFromJournal = true;
+      } else {
+        liveQueue.push(queued);
+        liveQueueBytes += queued.bytes;
       }
-      liveQueue.push(queued);
-      liveQueueBytes += queued.bytes;
-      setProviderDaemonStreamDiagnostics({
-        queuedLiveRecords: liveQueue.length,
-        queuedLiveBytes: liveQueueBytes,
-      });
-      wakeWriter?.();
-      wakeWriter = null;
+      publishLiveQueueSize();
+      signalWriter();
     } catch (cause) {
       cleanup(cause);
     }
@@ -1400,8 +1417,9 @@ export async function handleProviderDaemonEventStream(
     await writeProviderDaemonStreamLine(response, queued.line);
   };
 
-  const waitForLive = (): Promise<void> => {
-    if (!active || liveQueue.length > 0) return Promise.resolve();
+  const waitForLive = (cursor: number): Promise<void> => {
+    if (!active || liveQueue.length > 0 || (readLiveFromJournal && liveHighWaterCursor > cursor))
+      return Promise.resolve();
     return new Promise((resolve) => {
       wakeWriter = resolve;
     });
@@ -1442,10 +1460,7 @@ export async function handleProviderDaemonEventStream(
       );
       liveQueue.splice(0, liveQueue.length, ...newerRecords);
       liveQueueBytes = newerRecords.reduce((total, queued) => total + queued.bytes, 0);
-      setProviderDaemonStreamDiagnostics({
-        queuedLiveRecords: liveQueue.length,
-        queuedLiveBytes: liveQueueBytes,
-      });
+      publishLiveQueueSize();
     }
 
     let cursor = Math.max(0, Math.trunc(afterCursor));
@@ -1467,30 +1482,38 @@ export async function handleProviderDaemonEventStream(
       }
     };
 
-    // Replay is deliberately capped at the captured high-water cursor. Without
-    // this bound a busy provider can keep extending historical replay while
-    // the same records accumulate in the live queue.
-    for (;;) {
-      if (!active) break;
-      const page = await runJournalEffect(
-        journal.replayPageThrough(
-          cursor,
-          replaySubscription.replayBoundaryCursor,
-          PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords,
-        ),
-      );
-      if (page.length === 0) break;
-      addProviderDaemonStreamDiagnostics({ replayPageCount: 1 });
-      for (const record of page) {
-        if (!active) return;
-        if (record.cursor <= cursor) continue;
-        const queued = encodeRecord(record);
-        addProviderDaemonStreamDiagnostics({ replayRecordCount: 1, replayBytes: queued.bytes });
-        await writeQueued(queued);
-        cursor = record.cursor;
-        await accountWork(queued.bytes);
+    const replayThrough = async (throughCursor: number): Promise<void> => {
+      while (active && cursor < throughCursor) {
+        const page = await runJournalEffect(
+          journal.replayPageThrough(
+            cursor,
+            throughCursor,
+            PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords,
+          ),
+        );
+        if (page.length === 0) {
+          // The owner-scoped range is exhausted, including retained holes.
+          // This scan cursor stays on the server. The receiver still advances
+          // only from actual records delivered over the wire.
+          cursor = throughCursor;
+          return;
+        }
+        addProviderDaemonStreamDiagnostics({ replayPageCount: 1 });
+        for (const record of page) {
+          if (!active) return;
+          if (record.cursor <= cursor) continue;
+          const queued = encodeRecord(record);
+          addProviderDaemonStreamDiagnostics({ replayRecordCount: 1, replayBytes: queued.bytes });
+          await writeQueued(queued);
+          cursor = record.cursor;
+          await accountWork(queued.bytes);
+        }
       }
-    }
+    };
+
+    // Each pass has a fixed boundary. A busy provider cannot extend an active
+    // read or require accumulating every newer frame while that read finishes.
+    await replayThrough(replaySubscription.replayBoundaryCursor);
 
     for (;;) {
       if (!active) break;
@@ -1498,16 +1521,17 @@ export async function handleProviderDaemonEventStream(
         const queued = liveQueue.shift();
         if (queued === undefined) break;
         liveQueueBytes = Math.max(0, liveQueueBytes - queued.bytes);
-        setProviderDaemonStreamDiagnostics({
-          queuedLiveRecords: liveQueue.length,
-          queuedLiveBytes: liveQueueBytes,
-        });
+        publishLiveQueueSize();
         if (queued.record.cursor <= cursor) continue;
         await writeQueued(queued);
         cursor = queued.record.cursor;
         await accountWork(queued.bytes);
       }
-      await waitForLive();
+      if (active && readLiveFromJournal && liveHighWaterCursor > cursor) {
+        await replayThrough(liveHighWaterCursor);
+        continue;
+      }
+      await waitForLive(cursor);
     }
   } catch (cause) {
     cleanup(cause);
