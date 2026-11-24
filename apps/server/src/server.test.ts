@@ -21,6 +21,7 @@ import { connectViewer as connectRelayViewer } from "@cafecode/relay/client";
 import { parseInvitationUrl as parseRelayInvitation } from "@cafecode/relay/invitation";
 import { fetchRelayed as fetchRelayHttp } from "@cafecode/relay/http";
 import { relayRpcHeaders, relayRpcProtocol, readRelayRpcProtocol } from "@cafecode/relay/rpc";
+import { deferred as relayDeferred } from "@cafecode/relay/deferred";
 import { relayEffectSocket } from "./relay/request.ts";
 import {
   RelayRuntime,
@@ -36,6 +37,8 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "node:crypto";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - Relay fixtures must use the private reader's native canonical-path boundary.
+import { realpath as nativeRealpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { webAppIconUrl, webAppManifestHref } from "@cafecode/shared/webAppBranding";
 import type { ClientSettings, SidebarBrandImageAsset } from "@cafecode/contracts/settings";
@@ -549,10 +552,12 @@ const buildAppUnderTest = (options?: {
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const tempBaseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-router-test-" });
+    // The native lookup is not cancellable. Join it before scoped retirement
+    // may remove this same temporary directory, without masking the test body.
     const baseDir =
       options?.config?.baseDir ??
       (options?.relayConfig || options?.relayIO
-        ? yield* fileSystem.realPath(tempBaseDir)
+        ? yield* Effect.promise(() => nativeRealpath(tempBaseDir)).pipe(Effect.uninterruptible)
         : tempBaseDir);
     const devUrl = options?.config?.devUrl;
     const derivedPaths = yield* deriveServerPaths(baseDir, devUrl);
@@ -768,7 +773,7 @@ const buildAppUnderTest = (options?: {
         Layer.provide(
           Layer.mock(ProviderRegistry)({
             getProviders: Effect.succeed([]),
-            readInstanceAccountQuota: () => Effect.succeed(null),
+            readInstanceAccountQuota: () => Effect.succeed({ report: null }),
             refresh: () => Effect.succeed([]),
             refreshInstance: () => Effect.succeed([]),
             refreshInstanceAccountUsage: () => Effect.succeed([]),
@@ -1641,40 +1646,135 @@ const qualifyRelayRouter = (
   publicNetwork = false,
   selfService = false,
 ) => {
-  let phase = "setup";
+  let phase = "setup",
+    failurePhase: string | undefined,
+    retired = false;
+  const freezeFailurePhase = () => {
+    failurePhase ??= phase;
+  };
   test.onTestFailed(() => {
-    process.stdout.write("relay-router-phase: " + phase + "\n");
+    freezeFailurePhase();
+    try {
+      process.stdout.write("relay-router-phase: " + failurePhase + "\n");
+    } catch {
+      // Fixed passive phases must never replace the original test failure.
+    }
   });
   const lifetime = new RelayLifetime();
   let relay: Awaited<ReturnType<typeof startRelayServer>> | undefined;
   let connection: Awaited<ReturnType<typeof connectRelayViewer>> | undefined;
-  const retire = () => {
-    lifetime.retire();
-    void connection?.close();
-    void relay?.close();
+  type NativeOwner = { readonly close: () => Promise<void> };
+  const acquisitions = new Set<Promise<unknown>>(),
+    nativeCloses = new Map<NativeOwner, Promise<void>>();
+  const assertActive = () => {
+    if (retired || test.signal.aborted || !lifetime.active)
+      throw new Error("relay-router-fixture-retired");
   };
-  test.signal.addEventListener("abort", retire, { once: true });
-  test.onTestFinished(async () => {
+  const closeNative = (owner: NativeOwner): Promise<void> => {
+    const existing = nativeCloses.get(owner);
+    if (existing) return existing;
+    // Publish before calling native close, including synchronous reentry. The
+    // rejection observer prevents an orphan during signal retirement; cleanup
+    // still joins this original outcome and reports every failed native close.
+    const closed = relayDeferred<void>();
+    nativeCloses.set(owner, closed.promise);
+    void closed.promise.catch(() => {});
+    try {
+      void owner.close().then(closed.resolve, closed.reject);
+    } catch (error) {
+      closed.reject(error);
+    }
+    return closed.promise;
+  };
+  const ownNative = <A extends NativeOwner>(
+    start: () => Promise<A>,
+    adopt: (owner: A) => void,
+  ): Promise<A> => {
+    assertActive();
+    const original = start();
+    // Retain both the original native operation and its exact adoption/late
+    // close. Effect interruption may retire its caller before either settles.
+    const adopted = original.then(async (owner) => {
+      adopt(owner);
+      if (retired || test.signal.aborted || !lifetime.active) {
+        await closeNative(owner);
+        throw new Error("relay-router-fixture-retired");
+      }
+      return owner;
+    });
+    for (const operation of [original, adopted]) {
+      acquisitions.add(operation);
+      void operation.then(
+        () => acquisitions.delete(operation),
+        () => acquisitions.delete(operation),
+      );
+    }
+    return adopted;
+  };
+  const retire = () => {
+    retired = true;
+    lifetime.retire();
+    if (connection) void closeNative(connection);
+    if (relay) void closeNative(relay);
+  };
+  const abort = () => {
+    freezeFailurePhase();
     retire();
-    await connection?.close();
-    await relay?.close();
-    await lifetime.close();
-  });
+  };
+  let cleaning: Promise<void> | undefined;
+  const cleanup = (): Promise<void> => {
+    if (cleaning) return cleaning;
+    const closed = relayDeferred<void>();
+    cleaning = closed.promise;
+    void cleaning.catch(() => {});
+    void (async () => {
+      freezeFailurePhase();
+      retire();
+      test.signal.removeEventListener("abort", abort);
+      // A listener/viewer resolving after retirement adopts inside its held
+      // promise and joins its own native close before this drain can finish.
+      // hostStarted is an application notification, never an acquisition join.
+      while (acquisitions.size) await Promise.allSettled([...acquisitions]);
+      const results = await Promise.allSettled([...nativeCloses.values()]);
+      const failures: unknown[] = results.flatMap((result) =>
+        result.status === "rejected" ? [result.reason] : [],
+      );
+      try {
+        await lifetime.close();
+      } catch (error) {
+        failures.push(error);
+      }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1)
+        throw new AggregateError(failures, "Relay router fixture cleanup failed.");
+    })().then(closed.resolve, closed.reject);
+    return closed.promise;
+  };
+  // Public retirement and its complete, memoized cleanup precede every native
+  // acquisition. Late continuations cannot outlive this fixture's owner.
+  test.signal.addEventListener("abort", abort, { once: true });
+  test.onTestFinished(cleanup);
+  if (test.signal.aborted) abort();
   return Effect.gen(function* () {
+    assertActive();
     const fs = yield* FileSystem.FileSystem;
     const publicConfig = publicNetwork
       ? yield* Effect.promise(async () => {
+          assertActive();
           const bytes = await readRelayPrivate(
             process.env.CAFE_RELAY_PUBLIC_STATE_ROOT!,
             "config.json",
             32_768,
           );
+          assertActive();
           if (!bytes) throw new Error("public-relay-configuration-required");
           return readRelayCanonical(RelayHostConfig, bytes, 32_768);
         })
       : undefined;
+    assertActive();
     const publicEntry = publicConfig?.networks[0];
     const tlsRoot = new URL("../../desktop/src/settings/__fixtures__/remote-tls/", import.meta.url);
+    phase = "tls";
     const tls = {
       key: yield* fs.readFileString(
         compiled && !publicNetwork
@@ -1687,6 +1787,7 @@ const qualifyRelayRouter = (
           : fileURLToPath(new URL("test-only-cert.pem", tlsRoot)),
       ),
     };
+    assertActive();
     const hostname = publicEntry
       ? new URL(publicEntry.viewerOrigin).hostname
       : compiled
@@ -1698,6 +1799,7 @@ const qualifyRelayRouter = (
           return compiledRelayViewer(test, hostname, tls, publicEntry?.viewerOrigin);
         })
       : undefined;
+    assertActive();
     const viewerOrigin = browser?.origin ?? "https://trusted-viewer.example";
     const descriptor = compiled
       ? { ...testEnvironmentDescriptor, serverVersion: serverPackage.version }
@@ -1726,11 +1828,15 @@ const qualifyRelayRouter = (
             },
           }
         : { ca: tls.cert };
-    const dial: RelayRuntimeIOShape["dial"] = (member, resources) =>
-      connectRelayNative(member.url, resources, hostWorkTls);
+    const dial: RelayRuntimeIOShape["dial"] = (member, resources) => {
+      assertActive();
+      return connectRelayNative(member.url, resources, hostWorkTls);
+    };
+    phase = "identities";
     const [root, node, admission, device, deviceAdmission] = yield* Effect.promise(() =>
       Promise.all(Array.from({ length: 5 }, () => createRelayIdentity())),
     );
+    assertActive();
     const nodeId = deriveRelayIdentityId("node", node!.publicKey),
       locator = publicEntry?.locator ?? randomRelayOpaque(),
       capacity = randomRelayOpaque();
@@ -1744,28 +1850,33 @@ const qualifyRelayRouter = (
           nodes: [{ id: nodeId, publicKey: node!.publicKey, url: `wss://${hostname}:1/v1/relay` }],
         }),
       ));
+    assertActive();
     if (!publicNetwork) {
-      relay = yield* Effect.promise(() =>
-        startRelayServer({
-          network,
-          nodeId,
-          host: "127.0.0.1",
-          port: 0,
-          tls,
-          grants: [
-            {
-              locator,
-              admissionPublicKey: admission!.publicKey,
-              tokenDigest: relayOpaque(relaySha256(relayUnopaque(capacity, 32))),
-            },
-          ],
-          selfService,
-        }),
+      phase = "native-listen";
+      yield* Effect.promise(() =>
+        ownNative(
+          () =>
+            startRelayServer({
+              network,
+              nodeId,
+              host: "127.0.0.1",
+              port: 0,
+              tls,
+              grants: [
+                {
+                  locator,
+                  admissionPublicKey: admission!.publicKey,
+                  tokenDigest: relayOpaque(relaySha256(relayUnopaque(capacity, 32))),
+                },
+              ],
+              selfService,
+            }),
+          (owner) => {
+            relay = owner;
+          },
+        ),
       );
-      if (!lifetime.active) {
-        yield* Effect.promise(() => relay!.close());
-        return;
-      }
+      assertActive();
       network = yield* Effect.promise(() =>
         signRelayNetwork({
           root: root!,
@@ -1780,10 +1891,33 @@ const qualifyRelayRouter = (
           ],
         }),
       );
+      assertActive();
       yield* Effect.promise(() => relay!.updateNetwork(relayCanonicalBytes(network)));
+      assertActive();
     }
     const hostStarted = Promise.withResolvers<{ networkId: string; serving: number }>();
     let relaySettings: ServerSettings = DEFAULT_SERVER_SETTINGS;
+    phase = "private-config";
+    const relayConfig = selfService
+      ? undefined
+      : relayCanonicalBytes({
+          version: 1,
+          networks: [
+            publicEntry ?? {
+              descriptor: network,
+              viewerOrigin,
+              locator,
+              credentials: [
+                {
+                  nodeId,
+                  token: capacity,
+                  admissionPrivateKey: relayOpaque(privateRelayIdentityBytes(admission!)),
+                },
+              ],
+            },
+          ],
+        });
+    phase = "app-build";
     yield* buildAppUnderTest({
       layers: {
         ...(selfService
@@ -1822,27 +1956,7 @@ const qualifyRelayRouter = (
             }
           : {}),
       },
-      ...(selfService
-        ? {}
-        : {
-            relayConfig: relayCanonicalBytes({
-              version: 1,
-              networks: [
-                publicEntry ?? {
-                  descriptor: network,
-                  viewerOrigin,
-                  locator,
-                  credentials: [
-                    {
-                      nodeId,
-                      token: capacity,
-                      admissionPrivateKey: relayOpaque(privateRelayIdentityBytes(admission!)),
-                    },
-                  ],
-                },
-              ],
-            }),
-          }),
+      ...(relayConfig === undefined ? {} : { relayConfig }),
       relayIO: {
         dial,
         ...(selfService && !publicNetwork
@@ -1855,6 +1969,7 @@ const qualifyRelayRouter = (
                 viewerOrigin,
               },
               fetchNetwork: async (input) => {
+                assertActive();
                 assert.equal(input, `https://${hostname}:${relay!.port}/v1/network`);
                 return new Response(relayCanonicalBytes(network).slice());
               },
@@ -1865,13 +1980,18 @@ const qualifyRelayRouter = (
         onHostStarted: (networkId, serving) => hostStarted.resolve({ networkId, serving }),
       },
     });
+    assertActive();
     if (browser) yield* Effect.addFinalizer(() => Effect.promise(() => browser.close()));
+    phase = "owner-auth";
     const owner = yield* getAuthenticatedBearerSessionToken();
+    assertActive();
     if (selfService) {
+      phase = "toggle-on";
       const before = yield* HttpClient.get("/api/relay", {
         headers: { authorization: "Bearer " + owner },
       });
       assert.deepEqual((yield* before.json as Effect.Effect<{ enabled: boolean }>).enabled, false);
+      assertActive();
       const enabled = yield* HttpClient.post("/api/relay", {
         headers: { authorization: "Bearer " + owner },
         body: HttpBody.jsonUnsafe({ enabled: true }),
@@ -1879,9 +1999,13 @@ const qualifyRelayRouter = (
       assert.equal(enabled.status, 200);
       assert.equal(relaySettings.relayEnabled, true);
     }
+    assertActive();
+    phase = "host-start-await";
     const started = yield* Effect.promise(() => hostStarted.promise);
+    assertActive();
     assert.equal(started.networkId, network.networkId);
     assert.isTrue(started.serving > 0);
+    phase = "invitation";
     const issued = yield* HttpClient.post("/api/relay/invitations", {
       headers: { authorization: "Bearer " + owner },
       body: HttpBody.jsonUnsafe({ networkId: network.networkId, role: "owner" }),
@@ -1889,48 +2013,56 @@ const qualifyRelayRouter = (
     assert.equal(issued.status, 200);
     const body = yield* issued.json;
     const decoded = yield* Schema.decodeUnknownEffect(Schema.Struct({ url: Schema.String }))(body);
+    assertActive();
     const invitation = parseRelayInvitation(decoded.url, new Set([viewerOrigin]), relayEpochNow());
-    connection = yield* Effect.promise(() =>
-      connectRelayViewer({
-        lifetime,
-        target: {
-          network,
-          hostPublicKey: invitation.hostPublicKey,
-          environmentId: invitation.environmentId,
-          locator: invitation.locator,
-          preferredNodeId: invitation.nodeId,
-          deviceIdentity: device!,
-          tickets: [
-            {
-              nodeId: invitation.nodeId,
-              registrationId: invitation.registrationId,
-              token: invitation.inviteTicket,
-              expiresAt: invitation.expiresAt,
-              admissionIdentity: deviceAdmission!,
+    phase = "viewer-connect";
+    const ownedConnection = yield* Effect.promise(() =>
+      ownNative(
+        () =>
+          connectRelayViewer({
+            lifetime,
+            target: {
+              network,
+              hostPublicKey: invitation.hostPublicKey,
+              environmentId: invitation.environmentId,
+              locator: invitation.locator,
+              preferredNodeId: invitation.nodeId,
+              deviceIdentity: device!,
+              tickets: [
+                {
+                  nodeId: invitation.nodeId,
+                  registrationId: invitation.registrationId,
+                  token: invitation.inviteTicket,
+                  expiresAt: invitation.expiresAt,
+                  admissionIdentity: deviceAdmission!,
+                },
+              ],
+              paired: false,
             },
-          ],
-          paired: false,
+            dial,
+            // Discovery replication/native HTTP have their own tests. This seam keeps
+            // this qualification on the real application auth/router/socket adapter.
+            ...(publicNetwork
+              ? {}
+              : {
+                  fetcher: async () => {
+                    assertActive();
+                    return new Response(
+                      relayCanonicalBytes(
+                        relay!.broker.directory.lookup(invitation.locator, relayEpochNow()),
+                      ).slice(),
+                    );
+                  },
+                }),
+          }),
+        (owner) => {
+          connection = owner;
         },
-        dial,
-        // Discovery replication/native HTTP have their own tests. This seam keeps
-        // this qualification on the real application auth/router/socket adapter.
-        ...(publicNetwork
-          ? {}
-          : {
-              fetcher: async () =>
-                new Response(
-                  relayCanonicalBytes(
-                    relay!.broker.directory.lookup(invitation.locator, relayEpochNow()),
-                  ).slice(),
-                ),
-            }),
-      }),
+      ),
     );
-    if (!lifetime.active) {
-      yield* Effect.promise(() => connection!.close());
-      return;
-    }
-    const session = connection.session;
+    assertActive();
+    const session = ownedConnection.session;
+    phase = "viewer-auth";
     const auth = yield* Effect.promise(() =>
       session.authenticate({
         environmentId: invitation.environmentId,
@@ -1938,8 +2070,10 @@ const qualifyRelayRouter = (
         credential: invitation.pairingSecret,
       }),
     );
+    assertActive();
     assert.equal(auth.role, "owner");
     yield* Effect.promise(async () => {
+      assertActive();
       const headers = { authorization: "Bearer " + auth.bearerToken };
       phase = "descriptor";
       const descriptor = await fetchRelayHttp(session, "/.well-known/cafe-code/environment", {
@@ -1952,6 +2086,7 @@ const qualifyRelayRouter = (
           ? { ...testEnvironmentDescriptor, serverVersion: serverPackage.version }
           : testEnvironmentDescriptor,
       );
+      assertActive();
       const bytes = new Uint8Array(65_543).map((_, index) => index % 251);
       phase = "file-upload";
       const upload = await fetchRelayHttp(session, "/api/attachments", {
@@ -1966,12 +2101,14 @@ const qualifyRelayRouter = (
       });
       assert.equal(upload.status, 201);
       const file = (await upload.json()) as { id: string };
+      assertActive();
       phase = "file-download";
       const downloaded = await fetchRelayHttp(session, "/api/attachments/" + file.id, {
         headers,
       });
       assert.equal(downloaded.status, 200);
       assert.deepEqual(new Uint8Array(await downloaded.arrayBuffer()), bytes);
+      assertActive();
       phase = "image-upload";
       const image = await fetchRelayHttp(session, "/api/branding/sidebar-image", {
         method: "POST",
@@ -1980,19 +2117,23 @@ const qualifyRelayRouter = (
       });
       assert.equal(image.status, 200);
       const asset = (await image.json()) as { sidebarBrandImage: { url: string } };
+      assertActive();
       phase = "image-download";
       const rendered = await fetchRelayHttp(session, asset.sidebarBrandImage.url, { headers });
       assert.equal(rendered.status, 200);
       assert.deepEqual(new Uint8Array(await rendered.arrayBuffer()), tinyPngBytes);
+      assertActive();
       phase = "native-route-denial";
       await expect(
         fetchRelayHttp(session, "/api/auth/bootstrap/bearer", { method: "POST", body: "{}" }),
       ).rejects.toMatchObject({ code: "INCOMPLETE" });
     });
+    assertActive();
     phase = "request-cancellation";
     const cancellation = new AbortController();
     let cancelledRequest: Promise<void> | undefined;
     yield* Effect.gen(function* () {
+      assertActive();
       holdDescriptor = true;
       cancelledRequest = fetchRelayHttp(session, "/.well-known/cafe-code/environment", {
         signal: cancellation.signal,
@@ -2003,6 +2144,7 @@ const qualifyRelayRouter = (
         () => {},
       );
       yield* Deferred.await(descriptorEntered);
+      assertActive();
       cancellation.abort();
       yield* Deferred.await(descriptorInterrupted);
       yield* Effect.promise(() => cancelledRequest!);
@@ -2018,12 +2160,15 @@ const qualifyRelayRouter = (
         }),
       ),
     );
+    assertActive();
     phase = "rpc";
     for (const headers of [[], relayRpcHeaders()]) {
+      assertActive();
       const rpc = yield* Effect.promise(() =>
         session.open("rpc", { method: "GET", path: "/ws", headers }),
       );
       const mode = readRelayRpcProtocol(yield* Effect.promise(() => rpc.metadata), headers);
+      assertActive();
       assert.equal(mode, relayRpcProtocol(headers));
       const protocol = RpcClient.layerProtocolSocket({ retryTransientErrors: false }).pipe(
         Layer.provide(RpcSerialization.layerNdjson),
@@ -2033,12 +2178,15 @@ const qualifyRelayRouter = (
         Effect.flatMap((client) => client[WS_METHODS.serverGetConfig]({})),
         Effect.provide(protocol),
       );
+      assertActive();
       assert.isDefined(result);
       assert.isTrue(session.active);
     }
     if (browser) {
+      assertActive();
       phase = "compiled-application";
-      yield* Effect.promise(() => connection!.close());
+      yield* Effect.promise(() => closeNative(ownedConnection));
+      assertActive();
       const issued = yield* HttpClient.post("/api/relay/invitations", {
         headers: { authorization: "Bearer " + owner },
         body: HttpBody.jsonUnsafe({ networkId: network.networkId, role: "owner" }),
@@ -2047,6 +2195,7 @@ const qualifyRelayRouter = (
       const invitation = yield* Schema.decodeUnknownEffect(Schema.Struct({ url: Schema.String }))(
         yield* issued.json,
       );
+      assertActive();
       yield* Effect.promise(() => browser.qualify(invitation.url)).pipe(
         Effect.ensuring(
           Effect.promise(() => {
@@ -2058,15 +2207,19 @@ const qualifyRelayRouter = (
       phase = "backend-close";
     }
     if (selfService) {
+      assertActive();
+      phase = "toggle-off";
       const disabled = yield* HttpClient.post("/api/relay", {
         headers: { authorization: "Bearer " + owner },
         body: HttpBody.jsonUnsafe({ enabled: false }),
       });
       assert.equal(disabled.status, 200);
       assert.equal(relaySettings.relayEnabled, false);
+      assertActive();
       // Off withdraws application admission synchronously; transport close is
       // joined by this fixture's exact runtime before its dependencies retire.
-      yield* Effect.promise(() => connection!.close());
+      yield* Effect.promise(() => closeNative(ownedConnection));
+      assertActive();
       const unavailable = yield* HttpClient.post("/api/relay/invitations", {
         headers: { authorization: "Bearer " + owner },
         body: HttpBody.jsonUnsafe({ networkId: network.networkId, role: "client" }),
@@ -4173,11 +4326,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         observedAt: "2026-10-16T00:00:00.000Z",
         meters: [],
       };
+      const reading = { report, stale: true as const };
       let calls = 0;
       let enabled = true;
       let replaceDuringRead = false;
       let sequence = 0;
       let disableDuringAssembly = false;
+      let retireDuringRecheck = false;
+      let nativeReadingCurrent = true;
       yield* buildAppUnderTest({
         layers: {
           providerRegistry: {
@@ -4186,7 +4342,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 assert.equal(selected, instanceId);
                 calls++;
                 if (replaceDuringRead) enabled = false;
-                return report;
+                return { ...reading, isCurrent: () => nativeReadingCurrent };
               }),
             refresh: () => Effect.die("quota must not refresh health"),
             refreshInstance: () => Effect.die("quota must not refresh health"),
@@ -4221,6 +4377,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   disableDuringAssembly = false;
                   enabled = false;
                 }
+                if (retireDuringRecheck && calls === 3) nativeReadingCurrent = false;
                 return snapshot;
               }),
             getSnapshotSequence: () => Effect.sync(() => ({ snapshotSequence: sequence })),
@@ -4248,7 +4405,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             ),
           ),
         );
-      assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report }]);
+      assert.deepEqual(yield* first(wsUrl, { instanceId }), [reading]);
       assert.equal(calls, 1);
       disableDuringAssembly = true;
       assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report: null }]);
@@ -4279,6 +4436,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(calls, 2);
       assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report: null }]);
       assert.equal(calls, 2);
+      replaceDuringRead = false;
+      enabled = true;
+      retireDuringRecheck = true;
+      assert.deepEqual(yield* first(wsUrl, { instanceId }), [{ report: null }]);
+      assert.equal(calls, 3);
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 

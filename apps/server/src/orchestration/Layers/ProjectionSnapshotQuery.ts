@@ -2,6 +2,7 @@ import {
   ChatAttachment,
   AdditionalWorkspaceRoots,
   IsoDateTime,
+  MAX_CONCURRENT_SUBAGENTS,
   MAX_RUNTIME_SUBAGENT_IDENTITIES_PER_TURN,
   MAX_UNCONFIRMED_NATIVE_AGENTS,
   MessageId,
@@ -941,6 +942,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     // The shared subagent predicate below remains independently fail-closed.
     "(kind != 'task.started' OR (json_type(payload_json, '$.taskType') = 'text' AND json_extract(payload_json, '$.taskType') = 'approval-review' AND COALESCE(json_extract(payload_json, '$.visibility'), '') != 'ambient' AND json_type(payload_json, '$.workflow') IS NULL AND COALESCE(json_extract(payload_json, '$.itemType'), '') != 'collab_agent_tool_call'))",
     "kind != 'provider.async-questions'",
+    // Optional-policy notices render in the primary conversation, including
+    // unknown future envelopes which the renderer must never expose as prose.
+    "kind != 'provider.subagent-limit.not-applied'",
     "summary != 'Checkpoint captured'",
     "(kind != 'tool.started' OR json_extract(payload_json, '$.itemType') = 'context_compaction' OR (json_extract(payload_json, '$.itemType') = 'command_execution' AND json_extract(payload_json, '$.data.toolName') = 'Bash' AND json_type(payload_json, '$.data.commandInspectionVersion') IN ('integer', 'real') AND json_extract(payload_json, '$.data.commandInspectionVersion') = 1 AND json_extract(payload_json, '$.data.inspectionProvider') = 'claudeAgent'))",
     `(kind != 'reasoning.summary' OR (json_type(payload_json, '$.summaryVersion') IN ('integer', 'real') AND json_extract(payload_json, '$.summaryVersion') = 1 AND json_extract(payload_json, '$.provider') IN (${summaryProviders}) AND json_extract(payload_json, '$.streamKind') = 'reasoning_summary_text' AND json_type(payload_json, '$.itemId') = 'text' AND length(trim(json_extract(payload_json, '$.itemId'), ${ecmaTrimCharacters})) > 0 AND json_type(payload_json, '$.detail') = 'text' AND length(trim(${summaryDetail}, ${ecmaTrimCharacters})) > 0 AND instr(${summaryDetail},char(0)) = 0 AND ${summaryDetail} NOT GLOB ${unsafeSummaryPattern} AND ${summaryUtf16Bound} AND json_type(payload_json, '$.truncated') IN ('true', 'false') AND json_extract(payload_json, '$.status') IN ('inProgress', 'completed', 'failed')))`,
@@ -2893,6 +2897,36 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             FROM mcp_question_notice_candidates
           ) WHERE retained_extra_bytes <= 1048576
         ),
+        retained_subagent_limit_notice_ids AS (
+          -- Optional-policy warnings must survive ordinary tool bursts without
+          -- growing transcript hydration. Probe only this exact thread/kind
+          -- index, retain the newest 16 finite envelopes, and bound each body
+          -- to 1 KiB. The UI still correlates the accepted message and intent;
+          -- this display retention never grants retry or native policy proof.
+          SELECT activity_id
+          FROM projection_thread_activities
+            INDEXED BY idx_projection_thread_activities_thread_kind_created_id
+          WHERE thread_id = ${threadId}
+            AND kind = 'provider.subagent-limit.not-applied'
+            AND tone = 'info'
+            AND length(CAST(payload_json AS BLOB)) <= 1024
+            AND CASE WHEN json_valid(payload_json) THEN
+              json_type(payload_json, '$.version') = 'integer'
+              AND json_extract(payload_json, '$.version') = 1
+              AND json_type(payload_json, '$.reason') = 'text'
+              AND json_extract(payload_json, '$.reason') = 'support-unconfirmed'
+              AND json_type(payload_json, '$.fallback') = 'text'
+              AND json_extract(payload_json, '$.fallback') = 'current-provider-policy'
+              AND json_type(payload_json, '$.requestedLimit') = 'integer'
+              AND json_extract(payload_json, '$.requestedLimit') BETWEEN 1 AND ${MAX_CONCURRENT_SUBAGENTS}
+              AND json_type(payload_json, '$.messageId') = 'text'
+              AND length(json_extract(payload_json, '$.messageId')) > 0
+              AND json_type(payload_json, '$.intentSequence') = 'integer'
+              AND json_extract(payload_json, '$.intentSequence') BETWEEN 1 AND 9007199254740991
+            ELSE 0 END
+          ORDER BY created_at DESC, activity_id DESC
+          LIMIT 16
+        ),
         latest_task_plan_activity_id AS (
           SELECT activity_id
           FROM projection_thread_activities
@@ -3294,6 +3328,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           SELECT activity_id FROM retained_request_terminal_ids
           UNION
           SELECT activity_id FROM retained_mcp_question_notice_ids
+          UNION
+          SELECT activity_id FROM retained_subagent_limit_notice_ids
           UNION
           SELECT work.activity_id
           FROM current_live_work_heads AS work WHERE work.active = 1

@@ -71,6 +71,93 @@ const queryLayer = it.layer(
 );
 
 queryLayer("indexed historical question reads", (it) => {
+  it.effect("retains only the newest sixteen finite policy notices beyond ordinary activity", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const query = yield* ProjectionSnapshotQuery;
+      const threadId = ThreadId.make("policy-notice-retention");
+      const sibling = ThreadId.make("policy-notice-retention-sibling");
+      yield* insertThread(sql, threadId);
+      yield* insertThread(sql, sibling);
+      const payload = {
+        version: 1,
+        reason: "support-unconfirmed",
+        fallback: "current-provider-policy",
+        requestedLimit: 12,
+        messageId: "accepted-policy-message",
+        intentSequence: 1,
+      };
+      const newestPayload = { ...payload, padding: "" };
+      newestPayload.padding = "x".repeat(1024 - Buffer.byteLength(encodeJson(newestPayload)));
+      assert.equal(Buffer.byteLength(encodeJson(newestPayload)), 1024);
+      for (let index = 0; index < 17; index += 1)
+        yield* insertActivity(
+          sql,
+          threadId,
+          `policy-notice-${String(index).padStart(3, "0")}`,
+          "provider.subagent-limit.not-applied",
+          encodeJson(index === 16 ? newestPayload : payload),
+          index + 2,
+        );
+
+      // Newer malformed rows must neither consume the retained prefix nor
+      // abort JSON decoding of this thread's otherwise readable snapshot.
+      const invalidPayloads = [
+        "malformed-policy-json",
+        ...[
+          { ...payload, version: 2 },
+          { ...payload, version: "1" },
+          { ...payload, reason: "provider-default-applied" },
+          { ...payload, fallback: "provider-default" },
+          { ...payload, requestedLimit: 0 },
+          { ...payload, requestedLimit: 65 },
+          { ...payload, requestedLimit: 1.5 },
+          { ...payload, requestedLimit: "12" },
+          { ...payload, messageId: "" },
+          { ...payload, messageId: 12 },
+          { ...payload, intentSequence: 0 },
+          { ...payload, intentSequence: 1.5 },
+          { ...payload, intentSequence: Number.MAX_SAFE_INTEGER + 1 },
+          { ...payload, intentSequence: "1" },
+          // Character count alone would admit this >1 KiB UTF-8 body.
+          { ...payload, padding: "界".repeat(400) },
+        ].map((value) => encodeJson(value)),
+      ];
+      for (const [index, invalidPayload] of invalidPayloads.entries())
+        yield* insertActivity(
+          sql,
+          threadId,
+          `policy-notice-invalid-${index}`,
+          "provider.subagent-limit.not-applied",
+          invalidPayload,
+          index + 100,
+        );
+      yield* insertActivity(
+        sql,
+        sibling,
+        "policy-notice-foreign-thread",
+        "provider.subagent-limit.not-applied",
+        encodeJson(payload),
+        200,
+      );
+      yield* insertOrdinaryTail(sql, threadId);
+
+      const detail = Option.getOrThrow(yield* query.getThreadDetailById(threadId));
+      const notices = detail.activities.filter(
+        (row) => row.kind === "provider.subagent-limit.not-applied",
+      );
+      assert.deepEqual(
+        notices.map((row) => row.id),
+        Array.from(
+          { length: 16 },
+          (_, index) => `policy-notice-${String(index + 1).padStart(3, "0")}`,
+        ),
+      );
+      assert.deepEqual(notices.at(-1)!.payload, newestPayload);
+      assert.equal(detail.activities.length, THREAD_DETAIL_ACTIVITY_LIMIT + 16);
+    }),
+  );
+
   it.effect(
     "pages old questions independently of ordinary activity and reports unreadable bodies",
     () =>

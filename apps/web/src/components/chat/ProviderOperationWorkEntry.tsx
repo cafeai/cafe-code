@@ -11,6 +11,7 @@ import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collaps
 import { InspectableWorkEntry } from "./InspectableWorkEntry";
 import {
   compactCommandPreview,
+  providerPublicSummaryLabel,
   type ClaudeCommandInspection,
   type ProviderPublicSummary,
 } from "./providerOperationVisibility";
@@ -19,21 +20,20 @@ import {
 const SUMMARY_AUTO_COLLAPSE_DELAY_MS = 450;
 
 /**
- * Public summaries (Claude) and thinking (OpenCode) stay separate from
+ * Public summaries and thinking stay separate from
  * canonical assistant prose and answers. While a trace is still streaming it
  * is shown expanded so it can be followed live; once it finishes it folds
  * down to a one-line preview with an eased height + fade animation. A trace
  * that is already finished when it mounts (history, remount) starts folded.
  * Any manual toggle while streaming is respected and suppresses the
- * automatic collapse. OpenCode thinking can be raw model reasoning rather
- * than a summary, so it reads as secondary, muted text.
+ * automatic collapse. Native thinking reads as secondary, muted text.
  */
 export const ProviderSummaryWorkEntry = memo(function ProviderSummaryWorkEntry(props: {
   readonly summary: ProviderPublicSummary;
 }) {
   const uiLocale = useUiLocale();
   const panelId = useId();
-  const thinking = props.summary.provider === "opencode";
+  const thinking = props.summary.provider !== "claudeAgent";
   const streaming = props.summary.status === "inProgress";
   const [open, setOpen] = useState(streaming);
   const userToggledRef = useRef(false);
@@ -52,9 +52,7 @@ export const ProviderSummaryWorkEntry = memo(function ProviderSummaryWorkEntry(p
     return () => window.clearTimeout(timer);
   }, [streaming]);
 
-  const label = thinking
-    ? uiText("OpenCode thinking", undefined, undefined, uiLocale)
-    : uiText("Claude summary", undefined, undefined, uiLocale);
+  const label = providerPublicSummaryLabel(props.summary.provider, uiLocale);
   const preview = props.summary.text.split("\n").find((line) => line.trim().length > 0) ?? "";
 
   return (

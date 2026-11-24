@@ -91,7 +91,10 @@ export function normalizeClaudeNativeModels(
       ...(typeof raw.supportsAutoMode === "boolean"
         ? { supportsAutoMode: raw.supportsAutoMode }
         : {}),
-      ...(levels?.length ? { supportedEffortLevels: levels } : {}),
+      // An explicit empty native list is a conclusive account/policy cap, not
+      // missing discovery. Dropping it would re-enable the static effort and
+      // Ultracode controls after the provider deliberately excluded them.
+      ...(levels !== undefined ? { supportedEffortLevels: levels } : {}),
     });
   }
   return models.length ? models : undefined;
@@ -115,7 +118,7 @@ export function reconcileClaudeModelCapabilities(
 ): ModelCapabilities {
   if (!native) return caps;
   let descriptors: ProviderOptionDescriptor[] = [...(caps.optionDescriptors ?? [])];
-  if (native.supportsEffort === false)
+  if (native.supportsEffort === false || native.supportedEffortLevels?.length === 0)
     descriptors = descriptors.filter((item) => item.id !== "effort");
   else if (native.supportedEffortLevels) {
     const prior = descriptors.find((item) => item.id === "effort" && item.type === "select");

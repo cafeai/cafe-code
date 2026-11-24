@@ -28,7 +28,7 @@ const settle = Effect.forEach(Array.from({ length: 32 }), () => Effect.yieldNow,
 
 function makeTurnEvent(input: {
   readonly type: "turn.started" | "turn.completed" | "turn.aborted";
-  readonly provider: "codex" | "grok" | "claudeAgent";
+  readonly provider: "codex" | "gemini" | "grok" | "claudeAgent";
   readonly instanceId?: string;
   readonly eventId?: string;
 }): ProviderRuntimeEvent {
@@ -141,7 +141,7 @@ describe("providerAuthenticationRefusalInstanceFromEvent", () => {
 });
 
 describe("providerAccountUsageRefreshInstanceFromEvent", () => {
-  it("selects Codex and Grok only after a terminal turn event", () => {
+  it("selects Codex, Gemini and Grok only after a terminal turn event", () => {
     expect(
       providerAccountUsageRefreshInstanceFromEvent(
         makeTurnEvent({ type: "turn.completed", provider: "grok", instanceId: "grok-work" }),
@@ -152,6 +152,11 @@ describe("providerAccountUsageRefreshInstanceFromEvent", () => {
         makeTurnEvent({ type: "turn.aborted", provider: "codex", instanceId: "codex-work" }),
       ),
     ).toBe(ProviderInstanceId.make("codex-work"));
+    expect(
+      providerAccountUsageRefreshInstanceFromEvent(
+        makeTurnEvent({ type: "turn.completed", provider: "gemini", instanceId: "gemini-work" }),
+      ),
+    ).toBe(ProviderInstanceId.make("gemini-work"));
     expect(
       providerAccountUsageRefreshInstanceFromEvent(
         makeTurnEvent({ type: "turn.started", provider: "grok", instanceId: "grok-work" }),

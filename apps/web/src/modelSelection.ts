@@ -50,6 +50,8 @@ function readInstanceCustomModels(
   instanceId: ProviderInstanceId,
   driverKind: ProviderDriverKind,
 ): ReadonlyArray<string> {
+  // Antigravity only accepts model ids from its live native selector.
+  if (driverKind === "gemini") return [];
   const instance = settings.providerInstances?.[instanceId];
   const config = instance?.config;
   if (config !== null && typeof config === "object") {

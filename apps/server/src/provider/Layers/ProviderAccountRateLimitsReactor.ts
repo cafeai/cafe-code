@@ -9,8 +9,8 @@
  * sparse `account/rateLimits/updated` snapshots during active sessions; those updates are
  * merged into the latest full probe so a transient probe failure cannot leave a live quota
  * update invisible. From there both providers reach the UI through the existing snapshot
- * change pipeline. Codex and Grok expose their account usage through bounded, redacted
- * usage-only refreshes rather than prompt stream notifications. Trigger those refreshes after
+ * change pipeline. Codex, Gemini and Grok also support bounded, redacted
+ * usage-only refreshes. Trigger those refreshes after
  * a canonical terminal turn event, when the just-finished prompt has actually affected the
  * allowance, instead of when the prompt is submitted. The provider drivers own all credential
  * access; this reactor sees only the redacted resulting snapshot.
@@ -43,6 +43,7 @@ import { ProviderService } from "../Services/ProviderService.ts";
 
 const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
+const GEMINI_DRIVER = ProviderDriverKind.make("gemini");
 const GROK_DRIVER = ProviderDriverKind.make("grok");
 const TERMINAL_ACCOUNT_USAGE_REFRESH_THROTTLE_MS = 60_000;
 /** Daemon and backend share one host clock; replay overlap is older than this. */
@@ -95,7 +96,12 @@ export function providerAccountRateLimitUpdateFromEvent(event: ProviderRuntimeEv
 export function providerAccountUsageRefreshInstanceFromEvent(event: ProviderRuntimeEvent) {
   if (event.type !== "turn.completed" && event.type !== "turn.aborted") return null;
   if (event.providerInstanceId === undefined) return null;
-  if (event.provider !== CODEX_DRIVER && event.provider !== GROK_DRIVER) return null;
+  if (
+    event.provider !== CODEX_DRIVER &&
+    event.provider !== GROK_DRIVER &&
+    event.provider !== GEMINI_DRIVER
+  )
+    return null;
   return event.providerInstanceId;
 }
 

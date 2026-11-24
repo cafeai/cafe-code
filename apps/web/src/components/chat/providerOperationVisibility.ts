@@ -2,11 +2,12 @@ import {
   isPublicReasoningSummaryProvider,
   type PublicReasoningSummaryProvider,
 } from "@cafecode/shared/providerWorkLog";
+import { uiText, type UiLocale } from "@cafecode/shared/i18n";
 
 /**
  * Only explicitly projected presentation contracts are inspected: version-1
- * public reasoning summaries from an admitted provider (Claude summaries and
- * OpenCode thinking) and Claude command inspections. Never turn an arbitrary
+ * public reasoning summaries from admitted providers and Claude command
+ * inspections. Never turn an arbitrary
  * saved provider object into a renderer disclosure: raw results can contain
  * file bodies, resource capabilities or signatures.
  */
@@ -15,6 +16,20 @@ export interface ProviderPublicSummary {
   readonly text: string;
   readonly truncated: boolean;
   readonly status: "inProgress" | "completed" | "failed";
+}
+
+export function providerPublicSummaryLabel(
+  provider: PublicReasoningSummaryProvider,
+  locale?: UiLocale,
+): string {
+  switch (provider) {
+    case "claudeAgent":
+      return uiText("Claude summary", undefined, undefined, locale);
+    case "opencode":
+      return uiText("OpenCode thinking", undefined, undefined, locale);
+    case "gemini":
+      return uiText("Gemini thinking", undefined, undefined, locale);
+  }
 }
 
 export interface ClaudeCommandInspection {

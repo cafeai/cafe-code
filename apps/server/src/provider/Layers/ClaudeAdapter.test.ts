@@ -1830,6 +1830,7 @@ describe("ClaudeAdapterLive", () => {
         ? ([
             "unchanged",
             "completed",
+            "completed-current-root",
             "replaced",
             "ended",
             "pending-result",
@@ -1944,7 +1945,20 @@ describe("ClaudeAdapterLive", () => {
                 .pipe(Effect.result, Effect.forkChild);
               yield* Deferred.await(readingAttachment);
 
-              if (boundary === "completed" || boundary === "pending-result") {
+              if (boundary === "completed-current-root") {
+                // Unlike the uninitialized/uncorrelated completion negative,
+                // this exact primary owner successfully consumed the actual
+                // original input while attachment preparation was suspended.
+                emitWorkflowFixtureInit(harness.query, "2.1.321", "synthetic-priority", [
+                  "msg_lifecycle_v1",
+                ]);
+                harness.query.emit({
+                  ...makeSuccessfulClaudeResult("synthetic-priority"),
+                  user_message_uuid: first.value!.uuid,
+                });
+                yield* Deferred.await(completed);
+                assert.equal((yield* adapter.listSessions())[0]?.status, "ready");
+              } else if (boundary === "completed" || boundary === "pending-result") {
                 harness.query.emit(makeSuccessfulClaudeResult("synthetic-priority"));
                 if (boundary === "completed") {
                   yield* Deferred.await(completed);
@@ -1987,7 +2001,8 @@ describe("ClaudeAdapterLive", () => {
               const accepted =
                 boundary === "unchanged" ||
                 boundary === "pending-delta" ||
-                (priority === undefined && boundary === "pending-result");
+                (priority === undefined &&
+                  (boundary === "pending-result" || boundary === "completed-current-root"));
               assert.equal(result._tag, accepted ? "Success" : "Failure");
               if (priority === undefined && !accepted && result._tag === "Failure") {
                 assert.equal(
@@ -2001,6 +2016,27 @@ describe("ClaudeAdapterLive", () => {
                 assert.equal(delivered.done, false);
                 assert.equal(delivered.value?.priority, priority);
                 assert.equal(promptMessageText(delivered.value), "must stay bound to first turn");
+                if (boundary === "completed-current-root" && result._tag === "Success") {
+                  assert.notEqual(result.success.turnId, turn.turnId);
+                  assert.equal(delivered.value?.uuid, result.success.turnId);
+                  assert.deepEqual(delivered.value?.message.content, [
+                    { type: "text", text: "must stay bound to first turn" },
+                    {
+                      type: "image",
+                      source: {
+                        type: "base64",
+                        media_type: "image/png",
+                        data: "AQIDBA==",
+                      },
+                    },
+                  ]);
+                  assert.equal(harness.getLastCreateQueryInput(), originalInput);
+                  assert.equal(
+                    (yield* adapter.listSessions())[0]?.activeTurnId,
+                    result.success.turnId,
+                  );
+                  assert.deepEqual(harness.query.interruptCalls, []);
+                }
               } else if (boundary === "replaced") {
                 assert.equal((yield* Fiber.join(nextPrompt)).done, true);
                 const replacementPrompt = yield* Effect.promise(() =>
@@ -2489,6 +2525,9 @@ describe("ClaudeAdapterLive", () => {
       () => {
         const harness = makeHarness({
           environment: {},
+          // Exercise both protocol generations at the adapter's existing
+          // account-binding boundary without adding duplicate fixture cases.
+          nativeVersion: configuredInstance ? "2.1.326" : "2.1.325",
           ...(configuredInstance ? { instanceId: configuredInstance } : {}),
         });
         return Effect.gen(function* () {
@@ -2555,6 +2594,7 @@ describe("ClaudeAdapterLive", () => {
             },
           });
           assert.deepEqual(queryOptions.settingSources, ["user", "project", "local"]);
+          assert.equal(queryOptions.mcpServersDelivery, configuredInstance ? "initialize" : "argv");
           assert.equal(queryOptions.strictMcpConfig, undefined);
           assert.equal(queryOptions.allowedTools, undefined);
           assert.equal(queryOptions.permissionMode, "default");
@@ -3605,14 +3645,19 @@ describe("ClaudeAdapterLive", () => {
           runtimeMode: "full-access",
           maxConcurrentSubagents: null,
         });
+        const legacy = yield* adapter.startSession({
+          threadId: ThreadId.make("claude-limit-legacy-config"),
+          runtimeMode: "full-access",
+        });
         assert.equal(first.maxConcurrentSubagents, 1);
         assert.equal(second.maxConcurrentSubagents, 64);
-        assert.equal(inherited.maxConcurrentSubagents, 20);
+        assert.equal(inherited.maxConcurrentSubagents, null);
+        assert.equal(legacy.maxConcurrentSubagents, 20);
         assert.deepEqual(
           harness.createInputs.map(
             (input) => input.options.env?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS,
           ),
-          ["1", "64", "20"],
+          ["1", "64", "128", "20"],
         );
         assert.equal(firstEnvironment?.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, "1");
         assert.notEqual(firstEnvironment, harness.createInputs[1]?.options.env);
@@ -4890,12 +4935,14 @@ describe("ClaudeAdapterLive", () => {
           });
           const nativeSessionId = "claude-initial-input-owner";
           let oldUuid: string | undefined;
+          let completedRootTurnId: TurnId | undefined;
           if (nativeOwner === "retained-background") {
-            yield* adapter.sendTurn({
+            const warmup = yield* adapter.sendTurn({
               threadId: session.threadId,
               input: "start background work",
               attachments: [],
             });
+            completedRootTurnId = warmup.turnId;
             oldUuid = (yield* Effect.promise(() =>
               readPromptMessages(harness.getLastCreateQueryInput(), 1),
             ))[0]?.uuid;
@@ -4932,7 +4979,29 @@ describe("ClaudeAdapterLive", () => {
             input: "continue the unfinished work",
             attachments: [],
           };
-          const turn = yield* adapter.sendTurn(input);
+          // A foreground completion can beat the caller's steering snapshot.
+          // Keep this one ordinary request on the same query, with the exact
+          // successful predecessor and actual initialized native owner above.
+          const turn = yield* completedRootTurnId === undefined
+            ? adapter.sendTurn(input)
+            : adapter.steerTurn({ ...input, expectedTurnId: completedRootTurnId });
+          if (completedRootTurnId !== undefined) {
+            assert.notEqual(turn.turnId, completedRootTurnId);
+            // Completion authority is one-use and cannot retarget another
+            // message once the new user root owns this query. The remaining
+            // consumption/result checks also expose any secretly queued input.
+            const repeated = yield* adapter
+              .steerTurn({
+                ...input,
+                expectedTurnId: completedRootTurnId,
+                messageId: MessageId.make("repeated-completed-root-follow-up"),
+                intentSequence: 38,
+                input: "must not follow the old predecessor twice",
+              })
+              .pipe(Effect.result);
+            assert.equal(repeated._tag, "Failure");
+            assert.equal((yield* adapter.listSessions())[0]?.activeTurnId, turn.turnId);
+          }
           assert.equal(harness.getLastCreateQueryInput(), queryInput);
           const uuid = (yield* Effect.promise(() =>
             readPromptMessages(harness.getLastCreateQueryInput(), 1),
@@ -5099,6 +5168,7 @@ describe("ClaudeAdapterLive", () => {
           });
           yield* Deferred.await(completions[nativeOwner === "fresh-query" ? 1 : 2]!);
           assert.equal(receipts().length, 1);
+          assert.deepEqual(harness.query.interruptCalls, []);
         }).pipe(
           Effect.provideService(Random.Random, makeDeterministicRandomService()),
           Effect.provide(harness.layer),
@@ -14088,7 +14158,7 @@ describe("ClaudeAdapterLive", () => {
       } as unknown as SDKMessage);
       yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
 
-      const progressEventsFiber = yield* Stream.take(adapter.streamEvents, 4).pipe(
+      const progressEventsFiber = yield* Stream.take(adapter.streamEvents, 5).pipe(
         Stream.runCollect,
         Effect.forkChild,
       );
@@ -14101,6 +14171,19 @@ describe("ClaudeAdapterLive", () => {
         heartbeat: true,
         session_id: "sdk-session-subagent-retry",
         uuid: "00000000-0000-4000-8000-000000000221",
+      } satisfies SDKMessage);
+      // SDK 0.3.323 also emits heartbeat-only hook waits. There is no native
+      // tool or task to adopt; SDKToolProgressMessage represents no parent
+      // with an explicit null, rather than omitting its required field.
+      harness.query.emit({
+        type: "tool_progress",
+        tool_use_id: "hook-PreToolUse-fixture",
+        tool_name: "PreToolUse",
+        parent_tool_use_id: null,
+        elapsed_time_seconds: 30,
+        heartbeat: true,
+        session_id: "sdk-session-subagent-retry",
+        uuid: "00000000-0000-4000-8000-000000000224",
       } satisfies SDKMessage);
       const retryMessage = {
         type: "tool_progress",
@@ -14128,7 +14211,7 @@ describe("ClaudeAdapterLive", () => {
       });
 
       const progressEvents = Array.from(yield* Fiber.join(progressEventsFiber));
-      assert.equal(progressEvents.filter((event) => event.type === "tool.progress").length, 3);
+      assert.equal(progressEvents.filter((event) => event.type === "tool.progress").length, 4);
       const retryEvents = progressEvents.filter((event) => event.type === "task.progress");
       assert.equal(retryEvents.length, 1);
       const retryEvent = retryEvents[0];

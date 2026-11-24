@@ -680,6 +680,7 @@ describe("Cafe Code MCP server", () => {
             sessionInstanceId: actualInstanceId,
           },
           project: null,
+          operationStorage: null,
           contractVersion: 2,
         });
         const status = await client.callTool({
@@ -939,6 +940,29 @@ describe("Cafe Code MCP server", () => {
           result: original,
         });
         expect(JSON.stringify(receipt)).not.toContain("PRIVATE_MESSAGE");
+        const storage = await client.callTool({
+          name: "get_cafe_context",
+          arguments: { threadId },
+        });
+        expect(storage.isError).not.toBe(true);
+        expect(storage.structuredContent).toMatchObject({
+          operationStorage: {
+            scope: "global",
+            policyVersion: 1,
+            receiptCount: 1,
+            budgetBytes: 665_600_000,
+          },
+        });
+        const ledger = (
+          storage.structuredContent as {
+            operationStorage: { chargedBytes: number; availableBytes: number };
+          }
+        ).operationStorage;
+        expect(ledger.chargedBytes).toBeGreaterThanOrEqual(1_024);
+        expect(ledger.chargedBytes).toBeLessThan(66_560);
+        expect(ledger.availableBytes + ledger.chargedBytes).toBe(665_600_000);
+        expect(JSON.stringify(ledger)).not.toContain(requestId);
+        expect(JSON.stringify(ledger)).not.toContain("PRIVATE_MESSAGE");
         const replay = await client.callTool({
           name: "send_message",
           arguments: { message: "PRIVATE_MESSAGE", requestId, threadId },
@@ -965,6 +989,30 @@ describe("Cafe Code MCP server", () => {
         });
       },
       { operations, operationOwner: { ...owner, sessionId: "other-owner" } },
+    );
+    await withClient(
+      context,
+      dependencies,
+      async (client) => {
+        const current = await client.callTool({
+          name: "get_cafe_context",
+          arguments: { threadId },
+        });
+        expect(current.isError).not.toBe(true);
+        expect(current.structuredContent).toMatchObject({
+          thread: { id: threadId },
+          operationStorage: null,
+        });
+        expect(JSON.stringify(current)).not.toContain("PRIVATE_ACCOUNTING_FAILURE");
+        expect(dispatched).toHaveLength(1);
+      },
+      {
+        operationOwner: owner,
+        operations: {
+          ...operations,
+          storageStatus: Effect.fail(new McpToolError("unavailable", "PRIVATE_ACCOUNTING_FAILURE")),
+        },
+      },
     );
     const unsettledId = "b30d5792-ccce-4025-a6a1-53c4c4fed452";
     await withClient(
@@ -1234,7 +1282,9 @@ describe("Cafe Code MCP server", () => {
       dispatched,
     });
     const read = vi.fn(() =>
-      Effect.succeed({ ...claudeAccountReport, PRIVATE_NATIVE_FIELD: "must stay private" }),
+      Effect.succeed({
+        report: { ...claudeAccountReport, PRIVATE_NATIVE_FIELD: "must stay private" },
+      }),
     );
     const result = await withClient(
       context,
@@ -1372,7 +1422,7 @@ describe("Cafe Code MCP server", () => {
   });
 
   it("keeps filtered account pages separate and rejects a cursor from a different quota query", async (context) => {
-    const read = vi.fn(() => Effect.succeed(claudeAccountReport));
+    const read = vi.fn(() => Effect.succeed({ report: claudeAccountReport }));
     const dependencies = passiveDependencies({
       providers: [usageProvider, claudeUsageProvider],
       threads: [],
@@ -1492,7 +1542,9 @@ describe("Cafe Code MCP server", () => {
           providerRegistry: {
             ...dependencies.providerRegistry,
             readInstanceAccountQuota: () =>
-              Effect.succeed({ ...report, ...(extraUsage === undefined ? {} : { extraUsage }) }),
+              Effect.succeed({
+                report: { ...report, ...(extraUsage === undefined ? {} : { extraUsage }) },
+              }),
           },
         },
         (client) => client.callTool({ name: "get_provider_usage", arguments: {} }),
@@ -2772,6 +2824,32 @@ describe("Cafe MCP thread groups and origin", () => {
       context,
       dependencies,
       async (client) => {
+        const { tools } = await client.listTools();
+        const descriptionSchema = tools.find((tool) => tool.name === "create_thread")?.inputSchema
+          .properties?.description;
+        const titleSchema = tools.find((tool) => tool.name === "create_thread_group")?.inputSchema
+          .properties?.title;
+        for (const inputSchema of [descriptionSchema, titleSchema]) {
+          expect(inputSchema).toMatchObject({ type: "string" });
+          expect(JSON.stringify(inputSchema)).not.toContain("\\p{Bidi_Control}");
+        }
+
+        // Consumers that cannot compile ECMAScript Unicode property escapes
+        // still get a usable catalog. Cafe enforces both rules at invocation.
+        for (const unsafe of ["a\u0007b", "a\u202eb"]) {
+          const invalidDescription = await client.callTool({
+            name: "create_thread",
+            arguments: { title: "Worker", description: unsafe },
+          });
+          const invalidTitle = await client.callTool({
+            name: "create_thread_group",
+            arguments: { title: unsafe },
+          });
+          expect(invalidDescription.isError).toBe(true);
+          expect(invalidTitle.isError).toBe(true);
+        }
+        expect(dispatched).toHaveLength(0);
+
         const group = await client.callTool({
           name: "create_thread_group",
           arguments: { title: "Audit workers" },
@@ -2782,7 +2860,7 @@ describe("Cafe MCP thread groups and origin", () => {
           arguments: {
             title: "Worker",
             groupId: (group.structuredContent as { groupId: string }).groupId,
-            description: "Check relay PoW",
+            description: "Check relay PoW\nReport the result",
             provenance: { creationPath: "cafe-ui" },
           },
         });
@@ -2802,7 +2880,7 @@ describe("Cafe MCP thread groups and origin", () => {
     expect(launched).toMatchObject({
       type: "thread.create",
       groupId: (groupCommand as { groupId: string }).groupId,
-      description: "Check relay PoW",
+      description: "Check relay PoW\nReport the result",
       // The launch claim names a Cafe chat; caller-supplied provenance is ignored.
       provenance: { creationPath: "mcp-launch", originThreadId: threadId },
     });

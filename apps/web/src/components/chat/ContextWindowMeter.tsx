@@ -24,7 +24,8 @@ function formatPercentage(value: number | null): string | null {
 
 export function ContextWindowMeter(props: {
   usage: ContextWindowSnapshot | null;
-  codexRateLimits?: ServerProviderAccountRateLimits | null | undefined;
+  accountRateLimits?: ServerProviderAccountRateLimits | null | undefined;
+  showAntigravityQuotaStatus?: boolean | undefined;
   quotaContext?: ProviderQuotaContext | undefined;
   onShowOnSide?: () => void;
   subagentConcurrency?: SubagentConcurrencyPresentation | null | undefined;
@@ -120,7 +121,8 @@ export function ContextWindowMeter(props: {
       <PopoverPopup tooltipStyle side="top" align="end" className="w-max max-w-none px-3 py-2">
         <ContextWindowDetails
           usage={usage}
-          rateLimits={props.codexRateLimits}
+          rateLimits={props.accountRateLimits}
+          showAntigravityQuotaStatus={props.showAntigravityQuotaStatus}
           sessionQuota={sessionQuota}
           selectedModel={props.quotaContext?.selectedModel}
           layout="popover"

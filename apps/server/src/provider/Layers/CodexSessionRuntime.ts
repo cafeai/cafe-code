@@ -149,6 +149,8 @@ const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
+const CODEX_TURN_INTERRUPT_TIMEOUT = "10 seconds" as const;
+const CODEX_INTERRUPT_GOAL_PAUSE_TIMEOUT = "5 seconds" as const;
 const CODEX_LOCAL_ENVIRONMENT_ID = "local";
 // Codex TUI 0.147 uses a 60-second hidden grace followed by a 60-second
 // visible countdown for non-blocking request_user_input calls. The runtime
@@ -825,8 +827,18 @@ export type CodexSessionRuntimeError =
   | CodexSessionRuntimePendingApprovalNotFoundError
   | CodexSessionRuntimePendingUserInputNotFoundError
   | CodexSessionRuntimeInvalidUserInputAnswersError
+  | CodexSessionRuntimeInterruptUnconfirmedError
   | CodexSessionRuntimeThreadIdMissingError
   | CodexSessionRuntimeInvalidSubagentThreadError;
+
+class CodexSessionRuntimeInterruptUnconfirmedError extends Schema.TaggedErrorClass<CodexSessionRuntimeInterruptUnconfirmedError>()(
+  "CodexSessionRuntimeInterruptUnconfirmedError",
+  {},
+) {
+  override get message(): string {
+    return "Codex did not acknowledge the turn interrupt. Its status is unknown.";
+  }
+}
 
 export class CodexSessionRuntimePendingApprovalNotFoundError extends Schema.TaggedErrorClass<CodexSessionRuntimePendingApprovalNotFoundError>()(
   "CodexSessionRuntimePendingApprovalNotFoundError",
@@ -903,6 +915,8 @@ interface PendingApproval {
   readonly turnId: TurnId | undefined;
   readonly itemId: ProviderItemId | undefined;
   readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
+  /** A native humanCommand cannot grant a reusable session permission. */
+  readonly oneTimeOnly?: boolean;
 }
 
 interface ApprovalCorrelation {
@@ -3231,6 +3245,9 @@ export function isCodexPrivateMetadataNotification(method: string): boolean {
   // Source: rust-v0.157.0 app-server-protocol/src/protocol/v2/account.rs,
   // GatewayOAuthChangedNotification. A future login UI must consume it via a
   // private, live-only channel, not the durable conversation event stream.
+  // 0.169's native section labels are provider organization metadata, not Cafe
+  // groups or work. Without a separate adoption contract, discard them before
+  // logs/observers can persist labels or infer ownership from a native section.
   // 0.162's prediction result is speculative model text, not an assistant
   // item, goal, user request or liveness edge. Cafe has no authenticated
   // prediction surface or retention contract; discard it before observers,
@@ -3238,6 +3255,7 @@ export function isCodexPrivateMetadataNotification(method: string): boolean {
   return (
     method === "thread/attachment/updated" ||
     method === "account/gatewayOAuth/changed" ||
+    method === "thread/section/changed" ||
     method === "thread/prediction/updated"
   );
 }
@@ -5305,7 +5323,11 @@ export function sanitizeCodexProtocolDiagnosticPayload(input: {
     // not duplicate it (or prompts) into ordinary logs before the owner acts.
     return { method, diagnosticClass: "private-turn-input-redacted", stage: input.stage };
   }
-  if (method === "thread/prediction/updated" || method === "thread/attachment/updated") {
+  if (
+    method === "thread/prediction/updated" ||
+    method === "thread/attachment/updated" ||
+    method === "thread/section/changed"
+  ) {
     // This defense also covers typed-client decode failures, whose schema
     // issue can embed private attachment values or speculative text before the
     // runtime's early discard.
@@ -9075,6 +9097,7 @@ export const makeCodexSessionRuntime = (
             turnId,
             itemId,
             decision,
+            ...(payload.kind === "humanCommand" ? { oneTimeOnly: true } : {}),
           });
           return next;
         });
@@ -9450,7 +9473,10 @@ export const makeCodexSessionRuntime = (
           },
         });
       }
-      yield* client.request("initialize", buildCodexInitializeParams());
+      yield* client.request(
+        "initialize",
+        buildCodexInitializeParams({ requiredHumanApproval: true }),
+      );
       yield* client.notify("initialized", undefined);
 
       const requestedModel = normalizeCodexModelSlug(options.model);
@@ -10817,6 +10843,13 @@ export const makeCodexSessionRuntime = (
                 return yield* requestInterrupt(actualTurnId);
               }),
             ),
+            // The initial request and its exact mismatch retarget share one
+            // deadline. Losing either ACK leaves native turn state unknown.
+            // Do not replay, clear its ownership, or report an accepted Stop.
+            Effect.timeoutOrElse({
+              duration: CODEX_TURN_INTERRUPT_TIMEOUT,
+              orElse: () => Effect.fail(new CodexSessionRuntimeInterruptUnconfirmedError()),
+            }),
           );
           // Upstream Codex TUI pauses an active goal when the user interrupts
           // the current task. Cafe awaits this update before its adapter may
@@ -10837,6 +10870,9 @@ export const makeCodexSessionRuntime = (
               status: "paused",
             });
           }).pipe(
+            // This optional follow-up must not strand a Stop that Codex already
+            // acknowledged. The existing warning preserves pause uncertainty.
+            Effect.timeout(CODEX_INTERRUPT_GOAL_PAUSE_TIMEOUT),
             Effect.catchCause((cause) =>
               Effect.logWarning("codex.goal.pause-after-interrupt-failed", {
                 threadId: options.threadId,
@@ -10975,6 +11011,15 @@ export const makeCodexSessionRuntime = (
             return yield* new CodexSessionRuntimePendingApprovalNotFoundError({
               requestId,
             });
+          }
+          // Enforce the native one-time contract at the held callback, not only
+          // in presentation. Reconnected/older clients cannot turn a human ask
+          // into a reusable grant, and refusal leaves that same request pending
+          // so the person can still approve once or decline it.
+          if (pending.oneTimeOnly && decision === "acceptForSession") {
+            return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+              "This provider approval permits a one-time decision only.",
+            );
           }
           yield* Ref.update(pendingApprovalsRef, (current) => {
             const next = new Map(current);

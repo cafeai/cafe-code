@@ -17,7 +17,6 @@ import type {
   ProviderUsageResetResult,
   ProviderUsageResetError,
   ProviderSkillsResult,
-  ProviderSessionQuotaReport,
   ProviderSession,
   ServerProviderLoginInput,
   ServerProviderLoginResult,
@@ -27,7 +26,7 @@ import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 import type { ProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
-import type { ProviderInstance } from "../ProviderDriver.ts";
+import type { ProviderAccountQuotaReading, ProviderInstance } from "../ProviderDriver.ts";
 import type { ProviderAdapterRequestError } from "../Errors.ts";
 import type { ProviderAdapterError } from "../Errors.ts";
 
@@ -44,7 +43,7 @@ export interface ProviderRegistryShape {
   ) => Effect.Effect<ServerProviderLoginResult, ProviderAdapterError>;
   readonly readInstanceAccountQuota?: (
     instanceId: ProviderInstanceId,
-  ) => Effect.Effect<ProviderSessionQuotaReport | null>;
+  ) => Effect.Effect<ProviderAccountQuotaReading>;
   readonly discoverSkills?: (
     instanceId: ProviderInstanceId,
     cwd: string,

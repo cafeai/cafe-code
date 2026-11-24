@@ -3,12 +3,21 @@ import {
   AxiomSettings,
   ClaudeSettings,
   CodexSettings,
+  GeminiSettings,
   GrokSettings,
   OpenCodeSettings,
   ProviderDriverKind,
 } from "@cafecode/contracts";
 import type * as Schema from "effect/Schema";
-import { AxiomIcon, ClaudeAI, GrokIcon, type Icon, OpenAI, OpenCodeIcon } from "../Icons";
+import {
+  AntigravityIcon,
+  AxiomIcon,
+  ClaudeAI,
+  GrokIcon,
+  type Icon,
+  OpenAI,
+  OpenCodeIcon,
+} from "../Icons";
 
 type ProviderSettingsSchema = {
   readonly fields: Readonly<Record<string, Schema.Top>>;
@@ -47,6 +56,12 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     label: "Claude",
     icon: ClaudeAI,
     settingsSchema: ClaudeSettings,
+  },
+  {
+    value: ProviderDriverKind.make("gemini"),
+    label: "Gemini",
+    icon: AntigravityIcon,
+    settingsSchema: GeminiSettings,
   },
   {
     value: ProviderDriverKind.make("grok"),

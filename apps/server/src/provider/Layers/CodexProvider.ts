@@ -902,6 +902,12 @@ const CODEX_MAX_REASONING_EFFORTS = [...CODEX_STANDARD_REASONING_EFFORTS, "max"]
 // fresh installs usable before the full Codex probe refreshes provider cache.
 const CODEX_ULTRA_REASONING_EFFORTS = [...CODEX_MAX_REASONING_EFFORTS, "ultra"] as const;
 
+/**
+ * Current native model guides expose these controls without promising one
+ * account-independent effort or paid routing default. Keep effort inherited
+ * until model/list supplies the selected account's actual metadata. Standard
+ * routing remains explicit so adding a catalogue row cannot opt into charges.
+ */
 function inheritedCodexReasoningCapabilities(): ModelCapabilities {
   return createModelCapabilities({
     optionDescriptors: [
@@ -925,9 +931,20 @@ function inheritedCodexReasoningCapabilities(): ModelCapabilities {
   });
 }
 
-// The Codex guide lists Sol with client-selected reasoning effort. Keep
-// fallback effort inherited and routing Standard until live account discovery.
+// The current native Codex guide explicitly lists both GPT-6.2 IDs. Its
+// account/client-selected effort is intentionally not taken from API defaults:
 // https://learn.chatgpt.com/docs/models
+// Fallback presence is discovery metadata, not fresh entitlement. The exact
+// account's live model/list still owns visibility and all reported controls.
+const ASTRA_62_CODEX_MODEL: ServerProviderModel = {
+  slug: "gpt-6.2-astra",
+  name: "GPT-6.2-Astra",
+  isCustom: false,
+  capabilities: {
+    ...inheritedCodexReasoningCapabilities(),
+    inputModalities: ["text", "image"],
+  },
+};
 const SOL_62_CODEX_MODEL: ServerProviderModel = {
   slug: "gpt-6.2-sol",
   name: "GPT-6.2-Sol",
@@ -1006,8 +1023,9 @@ const LUNA_CODEX_MODEL: ServerProviderModel = {
   }),
 };
 const KNOWN_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new Map([
-  [SOL_62_CODEX_MODEL.slug, { ...SOL_62_CODEX_MODEL, isCustom: true }],
   [ASTRA_CODEX_MODEL.slug, { ...ASTRA_CODEX_MODEL, isCustom: true }],
+  [ASTRA_62_CODEX_MODEL.slug, { ...ASTRA_62_CODEX_MODEL, isCustom: true }],
+  [SOL_62_CODEX_MODEL.slug, { ...SOL_62_CODEX_MODEL, isCustom: true }],
   [SOL_61_CODEX_MODEL.slug, { ...SOL_61_CODEX_MODEL, isCustom: true }],
   [TERRA_61_CODEX_MODEL.slug, { ...TERRA_61_CODEX_MODEL, isCustom: true }],
   [SOL_CODEX_MODEL.slug, { ...SOL_CODEX_MODEL, isCustom: true }],
@@ -1018,8 +1036,9 @@ const KNOWN_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new 
 // conservative model fallback so a fresh install still has selectable Codex
 // models before the full app-server diagnostic path has ever populated cache.
 const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
-  SOL_62_CODEX_MODEL,
   ASTRA_CODEX_MODEL,
+  ASTRA_62_CODEX_MODEL,
+  SOL_62_CODEX_MODEL,
   SOL_61_CODEX_MODEL,
   TERRA_61_CODEX_MODEL,
   SOL_CODEX_MODEL,
@@ -1397,7 +1416,9 @@ export const readCodexAppServerModels = (
     ),
   );
 
-export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
+export function buildCodexInitializeParams(options?: {
+  readonly requiredHumanApproval?: boolean;
+}): CodexSchema.V1InitializeParams {
   return {
     clientInfo: {
       name: "cafecode_desktop",
@@ -1406,6 +1427,9 @@ export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
     },
     capabilities: {
       experimentalApi: true,
+      // Only the session connection with a human approval handler opts in.
+      // Metadata/history clients must not receive replayed approval requests.
+      ...(options?.requiredHumanApproval ? { requiredHumanApproval: true } : {}),
     },
   };
 }

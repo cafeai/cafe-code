@@ -1,5 +1,9 @@
 import { uiText } from "@cafecode/shared/i18n";
-import { ProviderTurnConfiguration, type RuntimeMode } from "@cafecode/contracts";
+import {
+  type ProviderInteractionMode,
+  ProviderTurnConfiguration,
+  type RuntimeMode,
+} from "@cafecode/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import {
@@ -7,6 +11,10 @@ import {
   deriveClaudePermissionMode,
   GROK_PERMISSION_MODE_OPTIONS,
 } from "./components/chat/claudePermissionMode";
+import {
+  deriveGeminiPermissionMode,
+  GEMINI_PERMISSION_MODE_OPTIONS,
+} from "./components/chat/geminiPermissionMode";
 
 /** Access names shared with the composer's access control. */
 const RUNTIME_MODE_LABELS: Readonly<Record<RuntimeMode, string>> = {
@@ -21,15 +29,38 @@ const RUNTIME_MODE_LABELS: Readonly<Record<RuntimeMode, string>> = {
   },
 };
 
+const INTERACTION_MODE_LABELS: Readonly<Record<ProviderInteractionMode, string>> = {
+  get default() {
+    return uiText("Build");
+  },
+  get plan() {
+    return uiText("Plan");
+  },
+  get auto() {
+    return uiText("Auto");
+  },
+  get "gemini-bypass"() {
+    return uiText("Bypass permissions");
+  },
+};
+
 /**
- * Claude and Grok present one native permission mode (Ask permissions,
- * Accept edits, Plan, Auto, Bypass permissions) rather than Cafe's
- * interaction/access pair. Reuse the composer's own mapping so the work log
- * names the mode exactly as it was selected. An omitted interaction mode
- * (provider default) is ambiguous, so it keeps the generic pair.
+ * Use the same native permission labels as the composer. Leave omitted
+ * settings generic and preserve the label from earlier Gemini settings.
  */
 function nativePermissionModeLabel(configuration: ProviderTurnConfiguration): string | null {
   if (configuration.interactionMode === undefined) return null;
+  const state = {
+    interactionMode: configuration.interactionMode,
+    runtimeMode: configuration.runtimeMode,
+  };
+  if (configuration.provider === "gemini") {
+    if (state.runtimeMode === "full-access" && state.interactionMode === "default") {
+      return uiText("Antigravity CLI permissions");
+    }
+    const mode = deriveGeminiPermissionMode(state);
+    return GEMINI_PERMISSION_MODE_OPTIONS.find((option) => option.id === mode)?.label ?? null;
+  }
   const options =
     configuration.provider === "claudeAgent"
       ? CLAUDE_PERMISSION_MODE_OPTIONS
@@ -37,10 +68,7 @@ function nativePermissionModeLabel(configuration: ProviderTurnConfiguration): st
         ? GROK_PERMISSION_MODE_OPTIONS
         : null;
   if (options === null) return null;
-  const mode = deriveClaudePermissionMode({
-    interactionMode: configuration.interactionMode,
-    runtimeMode: configuration.runtimeMode,
-  });
+  const mode = deriveClaudePermissionMode(state);
   return options.find((option) => option.id === mode)?.label ?? null;
 }
 
@@ -84,6 +112,14 @@ const EFFORT_LABELS: Readonly<Record<string, string>> = {
     return uiText("Ultra");
   },
 };
+
+function presentEffortLabel(
+  provider: ProviderTurnConfiguration["provider"],
+  effort: string,
+): string {
+  if (provider === "gemini" && effort === "xhigh") return uiText("Extra");
+  return Object.hasOwn(EFFORT_LABELS, effort) ? EFFORT_LABELS[effort]! : effort;
+}
 
 function presentServiceTier(tier: string): string {
   switch (tier) {
@@ -175,9 +211,7 @@ export function presentTurnConfigurationSummary(configuration: ProviderTurnConfi
       ? isOpenCode
         ? uiText("Default variant")
         : uiText("Default effort")
-      : Object.hasOwn(EFFORT_LABELS, configuration.effort)
-        ? EFFORT_LABELS[configuration.effort]!
-        : configuration.effort;
+      : presentEffortLabel(configuration.provider, configuration.effort);
   const routedTier =
     configuration.provider === "codex"
       ? (configuration.resolvedServiceTier ?? configuration.serviceTier)
@@ -196,9 +230,7 @@ export function presentTurnConfigurationSummary(configuration: ProviderTurnConfi
   const interactionMode =
     configuration.interactionMode === undefined
       ? uiText("Default mode")
-      : { default: uiText("Build"), plan: uiText("Plan"), auto: uiText("Auto") }[
-          configuration.interactionMode
-        ];
+      : INTERACTION_MODE_LABELS[configuration.interactionMode];
   const nativeMode = nativePermissionModeLabel(configuration);
   const modes = nativeMode
     ? [nativeMode]
@@ -246,9 +278,7 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
         })
       : uiText("{provider, select, opencode {Variant} other {Effort}}: {effort}", {
           provider: configuration.provider,
-          effort: Object.hasOwn(EFFORT_LABELS, configuration.effort)
-            ? EFFORT_LABELS[configuration.effort]
-            : configuration.effort,
+          effort: presentEffortLabel(configuration.provider, configuration.effort),
         });
   // Prefer routing captured from the exact native start over submitted options.
   // Old snapshots stay unknown rather than borrowing today's session settings.
@@ -268,9 +298,7 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
   const interactionMode =
     configuration.interactionMode === undefined
       ? uiText("Mode: provider default")
-      : { default: uiText("Build"), plan: uiText("Plan"), auto: uiText("Auto") }[
-          configuration.interactionMode
-        ];
+      : INTERACTION_MODE_LABELS[configuration.interactionMode];
   return {
     settings: [
       model,
@@ -284,7 +312,9 @@ export function presentTurnConfiguration(configuration: ProviderTurnConfiguratio
     // This is the configured instance label, deliberately not an auth email,
     // account identifier, token, or a fresh read of the provider's credentials.
     account: uiText("Account: {account}", { account: configuration.providerDisplayName }),
-    modes: uiText("{interactionMode} · {runtimeMode}", { interactionMode, runtimeMode }),
+    modes:
+      (configuration.provider === "gemini" ? nativePermissionModeLabel(configuration) : null) ??
+      uiText("{interactionMode} · {runtimeMode}", { interactionMode, runtimeMode }),
     source:
       configuration.settingsSource === "submitted"
         ? uiText("Submitted settings")

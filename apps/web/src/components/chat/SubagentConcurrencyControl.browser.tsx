@@ -1,8 +1,8 @@
 import "../../index.css";
-import { useState } from "react";
+import { useState, type ReactElement } from "react";
 import { ProviderDriverKind } from "@cafecode/contracts";
 import { page, userEvent } from "vitest/browser";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { getUiLocale, setUiLocale, uiText } from "@cafecode/shared/i18n";
 import { render } from "vitest-browser-react";
 import { MenuItem } from "../ui/menu";
@@ -10,6 +10,7 @@ import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { SubagentConcurrencyControl } from "./SubagentConcurrencyControl";
 import { applyInterfaceScalePercent } from "../../interfaceScale";
 import type { SubagentConcurrencyPresentation } from "../../subagentConcurrency";
+import { createChatViewFixtureRetirement } from "../chatViewFixtureRetirement.test.fixture";
 
 function Harness(props: {
   onChange: (value: number | undefined) => Promise<void>;
@@ -41,12 +42,7 @@ function Harness(props: {
         onTogglePlanSidebar={() => {}}
         onRuntimeModeChange={() => {}}
         subagentConcurrencyControl={
-          <MenuItem
-            disabled={!supported && props.override === undefined}
-            onClick={() => setOpen(true)}
-          >
-            Subagent limit…
-          </MenuItem>
+          <MenuItem onClick={() => setOpen(true)}>Subagent limit…</MenuItem>
         }
       />
       <SubagentConcurrencyControl
@@ -78,13 +74,76 @@ async function openEditor() {
   await expect.element(page.getByRole("dialog")).toBeVisible();
 }
 
+const scopedEditorRetirement = createChatViewFixtureRetirement();
+
+/** Own the changed editor journeys before render, including timeout cleanup.
+ * Shared afterEach joins this same owner before resetting DOM/locale/viewport.
+ * Late renders remain held for exact unmount; retirement admits no new input.
+ */
+function ownEditorFixture(context: TestContext) {
+  const pending = new Set<Promise<unknown>>();
+  const views = new Set<Awaited<ReturnType<typeof render>>>();
+  let retired = false;
+  let completion: Promise<void> | undefined;
+  const assertActive = () => {
+    if (retired || context.signal.aborted) throw new Error("The editor fixture was retired.");
+  };
+  const own = async <T,>(operation: () => PromiseLike<T>): Promise<T> => {
+    assertActive();
+    const original = Promise.resolve(operation());
+    pending.add(original);
+    try {
+      const value = await original;
+      assertActive();
+      return value;
+    } finally {
+      pending.delete(original);
+    }
+  };
+  const cleanup = (): Promise<void> => {
+    retired = true;
+    context.signal.removeEventListener("abort", onAbort);
+    return (completion ??= Promise.resolve().then(async () => {
+      while (pending.size > 0) await Promise.allSettled([...pending]);
+      for (const view of views) await view.unmount();
+      views.clear();
+    }));
+  };
+  const onAbort = () => {
+    // The registered completion and shared hook still join/report this owner.
+    void cleanup().catch(() => undefined);
+  };
+  scopedEditorRetirement.admit(cleanup);
+  context.onTestFinished(cleanup);
+  context.signal.addEventListener("abort", onAbort, { once: true });
+  if (context.signal.aborted) onAbort();
+  return {
+    own,
+    mount: (element: ReactElement) =>
+      own(async () => {
+        const view = await render(element);
+        views.add(view);
+        return view;
+      }),
+    async open() {
+      await own(() => page.getByRole("button", { name: "More composer controls" }).click());
+      await own(() => page.getByRole("menuitem", { name: "Subagent limit…", exact: true }).click());
+      await own(() => expect.element(page.getByRole("dialog")).toBeVisible());
+    },
+  };
+}
+
 describe("per-chat subagent concurrency editor", () => {
   const originalLocale = getUiLocale();
-  beforeEach(() => setUiLocale("en"));
+  beforeEach(() => {
+    scopedEditorRetirement.assertIdle();
+    setUiLocale("en");
+  });
   let mounted: Awaited<ReturnType<typeof render>> | undefined;
   const viewport = { width: window.innerWidth, height: window.innerHeight };
   const fontSize = document.documentElement.style.fontSize;
   afterEach(async () => {
+    await scopedEditorRetirement.retire();
     await mounted?.unmount();
     mounted = undefined;
     document.body.innerHTML = "";
@@ -247,39 +306,63 @@ describe("per-chat subagent concurrency editor", () => {
       .toBeVisible();
     expect(document.body.textContent).not.toContain("next turn");
   });
-  it("gates an older unsupported runtime without presenting an enabled editor", async () => {
+  it("saves a bounded preference when runtime support is unconfirmed", async (context) => {
+    const owner = ownEditorFixture(context);
     const onChange = vi.fn(async () => {});
-    mounted = await render(<Harness onChange={onChange} supported={false} />);
-    await page.getByRole("button", { name: "More composer controls" }).click();
-    await expect
-      .element(page.getByRole("menuitem", { name: "Subagent limit…", exact: true }))
-      .toBeDisabled();
-    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    await owner.mount(<Harness onChange={onChange} supported={false} />);
+    await owner.open();
+    await owner.own(() =>
+      expect
+        .element(
+          page.getByText(
+            "Support for this override is not confirmed. You can save this preference; chats continue with the current provider policy if it cannot be applied.",
+            { exact: true },
+          ),
+        )
+        .toBeVisible(),
+    );
+    await owner.own(() =>
+      page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }).fill("24"),
+    );
+    await owner.own(() => page.getByRole("button", { name: "Save", exact: true }).click());
+    expect(onChange).toHaveBeenCalledExactlyOnceWith(24);
+  });
+  it("preserves a valid edit if support becomes unconfirmed while open", async (context) => {
+    const owner = ownEditorFixture(context);
+    const onChange = vi.fn(async () => {});
+    const view = await owner.mount(<Harness onChange={onChange} override={12} />);
+    await owner.open();
+    const input = page.getByRole("spinbutton", { name: "Maximum concurrent subagents" });
+    await owner.own(() => input.fill("24"));
+    await owner.own(() =>
+      view.rerender(<Harness onChange={onChange} override={12} supported={false} />),
+    );
+    await owner.own(() => expect.element(input).toHaveValue(24));
+    await owner.own(() => input.fill("65"));
+    await owner.own(() =>
+      expect.element(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled(),
+    );
     expect(onChange).not.toHaveBeenCalled();
+    await owner.own(() => input.fill("24"));
+    await owner.own(() => page.getByRole("button", { name: "Save", exact: true }).click());
+    expect(onChange).toHaveBeenCalledExactlyOnceWith(24);
   });
-  it("blocks numeric writes but preserves reset if a capability is revoked while open", async () => {
+  it("resets a remembered preference without claiming a native policy change", async (context) => {
+    const owner = ownEditorFixture(context);
     const onChange = vi.fn(async () => {});
-    mounted = await render(<Harness onChange={onChange} override={12} />);
-    await openEditor();
-    await mounted.rerender(<Harness onChange={onChange} override={12} supported={false} />);
-    await expect.element(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
-    await expect
-      .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
-      .toBeDisabled();
-    await expect.element(page.getByRole("button", { name: "Reset", exact: true })).toBeEnabled();
-    await page.getByRole("button", { name: "Reset", exact: true }).click();
-    expect(onChange).toHaveBeenCalledExactlyOnceWith(undefined);
-  });
-  it("allows clearing a remembered request on an unsupported runtime without a numeric save", async () => {
-    const onChange = vi.fn(async () => {});
-    mounted = await render(<Harness onChange={onChange} override={12} supported={false} />);
-    await openEditor();
-    await expect
-      .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
-      .toBeDisabled();
-    await expect.element(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
-    await expect.element(page.getByText(/This account can’t apply a numeric limit/)).toBeVisible();
-    await page.getByRole("button", { name: "Reset", exact: true }).click();
+    await owner.mount(
+      <Harness onChange={onChange} override={12} configured={12} supported={false} />,
+    );
+    await owner.open();
+    await owner.own(() =>
+      expect
+        .element(page.getByRole("spinbutton", { name: "Maximum concurrent subagents" }))
+        .toHaveValue(12),
+    );
+    await owner.own(() =>
+      expect.element(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled(),
+    );
+    await owner.own(() => page.getByRole("button", { name: "Reset", exact: true }).click());
     expect(onChange).toHaveBeenCalledExactlyOnceWith(undefined);
   });
   it("preserves an in-progress edit across metadata updates and reads fresh state on reopening", async () => {

@@ -8,8 +8,25 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { z } from "zod";
 import { McpToolError } from "./results.ts";
+import {
+  MCP_OPERATION_STORAGE_BUDGET_BYTES,
+  MCP_OPERATION_RESULT_MAX_BYTES,
+  operationStorageReservationBytes,
+} from "./operationStorage.ts";
 
+// Kept as the number of full-sized pending reservations the logical budget
+// supports, rather than a limit on the number of retained settled receipts.
 export const MAX_MCP_OPERATIONS = 10_000;
+const EXPIRED_RECEIPT_PRUNE_BATCH = 256;
+export const operationStorageStatusSchema = z.object({
+  scope: z.literal("global"),
+  policyVersion: z.literal(1),
+  receiptCount: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  chargedBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  budgetBytes: z.literal(MCP_OPERATION_STORAGE_BUDGET_BYTES),
+  availableBytes: z.number().int().nonnegative().max(MCP_OPERATION_STORAGE_BUDGET_BYTES),
+});
+export type McpOperationStorageStatus = z.infer<typeof operationStorageStatusSchema>;
 export const requestIdSchema = z
   .string()
   .uuid()
@@ -47,6 +64,9 @@ export interface McpOperation {
   readonly expiresAt: string;
 }
 export interface McpOperationsShape {
+  /** Aggregate, content-free observation only; never admission or replay authority.
+   * Optional for older embedders, which report unknown storage rather than zero. */
+  readonly storageStatus?: Effect.Effect<McpOperationStorageStatus, McpToolError>;
   readonly reserve: (
     owner: McpOperationOwner,
     requestId: string,
@@ -202,65 +222,125 @@ export const makeMcpOperations = Effect.gen(function* () {
       ),
     );
   const get: McpOperationsShape["get"] = (owner, requestId) => safe(read(owner, requestId));
+  const storageStatus = safe(
+    Effect.gen(function* () {
+      const rows = yield* sql<{
+        policyVersion: number;
+        bytes: number;
+        entryCount: number;
+      }>`SELECT policy_version AS "policyVersion", bytes, entry_count AS "entryCount"
+        FROM mcp_operation_storage_budget WHERE singleton = 1`;
+      const row = rows[0];
+      // Missing/corrupt bookkeeping is unavailable, never an empty ledger. The
+      // migration and write triggers independently protect these same bounds.
+      if (
+        rows.length !== 1 ||
+        !row ||
+        row.policyVersion !== 1 ||
+        !Number.isSafeInteger(row.bytes) ||
+        row.bytes < 0 ||
+        !Number.isSafeInteger(row.entryCount) ||
+        row.entryCount < 0 ||
+        row.entryCount > Math.floor(row.bytes / 1_024) ||
+        (row.entryCount === 0 && row.bytes !== 0)
+      )
+        return yield* Effect.fail(
+          new McpToolError("unavailable", "Operation storage accounting is unavailable."),
+        );
+      return {
+        scope: "global" as const,
+        policyVersion: 1 as const,
+        receiptCount: row.entryCount,
+        chargedBytes: row.bytes,
+        budgetBytes: MCP_OPERATION_STORAGE_BUDGET_BYTES,
+        availableBytes: Math.max(0, MCP_OPERATION_STORAGE_BUDGET_BYTES - row.bytes),
+      } satisfies McpOperationStorageStatus;
+    }),
+  );
   const reserve: McpOperationsShape["reserve"] = (owner, requestId, tool, inputHash) =>
     safe(
-      sql.withTransaction(
-        Effect.gen(function* () {
-          const now = DateTime.formatIso(yield* DateTime.now);
-          if (!Number.isFinite(Date.parse(owner.expiresAt)) || owner.expiresAt <= now)
-            return yield* Effect.fail(
-              new McpToolError(
-                "unavailable",
-                "A fresh expiring bearer session is required to track actions.",
-              ),
-            );
-          // A retired credential cannot read or reserve again. Expiry deletion never
-          // permits reuse within an authenticated owner's still-valid namespace.
-          yield* sql`DELETE FROM mcp_operations WHERE expires_at <= ${now}`;
-          const existing = yield* read(owner, requestId);
-          if (existing) {
-            if (existing.tool !== tool || existing.inputHash !== inputHash)
+      Effect.gen(function* () {
+        const outcome = yield* sql.withTransaction(
+          Effect.gen(function* () {
+            const now = DateTime.formatIso(yield* DateTime.now);
+            if (!Number.isFinite(Date.parse(owner.expiresAt)) || owner.expiresAt <= now)
               return yield* Effect.fail(
                 new McpToolError(
-                  "conflict",
-                  "This requestId already belongs to a different action.",
-                  "Inspect get_operation; use a new requestId only for a separately intended action.",
+                  "unavailable",
+                  "A fresh expiring bearer session is required to track actions.",
                 ),
               );
-            return { fresh: false, operation: existing };
-          }
-          const counts = yield* sql<{
-            count: number;
-          }>`SELECT count(*) AS count FROM mcp_operations`;
-          if ((counts[0]?.count ?? MAX_MCP_OPERATIONS) >= MAX_MCP_OPERATIONS)
-            return yield* Effect.fail(
-              new McpToolError(
-                "capacity",
-                "Operation receipt capacity is full; no action was started.",
-              ),
-            );
-          yield* sql`INSERT INTO mcp_operations (owner_hash, request_id, tool, input_hash, state, result_json, created_at, updated_at, expires_at) VALUES (${operationScopeId(owner)}, ${requestId}, ${tool}, ${inputHash}, 'unconfirmed', NULL, ${now}, ${now}, ${owner.expiresAt})`;
-          return {
-            fresh: true,
-            operation: {
+            // A retired credential cannot read or reserve again. Expiry deletion never
+            // permits reuse within an authenticated owner's still-valid namespace.
+            // Settled receipts can be numerous. Use the expiry index and a finite
+            // batch so one admission cannot monopolize SQLite pruning history.
+            yield* sql`DELETE FROM mcp_operations WHERE (owner_hash, request_id) IN (
+            SELECT owner_hash, request_id FROM mcp_operations WHERE expires_at <= ${now}
+            ORDER BY expires_at, owner_hash, request_id LIMIT ${EXPIRED_RECEIPT_PRUNE_BATCH}
+          )`;
+            const existing = yield* read(owner, requestId);
+            if (existing) {
+              if (existing.tool !== tool || existing.inputHash !== inputHash)
+                return yield* Effect.fail(
+                  new McpToolError(
+                    "conflict",
+                    "This requestId already belongs to a different action.",
+                    "Inspect get_operation; use a new requestId only for a separately intended action.",
+                  ),
+                );
+              return { fresh: false, operation: existing };
+            }
+            const storage = yield* storageStatus;
+            const reservationBytes = operationStorageReservationBytes({
+              ownerHash: operationScopeId(owner),
               requestId,
               tool,
               inputHash,
-              state: "unconfirmed" as const,
-              result: null,
+              state: "unconfirmed",
               createdAt: now,
               updatedAt: now,
               expiresAt: owner.expiresAt,
-            },
-          };
-        }),
-      ),
+            });
+            if (
+              !Number.isSafeInteger(reservationBytes) ||
+              reservationBytes > storage.availableBytes
+            )
+              // Return a refused outcome so this bounded expiry batch commits.
+              // Raising inside the transaction would undo each batch and could
+              // strand overbudget legacy history behind the same expired rows.
+              return null;
+            yield* sql`INSERT INTO mcp_operations (owner_hash, request_id, tool, input_hash, state, result_json, created_at, updated_at, expires_at) VALUES (${operationScopeId(owner)}, ${requestId}, ${tool}, ${inputHash}, 'unconfirmed', NULL, ${now}, ${now}, ${owner.expiresAt})`;
+            return {
+              fresh: true,
+              operation: {
+                requestId,
+                tool,
+                inputHash,
+                state: "unconfirmed" as const,
+                result: null,
+                createdAt: now,
+                updatedAt: now,
+                expiresAt: owner.expiresAt,
+              },
+            };
+          }),
+        );
+        if (outcome === null)
+          return yield* Effect.fail(
+            new McpToolError(
+              "capacity",
+              "Operation receipt storage is full; no action was started.",
+              "Read get_cafe_context operationStorage. Live receipts are retained; restarting does not clear them. Never repeat an uncertain action.",
+            ),
+          );
+        return outcome;
+      }),
     );
   const settle: McpOperationsShape["settle"] = (owner, requestId, state, result) =>
     safe(
       Effect.gen(function* () {
         const json = result === undefined ? null : encodeJson(result);
-        if (json !== null && Buffer.byteLength(json, "utf8") > 65_536)
+        if (json !== null && Buffer.byteLength(json, "utf8") > MCP_OPERATION_RESULT_MAX_BYTES)
           return yield* Effect.fail(
             new McpToolError("capacity", "The operation receipt exceeds its size limit."),
           );
@@ -278,6 +358,6 @@ export const makeMcpOperations = Effect.gen(function* () {
       WHERE owner_hash = ${operationScopeId(owner)} AND request_id = ${requestId}`;
       }),
     );
-  return { get, reserve, settle } satisfies McpOperationsShape;
+  return { get, reserve, settle, storageStatus } satisfies McpOperationsShape;
 });
 export const McpOperationsLive = Layer.effect(McpOperations, makeMcpOperations);

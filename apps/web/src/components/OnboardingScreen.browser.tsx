@@ -9,6 +9,7 @@ import {
 } from "@cafecode/contracts";
 import { DEFAULT_UNIFIED_SETTINGS, type UnifiedSettings } from "@cafecode/contracts/settings";
 import { getUiLocale, setUiLocale } from "@cafecode/shared/i18n";
+import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { page } from "vitest/browser";
@@ -139,11 +140,20 @@ describe("onboarding provider status", () => {
   it("retains checking until the server reports the default account", async () => {
     fixture.config = null;
     await openProviders();
-    expect(page.getByText("Checking…", { exact: true }).elements()).toHaveLength(5);
-    expect(axiomCard().textContent).not.toContain("Not configured");
-    publishConfig({ providers: [], settings: DEFAULT_SERVER_SETTINGS });
-    expect(page.getByText("Checking…", { exact: true }).elements()).toHaveLength(5);
-    expect(axiomCard().textContent).not.toContain("Not configured");
+    const expectPendingProviders = () => {
+      const cards = page.getByRole("listitem").elements();
+      expect(cards).toContain(axiomCard());
+      for (const card of cards) {
+        expect(card.textContent).toContain("Checking…");
+      }
+      expect(axiomCard().textContent).not.toContain("Not configured");
+    };
+
+    expectPendingProviders();
+    await act(() => {
+      publishConfig({ providers: [], settings: DEFAULT_SERVER_SETTINGS });
+    });
+    expectPendingProviders();
   });
 
   it("awaits an explicitly configured Axiom account and then displays its exact status", async () => {

@@ -168,6 +168,10 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
   Record<ProviderDriverKind, Record<string, string>>
 > = {
   [CODEX_DRIVER_KIND]: {
+    // Versioned spellings select only the named model. Do not advance saved
+    // Astra/Sol selections, or guess which family a bare "6.2" should mean.
+    "6.2-astra": "gpt-6.2-astra",
+    "6.2-sol": "gpt-6.2-sol",
     "5.6": "gpt-5.6-sol",
     "gpt-5.6": "gpt-5.6-sol",
     "5.6-sol": "gpt-5.6-sol",

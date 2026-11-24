@@ -71,12 +71,12 @@ export function isExcludedWorkLogOperation(
 
 /**
  * Providers whose adapters emit the version-1 public reasoning summary contract
- * from their own primary conversation (Claude public summaries and OpenCode
- * reasoning parts). Server ingestion, the historical work-log SQL predicate and
- * the renderer admit exactly this list; any other provider's reasoning item is
- * never promoted to a visible row by shape alone.
+ * from their own primary conversation (Claude public summaries, OpenCode
+ * reasoning parts, and Gemini ACP's disclosed thought text). Server ingestion,
+ * the historical work-log SQL predicate and the renderer admit exactly this
+ * list; other providers' reasoning items stay unpromoted.
  */
-export const PUBLIC_REASONING_SUMMARY_PROVIDERS = ["claudeAgent", "opencode"] as const;
+export const PUBLIC_REASONING_SUMMARY_PROVIDERS = ["claudeAgent", "opencode", "gemini"] as const;
 export type PublicReasoningSummaryProvider = (typeof PUBLIC_REASONING_SUMMARY_PROVIDERS)[number];
 
 export function isPublicReasoningSummaryProvider(

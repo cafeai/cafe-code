@@ -182,6 +182,8 @@ describe("resolveModelRate", () => {
   });
 
   it.each([
+    ["gpt-6.2-astra", { input: 8, cachedInput: 0.4, cacheWrite: 10, output: 40 }],
+    ["gpt-6.2-sol", { input: 2, cachedInput: 0.1, cacheWrite: 2.5, output: 10 }],
     ["gpt-6.1-sol", { input: 2, cachedInput: 0.1, cacheWrite: 2.5, output: 10 }],
     ["gpt-6.1-terra", { input: 1, cachedInput: 0.05, cacheWrite: 1.25, output: 5 }],
     ["gpt-6-sol", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
@@ -375,25 +377,32 @@ describe("rollUpCost", () => {
     expect(withRead.cost + withRead.cacheSavings).toBe(8);
   });
 
-  it("estimates Astra cache composition at standard rates even for large lifetime totals", () => {
-    // This row aggregates multiple requests. A lifetime total above 272k is
-    // not evidence that any individual request qualified for long-context
-    // pricing, so it must retain the published standard-rate estimate.
-    const rollup = rollUpCost([
-      {
-        model: "gpt-6-astra",
-        inputTokens: 1_000_000,
-        cachedInputTokens: 600_000,
-        cacheWriteInputTokens: 300_000,
-        outputTokens: 100_000,
-      },
-    ]);
-    // 100k fresh + 600k reads + 300k writes + 100k output.
-    expect(rollup.cost).toBeCloseTo(1 + 0.6 + 3.75 + 5, 6);
-    expect(rollup.cacheSavings).toBeCloseTo(5.4 - 0.75, 6);
-    expect(rollup.pricedTokens).toBe(1_100_000);
-    expect(rollup.unpricedTokens).toBe(0);
-  });
+  it.each([
+    ["gpt-6-astra", 10.35, 4.65],
+    ["gpt-6.2-astra", 8.04, 3.96],
+    ["gpt-6.2-sol", 2.01, 0.99],
+  ] as const)(
+    "estimates %s cache composition at standard rates even for large lifetime totals",
+    (model, cost, savings) => {
+      // This row aggregates multiple requests. A lifetime total above 272k is
+      // not evidence that any individual request qualified for long-context
+      // pricing, so it must retain the published standard-rate estimate.
+      const rollup = rollUpCost([
+        {
+          model,
+          inputTokens: 1_000_000,
+          cachedInputTokens: 600_000,
+          cacheWriteInputTokens: 300_000,
+          outputTokens: 100_000,
+        },
+      ]);
+      // 100k fresh + 600k reads + 300k writes + 100k output.
+      expect(rollup.cost).toBeCloseTo(cost, 6);
+      expect(rollup.cacheSavings).toBeCloseTo(savings, 6);
+      expect(rollup.pricedTokens).toBe(1_100_000);
+      expect(rollup.unpricedTokens).toBe(0);
+    },
+  );
 
   it("keeps Sol 6.1 cache pricing distinct from Sol 6 without inferring request tiers", () => {
     // Aggregate counters cannot establish a long-context request or Fast tier.

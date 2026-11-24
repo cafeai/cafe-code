@@ -227,64 +227,80 @@ it.layer(fixtureLayer)("earlier current-turn work-log pages", (it) => {
       }),
   );
 
-  it.effect("does not advertise task-card or roster-only activity as historical work", () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      const query = yield* ProjectionSnapshotQuery;
-      yield* sql`DELETE FROM projection_thread_activities`;
-      const hidden = [
-        ["task.progress", { taskId: "ambient", visibility: "ambient" }],
-        ["task.completed", { taskId: "ambient", visibility: "ambient" }],
-        ["task.progress", { taskId: "workflow", workflow: { version: 1 } }],
-        ["task.completed", { taskId: "workflow", workflow: null }],
-        ["tool.updated", { itemType: "collab_agent_tool_call" }],
-        ["tool.completed", { itemType: "collab_agent_tool_call" }],
-      ] as const;
-      for (const [index, [kind, payload]] of hidden.entries()) {
-        yield* sql`INSERT INTO projection_thread_activities
+  it.effect(
+    "does not advertise primary notices, task cards or roster activity as historical work",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const query = yield* ProjectionSnapshotQuery;
+        yield* sql`DELETE FROM projection_thread_activities`;
+        const hidden = [
+          // Primary policy notices are not commands, including a future envelope
+          // which the primary renderer deliberately declines to disclose.
+          [
+            "provider.subagent-limit.not-applied",
+            {
+              version: 1,
+              reason: "support-unconfirmed",
+              fallback: "current-provider-policy",
+              requestedLimit: 12,
+              messageId: "accepted-policy-message",
+              intentSequence: 1,
+            },
+          ],
+          ["provider.subagent-limit.not-applied", { version: 2 }],
+          ["task.progress", { taskId: "ambient", visibility: "ambient" }],
+          ["task.completed", { taskId: "ambient", visibility: "ambient" }],
+          ["task.progress", { taskId: "workflow", workflow: { version: 1 } }],
+          ["task.completed", { taskId: "workflow", workflow: null }],
+          ["tool.updated", { itemType: "collab_agent_tool_call" }],
+          ["tool.completed", { itemType: "collab_agent_tool_call" }],
+        ] as const;
+        for (const [index, [kind, payload]] of hidden.entries()) {
+          yield* sql`INSERT INTO projection_thread_activities
           (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
           VALUES (${`hidden-${index}`},${threadId},${turnId},'info',${kind},'Task',${encodeJsonString(payload)},${index + 1},${timestamp(index + 1)})`;
-      }
-      const before = cursor(500, "live-floor", timestamp(500));
-      for (const range of [{}, { before }]) {
+        }
+        const before = cursor(500, "live-floor", timestamp(500));
+        for (const range of [{}, { before }]) {
+          assert.deepStrictEqual(
+            (yield* query.getThreadTurnWorkLogPresence({ threadId, turnIds: [turnId], ...range }))
+              .turnIdsWithWorkLog,
+            [],
+          );
+          const page = yield* query.getThreadTurnActivityPage({
+            threadId,
+            turnId,
+            offset: 0,
+            limit: 6,
+            ...range,
+          });
+          assert.equal(page.totalCount, 0);
+          assert.deepStrictEqual(page.activities, []);
+        }
+
+        // Ordinary task progress remains visible, including the same summary.
+        yield* sql`INSERT INTO projection_thread_activities
+        (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
+        VALUES ('visible-task',${threadId},${turnId},'info','task.progress','Task',${encodeJsonString({ taskId: "visible", visibility: "visible" })},10,${timestamp(10)})`;
         assert.deepStrictEqual(
-          (yield* query.getThreadTurnWorkLogPresence({ threadId, turnIds: [turnId], ...range }))
+          (yield* query.getThreadTurnWorkLogPresence({ threadId, turnIds: [turnId], before }))
             .turnIdsWithWorkLog,
-          [],
+          [turnId],
         );
         const page = yield* query.getThreadTurnActivityPage({
           threadId,
           turnId,
           offset: 0,
           limit: 6,
-          ...range,
+          before,
         });
-        assert.equal(page.totalCount, 0);
-        assert.deepStrictEqual(page.activities, []);
-      }
-
-      // Ordinary task progress remains visible, including the same summary.
-      yield* sql`INSERT INTO projection_thread_activities
-        (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,sequence,created_at)
-        VALUES ('visible-task',${threadId},${turnId},'info','task.progress','Task',${encodeJsonString({ taskId: "visible", visibility: "visible" })},10,${timestamp(10)})`;
-      assert.deepStrictEqual(
-        (yield* query.getThreadTurnWorkLogPresence({ threadId, turnIds: [turnId], before }))
-          .turnIdsWithWorkLog,
-        [turnId],
-      );
-      const page = yield* query.getThreadTurnActivityPage({
-        threadId,
-        turnId,
-        offset: 0,
-        limit: 6,
-        before,
-      });
-      assert.equal(page.totalCount, 1);
-      assert.deepStrictEqual(
-        page.activities.map((activity) => activity.id),
-        ["visible-task"],
-      );
-    }),
+        assert.equal(page.totalCount, 1);
+        assert.deepStrictEqual(
+          page.activities.map((activity) => activity.id),
+          ["visible-task"],
+        );
+      }),
   );
 
   it.effect(

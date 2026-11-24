@@ -5,6 +5,7 @@ import type {
   ProviderSessionQuotaResult,
 } from "@cafecode/contracts";
 import { useEffect, useMemo, useState } from "react";
+import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime/catalog";
 import { subscribeMetadata } from "./metadataSubscription";
 
 export interface ProviderQuotaContext {
@@ -23,47 +24,87 @@ export interface ProviderQuotaContext {
 export interface ProviderQuotaState {
   readonly status: "loading" | "available" | "unavailable" | "offline";
   readonly report: ProviderSessionQuotaReport | null;
+  readonly stale?: true;
 }
 
-/** Metadata subscription: the owner may read native allowances without a prompt.
- * Scope/visibility changes clear in render, before old effect cleanup. Each
- * reconnect clears the previous reading while the authenticated transport
- * revalidates its subscription; transport delivery owns its connection fence. */
+type QuotaUpdate =
+  | { readonly kind: "transport"; readonly status: "loading" | "unavailable" }
+  | { readonly kind: "server"; readonly result: ProviderSessionQuotaResult };
+
+function waitingForQuota(
+  status: "loading" | "unavailable" | "offline",
+  earlier: ProviderSessionQuotaReport | null | undefined,
+): ProviderQuotaState {
+  // Only a native allowance can survive a transport interruption. The passive
+  // session report remains tied to an actively verified native query.
+  return earlier?.source === "claude-cli"
+    ? { status, report: earlier, stale: true }
+    : { status, report: null };
+}
+
+/** Keep a historical native reading while the same visible scope reconnects.
+ * Any scope change clears it in render. Authoritative server responses, even
+ * null, replace it so a revoked binding cannot inherit the old report. */
 export function useProviderQuota(
   context: ProviderQuotaContext | undefined,
   visible: boolean,
   expectedClaude = false,
 ): ProviderQuotaState | undefined {
+  const environmentDenied = useSavedEnvironmentRuntimeStore((store) => {
+    const runtime = context ? store.byId[context.environmentId] : undefined;
+    return runtime?.authState === "requires-auth" || runtime?.role === "client";
+  });
+  // A known revocation is a scope change, even during an offline interval.
+  const input = environmentDenied ? null : context?.input;
   const key = JSON.stringify(
     context
       ? {
           environmentId: context.environmentId,
-          input: context.input,
+          input,
           nativeOnly: context.nativeOnly,
           scopeRevision: context.scopeRevision,
-          connected: context.connected,
         }
       : null,
   );
-  const request = useMemo(() => ({ key, visible }), [key, visible]);
-  const [state, setState] = useState<{ request: typeof request; value: ProviderQuotaState } | null>(
-    null,
-  );
+  const scope = useMemo(() => ({ key, visible }), [key, visible]);
+  const connected = context?.connected === true;
+  const request = useMemo(() => ({ scope, connected }), [scope, connected]);
+  const [state, setState] = useState<{
+    request: typeof request;
+    value: ProviderQuotaState;
+  } | null>(null);
   useEffect(() => {
-    // The serialized input contains only typed identifiers and the opaque UI
-    // revision. Recreate its immutable scope rather than resubscribing whenever
-    // a caller creates an equivalent props object during a clock-only render.
-    const scoped = JSON.parse(key) as ProviderQuotaContext | null;
-    if (!visible || !scoped?.connected || !scoped.input) return;
+    // Decode only the immutable typed scope, without resubscribing on a
+    // differently allocated props object or a presentation-only model change.
+    const scoped = JSON.parse(request.scope.key) as ProviderQuotaContext | null;
+    if (!request.scope.visible || !request.connected || !scoped?.input) return;
     const input = scoped.input;
-    return subscribeMetadata<ProviderQuotaState>({
-      loading: { status: "loading", report: null },
-      unavailable: { status: "unavailable", report: null },
+    return subscribeMetadata<QuotaUpdate>({
+      loading: { kind: "transport", status: "loading" },
+      unavailable: { kind: "transport", status: "unavailable" },
       // Account selection may use its bounded authentication check before the
       // separate native allowance read. Leave the owner's fifteen-second read
       // bound room to publish before this presentation-only loading deadline.
       loadingTimeoutMs: 16_000,
-      publish: (value) => setState({ request, value }),
+      publish: (update) =>
+        setState((previous) => {
+          if (update.kind === "transport") {
+            const earlier =
+              previous?.request.scope === request.scope ? previous.value.report : null;
+            return { request, value: waitingForQuota(update.status, earlier) };
+          }
+          const { result } = update;
+          const report =
+            scoped.nativeOnly && result.report?.source !== "claude-cli" ? null : result.report;
+          return {
+            request,
+            value: {
+              status: report ? "available" : "unavailable",
+              report,
+              ...(report && result.stale ? { stale: true } : {}),
+            },
+          };
+        }),
       subscribe: async (publish, awaiting, active) => {
         const { requireEnvironmentConnection } = await import("../../environments/runtime");
         if (!active()) return () => undefined;
@@ -71,21 +112,15 @@ export function useProviderQuota(
           scoped.environmentId,
         ).client.server.subscribeProviderQuota(
           input,
-          (result: ProviderSessionQuotaResult) => {
-            const report =
-              scoped.nativeOnly && result.report?.source !== "claude-cli" ? null : result.report;
-            publish({ status: report ? "available" : "unavailable", report });
-          },
+          (result) => publish({ kind: "server", result }),
           { onResubscribe: awaiting, retryNonTransportErrors: false },
         );
       },
     });
-    // The serialized scope captures the complete input, settings generation and
-    // connection state; caller object identity alone is not a new subscription.
-  }, [key, request, visible]);
+  }, [request]);
   if (!context) return expectedClaude ? { status: "unavailable", report: null } : undefined;
-  if (!context.connected) return { status: "offline", report: null };
-  if (!context.input) return { status: "unavailable", report: null };
-  if (!visible) return { status: "unavailable", report: null };
-  return state?.request === request ? state.value : { status: "loading", report: null };
+  if (!input || !visible) return { status: "unavailable", report: null };
+  const earlier = state?.request.scope === scope ? state.value.report : null;
+  if (!connected) return waitingForQuota("offline", earlier);
+  return state?.request === request ? state.value : waitingForQuota("loading", earlier);
 }

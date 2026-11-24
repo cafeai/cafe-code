@@ -77,6 +77,33 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
     }),
   );
 
+  it.effect("keeps live Antigravity account quota out of the durable status cache", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "cafe-gemini-quota-cache-" });
+      const fallback = makeProvider(ProviderDriverKind.make("gemini"));
+      const live: ServerProvider = {
+        ...fallback,
+        accountRateLimits: {
+          rateLimits: { limitId: "gemini-weekly", secondary: { usedPercent: 90 } },
+          checkedAt: fallback.checkedAt,
+        },
+      };
+      const filePath = yield* resolveProviderStatusCachePath({
+        cacheDir: tempDir,
+        instanceId: live.instanceId,
+      });
+
+      yield* writeProviderStatusCache({ filePath, provider: live });
+      assert.notInclude(yield* fs.readFileString(filePath), '"accountRateLimits"');
+
+      // Old or manually supplied cache data cannot mint a live observation
+      // when its reusable provider instance id matches the current login.
+      yield* fs.writeFileString(filePath, Schema.encodeSync(Schema.UnknownFromJsonString)(live));
+      assert.deepStrictEqual(yield* readProviderStatusCache(filePath), fallback);
+    }),
+  );
+
   it.effect("never persists or hydrates a current-runtime Claude credential expiry", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

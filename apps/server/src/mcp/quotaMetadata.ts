@@ -36,7 +36,11 @@ export const quotaSchema = z.object({
 });
 
 export function accountRateLimitsForProvider(provider: ServerProvider | undefined) {
-  return provider?.auth.status === "authenticated" ? provider.accountRateLimits : undefined;
+  // The UI can retain historical windows when a login cannot be revalidated.
+  // These tools describe the current account and expose only qualified snapshots.
+  return provider?.auth.status === "authenticated" && !provider.accountRateLimits?.stale
+    ? provider.accountRateLimits
+    : undefined;
 }
 
 function quotaWindow(input: Parameters<typeof deriveProviderRateLimitWindow>[0]) {

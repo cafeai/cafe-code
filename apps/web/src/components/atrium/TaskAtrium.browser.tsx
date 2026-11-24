@@ -6,7 +6,7 @@ import {
   type EnvironmentApi,
   type ProviderTurnConfiguration,
 } from "@cafecode/contracts";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { page } from "vitest/browser";
 
@@ -2635,5 +2635,97 @@ describe("TaskAtriumBoard interaction", () => {
       await screen.unmount();
       host.remove();
     }
+  });
+});
+
+describe("Task Atrium Gemini account", () => {
+  let closeFixture: (() => Promise<void>) | undefined;
+  afterEach(async () => {
+    await closeFixture?.();
+    closeFixture = undefined;
+  });
+
+  it("filters Gemini work and shows the turn's exact model and native permissions", async ({
+    signal,
+    onTestFinished,
+  }) => {
+    const host = document.createElement("div");
+    const summary =
+      atriumHarness.useStore.getState().environmentStateById["env-1"]!.sidebarThreadSummaryById[
+        "thread-2"
+      ];
+    const previousSession = summary.session;
+    let restoreActivities: (() => void) | undefined;
+    let mounted: ReturnType<typeof render> | undefined;
+    let click: Promise<void> | undefined;
+    let retired = false;
+    let cleanup: Promise<void> | undefined;
+    const retire = () => {
+      retired = true;
+      signal.removeEventListener("abort", retire);
+    };
+    const assertActive = () => {
+      if (retired || signal.aborted) throw new Error("Gemini Atrium fixture retired");
+    };
+    const close = () => {
+      retire();
+      return (cleanup ??= (async () => {
+        try {
+          // Join the original browser operation before unmounting its target.
+          await click?.catch(() => undefined);
+          const screen = await mounted?.catch(() => undefined);
+          await screen?.unmount();
+        } finally {
+          restoreActivities?.();
+          summary.session = previousSession;
+          host.remove();
+        }
+      })());
+    };
+    signal.addEventListener("abort", retire, { once: true });
+    onTestFinished(close);
+    closeFixture = close;
+    assertActive();
+
+    const provider = ProviderDriverKind.make("gemini");
+    summary.session = { ...previousSession, provider };
+    restoreActivities = installTurnConfigurationActivities([
+      {
+        activityId: "gemini-turn-settings",
+        threadId: "thread-2",
+        turnId: "t2",
+        configuration: {
+          version: 1,
+          provider,
+          providerInstanceId: ProviderInstanceId.make("gemini-secondary"),
+          providerDisplayName: "Gemini Secondary",
+          model: "fixture-gemini-model",
+          modelDisplayName: "Fixture Gemini Model",
+          effort: "xhigh",
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          settingsSource: "submitted",
+        },
+      },
+    ]);
+    document.body.append(host);
+    mounted = render(<TaskAtriumBoard />, { container: host });
+    await mounted;
+    assertActive();
+
+    expect(host.textContent).toContain("Port the ambiance engine to WebGL");
+    const geminiPill = page
+      .getByRole("group", { name: "Filter by provider" })
+      .getByRole("button", { name: /^Gemini/u });
+    click = geminiPill.click();
+    await click;
+    await vi.waitFor(() => {
+      assertActive();
+      const card = taskCard(host, summary.title);
+      expect(card.textContent).toContain("Fixture Gemini Model · Effort: Extra");
+      expect(card.textContent).toContain("Account: Gemini Secondary · Antigravity CLI permissions");
+      expect(host.textContent).not.toContain("Port the ambiance engine to WebGL");
+      expect(geminiPill.element().getAttribute("aria-pressed")).toBe("true");
+    });
   });
 });

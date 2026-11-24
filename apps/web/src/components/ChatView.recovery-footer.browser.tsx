@@ -601,8 +601,25 @@ describe("ChatView full app (recovery-footer)", () => {
         expect.element(inspect).toHaveAttribute("aria-expanded", "false"),
       );
       await owner.own("controls", () => inspect.click());
+      const message = page.getByText(privateMessage, { exact: true });
+      const technical = page.getByRole("button", { name: "Technical details", exact: true });
       await owner.own("receipt", () =>
-        expect.element(page.getByText(privateMessage, { exact: true })).toBeVisible(),
+        vi.waitFor(() => {
+          owner.assertActive();
+          expect(message.element()).toBeVisible();
+          const button = technical.element();
+          const panel = button.closest<HTMLElement>('[data-slot="collapsible-panel"]');
+          if (!panel || panel.id !== inspect.element().getAttribute("aria-controls")) {
+            throw new Error("Technical details is outside the inspected diagnostic panel.");
+          }
+          // The message can be visible while the opening panel still clips
+          // its controls and changes the timeline's measured row height.
+          expect(panel.clientHeight).toBeGreaterThanOrEqual(panel.scrollHeight);
+          const controlBounds = button.getBoundingClientRect();
+          const panelBounds = panel.getBoundingClientRect();
+          expect(controlBounds.top).toBeGreaterThanOrEqual(panelBounds.top);
+          expect(controlBounds.bottom).toBeLessThanOrEqual(panelBounds.bottom);
+        }),
       );
       expect(detailRequests).toHaveLength(1);
       expect(detailRequests[0]).toMatchObject({
@@ -612,9 +629,7 @@ describe("ChatView full app (recovery-footer)", () => {
       });
       // Raw JSON stays behind the explicit Technical details disclosure.
       expect(document.querySelector("[data-provider-diagnostic-json]")).toBeNull();
-      await owner.own("controls", () =>
-        page.getByRole("button", { name: "Technical details", exact: true }).click(),
-      );
+      await owner.own("controls", () => technical.click());
       await owner.own("receipt", () =>
         vi.waitFor(() => {
           expect(document.querySelector("[data-provider-diagnostic-json]")?.textContent).toBe(

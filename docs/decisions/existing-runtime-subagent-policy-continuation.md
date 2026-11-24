@@ -1,8 +1,11 @@
 # Follow-ups under an unchanged native subagent policy
 
+Partially superseded by: [Nonblocking subagent-limit preferences](nonblocking-subagent-limit-preferences.md) for delivery when native numeric support is unconfirmed; historical rationale below is retained.
+
 Decision status: Accepted within the authorized follow-up repair.
 Created: 2026-10-11 10:54:53 JST (UTC+0900).
-Last updated: 2026-10-11 11:16:48 JST (UTC+0900).
+Last updated: 2026-11-15 16:01:39 JST (UTC+0900)
+Historical implementation checkpoint: 2026-10-11 11:16:48 JST (UTC+0900).
 Decision authority: Agent implementation discretion within the user's request to
 repair blocked Codex follow-ups and include the repair in the current dev push.
 Implementation status: Implemented; focused qualification passed, final gates and delivery pending.

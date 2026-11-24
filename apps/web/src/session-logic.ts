@@ -17,6 +17,7 @@ import {
   type WorkLogOperationIdentity,
   THREAD_DETAIL_ACTIVITY_WINDOW_LIMIT,
   THREAD_TURN_ACTIVITY_PAGE_MAX_LIMIT,
+  MAX_CONCURRENT_SUBAGENTS,
   type ProviderTurnConfiguration,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
@@ -58,6 +59,7 @@ import {
 import {
   readClaudeCommandInspection,
   readProviderPublicSummary,
+  providerPublicSummaryLabel,
   mergeClaudeCommandInspections,
   type ClaudeCommandInspection,
   type ProviderPublicSummary,
@@ -273,6 +275,13 @@ export type McpQuestionResolutionItem = {
 );
 
 export type TimelineEntry =
+  | {
+      id: string;
+      kind: "subagent-limit-warning";
+      createdAt: string;
+      turnId: TurnId | null;
+      requestedLimit: number;
+    }
   | {
       id: string;
       kind: "question-resolution";
@@ -924,6 +933,9 @@ export function deriveWorkLogEntries(
     // malformed/future notice must not fall back to exposing arbitrary detail
     // or answers through the generic Work Log renderer.
     .filter((activity) => activity.kind !== "mcp.question.resolved")
+    // An optional policy fallback belongs in the main conversation. Unknown
+    // versions must not disclose their received payload through a generic row.
+    .filter((activity) => activity.kind !== "provider.subagent-limit.not-applied")
     .filter((activity) => activity.summary !== "Checkpoint captured")
     .filter((activity) => !isPlanBoundaryToolActivity(activity))
     .filter((activity) => !isRetryableSteerDeliveryActivity(activity))
@@ -1563,13 +1575,8 @@ function toDerivedWorkLogEntry(
     activity.kind === "reasoning.summary" ? readProviderPublicSummary(payload) : undefined;
   if (publicSummary) {
     // The plain label stays canonical English for transcript copy/search.
-    if (publicSummary.provider === "opencode") {
-      entry.label = "OpenCode thinking";
-      entry.displayLabel = uiText("OpenCode thinking");
-    } else {
-      entry.label = "Claude summary";
-      entry.displayLabel = uiText("Claude summary");
-    }
+    entry.label = providerPublicSummaryLabel(publicSummary.provider, "en");
+    entry.displayLabel = providerPublicSummaryLabel(publicSummary.provider);
     entry.tone = "info";
     entry.publicSummary = publicSummary;
     entry.detail = publicSummary.text;
@@ -2731,6 +2738,47 @@ function readMcpQuestionResolution(
   }
 }
 
+/**
+ * Read only the server's finite warning envelope. Received prose, diagnostics,
+ * accessors and inherited fields never become primary-chat text. Correlation
+ * below is presentation evidence only, not retry, delivery or policy adoption.
+ */
+function readSubagentLimitWarning(payload: unknown): {
+  readonly requestedLimit: number;
+  readonly messageId: string;
+  readonly intentSequence: number;
+} | null {
+  const own = (key: string): unknown => {
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(payload, key);
+    return descriptor && "value" in descriptor ? descriptor.value : undefined;
+  };
+  try {
+    if (
+      own("version") !== 1 ||
+      own("reason") !== "support-unconfirmed" ||
+      own("fallback") !== "current-provider-policy"
+    )
+      return null;
+    const requestedLimit = own("requestedLimit");
+    const messageId = own("messageId");
+    const intentSequence = own("intentSequence");
+    return typeof requestedLimit === "number" &&
+      Number.isSafeInteger(requestedLimit) &&
+      requestedLimit >= 1 &&
+      requestedLimit <= MAX_CONCURRENT_SUBAGENTS &&
+      typeof messageId === "string" &&
+      messageId.length > 0 &&
+      typeof intentSequence === "number" &&
+      Number.isSafeInteger(intentSequence) &&
+      intentSequence > 0
+      ? { requestedLimit, messageId, intentSequence }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function deriveTimelineEntries(
   messages: ChatMessage[],
   proposedPlans: ProposedPlan[],
@@ -2813,6 +2861,52 @@ export function deriveTimelineEntries(
         ]
       : [];
   });
+  const retainedPolicyWarnings = retainedActivities
+    .filter((entry) => entry.kind === "provider.subagent-limit.not-applied")
+    .toSorted(compareActivitiesByOrder);
+  // Most streaming renders have no policy notice. Avoid indexing the entire
+  // retained conversation on that hot path just to process an empty set.
+  const canonicalUserMessages = new Map<string, ChatMessage>(
+    retainedPolicyWarnings.length === 0
+      ? []
+      : messages
+          .filter((message) => message.role === "user")
+          .map((message) => [message.id, message]),
+  );
+  const policyWarnings = new Map<
+    string,
+    Extract<TimelineEntry, { kind: "subagent-limit-warning" }>
+  >();
+  for (const activity of retainedPolicyWarnings) {
+    const warning = readSubagentLimitWarning(activity.payload);
+    if (!warning || activity.tone !== "info") continue;
+    const message = canonicalUserMessages.get(warning.messageId);
+    const occurredAt = Date.parse(activity.createdAt);
+    const acceptedAt = message ? Date.parse(message.createdAt) : Number.NaN;
+    if (
+      !message ||
+      !Number.isFinite(occurredAt) ||
+      !Number.isFinite(acceptedAt) ||
+      (activity.turnId !== null && activity.turnId !== message.turnId) ||
+      typeof activity.sequence !== "number" ||
+      !Number.isSafeInteger(activity.sequence) ||
+      activity.sequence <= warning.intentSequence
+    )
+      continue;
+    // Tail/retained overlap and repeated projections describe one admitted
+    // intent. Keep the notice after the message acquires a successful turn;
+    // optional fallback is not an unstarted-turn failure or a work-log anchor.
+    policyWarnings.set(JSON.stringify([warning.messageId, warning.intentSequence]), {
+      id: `subagent-limit-warning:${activity.id}`,
+      kind: "subagent-limit-warning",
+      // Client message and server warning clocks can disagree. Exact durable
+      // sequence provides order; clamp presentation only, leaving the saved
+      // activity timestamp and all delivery/native ownership evidence intact.
+      createdAt: occurredAt < acceptedAt ? message.createdAt : activity.createdAt,
+      turnId: activity.turnId,
+      requestedLimit: warning.requestedLimit,
+    });
+  }
   return [
     ...messageRows,
     ...proposedPlanRows,
@@ -2820,6 +2914,7 @@ export function deriveTimelineEntries(
     ...[...summaries.values()].filter((summary) => !placedSummaries.has(summary.operationKey)),
     ...visualizationRows,
     ...resolutionRows,
+    ...policyWarnings.values(),
   ].toSorted((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 

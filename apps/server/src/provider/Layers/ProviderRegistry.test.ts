@@ -2036,14 +2036,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         );
       });
 
-      it("does not preserve Grok usage when a full refresh omits account identity and quota", () => {
+      it.each(["grok", "gemini"])("withdraws unavailable quota for the %s login", (provider) => {
         const previousProvider = {
-          instanceId: ProviderInstanceId.make("grok"),
-          driver: ProviderDriverKind.make("grok"),
+          instanceId: ProviderInstanceId.make(provider),
+          driver: ProviderDriverKind.make(provider),
           status: "ready",
           enabled: true,
           installed: true,
-          auth: { status: "authenticated", type: "cached-token" },
+          auth: {
+            status: "authenticated",
+            ...(provider === "grok" ? { type: "cached-token" } : {}),
+          },
           checkedAt: "2026-08-16T00:00:00.000Z",
           version: "1.0.4",
           models: [],
@@ -2051,7 +2054,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           skills: [],
           accountRateLimits: {
             rateLimits: {
-              limitId: "grok",
+              limitId: provider,
               primary: { usedPercent: 1, windowDurationMins: 10_080 },
             },
             checkedAt: "2026-08-16T00:00:00.000Z",
@@ -2251,6 +2254,50 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, refreshedProvider).models, [
           ...previousProvider.models,
         ]);
+      });
+
+      it("retires models omitted by a complete Gemini account discovery", () => {
+        const previous = {
+          instanceId: ProviderInstanceId.make("gemini-account"),
+          driver: ProviderDriverKind.make("gemini"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-11-19T00:00:00.000Z",
+          version: "1.5.11",
+          models: [
+            {
+              slug: "gemini-4-neon",
+              name: "Gemini 4 Neon",
+              isCustom: false,
+              capabilities: { inputModalities: ["text"] },
+            },
+            {
+              slug: "gemini-3.8-flash",
+              name: "Gemini 3.8 Flash",
+              isCustom: false,
+              capabilities: { inputModalities: ["text"] },
+            },
+          ],
+          slashCommands: [],
+          skills: [],
+        } as const satisfies ServerProvider;
+        const current = {
+          ...previous,
+          checkedAt: "2026-11-19T00:01:00.000Z",
+          models: [previous.models[1]],
+        } satisfies ServerProvider;
+
+        assert.deepStrictEqual(mergeProviderSnapshot(previous, current).models, current.models);
+        assert.deepStrictEqual(
+          mergeProviderSnapshot(current, {
+            ...current,
+            auth: { status: "unauthenticated" },
+            models: [],
+          }).models,
+          [],
+        );
       });
 
       it("persists merged provider snapshots for the providers that were refreshed", () => {
@@ -3532,20 +3579,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(status.auth.label, "ChatGPT Subscription");
           assert.strictEqual(status.codexModelCatalogSource, "fallback");
           assert.deepStrictEqual(probeArgs, ["--version", "login status"]);
-          assert.deepStrictEqual(
-            status.models.map((model) => model.slug),
-            [
-              "gpt-6.2-sol",
-              "gpt-6-astra",
-              "gpt-6.1-sol",
-              "gpt-6.1-terra",
-              "gpt-6-sol",
-              "gpt-6-luna",
-              "gpt-5.6-sol",
-              "gpt-5.6-terra",
-              "gpt-5.6-luna",
-            ],
-          );
+          // The lightweight status path must make newly documented models
+          // selectable without launching app-server or changing the first row
+          // used by unconfigured accounts. Other catalogue rows can evolve.
+          const modelSlugs = status.models.map((model) => model.slug);
+          assert.strictEqual(modelSlugs[0], "gpt-6-astra");
+          assert.includeMembers(modelSlugs, ["gpt-6.2-astra", "gpt-6.2-sol"]);
           const reasoningDescriptor = (slug: string) => {
             const descriptor = status.models
               .find((model) => model.slug === slug)

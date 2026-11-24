@@ -84,6 +84,30 @@ it("preserves safe non-image JSON and its identity", () => {
   expect(redactCodexImageGenerationMetadata(undefined)).toBeUndefined();
 });
 
+it("omits opaque answer display metadata without changing the answer or reading private accessors", () => {
+  let reads = 0;
+  const message = Object.defineProperty(
+    { type: "agentMessage", id: "answer-1", text: "The visible answer", phase: "final_answer" },
+    "moderation",
+    {
+      enumerable: true,
+      get: () => {
+        reads += 1;
+        return { moderated: true, display: { action: "private-display-metadata" } };
+      },
+    },
+  );
+  const unrelated = { type: "ordinary-tool", moderation: "ordinary tool data" };
+  expect(redactCodexImageGenerationMetadata({ items: [message, unrelated] })).toEqual({
+    items: [
+      { type: "agentMessage", id: "answer-1", text: "The visible answer", phase: "final_answer" },
+      unrelated,
+    ],
+  });
+  expect(reads).toBe(0);
+  expect(Object.getOwnPropertyDescriptor(message, "moderation")?.get).toBeTypeOf("function");
+});
+
 it("preserves retained data-property visibility when a private image field is removed", () => {
   const original = Object.defineProperty(
     { type: "imageGeneration", id: "image-1", ...privateFields },

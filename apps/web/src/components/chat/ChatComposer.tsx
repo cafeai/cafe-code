@@ -183,7 +183,10 @@ import type {
 } from "../../session-logic";
 import { deriveLatestContextWindowSnapshot } from "../../lib/contextWindow";
 import { deriveGenerationRate } from "../../lib/generationRate";
-import { shouldSurfaceProviderAccountRateLimits } from "../../lib/codexRateLimits";
+import {
+  shouldShowAntigravityQuotaStatus,
+  shouldSurfaceProviderAccountRateLimits,
+} from "../../lib/codexRateLimits";
 import { formatProviderSkillDisplayName } from "../../providerSkillPresentation";
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useHasOnScreenKeyboard } from "../../hooks/useMediaQuery";
@@ -201,6 +204,7 @@ import {
   deriveClaudePermissionMode,
   getNextClaudePermissionMode,
 } from "./claudePermissionMode";
+import { applyGeminiPermissionMode } from "./geminiPermissionMode";
 
 function getIMAGE_SIZE_LIMIT_LABEL() {
   return uiText("{value0}MB", {
@@ -274,7 +278,8 @@ function isInsideComposerFloatingLayer(element: Element): boolean {
 const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(props: {
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
-  codexRateLimits: ServerProvider["accountRateLimits"] | null;
+  accountRateLimits: ServerProvider["accountRateLimits"] | null;
+  showAntigravityQuotaStatus: boolean;
   quotaContext?: ProviderQuotaContext | undefined;
   usageResetAction: ReactNode;
   subagentConcurrency?: SubagentConcurrencyPresentation | null;
@@ -312,10 +317,15 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 }) {
   return (
     <>
-      {(props.activeContextWindow || props.quotaContext) && !props.sessionRailVisible ? (
+      {(props.activeContextWindow ||
+        props.accountRateLimits ||
+        props.showAntigravityQuotaStatus ||
+        props.quotaContext) &&
+      !props.sessionRailVisible ? (
         <ContextWindowMeter
           usage={props.activeContextWindow}
-          codexRateLimits={props.codexRateLimits}
+          accountRateLimits={props.accountRateLimits}
+          showAntigravityQuotaStatus={props.showAntigravityQuotaStatus}
           quotaContext={props.quotaContext}
           subagentConcurrency={props.subagentConcurrency}
           codexContextWindow={props.codexContextWindow}
@@ -931,6 +941,7 @@ export interface ChatComposerProps extends ComposerInteractionCallbacks {
   // Mode
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
+  geminiBypassInstanceId?: ProviderInstanceId | null;
 
   // Provider / model
   lockedProvider: ProviderDriverKind | null;
@@ -1067,6 +1078,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     goalControlsSupported,
     runtimeMode,
     interactionMode,
+    geminiBypassInstanceId,
     lockedProvider,
     providerStatuses,
     activeProjectDefaultModelSelection,
@@ -1410,7 +1422,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       disabled={isSendBusy || isConnecting || environmentUnavailable !== null}
     />
   ) : null;
-  const selectedCodexRateLimits = shouldSurfaceProviderAccountRateLimits(selectedProviderStatus)
+  const selectedAccountRateLimits = shouldSurfaceProviderAccountRateLimits(selectedProviderStatus)
     ? (selectedProviderStatus?.accountRateLimits ?? null)
     : null;
   const requestProviderModelsRefresh = useCallback(
@@ -1532,8 +1544,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isServerThread,
   ]);
   const saveSubagentLimit = async (value: number | undefined) => {
-    if (!concurrencyKey || (value !== undefined && !concurrencySupported))
-      throw new Error("Unsupported runtime");
+    // Saving bounded intent does not attest support or change a native owner.
+    // Keep the exact driver/ACK scope even when runtime support is unconfirmed.
+    if (!concurrencyKey) throw new Error("Unsupported provider");
     const store = useComposerDraftStore.getState();
     if (isServerThread && activeThreadId) {
       const scope = concurrencySaveScope.current;
@@ -1576,15 +1589,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const concurrencyMenuItem = concurrencyKey ? (
     <MenuItem
       inset
-      disabled={
-        !concurrencySupported &&
-        desiredSubagentLimits?.[concurrencyKey] === undefined &&
-        inheritedSubagentPolicy.limit === undefined
-      }
       title={
         !concurrencySupported
           ? uiText(
-              "This provider runtime cannot apply a numeric subagent limit. An existing chat override can still be reset.",
+              "Runtime support is unconfirmed. You can save a subagent limit; chats continue with the current provider policy if it cannot be applied.",
               undefined,
               undefined,
               uiLocale,
@@ -1701,7 +1709,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const selectedPromptEffort = composerProviderState.promptEffort;
   const selectedModelOptionsForDispatch = composerProviderState.modelOptionsForDispatch;
   const selectedProviderUsesNativePermissionModes =
-    selectedProvider === "claudeAgent" || selectedProvider === "grok";
+    selectedProvider === "claudeAgent" ||
+    selectedProvider === "grok" ||
+    selectedProvider === "gemini";
+  const geminiPermissionModeBusy =
+    selectedProvider === "gemini" &&
+    (phase === "running" ||
+      isSendBusy ||
+      isConnecting ||
+      activeThread?.session?.status === "running");
   // Ambiance composer surface: tint the frame ring with the current weather
   // state color (via CSS variables owned by AmbianceLayer). Ultrathink's
   // rainbow frame intentionally wins when both want the frame.
@@ -1710,16 +1726,32 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const composerProviderControls = useMemo(
     () => ({
-      showInteractionModeToggle: getProviderInteractionModeToggle(
-        providerStatuses,
-        selectedProvider,
-      ),
+      showInteractionModeToggle:
+        selectedProvider !== "gemini" &&
+        getProviderInteractionModeToggle(providerStatuses, selectedProvider),
     }),
     [providerStatuses, selectedProvider],
   );
-  const handleClaudePermissionModeChange = useCallback(
+  const handleNativePermissionModeChange = useCallback(
     (mode: ClaudePermissionMode) => {
-      const mapped = applyClaudePermissionMode({ interactionMode, runtimeMode }, mode);
+      if (geminiPermissionModeBusy) return;
+      if (selectedProvider === "gemini" && mode === "bypassPermissions") {
+        if (selectedProviderEntry?.driverKind !== "gemini" || !selectedModel) return;
+        // Keep explicit consent with the selected account even if that
+        // account was chosen through a default that later changes.
+        const drafts = useComposerDraftStore.getState();
+        drafts.setModelSelection(
+          composerDraftTarget,
+          createModelSelection(selectedInstanceId, selectedModel),
+        );
+        if (interactionMode === "gemini-bypass" && geminiBypassInstanceId !== selectedInstanceId) {
+          drafts.setInteractionMode(composerDraftTarget, "gemini-bypass");
+        }
+      }
+      const mapped =
+        selectedProvider === "gemini"
+          ? applyGeminiPermissionMode(mode)
+          : applyClaudePermissionMode({ interactionMode, runtimeMode }, mode);
       const next =
         selectedProvider === "grok" && mode === "auto"
           ? { ...mapped, runtimeMode: "auto-accept-edits" as const }
@@ -1736,22 +1768,28 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
     },
     [
+      composerDraftTarget,
+      geminiBypassInstanceId,
+      geminiPermissionModeBusy,
       handleInteractionModeChange,
       handleRuntimeModeChange,
       interactionMode,
       runtimeMode,
+      selectedInstanceId,
+      selectedModel,
       selectedProvider,
+      selectedProviderEntry?.driverKind,
     ],
   );
   const cycleComposerInteractionMode = useCallback(() => {
     if (selectedProvider === "claudeAgent" || selectedProvider === "grok") {
       const currentMode = deriveClaudePermissionMode({ interactionMode, runtimeMode });
-      handleClaudePermissionModeChange(getNextClaudePermissionMode(currentMode));
+      handleNativePermissionModeChange(getNextClaudePermissionMode(currentMode));
       return;
     }
     toggleInteractionMode();
   }, [
-    handleClaudePermissionModeChange,
+    handleNativePermissionModeChange,
     interactionMode,
     runtimeMode,
     selectedProvider,
@@ -2130,20 +2168,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           label: uiText("/model", undefined, undefined, uiLocale),
           description: uiText("Switch the model for this chat", undefined, undefined, uiLocale),
         },
-        {
-          id: "slash:plan",
-          type: "slash-command",
-          command: "plan",
-          label: uiText("/plan", undefined, undefined, uiLocale),
-          description: uiText("Switch to Plan", undefined, undefined, uiLocale),
-        },
-        {
-          id: "slash:default",
-          type: "slash-command",
-          command: "default",
-          label: uiText("/default", undefined, undefined, uiLocale),
-          description: uiText("Switch back to Build", undefined, undefined, uiLocale),
-        },
+        ...(selectedProvider === "gemini"
+          ? []
+          : [
+              {
+                id: "slash:plan",
+                type: "slash-command" as const,
+                command: "plan" as const,
+                label: uiText("/plan", undefined, undefined, uiLocale),
+                description: uiText("Switch to Plan", undefined, undefined, uiLocale),
+              },
+              {
+                id: "slash:default",
+                type: "slash-command" as const,
+                command: "default" as const,
+                label: uiText("/default", undefined, undefined, uiLocale),
+                description: uiText("Switch back to Build", undefined, undefined, uiLocale),
+              },
+            ]),
         ...(selectedProvider === "codex" ||
         selectedProvider === "opencode" ||
         selectedProvider === "axiom"
@@ -2912,6 +2954,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           }
           return;
         }
+        if (selectedProvider === "gemini") return;
         void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
         const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
           expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
@@ -3248,6 +3291,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     event: KeyboardEvent,
   ) => {
     if (key === "Tab" && event.shiftKey) {
+      if (selectedProvider === "gemini") return false;
       cycleComposerInteractionMode();
       return true;
     }
@@ -4648,9 +4692,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       : null
                   }
                   onToggleInteractionMode={cycleComposerInteractionMode}
-                  onNativePermissionModeChange={handleClaudePermissionModeChange}
+                  onNativePermissionModeChange={handleNativePermissionModeChange}
                   onTogglePlanSidebar={togglePlanSidebar}
                   onRuntimeModeChange={handleRuntimeModeChange}
+                  geminiPermissionModeBusy={geminiPermissionModeBusy}
+                  geminiBypassMatchesAccount={geminiBypassInstanceId === selectedInstanceId}
                   onOpenGoal={onOpenGoalDialog}
                   open={isComposerControlsMenuOpen}
                   onOpenChange={setIsComposerControlsMenuOpen}
@@ -4723,7 +4769,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 <ComposerFooterPrimaryActions
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}
-                  codexRateLimits={selectedCodexRateLimits}
+                  accountRateLimits={selectedAccountRateLimits}
+                  showAntigravityQuotaStatus={shouldShowAntigravityQuotaStatus(
+                    selectedProviderStatus,
+                  )}
                   quotaContext={quotaContext}
                   usageResetAction={
                     <ProviderUsageResetButton

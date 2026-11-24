@@ -178,11 +178,13 @@ export const mergeProviderSnapshot = (
     ...catalogueProvider,
     // A trusted Codex producer explicitly distinguishes static fallback from
     // successful native discovery. Both are complete catalogues; a generic
-    // union would revive retired fallback rows or native omissions. Older and
-    // other-driver snapshots keep their established sparse merge behavior.
+    // union would revive retired fallback rows or native omissions. Gemini's
+    // discovery likewise reports a complete account catalogue (or no choices
+    // after failed discovery). Other snapshots retain sparse merging.
     models:
-      catalogueProvider.driver === "codex" &&
-      catalogueProvider.codexModelCatalogSource !== undefined
+      catalogueProvider.driver === "gemini" ||
+      (catalogueProvider.driver === "codex" &&
+        catalogueProvider.codexModelCatalogSource !== undefined)
         ? catalogueProvider.models
         : mergeProviderModels(previousProvider.models, catalogueProvider.models),
     // Carry forward event-sourced account rate limits when an incoming snapshot
@@ -193,14 +195,14 @@ export const mergeProviderSnapshot = (
     // Codex has both full probe snapshots and sparse live updates. Preserve the
     // latest redacted usage when the same authenticated account suffers a transient
     // probe failure, but clear it on auth/account churn so a percentage from one
-    // account can never be presented as another account's quota. Grok's ACP auth
-    // response does not currently expose a stable account identity, so an omitted
-    // full-probe usage result must clear instead of guessing that cached-token auth
-    // still represents the same person. Its usage-only prompt refresh independently
-    // preserves a known-good snapshot on transient endpoint failure.
+    // account can never be presented as another account's quota. The Gemini
+    // driver's historical readings come only from its exact live owner.
+    // The registry must not revive an omitted reading after the driver
+    // withdraws it. Grok also has no stable account identity.
     ...(reconciledProvider.accountRateLimits === undefined &&
     previousProvider.accountRateLimits !== undefined &&
     reconciledProvider.driver !== ProviderDriverKind.make("grok") &&
+    reconciledProvider.driver !== ProviderDriverKind.make("gemini") &&
     (reconciledProvider.driver !== ProviderDriverKind.make("codex") ||
       isSameAuthenticatedProviderAccount(previousProvider, reconciledProvider))
       ? { accountRateLimits: previousProvider.accountRateLimits }
@@ -1007,22 +1009,27 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
               // was itself replaced while waiting for a preceding publication.
               if ((yield* instanceRegistry.getInstance(instanceId)) !== instance) return;
               if (catalogueOwners.get(instanceId) === instance) return;
-              // Replacement itself retires native proof, even if the new
-              // owner's initial health probe later fails. Historical rows may
-              // remain visible, but they cannot qualify the new scope.
+              // Replacement retires exact-owner metadata even if the new
+              // owner's initial health probe later fails.
               catalogueOwners.delete(instanceId);
               const [changed, providers] = yield* Ref.modify(providersRef, (previous) => {
                 let changed = false;
                 const providers = previous.map((provider) => {
+                  if (provider.instanceId !== instanceId) return provider;
                   if (
-                    provider.instanceId !== instanceId ||
-                    provider.driver !== "codex" ||
-                    provider.codexModelCatalogSource !== "native"
-                  )
-                    return provider;
-                  changed = true;
-                  const { codexModelCatalogSource: _retiredSource, ...historical } = provider;
-                  return historical;
+                    provider.driver === "codex" &&
+                    provider.codexModelCatalogSource === "native"
+                  ) {
+                    changed = true;
+                    const { codexModelCatalogSource: _retiredSource, ...historical } = provider;
+                    return historical;
+                  }
+                  if (provider.driver === "gemini" && provider.accountRateLimits !== undefined) {
+                    changed = true;
+                    const { accountRateLimits: _retiredQuota, ...current } = provider;
+                    return current;
+                  }
+                  return provider;
                 });
                 return [[changed, providers] as const, providers] as const;
               });

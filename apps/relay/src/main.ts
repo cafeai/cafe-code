@@ -105,9 +105,6 @@ async function main(): Promise<void> {
   process.once("SIGTERM", retire);
   process.once("SIGINT", retire);
   process.once("disconnect", retire);
-  process.stdout.write("relay-ready\n");
-  if (localTest && process.send)
-    process.send({ phase: "ready", port: server.port, meshPort: server.meshPort });
   let reloading = false;
   process.on("SIGHUP", () => {
     if (closing || reloading) return;
@@ -161,6 +158,11 @@ async function main(): Promise<void> {
         reloading = false;
       });
   });
+  // Readiness includes the reload listener, so an owner acting on this
+  // receipt cannot send SIGHUP before its native handler has been installed.
+  process.stdout.write("relay-ready\n");
+  if (localTest && process.send)
+    process.send({ phase: "ready", port: server.port, meshPort: server.meshPort });
 }
 void main().catch(() => {
   process.stderr.write("relay-startup-refused\n");

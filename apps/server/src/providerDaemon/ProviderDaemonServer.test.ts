@@ -2,11 +2,13 @@ import {
   EventId,
   PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LIVENESS_PATH,
+  PROVIDER_DAEMON_STARTUP_READINESS_PATH,
   PROVIDER_DAEMON_RETIRE_PATH,
   ProviderDaemonHealth,
   ProviderDaemonLeaseRequest,
   ProviderDaemonLeaseResponse,
   ProviderDaemonLiveness,
+  ProviderDaemonStartupReadiness,
   ProviderDaemonRetirementResponse,
   type ProviderDaemonRetirementRequest,
   ProviderDaemonRpcRequest,
@@ -21,6 +23,7 @@ import {
   TurnId,
 } from "@cafecode/contracts";
 import { assert, describe, expect, it, vi } from "@effect/vitest";
+import type { TestContext } from "vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Data from "effect/Data";
@@ -89,6 +92,7 @@ import * as McpAppOwner from "../mcpApps/owner.ts";
 import { privateVisualizationDaemonRequestCount } from "../visualizations/privateDaemonBody.ts";
 import { MCP_APP_JSON_MAX_TRANSPORT_BYTES } from "@cafecode/shared/mcpAppJson";
 import { dataProfileIdentity } from "@cafecode/shared/dataProfileIdentity";
+import { PROVIDER_PIPELINE_POLICY } from "@cafecode/shared/providerPipelinePolicy";
 
 const decodeProviderJsonString = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 const decodeErrorKeysJsonString = Schema.decodeUnknownSync(
@@ -100,6 +104,9 @@ const TEST_TOKEN = "provider-daemon-test-token-000000000000000000000000";
 
 const decodeProviderDaemonHealth = Schema.decodeUnknownSync(ProviderDaemonHealth);
 const decodeProviderDaemonLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
+const decodeProviderDaemonStartupReadiness = Schema.decodeUnknownSync(
+  ProviderDaemonStartupReadiness,
+);
 const encodeProviderDaemonHealthJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonHealth),
 );
@@ -423,6 +430,147 @@ const startRetirementDaemon = (options: Partial<ProviderDaemonServerOptions> = {
     );
     return { port: yield* Deferred.await(listening), closed, fiber };
   });
+
+/** Own every new native request before admission, including hard-timeout
+ * retirement. The outer task is joined after its scoped server finalizes; a
+ * late listen finishes under an uninterruptible acquisition before that scope
+ * may close. Diagnostic gates are released before sockets are retired, so no
+ * artificial held dependency can deadlock teardown or outlive the test. */
+function makeStartupReadinessNativeOwner(test: TestContext) {
+  const controller = new AbortController();
+  const requests = new Map<http.ClientRequest, () => void>();
+  const closes = new Set<Promise<void>>();
+  const releases = new Set<() => void>();
+  let retired = false;
+  let running: Promise<void> | undefined;
+  let closing: Promise<void> | undefined;
+  const active = () => {
+    if (retired || test.signal.aborted) throw new Error("Synthetic readiness fixture retired.");
+  };
+  const quiesce = () => {
+    retired = true;
+    for (const release of releases) release();
+    for (const cancel of requests.values()) cancel();
+  };
+  const retire = () => {
+    quiesce();
+    controller.abort();
+  };
+  const close = () => {
+    closing ??= (async () => {
+      retire();
+      try {
+        if (running !== undefined) await running.catch(() => undefined);
+        await Promise.all([...closes]);
+      } finally {
+        test.signal.removeEventListener("abort", retire);
+      }
+    })();
+    return closing;
+  };
+  // This public owner exists before Effect layer/SQLite/server construction.
+  test.signal.addEventListener("abort", retire, { once: true });
+  test.onTestFinished(close);
+  const request = (
+    port: number,
+    route: string,
+    token: string | null = TEST_TOKEN,
+    body?: string,
+    stopAfterText?: (text: string) => boolean,
+  ): Promise<{ readonly status: number; readonly text: string }> => {
+    active();
+    return new Promise((resolve, reject) => {
+      let closed = false;
+      let ended = false;
+      let reply: { readonly status: number; readonly text: string } | undefined;
+      const refuse = () => {
+        if (!ended) reject(new Error("Synthetic readiness HTTP request did not complete."));
+      };
+      const settle = () => {
+        if (closed && ended && reply !== undefined) resolve(reply);
+      };
+      const native = http.request(
+        {
+          hostname: "127.0.0.1",
+          port,
+          path: route,
+          method: body === undefined ? "GET" : "POST",
+          agent: false,
+          headers: {
+            connection: "close",
+            ...(token === null ? {} : { authorization: `Bearer ${token}` }),
+            ...(body === undefined ? {} : { "content-type": "application/json" }),
+          },
+        },
+        (response) => {
+          const chunks: Buffer[] = [];
+          let bytes = 0;
+          response.once("error", refuse);
+          response.once("aborted", refuse);
+          response.on("data", (chunk: Buffer) => {
+            bytes += chunk.length;
+            if (bytes > 128 * 1024) {
+              refuse();
+              native.destroy();
+              return;
+            }
+            chunks.push(chunk);
+            if (stopAfterText !== undefined) {
+              const text = Buffer.concat(chunks).toString("utf8");
+              if (stopAfterText(text)) {
+                // An event subscription is intentionally open-ended. After a
+                // complete terminal record, close this exact native request
+                // and wait for its close just as for a finite response.
+                reply = { status: response.statusCode ?? 0, text };
+                ended = true;
+                native.destroy();
+              }
+            }
+          });
+          response.once("end", () => {
+            reply = {
+              status: response.statusCode ?? 0,
+              text: Buffer.concat(chunks).toString("utf8"),
+            };
+            ended = true;
+            settle();
+          });
+        },
+      );
+      native.once("error", refuse);
+      let markClosed!: () => void;
+      const joinedClose = new Promise<void>((done) => {
+        markClosed = done;
+      });
+      closes.add(joinedClose);
+      requests.set(native, () => {
+        refuse();
+        native.destroy();
+      });
+      native.once("close", () => {
+        closed = true;
+        requests.delete(native);
+        closes.delete(joinedClose);
+        markClosed();
+        if (stopAfterText !== undefined) refuse();
+        settle();
+      });
+      native.end(body);
+    });
+  };
+  return {
+    active,
+    quiesce,
+    close,
+    request,
+    releaseBeforeClose: (release: () => void) => releases.add(release),
+    run: <E>(effect: Effect.Effect<void, E>) => {
+      active();
+      running = Effect.runPromise(effect, { signal: controller.signal });
+      return running;
+    },
+  };
+}
 
 const retirementRequestFromHealth = (
   health: ProviderDaemonHealth,
@@ -2227,11 +2375,13 @@ describe("ProviderDaemonServer", () => {
       }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer));
     },
   );
-  it("waits for drain and rejects close for a slow daemon event response", async () => {
+  it("joins the exact backpressured write and rejects an early response close", async () => {
     class FakeSlowResponse extends EventEmitter {
       writes: string[] = [];
-      write(line: string): boolean {
+      complete: (() => void) | undefined;
+      write(line: string, complete: () => void): boolean {
         this.writes.push(line);
+        this.complete = complete;
         return false;
       }
     }
@@ -2247,7 +2397,7 @@ describe("ProviderDaemonServer", () => {
     });
     await Promise.resolve();
     assert.isFalse(settled);
-    draining.emit("drain");
+    draining.complete?.();
     await drainPromise;
     assert.deepEqual(draining.writes, ["record\n"]);
 
@@ -2263,7 +2413,7 @@ describe("ProviderDaemonServer", () => {
     closing.emit("close");
     const closeError = await closeResult;
     assert.instanceOf(closeError, Error);
-    assert.match(closeError.message, /closed before drain/u);
+    assert.match(closeError.message, /closed before the write completed/u);
   });
 
   it("filters replay/live overlap before it can overflow the finite live queue", async () => {
@@ -2348,6 +2498,148 @@ describe("ProviderDaemonServer", () => {
     ).toEqual(Array.from({ length: 305 }, (_, index) => index + 1));
     expect(cleanupCount).toBe(1);
     expect(liveListener).toBeNull();
+  });
+
+  it("delivers live overflow through bounded journal replay on the same HTTP connection", async (test) => {
+    const owner = makeStartupReadinessNativeOwner(test);
+    try {
+      await owner.run(
+        Effect.gen(function* () {
+          const initialBoundary = PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords + 1;
+          const terminalCursor =
+            initialBoundary + PROVIDER_PIPELINE_POLICY.daemonWriterMaxRecords + 2;
+          const retained = Array.from({ length: initialBoundary }, (_, index) =>
+            makeDaemonRecord(index + 1),
+          );
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          owner.releaseBeforeClose(() => Deferred.doneUnsafe(release, Effect.void));
+          let listener: ((record: ProviderDaemonEventRecord) => void) | undefined;
+          const snapshot = Effect.sync(() => ({
+            eventCursor: retained.length,
+            retainedEventCount: retained.length,
+            oldestCursor: 1,
+            newestCursor: retained.length,
+          }));
+          const journal = {
+            publish: (event: ProviderRuntimeEvent) =>
+              Effect.sync(() => {
+                owner.active();
+                const record = { ...makeDaemonRecord(retained.length + 1), event };
+                retained.push(record);
+                listener?.(record);
+                return record;
+              }),
+            replayAfter: () => Effect.die("expected a bounded replay page"),
+            replayPageAfter: () => Effect.die("expected a bounded replay high-water mark"),
+            replayPageThrough: (cursor, throughCursor, limit) =>
+              Effect.gen(function* () {
+                const pageSize = limit ?? Infinity;
+                assert.isAtMost(pageSize, PROVIDER_PIPELINE_POLICY.daemonReplayPageRecords);
+                if (cursor === 0) {
+                  yield* Deferred.succeed(entered, undefined);
+                  yield* Deferred.await(release);
+                }
+                return retained.slice(cursor, Math.min(throughCursor, cursor + pageSize));
+              }),
+            subscribe: () => () => undefined,
+            subscribeWithReplayBoundary: (onRecord) =>
+              Effect.sync(() => {
+                listener = onRecord;
+                return {
+                  replayBoundaryCursor: retained.length,
+                  unsubscribe: () => {
+                    listener = undefined;
+                  },
+                };
+              }),
+            snapshot,
+            startupMaintenance: Effect.void,
+          } satisfies ProviderDaemonPersistentEventJournal;
+          let stream: Promise<void> | undefined;
+          let requestCount = 0;
+          const server = yield* Effect.acquireRelease(
+            Effect.promise(
+              () =>
+                new Promise<http.Server>((resolve, reject) => {
+                  const server = http.createServer((request, response) => {
+                    if (test.signal.aborted) {
+                      response.end();
+                      return;
+                    }
+                    requestCount += 1;
+                    // Keep native transport error ownership when qualifying
+                    // this handler without the full daemon authentication layer.
+                    response.on("error", () => undefined);
+                    stream = handleProviderDaemonEventStream(
+                      request,
+                      response,
+                      journal,
+                      0,
+                      Effect.runPromise,
+                      () => undefined,
+                    );
+                  });
+                  server.once("error", reject);
+                  server.listen(0, "127.0.0.1", () => resolve(server));
+                }),
+            ),
+            (server) =>
+              Effect.promise(async () => {
+                owner.quiesce();
+                await new Promise<void>((resolve) => server.close(() => resolve()));
+                await stream;
+              }),
+          );
+          const address = server.address();
+          if (address === null || typeof address === "string") {
+            throw new Error("Expected a loopback HTTP test server.");
+          }
+          const request = owner.request(
+            address.port,
+            "/events",
+            null,
+            undefined,
+            (text) => text.endsWith("\n") && text.includes('"type":"turn.completed"'),
+          );
+          // Own a failure that closes the transport before the held page gate.
+          const result = request.then(
+            (value) => ({ value, error: null }),
+            (error: unknown) => ({ value: null, error }),
+          );
+          yield* Deferred.await(entered);
+          for (let cursor = initialBoundary + 1; cursor <= terminalCursor; cursor += 1) {
+            const { event } = makeDaemonRecord(cursor);
+            yield* journal.publish(
+              cursor === terminalCursor
+                ? {
+                    ...event,
+                    type: "turn.completed",
+                    turnId: TurnId.make("stream-overflow-terminal"),
+                    payload: { state: "completed" },
+                  }
+                : event,
+            );
+          }
+          yield* Deferred.succeed(release, undefined);
+          const reply = yield* Effect.promise(() => result);
+          if (!reply.value) throw reply.error;
+          assert.equal(reply.value.status, 200);
+          const records = reply.value.text
+            .trimEnd()
+            .split("\n")
+            .map((line) => JSON.parse(line) as ProviderDaemonEventRecord);
+          assert.deepEqual(
+            records.map((record) => record.cursor),
+            retained.map((record) => record.cursor),
+          );
+          assert.equal(records.at(-1)?.event.type, "turn.completed");
+          assert.equal(requestCount, 1);
+        }).pipe(Effect.scoped),
+      );
+    } finally {
+      await owner.close();
+    }
   });
 
   it("cleans up the HTTP stream when replay-boundary acquisition fails", async () => {
@@ -2470,6 +2762,235 @@ describe("ProviderDaemonServer", () => {
     expect(cleanupCount).toBe(1);
     expect(unsubscribeCount).toBe(1);
     expect(response.writableEnded).toBe(true);
+  });
+
+  it("serves exact startup readiness while an admitted rich-health dependency is held", async (test) => {
+    const owner = makeStartupReadinessNativeOwner(test);
+    try {
+      await owner.run(
+        Effect.gen(function* () {
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          owner.releaseBeforeClose(() => Deferred.doneUnsafe(release, Effect.void));
+          const service: ProviderServiceShape = {
+            ...mockProviderService,
+            listSessions: () =>
+              Deferred.succeed(entered, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.as([]),
+              ),
+          };
+          const windowsOwnershipId = "9a90b48d-868f-4614-ae9c-66d50293d52b";
+          const identity = { pid: process.pid, creationTime100ns: "134348901321234567" };
+          yield* Effect.gen(function* () {
+            const config = yield* ServerConfig;
+            owner.active();
+            const snapshot = yield* runProviderDaemonServer(
+              {
+                port: 0,
+                host: "127.0.0.1",
+                token: TEST_TOKEN,
+                version: "0.0.0-test",
+                protocolVersion: 1,
+                runtimeBuildId: "b".repeat(64),
+                windowsOwnershipId,
+              },
+              {
+                platform: "win32",
+                capture: async () => ({ status: "present", identity }),
+              },
+            ).pipe(Effect.uninterruptible);
+            const port = snapshot.port;
+            if (port === null) throw new Error("Expected synthetic readiness TCP endpoint.");
+            owner.active();
+            let richSettled = false;
+            const rich = owner.request(port, PROVIDER_DAEMON_HEALTH_PATH).then(
+              (reply) => {
+                richSettled = true;
+                return { ok: true as const, reply };
+              },
+              () => {
+                richSettled = true;
+                return { ok: false as const };
+              },
+            );
+            // Observe the real rich HTTP handler entering its real injected
+            // diagnostic dependency. Its gate stays held throughout readiness.
+            yield* Deferred.await(entered);
+            const reply = yield* Effect.promise(() =>
+              owner.request(port, PROVIDER_DAEMON_STARTUP_READINESS_PATH),
+            );
+            assert.equal(reply.status, 200);
+            const ready = decodeProviderDaemonStartupReadiness(
+              decodeProviderJsonString(reply.text),
+            );
+            assert.deepEqual(ready, {
+              readinessProtocol: 1,
+              ok: true,
+              journalState: "ready",
+              mode: "provider-daemon",
+              dataProfile: "debug",
+              dataProfileId: dataProfileIdentity("debug", config.baseDir),
+              protocolVersion: 1,
+              pid: process.pid,
+              ppid: process.ppid,
+              version: "0.0.0-test",
+              runtimeBuildId: "b".repeat(64),
+              startedAt: snapshot.startedAt,
+              transport: "tcp",
+              windowsProcessIdentity: identity,
+              windowsOwnershipId,
+            });
+            assert.isFalse(richSettled);
+            assert.notInclude(reply.text, TEST_TOKEN);
+            for (const token of [null, "wrong-synthetic-owner-token"]) {
+              const refused = yield* Effect.promise(() =>
+                owner.request(port, PROVIDER_DAEMON_STARTUP_READINESS_PATH, token),
+              );
+              assert.equal(refused.status, 401);
+              assert.deepEqual(decodeProviderJsonString(refused.text), { error: "unauthorized" });
+            }
+            const leaseReply = yield* Effect.promise(() =>
+              owner.request(
+                port,
+                "/api/provider-daemon/leases",
+                TEST_TOKEN,
+                encodeProviderDaemonLeaseRequestJson({
+                  clientKind: "test",
+                  capabilities: ["rpc"],
+                }),
+              ),
+            );
+            assert.equal(leaseReply.status, 200);
+            const lease = decodeProviderDaemonLeaseResponseJson(leaseReply.text);
+            const refusedLease = yield* Effect.promise(() =>
+              owner.request(port, PROVIDER_DAEMON_STARTUP_READINESS_PATH, lease.token),
+            );
+            assert.equal(refusedLease.status, 401);
+            yield* Deferred.succeed(release, undefined);
+            const richReply = yield* Effect.promise(() => rich);
+            assert.isTrue(richReply.ok);
+            if (!richReply.ok) throw new Error("Synthetic rich health failed after release.");
+            assert.equal(richReply.reply.status, 200);
+            decodeProviderDaemonHealth(decodeProviderJsonString(richReply.reply.text));
+          }).pipe(
+            Effect.ensuring(Effect.sync(owner.quiesce)),
+            Effect.scoped,
+            // Feed and retain the Debug profile in one layer. Keep the inner
+            // server scope above this provision so it retires before SQLite.
+            Effect.provide(
+              makeProviderDaemonServerTestLayer(service).pipe(
+                Layer.provideMerge(retirementProfileLayer),
+              ),
+            ),
+          );
+        }).pipe(Effect.ensuring(Effect.sync(owner.quiesce)), Effect.scoped),
+      );
+    } finally {
+      await owner.close();
+    }
+  });
+
+  it("refuses startup readiness when the real durable journal lane is blocked", async (test) => {
+    const owner = makeStartupReadinessNativeOwner(test);
+    try {
+      await owner.run(
+        Effect.gen(function* () {
+          const events = yield* Deferred.make<ReadonlyArray<ProviderRuntimeEvent>>();
+          const blocked = yield* Deferred.make<void>();
+          const service: ProviderServiceShape = {
+            ...mockProviderService,
+            streamEvents: Stream.fromEffect(Deferred.await(events)).pipe(
+              Stream.flatMap(Stream.fromIterable),
+              Stream.concat(Stream.never),
+            ),
+          };
+          const logger = Logger.make<unknown, void>(({ message }) => {
+            if (
+              Array.isArray(message) &&
+              message[0] === "durable write blocked; storage repair is required" &&
+              typeof message[1] === "object" &&
+              message[1] !== null &&
+              "component" in message[1] &&
+              message[1].component === "provider-journal"
+            ) {
+              // The production lane sets its blocked state before this event.
+              Deferred.doneUnsafe(blocked, Effect.void);
+            }
+          });
+          yield* Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            const faultSql = new Proxy(sql, {
+              apply(target, thisArg, args) {
+                const template = args[0] as TemplateStringsArray;
+                if (
+                  Array.isArray(template) &&
+                  template.join("?").includes("INSERT INTO provider_daemon_events")
+                ) {
+                  return Effect.fail(
+                    new SqlError.SqlError({
+                      reason: new SqlError.UnknownError({
+                        operation: "execute",
+                        cause: "synthetic journal write refusal",
+                      }),
+                    }),
+                  );
+                }
+                return Reflect.apply(target, thisArg, args);
+              },
+            });
+            owner.active();
+            const port = yield* startProviderDaemonServerOnEphemeralPort({
+              host: "127.0.0.1",
+              token: TEST_TOKEN,
+              version: "0.0.0-test",
+            }).pipe(
+              Effect.provideService(SqlClient.SqlClient, faultSql),
+              Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+              Effect.uninterruptible,
+            );
+            owner.active();
+            yield* Deferred.succeed(events, [
+              {
+                type: "turn.completed",
+                eventId: asEventId("startup-readiness-blocked-journal"),
+                provider: ProviderDriverKind.make("codex"),
+                threadId: ThreadId.make("startup-readiness-synthetic-thread"),
+                createdAt: "2026-01-01T00:00:00.000Z",
+                payload: { state: "completed" },
+              },
+            ]);
+            yield* Deferred.await(blocked);
+            const readiness = yield* Effect.promise(() =>
+              owner.request(port, PROVIDER_DAEMON_STARTUP_READINESS_PATH),
+            );
+            assert.equal(readiness.status, 503);
+            assert.deepEqual(decodeProviderJsonString(readiness.text), {
+              error: "provider-journal-unavailable",
+              state: "blocked",
+            });
+            const unauthenticated = yield* Effect.promise(() =>
+              owner.request(port, PROVIDER_DAEMON_STARTUP_READINESS_PATH, null),
+            );
+            assert.equal(unauthenticated.status, 401);
+            const live = yield* Effect.promise(() =>
+              owner.request(port, PROVIDER_DAEMON_LIVENESS_PATH),
+            );
+            assert.equal(live.status, 200);
+            const health = yield* Effect.promise(() =>
+              owner.request(port, PROVIDER_DAEMON_HEALTH_PATH),
+            );
+            assert.equal(health.status, 503);
+          }).pipe(
+            Effect.ensuring(Effect.sync(owner.quiesce)),
+            Effect.scoped,
+            Effect.provide(makeProviderDaemonServerTestLayer(service)),
+          );
+        }).pipe(Effect.ensuring(Effect.sync(owner.quiesce)), Effect.scoped),
+      );
+    } finally {
+      await owner.close();
+    }
   });
 
   it.effect("serves authenticated liveness without reading provider diagnostics", () => {

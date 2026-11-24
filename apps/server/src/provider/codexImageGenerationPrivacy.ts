@@ -19,6 +19,10 @@ const MAX_ENTRIES = 50_000;
  * including savedPath, while keeping these new private fields out of public
  * activity, retained history and logs. The projected value is deliberately
  * unknown: a file-only copy is no longer a valid upstream image-item schema.
+ * Codex 0.169 also embeds opaque moderation/display metadata on agent messages.
+ * Cafe does not implement that producing client's display protocol. Omit the
+ * metadata from the same observational paths, retaining the actual answer and
+ * leaving original wire decoding/native policy unchanged.
  *
  * https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/ext/items/src/image_generation.rs
  */
@@ -70,11 +74,15 @@ export function redactCodexImageGenerationMetadata(value: unknown): unknown {
       const type = Object.getOwnPropertyDescriptor(current, "type");
       if (type && !("value" in type)) return OMITTED;
       const image = type?.value === "imageGeneration";
+      const agentMessage = type?.value === "agentMessage";
       const copy: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
       let changed = false;
       for (const key of keys) {
         if (typeof key !== "string") return OMITTED;
-        if (image && (key === "fileId" || key === "generationId" || key === "inputImages")) {
+        if (
+          (image && (key === "fileId" || key === "generationId" || key === "inputImages")) ||
+          (agentMessage && key === "moderation")
+        ) {
           // Even an accessor in an omitted field stays unread. No attachment
           // lookup, path normalization or coercion belongs to this projection.
           changed = true;

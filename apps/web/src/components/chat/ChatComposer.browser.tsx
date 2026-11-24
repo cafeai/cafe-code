@@ -89,7 +89,7 @@ const environmentId = EnvironmentId.make("composer-test-environment");
 const createdAt = "2026-10-07T00:00:00.000Z";
 
 function provider(
-  driver: "codex" | "claudeAgent" | "grok" | "axiom",
+  driver: "codex" | "claudeAgent" | "grok" | "axiom" | "gemini",
   id: string,
   label: string,
 ): ServerProvider {
@@ -121,7 +121,9 @@ function provider(
             ? "gpt-5-codex"
             : driver === "claudeAgent"
               ? "claude-opus-4-6"
-              : "grok-code-fast-1",
+              : driver === "gemini"
+                ? "gemini-4-neon"
+                : "grok-code-fast-1",
         name: `${label} model`,
         isCustom: false,
         capabilities: createModelCapabilities({ optionDescriptors: [] }),
@@ -866,6 +868,93 @@ describe("provider-specific composer menu actions", () => {
       expect(showOnSide).toHaveBeenCalledOnce();
     },
   );
+
+  it("shows the selected Gemini account quota before context usage and retains an out-of-date reading", async (context) => {
+    const owner = createComposerOwner(context, "composer-controls");
+    await owner.run(async () => {
+      const accounts = [
+        { id: "gemini-personal", label: "Gemini personal", usedPercent: 85 },
+        { id: "gemini-work", label: "Gemini work", usedPercent: 25 },
+      ].map(({ id, label, usedPercent }): ServerProvider => {
+        const quotaGroup = {
+          limitId: "gemini-models",
+          limitName: "Gemini models",
+          primary: {
+            usedPercent,
+            windowDurationMins: 300,
+            resetsAt: Math.floor(Date.now() / 1000) + 3600,
+          },
+        };
+        return {
+          ...provider("gemini", id, label),
+          accountRateLimits: {
+            checkedAt: new Date().toISOString(),
+            rateLimits: quotaGroup,
+            rateLimitsByLimitId: { [quotaGroup.limitId]: quotaGroup },
+          },
+        };
+      });
+      const modelSelection = createModelSelection(
+        ProviderInstanceId.make("gemini-work"),
+        "gemini-4-neon",
+      );
+      const fixture = await mountComposer(
+        860,
+        {
+          providerStatuses: accounts,
+          activeThread: { ...thread(), session: null, modelSelection },
+          activeThreadModelSelection: modelSelection,
+          activeThreadActivities: [],
+        },
+        owner,
+      );
+      await owner.observe("controls", () =>
+        page.getByRole("button", { name: "Usage", exact: true }).click(),
+      );
+      await owner.observe("assertion", async () => {
+        await expect.element(page.getByText("Gemini models", { exact: true })).toBeVisible();
+        await expect.element(page.getByText("75% left", { exact: true })).toBeVisible();
+        await expect.element(page.getByText(/^5h reset:/u)).toBeVisible();
+        await expect.element(page.getByText("15% left", { exact: true })).not.toBeInTheDocument();
+      });
+
+      await fixture.update({
+        providerStatuses: accounts.map((account) =>
+          account.instanceId === modelSelection.instanceId && account.accountRateLimits
+            ? {
+                ...account,
+                auth: { status: "unknown" },
+                accountRateLimits: { ...account.accountRateLimits, stale: true },
+              }
+            : account,
+        ),
+      });
+      await owner.observe("assertion", async () => {
+        await expect
+          .element(page.getByText("Showing last reported quota.", { exact: true }))
+          .toBeVisible();
+        await expect.element(page.getByText("75% left", { exact: true })).toBeVisible();
+        await expect.element(page.getByText(/^5h reset:/u)).toBeVisible();
+      });
+
+      await fixture.update({
+        providerStatuses: accounts.map((account) =>
+          account.instanceId === modelSelection.instanceId
+            ? provider("gemini", account.instanceId, "Gemini work")
+            : account,
+        ),
+      });
+      await owner.observe("assertion", async () => {
+        await expect
+          .element(page.getByText("Antigravity quota is unavailable.", { exact: true }))
+          .toBeVisible();
+        await expect.element(page.getByText("75% left", { exact: true })).not.toBeInTheDocument();
+        await expect.element(page.getByText("15% left", { exact: true })).not.toBeInTheDocument();
+        expect(fixture.onSend).not.toHaveBeenCalled();
+        expect(subscribeQuota).not.toHaveBeenCalled();
+      });
+    });
+  });
 
   it("enables computer use before the first message, retains the exact draft choice, and starts another draft off", async () => {
     const state: GlideControlResult = {

@@ -87,5 +87,7 @@ export const ProviderSessionQuotaInput = Schema.Struct({
 export type ProviderSessionQuotaInput = typeof ProviderSessionQuotaInput.Type;
 export const ProviderSessionQuotaResult = Schema.Struct({
   report: Schema.NullOr(ProviderSessionQuotaReport),
+  /** The current owner could only supply its earlier observation. */
+  stale: Schema.optionalKey(Schema.Literal(true)),
 });
 export type ProviderSessionQuotaResult = typeof ProviderSessionQuotaResult.Type;

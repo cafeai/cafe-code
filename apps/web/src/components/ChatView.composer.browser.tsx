@@ -6314,6 +6314,165 @@ describe("ChatView full app (composer)", () => {
     }
   });
 
+  it("sends the selected queued Claude follow-up while an older rejected steer remains queued", async (testContext) => {
+    const owner = createChatViewCallerOwner(testContext, mountChatView, {
+      label: "pending-steer",
+    });
+    await owner.run(async () => {
+      const activeTurnId = TurnId.make("claude-selected-queued-follow-up-turn");
+      const rejectedMessageId = MessageId.make("claude-older-rejected-follow-up");
+      const rejectedText = "REVIEW 3: Preserve this earlier instruction for the next turn.";
+      const selectedText = "Answer this new question while the current work continues.";
+      const base = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("claude-selected-follow-up-original"),
+        targetText: "Keep the primary query running",
+        sessionStatus: "running",
+        provider: "claudeAgent",
+        history: "essential",
+      });
+      const snapshot: OrchestrationReadModel = {
+        ...base,
+        snapshotSequence: 43,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          messages: [
+            ...thread.messages,
+            {
+              ...createUserMessage({
+                id: rejectedMessageId,
+                text: rejectedText,
+                offsetSeconds: 2_000,
+              }),
+              turnId: activeTurnId,
+            },
+          ],
+          // Reconstruct the first row through the ordinary retained failure
+          // path. A generic rejection permits a later turn, never an automatic
+          // replay into this still-running Claude query.
+          activities: [
+            {
+              id: EventId.make("claude-older-follow-up-rejection"),
+              tone: "error",
+              kind: "provider.turn.steer.failed",
+              summary: "Provider steer queued",
+              payload: {
+                provider: "claudeAgent",
+                messageId: rejectedMessageId,
+                intentSequence: 41,
+                retryableFollowUp: true,
+              },
+              turnId: activeTurnId,
+              sequence: 42,
+              createdAt: isoAt(2_001),
+            },
+          ],
+          latestTurn: {
+            turnId: activeTurnId,
+            state: "running",
+            requestedAt: isoAt(1_900),
+            startedAt: isoAt(1_901),
+            completedAt: null,
+            assistantMessageId: null,
+          },
+          session: {
+            ...thread.session!,
+            status: "running",
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            subagentRuntimeId: "c0ac4639-c95d-4589-8919-6e4a28bc5b5a",
+            activeTurnId,
+          },
+        })),
+      };
+      const steers = () => wsRequests.filter((request) => request.type === "thread.turn.steer");
+      const requeued = () =>
+        document.querySelector('[aria-label="Follow-up requeued after provider steer rejection"]');
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        configureFixture: (fixture) => {
+          configureResponseLimitFixture(fixture);
+          fixture.serverConfig = {
+            ...fixture.serverConfig,
+            providers: fixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
+            })),
+          };
+        },
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? { sequence: snapshot.snapshotSequence + 1 }
+            : undefined,
+      });
+      await owner.own("first-row", () => vi.waitFor(() => expect(requeued()).not.toBeNull()));
+      expect(steers()).toHaveLength(0);
+
+      // Queue and activate the later row through native browser input. The
+      // rejected row deliberately remains first; its wait policy must not
+      // turn this distinct row's enabled Send action into a silent no-op.
+      await owner.own("editor", () => waitForComposerEditor());
+      await owner.own("input", () => page.getByTestId("composer-editor").fill(selectedText));
+      await owner.own("send", () =>
+        page.getByRole("button", { name: "Queue message", exact: true }).click(),
+      );
+      const persistence = createFollowUpQueuePersistence();
+      let selectedMessageId: string | undefined;
+      await owner.own("second-row", () =>
+        vi.waitFor(() => {
+          expect(
+            document.querySelectorAll('button[aria-label="Remove queued message"]'),
+          ).toHaveLength(2);
+          expect(queuedSendButtons()).toHaveLength(1);
+          expect(queuedSendButtons()[0]?.disabled).toBe(false);
+          const saved = persistence.load(LOCAL_ENVIRONMENT_ID);
+          expect(saved.ok).toBe(true);
+          if (!saved.ok) return;
+          expect(saved.value.pending).toHaveLength(1);
+          expect(saved.value.pending[0]?.promptText).toBe(selectedText);
+          selectedMessageId = saved.value.pending[0]?.id;
+        }),
+      );
+      expect(selectedMessageId).toBeDefined();
+      expect(steers()).toHaveLength(0);
+      await owner.own("steer", () =>
+        page.getByRole("button", { name: "Send", exact: true }).click(),
+      );
+      await owner.own("request", () => vi.waitFor(() => expect(steers()).toHaveLength(1)));
+      expect(steers()[0]).toMatchObject({
+        threadId: THREAD_ID,
+        message: { messageId: selectedMessageId, role: "user", text: selectedText },
+      });
+      await owner.own("receipt", () =>
+        vi.waitFor(() => {
+          expect(queuedSendButtons()).toHaveLength(0);
+          expect(
+            document.querySelectorAll('button[aria-label="Remove queued message"]'),
+          ).toHaveLength(1);
+          expect(requeued()).not.toBeNull();
+          expect(
+            document.querySelector('[data-cafe-followup-queue="true"]')?.textContent,
+          ).toContain(rejectedText);
+          expect(persistence.load(LOCAL_ENVIRONMENT_ID)).toEqual({
+            ok: true,
+            value: { pending: [], claimed: [] },
+          });
+        }),
+      );
+      expect(
+        selectThreadByRef(useStore.getState(), THREAD_REF)?.messages.find(
+          (message) => message.id === rejectedMessageId,
+        ),
+      ).toMatchObject({ id: rejectedMessageId, text: rejectedText, turnId: activeTurnId });
+      expect(steers()).toHaveLength(1);
+      expect(
+        wsRequests.some(
+          (request) =>
+            request.type === "thread.turn.start" || request.type === "thread.turn.interrupt",
+        ),
+      ).toBe(false);
+    });
+  });
+
   it("keeps a steer pending when another message starts processing on the same turn", async (testContext) => {
     let releaseSteerReceipt: (() => void) | undefined;
     let steerReceiptReleased = false;
@@ -6952,6 +7111,204 @@ describe("ChatView full app (composer)", () => {
             request.type === "thread.turn.start" || request.type === "thread.turn.interrupt",
         ),
       ).toBe(false);
+    });
+  });
+
+  it("clears the stopped Claude steer after a new turn begins without resending it", async (testContext) => {
+    const owner = createChatViewCallerOwner(testContext, mountChatView, { label: "pending-steer" });
+    await owner.run(async () => {
+      const stoppedTurnId = TurnId.make("claude-stopped-steer-original-turn");
+      const newTurnId = TurnId.make("claude-stopped-steer-new-turn");
+      const steerText = "Keep this stopped steering message in history";
+      const nextText = "Start this new Claude response";
+      const base = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("claude-stopped-steer-original-message"),
+        targetText: "Original Claude work",
+        sessionStatus: "running",
+        provider: "claudeAgent",
+        history: "essential",
+      });
+      const original = base.threads[0]!;
+      let thread: OrchestrationReadModel["threads"][number] = {
+        ...original,
+        latestTurn: {
+          turnId: stoppedTurnId,
+          state: "running",
+          requestedAt: isoAt(1_000),
+          startedAt: isoAt(1_001),
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        session: {
+          ...original.session!,
+          activeTurnId: stoppedTurnId,
+          subagentRuntimeId: SUBAGENT_RUNTIME_ID,
+        },
+      };
+      let sequence = base.snapshotSequence;
+      const earlierStopIntent = ++sequence;
+      let admittedSteer: { messageId: MessageId; createdAt: string } | undefined;
+      let acceptedStop: { requestedAt: string; interruptIntentSequence: number } | undefined;
+      await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: { ...base, snapshotSequence: sequence, threads: [thread] },
+        configureFixture: (fixture) => {
+          configureResponseLimitFixture(fixture);
+          fixture.serverConfig = {
+            ...fixture.serverConfig,
+            providers: fixture.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
+            })),
+          };
+        },
+        resolveRpc: (body) => {
+          if (body._tag !== ORCHESTRATION_WS_METHODS.dispatchCommand) return undefined;
+          const receipt = { sequence: ++sequence };
+          if (body.type === "thread.turn.steer") {
+            const { messageId } = body.message as { messageId: MessageId };
+            admittedSteer = { messageId, createdAt: String(body.createdAt) };
+          }
+          if (body.type === "thread.turn.interrupt") {
+            acceptedStop = {
+              requestedAt: String(body.createdAt),
+              interruptIntentSequence: receipt.sequence,
+            };
+          }
+          return receipt;
+        },
+      });
+      const publishThread = () => {
+        owner.assertActive();
+        const snapshotSequence = ++sequence;
+        chatViewFixture.fixture.snapshot = { ...base, snapshotSequence, threads: [thread] };
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: { snapshotSequence, thread },
+        });
+      };
+      const steeringRows = () => document.querySelectorAll('[data-cafe-followup-steering="true"]');
+
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, steerText);
+      await owner.own("send", () =>
+        page.getByRole("button", { name: "Queue message", exact: true }).click(),
+      );
+      await owner.own("steer", () =>
+        page.getByRole("button", { name: "Send", exact: true }).click(),
+      );
+      await owner.own("receipt", () =>
+        vi.waitFor(() => {
+          expect(admittedSteer).toBeDefined();
+          expect(steeringRows()).toHaveLength(1);
+          expect(queuedSendButtons()).toHaveLength(0);
+        }),
+      );
+      await owner.own("controls", () =>
+        page.getByRole("button", { name: "Stop generation", exact: true }).click(),
+      );
+      await owner.own("request", () => vi.waitFor(() => expect(acceptedStop).toBeDefined()));
+      expect(wsRequests.find((request) => request.type === "thread.turn.interrupt")?.turnId).toBe(
+        stoppedTurnId,
+      );
+
+      const stopActivity = (
+        id: string,
+        turnId: TurnId,
+        kind: "provider.turn.interrupt.completed" | "provider.turn.interrupt.failed",
+        interruptIntentSequence = acceptedStop!.interruptIntentSequence,
+      ) => ({
+        id: EventId.make(id),
+        kind,
+        tone: "info" as const,
+        summary: "Provider stop result",
+        turnId,
+        createdAt: new Date().toISOString(),
+        sequence: ++sequence,
+        payload: { requestedAt: acceptedStop!.requestedAt, interruptIntentSequence },
+      });
+      const stoppedAt = new Date().toISOString();
+      const steeredMessage = {
+        ...createUserMessage({ id: admittedSteer!.messageId, text: steerText, offsetSeconds: 0 }),
+        turnId: stoppedTurnId,
+        createdAt: admittedSteer!.createdAt,
+        updatedAt: admittedSteer!.createdAt,
+      };
+      // These activities arrive after the click, but none resolves this attempt.
+      // Even an older Stop on the right turn can publish its outcome late.
+      thread = {
+        ...thread,
+        latestTurn: { ...thread.latestTurn!, state: "interrupted", completedAt: stoppedAt },
+        session: { ...thread.session!, status: "ready", activeTurnId: null },
+        messages: [...thread.messages, steeredMessage],
+        activities: [
+          ...thread.activities,
+          stopActivity("claude-stop-failed", stoppedTurnId, "provider.turn.interrupt.failed"),
+          stopActivity("claude-stop-other-turn", newTurnId, "provider.turn.interrupt.completed"),
+          stopActivity(
+            "claude-stop-earlier-intent",
+            stoppedTurnId,
+            "provider.turn.interrupt.completed",
+            earlierStopIntent,
+          ),
+        ],
+      };
+      publishThread();
+      await owner.own("controls", () =>
+        expect
+          .element(page.getByRole("button", { name: "Send message", exact: true }))
+          .toBeVisible(),
+      );
+      expect(steeringRows()).toHaveLength(1);
+      expect(wsRequests.filter((request) => request.type === "thread.turn.start")).toHaveLength(0);
+
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, nextText);
+      await owner.own("send", () =>
+        page.getByRole("button", { name: "Send message", exact: true }).click(),
+      );
+      const sentTurns = () => wsRequests.filter((request) => request.type === "thread.turn.start");
+      await owner.own("request", () => vi.waitFor(() => expect(sentTurns()).toHaveLength(1)));
+      expect(sentTurns()[0]?.message).toMatchObject({ text: nextText });
+      const startedAt = new Date().toISOString();
+      thread = {
+        ...thread,
+        latestTurn: {
+          turnId: newTurnId,
+          state: "running",
+          requestedAt: startedAt,
+          startedAt,
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        session: { ...thread.session!, status: "running", activeTurnId: newTurnId },
+      };
+      publishThread();
+      await owner.own("snapshot", () =>
+        vi.waitFor(() =>
+          expect(selectThreadByRef(useStore.getState(), THREAD_REF)?.session?.activeTurnId).toBe(
+            newTurnId,
+          ),
+        ),
+      );
+      expect(steeringRows()).toHaveLength(1);
+
+      // The old Stop receipt can reach the pane after the new root is active.
+      thread = {
+        ...thread,
+        activities: [
+          ...thread.activities,
+          stopActivity("claude-stop-confirmed", stoppedTurnId, "provider.turn.interrupt.completed"),
+        ],
+      };
+      publishThread();
+      await owner.own("processing", () => vi.waitFor(() => expect(steeringRows()).toHaveLength(0)));
+      await owner.own("canonical", () =>
+        expect.element(page.getByText(steerText, { exact: true })).toBeVisible(),
+      );
+      expect(wsRequests.filter((request) => request.type === "thread.turn.steer")).toHaveLength(1);
+      expect(wsRequests.filter((request) => request.type === "thread.turn.interrupt")).toHaveLength(
+        1,
+      );
+      expect(sentTurns()).toHaveLength(1);
     });
   });
 

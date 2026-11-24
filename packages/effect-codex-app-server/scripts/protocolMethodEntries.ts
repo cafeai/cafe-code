@@ -2,6 +2,7 @@ export interface ProtocolMethodEntry {
   readonly method: string;
   readonly paramsType?: string;
   readonly paramsOptional?: boolean;
+  readonly paramsNullable?: boolean;
 }
 
 /**
@@ -21,18 +22,22 @@ export function parseRequestEntries(fileContents: string): ReadonlyArray<Protoco
   let match: RegExpExecArray | null;
   while ((match = entryPattern.exec(fileContents)) !== null) {
     const rawParamsType = match[3]!.trim();
-    const paramsTypeMembers = rawParamsType
-      .split("|")
-      .map((member) => member.trim())
-      .filter((member) => member !== "undefined");
-    const paramsOptional =
-      match[2] === "?" || paramsTypeMembers.length !== rawParamsType.split("|").length;
+    const rawParamsMembers = rawParamsType.split("|").map((member) => member.trim());
+    // Keep absence and an explicit JSON null distinct. Codex 0.169 gateway
+    // requests permit both; dropping either union member would silently narrow
+    // the generated public client or attempt to resolve a union as a type name.
+    const paramsTypeMembers = rawParamsMembers.filter(
+      (member) => member !== "undefined" && member !== "null",
+    );
+    const paramsOptional = match[2] === "?" || rawParamsMembers.includes("undefined");
+    const paramsNullable = rawParamsMembers.includes("null");
     const paramsType = paramsTypeMembers.length === 0 ? "undefined" : paramsTypeMembers.join(" | ");
 
     entries.push({
       method: match[1]!,
       paramsType,
       ...(paramsOptional && paramsType !== "undefined" ? { paramsOptional: true } : {}),
+      ...(paramsNullable ? { paramsNullable: true } : {}),
     });
   }
   return entries;

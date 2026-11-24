@@ -14,12 +14,16 @@ without a saved override inherit this setting from their selected account. Editi
 the account default updates their saved-limit display immediately; native changes
 wait for the next safe idle send, never an account restart on save. An explicit
 per-chat override takes precedence. A numeric override or inherited account
-default requires the configured runtime to advertise support before it is applied;
-unsupported or unknown runtimes reject new configuration explicitly.
-Reset remains available if a provider is downgraded or its version becomes
-unknown. Sends preserve the prompt and refuse an unsupported selected-driver
-numeric policy, including queued sends; they never silently discard it on an
-older server. Another driver's remembered value does not block the current one.
+default is applied only when the configured runtime confirms support. If support
+is unavailable or unconfirmed, the message still runs with the current provider
+policy. A notice in the primary chat names the requested limit and explains that
+it was not applied; your saved setting stays unchanged. An existing working
+session keeps its current controls. Neither a missing capability nor a failed
+version probe proves that Astra or another model cannot use subagents.
+
+This fallback can permit more native workers than your saved preference. Treat
+the preference as a concurrency convenience, not a universal spending or security
+cap. See the [nonblocking preference decision](decisions/nonblocking-subagent-limit-preferences.md).
 
 ## Saved limit and session configuration
 
@@ -91,14 +95,16 @@ delivery to the exact thread, account, native runtime generation and configured
 number, rechecks them at native admission and forbids automatic process recovery
 on that path. If the process changed or disappeared, the operation refuses rather
 than starting an unqualified replacement. A saved number alone is insufficient;
-changed limits, account switches, unknown process evidence and replacement still
-require native support. Older owners without the guarantee remain fail-closed.
+changed limits and replacement still require native support to apply a numeric
+override. When that support is unconfirmed, ordinary delivery continues under the
+current provider policy with the visible warning described above. Exact-process
+continuation controls retain their ownership and no-recovery fences.
 See [the exact-process continuation decision](decisions/existing-runtime-subagent-policy-continuation.md).
 
 The authenticated provider-daemon capability response preserves the selected
 adapter's optional subagent-support boolean through remote result decoding.
-An explicit true is required; false or omission from an older daemon remains
-unsupported. This transport evidence does not bypass the native idle boundary or
+An explicit true is required to apply a numeric override; false or omission
+selects the warning-and-continue policy for an optional saved limit. This transport evidence does not bypass the native idle boundary or
 prove available worker capacity. Adopting the rebuilt backend fixes reception of
 an explicit true already emitted by its daemon. A daemon that omits the field
 still cannot certify support; Cafe does not restart an active daemon or replay a

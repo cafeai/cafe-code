@@ -91,7 +91,11 @@ export function DesktopNotificationWatcher() {
       const current = {
         running,
         turnId: thread.session?.activeTurnId ?? null,
-        userInputPending: thread.hasPendingUserInput,
+        userInputPending:
+          thread.hasPendingUserInput ||
+          (thread.session?.provider === "gemini" &&
+            (running || thread.session.status === "ready") &&
+            thread.hasPendingApprovals),
       };
       next.set(key, current);
       // Retire resolved prompts and superseded completion decisions before

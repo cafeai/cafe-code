@@ -444,36 +444,40 @@ export function ProviderModelsSection({
         })}
       </div>
 
-      <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-        <Input
-          id={`provider-instance-${instanceId}-custom-model`}
-          value={input}
-          onChange={(event) => {
-            setInput(event.target.value);
-            if (errorCode) setErrorCode(null);
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter") return;
-            event.preventDefault();
-            handleAdd();
-          }}
-          placeholder={
-            driverKind
-              ? uiPresentation.CUSTOM_MODEL_PLACEHOLDER_BY_KIND[driverKind]
-              : uiText("model-slug", undefined, undefined, uiLocale)
-          }
-          spellCheck={false}
-        />
-        <Button className="shrink-0" variant="outline" onClick={handleAdd}>
-          <PlusIcon className="size-3.5" />
-          {uiText("Add", undefined, undefined, uiLocale)}
-        </Button>
-      </div>
+      {driverKind !== "gemini" ? (
+        <>
+          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+            <Input
+              id={`provider-instance-${instanceId}-custom-model`}
+              value={input}
+              onChange={(event) => {
+                setInput(event.target.value);
+                if (errorCode) setErrorCode(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                handleAdd();
+              }}
+              placeholder={
+                driverKind
+                  ? uiPresentation.CUSTOM_MODEL_PLACEHOLDER_BY_KIND[driverKind]
+                  : uiText("model-slug", undefined, undefined, uiLocale)
+              }
+              spellCheck={false}
+            />
+            <Button className="shrink-0" variant="outline" onClick={handleAdd}>
+              <PlusIcon className="size-3.5" />
+              {uiText("Add", undefined, undefined, uiLocale)}
+            </Button>
+          </div>
 
-      {errorCode ? (
-        <p className="mt-2 text-xs text-destructive">
-          {formatModelValidation(errorCode, uiLocale)}
-        </p>
+          {errorCode ? (
+            <p className="mt-2 text-xs text-destructive">
+              {formatModelValidation(errorCode, uiLocale)}
+            </p>
+          ) : null}
+        </>
       ) : null}
     </div>
   );

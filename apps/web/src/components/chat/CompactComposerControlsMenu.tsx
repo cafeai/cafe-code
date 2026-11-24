@@ -38,6 +38,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { threadGoalStatusLabel } from "./ThreadGoalControl";
+import { deriveGeminiPermissionMode, GEMINI_PERMISSION_MODE_OPTIONS } from "./geminiPermissionMode";
 
 const RUNTIME_MODE_OPTIONS: ReadonlyArray<{
   id: RuntimeMode;
@@ -156,6 +157,8 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   onNativePermissionModeChange: (mode: ClaudePermissionMode) => void;
   onTogglePlanSidebar: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
+  geminiPermissionModeBusy?: boolean;
+  geminiBypassMatchesAccount?: boolean;
   onOpenGoal?: () => void;
   /** Optional controlled state so explicit shortcuts can open this menu. */
   open?: boolean;
@@ -165,20 +168,30 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
   const isClaude = props.provider === "claudeAgent";
-  const usesNativePermissionModes = isClaude || props.provider === "grok";
+  const isGemini = props.provider === "gemini";
+  const usesNativePermissionModes = isClaude || isGemini || props.provider === "grok";
   const permissionModeOptions = isClaude
     ? uiPresentation.CLAUDE_PERMISSION_MODE_OPTIONS
-    : uiPresentation.GROK_PERMISSION_MODE_OPTIONS;
+    : isGemini
+      ? uiPresentation.GEMINI_PERMISSION_MODE_OPTIONS
+      : uiPresentation.GROK_PERMISSION_MODE_OPTIONS;
   const hasTraits = props.traitsMenuContent !== null && props.traitsMenuContent !== undefined;
   const hasDaybreak = props.daybreakMenuContent !== null && props.daybreakMenuContent !== undefined;
   const hasSecondaryControls = Boolean(
     props.subagentConcurrencyControl || props.codexContextWindowControl || props.providerActions,
   );
   const showAccessControls = !usesNativePermissionModes;
-  const claudePermissionMode = deriveClaudePermissionMode({
+  const permissionModeState = {
     interactionMode: props.interactionMode,
     runtimeMode: props.runtimeMode,
-  });
+  };
+  const nativePermissionMode =
+    props.interactionMode === "gemini-bypass" && (!isGemini || !props.geminiBypassMatchesAccount)
+      ? undefined
+      : isGemini
+        ? deriveGeminiPermissionMode(permissionModeState)
+        : deriveClaudePermissionMode(permissionModeState);
+  const geminiPermissionModeBusy = isGemini && props.geminiPermissionModeBusy === true;
 
   return (
     <Menu
@@ -238,12 +251,25 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             <div className={MODE_GROUP_LABEL_CLASS_NAME}>
               {uiText("Mode", undefined, undefined, uiLocale)}
             </div>
+            {geminiPermissionModeBusy ? (
+              <div className="px-2 pb-1.5 text-xs text-muted-foreground">
+                {uiText(
+                  "Gemini permission mode can be changed when the session is idle.",
+                  undefined,
+                  undefined,
+                  uiLocale,
+                )}
+              </div>
+            ) : null}
             <MenuRadioGroup
-              value={usesNativePermissionModes ? claudePermissionMode : props.interactionMode}
+              value={
+                usesNativePermissionModes ? (nativePermissionMode ?? null) : props.interactionMode
+              }
+              disabled={geminiPermissionModeBusy}
               onValueChange={(value) => {
-                if (!value) return;
+                if (!value || geminiPermissionModeBusy) return;
                 if (usesNativePermissionModes) {
-                  if (isClaudePermissionMode(value) && value !== claudePermissionMode) {
+                  if (isClaudePermissionMode(value) && value !== nativePermissionMode) {
                     props.onNativePermissionModeChange(value);
                   }
                   return;
@@ -363,6 +389,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
 // Finite source-owned labels/helpers only; no received or user data.
 const UI_PRESENTATION_SOURCES = {
   CLAUDE_PERMISSION_MODE_OPTIONS,
+  GEMINI_PERMISSION_MODE_OPTIONS,
   GROK_PERMISSION_MODE_OPTIONS,
   RUNTIME_MODE_OPTIONS,
   threadGoalStatusLabel,

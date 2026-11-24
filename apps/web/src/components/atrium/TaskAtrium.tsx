@@ -245,6 +245,8 @@ function providerLabel(provider: string): string {
       return "Claude";
     case "codex":
       return "Codex";
+    case "gemini":
+      return "Gemini";
     case "grok":
       return "Grok";
     case "opencode":

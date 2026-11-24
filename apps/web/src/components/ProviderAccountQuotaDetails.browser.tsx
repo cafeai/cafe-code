@@ -121,6 +121,21 @@ describe("ProviderAccountQuotaDetails bounds", () => {
     );
     await expect.element(page.getByText("82% left", { exact: true })).toBeVisible();
     await expect.element(page.getByText("Weekly · Fable", { exact: true })).not.toBeInTheDocument();
+    await mounted.rerender(
+      <ProviderAccountQuotaDetails
+        layout="settings"
+        selectedModel="claude-opus-5-5"
+        sessionQuota={{
+          status: "available",
+          report: { ...report, observedAt: new Date(Date.now() - 31 * 60_000).toISOString() },
+          stale: true,
+        }}
+      />,
+    );
+    await expect
+      .element(page.getByText("Last reported quota is very out of date.", { exact: true }))
+      .toBeVisible();
+    await expect.element(page.getByText("Last reported: 82% left", { exact: true })).toBeVisible();
   });
 
   it.each(["compact", "popover", "settings"] as const)(

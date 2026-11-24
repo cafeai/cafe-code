@@ -23,6 +23,7 @@
 import { AxiomDriver, type AxiomDriverEnv } from "./Drivers/AxiomDriver.ts";
 import { ClaudeDriver, type ClaudeDriverEnv } from "./Drivers/ClaudeDriver.ts";
 import { CodexDriver, type CodexDriverEnv } from "./Drivers/CodexDriver.ts";
+import { GeminiDriver, type GeminiDriverEnv } from "./Drivers/GeminiDriver.ts";
 import { GrokDriver, type GrokDriverEnv } from "./Drivers/GrokDriver.ts";
 import { OpenCodeDriver, type OpenCodeDriverEnv } from "./Drivers/OpenCodeDriver.ts";
 import type { AnyProviderDriver } from "./ProviderDriver.ts";
@@ -36,6 +37,7 @@ export type BuiltInDriversEnv =
   | AxiomDriverEnv
   | ClaudeDriverEnv
   | CodexDriverEnv
+  | GeminiDriverEnv
   | GrokDriverEnv
   | OpenCodeDriverEnv;
 
@@ -47,6 +49,7 @@ export type BuiltInDriversEnv =
 export const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>> = [
   CodexDriver,
   ClaudeDriver,
+  GeminiDriver,
   GrokDriver,
   OpenCodeDriver,
   AxiomDriver,

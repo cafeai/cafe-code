@@ -161,6 +161,7 @@ interface SessionRailProps {
     | undefined;
   readonly usage: ContextWindowSnapshot | null;
   readonly rateLimits?: ServerProviderAccountRateLimits | null | undefined;
+  readonly showAntigravityQuotaStatus?: boolean | undefined;
   readonly quotaContext?: ProviderQuotaContext | undefined;
   readonly usageResetAction?: ReactNode;
   readonly subagentConcurrency?: SubagentConcurrencyPresentation | null;
@@ -283,6 +284,7 @@ export const SessionRail = memo(
           <ContextWindowDetails
             usage={props.usage}
             rateLimits={props.rateLimits}
+            showAntigravityQuotaStatus={props.showAntigravityQuotaStatus}
             sessionQuota={sessionQuota}
             selectedModel={props.quotaContext?.selectedModel}
             usageResetAction={props.usageResetAction}

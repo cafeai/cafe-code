@@ -43,6 +43,7 @@ function renderContextCapacity(parts: (string | ReactNode)[]): ReactNode {
 export function ContextWindowDetails(props: {
   readonly usage: ContextWindowSnapshot | null | undefined;
   readonly rateLimits?: ServerProviderAccountRateLimits | null | undefined;
+  readonly showAntigravityQuotaStatus?: boolean | undefined;
   readonly sessionQuota?: ProviderQuotaState | undefined;
   readonly selectedModel?: string | null | undefined;
   readonly layout?: "popover" | "panel";
@@ -58,18 +59,19 @@ export function ContextWindowDetails(props: {
   const layout = props.layout ?? "popover";
   const quota = uiPresentation.formatCodexRateLimitPresentation(props.rateLimits, {
     compactDetails: true,
+    trackQuotaAge: props.showAntigravityQuotaStatus,
   });
   const usedPercentage = usage ? formatPercentage(usage.usedPercentage) : null;
   const hasUsage = usage !== null;
-  const hasRateLimits = quota !== null;
   const hasSessionQuota = props.sessionQuota !== undefined;
+  const hasAccountQuota = quota !== null || hasSessionQuota || props.showAntigravityQuotaStatus;
   const hasSubagentLimit = formatSubagentConcurrencyLimit(props.subagentConcurrency) !== null;
   const hasContextOverride =
     formatCodexContextWindowOverride(props.codexContextWindow, uiLocale) !== null;
   const hasProcessed = usage !== null && (usage.totalProcessedTokens ?? 0) > usage.usedTokens;
   const generationRate = usage?.generationRate;
 
-  if (!hasUsage && !hasRateLimits && !hasSubagentLimit && !hasContextOverride && !hasSessionQuota) {
+  if (!hasUsage && !hasAccountQuota && !hasSubagentLimit && !hasContextOverride) {
     return (
       <p className="text-ui text-subtle-foreground">
         {uiText("Waiting for usage from this chat.", undefined, undefined, uiLocale)}
@@ -189,7 +191,7 @@ export function ContextWindowDetails(props: {
         </div>
       ) : null}
 
-      {quota || hasSessionQuota ? (
+      {hasAccountQuota ? (
         <div
           className={cn(
             "text-xs",
@@ -200,6 +202,7 @@ export function ContextWindowDetails(props: {
         >
           <ProviderAccountQuotaDetails
             presentation={quota}
+            showAntigravityQuotaStatus={props.showAntigravityQuotaStatus}
             sessionQuota={props.sessionQuota}
             selectedModel={props.selectedModel}
             layout={layout}

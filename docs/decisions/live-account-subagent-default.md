@@ -1,8 +1,11 @@
 # Live account subagent-default inheritance
 
+Partially superseded by: [Nonblocking subagent-limit preferences](nonblocking-subagent-limit-preferences.md) for delivery when native numeric support is unconfirmed; historical rationale below is retained.
+
 Decision status: Accepted
 Created: 2026-10-10 17:22:53 JST (UTC+0900)
-Last updated: 2026-10-10 18:03:44 JST (UTC+0900)
+Last updated: 2026-11-15 16:01:39 JST (UTC+0900)
+Historical implementation checkpoint: 2026-10-10 18:03:44 JST (UTC+0900)
 Decision authority: User requested account-default changes to apply to existing
 chats at the next available safe turn, with per-chat/per-thread overrides taking
 precedence, and authorized implementation and publication to dev.
@@ -10,7 +13,7 @@ Implementation status: Implemented with synthetic regression coverage. Required
 repository-wide checks gate publication; native multi-OS qualification is separate.
 Supersedes: [Per-chat subagent concurrency](per-chat-subagent-concurrency.md),
 only its new-chat-only seeding, account fallback resolution and saved-only label presentation.
-Superseded by: None
+Partially superseded by the nonblocking-preference successor above; other accepted behavior is retained.
 
 ## Context
 

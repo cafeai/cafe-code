@@ -7,6 +7,7 @@ import {
 } from "@cafecode/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { render } from "vitest-browser-react";
+import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime/catalog";
 import { createChatViewFixtureRetirement } from "../chatViewFixtureRetirement.test.fixture";
 import { page } from "vitest/browser";
 import { useProviderQuota, type ProviderQuotaContext } from "./useProviderQuota";
@@ -23,6 +24,9 @@ const { subscribe, connection } = vi.hoisted(() => ({
   connection: vi.fn(),
 }));
 vi.mock("../../environments/runtime", () => ({
+  readEnvironmentConnection: () => null,
+  subscribeEnvironmentConnections: () => () => undefined,
+  resolveEnvironmentHttpUrl: () => null,
   requireEnvironmentConnection: (id: unknown) => {
     connection(id);
     return { client: { server: { subscribeProviderQuota: subscribe } } };
@@ -51,7 +55,9 @@ function Harness({
   return (
     <div>
       <span data-testid="status">{value?.status ?? "absent"}</span>
-      <span data-testid="received">{value?.report?.observedAt ?? "none"}</span>
+      <span data-testid="received" data-stale={value?.stale}>
+        {value?.report?.observedAt ?? "none"}
+      </span>
     </div>
   );
 }
@@ -61,6 +67,7 @@ afterEach(async () => {
   // The exact test owner must finish before mock histories or timer globals
   // can be reused by a later case. onTestFinished alone runs after this hook.
   await retirement.retire();
+  useSavedEnvironmentRuntimeStore.getState().clear(context.environmentId);
   vi.useRealTimers();
   vi.clearAllMocks();
 });
@@ -204,19 +211,38 @@ describe("passive Claude session quota subscription", () => {
       await fixture.own("assertion", () =>
         expect.element(page.getByTestId("status")).toHaveTextContent("loading"),
       );
+      await fixture.own("assertion", () =>
+        expect.element(page.getByTestId("received")).toHaveAttribute("data-stale", "true"),
+      );
       expect(subscribe).toHaveBeenCalledOnce();
       const old = subscribe.mock.calls[0]![1];
       await fixture.own("rerender", () =>
         mounted.rerender(<Harness scope={{ ...scope, connected: false }} />),
       );
-      old(native);
+      old({ report: { ...native.report!, observedAt: "2026-10-10T00:00:00.000Z" } });
       await fixture.own("assertion", () =>
         expect.element(page.getByTestId("status")).toHaveTextContent("offline"),
       );
       await fixture.own("assertion", () =>
-        expect.element(page.getByTestId("received")).toHaveTextContent("none"),
+        expect.element(page.getByTestId("received")).toHaveTextContent(native.report!.observedAt),
       );
       expect(close).toHaveBeenCalledOnce();
+      await fixture.own("rerender", () => mounted.rerender(<Harness scope={scope} />));
+      await fixture.own("subscription", () =>
+        expect.poll(() => subscribe.mock.calls.length).toBe(2),
+      );
+      subscribe.mock.calls[1]![1]({ report: null });
+      await fixture.own("assertion", () =>
+        expect.element(page.getByTestId("received")).toHaveTextContent("none"),
+      );
+      subscribe.mock.calls[1]![1](native);
+      await fixture.own("assertion", () =>
+        expect.element(page.getByTestId("received")).toHaveTextContent(native.report!.observedAt),
+      );
+      useSavedEnvironmentRuntimeStore.getState().patch(context.environmentId, { role: "client" });
+      await fixture.own("assertion", () =>
+        expect.element(page.getByTestId("received")).toHaveTextContent("none"),
+      );
     });
   });
 

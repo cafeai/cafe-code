@@ -17,11 +17,17 @@ export function supportsSubagentConcurrency(
   return compareSemverVersions(version, driver === "codex" ? "0.159.0" : "2.1.217") >= 0;
 }
 
-/** Resolve only Cafe's process override; native config/env is intentionally opaque. */
+/**
+ * Resolve only Cafe's process override; native config/env is intentionally opaque.
+ * Explicit null requests native inheritance, including when a legacy account
+ * config contains a numeric default. Only omission may recover that default;
+ * neither case writes or clears the user's stored configuration.
+ */
 export function resolveConfiguredSubagentLimit(
   requested: number | null | undefined,
   instance: number | undefined,
 ): number | null {
+  if (requested === null) return null;
   const limit = requested ?? instance ?? null;
   if (
     limit !== null &&

@@ -1548,17 +1548,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const persistUnlessThreadRetired = <E, R>(
     threadId: ThreadId,
     effect: Effect.Effect<void, E, R>,
-  ): Effect.Effect<void, E, R> =>
-    withThreadLifecycleLock(
-      threadId,
-      Effect.gen(function* () {
-        const retiredThreadIds = yield* Ref.get(hardDeleteRetiredThreadIds);
-        if (retiredThreadIds.has(threadId)) {
-          return;
-        }
-        yield* effect;
-      }),
-    );
+    options?: { readonly skipIfBusy: true },
+  ): Effect.Effect<void, E, R> => {
+    const persist = Effect.gen(function* () {
+      const retiredThreadIds = yield* Ref.get(hardDeleteRetiredThreadIds);
+      if (retiredThreadIds.has(threadId)) return;
+      yield* effect;
+    });
+    if (options?.skipIfBusy !== true) return withThreadLifecycleLock(threadId, persist);
+
+    // A heartbeat may skip a busy stripe until a later observation. Writes
+    // still take the exact lifecycle lock and recheck permanent retirement.
+    const semaphore = threadLifecycleSemaphores[threadLifecycleSemaphoreIndex(threadId)];
+    return semaphore === undefined
+      ? Effect.die("Missing provider lifecycle lock stripe")
+      : semaphore.withPermitsIfAvailable(1)(persist).pipe(Effect.asVoid);
+  };
 
   const runAdapterEventSubscription = (
     id: ProviderInstanceId,
@@ -1964,6 +1969,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           threadId,
           provider: resolvedProvider,
         };
+        if (input.interactionMode === "gemini-bypass" && resolvedProvider !== "gemini") {
+          return yield* toValidationError(
+            "ProviderService.startSession",
+            "Gemini Bypass permissions require a Gemini provider.",
+          );
+        }
         if (input.codexContextWindowOverride !== undefined && resolvedProvider !== "codex") {
           return yield* toValidationError(
             "ProviderService.startSession",
@@ -2517,6 +2528,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           : {}),
       });
       metricProvider = routed.adapter.provider;
+      if (input.interactionMode === "gemini-bypass" && routed.adapter.provider !== "gemini") {
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "Gemini Bypass permissions require a Gemini provider.",
+        );
+      }
       if (input.deliveryPriority !== undefined && routed.adapter.provider !== "claudeAgent") {
         return yield* toValidationError(
           "ProviderService.sendTurn",
@@ -2658,8 +2675,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       // from the live adapter inventory, never the durable binding. Pin it
       // through native admission so a later root cannot become the recipient.
       const completedRoot = getCodexRootTurnCompletion(activeSession);
+      const admitsGeminiFollowUp =
+        routed.adapter.provider !== "gemini" ||
+        ((input.interactionMode ?? "default") === (activeSession?.interactionMode ?? "default") &&
+          (input.modelSelection === undefined ||
+            (input.modelSelection.instanceId === routed.instanceId &&
+              input.modelSelection.model === activeSession?.model &&
+              (input.modelSelection.options?.length ?? 0) === 0)));
       if (
         routed.adapter.capabilities.liveSteer === "supported" &&
+        admitsGeminiFollowUp &&
         input.allowActiveTurnSteerFallback !== false &&
         input.expectedCompletedRootTurnId === undefined &&
         input.expectedFailedRoot === undefined &&
@@ -3438,78 +3463,84 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     sessions: ReadonlyArray<ProviderSession>,
     observedAdapters: ReadonlyMap<ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>>,
   ) =>
-    runtimeOwnerHeartbeatSemaphore.withPermit(
-      Effect.gen(function* () {
-        const observedAtMs = yield* Clock.currentTimeMillis;
-        const dueSessions = sessions.filter((session) => {
-          if (session.status !== "running" || session.activeTurnId === undefined) {
-            return false;
-          }
-          const lastWrittenAt = runtimeOwnerHeartbeatWrittenAt.get(session.threadId);
-          return (
-            lastWrittenAt === undefined ||
-            observedAtMs - lastWrittenAt >= PROVIDER_RUNTIME_OWNER_HEARTBEAT_INTERVAL_MS
-          );
-        });
+    // Inventory is a prerequisite for every provider's turns. A concurrent
+    // heartbeat already owns this pass, so callers can use their observed
+    // inventory immediately and let the periodic worker refresh future leases.
+    runtimeOwnerHeartbeatSemaphore
+      .withPermitsIfAvailable(1)(
+        Effect.gen(function* () {
+          const observedAtMs = yield* Clock.currentTimeMillis;
+          const dueSessions = sessions.filter((session) => {
+            if (session.status !== "running" || session.activeTurnId === undefined) {
+              return false;
+            }
+            const lastWrittenAt = runtimeOwnerHeartbeatWrittenAt.get(session.threadId);
+            return (
+              lastWrittenAt === undefined ||
+              observedAtMs - lastWrittenAt >= PROVIDER_RUNTIME_OWNER_HEARTBEAT_INTERVAL_MS
+            );
+          });
 
-        // Heartbeats update one bounded runtime row per live turn. They never
-        // append orchestration events, provider text, or credentials, and they
-        // are serialized to avoid creating SQLite write contention under a
-        // large set of long-running sessions.
-        yield* Effect.forEach(
-          dueSessions,
-          (session) =>
-            persistUnlessThreadRetired(
-              session.threadId,
-              Effect.gen(function* () {
-                const instanceId = session.providerInstanceId;
-                if (instanceId === undefined) return;
-                const currentAdapter = yield* registry.getByInstance(instanceId);
-                if (currentAdapter !== observedAdapters.get(instanceId)) return;
-                const binding = Option.getOrUndefined(
-                  yield* directory.getBinding(session.threadId),
-                );
-                const payload = binding?.runtimePayload;
-                // Inventory can finish after Stop, orphan repair, or a newer
-                // turn start. Never let that delayed heartbeat resurrect the
-                // old turn or borrow a replacement/foreign runtime's lease.
-                if (
-                  binding === undefined ||
-                  binding.status !== "running" ||
-                  binding.provider !== session.provider ||
-                  binding.providerInstanceId !== instanceId ||
-                  !isRecord(payload) ||
-                  payload.activeTurnId !== session.activeTurnId ||
-                  // The adapter and daemon can survive a cold native-session
-                  // replacement. Their identities cannot authenticate an old
-                  // sampled generation, even if native turn IDs collide.
-                  (payload.subagentRuntimeId != null &&
-                    payload.subagentRuntimeId !== session.subagentRuntimeId) ||
-                  (payload.runtimeOwnerId !== undefined &&
-                    payload.runtimeOwnerId !== runtimeOwner.runtimeOwnerId) ||
-                  (payload.runtimeOwnerPid !== undefined &&
-                    payload.runtimeOwnerPid !== runtimeOwner.runtimeOwnerPid) ||
-                  (payload.runtimeOwnerStartedAt !== undefined &&
-                    payload.runtimeOwnerStartedAt !== runtimeOwner.runtimeOwnerStartedAt)
-                ) {
-                  return;
-                }
-                yield* upsertSessionBinding(session, session.threadId);
-              }),
-            ).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("provider.runtime.owner-heartbeat-write-failed", {
-                  threadId: session.threadId,
-                  provider: session.provider,
-                  providerInstanceId: session.providerInstanceId,
-                  cause: Cause.pretty(cause),
+          // Heartbeats update one bounded runtime row per live turn. They never
+          // append orchestration events, provider text, or credentials, and they
+          // are serialized to avoid creating SQLite write contention under a
+          // large set of long-running sessions.
+          yield* Effect.forEach(
+            dueSessions,
+            (session) =>
+              persistUnlessThreadRetired(
+                session.threadId,
+                Effect.gen(function* () {
+                  const instanceId = session.providerInstanceId;
+                  if (instanceId === undefined) return;
+                  const currentAdapter = yield* registry.getByInstance(instanceId);
+                  if (currentAdapter !== observedAdapters.get(instanceId)) return;
+                  const binding = Option.getOrUndefined(
+                    yield* directory.getBinding(session.threadId),
+                  );
+                  const payload = binding?.runtimePayload;
+                  // Inventory can finish after Stop, orphan repair, or a newer
+                  // turn start. Never let that delayed heartbeat resurrect the
+                  // old turn or borrow a replacement/foreign runtime's lease.
+                  if (
+                    binding === undefined ||
+                    binding.status !== "running" ||
+                    binding.provider !== session.provider ||
+                    binding.providerInstanceId !== instanceId ||
+                    !isRecord(payload) ||
+                    payload.activeTurnId !== session.activeTurnId ||
+                    // The adapter and daemon can survive a cold native-session
+                    // replacement. Their identities cannot authenticate an old
+                    // sampled generation, even if native turn IDs collide.
+                    (payload.subagentRuntimeId != null &&
+                      payload.subagentRuntimeId !== session.subagentRuntimeId) ||
+                    (payload.runtimeOwnerId !== undefined &&
+                      payload.runtimeOwnerId !== runtimeOwner.runtimeOwnerId) ||
+                    (payload.runtimeOwnerPid !== undefined &&
+                      payload.runtimeOwnerPid !== runtimeOwner.runtimeOwnerPid) ||
+                    (payload.runtimeOwnerStartedAt !== undefined &&
+                      payload.runtimeOwnerStartedAt !== runtimeOwner.runtimeOwnerStartedAt)
+                  ) {
+                    return;
+                  }
+                  yield* upsertSessionBinding(session, session.threadId);
                 }),
+                { skipIfBusy: true },
+              ).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("provider.runtime.owner-heartbeat-write-failed", {
+                    threadId: session.threadId,
+                    provider: session.provider,
+                    providerInstanceId: session.providerInstanceId,
+                    cause: Cause.pretty(cause),
+                  }),
+                ),
               ),
-            ),
-          { concurrency: 1, discard: true },
-        );
-      }),
-    );
+            { concurrency: 1, discard: true },
+          );
+        }),
+      )
+      .pipe(Effect.asVoid);
 
   const listSessions: ProviderServiceShape["listSessions"] = Effect.fn("listSessions")(
     function* () {

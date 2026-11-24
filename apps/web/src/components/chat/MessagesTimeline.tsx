@@ -1795,12 +1795,43 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       ) : null}
       {row.kind === "provider-summary" ? <ProviderSummaryTimelineRow row={row} /> : null}
       {row.kind === "question-resolution" ? <QuestionResolutionTimelineRow row={row} /> : null}
+      {row.kind === "subagent-limit-warning" ? <SubagentLimitWarningTimelineRow row={row} /> : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "visualization" ? <VisualizationTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
     </div>
   );
 });
+
+/**
+ * An unconfirmed optional override must be visible without opening Work Log.
+ * Only the validated requested number enters fixed Cafe copy. This notice
+ * deliberately says nothing about a native default, adopted cap or retry.
+ */
+function SubagentLimitWarningTimelineRow({
+  row,
+}: {
+  row: Extract<TimelineRow, { kind: "subagent-limit-warning" }>;
+}) {
+  const uiLocale = useUiLocale();
+  return (
+    <section
+      role="note"
+      className="flex items-start gap-2 rounded-lg border border-border-subtle bg-card px-3 py-2 text-sm text-muted-foreground"
+      data-primary-subagent-limit-warning="true"
+    >
+      <CircleAlertIcon className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+      <p>
+        {uiText(
+          "Requested subagent limit: {limit}. This override was not applied because support could not be confirmed. The chat continues with the current provider policy. Your saved preference is unchanged.",
+          { limit: uiFormatNumber(row.requestedLimit, undefined, uiLocale) },
+          undefined,
+          uiLocale,
+        )}
+      </p>
+    </section>
+  );
+}
 
 /**
  * MCP completion belongs in the primary conversation even while every Work

@@ -35,7 +35,11 @@ type AcpClientRaw = {
    * replay. Slow or absent consumers never block registered ACP handlers.
    */
   readonly notifications: Stream.Stream<AcpProtocol.AcpIncomingNotification>;
-  readonly request: (method: string, payload: unknown) => Effect.Effect<unknown, AcpError.AcpError>;
+  readonly request: (
+    method: string,
+    payload: unknown,
+    admission?: AcpProtocol.AcpRequestQueueAdmission,
+  ) => Effect.Effect<unknown, AcpError.AcpError>;
   readonly notify: (method: string, payload: unknown) => Effect.Effect<void, AcpError.AcpError>;
 };
 

@@ -4,7 +4,11 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { query, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
-import { createObservedClaudeQuery, makeClaudeQueryProcessObserver } from "./claudeQueryProcess.ts";
+import {
+  createObservedClaudeQuery,
+  makeClaudeQueryProcessObserver,
+  resolveClaudeMcpServersDelivery,
+} from "./claudeQueryProcess.ts";
 
 vi.mock("node:child_process", () => ({ spawn: vi.fn() }));
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({ query: vi.fn(() => ({})) }));
@@ -23,6 +27,29 @@ function childFixture(pid: number | undefined = 123) {
 }
 
 describe("Claude exact query process observation", () => {
+  it("uses private MCP initialize delivery only for qualified stable executable versions", () => {
+    for (const version of [
+      undefined,
+      null,
+      "",
+      "unknown",
+      "2.1.325",
+      "2.1.326-rc.1",
+      "2.2.0-beta.1",
+      "2.1.326+build",
+      "v2.1.326",
+      "02.1.326",
+      "2.1",
+      " 2.1.326",
+      "2.1.326\n",
+      "9007199254740992.1.326",
+      "2.1.326" + "0".repeat(64),
+    ])
+      expect(resolveClaudeMcpServersDelivery(version)).toBe("argv");
+    for (const version of ["2.1.326", "2.1.327", "2.2.0", "3.0.0"])
+      expect(resolveClaudeMcpServersDelivery(version)).toBe("initialize");
+  });
+
   it("preserves SDK launch arguments, environment, cwd, forwarded signal and hidden piped stdio", async () => {
     const child = childFixture();
     vi.mocked(spawn).mockReturnValue(child as unknown as ChildProcessWithoutNullStreams);

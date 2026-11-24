@@ -1,5 +1,7 @@
 # Encrypted relay access
 
+Last updated: 2026-11-15 03:21:57 JST (UTC+0900)
+
 Cafe supports outbound relay hosting, relay connections in Saved environments,
 and a trusted browser viewer. Direct connections keep their existing pairing
 codes and password flow. The relay membership mesh remains operator controlled.
@@ -7,6 +9,32 @@ codes and password flow. The relay membership mesh remains operator controlled.
 The implementation is in `packages/relay`, `apps/relay`,
 `apps/server/src/relay`, and `apps/web/src/environments/relay`. See
 [the trust and protocol decision](decisions/encrypted-relay-pilot.md).
+
+Node readiness is published after its reload and retirement handlers are installed.
+Node shutdown stops both public and mesh admission before asynchronous cleanup.
+Concurrent close callers share one complete shutdown operation, including the
+actual close event of every admitted native TCP socket. Connection budgets are
+released only by those native events; a client-side close or the HTTP listener's
+close callback alone does not prove that the node has released its socket owners.
+
+The legacy host-work solver hashes the unchanged 37-byte preimage with Node's
+[one-shot SHA-256 API](https://nodejs.org/download/release/v24.22.1/docs/api/crypto.html#cryptohashalgorithm-data-options).
+It retains the four independent subpuzzles, random challenge, trial/time bounds
+and native worker limits defined in
+[`HOST_WORK`](../packages/relay/src/hostWork.ts). A proof is still independently
+verified and admitted only after that exact worker exits successfully.
+Unexpected refusal logs contain only fixed retirement categories, bounded timing,
+and native lifecycle/verification state; they never contain challenge bytes,
+solutions, native output or raw errors. The first retirement observation is frozen
+before requesting termination and logged only after native exit. An online event
+does not prove that hashing began, and a missing proof does not identify which
+solver limit was reached. Ordinary explicit lifetime cancellation stays quiet.
+
+The native solver correctness test uses one independently qualified public
+difficulty-17 challenge and checks its four exact first solutions, prefix and
+WebCrypto interoperability. Its unchanged worker and deadlines still execute;
+random search-cost sampling is separate from this deterministic correctness
+check. Production challenges remain random and retain every work bound.
 
 Proof of work is disabled by default. Hosts still obtain signed, bounded
 ten-minute reservations and prove their admission identity. Updated hosts request
@@ -287,6 +315,27 @@ available. Preserve network identity, root/host/device keys and database history
 Do not roll back an accepted membership revision or delete another owner's state.
 
 ## Qualification commands and limits
+
+The POSIX three-process integration test has a 30-second test allowance for
+cold Node startup, membership reload and authenticated discovery. Its separate
+two-second native cleanup guard, production budgets and CI scheduling remain
+unchanged. Timeout diagnostics report bounded phases and counts, never private
+configuration, native output or credentials.
+
+The paced HTTP upload/download fixture compares the complete received body with
+the original bytes directly. Its payload, native pacing, full-body read,
+status/length/circuit assertions and five-second test guard remain unchanged.
+Passive failure diagnostics freeze before native retirement and include only
+fixed phases, bounded timing and the completed read's byte count. An unfinished
+read has no byte count; these observations do not explain an earlier timeout.
+
+Application-router fixtures use the private reader's native canonical-path API
+for their same scoped temporary directory. They retain the original native
+listener/viewer acquisitions and their adoption/close joins across retirement,
+including handles that arrive after cancellation. Fixed failure phases freeze
+before cleanup. Requests, authorization assertions and enclosing test budgets
+remain unchanged; these fixture repairs grant no production file or provider
+authority.
 
 ### cafecode.sh edge deployment
 

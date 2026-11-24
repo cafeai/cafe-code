@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   providerTurnConfigurationCommand,
   snapshotProviderTurnConfiguration,
+  withResolvedGeminiConfiguration,
 } from "./providerTurnConfiguration.ts";
 
 const instanceId = ProviderInstanceId.make("codex_work");
@@ -41,6 +42,24 @@ const request: ProviderSendTurnInput = {
 };
 
 describe("snapshotProviderTurnConfiguration", () => {
+  it("records an acknowledged Gemini effort even when the composer delegates it", () => {
+    const snapshot = snapshotProviderTurnConfiguration({
+      session: { ...session, provider: ProviderDriverKind.make("gemini") },
+      request: { threadId, modelSelection: { instanceId, model: "gemini-4-neon" } },
+      instanceId,
+      providerDisplayName: "Gemini work",
+      settingsSource: "submitted",
+    });
+    expect(snapshot).toBeDefined();
+    expect(
+      withResolvedGeminiConfiguration(snapshot!, { model: "gemini-4-neon", effort: "xhigh" }),
+    ).toMatchObject({
+      providerDisplayName: "Gemini work",
+      model: "gemini-4-neon",
+      effort: "xhigh",
+    });
+  });
+
   it("records a separate Claude Ultracode request without changing native effort", () => {
     for (const ultracode of [true, false]) {
       const snapshot = snapshotProviderTurnConfiguration({

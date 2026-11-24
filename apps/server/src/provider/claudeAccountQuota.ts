@@ -2,7 +2,11 @@ import * as ProviderJsonSchema from "effect/Schema";
 import * as Data from "effect/Data";
 import * as ProviderDateTime from "effect/DateTime";
 import { randomUUID } from "node:crypto";
-import type { ProviderSessionQuotaReport } from "@cafecode/contracts";
+import type {
+  ProviderSessionQuotaReport,
+  ProviderSessionQuotaResult,
+  ServerProviderAuth,
+} from "@cafecode/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -10,6 +14,7 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { mapClaudeAccountQuotaReport } from "./claudeSessionQuota.ts";
+import type { ProviderAccountQuotaReading } from "./ProviderDriver.ts";
 import { terminateProbeChild } from "./providerSnapshot.ts";
 
 const encodeProviderJsonString = ProviderJsonSchema.encodeUnknownSync(
@@ -169,30 +174,26 @@ const readClaudeAccountQuotaInEnvironment = (
     );
   });
 
-const readClaudeAccountQuotaFromEnvironment = (
-  binaryPath: string,
-  resolveEnvironment: Effect.Effect<NodeJS.ProcessEnv>,
-) =>
-  Effect.gen(function* () {
-    // Cold macOS login selection may consult two local auth stores. Each already
-    // has its own four-second native budget and joined termination. Give that
-    // existing selection path a separate finite envelope; it must not consume
-    // the independent four-second get_usage allowance before its child starts.
-    // No timeout authorizes a different account, an initialize frame or a prompt.
-    const environment = yield* resolveEnvironment.pipe(
-      Effect.timeout("9 seconds"),
-      Effect.catchTag("TimeoutError", () => unavailable("authentication-selection", "deadline")),
-      Effect.catchCause((cause) =>
-        Cause.hasInterrupts(cause)
-          ? Effect.interrupt
-          : unavailable("authentication-selection", "failure"),
-      ),
-    );
-    return environment ? yield* readClaudeAccountQuotaInEnvironment(binaryPath, environment) : null;
-  });
+const selectClaudeQuotaEnvironment = (resolveEnvironment: Effect.Effect<NodeJS.ProcessEnv>) =>
+  // Cold macOS login selection may consult two local auth stores. Each already
+  // has its own four-second native budget and joined termination. Give that
+  // existing selection path a separate finite envelope; it must not consume
+  // the independent four-second get_usage allowance before its child starts.
+  // No timeout authorizes a different account, an initialize frame or a prompt.
+  resolveEnvironment.pipe(
+    Effect.timeout("9 seconds"),
+    Effect.catchTag("TimeoutError", () => unavailable("authentication-selection", "deadline")),
+    Effect.catchCause((cause) =>
+      Cause.hasInterrupts(cause)
+        ? Effect.interrupt
+        : unavailable("authentication-selection", "failure"),
+    ),
+  );
 
-export const readClaudeAccountQuota = (binaryPath: string, environment: NodeJS.ProcessEnv) =>
-  readClaudeAccountQuotaFromEnvironment(binaryPath, Effect.succeed(environment));
+export const readClaudeAccountQuota = readClaudeAccountQuotaInEnvironment;
+
+const NO_ACCOUNT_QUOTA: ProviderSessionQuotaResult = { report: null };
+type LoginObservation = Pick<ServerProviderAuth, "status" | "email" | "type">;
 
 /** Per-instance, shared single-flight cache includes unavailable and interrupted
  * exits for the full TTL. Cancelling/reopening a view or reconnecting cannot
@@ -203,13 +204,92 @@ export const makeClaudeAccountQuotaReader = Effect.fn("makeClaudeAccountQuotaRea
   resolveEnvironment: Effect.Effect<NodeJS.ProcessEnv>,
 ) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  let generation = 0;
+  let selectedEnvironment: NodeJS.ProcessEnv | undefined;
+  let observedLogin: LoginObservation | undefined;
+  let lastReport: ProviderSessionQuotaReport | null = null;
+
+  const retireReading = () => {
+    generation++;
+    lastReport = null;
+  };
+  const bindReading = (report: ProviderSessionQuotaReport, stale: boolean) => {
+    const readingGeneration = generation;
+    return {
+      report,
+      ...(stale ? { stale: true as const } : {}),
+      isCurrent: () => readingGeneration === generation,
+    };
+  };
+  const readLastReport = (): ProviderAccountQuotaReading =>
+    lastReport ? bindReading(lastReport, true) : NO_ACCOUNT_QUOTA;
+  const adoptEnvironment = (environment: NodeJS.ProcessEnv) => {
+    // The shared selector returns stable objects for its exact login sources.
+    // Never inspect or compare credentials from the environment itself.
+    if (selectedEnvironment && selectedEnvironment !== environment) retireReading();
+    selectedEnvironment = environment;
+  };
+  const observeAuthentication = (auth: LoginObservation) =>
+    Effect.sync(() => {
+      if (auth.status === "unknown") return;
+      if (
+        !observedLogin ||
+        observedLogin.status !== auth.status ||
+        observedLogin.email !== auth.email ||
+        observedLogin.type !== auth.type
+      ) {
+        retireReading();
+        observedLogin = { status: auth.status, email: auth.email, type: auth.type };
+      }
+    });
   const cache = yield* Cache.make({
     capacity: 1,
     timeToLive: "60 seconds",
     lookup: () =>
-      readClaudeAccountQuotaFromEnvironment(binaryPath, resolveEnvironment).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-      ),
+      Effect.gen(function* () {
+        const selectingGeneration = generation;
+        const environment = yield* selectClaudeQuotaEnvironment(resolveEnvironment);
+        if (selectingGeneration !== generation)
+          return { generation: selectingGeneration, reading: NO_ACCOUNT_QUOTA };
+
+        // An inconclusive selection may still display a prior observation from
+        // this instance. Only a successful selection authorizes native work.
+        if (environment) adoptEnvironment(environment);
+        const readingGeneration = generation;
+        const fresh = environment
+          ? yield* readClaudeAccountQuotaInEnvironment(binaryPath, environment)
+          : null;
+        // A sign-out or selected login change can occur while the native child
+        // is running. Neither its result nor the saved level can cross that fence.
+        if (readingGeneration !== generation)
+          return { generation: readingGeneration, reading: NO_ACCOUNT_QUOTA };
+        if (fresh) lastReport = fresh;
+        return {
+          generation: readingGeneration,
+          reading: fresh ? bindReading(fresh, false) : readLastReport(),
+        };
+      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner)),
   });
-  return Cache.get(cache, "usage");
+
+  return {
+    observeEnvironment: (environment: NodeJS.ProcessEnv) =>
+      Effect.sync(() => adoptEnvironment(environment)),
+    observeAuthentication,
+    retireReading,
+    // Preserve the original shared retry floor even after the cached entry
+    // loses its presentation authority. Only the next admitted read can renew it.
+    read: Effect.uninterruptibleMask((restore) =>
+      restore(Cache.get(cache, "usage")).pipe(
+        Effect.map((entry): ProviderAccountQuotaReading =>
+          entry.generation === generation ? entry.reading : NO_ACCOUNT_QUOTA,
+        ),
+        // The restored lookup still joins native cleanup on caller cancel.
+        // A later caller may receive that cached interrupt without itself
+        // being cancelled. Give it the prior reading without retrying the probe.
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause) ? Effect.sync(readLastReport) : Effect.failCause(cause),
+        ),
+      ),
+    ),
+  };
 });

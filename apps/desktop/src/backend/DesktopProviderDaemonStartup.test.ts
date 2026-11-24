@@ -8,7 +8,7 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/unstable/process";
-import type { ProviderDaemonHealth } from "@cafecode/contracts";
+import type { ProviderDaemonStartupReadiness } from "@cafecode/contracts";
 import { makeProviderDaemonStartupProgressTracker } from "@cafecode/shared/backendStartupProgress";
 
 import {
@@ -36,7 +36,9 @@ function ownedChild(
 }
 
 const endpoint = { httpBaseUrl: "http://127.0.0.1:1", token: "synthetic-test-token" };
-const health: ProviderDaemonHealth = {
+const health: ProviderDaemonStartupReadiness = {
+  readinessProtocol: 1,
+  journalState: "ready",
   ok: true,
   mode: "provider-daemon",
   pid: 123,
@@ -44,9 +46,6 @@ const health: ProviderDaemonHealth = {
   version: "fixture",
   protocolVersion: 1,
   startedAt: "1970-01-01T00:00:00.000Z",
-  activeSessionCount: 0,
-  configuredInstanceCount: 0,
-  eventCursor: 0,
 };
 const bytes = (value: string) => new TextEncoder().encode(value);
 
@@ -113,15 +112,39 @@ describe("owned provider daemon startup", () => {
         );
         const tracker = makeProviderDaemonStartupProgressTracker(30_000);
         const child = ownedChild(Effect.succeed(true), () => Effect.void);
+        const requestStarted = yield* Deferred.make<void>();
+        let observedSignal: AbortSignal | undefined;
+        let aborted = false;
+        let releaseRequest: (() => void) | undefined;
+        // Own the held request before admission so a failed assertion or hard
+        // cancellation cannot retain its synthetic pending continuation.
+        yield* Effect.addFinalizer(() => Effect.sync(() => releaseRequest?.()));
         const result = yield* waitForOwnedProviderDaemonHealth(
           endpoint,
           tracker,
           elapsedMs,
           child,
-          () => new Promise(() => {}),
+          (_endpoint, signal) =>
+            new Promise((resolve, reject) => {
+              observedSignal = signal;
+              const onAbort = () => {
+                aborted = true;
+                reject(new Error("Synthetic exact-request cancellation"));
+              };
+              releaseRequest = () => {
+                signal?.removeEventListener("abort", onAbort);
+                resolve(health);
+              };
+              signal?.addEventListener("abort", onAbort, { once: true });
+              Effect.runSync(Deferred.succeed(requestStarted, undefined));
+            }),
         ).pipe(Effect.exit, Effect.forkScoped);
+        yield* Deferred.await(requestStarted);
         yield* TestClock.adjust(Duration.seconds(30));
         assert.isTrue((yield* Fiber.join(result))._tag === "Failure");
+        assert.isDefined(observedSignal, "the absolute owner must reach its exact probe");
+        assert.isTrue(observedSignal?.aborted);
+        assert.isTrue(aborted);
         assert.equal(tracker.deadlineMs, 30_000);
       }),
     ),

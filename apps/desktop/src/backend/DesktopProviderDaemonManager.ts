@@ -7,16 +7,19 @@ import {
   PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LEASES_PATH,
   PROVIDER_DAEMON_LIVENESS_PATH,
+  PROVIDER_DAEMON_STARTUP_READINESS_PATH,
   ProviderDaemonBootstrap,
   ProviderDaemonHealth,
   ProviderDaemonLeaseRequest,
   ProviderDaemonLeaseResponse,
   ProviderDaemonLiveness,
+  ProviderDaemonStartupReadiness,
   ProviderDaemonMarker,
   type ProviderDaemonClientConfig,
   type ProviderDaemonHealth as ProviderDaemonHealthValue,
   type ProviderDaemonLeaseResponse as ProviderDaemonLeaseResponseValue,
   type ProviderDaemonLiveness as ProviderDaemonLivenessValue,
+  type ProviderDaemonStartupReadiness as ProviderDaemonStartupReadinessValue,
   type ProviderDaemonMarker as ProviderDaemonMarkerValue,
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
@@ -118,6 +121,10 @@ const decodeProviderDaemonLivenessJson = Schema.decodeUnknownSync(
   Schema.fromJsonString(ProviderDaemonLiveness),
 );
 
+const decodeProviderDaemonStartupReadinessJson = Schema.decodeUnknownSync(
+  Schema.fromJsonString(ProviderDaemonStartupReadiness),
+);
+
 export interface DesktopProviderDaemonSnapshot {
   readonly status: "idle" | "starting" | "running" | "error";
   readonly pid: Option.Option<number>;
@@ -190,8 +197,17 @@ export class DesktopProviderDaemonManager extends Context.Service<
   DesktopProviderDaemonManagerShape
 >()("cafecode/desktop/ProviderDaemonManager") {}
 
+type ProviderDaemonStartupFailurePhase =
+  | "ipc-preparation"
+  | "child-spawn"
+  | "recovery-publication"
+  | "startup-readiness"
+  | "desktop-lease";
+
 class ProviderDaemonSpawnError extends Data.TaggedError("ProviderDaemonSpawnError")<{
   readonly cause: unknown;
+  readonly startupPhase?: ProviderDaemonStartupFailurePhase;
+  readonly startupFailure?: "deadline" | "child-exited" | "identity" | "operation-failed";
 }> {
   override get message() {
     return this.cause instanceof Error
@@ -513,6 +529,29 @@ async function fetchProviderDaemonHealth(
   return decodeProviderDaemonHealthJson(response.body);
 }
 
+/**
+ * Only a fresh private bootstrap owner uses this bounded readiness contract.
+ * Rich health remains the unchanged compatibility/adoption boundary; silently
+ * falling back to it would reintroduce history work into exact-child startup.
+ */
+async function fetchProviderDaemonStartupReadiness(
+  endpoint: ProviderDaemonClientConfig,
+  signal?: AbortSignal,
+): Promise<ProviderDaemonStartupReadinessValue> {
+  const response = await requestProviderDaemonJson(
+    endpoint,
+    PROVIDER_DAEMON_STARTUP_READINESS_PATH,
+    {
+      timeoutMs: 5_000,
+      maxResponseBytes: 16_384,
+      ...(signal === undefined ? {} : { signal }),
+    },
+  );
+  if (response.statusCode < 200 || response.statusCode >= 300)
+    throw new Error("Provider daemon startup readiness was refused.");
+  return decodeProviderDaemonStartupReadinessJson(response.body);
+}
+
 async function fetchProviderDaemonLiveness(
   endpoint: ProviderDaemonClientConfig,
 ): Promise<ProviderDaemonLivenessValue> {
@@ -527,6 +566,7 @@ async function fetchProviderDaemonLiveness(
 
 async function issueProviderDaemonLease(
   endpoint: ProviderDaemonClientConfig,
+  signal?: AbortSignal,
 ): Promise<ProviderDaemonLeaseResponseValue> {
   const response = await requestProviderDaemonJson(endpoint, PROVIDER_DAEMON_LEASES_PATH, {
     method: "POST",
@@ -535,6 +575,7 @@ async function issueProviderDaemonLease(
       capabilities: ["health", "events", "rpc"],
     }),
     timeoutMs: 5_000,
+    ...(signal === undefined ? {} : { signal }),
   });
   if (response.statusCode < 200 || response.statusCode >= 300) {
     throw new Error(`provider daemon lease failed with HTTP ${response.statusCode}`);
@@ -683,20 +724,32 @@ const removeProviderDaemonIpcSocket = (
   }).pipe(Effect.ignore);
 };
 
+/**
+ * The existing owned-child health-admission API now returns a distinct small
+ * readiness receipt. Its name does not turn this into rich operational health:
+ * consumers must not publish synthetic session/history counts from this DTO.
+ */
 export const waitForOwnedProviderDaemonHealth = (
   endpoint: ProviderDaemonClientConfig,
   progress: ReturnType<typeof makeProviderDaemonStartupProgressTracker>,
   elapsedMs: Effect.Effect<number>,
   handle: ChildProcessSpawner.ChildProcessHandle,
-  fetchHealth: typeof fetchProviderDaemonHealth = fetchProviderDaemonHealth,
-): Effect.Effect<ProviderDaemonHealthValue, ProviderDaemonSpawnError> =>
+  fetchReadiness: typeof fetchProviderDaemonStartupReadiness = fetchProviderDaemonStartupReadiness,
+): Effect.Effect<ProviderDaemonStartupReadinessValue, ProviderDaemonSpawnError> =>
   Effect.gen(function* () {
     let lastError: unknown = undefined;
+    let childExited = false;
     while ((yield* elapsedMs) < progress.deadlineMs) {
-      if (!(yield* handle.isRunning.pipe(Effect.orElseSucceed(() => true)))) break;
+      if (!(yield* handle.isRunning.pipe(Effect.orElseSucceed(() => true)))) {
+        childExited = true;
+        break;
+      }
       const remainingMs = Math.max(0, progress.deadlineMs - (yield* elapsedMs));
       const healthResult = yield* Effect.tryPromise({
-        try: () => fetchHealth(endpoint),
+        // The enclosing absolute deadline owns cancellation of this exact
+        // request. Never leave a native HTTP observation alive after timeout
+        // or Quit while exact-child retirement/replacement begins.
+        try: (signal) => fetchReadiness(endpoint, signal),
         catch: (cause) => new ProviderDaemonHealthError({ cause }),
       }).pipe(
         Effect.timeout(Duration.millis(remainingMs)),
@@ -712,6 +765,8 @@ export const waitForOwnedProviderDaemonHealth = (
     }
     return yield* new ProviderDaemonSpawnError({
       cause: lastError ?? new Error("Provider daemon did not become ready before timeout."),
+      startupPhase: "startup-readiness",
+      startupFailure: childExited ? "child-exited" : "deadline",
     });
   });
 
@@ -1217,207 +1272,246 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
       return Option.some(endpoint);
     });
 
-  const spawnDaemon = Effect.gen(function* () {
-    const spawnStartedAtMs = performance.now();
-    const socketPath = providerDaemonIpcSocketPath(environment);
-    if (retirementReservation !== undefined && retiredNamespace === undefined) {
-      return yield* Effect.die(
-        new ProviderDaemonStartupRecoveryRequiredError({
-          phase: "compatibility",
-          ...(pendingStartupRecovery === undefined
-            ? {}
-            : { recoveryId: pendingStartupRecovery.id }),
-        }),
-      );
-    }
-    if (retiredNamespace !== undefined) {
-      // A retired daemon unlinks its own socket. Unlike ordinary stale-start
-      // preparation, this path must never blindly remove a replacement entry.
-      yield* Effect.tryPromise({
-        try: retiredNamespace.verifyBeforeSpawn,
-        catch: () => undefined,
-      }).pipe(Effect.catch(() => Effect.die(new ProviderDaemonTerminationUnconfirmedError())));
-    } else {
-      yield* prepareProviderDaemonIpcPath(environment, socketPath);
-    }
-    const token = makeProviderDaemonToken();
-    const cafeMcpPort = yield* Ref.get(cafeMcpPortRef);
-    const rootEndpoint: ProviderDaemonClientConfig = {
-      httpBaseUrl: "http://provider-daemon.local",
-      transport: "ipc",
-      socketPath,
-      token,
-    };
-    const now = DateTime.formatIso(yield* DateTime.now);
-    const bootstrap = {
-      mode: "provider-daemon",
-      startupProgressFd: BACKEND_STARTUP_PROGRESS_FD,
-      transport: "ipc",
-      socketPath,
-      cafeCodeHome: environment.baseDir,
-      configuredCafeCodeHome: environment.configuredBaseDir,
-      dataProfile: environment.dataProfile,
-      ...(cafeMcpPort !== undefined ? { cafeMcpPort } : {}),
-      token,
-      runtimeBuildId,
-      ...Option.match(environment.otlpTracesUrl, {
-        onNone: () => ({}),
-        onSome: (otlpTracesUrl) => ({ otlpTracesUrl }),
-      }),
-    } satisfies ProviderDaemonBootstrap;
-    const bootstrapJson = yield* encodeProviderDaemonBootstrapJson(bootstrap);
-    const command = ChildProcess.make(
-      process.execPath,
-      [environment.backendEntryPath, "provider-daemon", "--bootstrap-fd", "3"],
-      {
-        cwd: environment.backendCwd,
-        env: {
-          ...providerDaemonChildEnvPatch(),
-          ELECTRON_RUN_AS_NODE: "1",
-          [CAFE_CODE_SHELL_ENV_HYDRATED]: "1",
-        },
-        extendEnv: true,
-        stdin: "ignore",
-        // The daemon is intentionally allowed to outlive Electron. Parent-owned
-        // stdout/stderr pipes close when the desktop restarts and can terminate a
-        // still-healthy detached daemon with EPIPE on its next log write. The
-        // daemon owns durable trace/provider logs, so its inherited stdio must be
-        // detached from the desktop lifetime as well.
-        stdout: "ignore",
-        stderr: "ignore",
-        killSignal: "SIGTERM",
-        additionalFds: {
-          fd3: {
-            type: "input",
-            stream: Stream.encodeText(Stream.make(`${bootstrapJson}\n`)),
-          },
-          // Detached stdout/stderr stay ignored. Only this exact child pipe
-          // supplies startup evidence; its reader belongs to this attempt.
-          fd4: { type: "output" },
-        },
-      },
-    );
-    const spawnedAtNanos = yield* Clock.currentTimeNanos;
-    const elapsedMs = Clock.currentTimeNanos.pipe(
-      Effect.map((value) => Number(value - spawnedAtNanos) / 1_000_000),
-    );
-    const feedback: ProviderDaemonStartupProgress[] = [];
-    const progress = makeProviderDaemonStartupProgressTracker(
-      PROVIDER_DAEMON_READINESS_TIMEOUT_MS,
-      (update) => feedback.push(update),
-    );
-    const flushFeedback = Effect.suspend(() =>
-      Effect.forEach(feedback.splice(0), (update) => PubSub.publish(startupUpdates, update)).pipe(
-        Effect.asVoid,
-      ),
-    );
-    // A quit may interrupt readiness, but never the fresh child-to-recovery
-    // handoff. The persistent daemon scope deliberately does not reap a child
-    // when this attempt closes: complete its exact reservation and durable
-    // publication first, or perform bounded exact-handle retirement on an I/O
-    // failure. This fence never applies to adoption or the long readiness wait.
-    const { handle, retireOwnedChild } = yield* Effect.gen(function* () {
-      const handle = yield* spawner.spawn(command).pipe(
-        Effect.mapError((cause) => new ProviderDaemonSpawnError({ cause })),
-        Scope.provide(daemonScope),
-      );
-      progress.start();
-      yield* flushFeedback;
-      yield* handle.getOutputFd(BACKEND_STARTUP_PROGRESS_FD).pipe(
-        Stream.runForEach((bytes) =>
-          Effect.gen(function* () {
-            progress.push(bytes, yield* elapsedMs);
-            yield* flushFeedback;
+  const spawnDaemon = Effect.suspend(() => {
+    let startupPhase: ProviderDaemonStartupFailurePhase = "ipc-preparation";
+    return Effect.gen(function* () {
+      const spawnStartedAtMs = performance.now();
+      const socketPath = providerDaemonIpcSocketPath(environment);
+      if (retirementReservation !== undefined && retiredNamespace === undefined) {
+        return yield* Effect.die(
+          new ProviderDaemonStartupRecoveryRequiredError({
+            phase: "compatibility",
+            ...(pendingStartupRecovery === undefined
+              ? {}
+              : { recoveryId: pendingStartupRecovery.id }),
           }),
-        ),
-        Effect.catchCause(() =>
-          Effect.sync(() => progress.invalidate()).pipe(Effect.andThen(flushFeedback)),
-        ),
-        Effect.ensuring(Effect.sync(() => progress.end()).pipe(Effect.andThen(flushFeedback))),
-        // The reader is an attempt resource, not part of the publication fence.
-        // Its finalization must remain interruptible even during a pending quit.
-        Effect.interruptible,
-        Effect.forkScoped,
-      );
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => {
-          progress.finish("failed");
-          // Retry attempts do not publish a terminal UI failure; ensureRunning
-          // owns that event after its bounded typed-error retries are exhausted.
-          feedback.length = 0;
+        );
+      }
+      if (retiredNamespace !== undefined) {
+        // A retired daemon unlinks its own socket. Unlike ordinary stale-start
+        // preparation, this path must never blindly remove a replacement entry.
+        yield* Effect.tryPromise({
+          try: retiredNamespace.verifyBeforeSpawn,
+          catch: () => undefined,
+        }).pipe(Effect.catch(() => Effect.die(new ProviderDaemonTerminationUnconfirmedError())));
+      } else {
+        yield* prepareProviderDaemonIpcPath(environment, socketPath);
+      }
+      const token = makeProviderDaemonToken();
+      const cafeMcpPort = yield* Ref.get(cafeMcpPortRef);
+      const rootEndpoint: ProviderDaemonClientConfig = {
+        httpBaseUrl: "http://provider-daemon.local",
+        transport: "ipc",
+        socketPath,
+        token,
+      };
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const bootstrap = {
+        mode: "provider-daemon",
+        startupProgressFd: BACKEND_STARTUP_PROGRESS_FD,
+        transport: "ipc",
+        socketPath,
+        cafeCodeHome: environment.baseDir,
+        configuredCafeCodeHome: environment.configuredBaseDir,
+        dataProfile: environment.dataProfile,
+        ...(cafeMcpPort !== undefined ? { cafeMcpPort } : {}),
+        token,
+        runtimeBuildId,
+        ...Option.match(environment.otlpTracesUrl, {
+          onNone: () => ({}),
+          onSome: (otlpTracesUrl) => ({ otlpTracesUrl }),
         }),
+      } satisfies ProviderDaemonBootstrap;
+      const bootstrapJson = yield* encodeProviderDaemonBootstrapJson(bootstrap);
+      const command = ChildProcess.make(
+        process.execPath,
+        [environment.backendEntryPath, "provider-daemon", "--bootstrap-fd", "3"],
+        {
+          cwd: environment.backendCwd,
+          env: {
+            ...providerDaemonChildEnvPatch(),
+            ELECTRON_RUN_AS_NODE: "1",
+            [CAFE_CODE_SHELL_ENV_HYDRATED]: "1",
+          },
+          extendEnv: true,
+          stdin: "ignore",
+          // The daemon is intentionally allowed to outlive Electron. Parent-owned
+          // stdout/stderr pipes close when the desktop restarts and can terminate a
+          // still-healthy detached daemon with EPIPE on its next log write. The
+          // daemon owns durable trace/provider logs, so its inherited stdio must be
+          // detached from the desktop lifetime as well.
+          stdout: "ignore",
+          stderr: "ignore",
+          killSignal: "SIGTERM",
+          additionalFds: {
+            fd3: {
+              type: "input",
+              stream: Stream.encodeText(Stream.make(`${bootstrapJson}\n`)),
+            },
+            // Detached stdout/stderr stay ignored. Only this exact child pipe
+            // supplies startup evidence; its reader belongs to this attempt.
+            fd4: { type: "output" },
+          },
+        },
       );
-      const retireOwnedChild = Effect.gen(function* () {
-        if (!(yield* stopOwnedProviderDaemonChild(handle))) {
-          const error = yield* rememberOwnedStartupFailure(handle, rootEndpoint);
-          yield* Ref.update(state, (current) => ({
-            ...current,
-            status: "error" as const,
-            lastError: Option.some(error.message),
-          }));
-          yield* publishDebugSnapshot;
-          // A defect deliberately bypasses spawnDaemon's typed-error retry.
-          // Preserve the marker, credential and namespace if exit is uncertain.
-          return yield* Effect.die(error);
-        }
-      });
-      yield* handle.unref.pipe(Effect.ignore);
-      // Reserve this exact child before publishing either recovery file. A
-      // partial credential/marker failure is not permission to lose the handle
-      // and retry a second detached runtime over the still-live first child.
-      const previous = yield* Ref.get(state);
-      yield* Ref.set(state, {
-        status: "starting",
-        pid: Option.some(handle.pid),
-        endpoint: Option.some(rootEndpoint),
-        adoptedExistingProcess: false,
-        terminate: Option.some(retireOwnedChild),
-        ownedChild: Option.some(handle),
-        lastHealth: Option.none(),
-        lastHealthObservedAt: Option.none(),
-        lastError: Option.none(),
-        lastEnsureRunningDurationMs: Option.none(),
-        lastAdoptionDurationMs: Option.none(),
-        lastSpawnDurationMs: Option.none(),
-        lastHealthRefreshDurationMs: Option.none(),
-        healthRefreshCount: 0,
-        healthRefreshFailureCount: 0,
-        recoveryCount: previous.recoveryCount,
-        lastRecoveryAt: previous.lastRecoveryAt,
-        lastRecoveryReason: previous.lastRecoveryReason,
-      });
-      yield* publishDebugSnapshot;
+      const spawnedAtNanos = yield* Clock.currentTimeNanos;
+      const elapsedMs = Clock.currentTimeNanos.pipe(
+        Effect.map((value) => Number(value - spawnedAtNanos) / 1_000_000),
+      );
+      const feedback: ProviderDaemonStartupProgress[] = [];
+      const progress = makeProviderDaemonStartupProgressTracker(
+        PROVIDER_DAEMON_READINESS_TIMEOUT_MS,
+        (update) => feedback.push(update),
+      );
+      const flushFeedback = Effect.suspend(() =>
+        Effect.forEach(feedback.splice(0), (update) => PubSub.publish(startupUpdates, update)).pipe(
+          Effect.asVoid,
+        ),
+      );
+      // A quit may interrupt readiness, but never the fresh child-to-recovery
+      // handoff. The persistent daemon scope deliberately does not reap a child
+      // when this attempt closes: complete its exact reservation and durable
+      // publication first, or perform bounded exact-handle retirement on an I/O
+      // failure. This fence never applies to adoption or the long readiness wait.
+      const { handle, retireOwnedChild } = yield* Effect.gen(function* () {
+        startupPhase = "child-spawn";
+        const handle = yield* spawner.spawn(command).pipe(
+          Effect.mapError((cause) => new ProviderDaemonSpawnError({ cause })),
+          Scope.provide(daemonScope),
+        );
+        progress.start();
+        yield* flushFeedback;
+        yield* handle.getOutputFd(BACKEND_STARTUP_PROGRESS_FD).pipe(
+          Stream.runForEach((bytes) =>
+            Effect.gen(function* () {
+              progress.push(bytes, yield* elapsedMs);
+              yield* flushFeedback;
+            }),
+          ),
+          Effect.catchCause(() =>
+            Effect.sync(() => progress.invalidate()).pipe(Effect.andThen(flushFeedback)),
+          ),
+          Effect.ensuring(Effect.sync(() => progress.end()).pipe(Effect.andThen(flushFeedback))),
+          // The reader is an attempt resource, not part of the publication fence.
+          // Its finalization must remain interruptible even during a pending quit.
+          Effect.interruptible,
+          Effect.forkScoped,
+        );
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            progress.finish("failed");
+            // Retry attempts do not publish a terminal UI failure; ensureRunning
+            // owns that event after its bounded typed-error retries are exhausted.
+            feedback.length = 0;
+          }),
+        );
+        const retireOwnedChild = Effect.gen(function* () {
+          if (!(yield* stopOwnedProviderDaemonChild(handle))) {
+            const error = yield* rememberOwnedStartupFailure(handle, rootEndpoint);
+            yield* Ref.update(state, (current) => ({
+              ...current,
+              status: "error" as const,
+              lastError: Option.some(error.message),
+            }));
+            yield* publishDebugSnapshot;
+            // A defect deliberately bypasses spawnDaemon's typed-error retry.
+            // Preserve the marker, credential and namespace if exit is uncertain.
+            return yield* Effect.die(error);
+          }
+        });
+        yield* handle.unref.pipe(Effect.ignore);
+        // Reserve this exact child before publishing either recovery file. A
+        // partial credential/marker failure is not permission to lose the handle
+        // and retry a second detached runtime over the still-live first child.
+        const previous = yield* Ref.get(state);
+        yield* Ref.set(state, {
+          status: "starting",
+          pid: Option.some(handle.pid),
+          endpoint: Option.some(rootEndpoint),
+          adoptedExistingProcess: false,
+          terminate: Option.some(retireOwnedChild),
+          ownedChild: Option.some(handle),
+          lastHealth: Option.none(),
+          lastHealthObservedAt: Option.none(),
+          lastError: Option.none(),
+          lastEnsureRunningDurationMs: Option.none(),
+          lastAdoptionDurationMs: Option.none(),
+          lastSpawnDurationMs: Option.none(),
+          lastHealthRefreshDurationMs: Option.none(),
+          healthRefreshCount: 0,
+          healthRefreshFailureCount: 0,
+          recoveryCount: previous.recoveryCount,
+          lastRecoveryAt: previous.lastRecoveryAt,
+          lastRecoveryReason: previous.lastRecoveryReason,
+        });
+        yield* publishDebugSnapshot;
 
-      yield* Effect.gen(function* () {
-        const credentialEncrypted = yield* writeCredential({
-          credentialPath: environment.providerDaemonCredentialPath,
-          token,
-        }).pipe(Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage));
-        const marker: ProviderDaemonMarkerValue = {
-          version: 2,
-          mode: "provider-daemon",
-          dataProfile: environment.dataProfile,
-          dataProfileId: expectedProfileId,
-          protocolVersion: PROVIDER_DAEMON_PROTOCOL_VERSION,
-          pid: handle.pid,
-          ppid: process.pid,
-          transport: "ipc",
-          httpBaseUrl: rootEndpoint.httpBaseUrl,
-          socketPath,
-          credentialPath: environment.providerDaemonCredentialPath,
-          credentialEncrypted,
-          createdAt: now,
-          updatedAt: now,
-          appVersion: environment.appVersion,
-          runtimeBuildId,
-          ...(cafeMcpPort !== undefined ? { cafeMcpPort } : {}),
-        };
-        yield* writeMarker({ markerPath: environment.providerDaemonMarkerPath, marker });
-        yield* closeRetirementEvidence;
-        retirementReservation = undefined;
-        if (pendingStartupRecovery !== undefined) yield* closePendingNative(pendingStartupRecovery);
-        pendingStartupRecovery = undefined;
-      }).pipe(
+        startupPhase = "recovery-publication";
+        yield* Effect.gen(function* () {
+          const credentialEncrypted = yield* writeCredential({
+            credentialPath: environment.providerDaemonCredentialPath,
+            token,
+          }).pipe(Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage));
+          const marker: ProviderDaemonMarkerValue = {
+            version: 2,
+            mode: "provider-daemon",
+            dataProfile: environment.dataProfile,
+            dataProfileId: expectedProfileId,
+            protocolVersion: PROVIDER_DAEMON_PROTOCOL_VERSION,
+            pid: handle.pid,
+            ppid: process.pid,
+            transport: "ipc",
+            httpBaseUrl: rootEndpoint.httpBaseUrl,
+            socketPath,
+            credentialPath: environment.providerDaemonCredentialPath,
+            credentialEncrypted,
+            createdAt: now,
+            updatedAt: now,
+            appVersion: environment.appVersion,
+            runtimeBuildId,
+            ...(cafeMcpPort !== undefined ? { cafeMcpPort } : {}),
+          };
+          yield* writeMarker({ markerPath: environment.providerDaemonMarkerPath, marker });
+          yield* closeRetirementEvidence;
+          retirementReservation = undefined;
+          if (pendingStartupRecovery !== undefined)
+            yield* closePendingNative(pendingStartupRecovery);
+          pendingStartupRecovery = undefined;
+        }).pipe(
+          Effect.catch((error) =>
+            retireOwnedChild.pipe(
+              Effect.andThen(removeMarker(environment.providerDaemonMarkerPath)),
+              Effect.andThen(removeCredential(environment.providerDaemonCredentialPath)),
+              Effect.andThen(removeProviderDaemonIpcSocket(environment)),
+              Effect.andThen(Effect.fail(error)),
+            ),
+          ),
+        );
+        return { handle, retireOwnedChild };
+      }).pipe(Effect.uninterruptible);
+
+      startupPhase = "startup-readiness";
+      yield* waitForOwnedProviderDaemonHealth(rootEndpoint, progress, elapsedMs, handle).pipe(
+        Effect.flatMap((receipt) =>
+          matchesCurrentProfile(receipt) &&
+          receipt.mode === "provider-daemon" &&
+          receipt.protocolVersion === PROVIDER_DAEMON_PROTOCOL_VERSION &&
+          receipt.pid === handle.pid &&
+          receipt.ppid === process.pid &&
+          receipt.version === environment.appVersion &&
+          receipt.runtimeBuildId === runtimeBuildId &&
+          receipt.transport === "ipc"
+            ? Effect.succeed(receipt)
+            : Effect.fail(
+                new ProviderDaemonSpawnError({
+                  cause: new Error(
+                    "Provider daemon startup identity did not match its admitted bootstrap.",
+                  ),
+                  startupPhase: "startup-readiness",
+                  startupFailure: "identity",
+                }),
+              ),
+        ),
         Effect.catch((error) =>
           retireOwnedChild.pipe(
             Effect.andThen(removeMarker(environment.providerDaemonMarkerPath)),
@@ -1427,76 +1521,68 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
           ),
         ),
       );
-      return { handle, retireOwnedChild };
-    }).pipe(Effect.uninterruptible);
-
-    const health = yield* waitForOwnedProviderDaemonHealth(
-      rootEndpoint,
-      progress,
-      elapsedMs,
-      handle,
-    ).pipe(
-      Effect.flatMap((receipt) =>
-        matchesCurrentProfile(receipt)
-          ? Effect.succeed(receipt)
-          : Effect.fail(
-              new ProviderDaemonSpawnError({
-                cause: new Error(
-                  "Provider daemon profile receipt did not match its admitted bootstrap.",
-                ),
-              }),
-            ),
-      ),
-      Effect.catch((error) =>
-        retireOwnedChild.pipe(
-          Effect.andThen(removeMarker(environment.providerDaemonMarkerPath)),
-          Effect.andThen(removeCredential(environment.providerDaemonCredentialPath)),
-          Effect.andThen(removeProviderDaemonIpcSocket(environment)),
-          Effect.andThen(Effect.fail(error)),
+      // Readiness deliberately supplies no rich health observation. Keep the
+      // existing advisory empty until refreshHealth obtains a genuine response.
+      // This exact child/receipt is still checked before lease admission above.
+      startupPhase = "desktop-lease";
+      const lease = yield* Effect.tryPromise({
+        try: (signal) => issueProviderDaemonLease(rootEndpoint, signal),
+        catch: (cause) => new ProviderDaemonHealthError({ cause }),
+      }).pipe(
+        Effect.mapError((cause) => new ProviderDaemonSpawnError({ cause })),
+        Effect.catch((error) =>
+          retireOwnedChild.pipe(
+            Effect.andThen(removeMarker(environment.providerDaemonMarkerPath)),
+            Effect.andThen(removeCredential(environment.providerDaemonCredentialPath)),
+            Effect.andThen(removeProviderDaemonIpcSocket(environment)),
+            Effect.andThen(Effect.fail(error)),
+          ),
         ),
-      ),
-    );
-    const healthObservedAt = DateTime.formatIso(yield* DateTime.now);
-    const lease = yield* Effect.tryPromise({
-      try: () => issueProviderDaemonLease(rootEndpoint),
-      catch: (cause) => new ProviderDaemonHealthError({ cause }),
+      );
+      const endpoint: ProviderDaemonClientConfig = {
+        ...rootEndpoint,
+        token: lease.token,
+        leaseId: lease.leaseId,
+      };
+      yield* Ref.update(state, (current) => ({
+        ...current,
+        endpoint: Option.some(endpoint),
+        status: "running" as const,
+        lastHealth: Option.none(),
+        lastHealthObservedAt: Option.none(),
+        lastSpawnDurationMs: Option.some(
+          Math.round((performance.now() - spawnStartedAtMs) * 100) / 100,
+        ),
+      }));
+      yield* publishDebugSnapshot;
+      progress.finish("ready");
+      yield* flushFeedback;
+      yield* logInfo("started provider daemon", {
+        pid: handle.pid,
+        endpoint: endpoint.httpBaseUrl,
+        transport: endpoint.transport,
+        runtimeBuildId,
+      });
+      return endpoint;
     }).pipe(
-      Effect.mapError((cause) => new ProviderDaemonSpawnError({ cause })),
-      Effect.catch((error) =>
-        retireOwnedChild.pipe(
-          Effect.andThen(removeMarker(environment.providerDaemonMarkerPath)),
-          Effect.andThen(removeCredential(environment.providerDaemonCredentialPath)),
-          Effect.andThen(removeProviderDaemonIpcSocket(environment)),
-          Effect.andThen(Effect.fail(error)),
-        ),
+      Effect.mapError(
+        (error) =>
+          new ProviderDaemonSpawnError({
+            cause: error,
+            startupPhase:
+              error instanceof ProviderDaemonSpawnError
+                ? (error.startupPhase ?? startupPhase)
+                : startupPhase,
+            startupFailure:
+              error instanceof ProviderDaemonSpawnError
+                ? (error.startupFailure ?? "operation-failed")
+                : "operation-failed",
+          }),
       ),
+      Effect.scoped,
+      Effect.ensuring(closeRetirementEvidence),
     );
-    const endpoint: ProviderDaemonClientConfig = {
-      ...rootEndpoint,
-      token: lease.token,
-      leaseId: lease.leaseId,
-    };
-    yield* Ref.update(state, (current) => ({
-      ...current,
-      endpoint: Option.some(endpoint),
-      status: "running" as const,
-      lastHealth: Option.some(health),
-      lastHealthObservedAt: Option.some(healthObservedAt),
-      lastSpawnDurationMs: Option.some(
-        Math.round((performance.now() - spawnStartedAtMs) * 100) / 100,
-      ),
-    }));
-    yield* publishDebugSnapshot;
-    progress.finish("ready");
-    yield* flushFeedback;
-    yield* logInfo("started provider daemon", {
-      pid: handle.pid,
-      endpoint: endpoint.httpBaseUrl,
-      transport: endpoint.transport,
-      runtimeBuildId,
-    });
-    return endpoint;
-  }).pipe(Effect.scoped, Effect.ensuring(closeRetirementEvidence));
+  });
 
   const ensureRunningUnlocked = Effect.gen(function* () {
     const ensureStartedAtMs = performance.now();
@@ -1596,10 +1682,19 @@ const makeDesktopProviderDaemonManager = Effect.gen(function* () {
         Ref.update(state, (latest) => ({
           ...latest,
           status: "error" as const,
-          lastError: Option.some(error.message),
+          // Source-owned fixed text cannot expose paths, tokens or opaque
+          // nested native errors, and never delegates an absent error.message.
+          lastError: Option.some(
+            "The provider daemon did not complete startup. Its exact child was retired or preserved by the existing ownership checks.",
+          ),
         })).pipe(
           Effect.andThen(publishDebugSnapshot),
-          Effect.andThen(logWarning("failed to start provider daemon", { error: error.message })),
+          Effect.andThen(
+            logWarning("failed to start provider daemon", {
+              phase: error.startupPhase ?? "unknown",
+              failure: error.startupFailure ?? "operation-failed",
+            }).pipe(Effect.ignoreCause),
+          ),
           Effect.andThen(Effect.fail(error)),
         ),
       ),

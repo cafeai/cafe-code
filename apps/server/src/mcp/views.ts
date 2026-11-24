@@ -48,7 +48,7 @@ export const threadSummary = z.object({
   title: nonEmptyString,
   modelSelection,
   runtimeMode,
-  interactionMode,
+  interactionMode: z.enum([...interactionMode.options, "gemini-bypass"]),
   branch: z.string().nullable(),
   worktreePath: z.string().nullable(),
   status: z.enum(["idle", "starting", "running", "ready", "interrupted", "stopped", "error"]),

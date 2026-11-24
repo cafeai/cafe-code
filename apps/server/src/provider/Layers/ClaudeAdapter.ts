@@ -192,7 +192,10 @@ import { makeClaudeEnvironment, makeClaudeNonChatEnvironment } from "../Drivers/
 import { makeProviderSessionTitle } from "../providerSessionTitle.ts";
 import { awaitClaudeDecision } from "../claudeDecision.ts";
 import { recoverClaudeResume } from "../claudeResumeRecovery.ts";
-import { createObservedClaudeQuery } from "../claudeQueryProcess.ts";
+import {
+  createObservedClaudeQuery,
+  resolveClaudeMcpServersDelivery,
+} from "../claudeQueryProcess.ts";
 import {
   supportsClaudeTaskControls,
   isClaudeDetachedToolResult,
@@ -906,6 +909,12 @@ interface ClaudeSteerReceipt {
   readonly deliveryKind: "live-steer" | "turn-start";
 }
 
+interface ClaudeForegroundCompletion {
+  readonly turnId: TurnId;
+  readonly owner: ClaudeSteerReceiptOwner;
+  readonly nativeSessionId: string;
+}
+
 interface ClaudeSessionContext {
   /** Small independent budget; ordinary task bindings cannot multiply snapshots. */
   readonly workflowSnapshots: Map<
@@ -1034,6 +1043,8 @@ interface ClaudeSessionContext {
   unansweredCapability?: { readonly nativeSessionId: string } | undefined;
   readonly fastModeRequested: boolean;
   turnState: ClaudeTurnState | undefined;
+  /** Live-query evidence for the most recently completed foreground input. */
+  completedForeground?: ClaudeForegroundCompletion | undefined;
   deferredTurnResult: ClaudeDeferredTurnResult | undefined;
   lastFastModeNoticeKey: string | undefined;
   lastKnownContextWindow: number | undefined;
@@ -5442,6 +5453,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context.query === owner.query &&
     context.subagentRuntimeId === owner.runtimeId;
 
+  const canStartAfterForegroundCompletion = (
+    context: ClaudeSessionContext,
+    completion: ClaudeForegroundCompletion,
+  ): boolean =>
+    hasCurrentSteerReceiptOwner(context, completion.owner) &&
+    context.completedForeground === completion &&
+    context.resumeSessionId === completion.nativeSessionId &&
+    context.lastThreadStartedId === completion.nativeSessionId &&
+    !context.sdkStreamEnded &&
+    context.inFlightSdkTurnBoundaryCount === 0 &&
+    context.session.status === "ready" &&
+    context.session.activeTurnId === undefined &&
+    context.turnState === undefined &&
+    context.promptLifecycleByUuid.size === 0;
+
   const hasCurrentSteerReceipt = (
     context: ClaudeSessionContext,
     messageUuid: string,
@@ -6782,7 +6808,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     status: ProviderRuntimeTurnStatus,
     errorMessage?: string,
     result?: SDKResultMessage,
-    options?: { readonly segmentAlreadyFinalized?: boolean },
+    options?: {
+      readonly segmentAlreadyFinalized?: boolean;
+      readonly foregroundCompletion?: ClaudeForegroundCompletion;
+    },
   ) {
     const resultContextWindow = maxClaudeContextWindowFromModelUsage(result?.modelUsage);
     const totalReasoningOutputTokens = totalClaudeThinkingTokensFromModelUsage(result?.modelUsage);
@@ -6921,6 +6950,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     const updatedAt = yield* nowIso;
     retireClaudeSteerTurn(context, turnState);
+    const completion = options?.foregroundCompletion;
+    context.completedForeground =
+      status === "completed" &&
+      completion?.turnId === turnState.turnId &&
+      hasCurrentSteerReceiptOwner(context, completion.owner) &&
+      context.resumeSessionId === completion.nativeSessionId &&
+      context.lastThreadStartedId === completion.nativeSessionId
+        ? completion
+        : undefined;
     context.deferredTurnResult = undefined;
     context.turnState = undefined;
     context.session = {
@@ -7979,6 +8017,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
     configurationFailure?: ClaudeConfigurationFailureObservation,
+    foregroundCompletion?: ClaudeForegroundCompletion,
   ) {
     if (message.type !== "result") {
       return;
@@ -8162,7 +8201,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     context.deferredTurnResult = undefined;
-    yield* completeTurn(context, status, errorMessage, message);
+    yield* completeTurn(
+      context,
+      status,
+      errorMessage,
+      message,
+      foregroundCompletion === undefined ? undefined : { foregroundCompletion },
+    );
     if (authFailure) {
       yield* stopSessionInternal(context, {
         emitExitEvent: true,
@@ -9790,6 +9835,26 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // ensureThreadId's legacy mutable cursor adoption. Never infer init from
     // a result, status, permission mode or saved native history coordinate.
     const currentQuery = sessions.get(context.session.threadId) === context;
+    const resultFrame =
+      sdkMessageType(incomingMessage) === "result"
+        ? readClaudeSteerFrame(incomingMessage)
+        : undefined;
+    const foregroundTurn = context.turnState;
+    const resultOwner = context.steerReceiptOwner;
+    const resultNativeId = resultOwner.nativeSessionId;
+    const foregroundCompletion =
+      resultFrame !== undefined &&
+      foregroundTurn?.origin === "user" &&
+      resultNativeId !== undefined &&
+      resultFrame.session_id === resultNativeId &&
+      context.resumeSessionId === resultNativeId &&
+      context.lastThreadStartedId === resultNativeId &&
+      hasCurrentSteerReceiptOwner(context, resultOwner) &&
+      readClaudeSteerCorrelationUuids(resultFrame)?.some(
+        (uuid) => uuid === foregroundTurn.turnId || context.promptLifecycleByUuid.has(uuid),
+      )
+        ? { turnId: foregroundTurn.turnId, owner: resultOwner, nativeSessionId: resultNativeId }
+        : undefined;
     const steerEvidence = currentQuery
       ? captureClaudeSteerEvidence(context, incomingMessage)
       : undefined;
@@ -10350,7 +10415,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         yield* handleAssistantMessage(context, message, publicSummaryAdmitted);
         return;
       case "result":
-        yield* handleResultMessage(context, message, configurationFailure);
+        yield* handleResultMessage(context, message, configurationFailure, foregroundCompletion);
         return;
       case "system":
         yield* handleSystemMessage(context, message);
@@ -11340,6 +11405,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         runPromise(canUseToolEffect(toolName, toolInput, callbackOptions));
 
       const claudeBinaryPath = claudeSettings.binaryPath;
+      // Freeze the existing executable observation for this opening. An SDK
+      // upgrade does not qualify the configured external binary or replace it.
+      const nativeVersion = options?.getNativeVersion?.();
       const extraArgs = parseCliArgs(claudeSettings.launchArgs).flags;
       const modelSelection =
         input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
@@ -11354,7 +11422,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         modelSelection?.model && options?.getModelCapabilities
           ? yield* options.getModelCapabilities(modelSelection.model)
           : undefined,
-        options?.getNativeVersion?.(),
+        nativeVersion,
       );
       const fastMode = settings.fastMode === true;
       const permissionMode = runtimeModeToClaudePermissionMode(input.runtimeMode);
@@ -11523,7 +11591,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       secretHooks = makeClaudeSecretHooks({
         store: getThreadSecretsStore(serverConfig.secretsDir),
         threadId,
-        nativeVersion: options?.getNativeVersion?.(),
+        nativeVersion,
         runnerInvocation: secretRunner.invocation,
         isCurrent: () =>
           startedContext === undefined
@@ -11564,6 +11632,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // https://code.claude.com/docs/en/agent-sdk/mcp
         ...(providerMcpBindings.length
           ? {
+              // Keep private Cafe connection configuration off argv only when
+              // this exact selected runtime understands initialize delivery.
+              // Explicit argv preserves older/unknown executable compatibility
+              // when the SDK changes its own default in a later release.
+              mcpServersDelivery: resolveClaudeMcpServersDelivery(nativeVersion),
               mcpServers: Object.fromEntries(
                 providerMcpBindings.map((binding) => [
                   binding.name,
@@ -11679,9 +11752,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "claude.query.ultracode_requested":
           getModelSelectionBooleanOptionValue(modelSelection, "ultracode") ?? "inherited",
         "claude.query.ultracode_forwarded": settings.ultracode ?? "inherited",
-        "claude.query.ultracode_runtime_qualified": supportsClaudeUltracode(
-          options?.getNativeVersion?.(),
-        ),
+        "claude.query.ultracode_runtime_qualified": supportsClaudeUltracode(nativeVersion),
         "claude.query.permission_mode": initialPermissionMode ?? "",
         "claude.query.base_permission_mode": permissionMode ?? "",
         "claude.query.allow_dangerously_skip_permissions": permissionMode === "bypassPermissions",
@@ -11761,7 +11832,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
       const context: ClaudeSessionContext = {
         workflowSnapshots: new Map(),
-        taskControlVersion: options?.getNativeVersion?.(),
+        taskControlVersion: nativeVersion,
         session,
         subagentRuntimeId,
         environment: sessionEnvironment,
@@ -12289,8 +12360,25 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     });
 
-  const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    const context = yield* requireSession(input.threadId);
+  const startClaudeTurn = Effect.fn("sendTurn")(function* (
+    input: ProviderSendTurnInput,
+    continuation?: {
+      readonly context: ClaudeSessionContext;
+      readonly completion: ClaudeForegroundCompletion;
+      readonly prepared?: { readonly turnId: TurnId; readonly message: SDKUserMessage };
+    },
+  ) {
+    const context = continuation?.context ?? (yield* requireSession(input.threadId));
+    const continuationRefused = () =>
+      new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "turn/steer",
+        remoteErrorTag: "claude-steer-not-submitted",
+        detail: "The observed Claude session changed before the follow-up could start.",
+      });
+    if (continuation && !canStartAfterForegroundCompletion(context, continuation.completion)) {
+      return yield* continuationRefused();
+    }
     if (
       input.deliveryPriority !== undefined &&
       (input.inputOrigin === "scheduled" || !supportsClaudeTaskControls(context.taskControlVersion))
@@ -12454,14 +12542,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     }
 
-    const turnId = TurnId.make(yield* Random.nextUUIDv4);
-    const message = yield* buildUserMessageEffect(input, {
-      fileSystem,
-      attachmentsDir: serverConfig.attachmentsDir,
-      boundInstanceId,
-      method: "turn/start",
-      messageUuid: turnId,
-    });
+    const turnId = continuation?.prepared?.turnId ?? TurnId.make(yield* Random.nextUUIDv4);
+    const message =
+      continuation?.prepared?.message ??
+      (yield* buildUserMessageEffect(input, {
+        fileSystem,
+        attachmentsDir: serverConfig.attachmentsDir,
+        boundInstanceId,
+        method: continuation ? "turn/steer" : "turn/start",
+        messageUuid: turnId,
+      }));
 
     const turnState = makeClaudeTurnState({
       turnId,
@@ -12472,6 +12562,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     turnState.promptAttachmentCount = input.attachments?.length ?? 0;
 
     const updatedAt = yield* nowIso;
+    const turnStartedStamp = yield* makeEventStamp();
+    const startedEvent: ProviderRuntimeEvent = {
+      ...turnStartedStamp,
+      type: "turn.started",
+      provider: PROVIDER,
+      threadId: input.threadId,
+      turnId,
+      payload: modelSelection?.model ? { model: modelSelection.model } : {},
+      providerRefs: {},
+    };
+    if (continuation && !canStartAfterForegroundCompletion(context, continuation.completion)) {
+      return yield* continuationRefused();
+    }
+    const previousSession = context.session;
     context.turnState = turnState;
     context.session = {
       ...context.session,
@@ -12480,17 +12584,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       updatedAt,
     };
 
-    const turnStartedStamp = yield* makeEventStamp();
-    yield* offerRuntimeEvent(context, {
-      type: "turn.started",
-      eventId: turnStartedStamp.eventId,
-      provider: PROVIDER,
-      createdAt: turnStartedStamp.createdAt,
-      threadId: context.session.threadId,
-      turnId,
-      payload: modelSelection?.model ? { model: modelSelection.model } : {},
-      providerRefs: {},
-    });
+    if (!continuation) {
+      context.completedForeground = undefined;
+      yield* offerRuntimeEvent(context, startedEvent);
+    }
 
     context.promptLifecycleByUuid.set(turnId, "submitted");
     // Correlate an actual committed input before native admission, including a
@@ -12499,22 +12596,36 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // primary init plus this exact UUID must still witness native processing.
     // Legacy callers without the durable attempt sequence remain unknown.
     rememberClaudeSteerReceipt(context, turnId, input, turnState, "turn-start");
-    context.glideBinding?.resume();
-    yield* Queue.offer(context.promptQueue, {
-      type: "message",
-      message,
-    }).pipe(
-      Effect.mapError((cause) => toRequestError(input.threadId, "turn/start", cause)),
-      Effect.tapError(() =>
-        Effect.sync(() => {
-          context.promptLifecycleByUuid.delete(turnId);
-          context.steerReceiptsByUuid.delete(turnId);
-        }),
-      ),
-      Effect.tapError((error) =>
-        completeTurn(context, "failed", toMessage(error, "Failed to queue Claude turn.")),
-      ),
-    );
+    const prompt = { type: "message", message } as const;
+    if (continuation) {
+      // Match the exact completed root beside the queue offer. One local
+      // command owns this admission, so an uncertain reply never triggers a
+      // second provider request. Leave the prior lifecycle intact on refusal.
+      if (!Queue.offerUnsafe(context.promptQueue, prompt)) {
+        context.turnState = undefined;
+        context.session = previousSession;
+        context.promptLifecycleByUuid.delete(turnId);
+        context.steerReceiptsByUuid.delete(turnId);
+        return yield* continuationRefused();
+      }
+      context.completedForeground = undefined;
+      Queue.offerUnsafe(runtimeEventQueue, decorateRuntimeEvent(context, startedEvent));
+      context.glideBinding?.resume();
+    } else {
+      context.glideBinding?.resume();
+      yield* Queue.offer(context.promptQueue, prompt).pipe(
+        Effect.mapError((cause) => toRequestError(input.threadId, "turn/start", cause)),
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            context.promptLifecycleByUuid.delete(turnId);
+            context.steerReceiptsByUuid.delete(turnId);
+          }),
+        ),
+        Effect.tapError((error) =>
+          completeTurn(context, "failed", toMessage(error, "Failed to queue Claude turn.")),
+        ),
+      );
+    }
     context.hasSubmittedUserPrompt = true;
     rememberClaudeForkMessage({
       ids: context.forkMessageIds,
@@ -12535,9 +12646,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
   });
 
+  const sendTurn: ClaudeAdapterShape["sendTurn"] = (input) => startClaudeTurn(input);
+
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
     function* (threadId, _turnId) {
       const context = yield* requireSession(threadId);
+      if (_turnId === undefined || _turnId === context.completedForeground?.turnId) {
+        context.completedForeground = undefined;
+      }
       if (context.turnState && (_turnId === undefined || context.turnState.turnId === _turnId))
         retireClaudeSteerTurn(context, context.turnState);
       if (_turnId === undefined || context.turnState?.turnId === _turnId)
@@ -13215,6 +13331,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     const context = yield* requireSession(input.threadId);
     const activeTurnId = context.session.activeTurnId ?? context.turnState?.turnId;
+    const completedTarget = () => {
+      const completion = context.completedForeground;
+      return input.deliveryPriority === undefined &&
+        input.expectedPrioritySession === undefined &&
+        input.expectedSubagentPolicySession === undefined &&
+        completion?.turnId === input.expectedTurnId &&
+        canStartAfterForegroundCompletion(context, completion)
+        ? completion
+        : undefined;
+    };
     if (
       input.deliveryPriority !== undefined &&
       !supportsClaudeTaskControls(context.taskControlVersion)
@@ -13227,6 +13353,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (context.session.status !== "running" || !context.turnState || !activeTurnId) {
+      const completion = completedTarget();
+      if (completion) return yield* startClaudeTurn(input, { context, completion });
       return yield* new ProviderAdapterRequestError({
         provider: PROVIDER,
         method: "turn/steer",
@@ -13338,6 +13466,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     // response while its terminal frame awaits projection. Ordinary deltas and
     // pending native frames therefore do not fence this admission.
     return yield* Effect.suspend(() => {
+      const completion = completedTarget();
+      if (completion) {
+        return startClaudeTurn(input, {
+          context,
+          completion,
+          prepared: { turnId: TurnId.make(messageUuid), message },
+        });
+      }
       if (
         sessions.get(input.threadId) !== context ||
         context.stopped ||

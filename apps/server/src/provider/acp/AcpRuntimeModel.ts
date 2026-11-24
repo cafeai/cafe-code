@@ -92,6 +92,11 @@ export type AcpParsedSessionEvent =
       readonly modeId: string;
     }
   | {
+      readonly _tag: "ContextUsageUpdated";
+      readonly usedTokens: number;
+      readonly maxTokens: number;
+    }
+  | {
       readonly _tag: "AssistantItemStarted";
       readonly itemId: string;
     }
@@ -108,6 +113,7 @@ export type AcpParsedSessionEvent =
       readonly _tag: "ToolCallUpdated";
       readonly toolCall: AcpToolCallState;
       readonly rawPayload: unknown;
+      readonly started?: true;
     }
   | {
       readonly _tag: "AvailableCommandsChanged";
@@ -117,6 +123,7 @@ export type AcpParsedSessionEvent =
   | {
       readonly _tag: "ContentDelta";
       readonly itemId?: string;
+      readonly nativeMessageId?: string;
       readonly streamKind: "assistant_text" | "reasoning_text";
       readonly text: string;
       readonly rawPayload: unknown;
@@ -534,6 +541,21 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
   let modeId: string | undefined;
 
   switch (upd.sessionUpdate) {
+    case "usage_update": {
+      if (
+        Number.isSafeInteger(upd.used) &&
+        upd.used >= 0 &&
+        Number.isSafeInteger(upd.size) &&
+        upd.size > 0
+      ) {
+        events.push({
+          _tag: "ContextUsageUpdated",
+          usedTokens: upd.used,
+          maxTokens: upd.size,
+        });
+      }
+      break;
+    }
     case "current_mode_update": {
       modeId = upd.currentModeId.trim();
       if (modeId) {
@@ -611,6 +633,7 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
           _tag: "ContentDelta",
           streamKind: "assistant_text",
           ...(upd.messageId ? { itemId: upd.messageId } : {}),
+          ...(upd.messageId ? { nativeMessageId: upd.messageId } : {}),
           text: upd.content.text,
           rawPayload: params,
         });

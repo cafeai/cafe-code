@@ -35,9 +35,10 @@ corepack yarn workspace @cafecode/desktop start
 ```
 
 `corepack yarn start:desktop` is the root convenience command for the same
-built desktop. Neither start command builds the app. Run `build:desktop` again
-after changing source; launching an existing desktop package directly also
-requires built output.
+built desktop. `corepack yarn start:desktop:debug` opens it with diagnostic
+logging. Both commands use the existing build. After changing dependencies,
+run `corepack yarn install --immutable` before building. Run `build:desktop`
+again after changing source.
 
 On macOS, console starts keep following that launch's stdout and stderr after
 LaunchServices opens the app. Startup output and later entries appear in the

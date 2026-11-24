@@ -17,6 +17,15 @@ const decodeProviderStatusCache = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ServerProviderSchema),
 );
 
+function withoutVolatileProviderMetadata(provider: ServerProvider): ServerProvider {
+  const redacted = withoutClaudeCredentialExpiry(provider);
+  if (redacted.driver !== "gemini" || redacted.accountRateLimits === undefined) return redacted;
+  // A saved instance id cannot identify the Antigravity login behind the
+  // current report. Keep the live reading out of status cache files entirely.
+  const { accountRateLimits: _rateLimits, ...withoutRateLimits } = redacted;
+  return withoutRateLimits;
+}
+
 const mergeProviderModels = (
   fallbackModels: ReadonlyArray<ServerProvider["models"][number]>,
   cachedModels: ReadonlyArray<ServerProvider["models"][number]>,
@@ -188,7 +197,7 @@ export const readProviderStatusCache = (filePath: string) =>
             path: filePath,
             issues: Cause.pretty(cause),
           }).pipe(Effect.as(undefined)),
-        onSuccess: (provider) => Effect.succeed(withoutClaudeCredentialExpiry(provider)),
+        onSuccess: (provider) => Effect.succeed(withoutVolatileProviderMetadata(provider)),
       }),
     );
   });
@@ -197,7 +206,7 @@ export const writeProviderStatusCache = (input: {
   readonly filePath: string;
   readonly provider: ServerProvider;
 }) => {
-  const { updateState: _updateState, ...cacheableProvider } = withoutClaudeCredentialExpiry(
+  const { updateState: _updateState, ...cacheableProvider } = withoutVolatileProviderMetadata(
     input.provider,
   );
   return writeFileStringAtomically({

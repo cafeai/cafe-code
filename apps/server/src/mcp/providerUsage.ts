@@ -20,6 +20,7 @@ import {
 } from "./quotaMetadata.ts";
 import { jsonToolResult, McpToolError } from "./results.ts";
 import { providerInstanceId } from "./views.ts";
+import type { ProviderAccountQuotaReading } from "../provider/ProviderDriver.ts";
 import type { ProviderRegistryShape } from "../provider/Services/ProviderRegistry.ts";
 
 const resetCreditSchema = z.object({
@@ -98,8 +99,15 @@ const isAccountReport = Schema.is(ProviderSessionQuotaReport);
  * explicit whitelist again at the management boundary, preserving row order,
  * duplicate/model labels and missing extra usage. No selected chat/model can
  * hide Fable or substitute the normal weekly allowance for its own meter. */
-function accountQuota(report: ProviderSessionQuotaReport | null): AccountQuota {
-  if (!report || !isAccountReport(report) || report.source !== "claude-cli")
+function accountQuota(reading: ProviderAccountQuotaReading): AccountQuota {
+  const { report } = reading;
+  if (
+    reading.stale ||
+    reading.isCurrent?.() === false ||
+    !report ||
+    !isAccountReport(report) ||
+    report.source !== "claude-cli"
+  )
     return { status: "unknown", report: null };
   return {
     status: "reported",
@@ -190,7 +198,7 @@ export function readProviderAccountQuotaReports(
   read: ProviderRegistryShape["readInstanceAccountQuota"],
 ) {
   return Effect.gen(function* () {
-    const reports = new Map<ProviderInstanceId, AccountQuota>();
+    const readings = new Map<ProviderInstanceId, ProviderAccountQuotaReading>();
     if (read) {
       let next = 0;
       let retired = false;
@@ -205,17 +213,14 @@ export function readProviderAccountQuotaReports(
             provider.auth.status !== "authenticated"
           )
             return;
-          const report = yield* Effect.suspend(() => read(provider.instanceId)).pipe(
-            Effect.map(accountQuota),
+          const reading = yield* Effect.suspend(() => read(provider.instanceId)).pipe(
             // The native cache can retain an interrupted lookup for its TTL.
             // That is unavailable data for this account, not cancellation of
             // the whole MCP request. Actual caller cancellation still retires
             // the enclosing owner before its scope interrupts/joins workers.
-            Effect.catchCause(() =>
-              Effect.succeed<AccountQuota>({ status: "unknown", report: null }),
-            ),
+            Effect.catchCause(() => Effect.succeed({ report: null })),
           );
-          reports.set(provider.instanceId, report);
+          readings.set(provider.instanceId, reading);
         }).pipe(Effect.andThen(worker));
       });
       // Own both workers in a scope outside the timeout's racing joins. The
@@ -238,7 +243,10 @@ export function readProviderAccountQuotaReports(
         Effect.scoped,
       );
     }
-    return reports;
+    // A completed account may retire while a sibling is still being read.
+    return new Map(
+      Array.from(readings, ([instanceId, reading]) => [instanceId, accountQuota(reading)]),
+    );
   });
 }
 

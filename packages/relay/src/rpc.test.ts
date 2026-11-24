@@ -1,6 +1,8 @@
+import { deepStrictEqual } from "node:assert";
 import { randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { expect, it, type TestContext } from "vitest";
+import * as Effect from "effect/Effect";
 import { Budget } from "./budget.ts";
 import { RelayError } from "./errors.ts";
 import { RELAY_DATA_CHUNK_BYTES } from "./limits.ts";
@@ -93,12 +95,43 @@ it("negotiates compression only after an exact offer and acknowledgement, with s
 it.for(["compressible", "incompressible"])(
   "round trips %s bytes with bounded records, preserving UTF-8 and incompressible fallback",
   async (kind, context) => {
+    const started = performance.now();
+    const elapsed = () => Math.min(60_000, Math.max(0, Math.round(performance.now() - started)));
+    let phase = "input";
+    const completed = {
+      encodedMs: null as number | null,
+      decodedMs: null as number | null,
+      comparedMs: null as number | null,
+    };
+    const observe = () => ({
+      kind,
+      phase,
+      elapsedMs: elapsed(),
+      ...completed,
+    });
+    let failure: ReturnType<typeof observe> | undefined;
+    // Freeze the last actual phase before timeout cleanup can resume an
+    // interrupted stream. Diagnostics contain no payloads or native errors.
+    const retire = () => {
+      failure ??= observe();
+    };
+    context.signal.addEventListener("abort", retire, { once: true });
+    context.onTestFailed(() => {
+      try {
+        Effect.runSync(Effect.logError("Relay RPC round-trip phases", failure ?? observe()));
+      } catch {
+        // Passive metadata cannot replace the original test failure.
+      }
+    });
+    context.onTestFinished(() => context.signal.removeEventListener("abort", retire));
     const bytes =
       kind === "compressible"
         ? new TextEncoder().encode(JSON.stringify({ text: "café ☕ 🌐\n".repeat(20_000) }) + "\n")
         : new Uint8Array(randomBytes(RELAY_RPC_RECORD_BYTES * 3 + 127));
     const sender = ownStream(context);
+    phase = "encode";
     await sender.transport(protocol).write(bytes);
+    completed.encodedMs = elapsed();
     expect(sender.chunks.every((chunk) => chunk.length <= RELAY_DATA_CHUNK_BYTES)).toBe(true);
     const wireBytes = sender.chunks.reduce((total, chunk) => total + chunk.length, 0);
     if (kind === "compressible") expect(wireBytes).toBeLessThan(bytes.length / 20);
@@ -107,6 +140,7 @@ it.for(["compressible", "incompressible"])(
       decoded = receiver.transport(protocol);
     const output = new Uint8Array(bytes.length);
     let offset = 0;
+    phase = "decode";
     for (;;) {
       const chunk = await decoded.read();
       if (!chunk) break;
@@ -115,9 +149,16 @@ it.for(["compressible", "incompressible"])(
       offset += chunk.length;
     }
     expect(offset).toBe(bytes.length);
-    expect(output).toEqual(bytes);
+    completed.decodedMs = elapsed();
+    phase = "compare";
+    // Native typed-array equality checks every byte without creating and then
+    // recursively comparing a property-entry array for this large payload.
+    deepStrictEqual(output, bytes);
+    completed.comparedMs = elapsed();
+    phase = "budgets";
     expect(sender.budget.current).toBe(0);
     expect(receiver.budget.current).toBe(0);
+    phase = "complete";
   },
 );
 

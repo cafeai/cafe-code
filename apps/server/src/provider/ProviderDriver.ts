@@ -26,7 +26,7 @@ import type {
   ProviderInstanceEnvironment,
   ProviderInstanceId,
   ProviderSkillsResult,
-  ProviderSessionQuotaReport,
+  ProviderSessionQuotaResult,
 } from "@cafecode/contracts";
 import type * as Effect from "effect/Effect";
 import type * as Schema from "effect/Schema";
@@ -37,6 +37,12 @@ import type { ProviderAdapterError, ProviderDriverError } from "./Errors.ts";
 import type { ProviderAdapterShape } from "./Services/ProviderAdapter.ts";
 import type { ServerProviderShape } from "./Services/ServerProvider.ts";
 import type { ProviderUsageResetCapability } from "./ProviderUsageReset.ts";
+
+/** In-process only. Login retirement can occur while the RPC checks its saved
+ * shell authority, so publication must also verify the exact reader generation. */
+export interface ProviderAccountQuotaReading extends ProviderSessionQuotaResult {
+  readonly isCurrent?: () => boolean;
+}
 
 /**
  * Static metadata advertised by a driver. Used for default presentation
@@ -76,7 +82,7 @@ export interface ProviderInstance {
   readonly textGeneration: TextGenerationShape;
   readonly usageReset?: ProviderUsageResetCapability;
   /** Bounded control-only allowance read using this instance's selected login. */
-  readonly readAccountQuota?: Effect.Effect<ProviderSessionQuotaReport | null>;
+  readonly readAccountQuota?: Effect.Effect<ProviderAccountQuotaReading>;
   /** Explicit metadata read scoped to a server-resolved cwd; never a snapshot. */
   readonly discoverSkills?: (cwd: string) => Effect.Effect<ProviderSkillsResult>;
   /**

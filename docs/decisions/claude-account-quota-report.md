@@ -44,10 +44,9 @@ process outside this disposable child is interrupted.
 
 Each exact provider instance shares one single-flight cache for 60 seconds,
 including unavailable and interrupted results. Concurrent views, reopening and
-reconnection reuse that cache rather than restarting a cancelled probe. Only
-visible quota subscriptions trigger reads;
-a one-minute tick refreshes an open surface. Closing a surface stops its refresh
-stream. No background allowance scheduler is attached to chats or provider health.
+reconnection reuse that cache and its retry interval. Visible subscriptions check
+again a minute after the prior read completes, with immediate checks on existing
+invalidations. Closing a surface stops its refresh stream.
 Replacing the configured instance drops its cache, and exact object identity is
 revalidated after every read before release. This metadata never enters the
 provider status disk cache, command ledger, activity journal or RPC tracing.
@@ -76,8 +75,12 @@ rejected. A malformed complete native report is unavailable rather than a partia
 list masquerading as a complete current reading. Passed resets and old receipts
 remain stale; presentation never refills a meter or invents a newer timestamp.
 
-If native collection is unavailable, the existing passive `/usage` sibling may
-still supply `source = "claude-session"`. Cafe strips that sibling before native
+If the selected instance has a previous native reading for the same observed
+login environment, an unavailable native quota response supplies those figures
+with their original receipt time and an explicit stale flag. Known login/source
+changes retire it. The retained reading serves as historical display metadata.
+When no eligible native reading exists, the existing passive `/usage` sibling
+may supply `source = "claude-session"`. Cafe strips that sibling before native
 logging, canonical raw events, activity projection and accounting. Only an
 established primary native session of the current query may replace its volatile
 report, which clears on reset, rebind, retirement and stop. No automatic `/usage`

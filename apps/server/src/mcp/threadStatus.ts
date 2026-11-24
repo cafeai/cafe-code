@@ -12,7 +12,7 @@ import { z } from "zod";
 import { type CafeMcpDependencies, type CafeMcpServerOptions } from "./CafeMcpServer.ts";
 import { jsonToolResult, McpToolError } from "./results.ts";
 import { pageOutput, paginate } from "./pagination.ts";
-import { operationScopeId } from "./operations.ts";
+import { operationScopeId, operationStorageStatusSchema } from "./operations.ts";
 import { withStatusWait } from "./statusWait.ts";
 
 const explicitThreadId = z.string().trim().min(1).max(4096);
@@ -103,7 +103,7 @@ export function registerThreadStatusTools(
     {
       title: "Get this Cafe chat's context",
       description:
-        "For chat work, identify the authenticated launch Cafe chat, project, workspace and saved versus current provider once, then reuse those IDs. For account usage limits, call get_provider_usage directly instead; it needs no chat context. No inventories, transcripts, provider probes or paid calls. Omit threadId only on a Cafe-issued connection; inherited subagents still target the launch Cafe chat. Manual clients supply an exact ID. This is recorded context, not native ownership proof.",
+        "For chat work, identify the authenticated launch Cafe chat, project, workspace and saved versus current provider once, then reuse those IDs. Includes aggregate operation receipt storage when available; this observation reserves no capacity. For account usage limits, call get_provider_usage directly instead; it needs no chat context. No inventories, transcripts, provider probes or paid calls. Omit threadId only on a Cafe-issued connection; inherited subagents still target the launch Cafe chat. Manual clients supply an exact ID. This is recorded context, not native ownership proof.",
       inputSchema: { threadId: explicitThreadId.optional() },
       outputSchema: z.object({
         thread: threadSummary,
@@ -130,6 +130,9 @@ export function registerThreadStatusTools(
             expiresAt: z.string(),
           })
           .nullable(),
+        // Aggregate storage observation, not a promise that a later mutation
+        // will fit. Null is unknown/unavailable, never an empty ledger.
+        operationStorage: operationStorageStatusSchema.nullable(),
         // First bounded page of this chat's live groups. Continue with
         // list_thread_groups({ ownerThreadId, cursor: nextCursor }).
         ownedGroups: z.object({
@@ -187,6 +190,11 @@ export function registerThreadStatusTools(
               (group) => group.id,
             );
             const summary = Option.isSome(project) ? summarizeProject(project.value) : null;
+            const operationStorage = options.operations?.storageStatus
+              ? yield* options.operations.storageStatus.pipe(
+                  Effect.catch(() => Effect.succeed(null)),
+                )
+              : null;
             return {
               thread: summarizeThread(shell.value),
               target: {
@@ -215,6 +223,7 @@ export function registerThreadStatusTools(
                     expiresAt: options.operationOwner.expiresAt,
                   }
                 : null,
+              operationStorage,
               ownedGroups: {
                 items: groupsPage.items.map((group) => ({
                   id: group.id,

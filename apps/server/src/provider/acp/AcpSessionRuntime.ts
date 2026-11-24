@@ -10,6 +10,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Random from "effect/Random";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -17,7 +18,7 @@ import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as EffectAcpClient from "effect-acp/client";
 import * as EffectAcpErrors from "effect-acp/errors";
-import type * as EffectAcpSchema from "effect-acp/schema";
+import * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 
 import {
@@ -36,6 +37,14 @@ import {
   type AcpToolCallState,
 } from "./AcpRuntimeModel.ts";
 
+const decodeGroupedPrompt = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    stopReason: EffectAcpSchema.PromptResponse.fields.stopReason,
+    usage: Schema.optionalKey(Schema.Unknown),
+  }),
+);
+const decodeGroupedUsage = Schema.decodeUnknownOption(EffectAcpSchema.Usage);
+
 function formatConfigOptionValue(value: string | boolean): string {
   return JSON.stringify(value);
 }
@@ -45,7 +54,10 @@ export interface AcpSessionEventStreamBarrier {
   readonly acknowledge: Deferred.Deferred<void>;
 }
 
-export type AcpSessionRuntimeEvent = AcpParsedSessionEvent | AcpSessionEventStreamBarrier;
+export type AcpSessionRuntimeEvent =
+  | AcpParsedSessionEvent
+  | AcpSessionEventStreamBarrier
+  | { readonly _tag: "SessionConfigurationChanged"; readonly modeId: string | undefined };
 
 const defaultSessionLoadTimeout = Duration.seconds(90);
 const defaultSessionLoadReplayIdleGap = Duration.seconds(2);
@@ -59,15 +71,25 @@ export interface AcpSpawnInput {
   readonly args: ReadonlyArray<string>;
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
+  /** A prepared provider environment must not be merged with process.env. */
+  readonly extendEnv?: boolean;
 }
 
 export interface AcpSessionRuntimeOptions {
   readonly spawn: AcpSpawnInput;
   readonly cwd: string;
   readonly resumeSessionId?: string;
+  /** Acknowledge an advertised resume/load RPC before adopting a native conversation. */
+  readonly resumeSessionPolicy?: "acknowledged";
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
+  /** Accept the standard option snapshot only from this exact ready session. */
+  readonly observeSessionConfigUpdates?: boolean;
+  /** Preserve exact ACP tool creation and status changes for live work logs. */
+  readonly observeToolLifecycle?: boolean;
+  /** Antigravity joins the results of overlapping prompt requests in one session. */
+  readonly allowOverlappingPrompts?: boolean;
   readonly clientInfo: {
     readonly name: string;
     readonly version: string;
@@ -229,6 +251,13 @@ export class AcpSessionRuntime extends Context.Service<
     readonly prompt: (
       payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">,
     ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
+    /** The adapter owns grouped settlement and the assistant segment boundary. */
+    readonly promptInGroup?: (
+      payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">,
+      admission: EffectAcpProtocol.AcpRequestQueueAdmission & {
+        readonly configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+      },
+    ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
     /**
      * Sends a real ACP `session/cancel` notification for the active session.
      * @see https://agentclientprotocol.com/protocol/schema#session/cancel
@@ -362,7 +391,9 @@ export const make = (
       .spawn(
         ChildProcess.make(options.spawn.command, options.spawn.args, {
           ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
-          ...(options.spawn.env ? { env: options.spawn.env, extendEnv: true } : {}),
+          ...(options.spawn.env
+            ? { env: options.spawn.env, extendEnv: options.spawn.extendEnv ?? true }
+            : {}),
           // ACP is a structured stdio protocol. Shell expansion would make
           // custom paths and arguments command-injection surfaces.
           shell: false,
@@ -487,12 +518,39 @@ export const make = (
         ) {
           return;
         }
+        if (options.observeSessionConfigUpdates) {
+          const update = notification.update;
+          if (update.sessionUpdate === "config_option_update") {
+            yield* Ref.set(configOptionsRef, update.configOptions);
+            const modes = update.configOptions.filter((option) => option.category === "mode");
+            const mode = modes.length === 1 ? modes[0] : undefined;
+            yield* Queue.offer(eventQueue, {
+              _tag: "SessionConfigurationChanged",
+              modeId: mode?.type === "select" ? mode.currentValue : undefined,
+            });
+          } else if (update.sessionUpdate === "current_mode_update") {
+            // The mode notification is live session evidence even on peers
+            // that also expose mode through their configuration selector.
+            yield* Ref.update(configOptionsRef, (current) =>
+              current.map((option) =>
+                option.category === "mode" && option.type === "select"
+                  ? { ...option, currentValue: update.currentModeId }
+                  : option,
+              ),
+            );
+            yield* Queue.offer(eventQueue, {
+              _tag: "SessionConfigurationChanged",
+              modeId: update.currentModeId,
+            });
+          }
+        }
         yield* handleSessionUpdate({
           queue: eventQueue,
           modeStateRef,
           toolCallsRef,
           assistantSegmentRef,
           assistantItemRuntimeId,
+          observeToolLifecycle: options.observeToolLifecycle === true,
           params: notification,
         });
       }),
@@ -661,7 +719,36 @@ export const make = (
         | EffectAcpSchema.LoadSessionResponse
         | EffectAcpSchema.NewSessionResponse
         | EffectAcpSchema.ResumeSessionResponse;
-      if (options.resumeSessionId) {
+      if (options.resumeSessionId && options.resumeSessionPolicy === "acknowledged") {
+        const capabilities = initializeResult.agentCapabilities;
+        sessionId = options.resumeSessionId;
+        const payload = {
+          sessionId,
+          cwd: sessionCwd,
+          mcpServers: options.mcpServers ?? [],
+        } satisfies EffectAcpSchema.ResumeSessionRequest;
+        // Resume avoids history replay. When only load is supported, updates
+        // received while the runtime is Starting are never projected as new
+        // content. Neither silence after replay nor a failed RPC proves that
+        // the requested conversation was adopted.
+        if (capabilities?.sessionCapabilities?.resume != null) {
+          sessionSetupResult = yield* runLoggedRequest(
+            "session/resume",
+            payload,
+            acp.agent.resumeSession(payload),
+          );
+        } else if (capabilities?.loadSession === true) {
+          sessionSetupResult = yield* runLoggedRequest(
+            "session/load",
+            payload,
+            acp.agent.loadSession(payload),
+          );
+        } else {
+          return yield* EffectAcpErrors.AcpRequestError.invalidParams(
+            "The ACP provider cannot resume this conversation.",
+          );
+        }
+      } else if (options.resumeSessionId) {
         const loadPayload = {
           sessionId: options.resumeSessionId,
           cwd: sessionCwd,
@@ -879,6 +966,45 @@ export const make = (
       }).pipe(Effect.andThen(drainEvents)),
       getModeState: Ref.get(modeStateRef),
       getConfigOptions: Ref.get(configOptionsRef),
+      ...(options.allowOverlappingPrompts === true
+        ? {
+            promptInGroup: (payload, admission) =>
+              Effect.gen(function* () {
+                const started = yield* getStartedState;
+                const request = { ...payload, sessionId: started.sessionId };
+                return yield* acp.raw
+                  .request("session/prompt", request, {
+                    onQueued: admission.onQueued,
+                    // Native mode notifications update this ref ahead of the
+                    // adapter's event consumer. Fence that gap at queue admission.
+                    isCurrent: () =>
+                      admission.configOptions === Ref.getUnsafe(configOptionsRef) &&
+                      admission.isCurrent(),
+                  })
+                  .pipe(
+                    Effect.flatMap((value) =>
+                      decodeGroupedPrompt(value).pipe(
+                        Effect.mapError((cause) =>
+                          EffectAcpErrors.AcpProtocolParseError.fromSchemaError(
+                            "decode-wire-message",
+                            "session/prompt",
+                            cause,
+                          ),
+                        ),
+                        Effect.map(({ stopReason, usage }) => {
+                          // Optional usage is telemetry. A malformed sample must
+                          // not turn a successful prompt into a delivery failure.
+                          const tokens = decodeGroupedUsage(usage);
+                          return Option.isSome(tokens)
+                            ? { stopReason, usage: tokens.value }
+                            : { stopReason };
+                        }),
+                      ),
+                    ),
+                  );
+              }),
+          }
+        : {}),
       getAvailableCommands: Ref.get(availableCommandsRef),
       prompt: (payload) =>
         promptSerializationSemaphore.withPermit(
@@ -1026,6 +1152,7 @@ const handleSessionUpdate = ({
   toolCallsRef,
   assistantSegmentRef,
   assistantItemRuntimeId,
+  observeToolLifecycle,
   params,
 }: {
   readonly queue: Queue.Queue<AcpSessionRuntimeEvent>;
@@ -1033,6 +1160,7 @@ const handleSessionUpdate = ({
   readonly toolCallsRef: Ref.Ref<Map<string, AcpToolCallState>>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
   readonly assistantItemRuntimeId: string;
+  readonly observeToolLifecycle: boolean;
   readonly params: EffectAcpSchema.SessionNotification;
 }): Effect.Effect<void> =>
   Effect.gen(function* () {
@@ -1059,13 +1187,20 @@ const handleSessionUpdate = ({
           }
           return [{ previous, merged: nextToolCall }, next] as const;
         });
-        if (!shouldEmitToolCallUpdate(previous, merged)) {
+        const started =
+          observeToolLifecycle && params.update.sessionUpdate === "tool_call" && !previous;
+        if (
+          !started &&
+          !(observeToolLifecycle && merged.status !== previous?.status) &&
+          !shouldEmitToolCallUpdate(previous, merged)
+        ) {
           continue;
         }
         yield* Queue.offer(queue, {
           _tag: "ToolCallUpdated",
           toolCall: merged,
           rawPayload: event.rawPayload,
+          ...(started ? { started: true } : {}),
         });
         continue;
       }

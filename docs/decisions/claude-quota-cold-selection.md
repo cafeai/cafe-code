@@ -22,7 +22,9 @@ A content-free debug event distinguishes authentication-selection, native-start 
 
 ## Preserved authority and failure behavior
 
-The exact configured instance still owns one 60-second single-flight cache, including unavailable/interrupted exits. Only visible subscribers request reads. No extra retry loop, background polling, credential access, private OAuth call, initialize/user/slash command, inference, account fallback or native installation is added. Configuration/runtime/workspace identity and invalidation-generation checks remain unchanged. An unavailable response still clears the view; old reports are neither silently retained nor retimestamped. This is deliberate because the public source binding is not a stable authenticated principal or credential epoch.
+The exact configured instance owns one 60-second single-flight cache, including unavailable/interrupted exits. Visible subscriptions wait a minute after a completed read or wake on an existing invalidation. This aligns normal refreshes with the cache expiry even after a slow native read. Configuration, runtime, workspace and invalidation-generation checks gate every published report.
+
+If native quota is unavailable or selection is inconclusive, the current instance can supply its last successful native report as a visibly stale reading with the original receipt time. This is limited to the earlier selected login environment within the same instance's still-admitted generation. An observed login or environment change, sign-out, typed native auth transition or instance replacement retires that report. The source binding identifies Cafe's configured instance. An external account switch can remain unobserved by the probes. The earlier report is display-only and stays in memory. Only the newly selected environment can authorize the next bounded control request.
 
 ## Qualification and limits
 

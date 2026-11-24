@@ -207,6 +207,124 @@ describe("MCP question resolution notices", () => {
   });
 });
 
+describe("optional subagent limit notices", () => {
+  const message = {
+    id: "accepted-policy-message" as MessageId,
+    role: "user" as const,
+    text: "Continue the synthetic task",
+    turnId: null as TurnId | null,
+    createdAt: "2026-01-01T00:00:01.000Z",
+    streaming: false,
+  };
+  const warning = (payload: unknown): OrchestrationThreadActivity => ({
+    id: EventId.make("unconfirmed-policy-notice"),
+    turnId: null,
+    sequence: 43,
+    createdAt: "2026-01-01T00:00:02.000Z",
+    kind: "provider.subagent-limit.not-applied",
+    tone: "info",
+    summary: "Private received summary",
+    payload,
+  });
+  const payload = {
+    version: 1,
+    reason: "support-unconfirmed",
+    fallback: "current-provider-policy",
+    requestedLimit: 12,
+    messageId: message.id,
+    intentSequence: 42,
+    detail: "Private native error and provider configuration",
+  };
+
+  it("keeps one public notice beside its accepted message after a successful turn starts", () => {
+    const activity = warning(payload);
+    // Ordinary-tail and retained-notice overlap must not duplicate a warning.
+    const activities = [activity, { ...activity }];
+    for (const turnId of [null, "successfully-started-turn" as TurnId]) {
+      const work = deriveWorkLogEntries(activities, turnId ?? undefined);
+      expect(work).toEqual([]);
+      const entries = deriveTimelineEntries([{ ...message, turnId }], [], work, [], activities);
+      const rows = deriveMessagesTimelineRows({
+        timelineEntries: entries,
+        completionDividerAfterEntryId: null,
+        isWorking: turnId !== null,
+        activeTurnStartedAt: turnId === null ? null : "2026-01-01T00:00:03.000Z",
+        revertTurnCountByUserMessageId: new Map(),
+      });
+      const notices = rows.filter((row) => row.kind === "subagent-limit-warning");
+      expect(notices).toEqual([
+        {
+          id: "subagent-limit-warning:unconfirmed-policy-notice",
+          kind: "subagent-limit-warning",
+          createdAt: activity.createdAt,
+          turnId: null,
+          requestedLimit: 12,
+        },
+      ]);
+      expect(rows.some((row) => row.kind === "work" || row.kind === "completion-divider")).toBe(
+        false,
+      );
+      expect(JSON.stringify(notices)).not.toContain("Private");
+    }
+    // A remote composer's wall clock may be ahead of the server. The exact
+    // later durable sequence admits the notice; wall time only positions it
+    // after its accepted message and never supplies causal/adoption evidence.
+    const skewed = { ...activity, createdAt: "2026-01-01T00:00:00.000Z" };
+    const skewedEntries = deriveTimelineEntries([message], [], [], [], [skewed]);
+    expect(skewedEntries.map((entry) => entry.kind)).toEqual(["message", "subagent-limit-warning"]);
+    expect(skewedEntries.at(-1)).toMatchObject({
+      kind: "subagent-limit-warning",
+      requestedLimit: 12,
+      createdAt: message.createdAt,
+    });
+  });
+
+  it("does not promote malformed, foreign or uncorrelated policy data into conversation text", () => {
+    let getterCalls = 0;
+    const accessor = { ...payload };
+    Object.defineProperty(accessor, "requestedLimit", {
+      get() {
+        getterCalls += 1;
+        throw new Error("Private accessor must not execute");
+      },
+    });
+    const inherited = Object.assign(Object.create({ reason: payload.reason }), payload);
+    delete inherited.reason;
+    const activities = [
+      ...[
+        { ...payload, version: 2 },
+        { ...payload, reason: "native-default-applied" },
+        { ...payload, fallback: "provider-default" },
+        { ...payload, requestedLimit: 0 },
+        { ...payload, requestedLimit: 65 },
+        { ...payload, requestedLimit: 1.5 },
+        { ...payload, messageId: "foreign-message" },
+        { ...payload, intentSequence: 43 },
+        accessor,
+        inherited,
+      ].map((value, index) => ({ ...warning(value), id: EventId.make(`invalid-policy-${index}`) })),
+      { ...warning(payload), id: EventId.make("wrong-policy-kind"), kind: "runtime.warning" },
+      {
+        ...warning(payload),
+        id: EventId.make("wrong-policy-turn"),
+        turnId: "foreign-turn" as TurnId,
+      },
+      ...[undefined, 41, 42].map((sequence, index) => ({
+        ...warning(payload),
+        id: EventId.make(`unconfirmed-policy-order-${index}`),
+        sequence,
+      })),
+    ];
+    const work = deriveWorkLogEntries(activities, undefined);
+    const notices = deriveTimelineEntries([message], [], work, [], activities).filter(
+      (entry) => entry.kind === "subagent-limit-warning",
+    );
+    expect(notices).toEqual([]);
+    expect(work.some((entry) => entry.id.startsWith("invalid-policy-"))).toBe(false);
+    expect(getterCalls).toBe(0);
+  });
+});
+
 describe("mergeHistoricalSubagentEntries", () => {
   it("preserves current native confirmation against separately paged older-runtime completion", () => {
     const current = {

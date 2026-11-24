@@ -1,6 +1,6 @@
 # Verification decision index
 
-Last updated: 2026-11-08 03:53:13 JST (UTC+0900)
+Last updated: 2026-11-15 10:56:47 JST (UTC+0900)
 
 This index covers verification decisions; independent feature decisions remain
 in this directory.
@@ -38,6 +38,14 @@ in this directory.
 
 Related provider lifecycle decisions:
 
+- [Provider daemon startup readiness](provider-daemon-startup-readiness.md):
+  authenticated exact-child/journal readiness independent of rich diagnostics,
+  exact request cancellation and finite failure observations.
+
+- [MCP operation storage budget](mcp-operation-storage-budget.md): bounded
+  logical byte accounting retains every live request ID while releasing unused
+  settled result reservations; diagnostics never grant replay authority.
+
 - [Glide catalogue admission](glide-catalogue-admission.md): bounded inert
   catalogue resources, explicit desktop opt-in and finite startup guidance,
   separate from executing kernels and provider retry authority.
@@ -61,6 +69,11 @@ Related provider lifecycle decisions:
   guidance, separate from authentication, recovery and execution authority.
 
 - [Claude steer consumption](claude-steer-consumption.md): exact native input, message, attempt and runtime ownership for steering presentation.
+- [Claude steering after foreground completion](claude-completed-foreground-steer.md): same-query admission of an ordinary steer that missed its completed foreground turn.
+- [Gemini via Antigravity ACP](gemini-antigravity-acp.md) records native model discovery, effort, permissions, and session ownership.
+- [Gemini ACP follow-ups and background work](gemini-acp-follow-ups.md) describes native request settlement and the limits of background observation.
 - [Initial Claude input consumption](claude-initial-input-consumption.md): narrow
   successor for a committed initial input mapped by its exact native-consumption
   receipt to the actual new turn, without ACK settlement or old-turn aliases.
+
+- [Nonblocking subagent-limit preferences](nonblocking-subagent-limit-preferences.md): apply qualified overrides; otherwise warn in primary chat and retain ordinary delivery.

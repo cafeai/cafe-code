@@ -4,9 +4,9 @@
 
 **Settings → Cafe tools → Enable Cafe management tools** controls the backend-authoritative management endpoint. It remains enabled by default. Off rejects new management requests immediately; accepted work may finish. Only an owner connection can change it. Scheduling and visualizations retain their separate credentials, permissions and approval rules.
 
-Cafe supplies management MCP at launch to Codex, Claude, Grok, and local OpenCode chats it owns, including explicit account homes. There is no install/remove UI or registration RPC. Ordinary provider sessions started outside Cafe do not gain a connection. Existing Cafe sessions adopt changes through their normal stop/resume lifecycle; this change does not restart a running provider.
+Cafe supplies management MCP at launch to Codex, Claude, Gemini, Grok, and local OpenCode chats it owns, including explicit account homes. There is no install/remove UI or registration RPC. Ordinary provider sessions started outside Cafe do not gain a connection. Existing Cafe sessions adopt changes through their normal stop/resume lifecycle; this change does not restart a running provider.
 
-Codex receives a private stdio server through the existing structured app-server configuration override. Claude receives the same private stdio specification through SDK query options, preserving user/project sources and permission callbacks. Local OpenCode receives a runtime-only inline configuration override in its Cafe-owned child process. Configured external OpenCode servers are unchanged. Grok retains its existing session-scoped authenticated ACP HTTP connection. Axiom remains unavailable until its native session MCP ownership/revision contract is implemented.
+Codex receives a private stdio server through the existing structured app-server configuration override. Claude receives the same private stdio specification through SDK query options, preserving user/project sources and permission callbacks. Antigravity receives it in the ACP request that opens or resumes a Gemini session. Local OpenCode receives a runtime-only inline configuration override in its Cafe-owned child process. Configured external OpenCode servers are unchanged. Grok retains its existing session-scoped authenticated ACP HTTP connection. Axiom remains unavailable until its native session MCP ownership/revision contract is implemented.
 
 Management tools have owner authority over Cafe projects, chats, providers and settings. Cafe adds no management approval prompt and does not modify provider approval policy. This is broader than scheduling's proposal/list/pause capability; enabling management never approves a recurring task.
 
@@ -214,9 +214,31 @@ in another scope never proves an earlier action did not run. A missing or
 uncertain receipt must not trigger automatic replay. Authentication/revocation
 remain authoritative independently of these read-only receipts.
 
-The SQLite ledger retains at most 10,000 unexpired receipts, each at most 64 KiB.
+The SQLite ledger uses a bounded logical byte budget rather than a 10,000-row
+limit. Unconfirmed and scheduled actions reserve the full 64 KiB result
+allowance. Recorded, completed and failed actions retain their consumed IDs and
+results while releasing unused result capacity. Actual UTF-8 metadata is charged
+with a positive per-row floor, so even tiny receipts have a finite population.
+The budget equals 10,000 full result reservations plus the minimum metadata
+charge. Each result still has the same 64 KiB maximum. This bounds charged
+ledger bytes, not SQLite page, index, free-list or WAL file sizes.
+
+`get_cafe_context.operationStorage` reports aggregate `receiptCount`,
+`chargedBytes`, `budgetBytes` and `availableBytes` with a policy version and
+`scope: "global"`. It contains no individual request IDs or arguments. Null
+means storage accounting is unavailable or unsupported, never zero usage.
+These numbers are advisory: only the transaction admitting an action can
+reserve capacity. Read-only context remains usable if this diagnostic fails.
+
 Capacity refusal starts no new action and never evicts live deduplication
-evidence; expired credential namespaces can be pruned on admission. Stored data
+evidence. Expired credential namespaces are pruned in bounded admission batches.
+Genuine unfinished-work saturation can still refuse new actions safely.
+Restarting the app or provider does not clear these durable receipts. Do not
+purge them or issue replacement mutations for uncertain outcomes. Existing
+credential lifetimes, rotation and revocation rules are unchanged. See the
+[storage decision](decisions/mcp-operation-storage-budget.md).
+
+Stored data
 is limited to hashed scope/intent, tool, timestamps, public result identifiers
 and fixed errors. Prompts, answers, config/environment values and raw native
 failures are not copied into this ledger. Interrupted attempts stay unconfirmed

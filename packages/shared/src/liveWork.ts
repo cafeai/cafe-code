@@ -57,9 +57,12 @@ export function readLiveWorkObservation(
   const visible = payload.visibility !== "ambient";
   // A tool update without its former control retracts that foreground entry
   // when the provider binds it to an independent native background task.
-  const nativeBound = subagent
-    ? isSubagent(payload.subagent) && subagent.runtimeId === runtimeId
-    : isControl(payload.individualTaskControl) && control?.runtimeId === runtimeId;
+  const nativeBound =
+    tool && payload.geminiDetachedToolVersion === 1
+      ? payload.nativeWorkRuntimeId === runtimeId
+      : subagent
+        ? isSubagent(payload.subagent) && subagent.runtimeId === runtimeId
+        : isControl(payload.individualTaskControl) && control?.runtimeId === runtimeId;
   return {
     runtimeId,
     lane: task ? "task" : "tool",

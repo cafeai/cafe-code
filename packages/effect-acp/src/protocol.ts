@@ -83,8 +83,17 @@ export interface AcpPatchedProtocol {
    * delivery always continues independently through `onNotification`.
    */
   readonly incoming: Stream.Stream<AcpIncomingNotification>;
-  readonly request: (method: string, payload: unknown) => Effect.Effect<unknown, AcpError.AcpError>;
+  readonly request: (
+    method: string,
+    payload: unknown,
+    admission?: AcpRequestQueueAdmission,
+  ) => Effect.Effect<unknown, AcpError.AcpError>;
   readonly notify: (method: string, payload: unknown) => Effect.Effect<void, AcpError.AcpError>;
+}
+
+export interface AcpRequestQueueAdmission {
+  readonly isCurrent: () => boolean;
+  readonly onQueued: () => void;
 }
 
 interface AcpPendingRequest {
@@ -192,6 +201,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
 
   const offerOutgoing = Effect.fn("offerOutgoing")(function* (
     message: RpcMessage.FromClientEncoded | RpcMessage.FromServerEncoded,
+    admission?: AcpRequestQueueAdmission,
   ) {
     yield* logProtocol({
       direction: "outgoing",
@@ -219,7 +229,17 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
         payload: typeof encoded === "string" ? encoded : new TextDecoder().decode(encoded),
       });
 
-      yield* Queue.offer(outgoing, encoded).pipe(Effect.asVoid);
+      if (admission) {
+        // The owner check, non-waiting offer and callback are one admission
+        // point. Stop cannot race a blocked producer into a later write.
+        if (!admission.isCurrent())
+          return yield* AcpError.AcpRequestError.invalidRequest("ACP request owner retired.");
+        if (!Queue.offerUnsafe(outgoing, encoded))
+          return yield* AcpError.AcpRequestError.overloaded("The ACP send queue is full.");
+        admission.onQueued();
+      } else {
+        yield* Queue.offer(outgoing, encoded).pipe(Effect.asVoid);
+      }
     }
   });
 
@@ -667,7 +687,11 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     });
   });
 
-  const sendRequest = Effect.fn("sendRequest")(function* (method: string, payload: unknown) {
+  const sendRequest = Effect.fn("sendRequest")(function* (
+    method: string,
+    payload: unknown,
+    admission?: AcpRequestQueueAdmission,
+  ) {
     const requestId = yield* Ref.modify(
       nextRequestId,
       (current) => [current, current + 1] as const,
@@ -684,16 +708,16 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
         AcpError.AcpRequestError.overloaded("Too many pending ACP extension requests."),
       );
     }
-    yield* offerOutgoing({
-      _tag: "Request",
-      id: String(requestId),
-      tag: method,
-      payload,
-      headers: [],
-    }).pipe(Effect.tapError(() => removeExtPending(requestId)));
-    return yield* Deferred.await(deferred).pipe(
-      Effect.onInterrupt(() => removeExtPending(requestId)),
-    );
+    return yield* offerOutgoing(
+      {
+        _tag: "Request",
+        id: String(requestId),
+        tag: method,
+        payload,
+        headers: [],
+      },
+      admission,
+    ).pipe(Effect.andThen(Deferred.await(deferred)), Effect.ensuring(removeExtPending(requestId)));
   });
 
   return {

@@ -3062,12 +3062,17 @@ it.effect(
         runtimeMode: "full-access",
         maxConcurrentSubagents: null,
       });
+      const legacy = yield* adapter.startSession({
+        threadId: asThreadId("limit-legacy-config"),
+        runtimeMode: "full-access",
+      });
       assert.equal(one.maxConcurrentSubagents, 1);
       assert.equal(two.maxConcurrentSubagents, 64);
-      assert.equal(inherited.maxConcurrentSubagents, 12);
+      assert.equal(inherited.maxConcurrentSubagents, null);
+      assert.equal(legacy.maxConcurrentSubagents, 12);
       assert.deepEqual(
         factory.runtimes.map((runtime) => runtime.options.maxConcurrentSubagents),
-        [1, 64, 12],
+        [1, 64, undefined, 12],
       );
       const fork = yield* adapter.forkSession!({
         operationId: "limit-fork",
@@ -9483,6 +9488,50 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }
       assert.equal(firstEvent.value.turnId, "turn-1");
       assert.equal(firstEvent.value.payload.message, "warning: normal stderr diagnostic");
+    }),
+  );
+
+  it.effect("presents only native human commands as default-decline one-time approvals", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      for (const kind of ["humanCommand", "command"] as const) {
+        const next = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        yield* runtime.emit({
+          id: asEventId(`evt-human-command-${kind}`),
+          kind: "request",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "item/commandExecution/requestApproval",
+          requestKind: "command",
+          requestId: ApprovalRequestId.make(`human-command-${kind}`),
+          payload: {
+            threadId: "provider-thread-1",
+            turnId: "turn-1",
+            itemId: `command-item-${kind}`,
+            startedAtMs: 1_767_225_600_000,
+            kind,
+            command: "test-only-command",
+            reason: "A managed checkpoint requiring a fresh human decision",
+          },
+        } satisfies ProviderEvent);
+        const observed = yield* Fiber.join(next);
+        assert.equal(observed._tag, "Some");
+        if (observed._tag !== "Some" || observed.value.type !== "request.opened") {
+          return assert.fail("Expected the held native approval to reach the primary chat");
+        }
+        assert.equal(observed.value.payload.requestType, "command_execution_approval");
+        assert.equal(observed.value.payload.detail, "test-only-command");
+        assert.equal(
+          observed.value.payload.defaultToNo,
+          kind === "humanCommand" ? true : undefined,
+        );
+        assert.equal(
+          observed.value.payload.suppressAlwaysAllowRule,
+          kind === "humanCommand" ? true : undefined,
+        );
+      }
     }),
   );
 

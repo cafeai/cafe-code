@@ -777,11 +777,12 @@ describe("Codex picker model/list refresh", () => {
       ).some((model) => model.slug.includes("daybreak")),
     ).toBe(false);
   });
-  it("lists GPT-6.2 Sol first during cold-start fallback and de-duplicates custom entries", () => {
+  it("offers GPT-6.2 Sol in the cold-start fallback and deduplicates custom entries", () => {
     const models = fallbackCodexModelsFromSettings(
       decodeCodexSettings({ customModels: ["gpt-6.2-sol", "gpt-6-astra"] }),
     );
-    expect(models[0]).toMatchObject({
+    const sol = models.find((model) => model.slug === "gpt-6.2-sol");
+    expect(sol).toMatchObject({
       slug: "gpt-6.2-sol",
       name: "GPT-6.2-Sol",
       isCustom: false,
@@ -796,9 +797,9 @@ describe("Codex picker model/list refresh", () => {
         ],
       },
     });
-    expect(models[0]?.capabilities?.optionDescriptors?.[0]?.currentValue).toBeUndefined();
+    expect(sol?.capabilities?.optionDescriptors?.[0]?.currentValue).toBeUndefined();
     expect(models.filter((model) => model.slug === "gpt-6.2-sol")).toHaveLength(1);
-    expect(models.find((model) => model.slug === "gpt-6-astra")).toMatchObject({
+    expect(models[0]).toMatchObject({
       slug: "gpt-6-astra",
       name: "GPT-6-Astra",
       isCustom: false,
@@ -865,13 +866,19 @@ describe("Codex picker model/list refresh", () => {
     },
   );
 
-  it("offers Terra without inventing a default effort or paid tier", () => {
-    const slug = "gpt-6.1-terra";
+  it.each([
+    ["gpt-6.1-terra", "GPT-6.1-Terra"],
+    ["gpt-6.2-astra", "GPT-6.2-Astra"],
+    ["gpt-6.2-sol", "GPT-6.2-Sol"],
+  ])("offers %s without inventing a default effort or paid tier", (slug, name) => {
     const models = fallbackCodexModelsFromSettings(decodeCodexSettings({ customModels: [slug] }));
     const matching = models.filter((model) => model.slug === slug);
     expect(matching).toHaveLength(1);
     const row = matching[0]!;
-    expect(row).toMatchObject({ slug, name: "GPT-6.1-Terra", isCustom: false });
+    expect(row).toMatchObject({ slug, name, isCustom: false });
+    if (slug.startsWith("gpt-6.2-")) {
+      expect(row.capabilities?.inputModalities).toEqual(["text", "image"]);
+    }
     const descriptors = row.capabilities?.optionDescriptors ?? [];
     expect(descriptors).toMatchObject([
       {
@@ -911,7 +918,7 @@ describe("Codex picker model/list refresh", () => {
 
     // Account-native rows, including their own narrower options and tiers,
     // replace the static fallback; an explicit custom row remains conservative.
-    const live = { slug, name: "Account Terra", isCustom: false, capabilities: null };
+    const live = { slug, name: "Account model", isCustom: false, capabilities: null };
     expect(finalizeCodexModelListRefresh([live], [slug])).toEqual([live]);
     const other = { ...live, slug: "other" };
     expect(finalizeCodexModelListRefresh([other], [])).toEqual([other]);

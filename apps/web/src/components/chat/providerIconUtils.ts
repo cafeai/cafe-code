@@ -1,10 +1,19 @@
 import { ProviderDriverKind } from "@cafecode/contracts";
-import { AxiomIcon, ClaudeAI, GrokIcon, Icon, OpenAI, OpenCodeIcon } from "../Icons";
+import {
+  AntigravityIcon,
+  AxiomIcon,
+  ClaudeAI,
+  GrokIcon,
+  Icon,
+  OpenAI,
+  OpenCodeIcon,
+} from "../Icons";
 import { PROVIDER_OPTIONS } from "../../session-logic";
 
 export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>> = {
   [ProviderDriverKind.make("codex")]: OpenAI,
   [ProviderDriverKind.make("claudeAgent")]: ClaudeAI,
+  [ProviderDriverKind.make("gemini")]: AntigravityIcon,
   [ProviderDriverKind.make("grok")]: GrokIcon,
   [ProviderDriverKind.make("opencode")]: OpenCodeIcon,
   [ProviderDriverKind.make("axiom")]: AxiomIcon,

@@ -5,10 +5,12 @@ import * as fs from "node:fs/promises";
 
 import {
   PROVIDER_DAEMON_HEALTH_PATH,
+  PROVIDER_DAEMON_STARTUP_READINESS_PATH,
   PROVIDER_DAEMON_LEASES_PATH,
   PROVIDER_DAEMON_RETIRE_PATH,
   ProviderDaemonBootstrap,
   ProviderDaemonHealth,
+  ProviderDaemonStartupReadiness,
   ProviderDaemonLeaseResponse,
   ProviderDaemonMarker,
 } from "@cafecode/contracts";
@@ -64,6 +66,9 @@ const encodeDiagnosticJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unkn
 type TestProcessSpawner = Context.Service.Shape<typeof ChildProcessSpawner.ChildProcessSpawner>;
 const encodeProviderDaemonHealthJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonHealth),
+);
+const encodeProviderDaemonStartupReadinessJson = Schema.encodeSync(
+  Schema.fromJsonString(ProviderDaemonStartupReadiness),
 );
 const encodeProviderDaemonMarkerJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonMarker),
@@ -1176,6 +1181,7 @@ describe("DesktopProviderDaemonManager", () => {
           let healthPatch: Partial<ProviderDaemonHealth> = {};
           let running = true;
           let preparing = false;
+          let readinessRequests = 0;
           let healthRequests = 0;
           let leases = 0;
           let spawns = 0;
@@ -1225,6 +1231,28 @@ describe("DesktopProviderDaemonManager", () => {
                         token: TEST_LEASE_TOKEN,
                         capabilities: ["health", "events", "rpc"],
                         issuedAt: "1970-01-01T00:00:00.000Z",
+                      }),
+                    );
+                    return;
+                  }
+                  if (request.url === PROVIDER_DAEMON_STARTUP_READINESS_PATH) {
+                    readinessRequests += 1;
+                    assert.isFalse(preparing);
+                    response.end(
+                      encodeProviderDaemonStartupReadinessJson({
+                        readinessProtocol: 1,
+                        journalState: "ready",
+                        ok: true,
+                        mode: "provider-daemon",
+                        dataProfile: "production",
+                        dataProfileId: dataProfileIdentity("production", baseDir),
+                        pid: 1_234_567,
+                        ppid: process.pid,
+                        version: "0.0.0-test",
+                        protocolVersion: 1,
+                        runtimeBuildId: bootstrap.runtimeBuildId,
+                        startedAt: "1970-01-01T00:00:00.000Z",
+                        transport: "ipc",
                       }),
                     );
                     return;
@@ -1307,6 +1335,10 @@ describe("DesktopProviderDaemonManager", () => {
             const credentialBefore = yield* fileSystem.readFile(credentialPath);
             const snapshotBefore = yield* manager.snapshot;
             const observationsBefore = observations;
+            assert.equal(readinessRequests, 1);
+            assert.equal(healthRequests, 0);
+            // The startup receipt cannot fabricate a rich-health observation.
+            assert.isTrue(Option.isNone(snapshotBefore.lastHealth));
             preparing = true;
             if (phase === "changed-profile") healthPatch = { dataProfile: "debug" };
             if (phase === "changed-build")
@@ -1330,7 +1362,8 @@ describe("DesktopProviderDaemonManager", () => {
                   })
                 : yield* manager.prepareForUpdate!.pipe(Effect.exit);
             assert.equal(Exit.isSuccess(prepared), phase === "matching");
-            assert.equal(healthRequests, phase === "exited-before" ? 1 : 2);
+            assert.equal(readinessRequests, 1);
+            assert.equal(healthRequests, phase === "exited-before" ? 0 : 1);
             assert.equal(
               observations - observationsBefore,
               phase === "matching" || phase === "exited-during-health" ? 2 : 1,

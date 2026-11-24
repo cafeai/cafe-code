@@ -89,6 +89,14 @@ const BUNDLED_RATES: ReadonlyArray<readonly [prefix: string, rate: ModelRate]> =
   ["claude-fable", { input: 10, cachedInput: 1, cacheWrite: 12.5, output: 50 }],
   ["claude", { input: 3, cachedInput: 0.3, cacheWrite: 3.75, output: 15 }],
   // OpenAI
+  // Verified 2026-11-18 against the separate official model pages:
+  // https://developers.openai.com/api/docs/models/gpt-6.2-astra
+  // https://developers.openai.com/api/docs/models/gpt-6.2-sol
+  // These standard short-context rates use 30-minute cache writes. Keep
+  // historical model families unchanged; aggregate totals cannot identify
+  // individual long-context requests, speed tiers or 12-hour cache writes.
+  ["gpt-6.2-astra", { input: 8, cachedInput: 0.4, cacheWrite: 10, output: 40 }],
+  ["gpt-6.2-sol", { input: 2, cachedInput: 0.1, cacheWrite: 2.5, output: 10 }],
   // Verified 2026-09-05: https://developers.openai.com/api/docs/models/gpt-6-astra
   // Astra has its own rates; it must not inherit the legacy generic GPT rate.
   // Requests above 272k input use 2x input/cache and 1.5x output rates, and

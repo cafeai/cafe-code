@@ -1,7 +1,9 @@
 import * as ProviderJsonSchema from "effect/Schema";
 import { describe, expect, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Sink from "effect/Sink";
@@ -29,7 +31,7 @@ const environment = Object.freeze({
   CLAUDE_CONFIG_DIR: "/selected-config",
 });
 const encoder = new TextEncoder();
-function fixture(output?: (requestId: string) => Stream.Stream<Uint8Array>) {
+function fixture(output?: (requestId: string) => Stream.Stream<Uint8Array> | undefined) {
   const commands: ChildProcess.StandardCommand[] = [];
   const requests: unknown[] = [];
   const kills: string[] = [];
@@ -100,7 +102,7 @@ describe("Claude control-only account allowances", () => {
           ),
         ),
       );
-      const reader = yield* makeClaudeAccountQuotaReader(
+      const { read: reader } = yield* makeClaudeAccountQuotaReader(
         "selected-claude",
         Deferred.succeed(selecting, undefined).pipe(
           Effect.andThen(Deferred.await(selected)),
@@ -115,9 +117,9 @@ describe("Claude control-only account allowances", () => {
       yield* Deferred.await(reading);
       yield* TestClock.adjust(2_000);
       yield* Deferred.succeed(response, undefined);
-      expect((yield* Fiber.join(pending))?.meters?.map((meter) => meter.usedPercent)).toEqual([
-        57, 18,
-      ]);
+      expect(
+        (yield* Fiber.join(pending)).report?.meters?.map((meter) => meter.usedPercent),
+      ).toEqual([57, 18]);
       expect(peer.commands).toHaveLength(1);
       expect(peer.kills).toEqual(["SIGTERM"]);
     }),
@@ -129,7 +131,7 @@ describe("Claude control-only account allowances", () => {
         const selecting = yield* Deferred.make<void>();
         const retired = yield* Deferred.make<void>();
         const peer = fixture();
-        const reader = yield* makeClaudeAccountQuotaReader(
+        const { read: reader } = yield* makeClaudeAccountQuotaReader(
           "selected-claude",
           Effect.acquireRelease(Effect.void, () => Deferred.succeed(retired, undefined)).pipe(
             // A real auth-status child/pipe reports readiness asynchronously.
@@ -145,7 +147,7 @@ describe("Claude control-only account allowances", () => {
         yield* Deferred.await(selecting);
         if (action === "timeout") {
           yield* TestClock.adjust(9_000);
-          expect(yield* Fiber.join(pending)).toBeNull();
+          expect(yield* Fiber.join(pending)).toEqual({ report: null });
         } else yield* Fiber.interrupt(pending);
         expect(yield* Deferred.isDone(retired)).toBe(true);
         expect(peer.commands).toHaveLength(0);
@@ -280,14 +282,14 @@ describe("Claude control-only account allowances", () => {
     () =>
       Effect.gen(function* () {
         const peer = fixture(() => Stream.empty);
-        const reader = yield* makeClaudeAccountQuotaReader(
+        const { read: reader } = yield* makeClaudeAccountQuotaReader(
           "selected-claude",
           Effect.succeed(environment),
         ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, peer.spawner));
         expect(yield* Effect.all([reader, reader, reader], { concurrency: "unbounded" })).toEqual([
-          null,
-          null,
-          null,
+          { report: null },
+          { report: null },
+          { report: null },
         ]);
         expect(peer.commands).toHaveLength(1);
         yield* TestClock.adjust(59_000);
@@ -296,7 +298,7 @@ describe("Claude control-only account allowances", () => {
         yield* TestClock.adjust(1_001);
         yield* reader;
         expect(peer.commands).toHaveLength(2);
-        const other = yield* makeClaudeAccountQuotaReader(
+        const { read: other } = yield* makeClaudeAccountQuotaReader(
           "other-claude",
           Effect.succeed({ HOME: "/other" }),
         ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, peer.spawner));
@@ -329,7 +331,7 @@ describe("Claude control-only account allowances", () => {
             ),
           ),
         );
-        const reader = yield* makeClaudeAccountQuotaReader(
+        const { read: reader } = yield* makeClaudeAccountQuotaReader(
           "selected-claude",
           Effect.succeed(environment),
         ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, peer.spawner));
@@ -340,7 +342,7 @@ describe("Claude control-only account allowances", () => {
         expect(peer.commands).toHaveLength(1);
         yield* Deferred.succeed(release, undefined);
         const reports = yield* Fiber.join(consumers);
-        expect(reports[0]?.meters?.map((meter) => meter.usedPercent)).toEqual([57, 18]);
+        expect(reports[0]?.report?.meters?.map((meter) => meter.usedPercent)).toEqual([57, 18]);
         expect(reports).toEqual([reports[0], reports[0], reports[0]]);
         yield* TestClock.adjust(59_000);
         expect(yield* reader).toEqual(reports[0]);
@@ -350,6 +352,79 @@ describe("Claude control-only account allowances", () => {
         expect(peer.commands).toHaveLength(2);
         expect(peer.kills).toEqual(["SIGTERM", "SIGTERM"]);
       }),
+  );
+
+  it.effect("reuses the last native allowance only until the observed login changes", () =>
+    Effect.gen(function* () {
+      let unavailable = false;
+      let selectionUnavailable = false;
+      let waitForCancellation = false;
+      const selecting = yield* Deferred.make<void>();
+      const reading = yield* Deferred.make<void>();
+      const peer = fixture(() => {
+        if (waitForCancellation) {
+          return Stream.fromEffect(Deferred.succeed(reading, undefined)).pipe(
+            Stream.flatMap(() => Stream.never),
+          );
+        }
+        return unavailable ? Stream.empty : undefined;
+      });
+      const quota = yield* makeClaudeAccountQuotaReader(
+        "selected-claude",
+        Effect.suspend(() =>
+          selectionUnavailable
+            ? Effect.yieldNow.pipe(
+                Effect.andThen(Deferred.succeed(selecting, undefined)),
+                Effect.andThen(Effect.never),
+              )
+            : Effect.succeed(environment),
+        ),
+      ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, peer.spawner));
+      const original = { status: "authenticated", email: "first@example.test" } as const;
+      yield* quota.observeAuthentication(original);
+      const fresh = yield* quota.read;
+      expect(fresh.report?.meters?.map((meter) => meter.usedPercent)).toEqual([57, 18]);
+      expect(fresh.stale).toBeUndefined();
+
+      unavailable = true;
+      yield* TestClock.adjust(60_001);
+      expect(yield* quota.read).toMatchObject({ report: fresh.report, stale: true });
+      expect(yield* quota.read).toMatchObject({ report: fresh.report, stale: true });
+
+      selectionUnavailable = true;
+      yield* TestClock.adjust(60_001);
+      const pending = yield* quota.read.pipe(Effect.forkChild);
+      yield* Deferred.await(selecting);
+      yield* TestClock.adjust(9_000);
+      expect(yield* Fiber.join(pending)).toMatchObject({ report: fresh.report, stale: true });
+
+      // A sign-out and relogin can reuse both the configured instance and the
+      // displayed account string. They must still retire its exact old report.
+      yield* quota.observeAuthentication({ status: "unauthenticated" });
+      yield* quota.observeAuthentication(original);
+      expect(yield* quota.read).toEqual({ report: null });
+      expect(peer.commands).toHaveLength(2);
+
+      unavailable = false;
+      selectionUnavailable = false;
+      yield* TestClock.adjust(60_001);
+      const recovered = yield* quota.read;
+      expect(recovered.report?.meters?.map((meter) => meter.usedPercent)).toEqual([57, 18]);
+      expect(recovered.stale).toBeUndefined();
+
+      waitForCancellation = true;
+      yield* TestClock.adjust(60_001);
+      const cancelled = yield* quota.read.pipe(Effect.forkChild);
+      yield* Deferred.await(reading);
+      yield* Fiber.interrupt(cancelled);
+      const exit = yield* Fiber.await(cancelled);
+      expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true);
+      expect(yield* quota.read).toMatchObject({ report: recovered.report, stale: true });
+
+      yield* quota.observeEnvironment({ HOME: "/other-home" });
+      expect(yield* quota.read).toEqual({ report: null });
+      expect(peer.commands).toHaveLength(4);
+    }),
   );
 
   it.effect(
@@ -365,7 +440,7 @@ describe("Claude control-only account allowances", () => {
               )
             : Stream.empty,
         );
-        const reader = yield* makeClaudeAccountQuotaReader(
+        const { read: reader } = yield* makeClaudeAccountQuotaReader(
           "selected-claude",
           Effect.succeed(environment),
         ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, peer.spawner));
@@ -385,7 +460,7 @@ describe("Claude control-only account allowances", () => {
         yield* Effect.exit(reader);
         expect(peer.commands).toHaveLength(1);
         yield* TestClock.adjust(1_001);
-        expect(yield* reader).toBeNull();
+        expect(yield* reader).toEqual({ report: null });
         expect(peer.commands).toHaveLength(2);
         expect(peer.kills).toEqual(["SIGTERM", "SIGTERM"]);
       }),

@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 // Native HTTP cancellation qualification uses only this test's owned listener.
 import * as http from "node:http";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, type TestContext } from "vitest";
 import { randomOpaque } from "./bytes.ts";
 import { NativeHostWorkClient, solveHostWork } from "./nativeHostWork.ts";
 import { Lifetime } from "./lifetime.ts";
@@ -41,16 +41,51 @@ function challenge(difficulty: number): HostWorkChallenge {
   };
 }
 
+function ownSolver(test: TestContext) {
+  const lifetime = new Lifetime(),
+    pending: Promise<HostWorkSolutions>[] = [];
+  let closing: Promise<void> | undefined;
+  const retire = () => lifetime.retire();
+  const close = () => {
+    retire();
+    // A solver promise settles only after its actual worker exits (or before
+    // acquisition is admitted). Join those original promises before the
+    // lifetime's timer finalizers; cancelling the timers alone is not a join.
+    return (closing ??= (async () => {
+      await Promise.allSettled(pending);
+      await lifetime.close();
+      test.signal.removeEventListener("abort", retire);
+    })());
+  };
+  test.signal.addEventListener("abort", retire, { once: true });
+  test.onTestFinished(close);
+  if (test.signal.aborted) retire();
+  return {
+    lifetime,
+    solve(value: HostWorkChallenge) {
+      // Cleanup is registered before acquisition. A late body continuation
+      // after public test retirement must not acquire an unowned worker.
+      test.signal.throwIfAborted();
+      if (closing !== undefined) throw Error("fixture-retired");
+      const promise = solveHostWork(value, lifetime);
+      pending.push(promise);
+      // Preserve the original promise for assertions and exact cleanup, while
+      // observing rejection immediately even if the test is already retiring.
+      void promise.catch(() => {});
+      return promise;
+    },
+  };
+}
+
 describe("native host-only work solver", () => {
   it("completes disabled proof without any hash puzzle and still rejects retired work", async (test) => {
-    const lifetime = new Lifetime();
-    test.onTestFinished(() => lifetime.close());
-    const proof = await solveHostWork(challenge(0), lifetime);
+    const owner = ownSolver(test);
+    const proof = await owner.solve(challenge(0));
     expect(proof).toEqual([0, 0, 0, 0]);
     expect(verifyHostWork(challenge(0), proof)).toBe(true);
     expect(verifyHostWork(challenge(0), [1, 0, 0, 0])).toBe(false);
-    lifetime.retire();
-    await expect(solveHostWork(challenge(0), lifetime)).rejects.toThrow();
+    owner.lifetime.retire();
+    await expect(owner.solve(challenge(0))).rejects.toThrow();
   });
   it("bounds queued attempts and joins an admitted HTTP request before closing", async (test) => {
     const lifetime = new Lifetime(),
@@ -134,14 +169,40 @@ describe("native host-only work solver", () => {
     expect(requests).toBe(1);
   });
   it("joins its native worker and solves all four parts using interoperable SHA-256 bytes", async (test) => {
-    const lifetime = new Lifetime();
-    test.signal.addEventListener("abort", () => lifetime.retire(), { once: true });
-    test.onTestFinished(() => lifetime.close());
-    const value = challenge(HOST_WORK.difficulty),
-      solutions = await solveHostWork(value, lifetime);
+    const owner = ownSolver(test);
+    // Public inputs were fixed before the independent reference search. Keep
+    // default-strength work and the real bounded worker, but do not turn a
+    // correctness test into a fresh probabilistic search-cost sample per run.
+    // The reference used createHash with explicit big-endian counter bytes,
+    // crosschecked against WebCrypto; all four first solutions take 118002
+    // trials. Literal inputs keep that reference independent of later policy.
+    const value: HostWorkChallenge = {
+      version: 1,
+      purpose: "host-reservation",
+      replace: false,
+      networkId: "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+      nodeId: "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+      bootId: "AwMDAwMDAwMDAwMDAwMDAw",
+      locator: "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ",
+      admissionPublicKey: "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU",
+      claimId: "BgYGBgYGBgYGBgYGBgYGBg",
+      reservationId: null,
+      slots: 1,
+      reservationMs: 600_000,
+      difficulty: 17,
+      issuedAt: 1000,
+      expiresAt: 31_000,
+      nonce: "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      mac: "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg",
+    };
+    const solutions = await owner.solve(value);
+    expect(solutions).toEqual([8171, 56137, 5895, 47795]);
     expect(verifyHostWork(value, solutions)).toBe(true);
     const prefix = hostWorkPrefix(value),
       bytes = new Uint8Array(37);
+    expect(Buffer.from(prefix).toString("hex")).toBe(
+      "72d8e0e6fc5bdb8d956f2840035302bc656d688d1ea6c3491bf510d01586c37c",
+    );
     bytes.set(prefix);
     bytes[32] = 3;
     new DataView(bytes.buffer).setUint32(33, solutions[3]);
@@ -152,19 +213,11 @@ describe("native host-only work solver", () => {
     expect(() => readCanonical(HostWorkSolutions, canonicalBytes([1, 2, 3, -1]))).toThrow();
   });
   it("cancels a held worker and rejects a late or unsupported result", async (test) => {
-    const lifetime = new Lifetime();
-    test.signal.addEventListener("abort", () => lifetime.retire(), { once: true });
-    test.onTestFinished(() => lifetime.close());
-    const pending = solveHostWork(challenge(HOST_WORK.maximumDifficulty), lifetime);
-    lifetime.retire();
+    const owner = ownSolver(test);
+    const pending = owner.solve(challenge(HOST_WORK.maximumDifficulty));
+    owner.lifetime.retire();
     await expect(pending).rejects.toThrow();
-    const fresh = new Lifetime();
-    try {
-      await expect(
-        solveHostWork(challenge(HOST_WORK.maximumDifficulty + 1), fresh),
-      ).rejects.toThrow();
-    } finally {
-      await fresh.close();
-    }
+    const fresh = ownSolver(test);
+    await expect(fresh.solve(challenge(HOST_WORK.maximumDifficulty + 1))).rejects.toThrow();
   });
 });

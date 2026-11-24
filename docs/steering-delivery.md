@@ -1,7 +1,7 @@
 # Steer delivery status
 
 Created: 2026-10-14 01:33:41 JST (UTC+0900)
-Last updated: 2026-10-27 02:29:57 JST (UTC+0900)
+Last updated: 2026-11-14 17:19:27 JST (UTC+0900)
 
 Live follow-ups keep their delivery status beside the saved message above the
 composer. Sending means the provider has not yet confirmed acceptance. Accepted
@@ -32,6 +32,14 @@ The exact admitted composer content is consumed even if processing already
 settled its pending row before that error; a newer edited draft is never cleared.
 Full page reload restores the durable Work log, not the volatile pending shelf;
 this change does not introduce a new pending-message persistence mechanism.
+
+During a running turn, pressing **Send** on a particular queued row checks that
+row's delivery restrictions. An older rejected follow-up may still have to wait
+for the next turn; it does not block an unrelated ordinary message explicitly
+selected for steering. Automatic queue delivery retains its first-item ordering
+and retry restrictions. The selected message still requires the existing live
+session, account/priority, durable-claim and in-flight transport checks. This
+does not replay the rejected input or interrupt the running provider.
 
 This is presentation, not delivery authority. Existing authenticated receipt,
 native correlation and recovery guards continue to own provider operations.
