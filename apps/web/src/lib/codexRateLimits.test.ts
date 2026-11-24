@@ -26,6 +26,18 @@ describe("codexRateLimits", () => {
     ).toBe(false);
     expect(
       shouldSurfaceProviderAccountRateLimits({
+        driver: ProviderDriverKind.make("axiom"),
+        auth: { status: "authenticated" },
+      }),
+    ).toBe(true);
+    expect(
+      shouldSurfaceProviderAccountRateLimits({
+        driver: ProviderDriverKind.make("axiom"),
+        auth: { status: "unauthenticated" },
+      }),
+    ).toBe(false);
+    expect(
+      shouldSurfaceProviderAccountRateLimits({
         driver: ProviderDriverKind.make("opencode"),
         auth: { status: "authenticated" },
       }),
@@ -271,6 +283,26 @@ describe("codexRateLimits", () => {
     {
       credits: { hasCredits: false, unlimited: false, balance: "  " },
       expected: ["Credits: None available"],
+    },
+    {
+      credits: { hasCredits: true, unlimited: false, balance: "$13.07" },
+      expected: ["Credits: $13.07 available"],
+    },
+    {
+      credits: { hasCredits: true, unlimited: false, balance: "$1234.56" },
+      expected: ["Credits: $1,234.56 available"],
+    },
+    {
+      credits: { hasCredits: false, unlimited: false, balance: "$0.00" },
+      expected: ["Credits: $0.00 available"],
+    },
+    {
+      credits: { hasCredits: true, unlimited: false, balance: "<$0.01" },
+      expected: ["Credits: <$0.01 available"],
+    },
+    {
+      credits: { hasCredits: false, unlimited: false, balance: "$9.99" },
+      expected: ["Credits: None available (balance: $9.99)"],
     },
     {
       credits: { hasCredits: true, unlimited: false, balance: "9007199254740993.0001" },

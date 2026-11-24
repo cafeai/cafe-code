@@ -14,10 +14,11 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import { ServerConfig } from "../../config.ts";
 import { makeAxiomTextGeneration } from "../../textGeneration/AxiomTextGeneration.ts";
 import {
+  axiomAccountRateLimitsFromBilling,
   axiomConfigurationKey,
   axiomDefaultThinkingLevel,
-  axiomCreditBalance,
   AxiomBilling,
+  AxiomCreditBillingSummaryResponse,
   AxiomAccount,
   AxiomModels,
   decodeAxiom,
@@ -107,6 +108,38 @@ export const AxiomDriver: ProviderDriver<AxiomSettings, AxiomDriverEnv> = {
         runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
         message: "Checking the configured native AxiomCLI.",
       });
+      const readAxiomAccountRateLimits = (
+        client: Effect.Success<ReturnType<typeof makeAxiomBackgroundControl>>["client"],
+        extension: Effect.Success<ReturnType<typeof makeAxiomBackgroundControl>>["extension"],
+        checkedAt: string,
+      ) =>
+        Effect.gen(function* () {
+          const billingFeature = extension.features.billing ?? 0;
+          const creditSummary =
+            billingFeature >= 7
+              ? yield* client.raw
+                  .request("_axiom/billing/credits", { action: { kind: "summary" } })
+                  .pipe(
+                    Effect.flatMap((value) =>
+                      decodeAxiom(AxiomCreditBillingSummaryResponse, value),
+                    ),
+                    Effect.map((response) => response.result.value),
+                    Effect.catch(() => Effect.succeed(undefined)),
+                  )
+              : undefined;
+          const billingStatus =
+            !creditSummary && billingFeature >= 2
+              ? yield* client.raw.request("_axiom/billing/status", {}).pipe(
+                  Effect.flatMap((value) => decodeAxiom(AxiomBilling, value)),
+                  Effect.catch(() => Effect.succeed(undefined)),
+                )
+              : undefined;
+          return axiomAccountRateLimitsFromBilling({
+            checkedAt,
+            creditSummary,
+            billingStatus,
+          });
+        });
       const checkProvider = Effect.gen(function* () {
         const base = initial(yield* timestamp);
         if (!enabled) return { ...base, message: "Axiom is disabled." };
@@ -127,13 +160,9 @@ export const AxiomDriver: ProviderDriver<AxiomSettings, AxiomDriverEnv> = {
                 .filter((model) => ["near", "tinfoil"].includes(model.providerId))
                 .map(axiomModelToCafe)
             : [];
-          const billing =
-            authenticated && extension.features.billing === 4
-              ? yield* client.raw.request("_axiom/billing/status", {}).pipe(
-                  Effect.flatMap((value) => decodeAxiom(AxiomBilling, value)),
-                  Effect.catch(() => Effect.succeed(undefined)),
-                )
-              : undefined;
+          const accountRateLimits = authenticated
+            ? yield* readAxiomAccountRateLimits(client, extension, base.checkedAt)
+            : undefined;
           const after = yield* client.raw
             .request("_axiom/account/status", {})
             .pipe(Effect.flatMap((value) => decodeAxiom(AxiomAccount, value)));
@@ -153,22 +182,7 @@ export const AxiomDriver: ProviderDriver<AxiomSettings, AxiomDriverEnv> = {
             ...axiomAccountHealth(status),
             authActions: { login: true },
             models,
-            ...(billing
-              ? {
-                  accountRateLimits: {
-                    checkedAt: base.checkedAt,
-                    rateLimits: {
-                      limitId: "axiom-credit",
-                      limitName: "Axiom credit",
-                      credits: {
-                        hasCredits: billing.status.availableMicrousd > 0,
-                        unlimited: false,
-                        balance: axiomCreditBalance(billing.status.availableMicrousd),
-                      },
-                    },
-                  },
-                }
-              : {}),
+            ...(accountRateLimits ? { accountRateLimits } : {}),
           };
         }).pipe(
           Effect.timeout(15_000),
@@ -201,6 +215,42 @@ export const AxiomDriver: ProviderDriver<AxiomSettings, AxiomDriverEnv> = {
         haveSettingsChanged: () => false,
         initialSnapshot: () => timestamp.pipe(Effect.map(initial)),
         checkProvider,
+        refreshAccountUsage: ({ snapshot }) => {
+          if (!enabled || snapshot.auth.status === "unauthenticated") {
+            return Effect.succeed(null);
+          }
+          if (snapshot.auth.status !== "authenticated") {
+            return Effect.succeed(undefined);
+          }
+          return Effect.gen(function* () {
+            const checkedAt = yield* timestamp;
+            const { client, extension } = yield* makeAxiomBackgroundControl(
+              config,
+              server.cwd,
+              processEnvironment,
+            );
+            const { status } = yield* client.raw
+              .request("_axiom/account/status", {})
+              .pipe(Effect.flatMap((value) => decodeAxiom(AxiomAccount, value)));
+            if (status.state !== "valid" || !status.account) return null;
+            const rateLimits = yield* readAxiomAccountRateLimits(client, extension, checkedAt);
+            const after = yield* client.raw
+              .request("_axiom/account/status", {})
+              .pipe(Effect.flatMap((value) => decodeAxiom(AxiomAccount, value)));
+            if (
+              after.status.state !== status.state ||
+              after.status.account?.id !== status.account.id
+            ) {
+              return undefined;
+            }
+            return rateLimits;
+          }).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Effect.timeout(15_000),
+            Effect.scoped,
+            Effect.catchCause(() => Effect.succeed(undefined)),
+          );
+        },
         refreshModels: () =>
           Effect.gen(function* () {
             const { client } = yield* makeAxiomBackgroundControl(

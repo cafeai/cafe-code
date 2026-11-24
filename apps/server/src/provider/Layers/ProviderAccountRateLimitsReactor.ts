@@ -41,6 +41,7 @@ import { parseCodexRateLimitUpdate } from "../codexRateLimits.ts";
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { ProviderService } from "../Services/ProviderService.ts";
 
+const AXIOM_DRIVER = ProviderDriverKind.make("axiom");
 const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const GEMINI_DRIVER = ProviderDriverKind.make("gemini");
@@ -97,6 +98,7 @@ export function providerAccountUsageRefreshInstanceFromEvent(event: ProviderRunt
   if (event.type !== "turn.completed" && event.type !== "turn.aborted") return null;
   if (event.providerInstanceId === undefined) return null;
   if (
+    event.provider !== AXIOM_DRIVER &&
     event.provider !== CODEX_DRIVER &&
     event.provider !== GROK_DRIVER &&
     event.provider !== GEMINI_DRIVER

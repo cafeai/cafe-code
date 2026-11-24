@@ -9,9 +9,11 @@ import {
   ProviderAttestationStatus,
   ProviderInstanceEnvironment,
   type ModelSelection,
+  type ServerProviderAccountRateLimits,
 } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -87,6 +89,7 @@ export type AxiomModel = (typeof AxiomModels.Type.models)[number];
 export const axiomDefaultThinkingLevel = (model: Pick<AxiomModel, "thinkingLevels">) =>
   ["medium", "enabled"].find((level) => model.thinkingLevels.includes(level)) ??
   model.thinkingLevels[0];
+const CreditInteger = Schema.String.check(Schema.isPattern(/^-?(?:0|[1-9]\d{0,15})$/u));
 export const AxiomBilling = Schema.Struct({
   status: Schema.Struct({
     availableMicrousd: Schema.Number.check(
@@ -94,9 +97,42 @@ export const AxiomBilling = Schema.Struct({
       Schema.isGreaterThanOrEqualTo(-Number.MAX_SAFE_INTEGER),
       Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
     ),
-    currency: Schema.Literal("USD"),
+    currency: Schema.Literals(["USD", "microUSD"]),
   }),
 });
+export type AxiomBilling = typeof AxiomBilling.Type;
+export const AxiomCreditSummary = Schema.Struct({
+  format: Schema.Literal("credits@3"),
+  enabled: Schema.Boolean,
+  scale: Schema.Literal("1000000"),
+  payment_review_required: Schema.Boolean,
+  purchased: Schema.Struct({
+    currency: Schema.Literal("usd"),
+    scale: Schema.Literal("100000000"),
+    available_units: CreditInteger,
+  }),
+  allowance: Schema.Struct({
+    limit_units: CreditInteger,
+    remaining_units: CreditInteger,
+    held_units: CreditInteger,
+    resets_at: Schema.NullOr(Schema.String),
+    effective_until: Schema.NullOr(Schema.String),
+  }),
+  subscription: Schema.NullOr(
+    Schema.Struct({
+      plan_key: Text,
+      state: Text,
+    }),
+  ),
+});
+export type AxiomCreditSummary = typeof AxiomCreditSummary.Type;
+export const AxiomCreditBillingSummaryResponse = Schema.Struct({
+  result: Schema.Struct({
+    kind: Schema.Literal("summary"),
+    value: Schema.NullOr(AxiomCreditSummary),
+  }),
+});
+export type AxiomCreditBillingSummaryResponse = typeof AxiomCreditBillingSummaryResponse.Type;
 /** Preserve the native integer microUSD balance without floating-point rounding. */
 export const axiomCreditBalance = (microusd: number) => {
   const amount = BigInt(microusd);
@@ -108,6 +144,104 @@ export const axiomCreditBalance = (microusd: number) => {
     String(positive % 1000000n).padStart(6, "0")
   );
 };
+/** Format a scaled integer USD amount to whole cents without overstating spendable credit. */
+export const axiomUsdCreditBalance = (units: bigint, scale: bigint): string => {
+  const centScale = scale / 100n;
+  if (units > 0n && units < centScale) return "<$0.01";
+  const sign = units < 0n ? "-" : "";
+  const magnitude = units < 0n ? -units : units;
+  const dollars = magnitude / scale;
+  const cents = (magnitude % scale) / centScale;
+  return `${sign}$${dollars.toString()}.${cents.toString().padStart(2, "0")}`;
+};
+
+function parseAxiomResetEpochSeconds(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const instant = Option.getOrUndefined(ProviderDateTime.make(value));
+  if (!instant) return undefined;
+  const seconds = Math.floor(ProviderDateTime.toEpochMillis(instant) / 1_000);
+  return Number.isSafeInteger(seconds) && seconds >= 0 ? seconds : undefined;
+}
+
+function formatAxiomPlanLabel(planKey: string | null | undefined): string | undefined {
+  const trimmed = planKey?.trim();
+  if (!trimmed || !/^[a-z0-9][a-z0-9_-]{0,31}$/iu.test(trimmed)) return undefined;
+  return trimmed
+    .split(/[-_]+/u)
+    .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1).toLowerCase() : ""))
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** Project Axiom credit billing (weekly subscription allowance + USD pay-per-use
+ * credits) or legacy microUSD billing status into Cafe's account quota snapshot. */
+export function axiomAccountRateLimitsFromBilling(input: {
+  readonly checkedAt: string;
+  readonly creditSummary?: AxiomCreditSummary | null | undefined;
+  readonly billingStatus?: AxiomBilling | undefined;
+}): ServerProviderAccountRateLimits | undefined {
+  const summary = input.creditSummary;
+  if (summary) {
+    const purchasedUnits = BigInt(summary.purchased.available_units);
+    const limitUnits = BigInt(summary.allowance.limit_units);
+    const remainingUnits = BigInt(summary.allowance.remaining_units);
+    const heldUnits = BigInt(summary.allowance.held_units);
+    const hasValidWeeklyAllowance =
+      summary.enabled &&
+      limitUnits > 0n &&
+      remainingUnits >= 0n &&
+      heldUnits >= 0n &&
+      remainingUnits + heldUnits <= limitUnits;
+    const usedPercent = hasValidWeeklyAllowance
+      ? Math.max(
+          0,
+          Math.min(100, Number(((limitUnits - remainingUnits) * 100_000n) / limitUnits) / 1_000),
+        )
+      : undefined;
+    const resetsAt = hasValidWeeklyAllowance
+      ? parseAxiomResetEpochSeconds(summary.allowance.resets_at)
+      : undefined;
+    const planLabel = formatAxiomPlanLabel(summary.subscription?.plan_key);
+    return {
+      checkedAt: input.checkedAt,
+      rateLimits: {
+        limitId: "axiom-credit",
+        limitName: planLabel ? `Axiom · ${planLabel}` : "Axiom",
+        ...(summary.subscription?.plan_key ? { planType: summary.subscription.plan_key } : {}),
+        ...(summary.payment_review_required ? { spendControlReached: true } : {}),
+        ...(hasValidWeeklyAllowance && usedPercent !== undefined
+          ? {
+              primary: {
+                usedPercent,
+                windowDurationMins: 10_080,
+                ...(resetsAt !== undefined ? { resetsAt } : {}),
+              },
+            }
+          : {}),
+        credits: {
+          hasCredits: purchasedUnits > 0n,
+          unlimited: false,
+          balance: axiomUsdCreditBalance(purchasedUnits, 100_000_000n),
+        },
+      },
+    };
+  }
+  const status = input.billingStatus?.status;
+  if (!status) return undefined;
+  const microusd = BigInt(status.availableMicrousd);
+  return {
+    checkedAt: input.checkedAt,
+    rateLimits: {
+      limitId: "axiom-credit",
+      limitName: "Axiom",
+      credits: {
+        hasCredits: microusd > 0n,
+        unlimited: false,
+        balance: axiomUsdCreditBalance(microusd, 1_000_000n),
+      },
+    },
+  };
+}
 export const AxiomVerification = Schema.Struct({
   status: ProviderAttestationStatus,
   evidence: Schema.NullOr(ProviderAttestationEvidence),
@@ -140,7 +274,7 @@ export const AXIOM_CLIENT_CAPABILITIES = {
         steering: 1,
         compaction: 1,
         commandInvocation: 1,
-        billing: 4,
+        billing: 7,
       },
     },
   },

@@ -20,7 +20,10 @@ export function shouldSurfaceProviderAccountRateLimits(provider: QuotaProvider |
   if (provider?.driver === "gemini") return shouldShowAntigravityQuotaStatus(provider);
   return (
     provider?.auth.status === "authenticated" &&
-    (provider.driver === "codex" || provider.driver === "claudeAgent" || provider.driver === "grok")
+    (provider.driver === "axiom" ||
+      provider.driver === "codex" ||
+      provider.driver === "claudeAgent" ||
+      provider.driver === "grok")
   );
 }
 
@@ -245,13 +248,36 @@ function formatCreditBalance(balance: string): string | null {
   return `${sign}${groups.toReversed().join(",")}${remainder ? `.${remainder}` : ""}`;
 }
 
+function formatUsdCreditBalance(
+  balance: string,
+): { readonly display: string; readonly zero: boolean } | null {
+  if (balance === "<$0.01") {
+    return { display: "<$0.01", zero: false };
+  }
+  const usd = /^([+-]?)\$(0|[1-9]\d*)(?:\.(\d{2}))?$/u.exec(balance);
+  if (!usd) return null;
+  const whole = usd[2]!;
+  const cents = usd[3];
+  const zero = whole === "0" && (cents === undefined || cents === "00");
+  const sign = usd[1] === "-" && !zero ? "-" : "";
+  const groups: string[] = [];
+  for (let end = whole.length; end > 0; end -= 3) {
+    groups.push(whole.slice(Math.max(0, end - 3), end));
+  }
+  return {
+    display: `${sign}$${groups.toReversed().join(",")}${cents !== undefined ? `.${cents}` : ""}`,
+    zero,
+  };
+}
+
 function formatCreditValue(
   credits: NonNullable<ServerProviderAccountRateLimitSnapshot["credits"]>,
   compact = false,
 ): string {
   const balance = credits.balance?.trim();
-  const rounded = balance ? formatCreditBalance(balance) : null;
-  const displayBalance = rounded ?? balance;
+  const usd = balance ? formatUsdCreditBalance(balance) : null;
+  const rounded = !usd && balance ? formatCreditBalance(balance) : null;
+  const displayBalance = usd?.display ?? rounded ?? balance;
   if (credits.unlimited)
     return displayBalance
       ? uiText("Unlimited (balance: {balance})", { balance: displayBalance })
@@ -262,14 +288,15 @@ function formatCreditValue(
       : uiText("None available");
 
   // Amounts are provider decimal strings, not floating-point numbers or
-  // currency. Availability uses the original unrounded value, never its
-  // display projection: a tiny nonzero amount that rounds to zero must not
-  // override hasCredits=false. A genuinely reported decimal zero is safe to
-  // describe as zero available; all other amounts require the provider flag.
-  const zero = /^[+-]?(?:0+(?:\.0*)?|\.0+)$/u.test(balance);
-  if ((credits.hasCredits && rounded !== null) || zero)
+  // currency (except explicit USD credit balances like "$13.07"). Availability
+  // uses the original unrounded value, never its display projection: a tiny
+  // nonzero amount that rounds to zero must not override hasCredits=false. A
+  // genuinely reported decimal zero is safe to describe as zero available; all
+  // other amounts require the provider flag.
+  const zero = usd ? usd.zero : /^[+-]?(?:0+(?:\.0*)?|\.0+)$/u.test(balance);
+  if ((credits.hasCredits && (usd !== null || rounded !== null)) || zero)
     return compact
-      ? (rounded ?? balance)
+      ? (displayBalance ?? balance)
       : uiText("{balance} available", { balance: displayBalance });
   return uiText(
     "{available, select, yes {Available} other {None available}} (balance: {balance})",

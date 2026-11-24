@@ -12,8 +12,10 @@ import {
   AXIOM_CLIENT_CAPABILITIES,
   AXIOM_CLI_CLIENT_CAPABILITIES,
   axiomAccountKey,
+  axiomAccountRateLimitsFromBilling,
   axiomConfigurationKey,
   axiomCreditBalance,
+  axiomUsdCreditBalance,
   applyAxiomSelection,
   axiomSpawnInput,
   makeAxiomBackgroundControl,
@@ -287,6 +289,79 @@ describe("Axiom native protocol admission", () => {
     expect(axiomCreditBalance(1000001)).toBe("1.000001");
     expect(axiomCreditBalance(-1)).toBe("-0.000001");
     expect(axiomCreditBalance(Number.MAX_SAFE_INTEGER)).toBe("9007199254.740991");
+    expect(axiomUsdCreditBalance(1307440200n, 100_000_000n)).toBe("$13.07");
+    expect(axiomUsdCreditBalance(500_000n, 100_000_000n)).toBe("<$0.01");
+    expect(axiomUsdCreditBalance(0n, 100_000_000n)).toBe("$0.00");
+    expect(axiomUsdCreditBalance(-150_000_000n, 100_000_000n)).toBe("-$1.50");
+  });
+  it("projects Axiom subscription weekly allowance and pay-per-use USD credits into account rate limits", () => {
+    const checkedAt = "2026-11-24T05:20:00.000Z";
+    const projected = axiomAccountRateLimitsFromBilling({
+      checkedAt,
+      creditSummary: {
+        format: "credits@3",
+        enabled: true,
+        scale: "1000000",
+        payment_review_required: false,
+        purchased: {
+          currency: "usd",
+          scale: "100000000",
+          available_units: "1307440200",
+        },
+        allowance: {
+          limit_units: "1250000000",
+          remaining_units: "1148453000",
+          held_units: "0",
+          resets_at: "2026-11-30T16:35:04+00:00",
+          effective_until: "2026-11-30T16:35:04+00:00",
+        },
+        subscription: {
+          plan_key: "starter",
+          state: "active",
+        },
+      },
+    });
+    expect(projected).toEqual({
+      checkedAt,
+      rateLimits: {
+        limitId: "axiom-credit",
+        limitName: "Axiom · Starter",
+        planType: "starter",
+        primary: {
+          usedPercent: 8.123,
+          windowDurationMins: 10_080,
+          resetsAt: Date.parse("2026-11-30T16:35:04+00:00") / 1_000,
+        },
+        credits: {
+          hasCredits: true,
+          unlimited: false,
+          balance: "$13.07",
+        },
+      },
+    });
+
+    const fallback = axiomAccountRateLimitsFromBilling({
+      checkedAt,
+      creditSummary: null,
+      billingStatus: {
+        status: {
+          availableMicrousd: 13_074_402,
+          currency: "microUSD",
+        },
+      },
+    });
+    expect(fallback).toEqual({
+      checkedAt,
+      rateLimits: {
+        limitId: "axiom-credit",
+        limitName: "Axiom",
+        credits: {
+          hasCredits: true,
+          unlimited: false,
+          balance: "$13.07",
+        },
+      },
+    });
   });
   it("rejects wrong model, expiry, future verification and unregistered protocols", () => {
     const evidence = evidenceFixture(1000);
