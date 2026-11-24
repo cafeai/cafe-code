@@ -43,7 +43,7 @@ const makeFixtureAdapter = Effect.fnUntraced(function* (environment: NodeJS.Proc
         env: {
           ...command.options.env,
           ...environment,
-          CAFE_GEMINI_FIXTURE_NATIVE_VERSION: "1.5.13",
+          CAFE_GEMINI_FIXTURE_NATIVE_VERSION: "1.5.16",
         },
       }),
     );

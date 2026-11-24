@@ -76,10 +76,7 @@ import {
   GeminiAcpSelectionError,
   readGeminiAcpSelection,
 } from "../acp/GeminiAcpSupport.ts";
-import {
-  GEMINI_QUALIFIED_PROMPT_USAGE_VERSION,
-  readGeminiPromptUsage,
-} from "../acp/GeminiAcpUsage.ts";
+import { readGeminiPromptUsage } from "../acp/GeminiAcpUsage.ts";
 import {
   PUBLIC_REASONING_SUMMARY_BLOCKS,
   PUBLIC_REASONING_SUMMARY_CHARS,
@@ -166,7 +163,6 @@ interface SessionOwner {
   readonly nativeId: string;
   readonly runtimeId: SubagentRuntimeId;
   readonly supportsDetachedWake: boolean;
-  readonly supportsPromptUsage: boolean;
   readonly permissionMode: NativePermissionMode;
   readonly permissionConfigId: string;
   readonly bypassPermissions: boolean;
@@ -1171,7 +1167,6 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
           nativeId,
           runtimeId,
           supportsDetachedWake: compareSemverVersions(qualified.version, "1.5.10") >= 0,
-          supportsPromptUsage: qualified.version === GEMINI_QUALIFIED_PROMPT_USAGE_VERSION,
           permissionMode,
           permissionConfigId: applied.permissionConfigId,
           bypassPermissions,
@@ -1487,7 +1482,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
           const group: GeminiPromptGroup = {
             turnId,
             model: applied.model,
-            usageModelConfirmed: ctx.supportsPromptUsage,
+            usageModelConfirmed: true,
             pending: 1,
             submitted: 0,
             rootQueued: false,

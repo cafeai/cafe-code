@@ -163,7 +163,12 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
       };
       const readQuota = Effect.fn("readGeminiQuotaForOwner")(function* (cli: QualifiedGeminiCli) {
         const source = yield* geminiQuotaSource(fs, cli);
-        const report = yield* readGeminiAccountRateLimits({ ...cli, environment, spawner, fs });
+        const report = yield* readGeminiAccountRateLimits({
+          binaryPath: cli.binaryPath,
+          environment,
+          spawner,
+          fs,
+        });
         const currentSource = yield* geminiQuotaSource(fs, cli);
         if (source !== currentSource || report === null) {
           lastQuota = null;

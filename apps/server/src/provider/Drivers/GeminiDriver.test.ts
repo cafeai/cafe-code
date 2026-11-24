@@ -52,12 +52,12 @@ it.live("preserves historical Gemini quota until fresh usage or a conclusive sig
       displayName: undefined,
       enabled: true,
       environment: [],
-      processEnvironment: { CAFE_GEMINI_FIXTURE_NATIVE_VERSION: "1.5.13" },
+      processEnvironment: { CAFE_GEMINI_FIXTURE_NATIVE_VERSION: "1.5.16" },
       config: { ...GeminiDriver.defaultConfig(), binaryPath: process.execPath },
     }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
 
     const ready = yield* instance.snapshot.refresh;
-    assert.equal(ready.version, "1.5.13");
+    assert.equal(ready.version, "1.5.16");
     assert.equal(ready.auth.status, "authenticated");
     assert.deepEqual(
       ready.models.map((model) => model.slug),

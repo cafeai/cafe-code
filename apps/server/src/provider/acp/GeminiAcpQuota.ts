@@ -18,7 +18,6 @@ import { collectUint8StreamText } from "../../stream/collectUint8StreamText.ts";
 import { terminateProbeChild } from "../providerSnapshot.ts";
 import { geminiCliEnvironment } from "./GeminiAcpRuntime.ts";
 
-const QUALIFIED_USAGE_VERSION = "1.5.13";
 const OUTPUT_LIMIT_BYTES = 64 * 1024;
 // Native /usage starts a process and reads the account over the network. Its
 // deadline is separate from ACP session discovery and keeps cold reads bounded.
@@ -140,14 +139,13 @@ function readUsageOutput(
 
 export function readGeminiAccountRateLimits(input: {
   readonly binaryPath: string;
-  readonly version: string | null;
   readonly environment: NodeJS.ProcessEnv;
   readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly fs: FileSystem.FileSystem;
 }): Effect.Effect<ServerProviderAccountRateLimits | null | undefined> {
-  // Keep automatic reads on the release we have qualified for headless
-  // dispatch. Older or changed runtimes can keep using ACP without quotas.
-  if (input.version !== QUALIFIED_USAGE_VERSION) return Effect.succeed(undefined);
+  // Attempt headless /usage on any qualified CLI and rely on strict zero-turn
+  // response validation. Older or changed runtimes degrade to unknown quota
+  // without affecting ACP chats.
   return Effect.gen(function* () {
     const cwd = yield* input.fs.makeTempDirectoryScoped({ prefix: "cafecode-gemini-quota-" });
     const child = yield* input.spawner.spawn(

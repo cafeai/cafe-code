@@ -2,9 +2,8 @@ import { UsageAccountingModel, type UsageAccountingSnapshot } from "@cafecode/co
 import * as Schema from "effect/Schema";
 import type { PromptResponse } from "effect-acp/schema";
 
-// ACP labels prompt-response usage unstable. Only this native version has
-// been observed on sequential responses with both zero and nonzero cache reads.
-export const GEMINI_QUALIFIED_PROMPT_USAGE_VERSION = "1.5.13";
+// ACP labels prompt-response usage unstable, so every response is validated
+// against the expected token accounting invariants instead of version pinning.
 
 const isAccountingModel = Schema.is(UsageAccountingModel);
 
