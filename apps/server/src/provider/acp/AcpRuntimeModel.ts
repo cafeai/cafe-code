@@ -267,7 +267,11 @@ function extractCommandFromTitle(title: string | undefined): string | undefined 
 
 function extractToolCallCommand(rawInput: unknown, title: string | undefined): string | undefined {
   if (isRecord(rawInput)) {
-    const directCommand = normalizeCommandValue(rawInput.command);
+    const directCommand =
+      normalizeCommandValue(rawInput.command) ??
+      normalizeCommandValue(rawInput.CommandLine) ??
+      normalizeCommandValue(rawInput.commandLine) ??
+      normalizeCommandValue(rawInput.command_line);
     if (directCommand) {
       return directCommand;
     }

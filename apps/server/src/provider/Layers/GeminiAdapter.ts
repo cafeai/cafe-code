@@ -1101,7 +1101,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
             const detail =
               permission.kind === "execute"
                 ? permission.toolCall?.command
-                : (permission.toolCall?.title ?? permission.toolCall?.detail);
+                : (permission.toolCall?.detail ?? permission.toolCall?.title);
             // Approve only a bounded, displayable native action. A generic
             // prompt or truncated command cannot convey the scope of consent.
             if (!detail || detail.length > 4096) return cancelled;

@@ -155,9 +155,13 @@ const requestPermission = (id) =>
       sessionId,
       toolCall: {
         toolCallId: id,
-        title: "List the fixture directory",
+        title: "ls",
         kind: "execute",
-        rawInput: { command: "ls" },
+        rawInput: {
+          CommandLine: "ls",
+          WaitMsBeforeAsync: 5000,
+          toolSummary: "List the fixture directory",
+        },
       },
       options: [
         { optionId: "fixture-once", kind: "allow_once", name: "Allow once" },

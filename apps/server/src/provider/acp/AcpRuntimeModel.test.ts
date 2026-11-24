@@ -472,4 +472,37 @@ describe("AcpRuntimeModel", () => {
       },
     });
   });
+
+  it("extracts Antigravity PascalCase CommandLine commands from permission and tool payloads", () => {
+    const request = parsePermissionRequest({
+      sessionId: "session-1",
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+      toolCall: {
+        toolCallId: "call_1",
+        title: "git status",
+        kind: "execute",
+        status: "pending",
+        rawInput: {
+          CommandLine: "git status",
+          WaitMsBeforeAsync: 5000,
+          toolSummary: "Check git status",
+        },
+      },
+    });
+
+    expect(request).toMatchObject({
+      kind: "execute",
+      detail: "git status",
+      toolCall: {
+        toolCallId: "call_1",
+        kind: "execute",
+        status: "pending",
+        command: "git status",
+        detail: "git status",
+      },
+    });
+  });
 });

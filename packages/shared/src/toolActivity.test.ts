@@ -113,4 +113,34 @@ describe("toolActivity", () => {
     ).toBe('{"query":"active pull requests","apiKey":"[redacted]","headers":"[redacted]"}');
     expect(summarizeToolArguments({ query: "x".repeat(500) })?.length).toBe(400);
   });
+
+  it("extracts Antigravity PascalCase CommandLine and Path fields", () => {
+    expect(
+      deriveToolActivityPresentation({
+        itemType: "command_execution",
+        title: "git status",
+        data: {
+          kind: "execute",
+          rawInput: { CommandLine: "git status", WaitMsBeforeAsync: 5000 },
+        },
+      }),
+    ).toEqual({
+      summary: "Ran command",
+      detail: "git status",
+    });
+
+    expect(
+      deriveToolActivityPresentation({
+        itemType: "file_change",
+        title: "File app.ts",
+        data: {
+          kind: "edit",
+          rawInput: { Path: "/tmp/app.ts", Content: "export {};" },
+        },
+      }),
+    ).toEqual({
+      summary: "Changed files",
+      detail: "/tmp/app.ts",
+    });
+  });
 });
