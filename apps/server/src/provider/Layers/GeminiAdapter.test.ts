@@ -299,3 +299,91 @@ it.live(
       );
     }).pipe(Effect.provide(configLayer)),
 );
+
+it.live(
+  "handles native ACP form elicitation questions in bypass mode and routes custom and multi-select answers",
+  () =>
+    Effect.gen(function* () {
+      const { adapter, threadId, start } = yield* makeFixtureAdapter();
+      const requested =
+        yield* Deferred.make<
+          Extract<ProviderRuntimeEvent, { readonly type: "user-input.requested" }>
+        >();
+      const resolved =
+        yield* Deferred.make<
+          Extract<ProviderRuntimeEvent, { readonly type: "user-input.resolved" }>
+        >();
+      const completed = yield* Deferred.make<void>();
+      const deltas: string[] = [];
+
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          if (event.type === "user-input.requested") {
+            yield* Deferred.succeed(requested, event);
+          }
+          if (event.type === "user-input.resolved") {
+            yield* Deferred.succeed(resolved, event);
+          }
+          if (event.type === "content.delta") {
+            deltas.push(event.payload.delta);
+          }
+          if (event.type === "turn.completed" && event.payload.state === "completed") {
+            yield* Deferred.succeed(completed, undefined);
+          }
+        }),
+      ).pipe(Effect.forkScoped({ startImmediately: true }));
+
+      yield* adapter.startSession({ ...start, interactionMode: "gemini-bypass" });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Ask structured questions",
+        interactionMode: "gemini-bypass",
+      });
+
+      const promptEvent = yield* Deferred.await(requested);
+      assert.isDefined(promptEvent.requestId);
+      assert.equal(promptEvent.payload.supportsUnanswered, true);
+      assert.deepEqual(promptEvent.payload.questions, [
+        {
+          id: "q1",
+          header: "Question",
+          question: "Color?",
+          multiSelect: false,
+          options: [
+            { label: "Red", description: "Red" },
+            { label: "Blue", description: "Blue" },
+          ],
+        },
+        {
+          id: "q2",
+          header: "Question",
+          question: "Fruits?",
+          multiSelect: true,
+          options: [
+            { label: "Apple", description: "Apple" },
+            { label: "Banana", description: "Banana" },
+            { label: "Pear", description: "Pear" },
+          ],
+        },
+      ]);
+
+      const requestId = ApprovalRequestId.make(promptEvent.requestId!);
+      // An incomplete response must fail without consuming the pending question.
+      yield* adapter.respondToUserInput(threadId, requestId, { q1: "Red" }).pipe(Effect.flip);
+      yield* adapter.respondToUserInput(threadId, requestId, {
+        q1: "Purple",
+        q2: ["Apple", "Pear"],
+      });
+
+      const resolvedEvent = yield* Deferred.await(resolved);
+      assert.deepEqual(resolvedEvent.payload, {
+        answers: {
+          q1: "Purple",
+          q2: ["Apple", "Pear"],
+        },
+      });
+      yield* Deferred.await(completed);
+      assert.deepEqual(deltas, ["Received Purple and Apple, Pear."]);
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.provide(configLayer)),
+);

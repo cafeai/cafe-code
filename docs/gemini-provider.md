@@ -14,7 +14,7 @@ The model picker uses the current account’s ACP model list. Cafe confirms a sw
 | Gemini 4 Argon    | Low, Medium, High        |
 | Gemini 4 Hydrogen | Low, Medium, High, Extra |
 
-Chats support streamed replies, reasoning and tool activity, native one-time approvals, and context usage when the CLI reports it. PNG, JPEG, and WebP attachments are available when the session advertises images. Stop cancels the active work and retires the process. Reopening a native conversation requires an acknowledged ACP resume or load.
+Chats support streamed replies, reasoning and tool activity, native one-time approvals, structured questions (single-select, multi-select, custom answers, and skip/dismiss via ACP form elicitation), and context usage when the CLI reports it. PNG, JPEG, and WebP attachments are available when the session advertises images. Stop cancels the active work and retires the process. Reopening a native conversation requires an acknowledged ACP resume or load.
 
 Use **Steer** while Gemini is working to send a follow-up to its current Antigravity session. Cafe keeps the turn open until both native responses settle. It queues a follow-up for later if the original request is no longer available before submission. If a submitted request loses its response, the message stays in the conversation with a delivery warning. [Antigravity ACP steering](https://antigravity.google/docs/ide/extensions/acp/)
 

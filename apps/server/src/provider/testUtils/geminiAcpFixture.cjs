@@ -66,7 +66,13 @@ if (process.argv.includes("--print")) {
   );
   process.exit(0);
 }
-if (process.argv[2] !== "acp" || process.argv.length !== 3) process.exit(1);
+if (
+  process.argv[2] !== "acp" ||
+  (process.argv.length !== 3 &&
+    !(process.argv.length === 4 && process.argv[3] === "--dangerously-skip-permissions"))
+) {
+  process.exit(1);
+}
 
 const expectManagementMcp = process.env.CAFE_GEMINI_FIXTURE_EXPECT_MANAGEMENT_MCP === "true";
 function validateMcpServers(servers, generation) {
@@ -93,9 +99,11 @@ let resumed = false;
 let mode = "auto";
 let effort = "high";
 let permissionPromptId;
+let questionPromptId;
 let steeringRootId;
 let steeringFollowUpId;
 let steeringCompleted = false;
+let clientAdvertisedFormElicitation = false;
 const initialUsage = {
   inputTokens: 9_230,
   outputTokens: 509,
@@ -159,8 +167,66 @@ const requestPermission = (id) =>
     },
   });
 
+const requestQuestion = (id) =>
+  write({
+    id,
+    method: "elicitation/create",
+    params: {
+      sessionId,
+      toolCallId: id,
+      mode: "form",
+      message: "The agent has 2 questions.",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          q1: {
+            type: "string",
+            title: "Color?",
+            oneOf: [
+              { const: "1", title: "Red" },
+              { const: "2", title: "Blue" },
+            ],
+          },
+          q1_other: {
+            type: "string",
+            title: "Other",
+            description: "Optional free-form answer to: Color?",
+          },
+          q2: {
+            type: "array",
+            title: "Fruits?",
+            items: {
+              anyOf: [
+                { const: "1", title: "Apple" },
+                { const: "2", title: "Banana" },
+                { const: "3", title: "Pear" },
+              ],
+            },
+          },
+          q2_other: {
+            type: "string",
+            title: "Other",
+            description: "Optional free-form answer to: Fruits?",
+          },
+        },
+      },
+    },
+  });
+
 createInterface({ input: process.stdin }).on("line", (line) => {
   const { id, method, params, result: clientResult } = JSON.parse(line);
+  if (id === "fixture-question" && clientResult) {
+    if (
+      clientResult.action !== "accept" ||
+      clientResult.content?.q1_other !== "Purple" ||
+      JSON.stringify(clientResult.content?.q2) !== JSON.stringify(["1", "3"])
+    ) {
+      process.exit(1);
+    }
+    text("Received Purple and Apple, Pear.");
+    result(questionPromptId, { stopReason: "end_turn", usage: initialUsage });
+    return;
+  }
   if (id === "fixture-approval" && clientResult) {
     if (clientResult.outcome?.optionId !== "fixture-once") process.exit(1);
     text(`Using ${effort} effort and one-time approval.`);
@@ -177,6 +243,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 
   switch (method) {
     case "initialize":
+      clientAdvertisedFormElicitation = Boolean(params?.clientCapabilities?.elicitation?.form);
       result(id, {
         protocolVersion: 1,
         agentInfo: { name: "antigravity-acp", version },
@@ -246,6 +313,19 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           stopReason: "end_turn",
           usage: { ...continuedUsage, cachedWriteTokens: 1 },
         });
+        return;
+      }
+      if (input === "Ask structured questions") {
+        if (!clientAdvertisedFormElicitation) process.exit(1);
+        questionPromptId = id;
+        update({
+          sessionUpdate: "tool_call",
+          toolCallId: "fixture-question",
+          title: "Run ask_question",
+          kind: "other",
+          status: "in_progress",
+        });
+        requestQuestion("fixture-question");
         return;
       }
       if (input !== "Hello Gemini") process.exit(1);

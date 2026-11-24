@@ -70,6 +70,13 @@ import {
   type AcpPermissionRequest,
 } from "../acp/AcpRuntimeModel.ts";
 import type { AcpSessionRuntime, AcpSessionRuntimeEvent } from "../acp/AcpSessionRuntime.ts";
+import {
+  buildGeminiElicitationResponse,
+  GeminiElicitationRequest,
+  parseGeminiElicitation,
+  type GeminiElicitationPlan,
+  type GeminiElicitationResolved,
+} from "../acp/GeminiAcpElicitation.ts";
 import { makeGeminiAcpRuntime, qualifyGeminiCli } from "../acp/GeminiAcpRuntime.ts";
 import {
   applyGeminiAcpSelection,
@@ -116,6 +123,16 @@ interface PendingApproval {
   readonly turnId: TurnId;
   readonly permission: AcpPermissionRequest;
   readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
+}
+
+type GeminiQuestionResolution =
+  | ({ readonly _tag: "answered" } & GeminiElicitationResolved)
+  | { readonly _tag: "cancelled" };
+
+interface PendingQuestion {
+  readonly turnId: TurnId;
+  readonly plan: GeminiElicitationPlan;
+  readonly decision: Deferred.Deferred<GeminiQuestionResolution>;
 }
 
 interface PublicThought {
@@ -168,6 +185,7 @@ interface SessionOwner {
   readonly bypassPermissions: boolean;
   readonly supportsImages: boolean;
   readonly approvals: Map<ApprovalRequestId, PendingApproval>;
+  readonly questions: Map<ApprovalRequestId, PendingQuestion>;
   readonly toolBindings: Map<string, GeminiToolBinding>;
   readonly retiredToolIds: Set<string>;
   readonly detachedMessages: Map<string, GeminiBackgroundReply>;
@@ -659,6 +677,33 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
       );
     });
 
+  const resolveQuestion = (
+    ctx: SessionOwner,
+    requestId: ApprovalRequestId,
+    pending: PendingQuestion,
+    resolution: GeminiQuestionResolution,
+  ) =>
+    Effect.gen(function* () {
+      if (ctx.questions.get(requestId) !== pending) return;
+      ctx.questions.delete(requestId);
+      yield* emit(
+        {
+          ...(yield* base(ctx.session.threadId)),
+          type: "user-input.resolved",
+          turnId: pending.turnId,
+          requestId: RuntimeRequestId.make(requestId),
+          payload:
+            resolution._tag === "answered"
+              ? {
+                  answers: resolution.answers,
+                  ...(resolution.unanswered ? { unanswered: resolution.unanswered } : {}),
+                }
+              : { answers: {}, cancelled: true },
+        },
+        ctx,
+      );
+    });
+
   const settle = (
     ctx: SessionOwner,
     turnId: TurnId,
@@ -700,7 +745,10 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
       if (!owns(ctx)) return;
       ctx.retiring = true;
       const turnId = ctx.session.activeTurnId;
-      if ((turnId || ctx.approvals.size > 0 || hasDetachedTools(ctx)) && !failure) {
+      if (
+        (turnId || ctx.approvals.size > 0 || ctx.questions.size > 0 || hasDetachedTools(ctx)) &&
+        !failure
+      ) {
         // Cancellation is a notification, so its transport write alone cannot
         // authorize reuse. Close the same owned child even if delivery fails.
         yield* ctx.runtime.cancel.pipe(
@@ -712,6 +760,10 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
       for (const [id, pending] of ctx.approvals) {
         yield* Deferred.succeed(pending.decision, "cancel");
         yield* resolveApproval(ctx, id, pending, "cancel");
+      }
+      for (const [id, pending] of ctx.questions) {
+        yield* Deferred.succeed(pending.decision, { _tag: "cancelled" });
+        yield* resolveQuestion(ctx, id, pending, { _tag: "cancelled" });
       }
       yield* Scope.close(ctx.scope, Exit.void);
       if (turnId) yield* settle(ctx, turnId, failure ? "failed" : "cancelled");
@@ -743,7 +795,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
         event.modeId !== ctx.permissionMode &&
         owns(ctx) &&
         !ctx.permissionModeRevoked &&
-        (turnId || ctx.approvals.size > 0 || hasDetachedTools(ctx))
+        (turnId || ctx.approvals.size > 0 || ctx.questions.size > 0 || hasDetachedTools(ctx))
       ) {
         // A live native mode change withdraws callback authority before
         // asynchronous retirement. Retirement must join this event fiber
@@ -927,6 +979,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
             previous.session.status !== "ready" ||
             previous.session.activeTurnId ||
             previous.approvals.size > 0 ||
+            previous.questions.size > 0 ||
             hasDetachedTools(previous)
           )
             return yield* invalid(
@@ -952,7 +1005,12 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
         // native process before starting a different permission owner, even
         // where both modes project the same ACP selector value.
         if (previous) {
-          if (!owns(previous) || previous.approvals.size > 0 || hasDetachedTools(previous)) {
+          if (
+            !owns(previous) ||
+            previous.approvals.size > 0 ||
+            previous.questions.size > 0 ||
+            hasDetachedTools(previous)
+          ) {
             return yield* invalid(
               "startSession",
               "Gemini background work is still active under the current permission mode.",
@@ -994,6 +1052,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
             cwd,
             environment,
             childProcessSpawner,
+            clientCapabilities: { elicitation: { form: {} } },
             clientInfo: { name: "cafe-code", version: APPLICATION_VERSION },
             observeSessionConfigUpdates: true,
             observeToolLifecycle: true,
@@ -1093,6 +1152,77 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
             );
           }),
         );
+        const handleElicitationRequest = (
+          request: GeminiElicitationRequest | AcpSchema.ElicitationRequest,
+        ): Effect.Effect<AcpSchema.ElicitationAction> =>
+          Effect.gen(function* () {
+            const cancelled = { action: "cancel" as const };
+            const ctx = owner;
+            const toolCallId =
+              "toolCallId" in request && typeof request.toolCallId === "string"
+                ? request.toolCallId
+                : undefined;
+            if (
+              !ctx ||
+              !owns(ctx) ||
+              ctx.retiring ||
+              ctx.permissionModeRevoked ||
+              request.sessionId !== ctx.nativeId ||
+              ctx.questions.size >= 32 ||
+              (toolCallId !== undefined &&
+                (!NATIVE_ID_PATTERN.test(toolCallId) || ctx.retiredToolIds.has(toolCallId)))
+            ) {
+              return cancelled;
+            }
+            const turnId =
+              toolCallId !== undefined ? approvalTurnFor(ctx, toolCallId) : foregroundTurnFor(ctx);
+            if (!turnId) return cancelled;
+            const plan = parseGeminiElicitation(request);
+            if (!plan) return cancelled;
+            const requestId = ApprovalRequestId.make(yield* Random.nextUUIDv4);
+            const decision = yield* Deferred.make<GeminiQuestionResolution>();
+            if (
+              !owns(ctx) ||
+              ctx.retiring ||
+              ctx.permissionModeRevoked ||
+              ctx.questions.size >= 32
+            ) {
+              return cancelled;
+            }
+            const pending: PendingQuestion = { turnId, plan, decision };
+            ctx.questions.set(requestId, pending);
+            yield* emit(
+              {
+                ...(yield* base(input.threadId)),
+                type: "user-input.requested",
+                turnId,
+                requestId: RuntimeRequestId.make(requestId),
+                payload: {
+                  questions: plan.questions,
+                  ...(plan.supportsUnanswered ? { supportsUnanswered: true } : {}),
+                },
+              },
+              ctx,
+            );
+            const resolution = yield* Deferred.await(decision);
+            if (!owns(ctx)) return cancelled;
+            return yield* locked(
+              input.threadId,
+              Effect.gen(function* () {
+                if (!owns(ctx) || ctx.questions.get(requestId) !== pending) return cancelled;
+                yield* resolveQuestion(ctx, requestId, pending, resolution);
+                return resolution._tag === "answered" ? resolution.response : cancelled;
+              }),
+            );
+          });
+        yield* runtime.handleExtRequest(
+          "elicitation/create",
+          GeminiElicitationRequest,
+          handleElicitationRequest,
+        );
+        yield* runtime.handleElicitation((request) =>
+          handleElicitationRequest(request).pipe(Effect.map((action) => ({ action }))),
+        );
         const started = yield* native(input.threadId, "session/setup", runtime.start()).pipe(
           Effect.timeoutOrElse({
             duration: START_REQUEST_TIMEOUT,
@@ -1172,6 +1302,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
           bypassPermissions,
           supportsImages: capabilities?.promptCapabilities?.image === true,
           approvals: new Map(),
+          questions: new Map(),
           toolBindings: new Map(),
           retiredToolIds: new Set(),
           detachedMessages: new Map(),
@@ -1434,7 +1565,8 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
           ctx.session.status !== "ready" ||
           ctx.session.activeTurnId ||
           ctx.permissionModeRevoked ||
-          ctx.approvals.size !== 0
+          ctx.approvals.size !== 0 ||
+          ctx.questions.size !== 0
         )
           return yield* invalid("sendTurn", "The Gemini session is busy.");
         if (
@@ -1467,8 +1599,13 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
         // Only exact native IDs already seen idle can cross this boundary.
         yield* ctx.runtime.finishPromptEvents;
         yield* finishBackgroundReply(ctx);
-        if (ctx.approvals.size > 0) {
-          return yield* invalid("sendTurn", "Gemini is waiting for a permission response.");
+        if (ctx.approvals.size > 0 || ctx.questions.size > 0) {
+          return yield* invalid(
+            "sendTurn",
+            ctx.questions.size > 0
+              ? "Gemini is waiting for a question response."
+              : "Gemini is waiting for a permission response.",
+          );
         }
         if (!owns(ctx) || ctx.permissionModeRevoked) {
           return yield* invalid(
@@ -1564,6 +1701,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
           const matches = active
             ? !turnId || active === turnId
             : [...ctx.approvals.values()].some((pending) => !turnId || pending.turnId === turnId) ||
+              [...ctx.questions.values()].some((pending) => !turnId || pending.turnId === turnId) ||
               [...ctx.toolBindings.values()].some(
                 (binding) => binding.detached && (!turnId || binding.turnId === turnId),
               );
@@ -1591,8 +1729,33 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
             );
         }),
       ),
-    respondToUserInput: () =>
-      Effect.fail(invalid("respondToUserInput", "Gemini structured questions are not available.")),
+    respondToUserInput: (threadId, requestId, answers, unanswered?) =>
+      locked(
+        threadId,
+        Effect.gen(function* () {
+          const ctx = yield* requireOwner(threadId);
+          const pending = ctx.questions.get(requestId);
+          if (!pending) {
+            return yield* invalid(
+              "respondToUserInput",
+              "The Gemini question is no longer pending.",
+            );
+          }
+          const resolved = buildGeminiElicitationResponse(pending.plan, answers, unanswered);
+          if (!resolved) {
+            return yield* invalid(
+              "respondToUserInput",
+              "The response does not match the pending Gemini question.",
+            );
+          }
+          if (!(yield* Deferred.succeed(pending.decision, { _tag: "answered", ...resolved }))) {
+            return yield* invalid(
+              "respondToUserInput",
+              "The Gemini question has already been resolved.",
+            );
+          }
+        }),
+      ),
     stopSession: (threadId) =>
       locked(
         threadId,
