@@ -22,6 +22,60 @@ const Revision = Schema.Number.check(
   Schema.isGreaterThanOrEqualTo(0),
   Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
 );
+/** Native desktopMcp@2 exposes public HTTP transport identity, never its bearer
+ * or OAuth credentials. Keep the same endpoint policy as Axiom's reviewed
+ * desktop_mcp/remote.rs so remote entries cannot smuggle credentials into UI. */
+const RemoteEndpoint = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(4096),
+  Schema.makeFilter((value) => {
+    if (/[\u0000-\u001f\u007f?#]/u.test(value)) return false;
+    try {
+      const url = new URL(value);
+      const loopback =
+        url.hostname === "localhost" || /^127\./u.test(url.hostname) || url.hostname === "[::1]";
+      return (
+        (url.protocol === "https:" || (url.protocol === "http:" && loopback)) &&
+        url.hostname.length > 0 &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash
+      );
+    } catch {
+      return false;
+    }
+  }),
+);
+export const ProviderMcpRemoteConnection = Schema.Struct({
+  url: RemoteEndpoint,
+  auth: Schema.Literals(["none", "bearer", "oauth"]),
+  clientId: Schema.optional(
+    Schema.String.check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(2048),
+      Schema.isPattern(/^[^\u0000-\u001f\u007f]+$/u),
+    ),
+  ),
+  clientMetadataUrl: Schema.optional(
+    RemoteEndpoint.check(
+      Schema.makeFilter((value) => {
+        try {
+          const url = new URL(value);
+          return url.protocol === "https:" && url.pathname !== "/";
+        } catch {
+          return false;
+        }
+      }),
+    ),
+  ),
+}).check(
+  Schema.makeFilter(
+    (value) =>
+      value.auth === "oauth" ||
+      (value.clientId === undefined && value.clientMetadataUrl === undefined),
+  ),
+);
 export const ProviderMcpServerInput = Schema.Struct({
   name: ServerName,
   command: Command,
@@ -57,11 +111,14 @@ export const ProviderMcpNativeInput = Schema.Struct({
 export type ProviderMcpNativeInput = typeof ProviderMcpNativeInput.Type;
 export const ProviderMcpState = Schema.Struct({
   revision: Revision,
+  remoteSupported: Schema.optional(Schema.Boolean),
   servers: Schema.Array(
     Schema.Struct({
       name: ServerName,
-      command: Command,
+      displayName: Schema.optional(Schema.NullOr(Name)),
+      command: Schema.String.check(Schema.isMaxLength(4096), Schema.isPattern(/^[^\0\r\n]*$/u)),
       args: Arguments,
+      remote: Schema.optional(Schema.NullOr(ProviderMcpRemoteConnection)),
       enabled: Schema.Boolean,
       environmentKeys: Schema.Array(EnvironmentName).check(Schema.isMaxLength(64)),
       tools: Schema.Array(Schema.Struct({ name: Name, description: Text, schemaHash: Name })).check(
@@ -69,7 +126,13 @@ export const ProviderMcpState = Schema.Struct({
       ),
       status: Name,
       error: Schema.optional(Schema.NullOr(Text)),
-    }),
+    }).check(
+      Schema.makeFilter((server) =>
+        server.remote
+          ? server.command === "" && server.args.length === 0 && server.environmentKeys.length === 0
+          : server.command.trim().length > 0,
+      ),
+    ),
   ).check(Schema.isMaxLength(32)),
   selectedTools: Schema.Array(Name).check(Schema.isMaxLength(2048)),
 });

@@ -201,7 +201,9 @@ export function summarizeThread(
   const provenance =
     organization?.provenance ?? ("provenance" in thread ? thread.provenance : null);
   return {
-    groupId: organization?.groupId ?? thread.groupId ?? null,
+    // A later organization read can observe a detach after the shell read.
+    // Explicit null is authoritative, not a reason to resurrect old membership.
+    groupId: organization ? organization.groupId : (thread.groupId ?? null),
     origin: origin ? { classification: origin.classification, source: origin.source } : null,
     provenance: provenance
       ? {

@@ -3271,6 +3271,67 @@ describe("deriveWorkLogEntries", () => {
     expect(failed.detail).toBe(detail);
   });
 
+  it("folds search-service calls using the actual operation outcome and preserves retained details", () => {
+    const detail =
+      'codex_apps.search_service.web_run: {"system2_search_query":[{"q":"Path ORAM"}]}';
+    const payload = {
+      itemId: "web-mcp-call",
+      itemType: "mcp_tool_call",
+      title: "MCP tool call",
+      detail,
+      data: {
+        item: {
+          server: "codex_apps",
+          tool: "search_service.web_run",
+          arguments: { system2_search_query: [{ q: "Path ORAM" }] },
+        },
+      },
+    };
+    const started = makeActivity({
+      id: "web-progress",
+      kind: "tool.updated",
+      sequence: 1,
+      payload,
+    });
+    expect(workLogDisplayToolTitle(deriveWorkLogEntries([started], undefined)[0]!)).toBe(
+      "Searching the web",
+    );
+    const completed = makeActivity({
+      id: "web-complete",
+      kind: "tool.completed",
+      sequence: 2,
+      payload: {
+        ...payload,
+        status: "completed",
+        data: { item: { server: "codex_apps", tool: "search_service.web_run" } },
+      },
+    });
+    const entries = deriveWorkLogEntries([started, completed], undefined);
+    expect(entries).toHaveLength(1);
+    expect(workLogDisplayToolTitle(entries[0]!)).toBe("Searched the web");
+    expect(entries[0]).toMatchObject({
+      detail,
+      itemType: "mcp_tool_call",
+      toolTitle: "MCP tool call",
+      webMcp: { action: "search", preview: "Path ORAM", state: "completed" },
+    });
+    const failed = {
+      ...completed,
+      payload: { ...payload, data: { item: { ...payload.data.item, result: { isError: true } } } },
+    };
+    const failedEntry = deriveWorkLogEntries([started, failed], undefined)[0]!;
+    expect(workLogDisplayToolTitle(failedEntry)).toBe("Could not search the web");
+    expect(failedEntry.detail).toBe(detail);
+    const rootCompleted = makeActivity({
+      id: "root-complete",
+      kind: "turn.completed",
+      sequence: 3,
+    });
+    expect(
+      workLogDisplayToolTitle(deriveWorkLogEntries([started, rootCompleted], undefined)[0]!),
+    ).toBe("Searching the web");
+  });
+
   it("recovers Codex MCP and dynamic-tool detail from retained activity payloads", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

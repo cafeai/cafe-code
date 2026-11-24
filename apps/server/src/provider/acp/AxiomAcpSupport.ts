@@ -113,10 +113,13 @@ export const AxiomVerification = Schema.Struct({
   evidence: Schema.NullOr(ProviderAttestationEvidence),
 });
 
-/** Feature versions are taken from the reviewed AxiomCLI 0.1.13 DTOs, not
- * from the independently versioned ACP runtime package. Unknown features do
- * not authorize calls. Desktop bootstrap/Agent is required for new chats;
- * Desktop MCP uses its own revision fence and explicit per-thread selection. */
+/** Reviewed against AxiomCLI 0.1.22's FeatureVersions and ExtensionState::negotiate
+ * in crates/axiom-acp-extension/src/lib.rs and apps/axiomcli/src/acp.rs.
+ * Activity v2 adds optional drafting notifications; MCP v2 adds remote transports.
+ * Both retain the previous calls, but only these reviewed versions are admitted.
+ * The independently versioned ACP package and the product version never authorize
+ * a contract. Command invocation is required so ordinary prompt text stays literal
+ * instead of reaching an older native implicit slash-command parser. */
 export const AXIOM_CLIENT_CAPABILITIES = {
   elicitation: { form: {} },
   _meta: {
@@ -125,17 +128,18 @@ export const AXIOM_CLIENT_CAPABILITIES = {
       features: {
         desktopChat: 1,
         desktopAgent: 1,
-        desktopMcp: 1,
+        desktopMcp: 2,
         webConsent: 1,
         account: 2,
         modelCatalog: 1,
         securityEvidence: 4,
-        activity: 1,
+        activity: 2,
         timeline: 2,
         threadCatalog: 1,
         attachments: 2,
         steering: 1,
         compaction: 1,
+        commandInvocation: 1,
         billing: 4,
       },
     },
@@ -175,27 +179,35 @@ export function negotiateAxiom(
 ) {
   return Effect.gen(function* () {
     const extension = yield* decodeAxiom(AxiomExtension, result.agentCapabilities?._meta?.axiom);
-    if (
-      result.protocolVersion !== 1 ||
-      extension.protocolVersion.split(".")[0] !== "0" ||
-      Object.entries({
-        ...(frontend === "desktop-chat"
-          ? { desktopChat: 1, desktopAgent: 1, desktopMcp: 1, webConsent: 1 }
-          : {}),
-        account: 2,
-        modelCatalog: 1,
-        securityEvidence: 4,
-        activity: 1,
-        timeline: 2,
-        attachments: 2,
-        steering: 1,
-        compaction: 1,
-        threadCatalog: 1,
-      }).some(([name, version]) => extension.features[name] !== version)
-    ) {
+    if (result.protocolVersion !== 1 || extension.protocolVersion.split(".")[0] !== "0") {
       return yield* AcpErrors.AcpRequestError.invalidParams(
-        "Update AxiomCLI to a compatible ACP and security-evidence contract.",
+        "AxiomCLI must support ACP v1 and Axiom extension family 0. Update the configured executable.",
       );
+    }
+    const required: Readonly<Record<string, readonly number[]>> = {
+      ...(frontend === "desktop-chat"
+        ? { desktopChat: [1], desktopAgent: [1], desktopMcp: [1, 2], webConsent: [1] }
+        : {}),
+      account: [2],
+      modelCatalog: [1],
+      securityEvidence: [4],
+      activity: [1, 2],
+      timeline: [2],
+      attachments: [2],
+      steering: [1],
+      compaction: [1],
+      threadCatalog: [1],
+      commandInvocation: [1],
+    };
+    for (const [name, supported] of Object.entries(required)) {
+      const actual = extension.features[name] ?? 0;
+      if (!supported.includes(actual)) {
+        // Names and accepted versions are local constants; only a decoded finite
+        // integer enters this diagnostic. Never copy native error prose/metadata.
+        return yield* AcpErrors.AcpRequestError.invalidParams(
+          `Unsupported Axiom ${name} contract ${actual}; supported versions: ${supported.join(", ")}. Update AxiomCLI or Cafe Code to a compatible version.`,
+        );
+      }
     }
     return extension;
   });

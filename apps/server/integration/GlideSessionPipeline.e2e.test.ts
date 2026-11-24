@@ -1,145 +1,173 @@
-// Native fixture retains exact loopback socket/response lifetime and bounded streaming controls.
-// @effect-diagnostics-next-line nodeBuiltinImport:off
+// Native transport fixture keeps exact child/socket lifetimes and public test retirement.
+// @effect-diagnostics nodeBuiltinImport:off
 import { createServer } from "node:http";
-import { Readable } from "node:stream";
-// Native fixture exercises actual file identity, namespace and cleanup behavior.
-// @effect-diagnostics-next-line nodeBuiltinImport:off
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { watch } from "node:fs";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-// Native fixture paths retain host drive, separator and namespace semantics.
-// @effect-diagnostics-next-line nodeBuiltinImport:off
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { ProviderInstanceId, ThreadId, TurnId } from "@cafecode/contracts";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { ServerConfig, type ServerConfigShape } from "../src/config.ts";
-import { glideOwnerOperationSchema } from "../src/glide/sessionRuntime.ts";
-import { runPrivateGlideRequest } from "../src/glide/privateDaemon.ts";
-import { handleGlideMcpRequest } from "../src/glide/http.ts";
-import { GlideNativeHost } from "../src/glide/nativeHost.ts";
-import { actionReceiptSchema } from "../src/glide/protocol.ts";
 import {
+  glideOwnerOperationSchema,
   installGlideSessionRuntime,
   makeGlideSessionRuntime,
-  type GlideSessionBinding,
 } from "../src/glide/sessionRuntime.ts";
+import { runPrivateGlideRequest } from "../src/glide/privateDaemon.ts";
+import { handleGlideMcpRequest } from "../src/glide/http.ts";
+import { GlideRuntime, makeGlideExecutionLane } from "../src/glide/openAiRuntime.ts";
+import { OpenAiMcpChild } from "../src/glide/mcpChild.ts";
+import type { OpenAiComputerInstallation } from "../src/glide/openAiInstallation.ts";
+import { glideChildEnvironment } from "../src/glide/child.ts";
 
-/** Actual copied stdio bridge -> native HTTP interpreter -> owner broker ->
- * real ESM worker -> shared native host. Only the OS peer is synthetic. No
- * provider, credentials, user app or permissions are used by this journey. */
-it.each(
+vi.mock("../src/glide/openAiInstallation.ts", () => ({
+  validateOpenAiComputerInstallation: vi.fn(async () => undefined),
+}));
+const installation: OpenAiComputerInstallation = {
+  applicationPath: "/fixture/OpenAI.app",
+  runtimeRoot: "/fixture/runtime",
+  nodePath: process.execPath,
+  replPath: "/fixture/repl",
+  codexPath: "/fixture/codex",
+  servicePath: "/fixture/Computer.app",
+  moduleDirectory: "/fixture/modules",
+};
+const peerSource = fileURLToPath(new URL("./fixtures/openai-repl.fixture.mjs", import.meta.url));
+
+/** Real copied bridge -> real HTTP/owner broker -> real OpenAI adapter -> inert
+ * native MCP peer. No OpenAI installation, credentials, provider or OS input. */
+it.for(
   (["local", "daemon", "supervisor", "desktop"] as const).flatMap((placement) =>
     ["glide-mcp-bridge.mjs", "glide-mcp.mjs"].map((entry) => ({ placement, entry })),
   ),
 )(
-  "$entry enforces the chat grant through the complete Glide pipeline ($placement)",
-  async ({ placement, entry }) => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), "glide-pipeline-")));
-    const scope = await Effect.runPromise(Scope.make());
-    const frontendConfig = {} as ServerConfigShape;
+  "$entry gates the OpenAI runtime across the complete $placement pipeline",
+  async ({ placement, entry }, context) => {
+    let retired = false,
+      root: string | undefined,
+      scope: Scope.Closeable | undefined;
+    let server: ReturnType<typeof createServer> | undefined,
+      ownerServer: ReturnType<typeof createServer> | undefined;
+    let runtime: ReturnType<typeof makeGlideSessionRuntime> | undefined,
+      uninstall: (() => void) | undefined;
+    let watcher: ReturnType<typeof watch> | undefined;
+    const clients: { client: Client; transport: OpenAiMcpChild }[] = [];
+    const privateTasks = new Set<Promise<void>>();
+    let cleanupPromise: Promise<void> | undefined;
+    const closeServer = async (value: typeof server) => {
+      if (!value) return;
+      value.closeAllConnections();
+      await new Promise<void>((resolve) => value.close(() => resolve()));
+    };
+    const cleanup = () =>
+      (cleanupPromise ??= (async () => {
+        retired = true;
+        watcher?.close();
+        uninstall?.();
+        await runtime?.close();
+        await Promise.all(
+          clients.map(async ({ client, transport }) => {
+            await transport.close();
+            await client.close();
+          }),
+        );
+        await closeServer(ownerServer);
+        await Promise.allSettled(privateTasks);
+        await closeServer(server);
+        if (scope) await Effect.runPromise(Scope.close(scope, Exit.void));
+        if (root) await rm(root, { recursive: true, force: true });
+      })());
+    context.signal.addEventListener(
+      "abort",
+      () => {
+        void cleanup();
+      },
+      { once: true },
+    );
+    context.onTestFinished(cleanup);
+    root = await realpath(await mkdtemp(join(tmpdir(), "openai-computer-pipeline-")));
+    if (retired) {
+      await rm(root, { recursive: true, force: true });
+      throw new Error("Fixture retired.");
+    }
+    scope = await Effect.runPromise(Scope.make());
+    const config = {} as ServerConfigShape;
     const handler = await Effect.runPromise(
       NodeHttpServer.makeHandler(
-        handleGlideMcpRequest.pipe(Effect.provideService(ServerConfig, frontendConfig)),
+        handleGlideMcpRequest.pipe(Effect.provideService(ServerConfig, config)),
         { scope },
       ),
     );
-    const server = createServer(handler);
-    const clients: Client[] = [];
-    let value = "initial";
-    const entered = Promise.withResolvers<void>();
-    const held = Promise.withResolvers<unknown>();
-    void held.promise.catch(() => undefined);
-    const effects: { method: unknown; sessionId: unknown }[] = [];
-    const nativeOperations: unknown[] = [];
-    const host = new GlideNativeHost(
-      () => ({
-        request: async (frame) => {
-          if (frame.method !== "retire_session") nativeOperations.push(frame.method);
-          if (frame.method === "list_apps")
-            return [{ name: "Fixture", bundleId: "fixture.editor", path: "/Fixture.app", pid: 10 }];
-          if (frame.method === "get_app_state")
-            return {
-              app: "/Fixture.app",
-              text: value,
-              screenshot: null,
-              revision: 1,
-              pid: 10,
-              windowId: 7,
-              accessibilityAvailable: true,
-              bounds: { x: 0, y: 0, width: 100, height: 100 },
-              screenshotWidth: 100,
-              screenshotHeight: 100,
-              capturedAt: "2026-10-17T00:00:00.000Z",
-            };
-          if (frame.method === "type_text") {
-            if ((frame.input as { text: string }).text === "held") {
-              entered.resolve();
-              return held.promise;
-            }
-            value += (frame.input as { text: string }).text;
-            effects.push({ method: frame.method, sessionId: frame.sessionId });
-            return {
-              actionId: `${String(frame.sessionId)}:${effects.length}`,
-              method: "type_text",
-              status: "unverified",
-              dispatch: "dispatched",
-              osAcceptance: "unacknowledged",
-              stage: "text-input",
-              progress: {
-                axAttempted: 0,
-                axAccepted: 0,
-                eventsPosted: [...(frame.input as { text: string }).text].length * 2,
-                textScalarsPosted: [...(frame.input as { text: string }).text].length,
-              },
-              verification: { kind: "none", matched: null },
-            };
-          }
-          return null;
-        },
-        close: async () => {
-          held.reject(new Error("Exact native peer retired."));
-        },
-      }),
-      async () => [{ name: "Fixture", bundleId: "fixture.editor", path: "/Fixture.app", pid: 10 }],
-    );
-    await new Promise<void>((yes) => server.listen(0, "127.0.0.1", yes));
+    if (retired) throw new Error("Fixture retired before native HTTP admission.");
+    server = createServer(handler);
+    await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Missing fixture address.");
+    const receipt = join(root, "entered"),
+      entered = Promise.withResolvers<void>();
+    watcher = watch(root, (_event, name) => {
+      if (name === "entered")
+        void readFile(receipt, "utf8").then(
+          (text) => {
+            if (text === "native request admitted") entered.resolve();
+          },
+          () => undefined,
+        );
+    });
     const policies = new Map<
       string,
       { enabled: boolean; apps: readonly string[]; fullAccess: boolean; desktop?: boolean }
     >();
-    const runtime = makeGlideSessionRuntime({
-      helperPath: "/synthetic/native-peer",
-      nativeHost: host,
+    const spawned: OpenAiMcpChild[] = [],
+      lane = makeGlideExecutionLane();
+    runtime = makeGlideSessionRuntime({
+      helperPath: "/fixture/status-only",
       mcpPort: address.port,
       bridgeSource: fileURLToPath(new URL(`../dist/${entry}`, import.meta.url)),
-      // AppKit is the only replaced display boundary; no real tray or desktop
-      // permission is needed for this owned Node/HTTP/worker qualification.
       trayFactory: () => ({ publish: async () => undefined, close: async () => undefined }),
-      readPolicy: async (threadId) =>
-        policies.get(threadId) ?? { enabled: false, apps: [], fullAccess: true },
-      initializePolicy: async (threadId) => {
-        if (!policies.has(threadId))
-          policies.set(threadId, { enabled: true, desktop: true, apps: [], fullAccess: true });
+      readPolicy: async (id) => policies.get(id) ?? { enabled: false, apps: [], fullAccess: true },
+      writePolicy: async (id, policy) => {
+        policies.set(id, { ...policy, fullAccess: true });
       },
-      writePolicy: async (threadId, policy) => {
-        policies.set(threadId, { ...policy, fullAccess: true });
+      initializePolicy: async (id) => {
+        if (!policies.has(id))
+          policies.set(id, { enabled: true, apps: [], desktop: true, fullAccess: true });
       },
-      status: async () => ({ accessibility: true, screenRecording: true, apps: [] }),
+      status: async () => ({
+        permissionsManagedBy: "openai",
+        accessibility: false,
+        screenRecording: false,
+        apps: [],
+      }),
+      runtimeFactory: (authority) =>
+        new GlideRuntime({
+          installation,
+          authority,
+          withLane: lane,
+          childFactory: (env, directory) => {
+            if (retired) throw new Error("Fixture retired before native MCP admission.");
+            const child = new OpenAiMcpChild({
+              command: process.execPath,
+              args: [peerSource],
+              env: { ...env, FIXTURE_RECEIPT: receipt },
+              cwd: directory,
+            });
+            spawned.push(child);
+            return child;
+          },
+        }),
     });
-    const uninstall = installGlideSessionRuntime(runtime);
-    const ownerToken = "cd".repeat(32);
-    const privateTasks = new Set<Promise<void>>();
-    const ownerServer = createServer((incoming, outgoing) => {
+    uninstall = installGlideSessionRuntime(runtime);
+    const token = "cd".repeat(32);
+    ownerServer = createServer((incoming, outgoing) => {
       if (
-        incoming.headers.authorization !== `Bearer ${ownerToken}` ||
+        incoming.headers.authorization !== `Bearer ${token}` ||
         incoming.url !== "/glide/session/operation"
       ) {
         outgoing.writeHead(401);
@@ -147,179 +175,111 @@ it.each(
         return;
       }
       const task = runPrivateGlideRequest(incoming, outgoing, (body, signal) =>
-        runtime.operation(glideOwnerOperationSchema.parse(body), signal),
+        runtime!.operation(glideOwnerOperationSchema.parse(body), signal),
       );
       privateTasks.add(task);
       void task.finally(() => privateTasks.delete(task));
     });
-    await new Promise<void>((yes) => ownerServer.listen(0, "127.0.0.1", yes));
+    await new Promise<void>((resolve) => ownerServer!.listen(0, "127.0.0.1", resolve));
     const ownerAddress = ownerServer.address();
     if (!ownerAddress || typeof ownerAddress === "string")
-      throw new Error("Missing owner fixture address.");
+      throw new Error("Missing owner address.");
     if (placement === "daemon" || placement === "supervisor")
-      Object.assign(frontendConfig, {
+      Object.assign(config, {
         [placement === "daemon" ? "providerDaemon" : "providerSupervisor"]: {
           httpBaseUrl: `http://127.0.0.1:${ownerAddress.port}`,
-          token: ownerToken,
+          token,
         },
       });
-    const attach = async (thread: string) => {
-      const binding = (await runtime.bind({
-        threadId: ThreadId.make(thread),
+    const attach = async (id: string) => {
+      const binding = (await runtime!.bind({
+        threadId: ThreadId.make(id),
         providerInstanceId: ProviderInstanceId.make("codex_fixture"),
         provider: "codex",
         runtimeMode: "full-access",
       }))!;
-      const transport = new StdioClientTransport({
+      const transport = new OpenAiMcpChild({
         command: binding.launch.command,
-        args: [...binding.launch.args],
-        env: { ...binding.launch.env },
-        stderr: "pipe",
+        args: binding.launch.args,
+        env: { ...glideChildEnvironment(process.env), ...binding.launch.env },
+        cwd: root!,
       });
-      const client = new Client({ name: "glide-pipeline-fixture", version: "1" });
-      clients.push(client);
+      const client = new Client({ name: "computer-pipeline-fixture", version: "1" });
+      clients.push({ client, transport });
       await client.connect(transport);
-      if (transport.stderr instanceof Readable) transport.stderr.resume();
-      return { binding, client };
+      return { client, binding };
     };
     const run = (client: Client, code: string) =>
       client.callTool({ name: "js", arguments: { code } });
     try {
       const a = await attach("chat-a"),
         b = await attach("chat-b");
-      expect((await a.client.listTools()).tools.map((tool) => tool.name)).toEqual([
-        "js",
-        "js_reset",
-      ]);
-      expect((await run(a.client, "nodeRepl.write('should refuse')")).isError).toBe(true);
-      await a.binding.activate();
-      await b.binding.activate();
-      for (const [thread, binding] of [
-        ["chat-a", a.binding],
-        ["chat-b", b.binding],
-      ] as const)
-        binding.observeTurn?.({
+      expect((await a.client.listTools()).tools.map((t) => t.name)).toEqual(["js", "js_reset"]);
+      expect((await run(a.client, "before activation")).isError).toBe(true);
+      for (const [id, pair] of [
+        ["chat-a", a],
+        ["chat-b", b],
+      ] as const) {
+        await pair.binding.activate();
+        pair.binding.observeTurn?.({
           type: "turn.started",
-          threadId: ThreadId.make(thread),
-          turnId: TurnId.make(`${thread}-turn`),
+          threadId: ThreadId.make(id),
+          turnId: TurnId.make(`${id}-turn`),
         });
-      expect((await run(a.client, "nodeRepl.write('still disabled')")).isError).toBe(true);
-      expect((await run(a.client, "await glide.listApps()")).isError).toBe(true);
-      expect(nativeOperations).toEqual([]);
-      for (const thread of ["chat-a", "chat-b"])
+        expect((await run(pair.client, "before permission")).isError).toBe(true);
         await runtime.operation(
           placement === "desktop"
-            ? { kind: "initialize-thread", threadId: thread }
+            ? { kind: "initialize-thread", threadId: id }
             : {
                 kind: "control",
                 input: {
                   action: "configure",
-                  threadId: thread,
+                  threadId: id,
                   enabled: true,
                   apps: ["fixture.editor"],
                 },
               },
         );
-      const first = await run(
-        a.client,
-        'import {glide as driver} from "@cafecode/glide"; var counter=1; var editor=await driver.getApp("Fixture",{windowId:7}); await editor.typeText(" managed"); nodeRepl.write(await editor.getAXState({emit:false}));',
-      );
+      }
+      expect(spawned).toHaveLength(0);
+      const first = await run(a.client, "literal first cell");
       expect(first.isError).not.toBe(true);
-      expect(JSON.stringify(first.content)).toContain("initial managed");
-      expect(effects).toEqual([
-        { method: "type_text", sessionId: expect.stringMatching(/^[a-f0-9-]{36}$/) },
+      expect(JSON.stringify(first.content)).toContain("literal first cell");
+      expect((await run(b.client, "approval")).content).toEqual([
+        { type: "text", text: '{"action":"accept"}' },
       ]);
-      expect(
-        JSON.stringify((await run(b.client, "nodeRepl.write(typeof counter)")).content),
-      ).toContain("undefined");
-      await b.client.callTool({ name: "js_reset", arguments: {} });
-      expect(
-        JSON.stringify((await run(a.client, "counter++; nodeRepl.write(counter)")).content),
-      ).toContain("2");
-      const pending = run(a.client, 'await editor.typeText("held");');
-      await entered.promise;
-      await a.binding.cancel();
-      const cancelled = await pending;
-      expect(cancelled.isError).toBe(true);
-      const outputs = JSON.parse(JSON.stringify(cancelled.content)) as {
-        type: string;
-        text?: string;
-      }[];
-      const receipts = outputs.flatMap((item) =>
-        item.type === "text" && item.text?.startsWith("Glide action ")
-          ? [actionReceiptSchema.parse(JSON.parse(item.text.slice("Glide action ".length)))]
-          : [],
-      );
-      expect(receipts).toMatchObject([
+      expect((await run(a.client, "foreign-app")).content).toEqual([
         {
-          method: "type_text",
-          status: "uncertain",
-          dispatch: "unknown",
-          progress: { eventsPosted: null },
+          type: "text",
+          text: JSON.stringify({ action: placement === "desktop" ? "accept" : "decline" }),
         },
       ]);
-      expect((await run(a.client, "nodeRepl.write('stopped')")).isError).toBe(true);
+      expect(spawned).toHaveLength(2);
+      await b.client.callTool({ name: "js_reset", arguments: {} });
+      expect((await run(a.client, "other reset does not replace me")).isError).not.toBe(true);
+      expect(spawned).toHaveLength(2);
+      const pending = run(a.client, "hold");
+      await entered.promise;
+      await a.binding.cancel();
+      expect((await pending).isError).toBe(true);
+      expect((await run(a.client, "paused")).isError).toBe(true);
       a.binding.resume();
       a.binding.observeTurn?.({
         type: "turn.started",
         threadId: ThreadId.make("chat-a"),
-        turnId: TurnId.make("chat-a-next-turn"),
+        turnId: TurnId.make("chat-a-next"),
       });
-      expect(
-        JSON.stringify((await run(a.client, "nodeRepl.write(typeof counter)")).content),
-      ).toContain("undefined");
+      expect((await run(a.client, "fresh generation")).isError).not.toBe(true);
+      const beforeRevocation = spawned.length;
       await runtime.operation({
         kind: "control",
         input: { action: "configure", threadId: "chat-a", enabled: false, apps: [] },
       });
-      const beforeRevokedCalls = nativeOperations.length;
-      expect((await run(a.client, "await glide.listApps()")).isError).toBe(true);
-      expect((await run(a.client, "await glide.getApp('Fixture', {windowId:7})")).isError).toBe(
-        true,
-      );
-      expect(nativeOperations).toHaveLength(beforeRevokedCalls);
-      expect(
-        JSON.stringify((await run(b.client, "nodeRepl.write('other chat still enabled')")).content),
-      ).toContain("other chat still enabled");
-      expect(effects).toHaveLength(1);
+      expect((await run(a.client, "revoked")).isError).toBe(true);
+      expect(spawned).toHaveLength(beforeRevocation);
+      expect((await run(b.client, "other chat remains enabled")).isError).not.toBe(true);
     } finally {
-      await Promise.allSettled(clients.map((client) => client.close()));
-      uninstall();
-      await runtime.close();
-      ownerServer.closeAllConnections();
-      await new Promise<void>((yes) => ownerServer.close(() => yes()));
-      await Promise.all(privateTasks);
-      server.closeAllConnections();
-      await new Promise<void>((yes) => server.close(() => yes()));
-      await Effect.runPromise(Scope.close(scope, Exit.void));
-      await rm(root, { recursive: true, force: true });
-    }
-  },
-);
-
-it.each(["glide-mcp.mjs", "glide-mcp-bridge.mjs"])(
-  "%s refuses an independent native runtime before MCP initialization",
-  async (entry) => {
-    // The pinned Node executable is an inert helper substitute: an old
-    // standalone server accepts its metadata without launching it during
-    // initialize. No desktop helper, user app or native permission is used.
-    const transport = new StdioClientTransport({
-      command: process.execPath,
-      args: [
-        fileURLToPath(new URL(`../dist/${entry}`, import.meta.url)),
-        "--native-helper",
-        process.execPath,
-        "--allow-app",
-        "fixture.editor",
-      ],
-      env: { ELECTRON_RUN_AS_NODE: "1" },
-      stderr: "pipe",
-    });
-    const client = new Client({ name: "glide-independent-runtime-refusal", version: "1" });
-    try {
-      await expect(client.connect(transport)).rejects.toThrow();
-    } finally {
-      await client.close();
+      await cleanup();
     }
   },
 );

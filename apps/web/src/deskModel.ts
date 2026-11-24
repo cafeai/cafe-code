@@ -64,6 +64,11 @@ export type DeskAction =
   | { readonly type: "closeRight"; readonly tabKey: string }
   | { readonly type: "closeGroup"; readonly groupId: string }
   | { readonly type: "closeAll" }
+  | {
+      readonly type: "clearIdle";
+      readonly tabKeys: readonly string[];
+      readonly dismissActiveDraft: boolean;
+    }
   | { readonly type: "reopen" }
   | {
       readonly type: "move";
@@ -471,6 +476,8 @@ export function reduceDesk(state: DeskState, action: DeskAction): DeskState {
     }
     case "close":
       return closeTabs(state, [action.tabKey]);
+    case "clearIdle":
+      return closeTabs(state, action.tabKeys);
     case "closeOthers":
     case "closeRight": {
       const group = deskGroupForTab(state, action.tabKey);

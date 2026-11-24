@@ -8,14 +8,12 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { ProviderInstanceId, ThreadId, TurnId } from "@cafecode/contracts";
 import { readBridgeConnection } from "../mcp/localBridge.ts";
-import { GlideNativeHost } from "./nativeHost.ts";
 import {
   glideHostAppFromExecutable,
   makeGlideSessionRuntime,
   type GlideSessionBinding,
 } from "./sessionRuntime.ts";
 import { GlideExecutionError } from "./runtime.ts";
-import { unknownActionReceipt } from "./protocol.ts";
 import type { GlideTrayEvent } from "./tray.ts";
 import type { GlideTraySnapshot } from "./activity.ts";
 
@@ -50,10 +48,6 @@ async function createFixture(root: string) {
     reset: ReturnType<typeof vi.fn>;
     close: ReturnType<typeof vi.fn>;
   }[] = [];
-  const nativeFactory = vi.fn(() => {
-    throw new Error("No native child is allowed in this fixture.");
-  });
-  const host = new GlideNativeHost(nativeFactory);
   let stopRevision = 0;
   let trayEvent: ((event: GlideTrayEvent) => void) | undefined;
   let trayFailure: (() => void) | undefined;
@@ -85,7 +79,6 @@ async function createFixture(root: string) {
     },
     bridgeSource,
     mcpPort: 12345,
-    nativeHost: host,
     readPolicy: async () => policy,
     writePolicy,
     readStopRevision: async () => String(stopRevision),
@@ -111,7 +104,6 @@ async function createFixture(root: string) {
     runtime,
     kernels,
     token,
-    nativeFactory,
     start: async (
       binding: GlideSessionBinding,
       threadId = identity.threadId,
@@ -194,7 +186,6 @@ describe("Cafe Glide session authority", () => {
         f.runtime.operation({ kind: "execute", token, input: { code: "not yet authorized" } }),
       ).rejects.toThrow("Glide");
       expect(f.kernels).toHaveLength(0);
-      expect(f.nativeFactory).not.toHaveBeenCalled();
       expect(f.writePolicy).not.toHaveBeenCalled();
 
       // Exercise the same explicit desktop enable operation as the button,
@@ -254,7 +245,6 @@ describe("Cafe Glide session authority", () => {
       ).rejects.toThrow("Glide");
       await expect(replacement.dispose()).resolves.toBeUndefined();
       expect(f.kernels).toHaveLength(0);
-      expect(f.nativeFactory).not.toHaveBeenCalled();
       expect(f.writePolicy).not.toHaveBeenCalled();
     } finally {
       await f.cleanup();
@@ -312,7 +302,6 @@ describe("Cafe Glide session authority", () => {
           retirement = f.runtime.operation({ kind: "retire-thread", threadId: identity.threadId });
           await expect(retirement).resolves.toBeNull();
           expect(f.kernels).toHaveLength(0);
-          expect(f.nativeFactory).not.toHaveBeenCalled();
           expect(f.writePolicy).not.toHaveBeenCalled();
           return;
         }
@@ -366,7 +355,6 @@ describe("Cafe Glide session authority", () => {
         ).rejects.toThrow("Glide");
         expect(f.kernels[0]!.execute).toHaveBeenCalledOnce();
         expect(f.kernels[0]!.reset).toHaveBeenCalledOnce();
-        expect(f.nativeFactory).not.toHaveBeenCalled();
       } finally {
         bodyDone.resolve();
         await retire();
@@ -406,7 +394,6 @@ describe("Cafe Glide session authority", () => {
         }),
       ).rejects.toThrow("Glide");
       expect(f.kernels).toHaveLength(0);
-      expect(f.nativeFactory).not.toHaveBeenCalled();
     } finally {
       release.resolve();
       await activating?.catch(() => undefined);
@@ -795,7 +782,7 @@ describe("Cafe Glide session authority", () => {
       await f.cleanup();
     }
   });
-  it("preserves bounded owned cancellation receipts inside the authenticated JSON result", async () => {
+  it("preserves an honest interruption result without inventing native action receipts", async () => {
     const f = await fixture();
     try {
       f.policy({ enabled: true, apps: ["fixture.editor"] });
@@ -804,12 +791,7 @@ describe("Cafe Glide session authority", () => {
       await f.start(binding);
       const token = await f.token(binding);
       await f.runtime.operation({ kind: "execute", token, input: { code: "prepare" } });
-      const receipt = unknownActionReceipt(
-        "type_into",
-        "owned:1",
-        "Input may have partially completed.",
-      );
-      f.kernels[0]!.execute.mockRejectedValueOnce(new GlideExecutionError("cancelled", [receipt]));
+      f.kernels[0]!.execute.mockRejectedValueOnce(new GlideExecutionError("cancelled"));
       const result = await f.runtime.operation({
         kind: "execute",
         token,
@@ -817,10 +799,7 @@ describe("Cafe Glide session authority", () => {
       });
       expect(JSON.parse(JSON.stringify(result))).toEqual({
         isError: true,
-        content: [
-          { type: "text", text: `Glide action ${JSON.stringify(receipt)}` },
-          { type: "text", text: "cancelled" },
-        ],
+        content: [{ type: "text", text: "cancelled" }],
       });
       f.policy({ enabled: false });
       await expect(
@@ -843,7 +822,6 @@ describe("Cafe Glide session authority", () => {
         fullAccess: false,
       });
       expect(f.kernels).toHaveLength(0);
-      expect(f.nativeFactory).not.toHaveBeenCalled();
       await expect(
         f.runtime.operation({
           kind: "control",
@@ -917,7 +895,6 @@ describe("Cafe Glide session authority", () => {
       await execute();
       expect(f.kernels).toHaveLength(1);
       expect(f.kernels[0]!.execute).toHaveBeenCalledTimes(2);
-      expect(f.nativeFactory).not.toHaveBeenCalled();
     } finally {
       await f.cleanup();
     }
@@ -1060,9 +1037,9 @@ async function setup(status: () => Promise<unknown>) {
     trayFactory: () => ({ publish: async () => undefined, close: async () => undefined }),
     bridgeSource,
     mcpPort: 12345,
-    nativeHost: new GlideNativeHost(() => {
-      throw new Error("No native child is allowed in this fixture.");
-    }),
+    runtimeFactory: () => {
+      throw new Error("No runtime is allowed in this metadata fixture.");
+    },
     readPolicy: async () => ({ enabled: false, apps: [], fullAccess: true }),
     writePolicy: async () => undefined,
     status: nativeStatus as never,

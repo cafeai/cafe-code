@@ -924,8 +924,8 @@ describe("UsageStatsPanel", () => {
     // Own only the detail resource's five-second polling boundary. A full CI
     // browser run can take longer than five seconds to inspect all calendar
     // ranges; that legitimate refresh must not be mistaken for a range-triggered
-    // request. The 250ms live projection interval, RAF odometer, tooltip timers,
-    // browser layout, and reconnect-triggered requests remain real.
+    // request. The RAF odometer, tooltip timers, browser layout, and
+    // reconnect-triggered requests remain real.
     vi.spyOn(window, "setInterval").mockImplementation((handler, delay, ...args) => {
       if (delay !== 5_000) {
         return setInterval(handler, delay, ...args) as unknown as ReturnType<
@@ -1492,41 +1492,44 @@ describe("UsageStatsPanel", () => {
     );
   });
 
-  it("resets the selected total's floor while retaining today's Activity floor across ranges", async () => {
-    // Mock Date without installing fake timers: waitFor auto-advances an
-    // installed fake clock, even when only Date is faked. Tooltip/layout waits
-    // must not add time to these exact accounting assertions. The component's
-    // real 250ms projection timer and browser layout still run normally.
+  it("uses reported time for delayed live updates and retains today's Activity across ranges", async () => {
     const baseMs = Date.parse("2026-07-21T12:00:00Z");
-    vi.setSystemTime(baseMs);
+    // A delayed active snapshot arrives 35 seconds behind the browser clock.
+    // Extrapolating two sessions over that gap would double today's 70 seconds.
+    vi.setSystemTime(baseMs + 45_000);
     const usage = { ...createRangeUsageDetail(), asOfMs: baseMs };
     usageHarness.reset(usage, usage);
     mounted = await render(<UsageStatsPanel />);
     await vi.waitFor(() => expectPanelRange("30 days"));
 
-    vi.setSystemTime(baseMs + 10_000);
-    usageHarness.emitSnapshot({
+    const active = {
       ...usage,
+      totals: { ...usage.totals, generatingMs: usage.totals.generatingMs + 10_000 },
       today: { ...usage.today, generatingMs: usage.today.generatingMs + 10_000 },
       activeSessionCount: 2,
       asOfMs: baseMs + 10_000,
-    });
-    await vi.waitFor(() => expect(overviewValue("Time spent generating")).toBe("10m 40s"));
+    };
+    usageHarness.emitSnapshot(active);
     await expect.element(page.getByText("2 chats generating", { exact: true })).toBeVisible();
+    expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m 10s generating");
+    expect(overviewValue("Time spent generating")).toBe("10m 40s");
 
-    // Two current sessions add two seconds after this newer observation; they
-    // must not be charged for all ten seconds since the earlier detail read.
-    vi.setSystemTime(baseMs + 11_000);
+    // The next server observation already includes both sessions' elapsed time.
+    usageHarness.emitSnapshot({
+      ...active,
+      totals: { ...active.totals, generatingMs: active.totals.generatingMs + 2_000 },
+      today: { ...active.today, generatingMs: active.today.generatingMs + 2_000 },
+      asOfMs: baseMs + 11_000,
+    });
     await vi.waitFor(() => expect(overviewValue("Time spent generating")).toBe("10m 42s"));
     expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m 12s generating");
     expectCostRange("30 days");
 
-    // A lower settled observation may trail projection. Hold both the hero
-    // time and today's heatmap value at the same floor until accounting catches
-    // up, and do not let an out-of-order stream event re-enable activity.
-    vi.setSystemTime(baseMs + 12_000);
+    // Keep both display floors on a lower observation, and ignore an older
+    // stream event that would re-enable activity.
     usageHarness.emitSnapshot({
       ...usage,
+      totals: { ...usage.totals, generatingMs: usage.totals.generatingMs + 1_000 },
       today: { ...usage.today, generatingMs: usage.today.generatingMs + 1_000 },
       activeSessionCount: 0,
       asOfMs: baseMs + 12_000,
@@ -1551,26 +1554,28 @@ describe("UsageStatsPanel", () => {
     for (const label of ["90 days", "All", "30 days", "7 days"] as const) {
       await page.getByRole("button", { name: label, exact: true }).click();
       expectCostRange(label);
-      // The latest settled detail is below the earlier live projection. Only
-      // the summary's accounting scope resets; Activity must keep today's
-      // already displayed duration even when a selector is clicked repeatedly.
+      // The summary resets for each range. Activity keeps today's already
+      // displayed duration even when the selector is clicked repeatedly.
       expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m 12s generating");
     }
   });
 
   it("freezes the old server day at midnight until a newer detailed response replaces its calendar", async () => {
     const baseMs = Date.parse("2026-07-21T23:59:58Z");
-    vi.setSystemTime(baseMs);
     const usage = { ...createRangeUsageDetail(), activeSessionCount: 1, asOfMs: baseMs };
     usageHarness.reset(usage, usage);
     mounted = await render(<UsageStatsPanel />);
     await vi.waitFor(() => expect(overviewValue("Time spent generating")).toBe("10m 30s"));
     await page.getByRole("button", { name: "7 days", exact: true }).click();
     expect(overviewValue("Time spent generating")).toBe("3m 30s");
-    vi.setSystemTime(baseMs + 1_000);
+    usageHarness.emitSnapshot({
+      ...usage,
+      totals: { ...usage.totals, generatingMs: usage.totals.generatingMs + 1_000 },
+      today: { ...usage.today, generatingMs: usage.today.generatingMs + 1_000 },
+      asOfMs: baseMs + 1_000,
+    });
     await vi.waitFor(() => expect(overviewValue("Time spent generating")).toBe("3m 31s"));
 
-    vi.setSystemTime(baseMs + 2_000);
     usageHarness.emitSnapshot({
       ...usage,
       today: { ...emptyTotals, day: "2026-07-22", generatingMs: 1_000 },
@@ -1578,11 +1583,6 @@ describe("UsageStatsPanel", () => {
       asOfMs: baseMs + 2_000,
     });
     await expect.element(page.getByText("2 chats generating", { exact: true })).toBeVisible();
-    vi.setSystemTime(baseMs + 12_000);
-    // Let the real projection interval read the post-midnight clock before
-    // checking the unchanged value; an immediate assertion would only inspect
-    // the render from the midnight event and miss continued extrapolation.
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 350));
     expect(overviewValue("Time spent generating")).toBe("3m 31s");
     expectCostRange("7 days");
     expect(overviewValue("Tokens generated")).toBe("250,000");

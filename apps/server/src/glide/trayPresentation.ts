@@ -21,7 +21,7 @@ export function glideTrayPresentation(
       about: uiText("About this list", undefined, undefined, locale),
       settings: uiText("Computer use settings", undefined, undefined, locale),
       explanation: uiText(
-        "Screenshots are taken only when a chat asks. Each preview is the last one Cafe actually received, with its time.",
+        "This list shows chats that can use your computer. App previews are managed by OpenAI.",
         undefined,
         undefined,
         locale,
@@ -42,6 +42,7 @@ export function glideTrayPresentation(
       capturing: uiText("Capturing", undefined, undefined, locale),
       reading: uiText("Reading text", undefined, undefined, locale),
       acting: uiText("Controlling", undefined, undefined, locale),
+      working: uiText("Working", undefined, undefined, locale),
       stopping: uiText("Stopping…", undefined, undefined, locale),
       stop: uiText("Stop all", undefined, undefined, locale),
       stopped: uiText("All computer use stopped", undefined, undefined, locale),

@@ -97,10 +97,14 @@ remains a separate desktop smoke check.
   to that group. Escape or dropping outside the workspace cancels the move.
 - Use a tab's right-click menu or the group's `…` button for close, close others,
   close right, close all, reopen, split, move, merge and focus actions.
-- Choose **Clear** at the top of the Desk sidebar (beside the open-chats icon) to close every
-  group's open chats and the active unsent draft editor. Chats and agents keep
-  running, and draft input and queued messages are retained. The button is
-  disabled when the desk is empty; **Reopen closed tab** restores recent kept tabs.
+- Choose **Clear** at the top of the Desk sidebar (beside the open-chats icon) to close idle
+  tabs across panes and dismiss an unsent draft editor. Chats that are starting,
+  running, doing background work, or waiting for an approval or answer stay open.
+  Draft input and queued messages are retained. The button is disabled when
+  nothing is idle. **Reopen closed tab** restores recent kept tabs.
+- Agent-created thread groups appear as expandable rows in each pane's Desk
+  list. They contain only that pane's open chats, even if the parent chat has
+  no open tab. Collapsing a group keeps the selected chat and its group path visible.
 - Choose **Open** in that menu to open the clicked chat's project/worktree in
   an installed editor, the file manager, or a terminal. The existing favorite-editor
   keyboard shortcut still acts on the focused chat pane. These actions are

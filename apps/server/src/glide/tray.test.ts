@@ -27,7 +27,6 @@ vi.mock("./runtime.ts", () => ({
   },
 }));
 import { createGlideTrayHost } from "./tray.ts";
-import { createGlideNativePeer } from "./nativeHost.ts";
 const snapshot = (state: GlideTraySnapshot["state"]): GlideTraySnapshot => ({ state, rows: [] });
 afterEach(() => {
   vi.useRealTimers();
@@ -36,29 +35,6 @@ afterEach(() => {
   fixture.stop.mockResolvedValue(undefined);
 });
 describe("private native tray transport", () => {
-  it("opts only observation frames into private visibility metadata", async () => {
-    const peer = createGlideNativePeer("/owned/mac-glide", ["fixture.editor"]);
-    try {
-      const observation = peer.request({
-        method: "get_app_state",
-        input: { app: "fixture.editor" },
-      });
-      expect(fixture.send).toHaveBeenLastCalledWith({
-        method: "get_app_state",
-        input: { app: "fixture.editor" },
-        id: 1,
-        visibilityVersion: 1,
-      });
-      fixture.message?.({ id: 1, result: null });
-      await observation;
-      const inventory = peer.request({ method: "list_apps", input: {} });
-      expect(fixture.send).toHaveBeenLastCalledWith({ method: "list_apps", input: {}, id: 2 });
-      fixture.message?.({ id: 2, result: [] });
-      await inventory;
-    } finally {
-      await peer.close();
-    }
-  });
   it("coalesces images behind one held ACK while stop events retain an independent lane", async () => {
     const event = vi.fn(),
       failure = vi.fn();

@@ -75,6 +75,38 @@ invocation. The model calls it through its ordinary native shell tool. The
 provider retains sandbox, approval, timeout and process ownership. Cafe adds
 no blanket helper approval or alternate native execution authority.
 
+### Restarting or resuming a conversation
+
+Values persist in the profile's encrypted chat vault; the runner connection is
+temporary and belongs to one provider-session owner. Retiring that owner deletes
+its connection file. A replacement session creates a new private connection for
+the same Cafe chat and vault, so existing references keep their values without
+re-entering them. Old helper invocations remain invalid and are never redirected
+to another connection or recreated from transcript text.
+
+Native conversation history can retain an old invocation. Codex can ignore a
+`thread/resume` developer-instruction override when the native thread is already
+loaded, so Cafe sends the current helper guidance once through the supported
+`thread/inject_items` developer channel for that exact resumed thread before
+publishing ready. This appends context without starting a user turn. Normal
+explicitly selected Default/Plan modes also carry the current helper in their
+developer context without changing the user's message, model, effort or native
+execution policy. A refused or uncertain refresh emits a fixed warning, is not
+retried automatically, and supplies no adoption or retry authority. Ordinary
+reference-free work remains available on older or declining native runtimes.
+
+Claude's exact current query supplies the invocation through `SessionStart` and
+`UserPromptSubmit` hook context as well as the initial system-prompt append.
+These context hooks need no vault read, add no permission decision, and stop
+publishing when their query retires or the callback is cancelled. They remain
+independent of version-qualified native output replacement.
+
+Current guidance explicitly supersedes earlier paths. A missing old connection
+file alone is not evidence that a saved value was lost; the model should use the
+new invocation. Only an unavailable reference reported by the current helper
+calls for restoring that value. Builds do not refresh an already-running legacy
+provider's instructions or recreate its retired connection.
+
 The compiled server entry recognizes `--cafe-secret-exec` before loading the
 backend graph. It loads only the one-shot runner, not SQLite, listeners,
 profile-role guards or providers. The runner is part of the primary server
@@ -157,6 +189,11 @@ Private-file tests cover encrypted persistence, concurrent writers, corruption,
 unsafe permissions and linked files. Browser tests cover real user actions and
 retain exact scoped render/async cleanup. Native helper qualification uses
 synthetic values and the compiled entry, separately from live providers.
+The restart fixture retires the original connection, reopens the same encrypted
+vault and resolves the same reference through a new compiled-helper connection,
+while checking that the old connection still fails. Synthetic native JSONL and
+SDK-hook fixtures cover context refresh, refusal and exact-owner retirement;
+they do not attest a live model's consumption of that guidance.
 
 The credential-free compiled-helper qualification is opt-in:
 

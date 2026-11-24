@@ -11,6 +11,7 @@ import {
   getProviderOptionDescriptors,
   getProviderOptionStringSelectionValue,
   isClaudeUltrathinkPrompt,
+  normalizeModelSlug,
 } from "@cafecode/shared/model";
 import type { ReactNode } from "react";
 
@@ -18,7 +19,7 @@ import type { DraftId } from "../../composerDraftStore";
 import { getProviderModelCapabilities } from "../../providerModels";
 import { withoutRetiredProviderOptions } from "../../providerOptionPresentation";
 import {
-  getTraitsTriggerLabel,
+  getTraitsTriggerEffortLabel,
   shouldRenderTraitsControls,
   TraitsMenuContent,
   TraitsPicker,
@@ -100,12 +101,11 @@ export function getComposerProviderState(input: ComposerProviderStateInput): Com
   const ultrathinkActive =
     (primarySelectDescriptor?.promptInjectedValues?.length ?? 0) > 0 &&
     isClaudeUltrathinkPrompt(prompt);
-  const traitsTriggerLabel = getTraitsTriggerLabel(
-    descriptors,
-    primarySelectDescriptor ?? null,
-    ultrathinkActive,
-  );
+  const traitsTriggerLabel = getTraitsTriggerEffortLabel(descriptors, ultrathinkActive);
   const dispatchOptions = buildProviderOptionSelectionsFromDescriptors(descriptors);
+  const slug = normalizeModelSlug(model, provider);
+  const unlistedCodexOptions =
+    provider === "codex" && !models.some((entry) => entry.slug === slug) ? modelOptions : undefined;
   const retainedDaybreak =
     provider === "codex"
       ? modelOptions?.find((option) => option.id === "cyberAccessProgram")
@@ -115,12 +115,13 @@ export function getComposerProviderState(input: ComposerProviderStateInput): Com
     provider,
     promptEffort,
     traitsTriggerLabel: traitsTriggerLabel || null,
-    // A disappeared entitlement must reach server validation, not silently
-    // erase an explicit On/Off choice and fall back to provider auto-routing.
+    // Keep explicit options with an unlisted saved Codex model. A missing
+    // capability (including Daybreak) still goes through server validation.
     modelOptionsForDispatch:
-      retainedDaybreak && !descriptors.some((entry) => entry.id === "cyberAccessProgram")
+      unlistedCodexOptions ??
+      (retainedDaybreak && !descriptors.some((entry) => entry.id === "cyberAccessProgram")
         ? [...(dispatchOptions ?? []), retainedDaybreak]
-        : dispatchOptions,
+        : dispatchOptions),
     ...(ultrathinkActive
       ? {
           composerFrameClassName: "ultrathink-frame",

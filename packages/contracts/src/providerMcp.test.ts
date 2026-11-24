@@ -50,3 +50,66 @@ it("drops native credential identifiers and environment values from returned MCP
   expect(JSON.stringify(state)).not.toContain("private-");
   expect(state.servers[0]?.environmentKeys).toEqual(["SECRET"]);
 });
+
+it("admits disabled native HTTP MCP entries without treating their empty command as a local executable", () => {
+  const decode = Schema.decodeUnknownSync(ProviderMcpState);
+  const remote = {
+    name: "remote",
+    displayName: "Remote tools",
+    command: "",
+    args: [],
+    remote: {
+      url: "https://mcp.example.com/mcp",
+      auth: "oauth",
+      clientId: "public-client",
+      clientMetadataUrl: "https://cafe.example.com/client.json",
+      bearerToken: "private-bearer",
+    },
+    enabled: false,
+    environmentKeys: [],
+    credentialId: "private-credential",
+    tools: [],
+    status: "needs_auth",
+    error: null,
+  };
+  const state = decode({
+    revision: 4,
+    remoteSupported: true,
+    selectedTools: [],
+    servers: [remote],
+  });
+  expect(state.remoteSupported).toBe(true);
+  expect(state.servers[0]).toMatchObject({
+    command: "",
+    enabled: false,
+    remote: {
+      url: "https://mcp.example.com/mcp",
+      auth: "oauth",
+      clientId: "public-client",
+    },
+  });
+  expect(JSON.stringify(state)).not.toContain("private-");
+  for (const patch of [
+    { remote: undefined },
+    { remote: null },
+    { command: "launch-local" },
+    { args: ["--secret"] },
+    { environmentKeys: ["SECRET"] },
+    { remote: { url: "https://user:password@mcp.example.com/mcp", auth: "none" } },
+    { remote: { url: "https://mcp.example.com/mcp?token=private", auth: "bearer" } },
+    { remote: { url: "https://mcp.example.com/mcp#private", auth: "none" } },
+    { remote: { url: "http://mcp.example.com/mcp", auth: "none" } },
+    { remote: { url: "file:///tmp/mcp", auth: "none" } },
+    { remote: { url: "https://mcp.example.com/mcp", auth: "unknown" } },
+    { remote: { url: "https://mcp.example.com/mcp", auth: "bearer", clientId: "oauth-only" } },
+  ]) {
+    expect(() => decode({ ...state, servers: [{ ...remote, ...patch }] })).toThrow();
+  }
+  expect(
+    decode({
+      revision: 4,
+      selectedTools: [],
+      servers: [{ ...remote, remote: { url: "http://127.0.0.1:8000/mcp", auth: "none" } }],
+    }).servers[0]?.remote?.url,
+  ).toBe("http://127.0.0.1:8000/mcp");
+});

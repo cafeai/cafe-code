@@ -35,6 +35,8 @@
   --animate-spin: spin var(--cafe-spin-duration, 1s) steps(var(--cafe-spin-steps, 60), end) infinite
     var(--cafe-status-animation-play-state, running);
   --animate-pulse: pulse 2s steps(60, end) infinite var(--cafe-status-animation-play-state, running);
+  --animate-thread-group-pulse: cafe-thread-group-pulse 2s steps(60, end) infinite
+    var(--cafe-status-animation-play-state, running);
   --animate-ping: ping 1s steps(45, end) infinite var(--cafe-status-animation-play-state, running);
   --animate-bounce: cafe-status-bounce var(--cafe-bounce-duration, 1s)
     steps(var(--cafe-bounce-steps, 30), end) infinite
@@ -130,6 +132,15 @@
   @keyframes skeleton {
     to {
       background-position: -200% 0;
+    }
+  }
+  @keyframes cafe-thread-group-pulse {
+    0%,
+    100% {
+      color: var(--muted-foreground);
+    }
+    50% {
+      color: var(--primary);
     }
   }
   /* Finite entrance keyframes for views, panels and newly appended rows. They

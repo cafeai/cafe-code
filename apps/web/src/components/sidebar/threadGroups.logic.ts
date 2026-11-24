@@ -27,6 +27,7 @@ export interface SidebarThreadGroupNode {
 
 export interface SidebarThreadGroupIndex {
   readonly groupsByOwnerKey: ReadonlyMap<string, readonly SidebarThreadGroupNode[]>;
+  readonly parentGroupByMemberKey: ReadonlyMap<string, SidebarThreadGroupNode>;
   /**
    * Chats shown beneath a group and therefore omitted from top-level lists.
    * Only members reachable from a visible top-level parent are listed, so a
@@ -38,6 +39,7 @@ export interface SidebarThreadGroupIndex {
 
 export const EMPTY_SIDEBAR_THREAD_GROUP_INDEX: SidebarThreadGroupIndex = {
   groupsByOwnerKey: new Map(),
+  parentGroupByMemberKey: new Map(),
   nestedThreadKeys: new Set(),
 };
 
@@ -131,15 +133,19 @@ export function buildSidebarThreadGroupIndex(
     return left.key < right.key ? -1 : left.key > right.key ? 1 : 0;
   };
   const groupsByOwnerKey = new Map<string, readonly SidebarThreadGroupNode[]>();
+  const parentGroupByMemberKey = new Map<string, SidebarThreadGroupNode>();
   for (const [ownerKey, nodes] of nodesByOwnerKey) {
     const visible: SidebarThreadGroupNode[] = [];
     for (const node of nodes.toSorted(compareGroups)) {
       const members = node.members.filter((member) => nestedThreadKeys.has(threadKeyOf(member)));
-      if (members.length > 0) visible.push(Object.assign({}, node, { members }));
+      if (members.length === 0) continue;
+      const visibleNode = { ...node, members };
+      visible.push(visibleNode);
+      for (const member of members) parentGroupByMemberKey.set(threadKeyOf(member), visibleNode);
     }
     if (visible.length > 0) groupsByOwnerKey.set(ownerKey, visible);
   }
-  return { groupsByOwnerKey, nestedThreadKeys };
+  return { groupsByOwnerKey, parentGroupByMemberKey, nestedThreadKeys };
 }
 
 /** Every chat beneath a group, including nested groups (for status summaries). */
@@ -170,15 +176,9 @@ export function sidebarGroupKeysContaining(
 ): ReadonlySet<string> {
   const keys = new Set<string>();
   if (!threadKey || !index.nestedThreadKeys.has(threadKey)) return keys;
-  const parentByThreadKey = new Map<string, SidebarThreadGroupNode>();
-  for (const nodes of index.groupsByOwnerKey.values()) {
-    for (const node of nodes) {
-      for (const member of node.members) parentByThreadKey.set(threadKeyOf(member), node);
-    }
-  }
   let current: string | undefined = threadKey;
   for (let depth = 0; current && depth < MAX_THREAD_GROUP_DEPTH; depth += 1) {
-    const node = parentByThreadKey.get(current);
+    const node = index.parentGroupByMemberKey.get(current);
     if (!node || keys.has(node.key)) break;
     keys.add(node.key);
     current = node.ownerKey;
@@ -248,15 +248,9 @@ export function sidebarRootThreadKey(
   threadKey: string | null,
 ): string | null {
   if (!threadKey || !index.nestedThreadKeys.has(threadKey)) return threadKey;
-  const ownerByMemberKey = new Map<string, string>();
-  for (const nodes of index.groupsByOwnerKey.values()) {
-    for (const node of nodes) {
-      for (const member of node.members) ownerByMemberKey.set(threadKeyOf(member), node.ownerKey);
-    }
-  }
   let current = threadKey;
   for (let depth = 0; depth < MAX_THREAD_GROUP_DEPTH; depth += 1) {
-    const owner = ownerByMemberKey.get(current);
+    const owner = index.parentGroupByMemberKey.get(current)?.ownerKey;
     if (!owner) return current;
     current = owner;
   }

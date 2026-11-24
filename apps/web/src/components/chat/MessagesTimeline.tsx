@@ -3964,12 +3964,13 @@ function workToneClass(tone: "thinking" | "tool" | "info" | "error"): string {
 }
 
 function workEntryPreview(
-  workEntry: Pick<TimelineWorkEntry, "detail" | "command" | "changedFiles" | "cafeMcp">,
+  workEntry: Pick<TimelineWorkEntry, "detail" | "command" | "changedFiles" | "cafeMcp" | "webMcp">,
   workspaceRoot: string | undefined,
 ) {
   // The random MCP server suffix and raw IDs remain in hover details; the
   // compact row describes the action without repeating connection plumbing.
   if (workEntry.cafeMcp) return null;
+  if (workEntry.webMcp) return workEntry.webMcp.preview ?? null;
   if (workEntry.command) return workEntry.command;
   if (workEntry.detail) return workEntry.detail;
   if ((workEntry.changedFiles?.length ?? 0) === 0) return null;
@@ -4006,7 +4007,7 @@ function workEntryIcon(workEntry: TimelineWorkEntry): LucideIcon {
   if (workEntry.itemType === "file_change" || (workEntry.changedFiles?.length ?? 0) > 0) {
     return SquarePenIcon;
   }
-  if (workEntry.itemType === "web_search") return GlobeIcon;
+  if (workEntry.itemType === "web_search" || workEntry.webMcp) return GlobeIcon;
   if (workEntry.itemType === "image_view") return EyeIcon;
 
   switch (workEntry.itemType) {
@@ -4059,7 +4060,8 @@ function openFileWithPreferredEditor(input: {
 }
 
 function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
-  if (workEntry.cafeMcp) return workLogDisplayToolTitle(workEntry) ?? workEntry.label;
+  if (workEntry.cafeMcp || workEntry.webMcp)
+    return workLogDisplayToolTitle(workEntry) ?? workEntry.label;
   // Compaction's canonical title carries its observed lifecycle phase. A
   // localized summary must not replace that title or imply a terminal outcome
   // for a hydrated start whose latest turn metadata is unavailable.
@@ -4133,7 +4135,9 @@ const OrdinaryWorkEntryContent = memo(function OrdinaryWorkEntryContent(props: {
   const rawCommand = workEntryRawCommand(workEntry);
   const displayText = preview ? `${heading} - ${preview}` : heading;
   const inspectionText =
-    workEntry.cafeMcp && workEntry.detail ? `${heading} - ${workEntry.detail}` : displayText;
+    (workEntry.cafeMcp || workEntry.webMcp) && workEntry.detail
+      ? `${heading} - ${workEntry.detail}`
+      : displayText;
   const hasChangedFiles = (workEntry.changedFiles?.length ?? 0) > 0;
   const previewIsChangedFiles = hasChangedFiles && !workEntry.command && !workEntry.detail;
   const primaryChangedFile = workEntry.changedFiles?.[0] ?? null;

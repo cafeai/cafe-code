@@ -6,6 +6,7 @@ import { constants, type BigIntStats } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { secretRunnerInstructions } from "./instructions.ts";
 
 const unavailable = () => new Error("The private Cafe Secrets runner is unavailable.");
 const sameFile = (a: BigIntStats, b: BigIntStats) => a.dev === b.dev && a.ino === b.ino;
@@ -132,7 +133,7 @@ export async function makeSecretRunnerSession(input: {
   return {
     invocation,
     connectionPath: filename,
-    instructions: `\n\nCafe Secrets: this chat uses opaque [CAFE_SECRET_<id>] references. Real values are private. For any operation requiring one, use the ordinary native shell tool to invoke this exact chat-bound helper:\n${invocation} '<JSON request>'\nRequests are {"operation":"run","argv":["node","scripts/setup.mjs"],"env":{"API_KEY":"[CAFE_SECRET_<id>]"},"stdin":"optional input","cwd":"optional absolute directory"}, {"operation":"write_file","path":"absolute path","content":"text containing references"}, or {"operation":"read_file","path":"absolute path"}. The JSON is an argument and must be correctly quoted for the native shell. Prefer env/stdin for values; references are forbidden in argv and paths. The helper expands only values in this chat and redacts its stdout/stderr before the native tool receives them. It retains ordinary sandbox and permission requirements. Never invent values, write references into configuration files, or use an unrelated chat's helper. An unavailable reference is a recoverable error; ask the user to restore it. Ordinary unwrapped tools remain available; they may reveal secrets previously written to files.`,
+    instructions: secretRunnerInstructions(invocation),
     retire: () => {
       retired = true;
     },

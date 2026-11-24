@@ -85,6 +85,52 @@ describe("model selection before provider hydration", () => {
 });
 
 describe("instance-scoped model selection", () => {
+  it("keeps an unlisted saved Codex model until native discovery for that account", () => {
+    const instanceId = ProviderInstanceId.make("codex_work");
+    const startup = provider({ instanceId, models: ["gpt-6-astra"] });
+    const otherAccount = {
+      ...provider({ instanceId: "codex", models: ["gpt-6-astra"] }),
+      codexModelCatalogSource: "native",
+    } as const;
+    const resolve = (snapshots: ReadonlyArray<ServerProvider>) =>
+      resolveAppModelSelectionForInstance(
+        instanceId,
+        DEFAULT_UNIFIED_SETTINGS,
+        [otherAccount, ...snapshots],
+        "gpt-6.2-sol",
+        { retainUnconfirmedCodexModel: true },
+      );
+
+    expect(resolve([startup])).toBe("gpt-6.2-sol");
+    expect(resolve([{ ...startup, codexModelCatalogSource: "fallback" }])).toBe("gpt-6.2-sol");
+    expect(resolve([{ ...startup, codexModelCatalogSource: "native" }])).toBe("gpt-6-astra");
+  });
+
+  it("lists GPT-6.2 Sol first for Codex with default ordering and respects model preferences", () => {
+    const instanceId = ProviderInstanceId.make("codex");
+    const [entry] = deriveProviderInstanceEntries([
+      provider({ instanceId, models: ["gpt-6-astra", "gpt-6.2-sol", "gpt-6-sol"] }),
+    ]);
+    const models = (overrides?: { hiddenModels: string[]; modelOrder: string[] }) =>
+      getAppModelOptionsForInstance(
+        overrides
+          ? { ...DEFAULT_UNIFIED_SETTINGS, providerModelPreferences: { [instanceId]: overrides } }
+          : DEFAULT_UNIFIED_SETTINGS,
+        entry!,
+      ).map((model) => model.slug);
+
+    expect(models()).toEqual(["gpt-6.2-sol", "gpt-6-astra", "gpt-6-sol"]);
+    expect(models({ hiddenModels: [], modelOrder: ["gpt-6-sol"] })).toEqual([
+      "gpt-6-sol",
+      "gpt-6-astra",
+      "gpt-6.2-sol",
+    ]);
+    expect(models({ hiddenModels: ["gpt-6.2-sol"], modelOrder: [] })).toEqual([
+      "gpt-6-astra",
+      "gpt-6-sol",
+    ]);
+  });
+
   it("removes Daybreak aliases from live and custom Codex choices without changing other providers", () => {
     const aliases = ["gpt-daybreak-blue-latest", "gpt-daybreak-red-latest"];
     const providers = [

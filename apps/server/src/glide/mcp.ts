@@ -1,19 +1,15 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { glideInstructions, jsInputSchema, type GlideInputMode } from "./protocol.ts";
+import { glideInstructions, jsInputSchema } from "./protocol.ts";
 import { glideExecutionFailure, type GlideRuntime } from "./runtime.ts";
 
-export function createGlideMcpServer(
-  runtime: Pick<GlideRuntime, "execute" | "reset">,
-  inputMode: GlideInputMode = "background",
-  managed = false,
-) {
-  const instructions = glideInstructions(inputMode, managed);
+export function createGlideMcpServer(runtime: Pick<GlideRuntime, "execute" | "reset">) {
+  const instructions = glideInstructions();
   const server = new McpServer({ name: "cafe-glide", version: "0.1.0" }, { instructions });
   server.registerTool(
     "js",
     {
-      title: "Run Glide JavaScript",
+      title: "Run computer-use JavaScript",
       description: instructions,
       inputSchema: jsInputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
@@ -29,7 +25,7 @@ export function createGlideMcpServer(
   server.registerTool(
     "js_reset",
     {
-      title: "Reset the Glide kernel",
+      title: "Reset the computer-use runtime",
       description:
         "Discard JavaScript bindings, native observations and queued work. Earlier edits and already-dispatched input remain. Applications stay open.",
       inputSchema: z.object({}).strict(),

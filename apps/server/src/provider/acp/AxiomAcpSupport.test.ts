@@ -22,6 +22,10 @@ import {
   validateAxiomEvidence,
 } from "./AxiomAcpSupport.ts";
 import { AxiomSettings, ProviderInstanceId } from "@cafecode/contracts";
+import {
+  AXIOM_CURRENT_INITIALIZE_RESPONSE,
+  axiomContractInitializeResponse,
+} from "../testUtils/axiomAcpContractFixture.ts";
 
 export const evidenceFixture = (
   now = Math.floor(ProviderDateTime.toEpochMillis(ProviderDateTime.nowUnsafe()) / 1000),
@@ -125,19 +129,96 @@ describe("Axiom native protocol admission", () => {
       }
     }),
   );
-  it.effect("negotiates the reviewed contracts independently of product version", () =>
-    negotiateAxiom({
-      protocolVersion: 1,
-      agentCapabilities: {
-        _meta: {
-          axiom: {
-            ...AXIOM_CLIENT_CAPABILITIES._meta.axiom,
-            runtimeInstanceId: "10000000-0000-4000-8000-000000000001",
-          },
+  it.effect(
+    "admits the current native contract independently of Cafe's requested capabilities",
+    () =>
+      Effect.gen(function* () {
+        const extension = yield* negotiateAxiom(AXIOM_CURRENT_INITIALIZE_RESPONSE);
+        expect(extension.features.activity).toBe(2);
+        expect(extension.features.desktopMcp).toBe(2);
+        expect(extension.features.billing).toBe(7);
+        expect(extension.features.commandInvocation).toBe(1);
+        yield* negotiateAxiom({
+          ...AXIOM_CURRENT_INITIALIZE_RESPONSE,
+          agentInfo: { name: "axiomcli", version: "9.99.0" },
+        });
+        yield* negotiateAxiom(
+          axiomContractInitializeResponse("10000000-0000-4000-8000-000000000002", "cli"),
+          "cli",
+        );
+      }),
+  );
+  it.effect("admits only the reviewed compatible activity and desktop MCP versions", () =>
+    Effect.gen(function* () {
+      for (const activity of [1, 2]) {
+        for (const desktopMcp of [1, 2]) {
+          const response = axiomContractInitializeResponse("10000000-0000-4000-8000-000000000001");
+          response.agentCapabilities._meta.axiom.features.activity = activity;
+          response.agentCapabilities._meta.axiom.features.desktopMcp = desktopMcp;
+          yield* negotiateAxiom(response);
+        }
+      }
+    }),
+  );
+  it.effect(
+    "rejects absent or unreviewed required contracts with the exact local feature name",
+    () =>
+      Effect.gen(function* () {
+        for (const [feature, version] of [
+          ["activity", 0],
+          ["activity", 3],
+          ["desktopMcp", 0],
+          ["desktopMcp", 3],
+          ["securityEvidence", 3],
+          ["securityEvidence", 5],
+          ["account", 1],
+          ["attachments", 1],
+          ["timeline", 1],
+          ["commandInvocation", 0],
+          ["commandInvocation", 2],
+        ] as const) {
+          const response = axiomContractInitializeResponse("10000000-0000-4000-8000-000000000001");
+          const features: Record<string, number> = response.agentCapabilities._meta.axiom.features;
+          features[feature] = version;
+          const failure = yield* negotiateAxiom(response).pipe(Effect.flip);
+          expect(failure.message).toContain(`Unsupported Axiom ${feature} contract ${version}`);
+        }
+        const missing = axiomContractInitializeResponse("10000000-0000-4000-8000-000000000001");
+        const features: Record<string, number> = missing.agentCapabilities._meta.axiom.features;
+        delete features.commandInvocation;
+        expect((yield* negotiateAxiom(missing).pipe(Effect.result))._tag).toBe("Failure");
+      }),
+  );
+  it.effect("rejects unsupported protocol families and malformed native runtime identities", () =>
+    Effect.gen(function* () {
+      for (const invalid of [
+        {
+          protocolVersion: 2,
+          extensionVersion: "0.2",
+          runtimeId: "10000000-0000-4000-8000-000000000001",
         },
-      },
-      agentInfo: { name: "axiomcli", version: "0.1.13" },
-    }).pipe((effect) => effect),
+        {
+          protocolVersion: 1,
+          extensionVersion: "1.0",
+          runtimeId: "10000000-0000-4000-8000-000000000001",
+        },
+        { protocolVersion: 1, extensionVersion: "0.2", runtimeId: "not-a-native-runtime" },
+      ]) {
+        const response = axiomContractInitializeResponse(invalid.runtimeId);
+        response.protocolVersion = invalid.protocolVersion;
+        response.agentCapabilities._meta.axiom.protocolVersion = invalid.extensionVersion;
+        expect((yield* negotiateAxiom(response).pipe(Effect.result))._tag).toBe("Failure");
+      }
+    }),
+  );
+  it.effect("ignores an unknown optional advertisement without granting its use", () =>
+    Effect.gen(function* () {
+      const response = axiomContractInitializeResponse("10000000-0000-4000-8000-000000000001");
+      const features: Record<string, number> = response.agentCapabilities._meta.axiom.features;
+      features.futureOptionalFeature = 1;
+      yield* negotiateAxiom(response);
+      expect("futureOptionalFeature" in AXIOM_CLIENT_CAPABILITIES._meta.axiom.features).toBe(false);
+    }),
   );
   it("uses structured native argv, including executable paths with spaces", () => {
     const settings = Schema.decodeSync(AxiomSettings)({

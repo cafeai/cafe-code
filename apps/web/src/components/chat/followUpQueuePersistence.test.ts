@@ -114,6 +114,35 @@ describe("follow-up queue persistence", () => {
       expect(claimed.value.claimed[0]?.axiomWebEnabled).toBe(consent);
     }
   });
+  it("preserves explicit Axiom command selection and refuses a claim with changed intent", async () => {
+    const storage = createMemoryStorage();
+    const persistence = createFollowUpQueuePersistence(storage);
+    const original = {
+      ...item(),
+      provider: ProviderDriverKind.make("axiom"),
+      promptText: "/help",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("axiom-personal"),
+        model: "native-model",
+      },
+      axiomCommand: { name: "help" },
+      axiomMcpRevision: 4,
+    };
+    expect((await persistence.save(environmentA, [original])).ok).toBe(true);
+    const loaded = createFollowUpQueuePersistence(storage).load(environmentA);
+    if (!loaded.ok) throw new Error(loaded.error);
+    expect(loaded.value.pending[0]?.axiomCommand).toEqual({ name: "help" });
+    expect(persistence.claim(claim(original), { ...original, axiomCommand: undefined }).ok).toBe(
+      false,
+    );
+    expect(
+      persistence.claim(claim(original), { ...original, axiomCommand: { name: "compact" } }).ok,
+    ).toBe(false);
+    expect(persistence.claim(claim(original), original).ok).toBe(true);
+    const claimed = createFollowUpQueuePersistence(storage).load(environmentA);
+    if (!claimed.ok) throw new Error(claimed.error);
+    expect(claimed.value.claimed[0]?.axiomCommand).toEqual({ name: "help" });
+  });
   it("never serializes display provenance or changes dispatch truth when a blocked row is translated", async () => {
     const storage = createMemoryStorage();
     const persistence = createFollowUpQueuePersistence(storage);

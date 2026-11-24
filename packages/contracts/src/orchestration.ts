@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import { ProviderOptionSelections } from "./model.ts";
+import { AxiomCommand } from "./axiomCommand.ts";
 import {
   ProviderDeliveryPriority,
   ProviderPrioritySessionBinding,
@@ -1140,8 +1141,8 @@ const ThreadCreateCommand = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
-  // Membership is fixed at creation; a new thread has no descendants, so this
-  // can never create a cycle.
+  // Initial membership; subsequent thread.metadata.update moves validate the
+  // retained containment tree.
   groupId: Schema.optional(ThreadGroupId),
   description: Schema.optional(ThreadDescription),
   // Server-resolved. The client dispatch normalizer always overwrites it, so a
@@ -1203,11 +1204,13 @@ const ThreadUnarchiveCommand = Schema.Struct({
   threadId: ThreadId,
 });
 
-/** Editable label/description only; provenance is never writable. */
+/** Editable organization only; provenance and runtime ownership are never writable. */
 const ThreadMetadataUpdateCommand = Schema.Struct({
   type: Schema.Literal("thread.metadata.update"),
   commandId: CommandId,
   threadId: ThreadId,
+  // Omitted means unchanged; null returns this chat (with its subtree) to top level.
+  groupId: Schema.optional(Schema.NullOr(ThreadGroupId)),
   originClassification: Schema.optional(ThreadOriginClassification),
   // Omitted means unchanged; null clears.
   description: Schema.optional(Schema.NullOr(ThreadDescription)),
@@ -1358,6 +1361,7 @@ export type ThreadTurnScheduledFollowUp = typeof ThreadTurnScheduledFollowUp.Typ
 
 export const ThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
+  axiomCommand: Schema.optional(AxiomCommand),
   axiomWebEnabled: Schema.optional(Schema.Boolean),
   axiomMcpRevision: Schema.optional(
     Schema.Number.check(
@@ -1393,6 +1397,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
 
 const ClientThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
+  axiomCommand: Schema.optional(AxiomCommand),
   axiomWebEnabled: Schema.optional(Schema.Boolean),
   axiomMcpRevision: Schema.optional(
     Schema.Number.check(
@@ -1432,6 +1437,7 @@ const ThreadTurnInterruptCommand = Schema.Struct({
 
 const ThreadTurnSteerCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.steer"),
+  axiomCommand: Schema.optional(AxiomCommand),
   axiomWebEnabled: Schema.optional(Schema.Boolean),
   axiomMcpRevision: Schema.optional(
     Schema.Number.check(
@@ -1467,6 +1473,7 @@ const ThreadTurnSteerCommand = Schema.Struct({
 
 const ClientThreadTurnSteerCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.steer"),
+  axiomCommand: Schema.optional(AxiomCommand),
   axiomWebEnabled: Schema.optional(Schema.Boolean),
   axiomMcpRevision: Schema.optional(
     Schema.Number.check(
@@ -2057,6 +2064,7 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
 
 export const ThreadOriginMetadataUpdatedPayload = Schema.Struct({
   threadId: ThreadId,
+  groupId: Schema.optional(Schema.NullOr(ThreadGroupId)),
   origin: Schema.optional(ThreadOrigin),
   description: Schema.optional(Schema.NullOr(ThreadDescription)),
   updatedAt: IsoDateTime,
@@ -2136,6 +2144,7 @@ export const ThreadMessageAssistantRepairAppliedPayload = Schema.Struct({
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  axiomCommand: Schema.optional(AxiomCommand),
   axiomWebEnabled: Schema.optional(Schema.Boolean),
   axiomMcpRevision: Schema.optional(
     Schema.Number.check(
@@ -2175,6 +2184,7 @@ export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
 
 export const ThreadTurnSteerRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  axiomCommand: Schema.optional(AxiomCommand),
   axiomWebEnabled: Schema.optional(Schema.Boolean),
   axiomMcpRevision: Schema.optional(
     Schema.Number.check(

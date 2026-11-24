@@ -902,6 +902,42 @@ const CODEX_MAX_REASONING_EFFORTS = [...CODEX_STANDARD_REASONING_EFFORTS, "max"]
 // fresh installs usable before the full Codex probe refreshes provider cache.
 const CODEX_ULTRA_REASONING_EFFORTS = [...CODEX_MAX_REASONING_EFFORTS, "ultra"] as const;
 
+function inheritedCodexReasoningCapabilities(): ModelCapabilities {
+  return createModelCapabilities({
+    optionDescriptors: [
+      {
+        id: "reasoningEffort",
+        label: "Reasoning",
+        type: "select",
+        options: CODEX_ULTRA_REASONING_EFFORTS.map((effort) => ({
+          id: effort,
+          label: reasoningEffortLabel(effort),
+        })),
+      },
+      {
+        id: "serviceTier",
+        label: "Service tier",
+        type: "select",
+        currentValue: "default",
+        options: [{ id: "default", label: "Standard", isDefault: true }],
+      },
+    ],
+  });
+}
+
+// The Codex guide lists Sol with client-selected reasoning effort. Keep
+// fallback effort inherited and routing Standard until live account discovery.
+// https://learn.chatgpt.com/docs/models
+const SOL_62_CODEX_MODEL: ServerProviderModel = {
+  slug: "gpt-6.2-sol",
+  name: "GPT-6.2-Sol",
+  isCustom: false,
+  capabilities: {
+    ...inheritedCodexReasoningCapabilities(),
+    inputModalities: ["text", "image"],
+  },
+};
+
 // Codex 0.153.4 promotes Astra from hidden to listed in models-manager/models.json.
 // Share its bundled controls between cold-start discovery and explicitly added
 // custom entries. An authenticated live row still owns visibility and defaults.
@@ -919,7 +955,7 @@ const ASTRA_CODEX_MODEL: ServerProviderModel = {
 // https://github.com/openai/codex/blob/8e68a98ef03cdde76d2e6800791ebdf1b3b95b24/codex-rs/models-manager/models.json
 // These are Codex controls, not the separate API model's effort defaults or
 // context maximum. Live discovery remains authoritative (including Bedrock's
-// narrower controls); adding this fallback does not replace Cafe's Astra default.
+// narrower controls).
 const SOL_61_CODEX_MODEL: ServerProviderModel = {
   slug: "gpt-6.1-sol",
   name: "GPT-6.1-Sol",
@@ -941,26 +977,7 @@ const TERRA_61_CODEX_MODEL: ServerProviderModel = {
   slug: "gpt-6.1-terra",
   name: "GPT-6.1-Terra",
   isCustom: false,
-  capabilities: createModelCapabilities({
-    optionDescriptors: [
-      {
-        id: "reasoningEffort",
-        label: "Reasoning",
-        type: "select",
-        options: CODEX_ULTRA_REASONING_EFFORTS.map((effort) => ({
-          id: effort,
-          label: reasoningEffortLabel(effort),
-        })),
-      },
-      {
-        id: "serviceTier",
-        label: "Service tier",
-        type: "select",
-        currentValue: "default",
-        options: [{ id: "default", label: "Standard", isDefault: true }],
-      },
-    ],
-  }),
+  capabilities: inheritedCodexReasoningCapabilities(),
 };
 // Codex's published model guide (verified 2026-09-23) lists Sol's CLI efforts
 // through Ultra with Medium as default, and Luna through Max only:
@@ -989,6 +1006,7 @@ const LUNA_CODEX_MODEL: ServerProviderModel = {
   }),
 };
 const KNOWN_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new Map([
+  [SOL_62_CODEX_MODEL.slug, { ...SOL_62_CODEX_MODEL, isCustom: true }],
   [ASTRA_CODEX_MODEL.slug, { ...ASTRA_CODEX_MODEL, isCustom: true }],
   [SOL_61_CODEX_MODEL.slug, { ...SOL_61_CODEX_MODEL, isCustom: true }],
   [TERRA_61_CODEX_MODEL.slug, { ...TERRA_61_CODEX_MODEL, isCustom: true }],
@@ -1000,6 +1018,7 @@ const KNOWN_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new 
 // conservative model fallback so a fresh install still has selectable Codex
 // models before the full app-server diagnostic path has ever populated cache.
 const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
+  SOL_62_CODEX_MODEL,
   ASTRA_CODEX_MODEL,
   SOL_61_CODEX_MODEL,
   TERRA_61_CODEX_MODEL,

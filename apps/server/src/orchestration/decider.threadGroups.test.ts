@@ -3,10 +3,14 @@ import {
   ClientOrchestrationCommand,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   MAX_THREAD_GROUP_DEPTH,
+  EventId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadGroupId,
   ThreadId,
+  TurnId,
+  SubagentRuntimeId,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
@@ -134,7 +138,246 @@ const thread = (model: OrchestrationReadModel, id: string) =>
 const group = (model: OrchestrationReadModel, id: string) =>
   model.threadGroups!.find((entry) => entry.id === id)!;
 
+const move = (
+  id: string,
+  groupId: string | null,
+): Extract<OrchestrationCommand, { type: "thread.metadata.update" }> => ({
+  type: "thread.metadata.update",
+  commandId: nextCommandId(),
+  threadId: tid(id),
+  groupId: groupId === null ? null : gid(groupId),
+});
+
 describe("thread groups", () => {
+  it("moves a running existing subtree and detaches it without changing work, context or provenance", async () => {
+    const seed = await seedTree();
+    const turnId = TurnId.make("running-root");
+    const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000111");
+    const running = {
+      ...thread(seed, "b"),
+      branch: "work-branch",
+      worktreePath: "/tmp/project-worktree",
+      latestTurn: {
+        turnId,
+        state: "running" as const,
+        requestedAt: NOW,
+        startedAt: NOW,
+        completedAt: null,
+        assistantMessageId: null,
+      },
+      session: {
+        threadId: tid("b"),
+        status: "running" as const,
+        providerName: "codex" as const,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        runtimeMode: "approval-required" as const,
+        activeTurnId: turnId,
+        subagentRuntimeId: runtimeId,
+        lastError: null,
+        updatedAt: NOW,
+      },
+      messages: [
+        {
+          id: MessageId.make("existing-message"),
+          role: "user" as const,
+          text: "Keep working",
+          turnId,
+          streaming: false,
+          createdAt: NOW,
+          updatedAt: NOW,
+        },
+      ],
+      activities: [
+        {
+          id: EventId.make("live-child"),
+          kind: "task.started",
+          tone: "info" as const,
+          summary: "Child started",
+          turnId,
+          createdAt: NOW,
+          payload: {
+            taskId: "child",
+            subagent: { threadId: "child", runtimeId, status: "active" },
+          },
+        },
+      ],
+    };
+    let model: OrchestrationReadModel = {
+      ...seed,
+      threads: seed.threads.map((entry) => (entry.id === "b" ? running : entry)),
+    };
+    for (const groupId of ["other", "other", null]) {
+      const applied = await apply(model, move("b", groupId));
+      // No stop/start/steer/session/native mode intent, even with an active root and child.
+      expect(applied.events.map((event) => event.type)).toEqual(["thread.metadata-updated"]);
+      expect(thread(applied.model, "b")).toEqual({ ...running, groupId });
+      expect(thread(applied.model, "c")).toEqual(thread(seed, "c"));
+      expect(applied.model.threadGroups).toEqual(seed.threadGroups);
+      model = applied.model;
+    }
+  });
+
+  it("keeps historical origin unknown on a move and applies explicit label corrections atomically", async () => {
+    let model = (await apply(await seedTree(), createThread("historical"))).model;
+    model = (await apply(model, move("historical", "wave"))).model;
+    expect(thread(model, "historical").origin).toBeUndefined();
+    expect(thread(model, "historical").provenance).toBeUndefined();
+    for (const originClassification of ["human", "agent", "unknown"] as const) {
+      const applied = await apply(model, {
+        ...move("a", "other"),
+        type: "thread.metadata.update",
+        threadId: tid("a"),
+        originClassification,
+        description: null,
+      });
+      expect(applied.events).toHaveLength(1);
+      expect(thread(applied.model, "a")).toMatchObject({
+        groupId: "other",
+        origin: { classification: originClassification, source: "user" },
+        provenance: MCP_PROVENANCE,
+        description: null,
+      });
+      model = applied.model;
+    }
+    await refuse(model, {
+      ...move("a", "missing"),
+      type: "thread.metadata.update",
+      threadId: tid("a"),
+      originClassification: "human",
+    });
+    expect(thread(model, "a").origin?.classification).toBe("unknown");
+  });
+
+  it("refuses missing/deleted/archived targets and sources, self/descendant cycles and broken ancestry", async () => {
+    const model = await seedTree();
+    for (const command of [
+      move("missing", "wave"),
+      move("a", "missing"),
+      move("coordinator", "wave"),
+      move("coordinator", "sub"),
+      move("b", "sub"),
+    ]) {
+      await refuse(model, command);
+    }
+    for (const type of ["thread.archive", "thread.delete"] as const) {
+      const sourceGone = (
+        await apply(model, { type, commandId: nextCommandId(), threadId: tid("a") })
+      ).model;
+      await refuse(sourceGone, move("a", "other"));
+      await refuse(sourceGone, move("a", null));
+      const ownerGone = (
+        await apply(model, { type, commandId: nextCommandId(), threadId: tid("b") })
+      ).model;
+      await refuse(ownerGone, move("d", "sub"));
+    }
+    const broken = {
+      ...model,
+      threads: model.threads.filter((entry) => entry.id !== "coordinator"),
+    };
+    await refuse(broken, move("d", "sub"));
+    // Detach needs no old-parent authority and can recover an orphaned member.
+    expect(thread((await apply(broken, move("a", null))).model, "a").groupId).toBeNull();
+  });
+
+  it("checks the whole retained subtree against the destination depth, including deleted groups", async () => {
+    let model = await seedTree();
+    let owner = "coordinator";
+    for (let depth = 1; depth <= MAX_THREAD_GROUP_DEPTH; depth += 1) {
+      model = (await apply(model, createGroup(`deep-${depth}`, owner))).model;
+      model = (await apply(model, createThread(`node-${depth}`, { groupId: gid(`deep-${depth}`) })))
+        .model;
+      owner = `node-${depth}`;
+    }
+    // A leaf fits at the deepest level, but b owns another group.
+    model = (await apply(model, move("a", `deep-${MAX_THREAD_GROUP_DEPTH}`))).model;
+    await refuse(model, move("b", `deep-${MAX_THREAD_GROUP_DEPTH}`));
+    model = (
+      await apply(model, {
+        type: "thread.group.delete",
+        commandId: nextCommandId(),
+        groupId: gid("sub"),
+      })
+    ).model;
+    await refuse(model, move("b", `deep-${MAX_THREAD_GROUP_DEPTH}`));
+    model = (await apply(model, move("b", `deep-${MAX_THREAD_GROUP_DEPTH - 1}`))).model;
+    model = (
+      await apply(model, {
+        type: "thread.group.restore",
+        commandId: nextCommandId(),
+        groupId: gid("sub"),
+      })
+    ).model;
+    expect(thread(model, "c")).toMatchObject({ groupId: "sub", deletedAt: null });
+    await refuse(model, move("coordinator", "sub"));
+  });
+
+  it("serializes moves with deletion and restore using current membership", async () => {
+    let model = await seedTree();
+    model = (await apply(model, move("b", "other"))).model;
+    model = (await apply(model, move("a", null))).model;
+    model = (
+      await apply(model, {
+        type: "thread.group.delete",
+        commandId: cid("delete-old"),
+        groupId: gid("wave"),
+      })
+    ).model;
+    for (const id of ["a", "b", "c"]) expect(thread(model, id).deletedAt).toBeNull();
+    await refuse(model, move("a", "wave"));
+    model = (
+      await apply(model, {
+        type: "thread.group.delete",
+        commandId: cid("delete-new"),
+        groupId: gid("other"),
+      })
+    ).model;
+    for (const id of ["b", "c", "d"]) expect(thread(model, id).deletionId).toBe("delete-new");
+    await refuse(model, move("b", null));
+    model = (
+      await apply(model, {
+        type: "thread.group.restore",
+        commandId: cid("restore-new"),
+        groupId: gid("other"),
+      })
+    ).model;
+    expect(thread(model, "b")).toMatchObject({ groupId: "other", deletedAt: null });
+    expect(thread(model, "c")).toMatchObject({ groupId: "sub", deletedAt: null });
+    expect(thread(model, "a")).toMatchObject({ groupId: null, deletedAt: null });
+  });
+
+  it("serializes archive against moves without rewriting archive state", async () => {
+    let model = await seedTree();
+    model = (await apply(model, createThread("new-owner"))).model;
+    model = (await apply(model, createGroup("new-group", "new-owner"))).model;
+    model = (await apply(model, move("b", "new-group"))).model;
+    model = (
+      await apply(model, {
+        type: "thread.archive",
+        commandId: nextCommandId(),
+        threadId: tid("coordinator"),
+      })
+    ).model;
+    for (const id of ["b", "c"]) expect(thread(model, id).archivedAt).toBeNull();
+    await refuse(model, move("b", "wave"));
+    model = (
+      await apply(model, {
+        type: "thread.archive",
+        commandId: nextCommandId(),
+        threadId: tid("new-owner"),
+      })
+    ).model;
+    for (const id of ["b", "c"]) expect(thread(model, id).archivedAt).not.toBeNull();
+    await refuse(model, move("b", null));
+    model = (
+      await apply(model, {
+        type: "thread.unarchive",
+        commandId: nextCommandId(),
+        threadId: tid("new-owner"),
+      })
+    ).model;
+    for (const id of ["b", "c"]) expect(thread(model, id).archivedAt).toBeNull();
+  });
+
   it("records server provenance and a derived origin label on creation", async () => {
     const model = await seedTree();
     expect(thread(model, "a")).toMatchObject({

@@ -106,11 +106,17 @@ function applyInstanceModelPreferences(
     readonly hiddenModels: ReadonlyArray<string>;
     readonly modelOrder: ReadonlyArray<string>;
   },
+  driver: ProviderDriverKind,
 ): AppModelOption[] {
   const hiddenModels = new Set(preferences.hiddenModels);
   return sortModelsForProviderInstance(
     options.filter((option) => option.isCustom || !hiddenModels.has(option.slug)),
-    { modelOrder: preferences.modelOrder },
+    {
+      modelOrder:
+        driver === "codex" && preferences.modelOrder.length === 0
+          ? ["gpt-6.2-sol"]
+          : preferences.modelOrder,
+    },
   );
 }
 
@@ -182,6 +188,7 @@ export function getAppModelOptions(
   return applyInstanceModelPreferences(
     options,
     readInstanceModelPreferences(settings, defaultInstanceId),
+    provider,
   );
 }
 
@@ -222,6 +229,7 @@ export function getAppModelOptionsForInstance(
   return applyInstanceModelPreferences(
     options,
     readInstanceModelPreferences(settings, entry.instanceId),
+    entry.driverKind,
   );
 }
 
@@ -253,18 +261,34 @@ export function resolveAppModelSelectionForInstance(
   settings: UnifiedSettings,
   providers: ReadonlyArray<ServerProvider>,
   selectedModel: string | null | undefined,
+  { retainUnconfirmedCodexModel = false }: { readonly retainUnconfirmedCodexModel?: boolean } = {},
 ): string | null {
   const entry = deriveProviderInstanceEntries(providers).find(
     (candidate) => candidate.instanceId === instanceId,
   );
-  if (!entry) return null;
-  const options = getAppModelOptionsForInstance(settings, entry);
-  return (
-    resolveSelectableModel(entry.driverKind, selectedModel, options) ??
-    options[0]?.slug ??
-    entry.models[0]?.slug ??
-    null
-  );
+  const options = entry ? getAppModelOptionsForInstance(settings, entry) : [];
+  const listedModel = entry && resolveSelectableModel(entry.driverKind, selectedModel, options);
+  if (listedModel) return listedModel;
+
+  // Startup, reconnect and historical snapshots can all present fewer models
+  // than the account actually supports. A missing row in those snapshots
+  // cannot displace this exact account's saved model.
+  if (retainUnconfirmedCodexModel && entry?.snapshot.codexModelCatalogSource !== "native") {
+    const driver =
+      entry?.driverKind ??
+      settings.providerInstances?.[instanceId]?.driver ??
+      (instanceId === "codex" ? "codex" : undefined);
+    const slug = driver === "codex" ? normalizeModelSlug(selectedModel) : null;
+    if (
+      slug &&
+      !isCodexDaybreakAlias(slug) &&
+      !readInstanceModelPreferences(settings, instanceId).hiddenModels.includes(slug)
+    ) {
+      return slug;
+    }
+  }
+
+  return options[0]?.slug ?? entry?.models[0]?.slug ?? null;
 }
 
 /**

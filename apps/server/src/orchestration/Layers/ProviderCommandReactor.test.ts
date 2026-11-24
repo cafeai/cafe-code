@@ -7428,7 +7428,7 @@ describe("ProviderCommandReactor", () => {
           providerInstanceId: ProviderInstanceId.make("opencode"),
         }),
       ),
-    ).rejects.toThrow("existing Codex or OpenCode");
+    ).rejects.toThrow("existing Codex, OpenCode or Axiom");
     expect(harness.compactThread).not.toHaveBeenCalled();
   });
 
@@ -8368,6 +8368,55 @@ describe("ProviderCommandReactor", () => {
     },
   );
 
+  it("preserves raw explicit Axiom commands and injects custom instructions on the first ordinary prompt", async () => {
+    const harness = await createHarness({
+      distinctNativeTurns: true,
+      threadModelSelection: { instanceId: ProviderInstanceId.make("axiom"), model: "native-model" },
+    });
+    fs.mkdirSync(path.dirname(harness.systemPromptPath), { recursive: true });
+    fs.writeFileSync(harness.systemPromptPath, "Follow the repository rules.", "utf8");
+    const commandMessageId = asMessageId("selected-axiom-help");
+    const selectedTurn = harness.observeNextProviderTurn(commandMessageId, { opening: true });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("selected-axiom-help"),
+        threadId: ThreadId.make("thread-1"),
+        message: { messageId: commandMessageId, role: "user", text: "/help", attachments: [] },
+        axiomCommand: { name: "help" },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      input: "/help",
+      axiomCommand: { name: "help" },
+    });
+    await harness.markThreadReady(undefined, undefined, selectedTurn);
+    const messageId = asMessageId("first-axiom-model-message");
+    const normalTurn = harness.observeNextProviderTurn(messageId);
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("first-axiom-model-message"),
+        threadId: ThreadId.make("thread-1"),
+        message: { messageId, role: "user", text: "Implement the feature.", attachments: [] },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    await normalTurn.waitForRunning();
+    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+      input:
+        "System prompt:\nFollow the repository rules.\n\nUser request:\nImplement the feature.",
+    });
+    expect(harness.sendTurn.mock.calls[1]?.[0]).not.toHaveProperty("axiomCommand");
+  });
+
   it("does not prepend a blank system prompt or apply the prompt to later provider turns", async () => {
     const harness = await createHarness({ distinctNativeTurns: true });
     const now = "2026-01-01T00:00:00.000Z";
@@ -8776,6 +8825,43 @@ describe("ProviderCommandReactor", () => {
           pending: number;
         }>`SELECT pending FROM projection_thread_context_bootstraps WHERE thread_id = ${target}`,
       );
+
+    it("retains copied context when an explicit Axiom command cannot deliver it", async () => {
+      const harness = await createHarness({
+        threadModelSelection: {
+          instanceId: ProviderInstanceId.make("axiom"),
+          model: "native-model",
+        },
+      });
+      await copy(harness);
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("copy-axiom-command"),
+          threadId: target,
+          message: {
+            messageId: asMessageId("copy-axiom-help"),
+            role: "user",
+            text: "/help",
+            attachments: [],
+          },
+          axiomCommand: { name: "help" },
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: "2026-01-01T00:00:03.000Z",
+        }),
+      );
+      await waitFor(
+        async () =>
+          (await harness.readThreadDetail(target))?.activities.some(
+            (entry) => entry.kind === "provider.turn.start.failed",
+          ) === true,
+      );
+      await harness.drain();
+      expect(await pending(harness)).toEqual([{ pending: 1 }]);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    });
 
     it.each(["codex", "claudeAgent", "grok"])(
       "bootstraps bounded visible context once for %s, only after the owner sends",

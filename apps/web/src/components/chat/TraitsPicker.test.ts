@@ -1,6 +1,6 @@
 import type { ProviderOptionDescriptor } from "@cafecode/contracts";
 import { describe, expect, it } from "vitest";
-import { getTraitsTriggerEffortLabel, getTraitsTriggerLabel } from "./TraitsPicker";
+import { getTraitsTriggerEffortLabel } from "./TraitsPicker";
 
 function selectDescriptor(
   id: string,
@@ -17,23 +17,23 @@ function selectDescriptor(
   };
 }
 
-describe("getTraitsTriggerLabel", () => {
-  it("summarizes requested native Ultracode separately from Max and leaves inheritance unstated", () => {
+describe("getTraitsTriggerEffortLabel", () => {
+  it("keeps requested native Ultracode out of the thinking label", () => {
     const effort = selectDescriptor("effort", "Reasoning", [{ id: "max", label: "Max" }], "max");
     const ultracode: Extract<ProviderOptionDescriptor, { type: "boolean" }> = {
       id: "ultracode",
       label: "Ultracode",
       type: "boolean",
     };
-    expect(getTraitsTriggerLabel([effort, ultracode], effort, false)).toBe("Max");
+    expect(getTraitsTriggerEffortLabel([effort, ultracode], false)).toBe("Max");
+    expect(getTraitsTriggerEffortLabel([effort, { ...ultracode, currentValue: true }], false)).toBe(
+      "Max",
+    );
     expect(
-      getTraitsTriggerLabel([effort, { ...ultracode, currentValue: true }], effort, false),
-    ).toBe("Max · Ultracode");
-    expect(
-      getTraitsTriggerLabel([effort, { ...ultracode, currentValue: false }], effort, false),
-    ).toBe("Max · Ultracode Off");
+      getTraitsTriggerEffortLabel([effort, { ...ultracode, currentValue: false }], false),
+    ).toBe("Max");
   });
-  it("keeps the Claude reasoning and context summary compact", () => {
+  it("keeps context and provider-wide preferences out of the thinking label", () => {
     const effort = selectDescriptor(
       "effort",
       "Reasoning",
@@ -63,11 +63,11 @@ describe("getTraitsTriggerLabel", () => {
     };
 
     expect(
-      getTraitsTriggerLabel([effort, contextWindow, outputStyle, progressSummaries], effort, false),
-    ).toBe("Max · 1M");
+      getTraitsTriggerEffortLabel([effort, contextWindow, outputStyle, progressSummaries], false),
+    ).toBe("Max");
   });
 
-  it("continues to summarize non-menu-only boolean controls", () => {
+  it("keeps speed out of the thinking label", () => {
     const effort = selectDescriptor(
       "effort",
       "Reasoning",
@@ -81,7 +81,7 @@ describe("getTraitsTriggerLabel", () => {
       currentValue: true,
     };
 
-    expect(getTraitsTriggerLabel([effort, fastMode], effort, false)).toBe("High · Fast");
+    expect(getTraitsTriggerEffortLabel([effort, fastMode], false)).toBe("High");
   });
 });
 
@@ -107,9 +107,15 @@ describe("getTraitsTriggerEffortLabel", () => {
     type: "boolean",
     currentValue: false,
   };
+  const serviceTier = selectDescriptor(
+    "serviceTier",
+    "Service tier",
+    [{ id: "default", label: "Standard" }],
+    "default",
+  );
 
-  it("names only the thinking level, leaving speed and context to the menu", () => {
-    expect(getTraitsTriggerEffortLabel([fastMode, contextWindow, effort], false)).toBe(
+  it("names only the thinking level, leaving service tier, speed and context to the menu", () => {
+    expect(getTraitsTriggerEffortLabel([serviceTier, fastMode, contextWindow, effort], false)).toBe(
       "Extra high",
     );
   });
@@ -135,6 +141,6 @@ describe("getTraitsTriggerEffortLabel", () => {
   });
 
   it("is empty when there is no thinking setting, so the caller can name the menu", () => {
-    expect(getTraitsTriggerEffortLabel([fastMode, contextWindow], false)).toBe("");
+    expect(getTraitsTriggerEffortLabel([serviceTier, fastMode, contextWindow], false)).toBe("");
   });
 });

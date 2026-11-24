@@ -96,6 +96,7 @@ function isThreadDetailEvent(event: OrchestrationEvent): boolean {
   return (
     event.type === "thread.message-sent" ||
     event.type === "thread.message.assistant-repair-applied" ||
+    event.type === "thread.metadata-updated" ||
     event.type === "thread.proposed-plan-upserted" ||
     event.type === "thread.activity-appended" ||
     event.type === "thread.turn-diff-completed" ||

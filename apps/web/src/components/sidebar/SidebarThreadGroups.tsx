@@ -2,7 +2,15 @@ import { MAX_THREAD_GROUP_DEPTH } from "@cafecode/contracts";
 import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import { uiText } from "@cafecode/shared/i18n";
 import { BotIcon, ChevronRightIcon } from "lucide-react";
-import { createContext, Fragment, useCallback, useContext, useMemo, type ReactNode } from "react";
+import {
+  createContext,
+  Fragment,
+  useCallback,
+  useContext,
+  useMemo,
+  type MouseEventHandler,
+  type ReactNode,
+} from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { useUiLocale } from "~/i18n";
@@ -47,6 +55,53 @@ export const SidebarThreadGroupContext = createContext<SidebarThreadGroupContext
 /** Visual indentation stops growing after four levels; order is preserved. */
 export function sidebarNestingIndentStyle(depth: number) {
   return depth > 0 ? { paddingInlineStart: `${Math.min(depth, 4) * 0.75}rem` } : undefined;
+}
+
+export function SidebarThreadGroupButton({
+  title,
+  count,
+  expanded,
+  working,
+  clusterHovered,
+  onToggle,
+  onContextMenu,
+}: {
+  title: string;
+  count: number;
+  expanded: boolean;
+  working: boolean;
+  clusterHovered?: boolean;
+  onToggle: () => void;
+  onContextMenu?: MouseEventHandler<HTMLButtonElement>;
+}) {
+  const uiLocale = useUiLocale();
+  return (
+    <button
+      type="button"
+      aria-expanded={expanded}
+      data-thread-selection-safe
+      data-thread-group-button
+      data-cluster-hover={clusterHovered ? "true" : undefined}
+      className="focus-ring flex h-6 w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground transition-colors duration-(--duration-fast) hover:bg-accent hover:text-foreground"
+      onClick={onToggle}
+      onContextMenu={onContextMenu}
+    >
+      <ChevronRightIcon
+        aria-hidden="true"
+        className={`size-3 shrink-0 transition-transform duration-(--duration-fast) motion-reduce:transition-none ${
+          expanded ? "rotate-90" : ""
+        }`}
+      />
+      <BotIcon
+        aria-hidden="true"
+        className={`size-3.5 shrink-0 ${working ? "animate-thread-group-pulse text-primary motion-reduce:animate-none" : ""}`}
+      />
+      <span className="min-w-0 flex-1 truncate">{title}</span>
+      <span className="shrink-0 text-subtle-foreground tabular-nums">
+        {uiText("{count, plural, one {# chat} other {# chats}}", { count }, undefined, uiLocale)}
+      </span>
+    </button>
+  );
 }
 
 export type SidebarThreadGroupRowRenderer = (
@@ -236,36 +291,15 @@ function SidebarThreadGroupRow({
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
       >
-        <button
-          type="button"
-          aria-expanded={expanded}
-          data-thread-selection-safe
-          data-thread-group-button
-          data-cluster-hover={clusterHovered ? "true" : undefined}
-          className="focus-ring flex h-6 w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-left text-xs text-muted-foreground transition-colors duration-(--duration-fast) hover:bg-accent hover:text-foreground"
-          onClick={toggle}
+        <SidebarThreadGroupButton
+          title={node.title}
+          count={node.members.length}
+          expanded={expanded}
+          working={isWorking}
+          clusterHovered={clusterHovered}
+          onToggle={toggle}
           onContextMenu={handleContextMenu}
-        >
-          <ChevronRightIcon
-            aria-hidden="true"
-            className={`size-3 shrink-0 transition-transform duration-(--duration-fast) motion-reduce:transition-none ${
-              expanded ? "rotate-90" : ""
-            }`}
-          />
-          <BotIcon
-            aria-hidden="true"
-            className={`size-3.5 shrink-0 ${isWorking ? "animate-pulse text-primary motion-reduce:animate-none" : ""}`}
-          />
-          <span className="min-w-0 flex-1 truncate">{node.title}</span>
-          <span className="shrink-0 text-subtle-foreground tabular-nums">
-            {uiText(
-              "{count, plural, one {# chat} other {# chats}}",
-              { count: node.members.length },
-              undefined,
-              uiLocale,
-            )}
-          </span>
-        </button>
+        />
       </SidebarMenuSubItem>
       {visibleMembers.map((member) => (
         <Fragment key={scopedThreadKey(scopeThreadRef(member.environmentId, member.id))}>

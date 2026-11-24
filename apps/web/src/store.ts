@@ -2467,12 +2467,13 @@ function applyEnvironmentOrchestrationEvent(
       }));
 
     case "thread.metadata-updated": {
-      // Detail view of the label/description; the shell stream remains the
+      // Detail view of organization; the shell stream remains the
       // sidebar's source of truth and also republishes this thread.
       const current = state.threadOrganizationById?.[event.payload.threadId];
       if (!current) return state;
       const next: ThreadOrganizationDetail = {
         ...current,
+        ...(event.payload.groupId !== undefined ? { groupId: event.payload.groupId } : {}),
         ...(event.payload.origin !== undefined ? { origin: event.payload.origin } : {}),
         ...(event.payload.description !== undefined
           ? { description: event.payload.description }

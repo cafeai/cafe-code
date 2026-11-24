@@ -1,39 +1,15 @@
 import { McpToolError } from "./results.ts";
 import { ThreadId } from "@cafecode/contracts";
-import {
-  deriveAvailableRateLimitResetCount,
-  deriveCodexRateLimitBuckets,
-  deriveLatestContextWindowUsage,
-  deriveProviderRateLimitWindow,
-} from "@cafecode/shared/threadResourceUsage";
+import { deriveLatestContextWindowUsage } from "@cafecode/shared/threadResourceUsage";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { z } from "zod";
 
 import type { CafeMcpDependencies, CafeMcpServerOptions } from "./CafeMcpServer.ts";
+import { cachedProviderQuota, nullableQuotaNumber, quotaSchema } from "./quotaMetadata.ts";
 
-const nullableNumber = z.number().finite().nonnegative().nullable();
-const windowSchema = z
-  .object({
-    usedPercent: nullableNumber,
-    remainingPercent: nullableNumber,
-    windowDurationMins: nullableNumber,
-    resetsAtEpochSeconds: nullableNumber,
-  })
-  .nullable();
-
-function quotaWindow(input: Parameters<typeof deriveProviderRateLimitWindow>[0]) {
-  const window = deriveProviderRateLimitWindow(input);
-  return window
-    ? {
-        usedPercent: window.usedPercent,
-        remainingPercent: window.remainingPercent,
-        windowDurationMins: window.windowDurationMins,
-        resetsAtEpochSeconds: window.resetsAt,
-      }
-    : null;
-}
+const nullableNumber = nullableQuotaNumber;
 const usageSchema = z.object({
   threadId: z.string(),
   target: z.object({
@@ -59,32 +35,7 @@ const usageSchema = z.object({
     compactsAutomatically: z.boolean().nullable(),
     autoCompactTokenLimit: nullableNumber,
   }),
-  quota: z.object({
-    status: z.enum(["reported", "unknown"]),
-    scope: z.literal("provider-account"),
-    providerInstanceId: z.string().nullable(),
-    checkedAt: z.string().nullable(),
-    limits: z
-      .array(
-        z.object({
-          limitId: z.string(),
-          limitName: z.string().nullable(),
-          normalModelSlug: z.string().nullable(),
-          primary: windowSchema,
-          secondary: windowSchema,
-          credits: z
-            .object({
-              hasCredits: z.boolean(),
-              unlimited: z.boolean(),
-              balance: z.string().nullable(),
-            })
-            .nullable(),
-        }),
-      )
-      .max(128),
-    availableResetCount: nullableNumber,
-    truncated: z.boolean(),
-  }),
+  quota: quotaSchema,
 });
 
 /**
@@ -102,7 +53,7 @@ export function registerThreadUsageTool(
     {
       title: "Get context and provider quota",
       description:
-        "Read last-reported context tokens and account-shared primary/secondary quota windows, reset times and credits without loading messages. Omit threadId only on a Cafe-issued management connection to use its launch chat; inherited subagent connections still identify that Cafe chat, not the child's native context. Manual clients must supply threadId. Missing values are unknown, not zero. Quota is shared across the provider account, not allocated to this chat; checkedAt does not guarantee every retained window was refreshed. Context reports do not expose Codex's hidden compaction estimate.",
+        "Read a chat's last-reported context tokens and cached account quota without loading messages. For account usage limits across Claude/Codex, model-specific allowances, extra usage or reset details, use get_provider_usage directly instead; it needs no chat lookup. Omit threadId on Cafe-issued connections to use the launch chat; inherited subagents still identify that Cafe chat, not the child's native context. Manual clients supply threadId. Missing values are unknown, not zero. Account quota is shared across chats; checkedAt does not date every retained window. Context reports do not expose Codex's hidden compaction estimate.",
       inputSchema: { threadId: z.string().trim().min(1).optional() },
       outputSchema: usageSchema,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
@@ -137,9 +88,6 @@ export function registerThreadUsageTool(
           // A legacy session without an instance can only identify configuration.
           const source =
             sessionInstanceId !== undefined ? ("session" as const) : ("configured" as const);
-          const account =
-            provider?.auth.status === "authenticated" ? provider.accountRateLimits : undefined;
-          const buckets = account ? deriveCodexRateLimitBuckets(account) : [];
           return {
             threadId: selectedThreadId,
             target: {
@@ -169,28 +117,7 @@ export function registerThreadUsageTool(
               compactsAutomatically: context?.compactsAutomatically ?? null,
               autoCompactTokenLimit: context?.autoCompactTokenLimit ?? null,
             },
-            quota: {
-              status: account ? ("reported" as const) : ("unknown" as const),
-              scope: "provider-account" as const,
-              providerInstanceId: instanceId,
-              checkedAt: account?.checkedAt ?? null,
-              limits: buckets.slice(0, 128).map((bucket) => ({
-                limitId: bucket.id,
-                limitName: bucket.snapshot.limitName ?? null,
-                normalModelSlug: bucket.snapshot.normalModelSlug ?? null,
-                primary: quotaWindow(bucket.snapshot.primary),
-                secondary: quotaWindow(bucket.snapshot.secondary),
-                credits: bucket.snapshot.credits
-                  ? {
-                      hasCredits: bucket.snapshot.credits.hasCredits,
-                      unlimited: bucket.snapshot.credits.unlimited,
-                      balance: bucket.snapshot.credits.balance ?? null,
-                    }
-                  : null,
-              })),
-              availableResetCount: deriveAvailableRateLimitResetCount(account),
-              truncated: buckets.length > 128,
-            },
+            quota: cachedProviderQuota(provider, instanceId),
           };
         }),
       ).catch(() => {

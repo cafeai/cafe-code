@@ -191,15 +191,15 @@ describe("CompactComposerControlsMenu", () => {
   });
 
   it("keeps the selected reasoning visible on the closed compact trigger", async () => {
-    await using _ = await mountMenu({ traitsTriggerLabel: "Ultra · 1M" });
+    await using _ = await mountMenu({ traitsTriggerLabel: "Ultra" });
 
     const trigger = document.querySelector<HTMLElement>('[aria-label="More composer controls"]');
     const label = document.querySelector<HTMLElement>(
       '[data-compact-composer-controls-label="true"]',
     );
 
-    expect(trigger?.textContent).toContain("Ultra · 1M");
-    expect(label?.textContent).toBe("Ultra · 1M");
+    expect(trigger?.textContent).toContain("Ultra");
+    expect(label?.textContent).toBe("Ultra");
 
     await page.getByLabelText("More composer controls").click();
     await vi.waitFor(() => {

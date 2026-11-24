@@ -5943,6 +5943,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ),
         ).pipe(Effect.provideService(Scope.Scope, sessionScope));
         const runtimeInput: CodexSessionRuntimeOptions = {
+          secretRunnerInstructions: secretRunner.instructions,
           customInstructions:
             ((yield* readSystemPromptFileForInjection(serverConfig.systemPromptPath).pipe(
               Effect.provideService(FileSystem.FileSystem, fileSystem),

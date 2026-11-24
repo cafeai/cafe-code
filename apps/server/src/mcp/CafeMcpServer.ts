@@ -71,6 +71,7 @@ import {
 import { registerScheduledFollowupTools } from "../scheduledFollowups/mcp.ts";
 import type { ManagementLaunchContext } from "../auth/managementLaunchContext.ts";
 import { registerThreadUsageTool } from "./threadUsage.ts";
+import { registerProviderUsageTool } from "./providerUsage.ts";
 import { registerThreadQuestionTools } from "./threadQuestions.ts";
 import { installManagementToolResults } from "./managementTools.ts";
 import { McpToolError } from "./results.ts";
@@ -115,7 +116,10 @@ export interface CafeMcpDependencies extends ProviderRuntimeControlDependencies 
     | "getThreadAsyncQuestionActivity"
     | "getThreadOrganization"
   >;
-  readonly providerRegistry: Pick<ProviderRegistryShape, "getProviders" | "refreshInstance">;
+  readonly providerRegistry: Pick<
+    ProviderRegistryShape,
+    "getProviders" | "refreshInstance" | "readInstanceAccountQuota"
+  >;
   readonly providerService: Pick<
     ProviderServiceShape,
     "getInstanceInfo" | "listSessions" | "restartProviderRuntime"
@@ -630,7 +634,7 @@ function registerDiscoveryTools(server: McpServer, dependencies: CafeMcpDependen
     {
       title: "List Cafe Code providers",
       description:
-        "Find configured provider instances and authentication state. Compact by default; use list_provider_models for a targeted model/options page. includeModels=true includes at most 100 models per returned provider with an explicit truncation flag.",
+        "Find configured provider instances and authentication state. For account quotas and usage limits, call get_provider_usage directly instead. Compact by default; use list_provider_models for a targeted model/options page. includeModels=true includes at most 100 models per returned provider with an explicit truncation flag.",
       inputSchema: {
         instanceId: providerInstanceId.optional(),
         includeModels: z.boolean().default(false),
@@ -1044,9 +1048,16 @@ function registerThreadTools(
     {
       title: "Update a Cafe Code thread",
       description:
-        "Rename or move a thread, or set its provider, model, provider options, runtime mode, and interaction mode.",
+        "Rename or move a thread, or set its provider, model, provider options, runtime mode, and interaction mode. Set groupId to move an existing unarchived chat (with its owned groups) into a live group, or null to return it to top level. Set originClassification to correct its human/agent/unknown label. Group and label edits preserve the exact chat, transcript, project, provider settings and running work; they grant no authority and never rewrite creation provenance.",
       inputSchema: {
         threadId: entityId,
+        groupId: groupIdInput
+          .nullable()
+          .optional()
+          .describe(
+            "Destination live group; null detaches to top level; omitted keeps membership.",
+          ),
+        originClassification: z.enum(["human", "agent", "unknown"]).optional(),
         projectId: entityId.nullable().optional(),
         title: nonEmptyString.optional(),
         providerInstanceId: providerInstanceId.optional(),
@@ -1066,6 +1077,8 @@ function registerThreadTools(
     },
     async ({
       threadId,
+      groupId,
+      originClassification,
       projectId,
       title,
       providerInstanceId: selectedProviderInstanceId,
@@ -1169,15 +1182,23 @@ function registerThreadTools(
         );
         sequences.push(result.sequence);
       }
-      if (description !== undefined) {
+      if (
+        groupId !== undefined ||
+        originClassification !== undefined ||
+        description !== undefined
+      ) {
         const result = await runEffect(
           dispatch(dependencies, {
             type: "thread.metadata.update",
             commandId: commandId(),
             threadId: thread.id,
-            description,
+            ...(groupId !== undefined
+              ? { groupId: groupId === null ? null : ThreadGroupId.make(groupId) }
+              : {}),
+            ...(originClassification !== undefined ? { originClassification } : {}),
+            ...(description !== undefined ? { description } : {}),
           }),
-          "Failed to update the thread description.",
+          "Failed to update thread organization. The chat and destination ancestry must be live and unarchived; groups cannot contain cycles or exceed the nesting limit.",
         );
         sequences.push(result.sequence);
       }
@@ -1601,7 +1622,7 @@ export function makeCafeMcpServer(
     { name: CAFE_MCP_SERVER_NAME, version: CAFE_MCP_SERVER_VERSION },
     {
       instructions:
-        "Start with get_cafe_context; discover only missing exact IDs. Follow pagination and omissions. Use each action's receipt to reconcile uncertain outcomes; never auto-retry. Recorded intent is not native completion.",
+        "For account quotas, call get_provider_usage directly without chat discovery. For chat work, call get_cafe_context once per connection and reuse known IDs; discover only missing exact IDs. Use get_thread_usage for chat context tokens and cached quota. Follow pagination and omissions. Use each action's receipt to reconcile uncertain outcomes; never auto-retry. Recorded intent is not native completion.",
     },
   );
 
@@ -1609,6 +1630,7 @@ export function makeCafeMcpServer(
   registerDiscoveryTools(server, dependencies);
   registerThreadStatusTools(server, dependencies, options);
   registerThreadUsageTool(server, dependencies, options);
+  registerProviderUsageTool(server, dependencies);
   registerThreadQuestionTools(server, dependencies);
   if (dependencies.scheduledFollowups)
     registerScheduledFollowupTools(server, dependencies.scheduledFollowups);

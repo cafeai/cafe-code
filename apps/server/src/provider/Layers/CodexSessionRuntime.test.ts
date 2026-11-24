@@ -34,12 +34,14 @@ import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Logger from "effect/Logger";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -197,6 +199,29 @@ for (const request of [
   { label: "explicit", context: 800_000, explicit: 600_000, expected: 600_000 },
   { label: "paired-resume", context: 800_000, resume: true, expected: 800_000 },
   { label: "paired-exact-resume", context: 800_000, resume: true, exact: true, expected: 800_000 },
+  { label: "secret-runner-resume", resume: true, secretRunner: true, expected: null },
+  {
+    label: "secret-runner-active-resume",
+    resume: true,
+    secretRunner: true,
+    secretActive: true,
+    expected: null,
+  },
+  {
+    label: "secret-runner-stop",
+    resume: true,
+    secretRunner: true,
+    secretStop: true,
+    expected: null,
+  },
+  { label: "secret-runner-fresh", secretRunner: true, expected: null },
+  {
+    label: "secret-runner-refused",
+    resume: true,
+    secretRunner: true,
+    secretRefused: true,
+    expected: null,
+  },
   {
     label: "failed-exact-resume",
     resume: true,
@@ -206,7 +231,14 @@ for (const request of [
     expected: null,
   },
   { label: "missing-exact-resume", exact: true, missingResume: true, expected: null },
-  { label: "mismatched-exact-resume", resume: true, exact: true, mismatched: true, expected: null },
+  {
+    label: "mismatched-exact-resume",
+    resume: true,
+    exact: true,
+    mismatched: true,
+    secretRunner: true,
+    expected: null,
+  },
   { label: "inherited-setting", inherited: true, expected: null },
   { label: "accessor-setting", accessor: true, expected: null },
   {
@@ -241,8 +273,13 @@ for (const request of [
         const openingWillBeRejected = "failed" in request;
         const resumeWillFailRecoverably = "recoverable" in request;
         const responseWillBeMismatched = "mismatched" in request;
+        const secretRefreshWillBeRefused = "secretRefused" in request;
+        const stopDuringSecretRefresh = "secretStop" in request;
+        const nativeInstructions = ["Previous helper: /synthetic/retired/connection.json"];
         const calls: Array<{ method: string; params?: Record<string, unknown> }> = [];
         const nativeQuestionReplies: unknown[] = [];
+        const refreshObserved = yield* Deferred.make<void>();
+        let heldRefreshId: string | number | undefined;
         const nativeQuestionReturned = yield* Deferred.make<{
           readonly result?: unknown;
           readonly error?: unknown;
@@ -270,8 +307,12 @@ for (const request of [
           projectId: null,
           sessionId: "synthetic-session",
           source: "appServer",
-          turns: [],
-          status: { type: "idle" },
+          turns:
+            "secretActive" in request
+              ? [{ id: "secret-resumed-turn", status: "inProgress", items: [] }]
+              : [],
+          status:
+            "secretActive" in request ? { type: "active", activeFlags: [] } : { type: "idle" },
         };
         const opened = {
           cwd: process.cwd(),
@@ -318,6 +359,21 @@ for (const request of [
                       ...(request.params ? { params: request.params } : {}),
                     });
                     if (request.id === undefined) continue;
+                    if (request.method === "thread/inject_items" && stopDuringSecretRefresh) {
+                      // Accept the native write but withhold only its reply.
+                      // A peer ACK is independent of the client's stdin owner.
+                      heldRefreshId = request.id;
+                      yield* Deferred.succeed(refreshObserved, undefined);
+                      continue;
+                    }
+                    // Emulate an already-loaded native resume: startup
+                    // developerInstructions do not replace retained context.
+                    if (request.method === "thread/inject_items" && !secretRefreshWillBeRefused) {
+                      const items = request.params?.items as Array<{
+                        content: Array<{ text: string }>;
+                      }>;
+                      nativeInstructions.push(items[0]!.content[0]!.text);
+                    }
                     const result =
                       request.method === "initialize"
                         ? {
@@ -359,7 +415,11 @@ for (const request of [
                                     : "Synthetic opening refused",
                                 },
                               }
-                            : { result }),
+                            : secretRefreshWillBeRefused && request.method === "thread/inject_items"
+                              ? {
+                                  error: { code: -32601, message: "Synthetic unsupported refresh" },
+                                }
+                              : { result }),
                         })}\n`,
                       ),
                     );
@@ -388,6 +448,12 @@ for (const request of [
           ...("explicit" in request ? { autoCompactTokenLimit: request.explicit } : {}),
           ...("resume" in request ? { resumeCursor: { threadId: nativeThreadId } } : {}),
           ...("exact" in request ? { requireExactResume: true as const } : {}),
+          ...("secretRunner" in request
+            ? {
+                secretRunnerInstructions:
+                  "Current exact runner: /synthetic/current/connection.json",
+              }
+            : {}),
         } satisfies CodexSessionRuntimeOptions;
         if ("inherited" in request) {
           Object.setPrototypeOf(runtimeOptions, {
@@ -406,9 +472,35 @@ for (const request of [
             });
           }
         }
+        // Production gives each runtime a child session scope. An explicit
+        // Stop must close that owner, not the test/orchestrator awaiting it.
+        const fixtureRuntimeScope = stopDuringSecretRefresh
+          ? yield* Scope.make("sequential")
+          : yield* Scope.Scope;
+        if (stopDuringSecretRefresh)
+          yield* Effect.addFinalizer(() => Scope.close(fixtureRuntimeScope, Exit.void));
         const runtime = yield* makeCodexSessionRuntime(runtimeOptions).pipe(
+          Effect.provideService(Scope.Scope, fixtureRuntimeScope),
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         );
+        if ("secretStop" in request) {
+          const starting = yield* runtime.start().pipe(Effect.exit, Effect.forkChild);
+          yield* Deferred.await(refreshObserved);
+          yield* runtime.close;
+          const started = yield* Fiber.await(starting);
+          assert.equal(Exit.isSuccess(started) && Exit.isSuccess(started.value), false);
+          yield* Queue.offer(
+            output,
+            encoder.encode(`${encodeProviderJsonString({ id: heldRefreshId, result: {} })}\n`),
+          );
+          assert.equal((yield* runtime.getSession).status, "closed");
+          assert.equal(calls.filter((call) => call.method === "thread/inject_items").length, 1);
+          assert.equal(
+            calls.some((call) => call.method === "turn/start"),
+            false,
+          );
+          return;
+        }
         // Mere runtime construction/settings are not evidence of a successful
         // native opening. The additive request field is unknown until its ACK.
         assert.equal(Object.hasOwn(yield* runtime.getSession, "codexAutoCompactTokenLimit"), false);
@@ -419,6 +511,7 @@ for (const request of [
         if (openingWillFail) {
           const exit = yield* Effect.exit(runtime.start());
           assert.equal(exit._tag, "Failure");
+          assert.equal(calls.filter((call) => call.method === "thread/inject_items").length, 0);
           assert.equal(
             Object.hasOwn(yield* runtime.getSession, "codexAutoCompactTokenLimit"),
             false,
@@ -443,6 +536,40 @@ for (const request of [
         }
         yield* runtime.start();
         const session = yield* runtime.getSession;
+        const refresh = calls.filter((call) => call.method === "thread/inject_items");
+        assert.equal(refresh.length, "secretRunner" in request && "resume" in request ? 1 : 0);
+        if (refresh.length) {
+          assert.deepEqual(nativeInstructions, [
+            "Previous helper: /synthetic/retired/connection.json",
+            ...(!secretRefreshWillBeRefused
+              ? ["Current exact runner: /synthetic/current/connection.json"]
+              : []),
+          ]);
+          assert.deepEqual(refresh[0]!.params, {
+            threadId: nativeThreadId,
+            items: [
+              {
+                type: "message",
+                role: "developer",
+                content: [
+                  {
+                    type: "input_text",
+                    text: "Current exact runner: /synthetic/current/connection.json",
+                  },
+                ],
+              },
+            ],
+          });
+          assert.equal(session.status, "secretActive" in request ? "running" : "ready");
+          assert.equal(
+            calls.some((call) => call.method === "turn/start"),
+            false,
+          );
+          assert.equal(
+            calls.some((call) => call.method === "turn/steer"),
+            false,
+          );
+        }
         assert.equal(accessorReads, 0);
         assert.equal(
           session.codexContextWindowOverride,

@@ -42,6 +42,7 @@ import { CodexCompactionObservation } from "./codexCompactionDiagnostics.ts";
 import { CodexTransientFailureCategory } from "./providerRuntime.ts";
 
 import { ProviderSecurityReport } from "./providerSecurity.ts";
+import { AxiomCommand } from "./axiomCommand.ts";
 
 const ProviderSessionStatus = Schema.Literals([
   "connecting",
@@ -283,6 +284,7 @@ export type ProviderFailedRootRecoverySession = typeof ProviderFailedRootRecover
 
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
+  axiomCommand: Schema.optional(AxiomCommand),
   /** Explicit Axiom desktop web consent for this message only. */
   axiomWebEnabled: Schema.optional(Schema.Boolean),
   axiomMcpRevision: Schema.optional(
@@ -417,6 +419,9 @@ export type ProviderFailedRootRecoveryPreparation =
 
 export const ProviderSteerTurnInput = Schema.Struct({
   threadId: ThreadId,
+  // Retained through dispatch so an explicit command is rejected, never
+  // downgraded to ordinary steering text by schema stripping.
+  axiomCommand: Schema.optional(AxiomCommand),
   axiomWebEnabled: Schema.optional(Schema.Boolean),
   axiomMcpRevision: Schema.optional(
     Schema.Number.check(

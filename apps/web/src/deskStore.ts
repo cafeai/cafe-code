@@ -219,6 +219,7 @@ export function createDeskStore(resolveStorage: () => StateStorage | null = brow
         action.type === "select" ||
         action.type === "reopen" ||
         action.type === "closeAll" ||
+        (action.type === "clearIdle" && action.dismissActiveDraft) ||
         action.type === "split" ||
         action.type === "move" ||
         (action.type === "activateGroup" && action.groupId !== editorGroup) ||

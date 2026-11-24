@@ -24,7 +24,7 @@ const labels = {
   about: "About this list",
   settings: "Computer use settings",
   explanation:
-    "Screenshots are taken only when a chat asks. Each preview is the last one Cafe actually received, with its time.",
+    "This list shows chats that can use your computer. App previews are managed by OpenAI.",
   unavailable: "Status unavailable",
   unconfirmed: "Stop has not been confirmed.",
   off: "Off in every chat",
@@ -36,6 +36,7 @@ const labels = {
   capturing: "Capturing",
   reading: "Reading text",
   acting: "Controlling",
+  working: "Working",
   stopping: "Stopping…",
   stop: "Stop all",
   stopped: "All computer use stopped",
@@ -114,8 +115,8 @@ window.renderSnapshot = (snapshot) => {
       shot.append(img, time);
     } else {
       item.dataset.preview = "false";
-      shot.title = labels.noScreenshot;
-      shot.setAttribute("aria-label", labels.noScreenshot);
+      shot.title = row.appName;
+      shot.setAttribute("aria-label", row.appName);
       shot.append(icon("panel"));
     }
     const body = node("div", "body");
@@ -125,7 +126,7 @@ window.renderSnapshot = (snapshot) => {
     );
     windowName.title = row.windowTitle ? row.appName + " — " + row.windowTitle : row.chat;
     body.append(windowName);
-    const chatline = node("div", "chatline", row.windowTitle ? row.chat : labels.ready);
+    const chatline = node("div", "chatline", row.windowTitle ? row.chat : row.appName);
     chatline.title = row.provider;
     const state = node(
       "span",
@@ -134,15 +135,15 @@ window.renderSnapshot = (snapshot) => {
         ? labels.unavailable
         : stopping || row.state === "stopping"
           ? labels.stopping
-          : row.state === "capturing"
-            ? labels.capturing
-            : row.state === "reading"
-              ? labels.reading
-              : row.state === "acting"
-                ? labels.acting
-                : row.preview
-                  ? labels.ready
-                  : labels.unused,
+          : row.state === "working"
+            ? labels.working
+            : row.state === "capturing"
+              ? labels.capturing
+              : row.state === "reading"
+                ? labels.reading
+                : row.state === "acting"
+                  ? labels.acting
+                  : labels.ready,
     );
     state.dataset.s = unknown
       ? "unknown"

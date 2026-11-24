@@ -11,6 +11,7 @@ const ACTIONS = {
   get_thread_status: "status",
   wait_for_thread: "wait",
   get_thread_usage: "usage",
+  get_provider_usage: "providerUsage",
   list_providers: "providers",
   list_provider_models: "models",
   get_provider_settings: "settings",
@@ -140,6 +141,11 @@ export function cafeMcpHistoryTitle({ tool, state }: CafeMcpHistoryAction): stri
     case "usage":
       return uiText(
         "{state, select, running {Checking Cafe Code context and quota} completed {Checked Cafe Code context and quota} other {Could not check Cafe Code context and quota}}",
+        { state },
+      );
+    case "providerUsage":
+      return uiText(
+        "{state, select, running {Checking Cafe Code provider usage limits} completed {Checked Cafe Code provider usage limits} other {Could not check Cafe Code provider usage limits}}",
         { state },
       );
     case "providers":

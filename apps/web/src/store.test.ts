@@ -12,6 +12,7 @@ import {
   ProviderDriverKind,
   SubagentRuntimeId,
   ThreadId,
+  ThreadGroupId,
   TurnId,
   type OrchestrationEvent,
   type OrchestrationShellStreamEvent,
@@ -49,6 +50,63 @@ import { deriveCodexRecoveryPresentation } from "./codexRecovery";
 
 const localEnvironmentId = EnvironmentId.make("environment-local");
 const remoteEnvironmentId = EnvironmentId.make("environment-remote");
+
+describe("thread organization updates", () => {
+  it("keeps detail membership and labels current without changing chat work state", () => {
+    const source = makeThread();
+    let state = makeState(source);
+    const initial = localEnvironmentStateOf(state);
+    const provenance = { creationPath: "cafe-ui" as const, recordedAt: source.createdAt };
+    state = withActiveEnvironmentState({
+      ...initial,
+      threadOrganizationById: {
+        [source.id]: { groupId: null, origin: null, description: "Purpose", provenance },
+      },
+    });
+    const before = localEnvironmentStateOf(state);
+    const origin = {
+      classification: "agent" as const,
+      source: "user" as const,
+      updatedAt: source.createdAt,
+    };
+    for (const [index, groupId] of [ThreadGroupId.make("destination"), null].entries()) {
+      state = applyOrchestrationEvent(
+        state,
+        {
+          type: "thread.metadata-updated",
+          sequence: index + 1,
+          eventId: EventId.make(`organization-${index}`),
+          aggregateKind: "thread",
+          aggregateId: source.id,
+          commandId: CommandId.make(`organization-${index}`),
+          causationEventId: null,
+          correlationId: null,
+          occurredAt: source.createdAt,
+          metadata: {},
+          payload: {
+            threadId: source.id,
+            groupId,
+            ...(index === 0 ? { origin } : {}),
+            updatedAt: source.createdAt,
+          },
+        },
+        localEnvironmentId,
+      );
+      const after = localEnvironmentStateOf(state);
+      expect(after.threadOrganizationById?.[source.id]).toEqual({
+        groupId,
+        origin,
+        description: "Purpose",
+        provenance,
+      });
+      expect(after.threadSessionById).toBe(before.threadSessionById);
+      expect(after.threadTurnStateById).toBe(before.threadTurnStateById);
+      expect(after.messageByThreadId).toBe(before.messageByThreadId);
+      expect(after.activityByThreadId).toBe(before.activityByThreadId);
+      expect(after.threadShellById).toBe(before.threadShellById);
+    }
+  });
+});
 
 function withActiveEnvironmentState(
   environmentState: EnvironmentState,

@@ -215,49 +215,68 @@ function createPublicSummaryFixture(context: TestContext, afterUnmount?: () => v
 
 const MESSAGE_CREATED_AT = "2026-04-13T12:00:00.000Z";
 
-it("shows Cafe MCP actions by name and retains the exact invocation in hover details", async (context) => {
-  const previousLocale = getUiLocale();
-  const fixture = createPublicSummaryFixture(context, () => setUiLocale(previousLocale));
-  setUiLocale("en");
-  const turnId = TurnId.make("cafe-mcp-history-turn");
-  const invocation = 'cafe-code-0123456789abcdef.list_threads: {"state":"active"}';
-  const activity: OrchestrationThreadActivity = {
-    id: EventId.make("cafe-mcp-history-call"),
-    turnId,
-    sequence: 1,
-    createdAt: MESSAGE_CREATED_AT,
-    kind: "tool.completed",
-    tone: "tool",
-    summary: "MCP tool call completed",
-    payload: {
-      itemId: "cafe-history-call",
-      itemType: "mcp_tool_call",
-      title: "MCP tool call",
-      status: "completed",
-      detail: invocation,
-      data: {
-        item: { type: "mcpToolCall", server: "cafe-code-0123456789abcdef", tool: "list_threads" },
-      },
+it.for([
+  {
+    item: { type: "mcpToolCall", server: "cafe-code-0123456789abcdef", tool: "list_threads" },
+    invocation: 'cafe-code-0123456789abcdef.list_threads: {"state":"active"}',
+    heading: "Viewed Cafe Code threads",
+    rowLabel: "Viewed Cafe Code threads",
+  },
+  {
+    item: {
+      type: "mcpToolCall",
+      server: "codex_apps",
+      tool: "search_service.web_run",
+      arguments: { system2_search_query: [{ q: "Path ORAM" }] },
     },
-  };
-  await fixture.run(async () => {
-    await fixture.render(
-      <MessagesTimeline
-        {...buildProps()}
-        timelineEntries={deriveTimelineEntries([], [], deriveWorkLogEntries([activity], turnId))}
-      />,
-    );
-    const row = page.getByRole("button", { name: "Viewed Cafe Code threads", exact: true });
-    await fixture.own(() => expect.element(row).toBeVisible());
-    expect(row.element().textContent).not.toContain("0123456789abcdef");
-    await fixture.own(() => row.hover());
-    await fixture.own(() =>
-      expect
-        .element(page.getByText(`Viewed Cafe Code threads - ${invocation}`, { exact: true }))
-        .toBeVisible(),
-    );
-  });
-});
+    invocation: 'codex_apps.search_service.web_run: {"system2_search_query":[{"q":"Path ORAM"}]}',
+    heading: "Searched the web",
+    rowLabel: "Searched the web - Path ORAM",
+  },
+])(
+  "shows $heading and retains the original MCP invocation in hover details",
+  async ({ item, invocation, heading, rowLabel }, context) => {
+    const previousLocale = getUiLocale();
+    const fixture = createPublicSummaryFixture(context, () => setUiLocale(previousLocale));
+    setUiLocale("en");
+    const turnId = TurnId.make("cafe-mcp-history-turn");
+    const activity: OrchestrationThreadActivity = {
+      id: EventId.make("cafe-mcp-history-call"),
+      turnId,
+      sequence: 1,
+      createdAt: MESSAGE_CREATED_AT,
+      kind: "tool.completed",
+      tone: "tool",
+      summary: "MCP tool call completed",
+      payload: {
+        itemId: "cafe-history-call",
+        itemType: "mcp_tool_call",
+        title: "MCP tool call",
+        status: "completed",
+        detail: invocation,
+        data: {
+          item,
+        },
+      },
+    };
+    await fixture.run(async () => {
+      await fixture.render(
+        <MessagesTimeline
+          {...buildProps()}
+          timelineEntries={deriveTimelineEntries([], [], deriveWorkLogEntries([activity], turnId))}
+        />,
+      );
+      const row = page.getByRole("button", { name: rowLabel, exact: true });
+      await fixture.own(() => expect.element(row).toBeVisible());
+      expect(row.element().textContent).not.toContain("0123456789abcdef");
+      expect(row.element().textContent).not.toContain("search_service");
+      await fixture.own(() => row.hover());
+      await fixture.own(() =>
+        expect.element(page.getByText(`${heading} - ${invocation}`, { exact: true })).toBeVisible(),
+      );
+    });
+  },
+);
 
 it("shows exact MCP questions and submitted responses in the primary chat without opening the work log", async (context) => {
   const previousLocale = getUiLocale();

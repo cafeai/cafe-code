@@ -91,22 +91,18 @@ export const handleGlideMcpRequest = Effect.gen(function* () {
             };
             response.once("close", abort);
             if (response.destroyed) controller.abort();
-            const server = createGlideMcpServer(
-              {
-                execute: async (input, signal) =>
-                  cellResultSchema.parse(
-                    await operation(
-                      { kind: "execute", token, input },
-                      signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
-                    ),
+            const server = createGlideMcpServer({
+              execute: async (input, signal) =>
+                cellResultSchema.parse(
+                  await operation(
+                    { kind: "execute", token, input },
+                    signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
                   ),
-                reset: async () => {
-                  await operation({ kind: "reset", token }, controller.signal);
-                },
+                ),
+              reset: async () => {
+                await operation({ kind: "reset", token }, controller.signal);
               },
-              "background",
-              true,
-            );
+            });
             try {
               await server.connect(transport);
               const outgoing = await transport.handleRequest(webRequest);

@@ -7,6 +7,7 @@ import {
   glideClickIntent,
   glidePermissionRequirements,
   glidePermissionsGranted,
+  glideUsesNativePermissionSetup,
   glideScreenRecordingPaneKind,
   glideSetupShouldPoll,
 } from "./glideSetup";
@@ -27,6 +28,13 @@ const status = (patch: Partial<GlideControlResult> = {}): GlideControlResult => 
 });
 
 describe("Glide permission setup policy", () => {
+  it("delegates native OpenAI setup without reporting an OS permission grant", () => {
+    const native = status({ permissionsManagedBy: "openai" });
+    expect(glideUsesNativePermissionSetup(native)).toBe(true);
+    expect(glidePermissionsGranted(native)).toBe(false);
+    expect(glideClickIntent({ error: false, enabled: false, status: native })).toBe("toggle");
+    expect(glideUsesNativePermissionSetup(status())).toBe(false);
+  });
   it.each([
     [false, false, false],
     [true, false, false],

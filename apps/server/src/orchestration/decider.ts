@@ -43,6 +43,7 @@ import {
   normalizedGroupTitle,
   threadGroupDepth,
   threadGroups,
+  threadGroupMoveError,
   type ContainmentClosure,
 } from "./threadGroups.ts";
 import { SESSION_LIFECYCLE_SUPERSEDED, sessionLifecycleSnapshot } from "./sessionLifecycle.ts";
@@ -858,11 +859,26 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: "This chat is in the Recycle Bin.",
         });
       }
-      if (command.originClassification === undefined && command.description === undefined) {
+      if (
+        command.groupId === undefined &&
+        command.originClassification === undefined &&
+        command.description === undefined
+      ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
           detail: "No metadata change was requested.",
         });
+      }
+      if (command.groupId !== undefined) {
+        // Serialized with delete/archive/restore: validate the current tree,
+        // never the MCP caller's earlier shell snapshot. This emits no work intent.
+        const detail = threadGroupMoveError(readModel, thread, command.groupId);
+        if (detail !== undefined) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail,
+          });
+        }
       }
       const occurredAt = yield* nowIso;
       return {
@@ -875,6 +891,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.metadata-updated",
         payload: {
           threadId: command.threadId,
+          ...(command.groupId !== undefined ? { groupId: command.groupId } : {}),
           // A saved label is the user's correction; provenance is untouched.
           ...(command.originClassification !== undefined
             ? {
@@ -1180,6 +1197,20 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: "This chat is in the Recycle Bin.",
         });
       }
+      if (
+        command.axiomCommand !== undefined &&
+        (threadHasUnsettledTurnStart(targetThread) ||
+          command.message.attachments.length > 0 ||
+          command.runtimeRecovery !== undefined ||
+          command.scheduledFollowUp !== undefined ||
+          command.sourceProposedPlan !== undefined)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Native Axiom commands require an idle conversation and explicit input without attachments or automatic continuation.",
+        });
+      }
       if (command.scheduledFollowUp !== undefined) {
         const scheduled = command.scheduledFollowUp;
         // Scheduling is idle-only. It must never inherit ordinary user-submit
@@ -1196,6 +1227,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           command.sourceProposedPlan !== undefined ||
           command.deliveryPriority !== undefined ||
           command.axiomWebEnabled === true ||
+          command.axiomCommand !== undefined ||
           command.runtimeMode !== targetThread.runtimeMode ||
           command.interactionMode !== targetThread.interactionMode ||
           scheduled.expectedRuntimeMode !== targetThread.runtimeMode ||
@@ -1361,6 +1393,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           causationEventId: userMessageEvent.eventId,
           type: "thread.turn-steer-requested",
           payload: {
+            ...(command.axiomCommand !== undefined ? { axiomCommand: command.axiomCommand } : {}),
             ...(command.axiomWebEnabled !== undefined
               ? { axiomWebEnabled: command.axiomWebEnabled }
               : {}),
@@ -1474,6 +1507,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         causationEventId: userMessageEvent.eventId,
         type: "thread.turn-start-requested",
         payload: {
+          ...(command.axiomCommand !== undefined ? { axiomCommand: command.axiomCommand } : {}),
           ...(command.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: command.axiomWebEnabled }
             : {}),
@@ -1542,6 +1576,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.turn.steer": {
+      if (command.axiomCommand !== undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Native Axiom commands cannot steer an active turn.",
+        });
+      }
       const targetThread = yield* requireThread({
         readModel,
         command,
@@ -1604,6 +1644,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           causationEventId: userMessageEvent.eventId,
           type: "thread.turn-start-requested",
           payload: {
+            ...(command.axiomCommand !== undefined ? { axiomCommand: command.axiomCommand } : {}),
             ...(command.axiomWebEnabled !== undefined
               ? { axiomWebEnabled: command.axiomWebEnabled }
               : {}),
@@ -1636,6 +1677,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         causationEventId: userMessageEvent.eventId,
         type: "thread.turn-steer-requested",
         payload: {
+          ...(command.axiomCommand !== undefined ? { axiomCommand: command.axiomCommand } : {}),
           ...(command.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: command.axiomWebEnabled }
             : {}),
@@ -1890,11 +1932,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       if (
         !thread.session ||
         thread.session.providerInstanceId !== command.providerInstanceId ||
-        (thread.session.providerName !== "codex" && thread.session.providerName !== "opencode")
+        (thread.session.providerName !== "codex" &&
+          thread.session.providerName !== "opencode" &&
+          thread.session.providerName !== "axiom")
       ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: "Select the existing Codex or OpenCode conversation before compacting.",
+          detail: "Select the existing Codex, OpenCode or Axiom conversation before compacting.",
         });
       }
       if (threadHasUnsettledTurnStart(thread)) {

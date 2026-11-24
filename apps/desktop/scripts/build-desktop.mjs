@@ -7,7 +7,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { ensureMacDictationHelper } from "./build-mac-dictation-helper.mjs";
-import { ensureMacGlideHelper } from "./build-mac-glide-helper.mjs";
+import { ensureMacGlideTray } from "./build-mac-glide-tray.mjs";
 import { ensureMacKeepAwakeHelper } from "./build-mac-keep-awake-helper.mjs";
 import { ensureMacProviderDaemonControlHelper } from "./build-mac-provider-daemon-control-helper.mjs";
 import { assertSandboxedPreloadBundles } from "./assert-sandboxed-preloads.mjs";
@@ -19,7 +19,7 @@ const require = createRequire(import.meta.url);
 // considered usable. Invoke the locked bundler through Node, without a shell
 // or any alternate JavaScript runtime.
 ensureMacDictationHelper();
-ensureMacGlideHelper();
+ensureMacGlideTray();
 ensureMacKeepAwakeHelper();
 ensureMacProviderDaemonControlHelper();
 

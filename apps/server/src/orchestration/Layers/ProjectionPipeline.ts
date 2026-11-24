@@ -1078,6 +1078,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
               sql,
               event.payload.threadId,
               {
+                ...(event.payload.groupId !== undefined ? { groupId: event.payload.groupId } : {}),
                 ...(event.payload.origin !== undefined ? { origin: event.payload.origin } : {}),
                 ...(event.payload.description !== undefined
                   ? { description: event.payload.description }

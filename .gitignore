@@ -9,8 +9,6 @@ node_modules
 apps/*/dist
 .astro
 packages/*/dist
-.env
-.env.local
 build/
 .logs/
 release/
@@ -35,3 +33,11 @@ dist-electron/
 
 # Local-only design mockups and experimental feature explorations. Never publish.
 /.explorations/
+
+.projects/cache
+.projects/vault
+.projects/state.test.json
+.projects/state.local.test.json
+.env
+.env.*
+!.env.example

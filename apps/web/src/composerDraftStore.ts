@@ -1,4 +1,5 @@
 import {
+  AxiomCommand,
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
@@ -44,7 +45,6 @@ import {
   createLegacyCompatibleStorage,
   createMemoryStorage,
 } from "./lib/storage";
-import { getDefaultServerModel } from "./providerModels";
 import { subagentLimitsEqual } from "./subagentConcurrency";
 import { UnifiedSettings } from "@cafecode/contracts/settings";
 import {
@@ -58,6 +58,9 @@ const isProviderDriverKind = Schema.is(ProviderDriverKind);
 // Compile once: persistence normalization and frequent composer edits reuse
 // this admission instead of recompiling the same bounded schema per value.
 const isSubagentLimits = Schema.is(SubagentLimits);
+const isAxiomCommand = Schema.is(AxiomCommand);
+const matchesAxiomCommand = (prompt: string, command: AxiomCommand) =>
+  /^\s*\/([^\s]+)/u.exec(prompt)?.[1] === command.name;
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "cafe-code:composer-drafts:v1";
 export const LEGACY_COMPOSER_DRAFT_STORAGE_KEY = "cafecode:composer-drafts:v1";
@@ -116,6 +119,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   files: Schema.optionalKey(Schema.Array(PersistedComposerFileAttachment)),
   queueEditingItemId: Schema.optionalKey(Schema.String),
   axiomWebEnabled: Schema.optionalKey(Schema.Boolean),
+  axiomCommand: Schema.optionalKey(AxiomCommand),
   computerUseEnabled: Schema.optionalKey(Schema.Boolean),
   computerUseRevision: Schema.optionalKey(
     Schema.String.check(Schema.isPattern(/^(0|[1-9][0-9]{0,15})$/)),
@@ -251,6 +255,9 @@ export interface ComposerThreadDraftState {
   computerUseEnabled?: boolean | undefined;
   computerUseRevision?: string | undefined;
   axiomMcpRevision?: number | undefined;
+  /** Volatile ownership of a review, never restored as live session authority. */
+  axiomMcpOwner?: string | undefined;
+  axiomCommand?: AxiomCommand | undefined;
   images: ComposerImageAttachment[];
   files: ComposerFileAttachment[];
   queueEditingItemId?: string;
@@ -448,6 +455,12 @@ interface ComposerDraftStoreState {
     threadRef: ComposerThreadTarget,
     revision: number,
     instanceId: ProviderInstanceId,
+    owner: string,
+  ) => void;
+  setAxiomCommand: (
+    threadRef: ComposerThreadTarget,
+    command: AxiomCommand,
+    instanceId: ProviderInstanceId,
   ) => void;
   setAxiomWebEnabled: (
     threadRef: ComposerThreadTarget,
@@ -522,6 +535,7 @@ interface ComposerDraftStoreState {
       interactionMode: ProviderInteractionMode;
       axiomWebEnabled?: boolean;
       axiomMcpRevision?: number;
+      axiomCommand?: AxiomCommand;
     },
   ) => boolean;
   finishQueueEdit: (threadRef: ComposerThreadTarget, retainImages?: boolean) => void;
@@ -543,6 +557,7 @@ interface ComposerDraftStoreState {
       files?: ComposerFileAttachment[];
       axiomWebEnabled?: boolean;
       axiomMcpRevision?: number;
+      axiomCommand?: AxiomCommand;
       axiomWebInstanceId?: ProviderInstanceId;
     },
   ) => boolean;
@@ -760,7 +775,8 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.codexContextWindowOverride === undefined &&
     draft.axiomWebEnabled !== true &&
     draft.computerUseEnabled !== true &&
-    draft.axiomMcpRevision === undefined
+    draft.axiomMcpRevision === undefined &&
+    draft.axiomCommand === undefined
   );
 }
 
@@ -1049,58 +1065,38 @@ export function deriveEffectiveComposerModelState(input: {
   const instanceDefaults = input.selectedInstanceId
     ? input.settings.providerInstances?.[input.selectedInstanceId]
     : undefined;
-  const baseModelCandidate =
-    input.threadModelSelection?.model ??
+  // Without an explicit instance, legacy drafts use the driver's default id.
+  const draftInstanceId =
+    input.selectedInstanceId ?? defaultInstanceIdForDriver(input.selectedProvider);
+  const draftSelection = input.draft?.modelSelectionByProvider?.[draftInstanceId];
+  const savedSelection = draftSelection?.model ? draftSelection : input.threadModelSelection;
+  const modelCandidate =
+    savedSelection?.model ??
     instanceDefaults?.defaultModel ??
     input.projectModelSelection?.model ??
     null;
-  const baseModel =
-    (input.selectedInstanceId
+  const modelInstanceId =
+    savedSelection?.instanceId ??
+    (instanceDefaults?.defaultModel !== undefined
+      ? input.selectedInstanceId
+      : input.projectModelSelection?.instanceId);
+  const lookupInstanceId = draftSelection?.model ? draftInstanceId : input.selectedInstanceId;
+  const selectedModel =
+    (lookupInstanceId
       ? resolveAppModelSelectionForInstance(
-          input.selectedInstanceId,
+          lookupInstanceId,
           input.settings,
           input.providers,
-          baseModelCandidate,
+          modelCandidate,
+          { retainUnconfirmedCodexModel: modelInstanceId === lookupInstanceId },
         )
       : null) ??
     resolveAppModelSelection(
       input.selectedProvider,
       input.settings,
       input.providers,
-      baseModelCandidate,
-    ) ??
-    normalizeModelSlug(baseModelCandidate, input.selectedProvider) ??
-    getDefaultServerModel(input.providers, input.selectedProvider);
-  // Look up the instance's saved selection first; fall back to the
-  // driver-kind bucket so legacy kind-keyed drafts still resolve. Every
-  // `ProviderDriverKind` literal is a valid `ProviderInstanceId` slug, so the
-  // cast to the branded type is safe.
-  const instanceSelection = input.selectedInstanceId
-    ? input.draft?.modelSelectionByProvider?.[input.selectedInstanceId]
-    : undefined;
-  const defaultInstanceId = defaultInstanceIdForDriver(input.selectedProvider);
-  const legacySelection =
-    !input.selectedInstanceId || input.selectedInstanceId === defaultInstanceId
-      ? input.draft?.modelSelectionByProvider?.[defaultInstanceId]
-      : undefined;
-  const activeSelection = instanceSelection ?? legacySelection;
-  const activeSelectionInstanceId = instanceSelection
-    ? (input.selectedInstanceId ?? defaultInstanceId)
-    : defaultInstanceId;
-  const selectedModel = activeSelection?.model
-    ? (resolveAppModelSelectionForInstance(
-        activeSelectionInstanceId,
-        input.settings,
-        input.providers,
-        activeSelection.model,
-      ) ??
-      resolveAppModelSelection(
-        input.selectedProvider,
-        input.settings,
-        input.providers,
-        activeSelection.model,
-      ))
-    : baseModel;
+      modelCandidate,
+    );
   const instanceDefaultOptions =
     input.selectedInstanceId &&
     instanceDefaults?.defaultModelOptions &&
@@ -1761,6 +1757,10 @@ function normalizePersistedDraftsByThreadId(
             axiomWebEnabled: draftCandidate.axiomWebEnabled,
           }
         : {}),
+      ...(isAxiomCommand(draftCandidate.axiomCommand) &&
+      matchesAxiomCommand(prompt, draftCandidate.axiomCommand)
+        ? { axiomCommand: draftCandidate.axiomCommand }
+        : {}),
       ...(typeof draftCandidate.computerUseEnabled === "boolean"
         ? { computerUseEnabled: draftCandidate.computerUseEnabled }
         : {}),
@@ -1875,6 +1875,9 @@ function partializeComposerDraftStoreState(
       files: draft.files.map(persistComposerFile),
       ...(draft.queueEditingItemId ? { queueEditingItemId: draft.queueEditingItemId } : {}),
       ...(draft.axiomWebEnabled !== undefined ? { axiomWebEnabled: draft.axiomWebEnabled } : {}),
+      ...(draft.axiomCommand && matchesAxiomCommand(draft.prompt, draft.axiomCommand)
+        ? { axiomCommand: draft.axiomCommand }
+        : {}),
       ...(draft.computerUseEnabled !== undefined
         ? { computerUseEnabled: draft.computerUseEnabled }
         : {}),
@@ -2124,6 +2127,10 @@ function toHydratedThreadDraft(
       : {}),
     ...(persistedDraft.axiomWebEnabled !== undefined
       ? { axiomWebEnabled: persistedDraft.axiomWebEnabled }
+      : {}),
+    ...(persistedDraft.axiomCommand &&
+    matchesAxiomCommand(persistedDraft.prompt, persistedDraft.axiomCommand)
+      ? { axiomCommand: persistedDraft.axiomCommand }
       : {}),
     ...(persistedDraft.computerUseEnabled !== undefined
       ? { computerUseEnabled: persistedDraft.computerUseEnabled }
@@ -2624,7 +2631,12 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               modelSelectionByProvider: nextMap,
               activeProvider: nextActiveProvider,
               ...(nextActiveProvider !== base.activeProvider
-                ? { axiomWebEnabled: undefined, axiomMcpRevision: undefined }
+                ? {
+                    axiomWebEnabled: undefined,
+                    axiomMcpRevision: undefined,
+                    axiomMcpOwner: undefined,
+                    axiomCommand: undefined,
+                  }
                 : {}),
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
@@ -2636,15 +2648,44 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             return { draftsByThreadKey: nextDraftsByThreadKey };
           });
         },
-        setAxiomMcpRevision: (threadRef, revision, instanceId) => {
+        setAxiomMcpRevision: (threadRef, revision, instanceId, owner) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef);
           if (!threadKey || !Number.isSafeInteger(revision) || revision < 0) return;
           set((state) => {
             const current = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            if (current.activeProvider !== null && current.activeProvider !== instanceId)
+              return state;
             return {
               draftsByThreadKey: {
                 ...state.draftsByThreadKey,
-                [threadKey]: { ...current, axiomMcpRevision: revision, activeProvider: instanceId },
+                [threadKey]: {
+                  ...current,
+                  axiomMcpRevision: revision,
+                  axiomMcpOwner: owner,
+                  activeProvider: instanceId,
+                },
+              },
+            };
+          });
+        },
+        setAxiomCommand: (threadRef, command, instanceId) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey || !isAxiomCommand(command)) return;
+          set((state) => {
+            const current = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            if (
+              (current.activeProvider !== null && current.activeProvider !== instanceId) ||
+              !matchesAxiomCommand(current.prompt, command)
+            )
+              return state;
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: {
+                  ...current,
+                  activeProvider: instanceId,
+                  axiomCommand: { name: command.name },
+                },
               },
             };
           });
@@ -2699,6 +2740,10 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const nextDraft: ComposerThreadDraftState = {
               ...existing,
               prompt,
+              axiomCommand:
+                existing.axiomCommand && matchesAxiomCommand(prompt, existing.axiomCommand)
+                  ? existing.axiomCommand
+                  : undefined,
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {
@@ -2748,7 +2793,12 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               modelSelectionByProvider: nextMap,
               activeProvider: nextActiveProvider,
               ...(nextActiveProvider !== base.activeProvider
-                ? { axiomWebEnabled: undefined, axiomMcpRevision: undefined }
+                ? {
+                    axiomWebEnabled: undefined,
+                    axiomMcpRevision: undefined,
+                    axiomMcpOwner: undefined,
+                    axiomCommand: undefined,
+                  }
                 : {}),
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
@@ -3064,6 +3114,12 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                   prompt: content.prompt,
                   axiomWebEnabled: content.axiomWebEnabled,
                   axiomMcpRevision: content.axiomMcpRevision,
+                  axiomMcpOwner: undefined,
+                  axiomCommand:
+                    content.axiomCommand &&
+                    matchesAxiomCommand(content.prompt, content.axiomCommand)
+                      ? content.axiomCommand
+                      : undefined,
                   images: content.images,
                   files: content.files,
                   persistedAttachments: [],
@@ -3261,6 +3317,13 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
                     content.axiomWebInstanceId === existing.activeProvider
                       ? content.axiomMcpRevision
                       : undefined,
+                  axiomMcpOwner: undefined,
+                  axiomCommand:
+                    content.axiomWebInstanceId === existing.activeProvider &&
+                    content.axiomCommand &&
+                    matchesAxiomCommand(content.prompt, content.axiomCommand)
+                      ? content.axiomCommand
+                      : undefined,
                   axiomWebEnabled: Object.hasOwn(existing, "axiomWebEnabled")
                     ? existing.axiomWebEnabled
                     : content.axiomWebInstanceId === existing.activeProvider
@@ -3285,6 +3348,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             const nextDraft: ComposerThreadDraftState = {
               ...current,
               prompt: "",
+              axiomCommand: undefined,
               images: [],
               files: [],
               nonPersistedImageIds: [],

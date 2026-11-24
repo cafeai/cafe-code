@@ -14,6 +14,7 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
   type ServerProvider,
+  type ProviderSessionQuotaReport,
   type ServerSettings,
 } from "@cafecode/contracts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -27,6 +28,9 @@ import * as Layer from "effect/Layer";
 import { McpOperations, McpOperationsLive, operationInputHash } from "./operations.ts";
 import { SqlitePersistenceTest } from "../persistence/Sqlite.test.fixture.ts";
 import { McpToolError } from "./results.ts";
+import { summarizeThread } from "./views.ts";
+import { decideOrchestrationCommand } from "../orchestration/decider.ts";
+import { projectEvent } from "../orchestration/projector.ts";
 
 import {
   CAFE_MCP_RESTART_DELAY_MS,
@@ -483,6 +487,65 @@ const usageProvider: ServerProvider = {
       secondary: { usedPercent: 10, windowDurationMins: 10_080, resetsAt: 1_793_900_000 },
       credits: { hasCredits: true, unlimited: false, balance: "123.00" },
     },
+  },
+};
+
+const claudeUsageProvider: ServerProvider = {
+  ...usageProvider,
+  instanceId: ProviderInstanceId.make("claude-account"),
+  driver: ProviderDriverKind.make("claudeAgent"),
+  displayName: "Claude account",
+  accountRateLimits: {
+    checkedAt: now,
+    rateLimits: { primary: { windowDurationMins: 300, resetsAt: 1_793_300_400 } },
+  },
+};
+const claudeAccountReport: ProviderSessionQuotaReport = {
+  source: "claude-cli",
+  observedAt: now,
+  meters: [
+    {
+      kind: "session",
+      group: "session",
+      usedPercent: 25.5,
+      resetsAt: now,
+      severity: "warning",
+      isActive: true,
+    },
+    {
+      kind: "weekly_all",
+      group: "weekly",
+      usedPercent: 90,
+      resetsAt: null,
+      severity: "unknown",
+      isActive: false,
+    },
+    {
+      kind: "weekly_scoped",
+      group: "weekly",
+      modelLabel: "Fable",
+      usedPercent: 10,
+      resetsAt: now,
+      severity: "ok",
+      isActive: false,
+    },
+    {
+      kind: "weekly_scoped",
+      group: "weekly",
+      modelLabel: "Fable",
+      surfaceLabel: "OAuth apps",
+      usedPercent: 20,
+      resetsAt: now,
+      severity: "ok",
+      isActive: false,
+    },
+  ],
+  extraUsage: {
+    enabled: true,
+    monthlyLimit: 15_000,
+    usedCredits: 1234,
+    usedPercent: 8.226,
+    currency: "USD",
   },
 };
 
@@ -1096,6 +1159,13 @@ describe("Cafe Code MCP server", () => {
       },
     );
     expect(
+      tools.tools.find((tool) => tool.name === "get_provider_usage")?.annotations,
+    ).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: true,
+    });
+    expect(
       tools.tools.find((tool) => tool.name === "get_thread_question")?.annotations,
     ).toMatchObject({ readOnlyHint: true, destructiveHint: false, openWorldHint: false });
     expect(
@@ -1154,6 +1224,390 @@ describe("Cafe Code MCP server", () => {
       }
     },
   );
+
+  it("reads both accounts, normal and Fable meters, extra usage and reset metadata in one thread-independent call", async (context) => {
+    const dispatched: Array<Parameters<CafeMcpDependencies["orchestrationEngine"]["dispatch"]>[0]> =
+      [];
+    const dependencies = passiveDependencies({
+      providers: [usageProvider, claudeUsageProvider],
+      threads: [],
+      dispatched,
+    });
+    const read = vi.fn(() =>
+      Effect.succeed({ ...claudeAccountReport, PRIVATE_NATIVE_FIELD: "must stay private" }),
+    );
+    const result = await withClient(
+      context,
+      {
+        ...dependencies,
+        projectionSnapshotQuery: new Proxy(dependencies.projectionSnapshotQuery, {
+          get: () => {
+            throw new Error("Account quota must not depend on a chat.");
+          },
+        }),
+        providerRegistry: {
+          ...dependencies.providerRegistry,
+          readInstanceAccountQuota: read,
+        },
+      },
+      (client) => client.callTool({ name: "get_provider_usage", arguments: {} }),
+    );
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      hasMore: false,
+      nextCursor: null,
+      totalMatches: 2,
+      providers: [
+        {
+          instanceId: claudeUsageProvider.instanceId,
+          driver: "claudeAgent",
+          accountQuota: {
+            status: "reported",
+            report: {
+              source: "claude-cli",
+              observedAt: now,
+              meters: [
+                {
+                  kind: "session",
+                  usedPercent: 25.5,
+                  remainingPercent: 74.5,
+                  resetsAt: now,
+                  severity: "warning",
+                  isActive: true,
+                },
+                { kind: "weekly_all", usedPercent: 90, remainingPercent: 10, resetsAt: null },
+                { kind: "weekly_scoped", modelLabel: "Fable", remainingPercent: 90 },
+                {
+                  kind: "weekly_scoped",
+                  modelLabel: "Fable",
+                  surfaceLabel: "OAuth apps",
+                  remainingPercent: 80,
+                },
+              ],
+              extraUsage: {
+                ...claudeAccountReport.extraUsage,
+                amountsUnit: "minor-currency-units",
+              },
+            },
+          },
+          cachedRateLimits: {
+            source: "cached",
+            checkedAt: now,
+            limits: [
+              {
+                primary: {
+                  usedPercent: null,
+                  remainingPercent: null,
+                  resetsAtEpochSeconds: 1_793_300_400,
+                },
+              },
+            ],
+          },
+        },
+        {
+          instanceId: actualInstanceId,
+          cachedRateLimits: {
+            status: "reported",
+            source: "cached",
+            checkedAt: now,
+            limits: [
+              {
+                primary: { usedPercent: 25, remainingPercent: 75 },
+                secondary: { remainingPercent: 90 },
+                credits: { balance: "123.00" },
+              },
+            ],
+            availableResetCount: 3,
+          },
+          accountQuota: { status: "unsupported", report: null },
+        },
+      ],
+    });
+    expect(read.mock.calls).toEqual([[claudeUsageProvider.instanceId]]);
+    expect(dispatched).toEqual([]);
+    for (const secret of [
+      "PRIVATE_NATIVE_FIELD",
+      "PRIVATE_ACCOUNT_EMAIL",
+      "PRIVATE_ACCOUNT_LABEL",
+      "PRIVATE_PROVIDER_MESSAGE",
+    ])
+      expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it("propagates MCP cancellation to the admitted account reader and joins its cleanup", async (context) => {
+    const started = Promise.withResolvers<void>();
+    const closed = Promise.withResolvers<void>();
+    const dependencies = passiveDependencies({ providers: [claudeUsageProvider], threads: [] });
+    const read = vi.fn(() =>
+      Effect.acquireUseRelease(
+        Effect.sync(() => started.resolve()),
+        () => Effect.never,
+        () => Effect.sync(() => closed.resolve()),
+      ),
+    );
+    await withClient(
+      context,
+      {
+        ...dependencies,
+        providerRegistry: { ...dependencies.providerRegistry, readInstanceAccountQuota: read },
+      },
+      async (client) => {
+        const controller = new AbortController();
+        const request = client.callTool({ name: "get_provider_usage", arguments: {} }, undefined, {
+          signal: controller.signal,
+        });
+        const settled = request.catch(() => undefined);
+        try {
+          await started.promise;
+          controller.abort();
+          await settled;
+          await closed.promise;
+          expect(read.mock.calls).toEqual([[claudeUsageProvider.instanceId]]);
+        } finally {
+          controller.abort();
+          await settled;
+        }
+      },
+    );
+  });
+
+  it("keeps filtered account pages separate and rejects a cursor from a different quota query", async (context) => {
+    const read = vi.fn(() => Effect.succeed(claudeAccountReport));
+    const dependencies = passiveDependencies({
+      providers: [usageProvider, claudeUsageProvider],
+      threads: [],
+    });
+    await withClient(
+      context,
+      {
+        ...dependencies,
+        providerRegistry: { ...dependencies.providerRegistry, readInstanceAccountQuota: read },
+      },
+      async (client) => {
+        const first = await client.callTool({
+          name: "get_provider_usage",
+          arguments: { limit: 1 },
+        });
+        expect(first.structuredContent).toMatchObject({
+          providers: [{ instanceId: claudeUsageProvider.instanceId }],
+          hasMore: true,
+          totalMatches: 2,
+        });
+        const cursor = (first.structuredContent as Record<string, unknown> | undefined)?.nextCursor;
+        expect(typeof cursor).toBe("string");
+        const second = await client.callTool({
+          name: "get_provider_usage",
+          arguments: { limit: 1, cursor },
+        });
+        expect(second.structuredContent).toMatchObject({
+          providers: [{ instanceId: actualInstanceId }],
+          hasMore: false,
+          nextCursor: null,
+          totalMatches: 2,
+        });
+        read.mockClear();
+        const filtered = await client.callTool({
+          name: "get_provider_usage",
+          arguments: { instanceId: actualInstanceId, query: "CODEX" },
+        });
+        expect(filtered.structuredContent).toMatchObject({
+          providers: [{ instanceId: actualInstanceId }],
+          totalMatches: 1,
+        });
+        expect(read).not.toHaveBeenCalled();
+        const wrongCursor = await client.callTool({
+          name: "get_provider_usage",
+          arguments: { query: "Claude", cursor },
+        });
+        expect(wrongCursor.isError).toBe(true);
+        expect(wrongCursor.structuredContent).toMatchObject({ error: { code: "invalid_request" } });
+        expect(
+          (
+            await client.callTool({
+              name: "get_provider_usage",
+              arguments: { instanceId: "missing" },
+            })
+          ).structuredContent,
+        ).toMatchObject({ providers: [], totalMatches: 0 });
+      },
+    );
+  });
+
+  it("does not read disabled, unavailable or unauthenticated accounts and preserves unknown reports", async (context) => {
+    const disabled = {
+      ...claudeUsageProvider,
+      instanceId: ProviderInstanceId.make("disabled"),
+      enabled: false,
+    };
+    const signedOut = {
+      ...claudeUsageProvider,
+      instanceId: ProviderInstanceId.make("signed-out"),
+      auth: { status: "unauthenticated" as const },
+    };
+    const unavailable = {
+      ...claudeUsageProvider,
+      instanceId: ProviderInstanceId.make("unavailable"),
+      availability: "unavailable" as const,
+    };
+    const dependencies = passiveDependencies({
+      providers: [disabled, signedOut, unavailable, claudeUsageProvider],
+    });
+    const read = vi.fn(() => Effect.die("PRIVATE_QUOTA_ERROR key=secret"));
+    const result = await withClient(
+      context,
+      {
+        ...dependencies,
+        providerRegistry: { ...dependencies.providerRegistry, readInstanceAccountQuota: read },
+      },
+      (client) => client.callTool({ name: "get_provider_usage", arguments: {} }),
+    );
+    expect(result.isError).not.toBe(true);
+    expect(read.mock.calls).toEqual([[claudeUsageProvider.instanceId]]);
+    const rows = (result.structuredContent as Record<string, unknown> | undefined)
+      ?.providers as Array<{
+      instanceId: string;
+      cachedRateLimits: unknown;
+      accountQuota: unknown;
+    }>;
+    for (const row of rows) expect(row.accountQuota).toEqual({ status: "unknown", report: null });
+    expect(rows.find((row) => row.instanceId === "signed-out")?.cachedRateLimits).toMatchObject({
+      status: "unknown",
+      checkedAt: null,
+      limits: [],
+      availableResetCount: null,
+    });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_QUOTA_ERROR");
+    expect(JSON.stringify(result)).not.toContain("key=secret");
+  });
+
+  it.for([undefined, null] as const)(
+    "preserves unreported extra usage %s without inferring disabled billing",
+    async (extraUsage, context) => {
+      const { extraUsage: _old, ...report } = claudeAccountReport;
+      const dependencies = passiveDependencies({ providers: [claudeUsageProvider] });
+      const result = await withClient(
+        context,
+        {
+          ...dependencies,
+          providerRegistry: {
+            ...dependencies.providerRegistry,
+            readInstanceAccountQuota: () =>
+              Effect.succeed({ ...report, ...(extraUsage === undefined ? {} : { extraUsage }) }),
+          },
+        },
+        (client) => client.callTool({ name: "get_provider_usage", arguments: {} }),
+      );
+      const account = (
+        (result.structuredContent as Record<string, unknown> | undefined)?.providers as Array<{
+          accountQuota: { report: Record<string, unknown> };
+        }>
+      )[0]?.accountQuota;
+      expect(account?.report.extraUsage).toBe(extraUsage);
+      expect(Object.hasOwn(account?.report ?? {}, "extraUsage")).toBe(extraUsage !== undefined);
+    },
+  );
+
+  it("preserves exact buckets and reset-credit metadata while bounding returned rows", async (context) => {
+    const credits = Array.from({ length: 129 }, (_, index) => ({
+      id: `reset-${index}`,
+      resetType: "codexRateLimits" as const,
+      status: "available" as const,
+      grantedAt: 1_793_300_400,
+      expiresAt: 1_793_900_000,
+      title: "Usage reset",
+      description: "Provider reset credit",
+    }));
+    const result = await withClient(
+      context,
+      passiveDependencies({
+        providers: [
+          {
+            ...usageProvider,
+            accountRateLimits: {
+              checkedAt: now,
+              rateLimits: {
+                limitId: "bucket-0",
+                primary: { usedPercent: 0 },
+                planType: "team",
+                rateLimitReachedType: "member_limit",
+                spendControlReached: true,
+                individualLimit: {
+                  limit: "100.00",
+                  used: "75.00",
+                  remainingPercent: 25,
+                  resetsAt: 1_793_900_000,
+                },
+              },
+              rateLimitsByLimitId: Object.fromEntries(
+                Array.from({ length: 129 }, (_, index) => [
+                  `bucket-${index + 1}`,
+                  { limitId: `bucket-${index + 1}`, primary: { usedPercent: index % 100 } },
+                ]),
+              ),
+              rateLimitResetCredits: { availableCount: 3, credits },
+            },
+          },
+        ],
+      }),
+      (client) => client.callTool({ name: "get_provider_usage", arguments: {} }),
+    );
+    expect(result.isError).not.toBe(true);
+    const quota = (
+      (result.structuredContent as Record<string, unknown> | undefined)?.providers as Array<{
+        cachedRateLimits: { limits: unknown[]; resetCredits: { credits: unknown[] } };
+      }>
+    )[0]?.cachedRateLimits;
+    expect(quota).toMatchObject({
+      availableResetCount: 3,
+      truncated: true,
+      resetCredits: { truncated: true },
+    });
+    expect(quota?.limits).toHaveLength(128);
+    expect(quota?.limits[0]).toMatchObject({
+      limitId: "bucket-0",
+      primary: { usedPercent: 0, remainingPercent: 100 },
+      planType: "team",
+      rateLimitReachedType: "member_limit",
+      spendControlReached: true,
+      individualLimit: {
+        limit: "100.00",
+        used: "75.00",
+        remainingPercent: 25,
+        resetsAtEpochSeconds: 1_793_900_000,
+      },
+    });
+    expect(quota?.resetCredits.credits).toHaveLength(128);
+    expect(quota?.resetCredits.credits[0]).toEqual({
+      id: "reset-0",
+      resetType: "codexRateLimits",
+      status: "available",
+      grantedAtEpochSeconds: 1_793_300_400,
+      expiresAtEpochSeconds: 1_793_900_000,
+      title: "Usage reset",
+      description: "Provider reset credit",
+    });
+  });
+
+  it("returns a fixed provider-usage failure without exposing registry errors", async (context) => {
+    const dependencies = passiveDependencies({});
+    const result = await withClient(
+      context,
+      {
+        ...dependencies,
+        providerRegistry: {
+          ...dependencies.providerRegistry,
+          getProviders: Effect.die("PRIVATE_REGISTRY_ERROR /private/path key=secret"),
+        },
+      },
+      (client) => client.callTool({ name: "get_provider_usage", arguments: {} }),
+    );
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: "unavailable", message: "Unable to read provider usage metadata." },
+    });
+    for (const secret of ["PRIVATE_REGISTRY_ERROR", "/private/path", "key=secret"])
+      expect(JSON.stringify(result)).not.toContain(secret);
+  });
 
   it("reads only metadata for its authenticated launch chat using the actual session account", async (context) => {
     const dispatched: Array<Parameters<CafeMcpDependencies["orchestrationEngine"]["dispatch"]>[0]> =
@@ -2113,6 +2567,22 @@ describe("Cafe Code MCP server", () => {
 describe("Cafe MCP thread groups and origin", () => {
   const owner = { sessionId: "group-owner", expiresAt: "2099-01-01T00:00:00.000Z" };
 
+  it("does not resurrect a detached membership from an earlier shell read", () => {
+    expect(
+      summarizeThread(
+        { ...threadShell, groupId: ThreadGroupId.make("old-group") },
+        {
+          groupId: null,
+          origin: null,
+          description: null,
+          provenance: null,
+          deletionId: null,
+          archiveCascadeId: null,
+        },
+      ).groupId,
+    ).toBeNull();
+  });
+
   async function operationsRuntime(context: TestContext) {
     const runtime = ManagedRuntime.make(
       McpOperationsLive.pipe(Layer.provide(SqlitePersistenceTest)),
@@ -2120,6 +2590,180 @@ describe("Cafe MCP thread groups and origin", () => {
     context.onTestFinished(() => runtime.dispose());
     return runtime.runPromise(Effect.service(McpOperations));
   }
+
+  it("journals existing-chat moves, detaches and label edits with discovery, status and non-replaying receipts", async (context) => {
+    const operations = await operationsRuntime(context);
+    const parentId = ThreadId.make("group-parent");
+    const groupId = ThreadGroupId.make("existing-work");
+    let model: OrchestrationReadModel = {
+      ...snapshot,
+      threads: [thread, { ...thread, id: parentId, messages: [] }],
+      threadGroups: [
+        {
+          id: groupId,
+          ownerThreadId: parentId,
+          title: "Existing work",
+          description: null,
+          provenance: {
+            creationPath: "mcp-owner-client",
+            attribution: "explicit-argument",
+            recordedAt: now,
+          },
+          createdAt: now,
+          updatedAt: now,
+          deletedAt: null,
+          deletionId: null,
+        },
+      ],
+    };
+    const dispatched: NonNullable<Parameters<typeof makeDependencies>[0]>["dispatched"] = [];
+    const defaults = makeDependencies();
+    const shells = () => model.threads.map((value) => ({ ...threadShell, ...value }));
+    const dependencies: CafeMcpDependencies = {
+      ...defaults,
+      orchestrationEngine: {
+        dispatch: (command) =>
+          Effect.gen(function* () {
+            dispatched.push(command);
+            const decision = yield* decideOrchestrationCommand({ command, readModel: model });
+            for (const event of Array.isArray(decision) ? decision : [decision]) {
+              model = yield* projectEvent(model, {
+                ...event,
+                sequence: model.snapshotSequence + 1,
+              });
+            }
+            return { sequence: model.snapshotSequence };
+          }),
+      },
+      projectionSnapshotQuery: {
+        ...defaults.projectionSnapshotQuery,
+        getShellSnapshot: () => Effect.sync(() => ({ ...model, threads: shells() })),
+        getThreadShellById: (id) =>
+          Effect.sync(() => Option.fromUndefinedOr(shells().find((entry) => entry.id === id))),
+        getThreadWorkStatusById: (id) =>
+          Effect.sync(() =>
+            Option.map(
+              Option.fromUndefinedOr(shells().find((entry) => entry.id === id)),
+              (value) => ({ thread: value, pendingTurnStart: null }),
+            ),
+          ),
+      },
+    };
+    await withClient(
+      context,
+      dependencies,
+      async (client) => {
+        const requestId = "2d8c9656-8656-4541-ac73-0f4c8bc95bdf";
+        const args = { threadId, groupId, requestId };
+        const beforeStatus = await client.callTool({
+          name: "get_thread_status",
+          arguments: { threadId },
+        });
+        const result = await client.callTool({ name: "update_thread", arguments: args });
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          threadId,
+          sequences: [2],
+          phase: "recorded",
+          operation: { state: "recorded", requestId },
+        });
+        expect(dispatched).toEqual([
+          expect.objectContaining({ type: "thread.metadata.update", threadId, groupId }),
+        ]);
+        expect(model.threads[0]).toEqual({ ...thread, groupId });
+        const afterStatus = await client.callTool({
+          name: "get_thread_status",
+          arguments: { threadId },
+        });
+        expect(
+          (afterStatus.structuredContent as { observationToken: string }).observationToken,
+        ).not.toBe(
+          (beforeStatus.structuredContent as { observationToken: string }).observationToken,
+        );
+        const members = await client.callTool({ name: "list_threads", arguments: { groupId } });
+        expect(
+          (members.structuredContent as { threads: { id: string }[] }).threads.map(
+            (entry) => entry.id,
+          ),
+        ).toEqual([threadId]);
+        const top = await client.callTool({
+          name: "list_threads",
+          arguments: { topLevelOnly: true },
+        });
+        expect(
+          (top.structuredContent as { threads: { id: string }[] }).threads.map((entry) => entry.id),
+        ).toEqual([parentId]);
+        const labeled = await client.callTool({
+          name: "update_thread",
+          arguments: {
+            threadId,
+            originClassification: "human",
+            provenance: { creationPath: "cafe-ui" },
+          },
+        });
+        expect(labeled.isError).not.toBe(true);
+        expect(model.threads[0]).toMatchObject({
+          groupId,
+          origin: { classification: "human", source: "user" },
+        });
+        expect(model.threads[0]?.provenance).toBeUndefined();
+        const detached = await client.callTool({
+          name: "update_thread",
+          arguments: { threadId, groupId: null },
+        });
+        expect(detached.isError).not.toBe(true);
+        const detail = await client.callTool({
+          name: "get_thread",
+          arguments: { threadId, messageLimit: 0 },
+        });
+        expect(detail.structuredContent).toMatchObject({
+          thread: { groupId: null, origin: { classification: "human", source: "user" } },
+        });
+        expect(model.threads[0]?.messages).toEqual(thread.messages);
+        const empty = await client.callTool({ name: "list_threads", arguments: { groupId } });
+        expect((empty.structuredContent as { threads: unknown[] }).threads).toEqual([]);
+        const currentTop = await client.callTool({
+          name: "list_threads",
+          arguments: { topLevelOnly: true },
+        });
+        expect((currentTop.structuredContent as { threads: unknown[] }).threads).toHaveLength(2);
+        const receipt = await client.callTool({ name: "get_operation", arguments: { requestId } });
+        expect(receipt.structuredContent).toMatchObject({
+          found: true,
+          operation: { state: "recorded" },
+          result: { threadId, sequences: [2] },
+        });
+        expect(
+          (await client.callTool({ name: "update_thread", arguments: args })).structuredContent,
+        ).toEqual(result.structuredContent);
+        // Reading the old successful result never reattaches the now-detached chat.
+        expect(dispatched).toHaveLength(3);
+        expect(model.threads[0]?.groupId).toBeNull();
+
+        const failedId = "63136be5-18ec-4d1c-a330-cd9858074c56";
+        const invalid = {
+          threadId: parentId,
+          groupId,
+          originClassification: "agent",
+          requestId: failedId,
+        };
+        expect((await client.callTool({ name: "update_thread", arguments: invalid })).isError).toBe(
+          true,
+        );
+        const failed = await client.callTool({
+          name: "get_operation",
+          arguments: { requestId: failedId },
+        });
+        expect(failed.structuredContent).toMatchObject({ operation: { state: "failed" } });
+        expect(model.threads[1]).toEqual({ ...thread, id: parentId, messages: [] });
+        expect((await client.callTool({ name: "update_thread", arguments: invalid })).isError).toBe(
+          true,
+        );
+        expect(dispatched).toHaveLength(4);
+      },
+      { operations, operationOwner: owner },
+    );
+  });
 
   it("records launch-claim and manual-client provenance without accepting caller input", async (context) => {
     const dispatched: NonNullable<Parameters<typeof makeDependencies>[0]>["dispatched"] = [];

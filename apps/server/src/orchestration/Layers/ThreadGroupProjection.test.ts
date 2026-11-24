@@ -7,9 +7,13 @@ import path from "node:path";
 
 import {
   CommandId,
+  EventId,
+  MessageId,
   ProviderInstanceId,
   ThreadGroupId,
   ThreadId,
+  TurnId,
+  SubagentRuntimeId,
   type OrchestrationCommand,
 } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -24,7 +28,6 @@ import { ServerConfig } from "../../config.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { makeSqlitePersistenceLive } from "../../persistence/Layers/Sqlite.ts";
-import { purgeOwnedThreadGroups } from "../../persistence/threadOrganization.ts";
 import { RepositoryIdentityResolverLive } from "../../project/Layers/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -55,8 +58,9 @@ async function openSystem(baseDir: string) {
     dispatch: (command: OrchestrationCommand) => runtime.runPromise(engine.dispatch(command)),
     read: <A, E>(effect: Effect.Effect<A, E, SqlClient.SqlClient | never>) =>
       runtime.runPromise(effect as Effect.Effect<A, E>),
-    sql: <A, E>(effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
-      runtime.runPromise(effect as never) as Promise<A>,
+    retire: (threadId: ThreadId) =>
+      runtime.runPromise(engine.retireThreadForHardDelete({ threadId })),
+    purge: (threadId: ThreadId) => runtime.runPromise(engine.purgeHardDeletedThread({ threadId })),
     query,
     dispose: () => runtime.dispose(),
   };
@@ -106,7 +110,6 @@ describe("thread group projections", () => {
         });
         await system.dispatch(
           create("worker", {
-            groupId: ThreadGroupId.make("wave"),
             description: "Check relay PoW",
             provenance: {
               creationPath: "mcp-launch",
@@ -115,6 +118,84 @@ describe("thread group projections", () => {
             },
           }),
         );
+
+        const workerId = ThreadId.make("worker");
+        const turnId = TurnId.make("existing-root");
+        const runtimeId = SubagentRuntimeId.make("00000000-0000-4000-8000-000000000111");
+        await system.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("running-session"),
+          threadId: workerId,
+          createdAt: now,
+          session: {
+            threadId: workerId,
+            status: "running",
+            providerName: "codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: "approval-required",
+            activeTurnId: turnId,
+            subagentRuntimeId: runtimeId,
+            lastError: null,
+            updatedAt: now,
+          },
+        });
+        await system.dispatch({
+          type: "thread.message.assistant.delta",
+          commandId: CommandId.make("existing-transcript"),
+          threadId: workerId,
+          messageId: MessageId.make("streaming-reply"),
+          turnId,
+          delta: "Still working",
+          createdAt: now,
+        });
+        await system.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("existing-child"),
+          threadId: workerId,
+          createdAt: now,
+          activity: {
+            id: EventId.make("child-start"),
+            kind: "task.started",
+            tone: "info",
+            summary: "Child working",
+            turnId,
+            createdAt: now,
+            payload: {
+              taskId: "child",
+              subagent: { threadId: "child", runtimeId, status: "active" },
+            },
+          },
+        });
+        const before = Option.getOrThrow(
+          await system.read(system.query.getThreadDetailById(workerId)),
+        );
+        const beforeShell = Option.getOrThrow(
+          await system.read(system.query.getThreadShellById(workerId)),
+        );
+        expect(beforeShell.liveWork).toMatchObject({ runtimeId, agentCount: 1 });
+        const move = {
+          type: "thread.metadata.update" as const,
+          commandId: CommandId.make("move-existing"),
+          threadId: workerId,
+          groupId: ThreadGroupId.make("wave"),
+        };
+        const receipt = await system.dispatch(move);
+        expect(await system.dispatch(move)).toEqual(receipt);
+        expect(
+          Option.getOrThrow(await system.read(system.query.getThreadDetailById(workerId))),
+        ).toEqual({ ...before, groupId: "wave" });
+        expect(
+          Option.getOrThrow(await system.read(system.query.getThreadShellById(workerId))),
+        ).toEqual({ ...beforeShell, groupId: "wave" });
+        await system.dispatch({
+          ...move,
+          commandId: CommandId.make("detach-existing"),
+          groupId: null,
+        });
+        expect(
+          Option.getOrThrow(await system.read(system.query.getThreadDetailById(workerId))),
+        ).toEqual(before);
+        await system.dispatch({ ...move, commandId: CommandId.make("regroup-existing") });
 
         const shell = await system.read(system.query.getShellSnapshot());
         const owner = shell.threads.find((thread) => thread.id === "owner")!;
@@ -132,6 +213,20 @@ describe("thread group projections", () => {
         expect(detail).toMatchObject({
           description: "Check relay PoW",
           provenance: { creationPath: "mcp-launch", originThreadId: "owner" },
+        });
+
+        await system.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("correct-origin"),
+          threadId: workerId,
+          originClassification: "human",
+        });
+        expect(
+          Option.getOrThrow(await system.read(system.query.getThreadShellById(workerId))),
+        ).toMatchObject({
+          groupId: "wave",
+          origin: { classification: "human", source: "user" },
+          liveWork: { agentCount: 1 },
         });
 
         await system.dispatch({
@@ -156,16 +251,31 @@ describe("thread group projections", () => {
           groupId: ThreadGroupId.make("wave"),
         });
         const shell = await system.read(system.query.getShellSnapshot());
-        expect(shell.threads.find((thread) => thread.id === "worker")?.groupId).toBe("wave");
+        expect(shell.threads.find((thread) => thread.id === "worker")).toMatchObject({
+          groupId: "wave",
+          origin: { classification: "human", source: "user" },
+        });
+        const restored = Option.getOrThrow(
+          await system.read(system.query.getThreadDetailById(ThreadId.make("worker"))),
+        );
+        expect(restored.provenance).toMatchObject({
+          creationPath: "mcp-launch",
+          originThreadId: "owner",
+        });
+        expect(restored.messages.map((message) => message.text)).toEqual(["Still working"]);
 
         // Hard delete of the owner removes its groups and returns members to
         // top level instead of orphaning them beneath a missing group.
-        await system.sql(
-          Effect.gen(function* () {
-            const sql = yield* SqlClient.SqlClient;
-            yield* purgeOwnedThreadGroups(sql, ThreadId.make("owner"));
+        await system.retire(ThreadId.make("owner"));
+        await expect(
+          system.dispatch({
+            type: "thread.metadata.update",
+            commandId: CommandId.make("move-after-parent-retirement"),
+            threadId: ThreadId.make("worker"),
+            groupId: ThreadGroupId.make("wave"),
           }),
-        );
+        ).rejects.toThrow();
+        await system.purge(ThreadId.make("owner"));
         const organization = await system.read(system.query.getThreadOrganization!(null));
         expect(organization.groups).toEqual([]);
         expect(organization.threads.get("worker")?.groupId).toBeNull();

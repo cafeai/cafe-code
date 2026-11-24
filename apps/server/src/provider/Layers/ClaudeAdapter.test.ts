@@ -2706,6 +2706,27 @@ describe("ClaudeAdapterLive", () => {
                 );
                 assert.ok(options.hooks?.PreToolUse?.[0]?.hooks[0]);
                 assert.ok(options.hooks?.PostToolUse?.[0]?.hooks[0]);
+                const refresh = options.hooks?.SessionStart?.[0]?.hooks[0];
+                assert.ok(refresh);
+                assert.ok(options.hooks?.UserPromptSubmit?.[0]?.hooks[0]);
+                const resumeEvent = {
+                  hook_event_name: "SessionStart" as const,
+                  source: "resume" as const,
+                  session_id: "native-resumed-secret-session",
+                  transcript_path: "synthetic-transcript",
+                  cwd: directory,
+                };
+                const refreshContext = yield* Effect.promise(() =>
+                  refresh(resumeEvent, undefined, { signal: new AbortController().signal }),
+                );
+                assert.ok("hookSpecificOutput" in refreshContext);
+                assert.ok(refreshContext.hookSpecificOutput?.hookEventName === "SessionStart");
+                assert.equal(
+                  inspectSecretRunnerInstructions(
+                    refreshContext.hookSpecificOutput.additionalContext,
+                  ).connectionPath,
+                  runner.connectionPath,
+                );
                 assert.deepEqual(options.mcpServers, {
                   "cafe-scheduling": { type: "stdio", ...schedulingLaunch, alwaysLoad: true },
                   ...(enabled
@@ -2732,6 +2753,12 @@ describe("ClaudeAdapterLive", () => {
                   ...(enabled ? ["visualization-active"] : []),
                 ]);
                 yield* adapter.stopSession(THREAD_ID);
+                assert.deepEqual(
+                  yield* Effect.promise(() =>
+                    refresh(resumeEvent, undefined, { signal: new AbortController().signal }),
+                  ),
+                  {},
+                );
                 yield* adapter.stopAll();
                 assert.equal(yield* fileSystem.exists(runner.connectionPath), false);
                 assert.equal(

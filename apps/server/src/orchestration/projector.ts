@@ -595,6 +595,7 @@ export function projectEvent(
         Effect.map((payload) => ({
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
+            ...(payload.groupId !== undefined ? { groupId: payload.groupId } : {}),
             ...(payload.origin !== undefined ? { origin: payload.origin } : {}),
             ...(payload.description !== undefined ? { description: payload.description } : {}),
           }),

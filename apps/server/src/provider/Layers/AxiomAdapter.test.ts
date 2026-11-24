@@ -306,6 +306,58 @@ const setupWith = (
 const setup = setupWith();
 
 describe("Axiom scoped ACP adapter", () => {
+  it.effect("starts and sends with a disabled account-wide remote MCP connection", () =>
+    Effect.gen(function* () {
+      const { adapter, session, complete, readReport } = yield* setupWith({
+        scenario: "remote-mcp",
+      });
+      const read = yield* adapter.manageMcp!({
+        instanceId,
+        threadId,
+        runtimeId: session.subagentRuntimeId!,
+        modelId: session.model!,
+        configurationKey: session.commandCatalogConfigurationKey!,
+        action: { kind: "list" },
+      });
+      expect(read.state?.servers).toMatchObject([
+        {
+          name: "fixture_remote",
+          command: "",
+          enabled: false,
+          remote: { url: "https://example.invalid/mcp", auth: "none" },
+        },
+      ]);
+      yield* adapter.sendTurn({ threadId, input: "normal prompt" });
+      yield* Deferred.await(complete);
+      expect((yield* readReport)?.reply.state).toBe("verified");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  it.effect("admits selected MCP tools only after the exact revision has been reviewed", () =>
+    Effect.gen(function* () {
+      const { adapter, session, complete, readReport } = yield* setupWith({
+        scenario: "selected-mcp",
+      });
+      expect(
+        (yield* adapter.sendTurn({ threadId, input: "normal prompt" }).pipe(Effect.result))._tag,
+      ).toBe("Failure");
+      const read = yield* adapter.manageMcp!({
+        instanceId,
+        threadId,
+        runtimeId: session.subagentRuntimeId!,
+        modelId: session.model!,
+        configurationKey: session.commandCatalogConfigurationKey!,
+        action: { kind: "list" },
+      });
+      expect(read.state?.selectedTools).toEqual(["mcp__fixture__example"]);
+      yield* adapter.sendTurn({
+        threadId,
+        input: "normal prompt",
+        axiomMcpRevision: read.state!.revision,
+      });
+      yield* Deferred.await(complete);
+      expect((yield* readReport)?.reply.state).toBe("verified");
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
   it.effect(
     "recovers native settlements with omitted cursors and retains their stable identity on resume",
     () =>
@@ -681,12 +733,86 @@ describe("Axiom scoped ACP adapter", () => {
       expect(decodeProviderJsonString(reply).thinking).toBe("medium");
     }).pipe(Effect.provide(layer), Effect.scoped),
   );
-  it.effect("never promotes unauthenticated completion to a verified reply", () =>
+  it.effect("fails an inference completion without authenticated terminal receipts", () =>
     Effect.gen(function* () {
-      const { adapter, complete, readReport } = yield* setup;
+      const { adapter, events, complete, readReport } = yield* setup;
       yield* adapter.sendTurn({ threadId, input: "unverified prompt" });
       yield* Deferred.await(complete);
-      expect((yield* readReport)?.reply.state).toBe("incomplete");
+      expect((yield* readReport)?.reply.state).toBe("failed");
+      expect(events.filter((event) => event.type === "turn.completed")).toMatchObject([
+        { payload: { state: "failed", errorMessage: "Axiom could not complete this response." } },
+      ]);
+    }).pipe(Effect.provide(layer), Effect.scoped),
+  );
+  for (const prompt of ["legacy native failure", "structured native failure"]) {
+    it.effect(`reports ${prompt} once without exposing native error text`, () =>
+      Effect.gen(function* () {
+        const { adapter, events, complete, readReport } = yield* setup;
+        yield* adapter.sendTurn({ threadId, input: prompt });
+        yield* Deferred.await(complete);
+        expect(events.filter((event) => event.type === "turn.completed")).toMatchObject([
+          { payload: { state: "failed", errorMessage: "Axiom could not complete this response." } },
+        ]);
+        expect((yield* adapter.listSessions())[0]?.status).toBe("error");
+        expect((yield* readReport)?.reply.state).toBe("failed");
+        expect(encodeProviderJsonString(events)).not.toContain("private fixture failure");
+        expect(events.filter((event) => event.type === "content.delta")).toHaveLength(
+          prompt === "structured native failure" ? 1 : 0,
+        );
+      }).pipe(Effect.provide(layer), Effect.scoped),
+    );
+  }
+  for (const input of ["/help", "/security accept-outdated", "/compact pasted ordinary text"]) {
+    it.effect(`keeps unselected slash prompt literal: ${input}`, () =>
+      Effect.gen(function* () {
+        const { adapter, events, complete, readReport } = yield* setup;
+        yield* adapter.sendTurn({ threadId, input });
+        yield* Deferred.await(complete);
+        expect(
+          events
+            .filter((event) => event.type === "content.delta")
+            .map((event) => event.payload.delta)
+            .join(""),
+        ).toBe(`Literal prompt: ${input}`);
+        expect((yield* readReport)?.reply.state).toBe("verified");
+      }).pipe(Effect.provide(layer), Effect.scoped),
+    );
+  }
+  for (const [name, input] of [
+    ["help", "/help"],
+    ["compact", "/compact preserve the API decisions"],
+  ] as const) {
+    it.effect(`dispatches deliberately selected native ${name} without model receipts`, () =>
+      Effect.gen(function* () {
+        const { adapter, events, complete, readReport } = yield* setup;
+        yield* adapter.sendTurn({ threadId, input, axiomCommand: { name } });
+        yield* Deferred.await(complete);
+        expect(
+          events
+            .filter((event) => event.type === "content.delta")
+            .map((event) => event.payload.delta)
+            .join(""),
+        ).toBe(`Native command: ${input}`);
+        expect(events.filter((event) => event.type === "turn.completed")).toMatchObject([
+          { payload: { state: "completed" } },
+        ]);
+        expect((yield* readReport)?.reply.state).toBe("incomplete");
+      }).pipe(Effect.provide(layer), Effect.scoped),
+    );
+  }
+  it.effect("rejects stale or unadvertised explicit command intent before starting work", () =>
+    Effect.gen(function* () {
+      const { adapter, events } = yield* setup;
+      for (const [name, input] of [
+        ["help", "/compact"],
+        ["not-advertised", "/not-advertised"],
+      ] as const) {
+        expect(
+          (yield* adapter.sendTurn({ threadId, input, axiomCommand: { name } }).pipe(Effect.result))
+            ._tag,
+        ).toBe("Failure");
+      }
+      expect(events.filter((event) => event.type === "turn.started")).toHaveLength(0);
     }).pipe(Effect.provide(layer), Effect.scoped),
   );
   it.effect("routes the exact offered approval id and clears pending ownership", () =>
@@ -932,9 +1058,11 @@ describe("Axiom scoped ACP adapter", () => {
         "/delete-sessions",
         "/reasoning high",
       ])
-        expect((yield* adapter.sendTurn({ threadId, input }).pipe(Effect.result))._tag).toBe(
-          "Failure",
-        );
+        expect(
+          (yield* adapter
+            .sendTurn({ threadId, input, axiomCommand: { name: input.slice(1).split(" ")[0]! } })
+            .pipe(Effect.result))._tag,
+        ).toBe("Failure");
       expect(events.filter((event) => event.type === "turn.started")).toHaveLength(0);
     }).pipe(Effect.provide(layer), Effect.scoped),
   );

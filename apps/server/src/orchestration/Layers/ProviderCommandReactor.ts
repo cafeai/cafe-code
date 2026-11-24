@@ -915,6 +915,10 @@ const make = Effect.gen(function* () {
       readonly instanceId: ProviderInstanceId;
       readonly revision: number;
     };
+    readonly axiomCommandSelection?: {
+      readonly instanceId: ProviderInstanceId;
+      readonly command: NonNullable<ProviderSendTurnInput["axiomCommand"]>;
+    };
     readonly axiomWebConsent?: {
       readonly instanceId: ProviderInstanceId;
       readonly enabled: boolean;
@@ -952,6 +956,9 @@ const make = Effect.gen(function* () {
             : {}),
           ...(input.retryAfter ? { retryAfter: input.retryAfter } : {}),
           ...(input.axiomMcpSelection ? { axiomMcpSelection: input.axiomMcpSelection } : {}),
+          ...(input.axiomCommandSelection
+            ? { axiomCommandSelection: input.axiomCommandSelection }
+            : {}),
           ...(input.axiomWebConsent ? { axiomWebConsent: input.axiomWebConsent } : {}),
           ...(input.codexNonSteerableTurnKind
             ? { codexNonSteerableTurnKind: input.codexNonSteerableTurnKind }
@@ -2353,6 +2360,7 @@ const make = Effect.gen(function* () {
 
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
+    readonly axiomCommand?: ProviderSendTurnInput["axiomCommand"];
     readonly axiomWebEnabled?: boolean;
     readonly axiomMcpRevision?: number;
     readonly codexReview?: ProviderSendTurnInput["codexReview"];
@@ -2424,6 +2432,16 @@ const make = Effect.gen(function* () {
             activeSession,
           })
         : false);
+    if (input.axiomCommand !== undefined && shouldBootstrapProviderContext) {
+      // A local command cannot deliver copied model context or consume its
+      // pending marker. Keep the bootstrap for the next ordinary prompt.
+      return yield* new ProviderAdapterRequestError({
+        provider: "Axiom",
+        method: "_axiom/session/command",
+        detail:
+          "Send an ordinary message before running a native command in this copied or continued chat.",
+      });
+    }
     const { session: ensuredSession, expectedSubagentPolicySession } =
       yield* ensureSessionForThread(input.threadId, input.createdAt, {
         ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
@@ -2440,13 +2458,39 @@ const make = Effect.gen(function* () {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
-    const isFirstUserMessageTurn =
-      input.messageId !== undefined &&
-      thread.messages.filter((entry) => entry.role === "user" && entry.id !== input.messageId)
-        .length === 0;
+    const previousUserMessages = thread.messages.filter(
+      (entry) => entry.role === "user" && entry.id !== input.messageId,
+    );
+    let isFirstUserMessageTurn = input.messageId !== undefined && previousUserMessages.length === 0;
+    if (
+      input.axiomCommand === undefined &&
+      ensuredSession.provider === "axiom" &&
+      previousUserMessages.length > 0 &&
+      previousUserMessages.every((entry) => /^\s*\//u.test(entry.text))
+    ) {
+      // Commands create visible Cafe rows but no model input. Before the first
+      // ordinary prompt, distinguish their exact durable descriptors from
+      // literal slash messages so command use cannot consume custom instructions.
+      // Ordinary conversations avoid this read as soon as a non-slash user
+      // message exists. Restrict the stream and IDs and bound returned metadata.
+      const commandRows = yield* sql<{ readonly messageId: string }>`
+        SELECT DISTINCT json_extract(payload_json, '$.messageId') AS messageId
+        FROM orchestration_events INDEXED BY idx_orch_events_stream_sequence
+        WHERE aggregate_kind = 'thread' AND stream_id = ${input.threadId}
+          AND event_type = 'thread.turn-start-requested'
+          AND json_type(payload_json, '$.axiomCommand') = 'object'
+          AND json_extract(payload_json, '$.messageId') IN ${sql.in(previousUserMessages.map((entry) => entry.id))}
+        LIMIT ${previousUserMessages.length}
+      `;
+      const commandMessageIds = new Set(commandRows.map((entry) => entry.messageId));
+      isFirstUserMessageTurn = previousUserMessages.every((entry) =>
+        commandMessageIds.has(entry.id),
+      );
+    }
     // Codex and Claude receive custom instructions through native session
     // options. Retain the legacy first-turn behavior for remaining providers.
     const systemPrompt =
+      input.axiomCommand === undefined &&
       isFirstUserMessageTurn &&
       ensuredSession.provider !== "codex" &&
       ensuredSession.provider !== "claudeAgent"
@@ -2501,6 +2545,7 @@ const make = Effect.gen(function* () {
 
     const request: ProviderSendTurnInput = {
       threadId: input.threadId,
+      ...(input.axiomCommand !== undefined ? { axiomCommand: input.axiomCommand } : {}),
       ...(input.axiomWebEnabled !== undefined ? { axiomWebEnabled: input.axiomWebEnabled } : {}),
       ...(input.axiomMcpRevision !== undefined ? { axiomMcpRevision: input.axiomMcpRevision } : {}),
       ...(expectedSubagentPolicySession !== undefined ? { expectedSubagentPolicySession } : {}),
@@ -3696,6 +3741,9 @@ const make = Effect.gen(function* () {
             });
 
             const sendTurnRequest = yield* buildSendTurnRequestForThread({
+              ...(event.payload.axiomCommand !== undefined
+                ? { axiomCommand: event.payload.axiomCommand }
+                : {}),
               ...(event.payload.axiomWebEnabled !== undefined
                 ? { axiomWebEnabled: event.payload.axiomWebEnabled }
                 : {}),
@@ -3760,6 +3808,9 @@ const make = Effect.gen(function* () {
         });
 
         yield* steerProviderTurn({
+          ...(event.payload.axiomCommand !== undefined
+            ? { axiomCommand: event.payload.axiomCommand }
+            : {}),
           ...(event.payload.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: event.payload.axiomWebEnabled }
             : {}),
@@ -3818,6 +3869,14 @@ const make = Effect.gen(function* () {
                         },
                       }
                     : {}),
+                  ...(event.payload.axiomCommand !== undefined
+                    ? {
+                        axiomCommandSelection: {
+                          instanceId: thread.modelSelection.instanceId,
+                          command: event.payload.axiomCommand,
+                        },
+                      }
+                    : {}),
                   ...(event.payload.axiomWebEnabled !== undefined
                     ? {
                         axiomWebConsent: {
@@ -3865,6 +3924,9 @@ const make = Effect.gen(function* () {
       }
 
       const sendTurnRequest = yield* buildSendTurnRequestForThread({
+        ...(event.payload.axiomCommand !== undefined
+          ? { axiomCommand: event.payload.axiomCommand }
+          : {}),
         ...(event.payload.axiomWebEnabled !== undefined
           ? { axiomWebEnabled: event.payload.axiomWebEnabled }
           : {}),
@@ -3926,6 +3988,9 @@ const make = Effect.gen(function* () {
         }
 
         return steerProviderTurn({
+          ...(event.payload.axiomCommand !== undefined
+            ? { axiomCommand: event.payload.axiomCommand }
+            : {}),
           ...(event.payload.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: event.payload.axiomWebEnabled }
             : {}),
@@ -3986,6 +4051,14 @@ const make = Effect.gen(function* () {
                         axiomMcpSelection: {
                           instanceId: thread.modelSelection.instanceId,
                           revision: event.payload.axiomMcpRevision,
+                        },
+                      }
+                    : {}),
+                  ...(event.payload.axiomCommand !== undefined
+                    ? {
+                        axiomCommandSelection: {
+                          instanceId: thread.modelSelection.instanceId,
+                          command: event.payload.axiomCommand,
                         },
                       }
                     : {}),
@@ -4818,6 +4891,9 @@ const make = Effect.gen(function* () {
         });
 
         const sendTurnRequest = yield* buildSendTurnRequestForThread({
+          ...(event.payload.axiomCommand !== undefined
+            ? { axiomCommand: event.payload.axiomCommand }
+            : {}),
           ...(event.payload.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: event.payload.axiomWebEnabled }
             : {}),
@@ -4919,6 +4995,9 @@ const make = Effect.gen(function* () {
       }
       return yield* Effect.gen(function* () {
         const sendTurnRequest = yield* buildSendTurnRequestForThread({
+          ...(event.payload.axiomCommand !== undefined
+            ? { axiomCommand: event.payload.axiomCommand }
+            : {}),
           ...(event.payload.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: event.payload.axiomWebEnabled }
             : {}),
@@ -5182,6 +5261,9 @@ const make = Effect.gen(function* () {
         }
 
         const sendTurnRequest = yield* buildSendTurnRequestForThread({
+          ...(event.payload.axiomCommand !== undefined
+            ? { axiomCommand: event.payload.axiomCommand }
+            : {}),
           ...(event.payload.axiomWebEnabled !== undefined
             ? { axiomWebEnabled: event.payload.axiomWebEnabled }
             : {}),
@@ -5275,6 +5357,9 @@ const make = Effect.gen(function* () {
       }
     }
     yield* steerProviderTurn({
+      ...(event.payload.axiomCommand !== undefined
+        ? { axiomCommand: event.payload.axiomCommand }
+        : {}),
       ...(event.payload.axiomWebEnabled !== undefined
         ? { axiomWebEnabled: event.payload.axiomWebEnabled }
         : {}),
@@ -5332,6 +5417,14 @@ const make = Effect.gen(function* () {
                         axiomMcpSelection: {
                           instanceId: thread.modelSelection.instanceId,
                           revision: event.payload.axiomMcpRevision,
+                        },
+                      }
+                    : {}),
+                  ...(event.payload.axiomCommand !== undefined
+                    ? {
+                        axiomCommandSelection: {
+                          instanceId: thread.modelSelection.instanceId,
+                          command: event.payload.axiomCommand,
                         },
                       }
                     : {}),
@@ -5772,7 +5865,7 @@ const make = Effect.gen(function* () {
             kind: "provider.compaction.failed",
             summary: "Compaction could not start",
             detail:
-              "Manual compaction requires an idle Codex or OpenCode conversation and a provider version that supports it. Wait for any active turn to finish, then try again.",
+              "Manual compaction requires an idle supported conversation and a provider version that supports it. Wait for any active turn to finish, then try again.",
             turnId: null,
             createdAt: DateTime.formatIso(yield* DateTime.now),
           });

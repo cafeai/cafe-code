@@ -122,10 +122,9 @@ export const UsageStatsModelGeneratingTime = Schema.Struct({
 export type UsageStatsModelGeneratingTime = typeof UsageStatsModelGeneratingTime.Type;
 
 /**
- * Live totals pushed to subscribers at a high cadence. `totals`
- * includes time accrued by in-flight turns up to `asOfMs`; clients
- * extrapolate between pushes as `activeSessionCount` ms per elapsed ms
- * (three concurrently generating sessions advance the clock 3x).
+ * Live totals pushed to subscribers at a high cadence. `totals` and `today`
+ * include time accrued by in-flight turns up to the server's `asOfMs`.
+ * `activeSessionCount` reports how many sessions are currently generating.
  */
 export const UsageStatsSnapshot = Schema.Struct({
   totals: UsageStatsTotals,

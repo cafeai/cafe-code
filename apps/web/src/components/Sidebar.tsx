@@ -57,7 +57,6 @@ import {
   type ScopedThreadRef,
   type SidebarProjectGroupingMode,
   type ThreadEnvMode,
-  ThreadId,
 } from "@cafecode/contracts";
 import {
   scopedProjectKey,
@@ -116,6 +115,7 @@ import {
   resolveThreadRouteTarget,
 } from "../threadRoutes";
 import { stackedThreadToast, toastManager } from "./ui/toast";
+import { copyThreadIdToClipboard } from "./threadClipboard";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
 import { SidebarFooterNavigation } from "./SidebarFooterNavigation";
@@ -1247,6 +1247,7 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
             label: uiText("Move to project…", undefined, undefined, uiLocale),
             disabled: !canMoveThread(thread),
           },
+          { id: "copy-thread-id", label: uiText("Copy chat ID", undefined, undefined, uiLocale) },
           {
             id: "archive",
             label: uiText("Archive", undefined, undefined, uiLocale),
@@ -1268,6 +1269,8 @@ export const SidebarStandaloneChats = memo(function SidebarStandaloneChats({
       else if (action === "move") {
         const current = rowsByKeyRef.current.get(scopedThreadKey(threadRef));
         if (canMoveThread(current)) openThreadMoveDialog(threadRef);
+      } else if (action === "copy-thread-id") {
+        await copyThreadIdToClipboard(threadRef.threadId, uiLocale);
       } else if (
         action === "duplicate" &&
         duplicateAvailable &&
@@ -1724,22 +1727,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
   const removeFromSelection = useThreadSelectionStore((state) => state.removeFromSelection);
   const setSelectionAnchor = useThreadSelectionStore((state) => state.setAnchor);
-  // Copying from a native context menu has no inline anchor for a "copied"
+  // Copying from a context menu has no inline anchor for a "copied"
   // confirmation, and a success toast for a trivial action is noise
   // (docs/style-guide.md §10). Only failures are reported.
-  const { copyToClipboard: copyThreadIdToClipboard } = useCopyToClipboard<{
-    threadId: ThreadId;
-  }>({
-    onError: (error) => {
-      console.warn("Failed to copy chat ID", { error });
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: uiText("Could not copy chat ID", undefined, undefined, uiLocale),
-        }),
-      );
-    },
-  });
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{
     path: string;
   }>({
@@ -3075,7 +3065,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         return;
       }
       if (clicked === "copy-thread-id") {
-        copyThreadIdToClipboard(thread.id, { threadId: thread.id });
+        await copyThreadIdToClipboard(threadRef.threadId, uiLocale);
         return;
       }
       if (clicked === "secrets") {
@@ -3106,7 +3096,6 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       appSettingsConfirmThreadDelete,
       beginRename,
       copyPathToClipboard,
-      copyThreadIdToClipboard,
       desktopDebugEnabled,
       deleteThread,
       duplicateThread,

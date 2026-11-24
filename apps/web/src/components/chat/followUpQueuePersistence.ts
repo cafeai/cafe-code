@@ -1,5 +1,6 @@
 import { uiText } from "@cafecode/shared/i18n";
 import {
+  AxiomCommand,
   ChatFileAttachment,
   ChatImageAttachment,
   CommandId,
@@ -47,6 +48,7 @@ const persistedItem = Schema.Struct({
   modelSelection: ModelSelection,
   deliveryPriority: Schema.optional(Schema.Literals(["now", "next", "later"])),
   axiomWebEnabled: Schema.optional(Schema.Boolean),
+  axiomCommand: Schema.optional(AxiomCommand),
   axiomMcpRevision: Schema.optional(
     Schema.Number.check(
       Schema.isInt(),
@@ -81,6 +83,7 @@ export interface FollowUpQueuePersistenceItem {
   readonly threadId: ThreadId;
   readonly promptText: string;
   readonly axiomWebEnabled?: boolean;
+  readonly axiomCommand?: AxiomCommand | undefined;
   readonly axiomMcpRevision?: number;
   readonly images: readonly ComposerImageAttachment[];
   readonly files?: readonly ChatFileAttachment[];
@@ -267,6 +270,7 @@ function itemMetadata(item: FollowUpQueuePersistenceItem): PersistedItem {
     modelSelection: item.modelSelection,
     ...(item.deliveryPriority !== undefined ? { deliveryPriority: item.deliveryPriority } : {}),
     ...(item.axiomWebEnabled !== undefined ? { axiomWebEnabled: item.axiomWebEnabled } : {}),
+    ...(item.axiomCommand !== undefined ? { axiomCommand: item.axiomCommand } : {}),
     ...(item.axiomMcpRevision !== undefined ? { axiomMcpRevision: item.axiomMcpRevision } : {}),
     runtimeMode: item.runtimeMode,
     interactionMode: item.interactionMode,
@@ -354,6 +358,7 @@ function hydrateItem(item: PersistedItem): HydratedFollowUpQueueItem {
     modelSelection: item.modelSelection,
     ...(item.deliveryPriority !== undefined ? { deliveryPriority: item.deliveryPriority } : {}),
     ...(item.axiomWebEnabled !== undefined ? { axiomWebEnabled: item.axiomWebEnabled } : {}),
+    ...(item.axiomCommand !== undefined ? { axiomCommand: item.axiomCommand } : {}),
     ...(item.axiomMcpRevision !== undefined ? { axiomMcpRevision: item.axiomMcpRevision } : {}),
     runtimeMode: item.runtimeMode,
     interactionMode: item.interactionMode,

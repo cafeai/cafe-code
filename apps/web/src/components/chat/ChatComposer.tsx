@@ -12,6 +12,7 @@ import { useSavedEnvironmentRuntimeStore } from "../../environments/runtime";
 import type { ScheduledFollowupsContext } from "./ScheduledFollowups";
 import type { ProviderTasksContext } from "./ProviderTasks";
 import type {
+  AxiomCommand,
   ApprovalRequestId,
   ChatFileAttachment,
   CodexReviewTarget,
@@ -98,6 +99,7 @@ import { GlideControl } from "./GlideControl";
 import { NativeCodexReview } from "./NativeCodexReview";
 import { ClaudeDeliveryPriorityPicker } from "./ClaudeDeliveryPriorityPicker";
 import { AxiomSecurityControl } from "./AxiomSecurityControl";
+import { AxiomMcpControl } from "./AxiomMcpControl";
 import { AxiomWebSearchControl } from "./AxiomWebSearchControl";
 import { ComposerTab } from "./ComposerTab";
 import { useUiStateStore } from "../../uiStateStore";
@@ -410,6 +412,7 @@ export interface ChatComposerHandle {
     computerUseEnabled?: boolean;
     computerUseRevision?: string;
     axiomMcpRevision?: number | undefined;
+    axiomCommand?: AxiomCommand | undefined;
   };
 }
 
@@ -1362,6 +1365,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   });
   const axiomInspectorOpen =
     axiomInspectorState.key === axiomInspectorKey && axiomInspectorState.open;
+  const [axiomMcpState, setAxiomMcpState] = useState({ key: axiomInspectorKey, open: false });
+  const axiomMcpOpen = axiomMcpState.key === axiomInspectorKey && axiomMcpState.open;
   const hasComposerTab = showNativeReviewControl || showAxiomSecurityControl;
   const nativeReviewControlDisabled = !nativeReviewAvailable || nativeReviewDisabled;
   const nativeReviewDisabledReason =
@@ -1798,17 +1803,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     setComputerUseActivity(undefined);
   }, [environmentId, activeThreadId]);
   const computerUseLabel =
-    computerUseActivity?.state === "capturing"
-      ? uiText("Taking screenshot", undefined, undefined, uiLocale)
-      : computerUseActivity?.state === "reading"
-        ? uiText("Reading text", undefined, undefined, uiLocale)
-        : computerUseActivity?.state === "acting"
-          ? uiText("Controlling window", undefined, undefined, uiLocale)
-          : computerUseActivity?.state === "stopping"
-            ? uiText("Stopping computer use…", undefined, undefined, uiLocale)
-            : computerUseActivity?.state === "unavailable"
-              ? uiText("Computer use status unavailable", undefined, undefined, uiLocale)
-              : null;
+    computerUseActivity?.state === "working"
+      ? uiText("Working", undefined, undefined, uiLocale)
+      : computerUseActivity?.state === "capturing"
+        ? uiText("Taking screenshot", undefined, undefined, uiLocale)
+        : computerUseActivity?.state === "reading"
+          ? uiText("Reading text", undefined, undefined, uiLocale)
+          : computerUseActivity?.state === "acting"
+            ? uiText("Controlling window", undefined, undefined, uiLocale)
+            : computerUseActivity?.state === "stopping"
+              ? uiText("Stopping computer use…", undefined, undefined, uiLocale)
+              : computerUseActivity?.state === "unavailable"
+                ? uiText("Computer use status unavailable", undefined, undefined, uiLocale)
+                : null;
   // A removed control or an unavailable status cannot own the chat's live
   // activity line. Connection/refresh errors remain on the Computer use button.
   const activity =
@@ -2137,7 +2144,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           label: uiText("/default", undefined, undefined, uiLocale),
           description: uiText("Switch back to Build", undefined, undefined, uiLocale),
         },
-        ...(selectedProvider === "codex" || selectedProvider === "opencode"
+        ...(selectedProvider === "codex" ||
+        selectedProvider === "opencode" ||
+        selectedProvider === "axiom"
           ? [
               {
                 id: "slash:compact",
@@ -2174,7 +2183,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         .filter(
           (command) =>
             !(
-              (selectedProvider === "codex" || selectedProvider === "opencode") &&
+              (selectedProvider === "codex" ||
+                selectedProvider === "opencode" ||
+                selectedProvider === "axiom") &&
               command.name.toLowerCase() === "compact"
             ),
         )
@@ -2880,7 +2891,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
             },
           );
-          if (applied) setComposerHighlightedItemId(null);
+          if (applied) {
+            if (selectedProvider === "axiom") {
+              useComposerDraftStore
+                .getState()
+                .setAxiomCommand(composerDraftTarget, { name: "compact" }, selectedInstanceId);
+            }
+            setComposerHighlightedItemId(null);
+          }
           return;
         }
         if (item.command === "goal") {
@@ -2917,6 +2935,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           { expectedText: snapshot.value.slice(trigger.rangeStart, replacementRangeEnd) },
         );
         if (applied) {
+          if (selectedProvider === "axiom") {
+            useComposerDraftStore
+              .getState()
+              .setAxiomCommand(
+                composerDraftTarget,
+                { name: item.command.name },
+                selectedInstanceId,
+              );
+          }
           setComposerHighlightedItemId(null);
         }
         return;
@@ -2945,6 +2972,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       handleInteractionModeChange,
       onOpenGoalDialog,
       resolveActiveComposerTrigger,
+      composerDraftTarget,
+      selectedProvider,
+      selectedInstanceId,
     ],
   );
 
@@ -3667,14 +3697,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             }
           : {}),
         ...(selectedProvider === "axiom"
-          ? {
-              axiomMcpRevision: useComposerDraftStore
+          ? (() => {
+              const currentDraft = useComposerDraftStore
                 .getState()
-                .getComposerDraft(composerDraftTarget)?.axiomMcpRevision,
-              axiomWebEnabled:
-                useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)
-                  ?.axiomWebEnabled === true,
-            }
+                .getComposerDraft(composerDraftTarget);
+              return {
+                axiomMcpRevision:
+                  currentDraft?.queueEditingItemId ||
+                  currentDraft?.axiomMcpOwner === axiomInspectorKey
+                    ? currentDraft?.axiomMcpRevision
+                    : undefined,
+                ...(currentDraft?.axiomCommand ? { axiomCommand: currentDraft.axiomCommand } : {}),
+                axiomWebEnabled: currentDraft?.axiomWebEnabled === true,
+              };
+            })()
           : {}),
         ...(desiredSubagentLimits !== undefined ? { subagentLimits: desiredSubagentLimits } : {}),
         // Existing chats consume current durable intent on every send. Only a
@@ -3717,6 +3753,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       supportsGlide,
       isServerThread,
       deliveryPriority,
+      axiomInspectorKey,
     ],
   );
 
@@ -3792,7 +3829,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 expandLabel={uiText("Expand composer tools", undefined, undefined, uiLocale)}
                 minimizeLabel={uiText("Minimize composer tools", undefined, undefined, uiLocale)}
                 collapsed={composerTabCollapsed}
-                active={nativeReviewOpen || axiomInspectorOpen}
+                active={nativeReviewOpen || axiomInspectorOpen || axiomMcpOpen}
                 onCollapsedChange={useUiStateStore.getState().setComposerTabCollapsed}
               >
                 {showAxiomSecurityControl ? (
@@ -3804,6 +3841,40 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     }
                     connected={environmentUnavailable === null && !isConnecting}
                     idle={phase !== "running" && !isSendBusy}
+                    input={
+                      isServerThread &&
+                      activeThreadId &&
+                      activeThread?.session?.provider === "axiom" &&
+                      activeThread.session.providerInstanceId === selectedInstanceId &&
+                      activeThread.session.subagentRuntimeId &&
+                      activeThread.modelSelection.model === selectedModel
+                        ? {
+                            instanceId: selectedInstanceId,
+                            threadId: activeThreadId,
+                            runtimeId: activeThread.session.subagentRuntimeId,
+                            modelId: selectedModel,
+                          }
+                        : null
+                    }
+                  />
+                ) : null}
+                {showAxiomSecurityControl ? (
+                  <AxiomMcpControl
+                    key={`${axiomInspectorKey}:mcp`}
+                    environmentId={environmentId}
+                    connected={environmentUnavailable === null && !isConnecting}
+                    idle={phase !== "running" && !isSendBusy}
+                    onOpenChange={(open) => setAxiomMcpState({ key: axiomInspectorKey, open })}
+                    onRevision={(revision) =>
+                      useComposerDraftStore
+                        .getState()
+                        .setAxiomMcpRevision(
+                          composerDraftTarget,
+                          revision,
+                          selectedInstanceId,
+                          axiomInspectorKey,
+                        )
+                    }
                     input={
                       isServerThread &&
                       activeThreadId &&

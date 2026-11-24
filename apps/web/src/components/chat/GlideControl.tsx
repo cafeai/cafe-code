@@ -23,6 +23,7 @@ import {
   glideButtonDisabled,
   glideClickIntent,
   glidePermissionsGranted,
+  glideUsesNativePermissionSetup,
   glideSetupShouldPoll,
 } from "./glideSetup";
 
@@ -171,7 +172,7 @@ export function GlideControl({
     };
   }, [environmentId, threadId, runtimeMode, refreshKey, read]);
 
-  const granted = glidePermissionsGranted(status);
+  const granted = glideUsesNativePermissionSetup(status) || glidePermissionsGranted(status);
   const confirmedActivity =
     status?.activity?.state === "unavailable" ? undefined : status?.activity;
   useEffect(() => {
@@ -264,7 +265,7 @@ export function GlideControl({
       return;
     }
     const value = await mutate({ action: "status" });
-    if (value && glidePermissionsGranted(value)) {
+    if (value && (glideUsesNativePermissionSetup(value) || glidePermissionsGranted(value))) {
       onDraftEnabledChange?.(true, value.stopRevision ?? "0");
       setSetupOpen(false);
     } else setSetupError(GLIDE_SETUP_ERROR.enable);
@@ -287,7 +288,14 @@ export function GlideControl({
           locale,
         )
       : status && !status.available
-        ? uiText("Computer use requires the macOS desktop app.", undefined, undefined, locale)
+        ? status.permissionsManagedBy === "openai"
+          ? uiText(
+              "A compatible OpenAI desktop app with Computer Use is required.",
+              undefined,
+              undefined,
+              locale,
+            )
+          : uiText("Computer use requires the macOS desktop app.", undefined, undefined, locale)
         : runtimeMode !== "full-access"
           ? uiText("Select Full access to enable computer use.", undefined, undefined, locale)
           : status && !granted

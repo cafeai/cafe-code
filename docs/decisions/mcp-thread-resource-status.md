@@ -65,6 +65,34 @@ scheduling and visualization authorization remain unchanged.
 
 ## Verification boundary
 
+### Thread-independent account usage successor
+
+The owner requested direct account usage across providers in one MCP call,
+including Claude's normal and Fable/model-scoped meters, extra usage and reset
+metadata. Add `get_provider_usage`, with optional exact instance/name filtering
+and the existing bounded live pagination, without requiring a chat or launch
+context. Route quota-only questions directly to it; reserve the once-per-connection
+context discovery for chat work. `get_thread_usage` retains its passive contract.
+
+Reuse the registry's exact-instance account reader already used by Settings for
+Claude's full report, including its replacement checks, native control-only
+execution, single-flight cache and joined cancellation. Bound direct-reader
+concurrency to two under a shared 15-second budget and retain completed sibling
+results after timeout. This is the explicit narrow exception to the original
+tool's no-native-read decision, not permission for session inventories, paid
+requests, full provider refreshes or reset redemption. Preserve every reported
+meter independently of selected model, plus extra-usage missing/null/disabled
+distinctions and native minor currency units.
+
+Return cached sparse rate limits separately with their own timestamp, plan/spend
+metadata and bounded reset-credit rows; do not merge their older windows into a
+full Claude report or invent model-specific allowances. Existing authentication,
+owner enablement, receipt, cache, native cleanup and adoption limits remain.
+The direct account read is annotated read-only/open-world because it may consult
+the configured provider through that control-only reader. Source tests qualify
+the MCP response, unknowns, resource limits and cancellation; a build does not
+prove an already-running backend/provider discovered the new tool.
+
 Behavioral tests cover exact target/instance selection, shared account quota,
 unknown counters, transcript-free projection, zero-message limit, credential
 rotation/revocation and authenticated transport targeting. Synthetic database

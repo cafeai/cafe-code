@@ -4,6 +4,7 @@ import {
   MessageId,
   ProjectId,
   ThreadId,
+  ThreadGroupId,
   type OrchestrationEvent,
 } from "@cafecode/contracts";
 import * as Duration from "effect/Duration";
@@ -79,6 +80,66 @@ const yieldHub = Effect.forEach(Array.from({ length: 10 }), () => Effect.yieldNo
 });
 
 describe("OrchestrationSubscriptionHub", () => {
+  it("delivers organization changes to shell and exact detail subscriptions", async () => {
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const live = yield* PubSub.unbounded<OrchestrationEvent>();
+          const engine: OrchestrationEngineShape = {
+            readEvents: () => Stream.empty,
+            dispatch: () => Effect.die("unused"),
+            retireThreadForHardDelete: () => Effect.die("unused"),
+            purgeHardDeletedThread: () => Effect.die("unused"),
+            diagnosticsSnapshot: Effect.die("unused"),
+            streamDomainEvents: Stream.fromPubSub(live),
+          };
+          const hub = yield* makeOrchestrationSubscriptionHub({
+            orchestrationEngine: engine,
+            initialCursor: 0,
+            pollInterval: Duration.hours(1),
+          });
+          yield* yieldHub;
+          const detail = yield* Stream.runHead(
+            hub.eventsFrom({
+              fromSequenceExclusive: 0,
+              route: { kind: "thread", threadId: ThreadId.make("moving") },
+            }),
+          ).pipe(Effect.forkScoped);
+          const shell = yield* Stream.runCollect(
+            hub
+              .eventsFrom({
+                fromSequenceExclusive: 0,
+                route: { kind: "shell" },
+              })
+              .pipe(Stream.take(2)),
+          ).pipe(Effect.forkScoped);
+          yield* yieldHub;
+          const event = (sequence: number, id: string): OrchestrationEvent => ({
+            ...makeEvent({ sequence, aggregateKind: "thread", aggregateId: id }),
+            type: "thread.metadata-updated",
+            payload: {
+              threadId: ThreadId.make(id),
+              groupId: ThreadGroupId.make("destination"),
+              origin: {
+                classification: "agent",
+                source: "user",
+                updatedAt: "2026-07-16T00:00:00.000Z",
+              },
+              updatedAt: "2026-07-16T00:00:00.000Z",
+            },
+          });
+          yield* PubSub.publish(live, event(1, "other"));
+          yield* PubSub.publish(live, event(2, "moving"));
+          expect(Option.getOrThrow(yield* Fiber.join(detail))).toEqual(event(2, "moving"));
+          expect(Array.from(yield* Fiber.join(shell))).toEqual([
+            event(1, "other"),
+            event(2, "moving"),
+          ]);
+        }),
+      ),
+    );
+  });
+
   it("uses one durable tail read regardless of active subscription count", async () => {
     await Effect.runPromise(
       Effect.scoped(

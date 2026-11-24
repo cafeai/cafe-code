@@ -112,7 +112,6 @@ describe("Codex account-scoped fallback catalogue", () => {
     expect(fallbackCodexModelsFromSettings(settings, chatGptAuth)).toEqual(
       baseline.filter((row) => !retired.includes(row.slug)),
     );
-    expect(fallbackCodexModelsFromSettings(settings, chatGptAuth)[0]?.slug).toBe("gpt-6-astra");
   });
 
   it.each([
@@ -778,11 +777,28 @@ describe("Codex picker model/list refresh", () => {
       ).some((model) => model.slug.includes("daybreak")),
     ).toBe(false);
   });
-  it("lists Astra first during cold-start fallback and de-duplicates custom entries", () => {
+  it("lists GPT-6.2 Sol first during cold-start fallback and de-duplicates custom entries", () => {
     const models = fallbackCodexModelsFromSettings(
-      decodeCodexSettings({ customModels: ["gpt-6-astra"] }),
+      decodeCodexSettings({ customModels: ["gpt-6.2-sol", "gpt-6-astra"] }),
     );
     expect(models[0]).toMatchObject({
+      slug: "gpt-6.2-sol",
+      name: "GPT-6.2-Sol",
+      isCustom: false,
+      capabilities: {
+        optionDescriptors: [
+          { id: "reasoningEffort", type: "select" },
+          {
+            id: "serviceTier",
+            currentValue: "default",
+            options: [{ id: "default", label: "Standard", isDefault: true }],
+          },
+        ],
+      },
+    });
+    expect(models[0]?.capabilities?.optionDescriptors?.[0]?.currentValue).toBeUndefined();
+    expect(models.filter((model) => model.slug === "gpt-6.2-sol")).toHaveLength(1);
+    expect(models.find((model) => model.slug === "gpt-6-astra")).toMatchObject({
       slug: "gpt-6-astra",
       name: "GPT-6-Astra",
       isCustom: false,

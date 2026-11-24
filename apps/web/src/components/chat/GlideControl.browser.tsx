@@ -252,6 +252,40 @@ async function withActivityFixture(
 const projectedActivity = () => page.getByTestId("glide-projected-activity");
 const readOnlyInputs = () => fixture.control.mock.calls.map(([input]) => input);
 
+it("enables OpenAI-managed computer use through the native setup path and keeps revocation direct", async (context) => {
+  await withActivityFixture(context, async (lifetime) => {
+    let enabled = false;
+    fixture.control.mockImplementation((input: { action: string; enabled?: boolean }) => {
+      if (input.action === "set-enabled") enabled = input.enabled === true;
+      return lifetime.reply(
+        Promise.resolve({
+          ...missing,
+          permissionsManagedBy: "openai",
+          enabled,
+          activity: {
+            state: enabled ? "working" : "stopped",
+            ...(enabled ? { appName: "Fixture editor" } : {}),
+          },
+        }),
+      );
+    });
+    await lifetime.mount(<ActivityHarness changed={() => undefined} />);
+    await lifetime.owned(() => expect.element(button()).toBeEnabled());
+    await lifetime.owned(() => button().click());
+    await lifetime.owned(() => expect.element(button()).toHaveAttribute("aria-pressed", "true"));
+    await lifetime.owned(() => expect.element(projectedActivity()).toHaveTextContent("working"));
+    await lifetime.owned(() => expect.element(dialog()).not.toBeInTheDocument());
+    await lifetime.owned(() => button().click());
+    await lifetime.owned(() => expect.element(button()).toHaveAttribute("aria-pressed", "false"));
+    expect(
+      readOnlyInputs().filter((input) => input.action !== "status" && input.action !== "activity"),
+    ).toEqual([
+      { action: "set-enabled", threadId, enabled: true },
+      { action: "set-enabled", threadId, enabled: false },
+    ]);
+  });
+});
+
 it("clears failed activity without revoking saved computer use and recovers through a fresh activity read", async (context) => {
   await withActivityFixture(context, async (lifetime) => {
     const changed = vi.fn();

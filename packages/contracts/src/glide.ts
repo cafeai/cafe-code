@@ -9,6 +9,7 @@ export const GlideThreadActivity = Schema.Struct({
     "capturing",
     "reading",
     "acting",
+    "working",
     "stopping",
     "stopped",
     "unavailable",
@@ -59,6 +60,9 @@ export const GlideControlInput = Schema.Union([
 ]);
 export type GlideControlInput = typeof GlideControlInput.Type;
 export const GlideControlResult = Schema.Struct({
+  /** OpenAI's native component owns its own OS permission setup. This is not
+   * evidence that Accessibility or Screen Recording has been granted. */
+  permissionsManagedBy: Schema.optional(Schema.Literal("openai")),
   available: Schema.Boolean,
   connected: Schema.Boolean,
   enabled: Schema.Boolean,

@@ -59,6 +59,81 @@ export function threadGroupDepth(
   return depth;
 }
 
+/**
+ * Validate a membership edit against the serialized command model. Include
+ * retained deleted/archived descendants in the height check: restoring them
+ * later must not introduce a cycle or exceed the traversal bound. A move does
+ * not change any group's owner, any descendant's membership or execution state.
+ */
+export function threadGroupMoveError(
+  readModel: OrchestrationReadModel,
+  thread: OrchestrationThread,
+  groupId: ThreadGroupId | null,
+): string | undefined {
+  if (thread.deletedAt !== null || thread.archivedAt !== null) {
+    return "Restore and unarchive this chat before changing its group.";
+  }
+  const groups = threadGroups(readModel);
+  const groupsById = new Map(groups.map((group) => [group.id, group]));
+  const threadsById = new Map(readModel.threads.map((entry) => [entry.id, entry]));
+  const depthError = `Groups can be nested at most ${MAX_THREAD_GROUP_DEPTH} levels deep.`;
+  const cycleError = "A chat cannot move into its own group or a descendant's group.";
+  const seenAncestors = new Set<ThreadGroupId>();
+  let destinationDepth = 0;
+  let ancestorId = groupId;
+  while (ancestorId !== null) {
+    if (seenAncestors.has(ancestorId)) return "The destination group has cyclic containment.";
+    seenAncestors.add(ancestorId);
+    const ancestor = groupsById.get(ancestorId);
+    const owner = ancestor ? threadsById.get(ancestor.ownerThreadId) : undefined;
+    if (!ancestor || ancestor.deletedAt !== null || !owner || owner.deletedAt !== null) {
+      return "The destination group or its parent is unavailable; restore the parent/group first.";
+    }
+    if (owner.archivedAt !== null) return "Unarchive the destination's parent chats first.";
+    if (owner.id === thread.id) return cycleError;
+    destinationDepth += 1;
+    if (destinationDepth > MAX_THREAD_GROUP_DEPTH) return depthError;
+    ancestorId = owner.groupId ?? null;
+  }
+
+  const ownedGroups = new Map<ThreadId, OrchestrationThreadGroup[]>();
+  const members = new Map<ThreadGroupId, OrchestrationThread[]>();
+  for (const group of groups) {
+    const owned = ownedGroups.get(group.ownerThreadId) ?? [];
+    owned.push(group);
+    ownedGroups.set(group.ownerThreadId, owned);
+  }
+  for (const member of readModel.threads) {
+    // This is the proposed tree: the moving thread leaves its old group.
+    if (member.id === thread.id || !member.groupId) continue;
+    const entries = members.get(member.groupId) ?? [];
+    entries.push(member);
+    members.set(member.groupId, entries);
+  }
+  const seenGroups = new Set<ThreadGroupId>();
+  const seenThreads = new Set<ThreadId>([thread.id]);
+  let frontier = [thread.id];
+  let depth = destinationDepth;
+  while (frontier.length > 0) {
+    depth += 1;
+    const next: ThreadId[] = [];
+    for (const ownerId of frontier) {
+      for (const group of ownedGroups.get(ownerId) ?? []) {
+        if (seenGroups.has(group.id)) return cycleError;
+        seenGroups.add(group.id);
+        if (depth > MAX_THREAD_GROUP_DEPTH) return depthError;
+        for (const member of members.get(group.id) ?? []) {
+          if (seenThreads.has(member.id)) return cycleError;
+          seenThreads.add(member.id);
+          next.push(member.id);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return undefined;
+}
+
 export interface ContainmentClosure {
   readonly groups: ReadonlyArray<OrchestrationThreadGroup>;
   readonly threads: ReadonlyArray<OrchestrationThread>;

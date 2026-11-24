@@ -103,7 +103,7 @@ export function registerThreadStatusTools(
     {
       title: "Get this Cafe chat's context",
       description:
-        "Start here to identify the authenticated launch Cafe chat, project, workspace and saved versus current provider. No inventories, transcripts, provider probes or paid calls. Omit threadId only on a Cafe-issued connection; inherited subagents still target the launch Cafe chat. Manual clients supply an exact ID. This is recorded context, not native ownership proof.",
+        "For chat work, identify the authenticated launch Cafe chat, project, workspace and saved versus current provider once, then reuse those IDs. For account usage limits, call get_provider_usage directly instead; it needs no chat context. No inventories, transcripts, provider probes or paid calls. Omit threadId only on a Cafe-issued connection; inherited subagents still target the launch Cafe chat. Manual clients supply an exact ID. This is recorded context, not native ownership proof.",
       inputSchema: { threadId: explicitThreadId.optional() },
       outputSchema: z.object({
         thread: threadSummary,

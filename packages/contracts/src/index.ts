@@ -15,6 +15,7 @@ export * from "./mcpApps.ts";
 export * from "./provider.ts";
 export * from "./providerSkills.ts";
 export * from "./providerCommands.ts";
+export * from "./axiomCommand.ts";
 export * from "./providerQuota.ts";
 export * from "./providerTaskControls.ts";
 export * from "./providerTaskOwnership.ts";

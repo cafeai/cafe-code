@@ -236,6 +236,72 @@ describe("composer file and queue edit durability", () => {
     },
   );
 
+  it("retains only deliberately selected Axiom commands across edits and queue reloads", () => {
+    const store = useComposerDraftStore.getState();
+    const account = ProviderInstanceId.make("axiom-personal");
+    store.setModelSelection(ref, createModelSelection(account, "native-model"));
+    store.setPrompt(ref, "/help");
+    expect(store.getComposerDraft(ref)?.axiomCommand).toBeUndefined();
+    store.setAxiomCommand(ref, { name: "help" }, account);
+    store.setPrompt(ref, "/help details");
+    expect(store.getComposerDraft(ref)?.axiomCommand).toEqual({ name: "help" });
+    expect(
+      store.beginQueueEdit(ref, "command-queue", {
+        ...edit,
+        prompt: "/compact focus",
+        modelSelection: createModelSelection(account, "native-model"),
+        axiomCommand: { name: "compact" },
+        axiomMcpRevision: 4,
+      }),
+    ).toBe(true);
+    const options = useComposerDraftStore.persist.getOptions();
+    const persisted = options.partialize!(useComposerDraftStore.getState());
+    useComposerDraftStore.setState(
+      options.merge!(JSON.parse(JSON.stringify(persisted)), useComposerDraftStore.getState()),
+    );
+    expect(store.getComposerDraft(ref)?.axiomCommand).toEqual({ name: "compact" });
+    expect(store.getComposerDraft(ref)?.axiomMcpRevision).toBe(4);
+    store.finishQueueEdit(ref);
+    expect(store.getComposerDraft(ref)?.axiomCommand).toEqual({ name: "help" });
+    store.setPrompt(ref, "/helpful");
+    expect(store.getComposerDraft(ref)?.axiomCommand).toBeUndefined();
+    store.setPrompt(ref, "/help");
+    expect(store.getComposerDraft(ref)?.axiomCommand).toBeUndefined();
+    store.setAxiomCommand(ref, { name: "help" }, account);
+    store.clearComposerContent(ref);
+    expect(store.getComposerDraft(ref)?.axiomCommand).toBeUndefined();
+    store.setPrompt(ref, "/help");
+    store.setAxiomCommand(ref, { name: "help" }, account);
+    store.setModelSelection(
+      ref,
+      createModelSelection(ProviderInstanceId.make("axiom-other"), "native-model"),
+    );
+    expect(store.getComposerDraft(ref)?.axiomCommand).toBeUndefined();
+  });
+
+  it("keeps native MCP review ownership volatile while retaining exact queue message revisions", () => {
+    const store = useComposerDraftStore.getState();
+    const account = ProviderInstanceId.make("axiom-personal");
+    store.setModelSelection(ref, createModelSelection(account, "native-model"));
+    store.setAxiomMcpRevision(ref, 7, account, "exact-runtime-model-owner");
+    expect(store.getComposerDraft(ref)?.axiomMcpOwner).toBe("exact-runtime-model-owner");
+    const options = useComposerDraftStore.persist.getOptions();
+    const serialized = JSON.stringify(options.partialize!(useComposerDraftStore.getState()));
+    expect(serialized).not.toContain("exact-runtime-model-owner");
+    useComposerDraftStore.setState(
+      options.merge!(JSON.parse(serialized), useComposerDraftStore.getState()),
+    );
+    expect(store.getComposerDraft(ref)?.axiomMcpRevision).toBeUndefined();
+    expect(store.getComposerDraft(ref)?.axiomMcpOwner).toBeUndefined();
+    store.setAxiomMcpRevision(ref, 7, account, "new-owner");
+    store.setModelSelection(
+      ref,
+      createModelSelection(ProviderInstanceId.make("axiom-other"), "native-model"),
+    );
+    expect(store.getComposerDraft(ref)?.axiomMcpRevision).toBeUndefined();
+    expect(store.getComposerDraft(ref)?.axiomMcpOwner).toBeUndefined();
+  });
+
   it("never writes raw Cafe Secret values to browser storage", () => {
     const store = useComposerDraftStore.getState();
     const options = useComposerDraftStore.persist.getOptions();

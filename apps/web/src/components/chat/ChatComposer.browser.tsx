@@ -31,8 +31,9 @@ import {
   __resetEnvironmentApiOverridesForTests,
 } from "../../environmentApi";
 
-const { quotaConnection, subscribeQuota } = vi.hoisted(() => ({
+const { quotaConnection, subscribeQuota, manageProviderMcp } = vi.hoisted(() => ({
   quotaConnection: { connected: false },
+  manageProviderMcp: vi.fn(),
   subscribeQuota:
     vi.fn<
       (
@@ -58,6 +59,7 @@ vi.mock("../../environments/runtime", () => {
     client: {
       server: {
         subscribeProviderQuota: subscribeQuota,
+        manageProviderMcp,
         refreshProviders: vi.fn().mockResolvedValue(undefined),
         getClientSettings: vi.fn().mockResolvedValue(null),
         updateClientSettings: vi.fn().mockResolvedValue(undefined),
@@ -533,6 +535,43 @@ async function waitForTabEntrance(owner?: ComposerOwner) {
 }
 
 describe("provider-specific composer menu actions", () => {
+  it("sends the saved Codex model and options before the live catalog arrives", async (context) => {
+    const owner = createComposerOwner(context, "composer-controls");
+    await owner.run(async () => {
+      const instanceId = ProviderInstanceId.make("codex");
+      const savedSelection = createModelSelection(instanceId, "gpt-6.2-sol", [
+        { id: "reasoningEffort", value: "max" },
+        { id: "serviceTier", value: "default" },
+      ]);
+      const fallback: ServerProvider = {
+        ...provider("codex", instanceId, "Codex personal"),
+        codexModelCatalogSource: "fallback",
+        models: [{ slug: "gpt-6-astra", name: "GPT-6-Astra", isCustom: false, capabilities: null }],
+      };
+      const onSend = vi.fn<ChatComposerProps["onSend"]>();
+      await using fixture = await mountComposer(
+        1100,
+        {
+          activeThread: { ...thread(), modelSelection: savedSelection },
+          activeThreadModelSelection: savedSelection,
+          providerStatuses: [fallback],
+          onSend,
+        },
+        owner,
+      );
+      const submitSelection = vi.fn();
+      onSend.mockImplementation((event) => {
+        event?.preventDefault();
+        submitSelection(fixture.composerRef.current?.getSendContext().selectedModelSelection);
+      });
+
+      await owner.observe("controls", () =>
+        page.getByRole("button", { name: "Send message", exact: true }).click(),
+      );
+      expect(submitSelection).toHaveBeenCalledExactlyOnceWith(savedSelection);
+    });
+  });
+
   it("keeps secret text editable and excludes its complete/incomplete ranges from native spellcheck", async (context) => {
     const owner = createComposerOwner(context, "composer-controls");
     await owner.run(async () => {
@@ -1062,7 +1101,7 @@ describe("provider-specific composer menu actions", () => {
       ).toBe(false);
       await expect
         .element(page.getByRole("button", { name: "MCP tools", exact: true }))
-        .not.toBeInTheDocument();
+        .toBeVisible();
       const button = fixture.host.querySelector<HTMLButtonElement>(
         '[data-axiom-web-search="true"]',
       )!;
@@ -1131,12 +1170,152 @@ describe("provider-specific composer menu actions", () => {
     await expect.element(page.elementLocator(tab)).toHaveAttribute("data-popup-open", "false");
     expect(fixture.onSend).not.toHaveBeenCalled();
   });
+  it("mounts MCP review and carries only the acknowledged current-model revision into sends", async (context) => {
+    const owner = createComposerOwner(context, "composer-controls");
+    await owner.run(async () => {
+      const axiom: ServerProvider = {
+        ...provider("axiom", "axiom-personal", "Axiom personal"),
+        models: ["axiom-model", "axiom-other"].map((slug) => ({
+          slug,
+          name: slug,
+          isCustom: false,
+          capabilities: createModelCapabilities({ optionDescriptors: [] }),
+        })),
+      };
+      const activeThread = thread();
+      activeThread.modelSelection = createModelSelection(axiom.instanceId, "axiom-model");
+      activeThread.session = {
+        ...activeThread.session!,
+        provider: ProviderDriverKind.make("axiom"),
+        providerInstanceId: axiom.instanceId,
+      };
+      const mcp = {
+        revision: 4,
+        selectedTools: ["mcp__fixture__example"],
+        servers: [
+          {
+            name: "fixture",
+            command: "fixture-command",
+            args: [],
+            enabled: true,
+            environmentKeys: [],
+            status: "tested",
+            error: null,
+            tools: [
+              {
+                name: "mcp__fixture__example",
+                description: "Fixture tool",
+                schemaHash: "a".repeat(64),
+              },
+            ],
+          },
+        ],
+      };
+      manageProviderMcp.mockResolvedValue({ state: mcp });
+      await using fixture = await mountComposer(
+        860,
+        {
+          providerStatuses: [...providers, axiom],
+          activeThread,
+          activeThreadModelSelection: activeThread.modelSelection,
+        },
+        owner,
+      );
+      expect(fixture.composerRef.current?.getSendContext().axiomMcpRevision).toBeUndefined();
+      await owner.observe("controls", () =>
+        page.getByRole("button", { name: "MCP tools", exact: true }).click(),
+      );
+      expect(manageProviderMcp).not.toHaveBeenCalled();
+      await owner.observe("controls", () =>
+        page.getByRole("button", { name: "Refresh", exact: true }).click(),
+      );
+      await owner.observe("assertion", () =>
+        expect
+          .element(page.getByRole("checkbox", { name: "mcp__fixture__example Fixture tool" }))
+          .toBeChecked(),
+      );
+      await owner.observe("assertion", () =>
+        expect.poll(() => fixture.composerRef.current?.getSendContext().axiomMcpRevision).toBe(4),
+      );
+      expect(manageProviderMcp.mock.calls[0]?.[0]).toMatchObject({
+        instanceId: axiom.instanceId,
+        threadId: activeThread.id,
+        runtimeId: activeThread.session.subagentRuntimeId,
+        modelId: "axiom-model",
+        action: { kind: "list" },
+      });
+      await owner.observe("keyboard", () => userEvent.keyboard("{Escape}"));
+      useComposerDraftStore
+        .getState()
+        .setModelSelection(
+          fixture.props.composerDraftTarget,
+          createModelSelection(axiom.instanceId, "axiom-other"),
+        );
+      await owner.observe("assertion", () =>
+        expect
+          .poll(() => fixture.composerRef.current?.getSendContext().selectedModel)
+          .toBe("axiom-other"),
+      );
+      expect(fixture.composerRef.current?.getSendContext().axiomMcpRevision).toBeUndefined();
+      expect(fixture.onSend).not.toHaveBeenCalled();
+    });
+  });
+  it("marks Axiom compaction only after a deliberate menu selection and withdraws edited intent", async (context) => {
+    const owner = createComposerOwner(context, "composer-controls");
+    await owner.run(async () => {
+      const axiom: ServerProvider = {
+        ...provider("axiom", "axiom-personal", "Axiom personal"),
+        models: [
+          {
+            slug: "native-model",
+            name: "Native model",
+            isCustom: false,
+            capabilities: createModelCapabilities({ optionDescriptors: [] }),
+          },
+        ],
+      };
+      const activeThread = thread();
+      activeThread.modelSelection = createModelSelection(axiom.instanceId, "native-model");
+      activeThread.session = {
+        ...activeThread.session!,
+        provider: ProviderDriverKind.make("axiom"),
+        providerInstanceId: axiom.instanceId,
+      };
+      await using fixture = await mountComposer(
+        860,
+        {
+          providerStatuses: [...providers, axiom],
+          activeThread,
+          activeThreadModelSelection: activeThread.modelSelection,
+          promptRef: { current: "" },
+        },
+        owner,
+      );
+      const editor = fixture.host.querySelector<HTMLElement>('[data-testid="composer-editor"]')!;
+      await owner.observe("keyboard", () => page.elementLocator(editor).fill("/compact"));
+      expect(fixture.composerRef.current?.getSendContext().axiomCommand).toBeUndefined();
+      await owner.observe("controls", () =>
+        page.getByRole("option", { name: /^\/compact\b/ }).click(),
+      );
+      await owner.observe("assertion", () =>
+        expect
+          .poll(() => fixture.composerRef.current?.getSendContext().axiomCommand)
+          .toEqual({ name: "compact" }),
+      );
+      useComposerDraftStore
+        .getState()
+        .setPrompt(fixture.props.composerDraftTarget, "ordinary prompt");
+      expect(fixture.composerRef.current?.getSendContext().axiomCommand).toBeUndefined();
+      expect(fixture.onSend).not.toHaveBeenCalled();
+    });
+  });
   afterEach(async () => {
     // afterEach runs before onTestFinished. Join the same exact owner before
     // any shared draft, mock, locale or viewport reset can expose new controls.
     await activeComposerOwner?.cleanup();
     quotaConnection.connected = false;
     subscribeQuota.mockReset();
+    manageProviderMcp.mockReset();
     useUiStateStore.setState({ composerTabCollapsed: false });
     applyInterfaceScalePercent(100);
     document.documentElement.classList.remove("dark");

@@ -38,10 +38,14 @@ export function AxiomMcpControl({
   onOpenChange?: (open: boolean) => void;
 }) {
   const locale = useUiLocale();
-  const key = JSON.stringify([environmentId, input, connected]);
-  const current = useRef(key);
+  // Idle admission belongs to the exact operation too: a read started before a
+  // turn may not grant a reviewed revision after that turn has begun.
+  const key = JSON.stringify([environmentId, input, connected, idle]);
+  const current = useRef({ key });
   useLayoutEffect(() => {
-    current.current = key;
+    // A return to identical account/session labels is a new observation owner.
+    // Old acknowledgements never regain authority after away-and-back changes.
+    current.current = { key };
   }, [key]);
   const mounted = useRef(true);
   useLayoutEffect(() => {
@@ -65,11 +69,12 @@ export function AxiomMcpControl({
   const act = async (action: ProviderMcpInput["action"]) => {
     if (!input || !available || (action.kind !== "list" && !state)) return;
     const started = key;
+    const owner = current.current;
     setPendingKey(key);
     setError(false);
     try {
       const { requireEnvironmentConnection } = await import("../../environments/runtime");
-      if (!mounted.current || current.current !== started) return;
+      if (!mounted.current || current.current !== owner) return;
       const result = await requireEnvironmentConnection(
         environmentId,
       ).client.server.manageProviderMcp({
@@ -77,7 +82,7 @@ export function AxiomMcpControl({
         action,
         ...(action.kind !== "list" ? { expectedRevision: state!.revision } : {}),
       });
-      if (!mounted.current || current.current !== started) return;
+      if (!mounted.current || current.current !== owner) return;
       if (!result.state) {
         setReceived(null);
         setError(true);
@@ -86,12 +91,12 @@ export function AxiomMcpControl({
       setReceived({ key: started, state: result.state });
       onRevision(result.state.revision);
     } catch {
-      if (mounted.current && current.current === started) {
+      if (mounted.current && current.current === owner) {
         setError(true);
         setReceived(null);
       }
     } finally {
-      if (mounted.current && current.current === started) {
+      if (mounted.current && current.current === owner) {
         setPendingKey(null);
         setEnv("");
       }
@@ -187,12 +192,24 @@ export function AxiomMcpControl({
           {state?.servers.map((server) => (
             <div key={server.name} className="space-y-2 rounded-lg border p-3">
               <div className="flex flex-wrap items-center gap-2">
-                <strong className="mr-auto break-all text-sm">{server.name}</strong>
+                <strong className="mr-auto break-all text-sm">
+                  {server.displayName ?? server.name}
+                </strong>
                 <span className="text-xs text-muted-foreground">{server.status}</span>
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={!available}
+                  disabled={!available || server.remote != null}
+                  title={
+                    server.remote
+                      ? uiText(
+                          "Edit this remote connection in Axiom.",
+                          undefined,
+                          undefined,
+                          locale,
+                        )
+                      : undefined
+                  }
                   onClick={() => {
                     setName(server.name);
                     setCommand(server.command);
@@ -220,6 +237,11 @@ export function AxiomMcpControl({
                   {uiText("Delete", undefined, undefined, locale)}
                 </Button>
               </div>
+              {server.remote ? (
+                <p className="break-all text-xs text-muted-foreground">
+                  {server.remote.url} · {server.remote.auth}
+                </p>
+              ) : null}
               {server.environmentKeys.length ? (
                 <p className="break-all text-xs text-muted-foreground">
                   {server.environmentKeys.join(", ")}

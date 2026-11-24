@@ -7,6 +7,7 @@ import {
   supportsClaudeSecretHooks,
 } from "./claudeHooks.ts";
 import type { ThreadSecretsStore } from "./store.ts";
+import { secretRunnerInstructions } from "./instructions.ts";
 
 const id = "0123456789abcdef0123456789abcdef";
 const invocation = "node /owned/bin.mjs --cafe-secret-exec /private/connection.json";
@@ -31,6 +32,46 @@ const make = (
     isCurrent,
     retire: vi.fn(async () => undefined),
   });
+
+it.each(["2.1.321", "2.1.1", "unknown"])(
+  "refreshes the current helper on Claude session/resume and prompt context (%s)",
+  async (version) => {
+    const snapshot = vi.fn(async () => {
+      throw new Error("Synthetic vault outage");
+    });
+    let current = true;
+    const owner = make(snapshot, () => current, version);
+    for (const eventName of ["SessionStart", "UserPromptSubmit"] as const) {
+      const refresh = owner.hooks[eventName][0]!.hooks[0]!;
+      const event = hookInput({
+        hook_event_name: eventName,
+        source: "resume",
+        prompt: "Do not copy this synthetic user prompt into guidance.",
+      });
+      expect(await refresh(event, undefined, options())).toEqual({
+        hookSpecificOutput: {
+          hookEventName: eventName,
+          additionalContext: secretRunnerInstructions(invocation),
+        },
+      });
+      const aborted = new AbortController();
+      aborted.abort();
+      expect(await refresh(event, undefined, { signal: aborted.signal })).toEqual({});
+      current = false;
+      expect(await refresh(event, undefined, options())).toEqual({});
+      current = true;
+    }
+    owner.retire();
+    expect(
+      await owner.hooks.SessionStart[0]!.hooks[0]!(
+        hookInput({ hook_event_name: "SessionStart", source: "resume" }),
+        undefined,
+        options(),
+      ),
+    ).toEqual({});
+    expect(snapshot).not.toHaveBeenCalled();
+  },
+);
 
 it("keeps native arguments opaque and leaves exact runner calls to ordinary authorization", async () => {
   const owner = make();

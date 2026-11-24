@@ -955,7 +955,7 @@ export function resolveMacDesktopBuildConfig(
         from: "apps/desktop/resources/mac-dictation-target",
         to: "mac-dictation-target",
       },
-      { from: "apps/desktop/resources/mac-glide", to: "mac-glide" },
+      { from: "apps/desktop/resources/mac-glide-tray", to: "mac-glide-tray" },
       { from: "apps/desktop/resources/mac-keep-awake", to: "mac-keep-awake" },
       {
         from: "apps/desktop/resources/mac-provider-daemon-control",
@@ -1019,7 +1019,7 @@ export function resolveLinuxDesktopBuildConfig(target: string): Record<string, u
       packageCategory: "devel",
       priority: "optional",
       // electron-builder's Debian defaults omit libraries that Electron links
-      // directly, and Cafe's local HTTPS bootstrap invokes the OpenSSL CLI.
+      // directly. Local HTTPS certificate generation uses the bundled Node runtime.
       // Keep the defaults explicit so a clean install with
       // --no-install-recommends provides every runtime dependency.
       depends: [
@@ -1272,11 +1272,11 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       ChildProcess.make(
         process.execPath,
         [
-          path.join(repoRoot, "apps/desktop/scripts/build-mac-glide-helper.mjs"),
+          path.join(repoRoot, "apps/desktop/scripts/build-mac-glide-tray.mjs"),
           "--arch",
           options.arch,
           "--output",
-          path.join(stageResourcesDir, "mac-glide"),
+          path.join(stageResourcesDir, "mac-glide-tray"),
           "--force",
         ],
         { cwd: repoRoot, ...commandOutputOptions(options.verbose), shell: false },

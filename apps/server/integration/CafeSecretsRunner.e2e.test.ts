@@ -11,19 +11,24 @@ import { makeSecretRunnerSession, type SecretRunnerSession } from "../src/secret
 
 async function fixture(context: TestContext) {
   let rootAcquisition: Promise<string> | undefined;
-  let bindingAcquisition: Promise<SecretRunnerSession> | undefined;
+  const bindings: Promise<SecretRunnerSession>[] = [];
   const pending = new Set<Promise<unknown>>();
   context.onTestFinished(async () => {
     await Promise.allSettled([...pending]);
-    if (bindingAcquisition) await (await bindingAcquisition).dispose();
+    for (const binding of bindings) await (await binding).dispose();
     if (rootAcquisition) await fs.rm(await rootAcquisition, { recursive: true, force: true });
   });
   rootAcquisition = fs.mkdtemp(path.join(os.tmpdir(), "cafe-secrets-native-"));
   const root = await fs.realpath(await rootAcquisition);
   const store = new ThreadSecretsStore(root);
-  bindingAcquisition = makeSecretRunnerSession({ secretsDir: root, threadId: "native-chat" });
-  const binding = await bindingAcquisition;
-  const run = (request: unknown) => {
+  const bind = () => {
+    if (context.signal.aborted) throw new Error("Native fixture retired.");
+    const acquisition = makeSecretRunnerSession({ secretsDir: root, threadId: "native-chat" });
+    bindings.push(acquisition);
+    return acquisition;
+  };
+  const binding = await bind();
+  const run = (request: unknown, connection = binding) => {
     let child: ReturnType<typeof spawn> | undefined;
     const abort = () => child?.kill("SIGTERM");
     context.signal.addEventListener("abort", abort, { once: true });
@@ -43,7 +48,7 @@ async function fixture(context: TestContext) {
         if (process.env[name] !== undefined) env[name] = process.env[name];
       child = spawn(
         executable,
-        [entry, "--cafe-secret-exec", binding.connectionPath, JSON.stringify(request)],
+        [entry, "--cafe-secret-exec", connection.connectionPath, JSON.stringify(request)],
         { env, stdio: ["ignore", "pipe", "pipe"] },
       );
       const output = { stdout: "", stderr: "" };
@@ -69,8 +74,32 @@ async function fixture(context: TestContext) {
     void result.finally(() => pending.delete(result));
     return result;
   };
-  return { root, store, binding, run };
+  return { root, store, binding, run, bind };
 }
+
+it.skipIf(process.env.CAFE_CODE_SECRETS_E2E !== "1")(
+  "uses the same encrypted secret through a new runner after session restart without reviving the old connection",
+  async (context) => {
+    const f = await fixture(context);
+    const value = "synthetic-restart-secret-12345";
+    const { secret } = await f.store.set({ threadId: "native-chat", value });
+    const request = {
+      operation: "run",
+      argv: [process.execPath, "-e", "process.stdout.write(process.env.CAFE_TEST_KEY)"],
+      env: { CAFE_TEST_KEY: secret.reference },
+    };
+    expect(await f.run(request)).toEqual({ code: 0, stdout: secret.reference, stderr: "" });
+    await f.binding.dispose();
+    const reopened = new ThreadSecretsStore(f.root);
+    expect((await reopened.list("native-chat")).secrets).toEqual([secret]);
+    const next = await f.bind();
+    expect(next.connectionPath).not.toBe(f.binding.connectionPath);
+    expect(await f.run(request, next)).toEqual({ code: 0, stdout: secret.reference, stderr: "" });
+    const retired = await f.run(request, f.binding);
+    expect(retired.code).not.toBe(0);
+    expect(retired.stdout + retired.stderr).not.toContain(value);
+  },
+);
 
 it.skipIf(process.env.CAFE_CODE_SECRETS_E2E !== "1")(
   "expands env/stdin and redacts split native stdout/stderr before outer capture",

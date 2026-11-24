@@ -92,7 +92,7 @@ import WebKit
     }
   }
   private func updateIcon(state: String, rows: [[String: Any]]) {
-    let active = rows.contains { ["capturing", "acting"].contains($0["state"] as? String ?? "") }
+    let active = rows.contains { ["capturing", "acting", "working"].contains($0["state"] as? String ?? "") }
     let reading = rows.contains { $0["state"] as? String == "reading" }
     let image = NSImage(size: NSSize(width: 22, height: 18), flipped: false) { rect in
       NSColor.labelColor.setStroke()

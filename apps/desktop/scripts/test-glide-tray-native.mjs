@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensureMacGlideHelper, writeGlideTrayPayload } from "./build-mac-glide-helper.mjs";
+import { ensureMacGlideTray, writeGlideTrayPayload } from "./build-mac-glide-tray.mjs";
 
 if (process.platform !== "darwin") throw new Error("Native tray qualification requires macOS.");
 if (process.argv[2] === "--protocol") {
@@ -71,7 +71,7 @@ if (process.argv[2] === "--protocol") {
     run(executable, [output], {
       env: { ...process.env, HOME: privateHome, CFFIXED_USER_HOME: privateHome },
     });
-    const helper = ensureMacGlideHelper();
+    const helper = ensureMacGlideTray();
     run(process.execPath, [fileURLToPath(import.meta.url), "--protocol", helper], {
       env: { ...process.env, HOME: privateHome, CFFIXED_USER_HOME: privateHome },
     });

@@ -330,7 +330,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           from: "apps/desktop/resources/mac-dictation-target",
           to: "mac-dictation-target",
         },
-        { from: "apps/desktop/resources/mac-glide", to: "mac-glide" },
+        { from: "apps/desktop/resources/mac-glide-tray", to: "mac-glide-tray" },
         { from: "apps/desktop/resources/mac-keep-awake", to: "mac-keep-awake" },
         {
           from: "apps/desktop/resources/mac-provider-daemon-control",

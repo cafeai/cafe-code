@@ -14,6 +14,7 @@ import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
@@ -166,6 +167,7 @@ const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const assets = yield* DesktopAssets.DesktopAssets;
   const appIcon = yield* Effect.serviceOption(DesktopAppIcon.DesktopAppIcon);
+  const electronApp = yield* ElectronApp.ElectronApp;
   const electronMenu = yield* ElectronMenu.ElectronMenu;
   const electronShell = yield* ElectronShell.ElectronShell;
   const electronTheme = yield* ElectronTheme.ElectronTheme;
@@ -220,6 +222,14 @@ const make = Effect.gen(function* () {
         sandbox: true,
       },
     });
+    if (environment.platform !== "darwin") {
+      window.on("close", (event) => {
+        if (Ref.getUnsafe(state.quitting)) return;
+        // Keep this renderer alive while the app decides whether to quit.
+        event.preventDefault();
+        void runPromise(electronApp.quit);
+      });
+    }
     const unsubscribeLocale = subscribeUiLocale(() => {
       if (!window.isDestroyed()) {
         window.webContents.send(DESKTOP_UI_LOCALE_CHANGED_CHANNEL, getUiLocale());

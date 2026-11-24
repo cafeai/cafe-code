@@ -1,6 +1,7 @@
 import type { HookCallback, HookCallbackMatcher, HookEvent } from "@anthropic-ai/claude-agent-sdk";
 import { hasCafeSecretReference, redactCafeSecretText } from "@cafecode/shared/cafeSecrets";
 import type { ThreadSecretsStore } from "./store.ts";
+import { secretRunnerInstructions } from "./instructions.ts";
 
 /** JSON-only transformation preserves each native output schema. No stringify
  * substitution, prototype setters, getters or recursive secret expansion. */
@@ -65,6 +66,23 @@ export function makeClaudeSecretHooks(input: {
   const seen = new Map<string, string>();
   const outputReplacement = supportsClaudeSecretHooks(input.nativeVersion);
   const current = () => !retired && input.isCurrent();
+  // Claude can retain the initial system-prompt append when resuming. Its
+  // supported context hooks refresh the exact query's helper independently of
+  // that cached prompt, without reading the vault or making a permission grant.
+  const context: HookCallback = async (event, _id, options) => {
+    if (
+      (event.hook_event_name !== "SessionStart" && event.hook_event_name !== "UserPromptSubmit") ||
+      !current() ||
+      options.signal.aborted
+    )
+      return {};
+    return {
+      hookSpecificOutput: {
+        hookEventName: event.hook_event_name,
+        additionalContext: secretRunnerInstructions(input.runnerInvocation),
+      },
+    };
+  };
   const remember = (values: ReadonlyMap<string, string>) => {
     for (const [id, value] of values) {
       if (!seen.has(value) && seen.size >= 128)
@@ -192,9 +210,12 @@ export function makeClaudeSecretHooks(input: {
     }
   };
   return {
-    hooks: { PreToolUse: [{ hooks: [pre] }], PostToolUse: [{ hooks: [post] }] } satisfies Partial<
-      Record<HookEvent, HookCallbackMatcher[]>
-    >,
+    hooks: {
+      SessionStart: [{ hooks: [context] }],
+      UserPromptSubmit: [{ hooks: [context] }],
+      PreToolUse: [{ hooks: [pre] }],
+      PostToolUse: [{ hooks: [post] }],
+    } satisfies Partial<Record<HookEvent, HookCallbackMatcher[]>>,
     retire: () => {
       retired = true;
     },

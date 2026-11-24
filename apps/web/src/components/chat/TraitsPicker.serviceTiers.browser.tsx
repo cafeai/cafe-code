@@ -53,7 +53,7 @@ describe("advertised Codex service tier selector", () => {
   it("does not choose a paid tier on mount and preserves the exact selected id", async () => {
     const { screen, onModelOptionsChange } = await mount();
     expect(onModelOptionsChange).not.toHaveBeenCalled();
-    await expect.element(screen.getByRole("button")).toHaveTextContent("Standard");
+    await expect.element(screen.getByRole("button")).toHaveTextContent("Model settings");
     await screen.getByRole("button").click();
     await expect
       .element(page.getByRole("menuitemradio", { name: "Standard", exact: true }))
@@ -83,7 +83,7 @@ describe("advertised Codex service tier selector", () => {
         },
       ],
     );
-    await expect.element(screen.getByRole("button")).toHaveTextContent("Fast");
+    await expect.element(screen.getByRole("button")).toHaveTextContent("Model settings");
     await screen.getByRole("button").click();
     await page.getByRole("menuitemradio", { name: "Standard", exact: true }).click();
     expect(onModelOptionsChange).toHaveBeenLastCalledWith([
@@ -96,7 +96,7 @@ describe("advertised Codex service tier selector", () => {
     const { screen, onModelOptionsChange } = await mount([
       { id: "serviceTier", value: "removed-tier" },
     ]);
-    await expect.element(screen.getByRole("button")).toHaveTextContent("Unavailable service tier");
+    await expect.element(screen.getByRole("button")).toHaveTextContent("Model settings");
     expect(onModelOptionsChange).not.toHaveBeenCalled();
     await screen.getByRole("button").click();
     await expect
@@ -122,7 +122,7 @@ describe("advertised Codex service tier selector", () => {
         },
       ],
     );
-    await expect.element(screen.getByRole("button")).toHaveTextContent("Fast");
+    await expect.element(screen.getByRole("button")).toHaveTextContent("Model settings");
     expect(onModelOptionsChange).not.toHaveBeenCalled();
     await screen.getByRole("button").click();
     await expect

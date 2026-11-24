@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -14,6 +15,7 @@ import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopState from "../app/DesktopState.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
@@ -135,23 +137,27 @@ const desktopIpcLayer = Layer.succeed(DesktopIpc.DesktopIpc, {
   handleSync: () => Effect.void,
 } satisfies DesktopIpc.DesktopIpcShape);
 
-const desktopEnvironmentLayer = DesktopEnvironment.layer(environmentInput).pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      NodeServices.layer,
-      DesktopConfig.layerTest({
-        CAFE_CODE_DESKTOP_DEV: "true",
-        CAFE_CODE_PORT: "3773",
-        VITE_DEV_SERVER_URL: "http://127.0.0.1:5733",
-      }),
+function makeDesktopEnvironmentLayer(platform: NodeJS.Platform) {
+  return DesktopEnvironment.layer({ ...environmentInput, platform }).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        DesktopConfig.layerTest({
+          CAFE_CODE_DESKTOP_DEV: "true",
+          CAFE_CODE_PORT: "3773",
+          VITE_DEV_SERVER_URL: "http://127.0.0.1:5733",
+        }),
+      ),
     ),
-  ),
-);
+  );
+}
 
 function makeTestLayer(input: {
   readonly window: Electron.BrowserWindow;
   readonly createCount: Ref.Ref<number>;
   readonly mainWindow: Ref.Ref<Option.Option<Electron.BrowserWindow>>;
+  readonly platform?: NodeJS.Platform;
+  readonly requestQuit?: Effect.Effect<void>;
   readonly onCreate?: (options: Electron.BrowserWindowConstructorOptions) => void;
   readonly onReveal?: () => void;
   readonly startupWindow?: DesktopStartupWindow.DesktopStartupWindowShape;
@@ -173,13 +179,21 @@ function makeTestLayer(input: {
     syncAllAppearance: (sync) => sync(input.window),
   } satisfies ElectronWindow.ElectronWindowShape);
 
+  const electronAppLayer = Layer.effect(
+    ElectronApp.ElectronApp,
+    Effect.map(Effect.service(ElectronApp.ElectronApp), (app) => ({
+      ...app,
+      quit: input.requestQuit ?? Effect.die("unexpected quit"),
+    })),
+  ).pipe(Layer.provide(ElectronApp.layer));
+
   return DesktopWindow.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         desktopAssetsLayer,
-        desktopEnvironmentLayer,
+        makeDesktopEnvironmentLayer(input.platform ?? environmentInput.platform),
         desktopServerExposureLayer,
-        DesktopState.layer,
+        electronAppLayer,
         electronMenuLayer,
         electronShellLayer,
         electronThemeLayer,
@@ -190,10 +204,54 @@ function makeTestLayer(input: {
           : Layer.empty,
       ),
     ),
+    Layer.provideMerge(DesktopState.layer),
   );
 }
 
 describe("DesktopWindow", () => {
+  it.effect("vetoes the Linux window close before requesting a cancellable quit", () =>
+    Effect.gen(function* () {
+      const fixture = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const quitRequested = yield* Deferred.make<void>();
+      const layer = makeTestLayer({
+        window: fixture.window,
+        createCount,
+        mainWindow,
+        platform: "linux",
+        requestQuit: Deferred.succeed(quitRequested, undefined).pipe(Effect.asVoid),
+      });
+
+      yield* Effect.gen(function* () {
+        const windows = yield* DesktopWindow.DesktopWindow;
+        const state = yield* DesktopState.DesktopState;
+        yield* windows.handleBackendReady;
+
+        const on = fixture.window.on as ReturnType<typeof vi.fn>;
+        const close = on.mock.calls.find(([event]) => event === "close")?.[1];
+        assert.isFunction(close);
+        const preventDefault = vi.fn();
+        close!({ preventDefault });
+        assert.equal(
+          preventDefault.mock.calls.length,
+          1,
+          "the close event must be vetoed synchronously",
+        );
+        yield* Deferred.await(quitRequested);
+
+        yield* Ref.set(state.quitting, true);
+        preventDefault.mockClear();
+        close!({ preventDefault });
+        assert.equal(
+          preventDefault.mock.calls.length,
+          0,
+          "committed shutdown may close the window",
+        );
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
   it.effect("routes the native Copy Image gesture through the original-image reader", () =>
     Effect.gen(function* () {
       const fixture = makeFakeBrowserWindow();

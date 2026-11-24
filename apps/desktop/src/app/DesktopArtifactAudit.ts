@@ -168,7 +168,7 @@ export async function auditPackagedDesktopArtifact(
   const resourceEntries = await readdir(resourcesPath, { withFileTypes: true });
   if (
     platform === "darwin" &&
-    !["mac-glide", "mac-keep-awake"].every((name) =>
+    !["mac-glide-tray", "mac-keep-awake"].every((name) =>
       resourceEntries.some(
         (entry) => entry.name === name && entry.isFile() && !entry.isSymbolicLink(),
       ),
@@ -183,7 +183,7 @@ export async function auditPackagedDesktopArtifact(
       ? [
           "icon.icns",
           "mac-dictation-target",
-          "mac-glide",
+          "mac-glide-tray",
           "mac-keep-awake",
           "en.lproj",
           "ja.lproj",

@@ -98,6 +98,10 @@ Cafe never retries a background check with interactive permissions.
   document extraction is not substituted for native file bytes.
 - Stop sends native cancellation before retiring prompt ownership. Prompt
   generation has no Cafe silence deadline. Startup/control reads are bounded.
+- Native RPC failures produce failed turns with sanitized feedback. A legacy
+  native `end_turn` without authenticated completion also fails for ordinary
+  inference; it cannot appear as a successful empty answer. Explicit native
+  commands need no inference receipt, and cancellation remains distinct.
 - A native process exit settles active work, releases pending interactions and
   leaves the durable account-bound resume cursor available for recovery.
   Loading never silently starts an unrelated native conversation.
@@ -118,14 +122,24 @@ Cafe never retries a background check with interactive permissions.
   A steer must match the active turn's web setting; changed consent is queued for
   the next turn. This toggle does not stop web work already admitted by a turn.
 - Native steering binds the exact active turn and stable message correlation;
-  steering is text-only and limited to 64 KiB. Manual compaction uses the native
-  extension and requires idle work.
+  steering is text-only and limited to 64 KiB. Select a native command from the
+  composer menu to invoke it through `_axiom/session/command`; ordinary pasted
+  slash text remains model input. Selected commands retain their intent through
+  queue save/edit/claim/reload, require idle work, and never become steering or
+  unattended scheduled commands. Selecting `/compact` supports native focus
+  arguments; the separate compaction control also requires idle work.
+  Copied or cross-provider continued chats must send an ordinary message first
+  to transfer their visible context; a local command cannot consume that pending
+  transfer. Commands do not consume first-model-message custom instructions.
 - Context use is the native replacement report from a completed request, with
   its reported capacity. It is not a draft estimate or an invented billing total.
-- The composer tab contains verification, without an MCP management control.
-  Native MCP configuration remains in Axiom. Cafe's backend retains its scoped
-  MCP protocol and revision checks; resources, prompts and MCP Apps are not
-  advertised by that tool-only interface.
+- The composer tab contains verification and an explicit **MCP tools** control.
+  It reads native connections, tests and manages local process connections,
+  and reviews the thread's selected tools. Saved HTTP connections remain usable
+  and show their public destination/authentication metadata; edit their remote
+  transport or service sign-in in Axiom. Disabled or unselected HTTP connections
+  do not block ordinary chats. Resources, prompts and MCP Apps are not advertised
+  by this tool-only interface.
 - MCP mutations require the exact idle account/runtime/thread/configuration and
   native revision. Secrets are write-only: blank preserves existing environment
   values, while an empty object clears them. Native credential identifiers and
@@ -136,7 +150,10 @@ Cafe never retries a background check with interactive permissions.
   save/edit/claim/reload and retry paths. Prompts carry that revision and the
   native runtime rejects changed executable/tool configuration. A conversation
   with selected tools requires an explicitly reviewed revision; missing review
-  fails closed. Plan prompts omit MCP configuration entirely.
+  fails closed. Direct-draft review is volatile and bound to the exact
+  account/chat/runtime/model; a restored direct draft must review again. Queue
+  entries retain their own explicit reviewed revision. Plan prompts omit MCP
+  configuration entirely.
 - Title, branch, commit and change-request helpers explicitly keep CLI sessions
   with the native None profile, a bounded deadline and no inference retries.
   Desktop mode cannot select None through `session/set_mode`.
@@ -223,13 +240,14 @@ that native process and expires on restart. Accepted evidence is degraded and
 retains the failed posture check. Expired evidence, invalid signatures, key/model
 or TLS binding failures and other verification failures are not overridable.
 
-Inference encryption does not encrypt Cafe's or Axiom's local conversation
-databases, workspace files, clipboard/exports or external tool traffic.
+Inference encryption is separate from local storage. Axiom's encrypted native
+store does not encrypt Cafe's separate conversation database, workspace files,
+clipboard/exports or external tool traffic.
 Enabled web searches use external tools; their queries are outside inference encryption.
 
 ## Protocol provenance and qualification
 
-The reviewed source copy declares AxiomCLI **0.1.13**. Its source files
+The reviewed source copy declares AxiomCLI **0.1.22**. Its source files
 `apps/axiomcli/src/acp/{server,sessions,settings,prompts,security,account}.rs`,
 `crates/axiom-acp-extension/src/lib.rs`, the v0.2 JSON Schema,
 `crates/axiom-inference/src/{attachments,accounting}.rs` and its native security
@@ -237,10 +255,15 @@ guide define this adapter's contract. This is compatibility review, not proof
 that a local source copy built a particular installed binary.
 
 Cafe negotiates ACP v1, extension family 0, account@2, modelCatalog@1,
-threadCatalog@1, timeline@2, attachments@2, activity@1, securityEvidence@4,
-steering@1 and compaction@1. New desktop sessions also require desktopChat@1,
-desktopAgent@1, desktopMcp@1 and webConsent@1. Billing@4 is optional. Incompatible required versions
-fail visibly without weakening the verification policy. The upstream ACP
+threadCatalog@1, timeline@2, attachments@2, activity@2, securityEvidence@4,
+steering@1, compaction@1 and commandInvocation@1. New desktop sessions also
+require desktopChat@1, desktopAgent@1, desktopMcp@2 and webConsent@1. Reviewed
+activity and desktop MCP versions 1 and 2 are accepted; unknown versions and
+missing required contracts are refused with the affected feature named.
+Security evidence remains exactly version 4. Billing@4 reads are optional;
+the newer billing@7 credit UI and image-generation/resource parity remain
+follow-up work. Incompatible required versions fail visibly without weakening
+the verification policy. The upstream ACP
 runtime/package version is independent of these contract versions.
 
 Default tests use isolated synthetic Node peers and public fixture evidence,
@@ -250,6 +273,11 @@ keyboard dismissal/focus, MCP controls and reported-cost overview presentation.
 MCP and billing fixtures use synthetic peers/receipts without launching real
 MCP servers, reading profiles, keychains or making paid requests. They also run in the existing macOS/Windows focused
 subset, with unchanged worker bounds and deadlines.
+The peer's current initialization fixture is independent of Cafe's client
+capabilities. See the [fixture provenance and update procedure](../apps/server/src/provider/testUtils/axiom-contract/README.md)
+and [repair plan](axiom-provider-repair-plan.md). A checked-in public snapshot
+qualifies that reviewed contract; the opt-in native probe qualifies the selected
+binary's actual advertisement.
 
 Native protocol-only qualification is explicit:
 
@@ -259,7 +287,9 @@ CAFE_AXIOMCLI_PATH=/Applications/Axiom.app/Contents/Resources/bin/axiomcli \
 ```
 
 This initializes the configured native binary and checks its advertised contract;
-it creates no conversation and sends no inference request. Native sign-in,
+it replaces the child environment, uses temporary storage roots and nonproduction
+loopback service origins, suppresses macOS Keychain UI, creates no conversation
+and sends no inference request. Native sign-in,
 deployed hardware verification, a real authenticated reply, long-running tool
 cleanup and other-host behavior require separate live qualification. Source,
 synthetic and local macOS evidence do not establish native Windows/Linux provider

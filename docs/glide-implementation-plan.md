@@ -1,4 +1,10 @@
-# Glide implementation plan
+# Historical Glide implementation plan
+
+**Retired on 2026-11-16.** The user requested delegation to OpenAI’s installed
+computer-use runtime. The custom JavaScript kernel and Swift desktop driver
+described below are removed; this document records historical design and
+qualification only. See [the current integration](glide.md) for executable
+behavior, ownership, requirements and limitations.
 
 Glide provides computer use inside ordinary Cafe chats on macOS. A user
 enables desktop access for a chat, and the agent uses persistent JavaScript to

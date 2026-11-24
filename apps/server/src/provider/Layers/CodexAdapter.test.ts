@@ -2640,6 +2640,11 @@ it.effect(
       const firstRunner = inspectSecretRunnerInstructions(
         factory.lastRuntime?.options.customInstructions,
       );
+      const refreshRunner = inspectSecretRunnerInstructions(
+        factory.lastRuntime?.options.secretRunnerInstructions,
+      );
+      assert.equal(refreshRunner.connectionPath, firstRunner.connectionPath);
+      assert.equal(refreshRunner.withoutRunner, "");
       assert.equal(firstRunner.withoutRunner, "Be concise.");
       assert.deepEqual(
         yield* Effect.promise(() => readSecretRunnerConnection(firstRunner.connectionPath)),
@@ -2652,6 +2657,11 @@ it.effect(
       yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
       const nextRunner = inspectSecretRunnerInstructions(
         factory.lastRuntime?.options.customInstructions,
+      );
+      assert.equal(
+        inspectSecretRunnerInstructions(factory.lastRuntime?.options.secretRunnerInstructions)
+          .connectionPath,
+        nextRunner.connectionPath,
       );
       assert.equal(nextRunner.withoutRunner, "Use metric units.");
       assert.notEqual(firstRunner.connectionPath, nextRunner.connectionPath);
@@ -3629,6 +3639,9 @@ validationLayer("CodexAdapterLive validation", (it) => {
       assert.equal(typeof options?.historySafety?.markBlocked, "function");
       const runner = inspectSecretRunnerInstructions(options?.customInstructions);
       assert.equal(runner.withoutRunner, "");
+      const refreshRunner = inspectSecretRunnerInstructions(options?.secretRunnerInstructions);
+      assert.equal(refreshRunner.connectionPath, runner.connectionPath);
+      assert.equal(refreshRunner.withoutRunner, "");
       assert.deepEqual(
         yield* Effect.promise(() => readSecretRunnerConnection(runner.connectionPath)),
         {
@@ -3641,6 +3654,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
         { ...options, customInstructions: runner.withoutRunner },
         {
           customInstructions: "",
+          secretRunnerInstructions: options?.secretRunnerInstructions,
           historySafety: options?.historySafety,
           appServerCwd: config.stateDir,
           binaryPath: "codex",

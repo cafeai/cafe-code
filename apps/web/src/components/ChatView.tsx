@@ -571,6 +571,7 @@ type ChatViewProps = {
 );
 
 interface ComposerSendSnapshot {
+  readonly axiomCommand?: import("@cafecode/contracts").AxiomCommand | undefined;
   readonly computerUseEnabled?: boolean;
   readonly computerUseRevision?: string;
   readonly axiomWebEnabled?: boolean;
@@ -1821,6 +1822,11 @@ export default function ChatView(props: ChatViewProps) {
             ...(activeThread.session?.provider === "axiom" &&
             candidate.failure.axiomWebConsent?.instanceId === activeThread.modelSelection.instanceId
               ? { axiomWebEnabled: candidate.failure.axiomWebConsent.enabled }
+              : {}),
+            ...(activeThread.session?.provider === "axiom" &&
+            candidate.failure.axiomCommandSelection?.instanceId ===
+              activeThread.modelSelection.instanceId
+              ? { axiomCommand: candidate.failure.axiomCommandSelection.command }
               : {}),
             ...(activeThread.session?.provider === "axiom" &&
             candidate.failure.axiomMcpSelection?.instanceId ===
@@ -4840,6 +4846,7 @@ export default function ChatView(props: ChatViewProps) {
         : {}),
       ...(sendCtx.selectedProvider === "axiom"
         ? {
+            ...(sendCtx.axiomCommand ? { axiomCommand: sendCtx.axiomCommand } : {}),
             axiomWebEnabled: sendCtx.axiomWebEnabled === true,
             ...(sendCtx.axiomMcpRevision !== undefined
               ? { axiomMcpRevision: sendCtx.axiomMcpRevision }
@@ -4882,6 +4889,7 @@ export default function ChatView(props: ChatViewProps) {
       current?.files !== expected?.files ||
       current?.queueEditingItemId !== expected?.queueEditingItemId ||
       current?.axiomWebEnabled !== expected?.axiomWebEnabled ||
+      current?.axiomCommand?.name !== expected?.axiomCommand?.name ||
       current?.axiomMcpRevision !== expected?.axiomMcpRevision
     )
       return;
@@ -4902,6 +4910,7 @@ export default function ChatView(props: ChatViewProps) {
     const retryComposerImages = snapshot.images.map(cloneComposerImageForRetry);
     const restored = restoreComposerDraftContentIfEmpty(composerDraftTarget, {
       prompt: snapshot.promptText,
+      ...(snapshot.axiomCommand !== undefined ? { axiomCommand: snapshot.axiomCommand } : {}),
       ...(snapshot.axiomWebEnabled !== undefined
         ? {
             axiomWebEnabled: snapshot.axiomWebEnabled,
@@ -5489,6 +5498,7 @@ export default function ChatView(props: ChatViewProps) {
         },
         modelSelection: item.modelSelection,
         ...(item.deliveryPriority !== undefined ? { deliveryPriority: item.deliveryPriority } : {}),
+        ...(item.axiomCommand !== undefined ? { axiomCommand: item.axiomCommand } : {}),
         ...(item.axiomWebEnabled !== undefined ? { axiomWebEnabled: item.axiomWebEnabled } : {}),
         ...(item.axiomMcpRevision !== undefined ? { axiomMcpRevision: item.axiomMcpRevision } : {}),
         titleSeed: queuedThread.title,
@@ -5635,7 +5645,12 @@ export default function ChatView(props: ChatViewProps) {
       snapshot.deliveryPriority === undefined ||
       (priorityAdmissionSession?.activeTurnId !== undefined &&
         canSteerPriorityToSession(snapshot, priorityAdmissionSession));
-    if (!activeProviderLiveSteerAvailable || phase !== "running" || !priorityMatchesSession) {
+    if (
+      snapshot.axiomCommand !== undefined ||
+      !activeProviderLiveSteerAvailable ||
+      phase !== "running" ||
+      !priorityMatchesSession
+    ) {
       if (!options?.queuedItem) {
         await enqueueFollowUpSnapshot(snapshot);
       }
@@ -5832,6 +5847,7 @@ export default function ChatView(props: ChatViewProps) {
       const receipt = await api.orchestration.dispatchCommand({
         type: "thread.turn.steer",
         commandId: commandIdForSend,
+        ...(snapshot.axiomCommand !== undefined ? { axiomCommand: snapshot.axiomCommand } : {}),
         ...(snapshot.axiomWebEnabled !== undefined
           ? { axiomWebEnabled: snapshot.axiomWebEnabled }
           : {}),
@@ -6082,6 +6098,7 @@ export default function ChatView(props: ChatViewProps) {
           context.computerUseEnabled,
           context.computerUseRevision,
           context.axiomWebEnabled,
+          context.axiomCommand,
           context.axiomMcpRevision,
           draft?.activeProvider,
           draft?.modelSelectionByProvider,
@@ -6380,6 +6397,7 @@ export default function ChatView(props: ChatViewProps) {
       phase: followUpQueuePhase,
       requestedSteer: snapshot.deliveryPriority !== undefined,
       liveSteerSupported:
+        snapshot.axiomCommand === undefined &&
         activeProviderLiveSteerAvailable &&
         canSteerPriorityToSession(snapshot, activeThread.session),
     });
@@ -6397,6 +6415,7 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (
+      snapshot.axiomCommand === undefined &&
       showPlanFollowUpPrompt &&
       activeProposedPlan &&
       snapshot.files.length === 0 &&
@@ -6647,6 +6666,7 @@ export default function ChatView(props: ChatViewProps) {
         type: "thread.turn.start",
         commandId: newCommandId(),
         threadId: threadIdForSend,
+        ...(snapshot.axiomCommand !== undefined ? { axiomCommand: snapshot.axiomCommand } : {}),
         ...(snapshot.axiomWebEnabled !== undefined
           ? { axiomWebEnabled: snapshot.axiomWebEnabled }
           : {}),
@@ -6698,6 +6718,7 @@ export default function ChatView(props: ChatViewProps) {
         !resend &&
         !turnStartSucceeded &&
         restoreComposerDraftContentIfEmpty(sendAttemptComposerDraftTarget, {
+          ...(snapshot.axiomCommand !== undefined ? { axiomCommand: snapshot.axiomCommand } : {}),
           ...(snapshot.axiomWebEnabled !== undefined
             ? {
                 axiomWebEnabled: snapshot.axiomWebEnabled,
@@ -6977,7 +6998,7 @@ export default function ChatView(props: ChatViewProps) {
     const delivery = decideFollowUpDelivery({
       phase: followUpQueuePhase,
       requestedSteer: true,
-      liveSteerSupported: activeProviderLiveSteerAvailable,
+      liveSteerSupported: snapshot.axiomCommand === undefined && activeProviderLiveSteerAvailable,
     });
     if (delivery === "send") {
       await onSend(e);
@@ -7168,7 +7189,7 @@ export default function ChatView(props: ChatViewProps) {
     updateManualStopBarrier(item.threadId, null);
     const action = decideQueuedFollowUpAction({
       phase: followUpQueuePhase,
-      liveSteerSupported: activeProviderLiveSteerAvailable,
+      liveSteerSupported: item.axiomCommand === undefined && activeProviderLiveSteerAvailable,
       canDispatchNow:
         followUpQueuePhase === "running"
           ? canActivateRunningFollowUpQueueAction
@@ -7306,6 +7327,7 @@ export default function ChatView(props: ChatViewProps) {
     if (
       !store.beginQueueEdit(composerDraftTarget, item.id, {
         prompt: item.promptText,
+        ...(item.axiomCommand !== undefined ? { axiomCommand: item.axiomCommand } : {}),
         ...(item.axiomWebEnabled !== undefined ? { axiomWebEnabled: item.axiomWebEnabled } : {}),
         ...(item.axiomMcpRevision !== undefined ? { axiomMcpRevision: item.axiomMcpRevision } : {}),
         images: item.images.map(cloneComposerImageForRetry),
@@ -7415,6 +7437,7 @@ export default function ChatView(props: ChatViewProps) {
     const replacement: FollowUpQueueItem = {
       ...original,
       ...snapshot,
+      axiomCommand: snapshot.provider === "axiom" ? snapshot.axiomCommand : undefined,
       axiomWebEnabled: snapshot.provider === "axiom" ? snapshot.axiomWebEnabled === true : false,
       ...(snapshot.provider === "axiom" && snapshot.axiomMcpRevision !== undefined
         ? { axiomMcpRevision: snapshot.axiomMcpRevision }

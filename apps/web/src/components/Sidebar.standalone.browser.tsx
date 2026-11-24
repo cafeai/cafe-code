@@ -12,6 +12,7 @@ import { page, userEvent } from "vitest/browser";
 import { useState } from "react";
 import { render } from "vitest-browser-react";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
+import { showContextMenu } from "../contextMenuView";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import type { SidebarThreadSummary } from "../types";
 import { buildStandaloneCatalog } from "./sidebar/standaloneNavigation.logic";
@@ -31,6 +32,7 @@ const mocks = vi.hoisted(() => ({
   duplicate: vi.fn(),
   deleteGroup: vi.fn(),
   showMenu: vi.fn(),
+  copyText: vi.fn<(value: string) => Promise<void>>(),
   confirm: vi.fn(),
 }));
 vi.mock("../hooks/useThreadActions", () => ({
@@ -56,6 +58,7 @@ vi.mock("../localApi", () => ({
   }),
 }));
 vi.mock("../threadRename", () => ({ renameThread: mocks.rename }));
+vi.mock("../lib/copyToClipboard", () => ({ copyTextToClipboard: mocks.copyText }));
 vi.mock("../hooks/useSettings", async () => {
   const { DEFAULT_UNIFIED_SETTINGS } = await import("@cafecode/contracts/settings");
   const settings = { ...DEFAULT_UNIFIED_SETTINGS, confirmThreadArchive: false };
@@ -101,7 +104,7 @@ function standaloneFixture(
   return { ...saved, id: ThreadId.make(id), title, latestUserMessageAt, ...extra };
 }
 const draftId = DraftId.make("unsent-standalone-draft");
-let moveFixtureCleanup: (() => Promise<void>) | null = null;
+let menuFixtureCleanup: (() => Promise<void>) | null = null;
 beforeEach(async () => {
   await page.viewport(1100, 800);
   mocks.archive.mockReset();
@@ -116,6 +119,7 @@ beforeEach(async () => {
   mocks.gitStatus.mockReturnValue({ data: null });
   mocks.duplicate.mockReset().mockResolvedValue(undefined);
   mocks.showMenu.mockReset().mockResolvedValue(undefined);
+  mocks.copyText.mockReset().mockResolvedValue(undefined);
   mocks.deleteGroup.mockReset().mockResolvedValue(undefined);
   mocks.confirm.mockReset().mockResolvedValue(true);
   useUiStateStore.setState({ expandedThreadGroupKeys: [] });
@@ -132,8 +136,8 @@ beforeEach(async () => {
     );
 });
 afterEach(async () => {
-  await moveFixtureCleanup?.();
-  moveFixtureCleanup = null;
+  await menuFixtureCleanup?.();
+  menuFixtureCleanup = null;
   const target = useThreadMoveDialogStore.getState().target;
   if (target) useThreadMoveDialogStore.getState().close(target);
   useThreadSelectionStore.getState().clearSelection();
@@ -181,7 +185,7 @@ async function setup(
 
 /** Retain late renders and native input through cancellation before the shared
  * sidebar stores are reset. Menu admission itself never changes the chat. */
-function createStandaloneMoveFixture(context: TestContext) {
+function createStandaloneMenuFixture(context: TestContext, closeMenu?: () => Promise<void>) {
   let retired = false;
   let rendering: ReturnType<typeof setup> | undefined;
   let completion: Promise<void> | undefined;
@@ -190,6 +194,7 @@ function createStandaloneMoveFixture(context: TestContext) {
     retired = true;
     return (completion ??= Promise.resolve().then(async () => {
       await Promise.allSettled([...pending]);
+      await closeMenu?.();
       const mounted = await rendering?.catch(() => null);
       await mounted?.screen.unmount();
       context.signal.removeEventListener("abort", retire);
@@ -200,21 +205,21 @@ function createStandaloneMoveFixture(context: TestContext) {
   };
   context.signal.addEventListener("abort", retire, { once: true });
   context.onTestFinished(cleanup);
-  moveFixtureCleanup = cleanup;
+  menuFixtureCleanup = cleanup;
   if (context.signal.aborted) retire();
   return {
-    async mount(source: SidebarThreadSummary) {
-      if (retired) throw new Error("Move menu fixture retired");
-      rendering = setup([source]);
+    async mount(threads: readonly SidebarThreadSummary[], activeThread?: SidebarThreadSummary) {
+      if (retired) throw new Error("Standalone menu fixture retired");
+      rendering = setup(threads, activeThread);
       const mounted = await rendering;
       if (retired) {
         await cleanup();
-        throw new Error("Move menu fixture retired");
+        throw new Error("Standalone menu fixture retired");
       }
       return mounted;
     },
     async input(operation: () => Promise<unknown>) {
-      if (retired) throw new Error("Move menu fixture retired");
+      if (retired) throw new Error("Standalone menu fixture retired");
       const promise = operation();
       pending.add(promise);
       try {
@@ -330,12 +335,36 @@ describe("agent-created thread groups", () => {
 });
 
 describe("standalone Chats catalog", () => {
+  it("copies the ID of the right-clicked chat while another chat is active", async (context) => {
+    let menu: Promise<string | null> | undefined;
+    const owner = createStandaloneMenuFixture(context, async () => {
+      if (!menu) return;
+      await showContextMenu([]);
+      await menu;
+    });
+    const source = standaloneFixture("copy-source", "Chat to copy", "2026-09-03T00:00:00Z");
+    const { screen, onOpen } = await owner.mount([saved, source], saved);
+    mocks.showMenu.mockImplementationOnce((items, position) => {
+      menu = showContextMenu(items, position);
+      return menu;
+    });
+    await owner.input(() =>
+      screen.getByTestId(`thread-row-${source.id}`).click({ button: "right" }),
+    );
+    expect(mocks.copyText).not.toHaveBeenCalled();
+    await owner.input(() =>
+      page.getByRole("menuitem", { name: "Copy chat ID", exact: true }).click(),
+    );
+    await owner.input(() => expect.poll(() => mocks.copyText.mock.calls).toEqual([[source.id]]));
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
   it.for([false, true])(
     "admits the exact saved chat's project chooser only when idle (busy=%s)",
     async (busy, context) => {
-      const owner = createStandaloneMoveFixture(context);
+      const owner = createStandaloneMenuFixture(context);
       const source = { ...saved, hasPendingUserInput: busy };
-      const { screen, onOpen, onNewChat } = await owner.mount(source);
+      const { screen, onOpen, onNewChat } = await owner.mount([source]);
       mocks.showMenu.mockResolvedValueOnce("move");
       await owner.input(() =>
         screen.getByTestId(`thread-row-${source.id}`).click({ button: "right" }),

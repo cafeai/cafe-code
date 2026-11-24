@@ -50,6 +50,12 @@ import {
   type CafeMcpTool,
 } from "./cafeMcpPresentation";
 import {
+  readWebMcpInvocation,
+  webMcpHistoryTitle,
+  type WebMcpHistoryAction,
+  type WebMcpInvocation,
+} from "./webMcpPresentation";
+import {
   readClaudeCommandInspection,
   readProviderPublicSummary,
   mergeClaudeCommandInspections,
@@ -120,6 +126,7 @@ export interface WorkLogEntry {
   displayToolTitle?: string;
   /** Fixed presentation from observed MCP lifecycle metadata, never authority. */
   cafeMcp?: CafeMcpHistoryAction;
+  webMcp?: WebMcpHistoryAction;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
   /** Explicit bounded public presentation, never arbitrary native payloads. */
@@ -167,6 +174,7 @@ export function workLogDisplayLabel(entry: WorkLogEntry): string {
 
 export function workLogDisplayToolTitle(entry: WorkLogEntry): string | undefined {
   if (entry.cafeMcp) return cafeMcpHistoryTitle(entry.cafeMcp);
+  if (entry.webMcp) return webMcpHistoryTitle(entry.webMcp);
   // Resolve the current canonical lifecycle result after folding. Storing only
   // the start's display title would survive a later canonical completion.
   return (
@@ -210,6 +218,7 @@ interface DerivedWorkLogEntry extends WorkLogEntry {
   diagnosticEchoKey?: string;
   cafeMcpTool?: CafeMcpTool | null;
   cafeMcpFailed?: boolean;
+  webMcpInvocation?: WebMcpInvocation | null;
 }
 
 export interface PendingApproval {
@@ -972,6 +981,7 @@ export function deriveWorkLogEntries(
       diagnosticEchoKey: _diagnosticEchoKey,
       cafeMcpTool,
       cafeMcpFailed,
+      webMcpInvocation,
       ...entry
     }) => ({
       ...entry,
@@ -981,6 +991,20 @@ export function deriveWorkLogEntries(
               tool: cafeMcpTool,
               state:
                 cafeMcpFailed || operationStatus === "failed" || entry.tone === "error"
+                  ? ("failed" as const)
+                  : activityKind === "tool.completed" || operationStatus === "completed"
+                    ? ("completed" as const)
+                    : ("running" as const),
+            },
+          }
+        : {}),
+      ...(webMcpInvocation
+        ? {
+            webMcp: {
+              action: webMcpInvocation.action ?? "browse",
+              ...(webMcpInvocation.preview ? { preview: webMcpInvocation.preview } : {}),
+              state:
+                webMcpInvocation.failed || operationStatus === "failed" || entry.tone === "error"
                   ? ("failed" as const)
                   : activityKind === "tool.completed" || operationStatus === "completed"
                     ? ("completed" as const)
@@ -1601,6 +1625,8 @@ function toDerivedWorkLogEntry(
     entry.cafeMcpTool = cafeMcp.tool;
     entry.cafeMcpFailed = cafeMcp.failed;
   }
+  const webMcpInvocation = readWebMcpInvocation(payload);
+  if (webMcpInvocation !== undefined) entry.webMcpInvocation = webMcpInvocation;
   if (itemType === "web_search") {
     const nativeToolName = asRecord(payload?.data)?.nativeToolName;
     if (nativeToolName === "web_search") entry.displayToolTitle = uiText("Searched the web");
@@ -1919,10 +1945,22 @@ function mergeDerivedWorkLogEntries(
       : next.itemType && next.itemType !== previous.itemType
         ? null
         : previous.cafeMcpTool;
+  const webMcpInvocation =
+    next.webMcpInvocation === undefined
+      ? next.itemType && next.itemType !== previous.itemType
+        ? null
+        : previous.webMcpInvocation
+      : next.webMcpInvocation === null
+        ? null
+        : {
+            ...(next.webMcpInvocation.action === undefined ? previous.webMcpInvocation : {}),
+            ...next.webMcpInvocation,
+          };
   return {
     ...previousCanonical,
     ...next,
     ...(cafeMcpTool !== undefined ? { cafeMcpTool } : {}),
+    ...(webMcpInvocation !== undefined ? { webMcpInvocation } : {}),
     ...(displayToolTitle !== undefined ? { displayToolTitle } : {}),
     ...(detail ? { detail } : {}),
     ...(command ? { command } : {}),

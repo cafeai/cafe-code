@@ -42,7 +42,7 @@ describe("DesktopArtifactAudit", () => {
         "provider: github\nowner: cafeai\nrepo: cafe-code\n",
       );
       await writeFile(join(root, "mac-dictation-target"), "synthetic native helper");
-      await writeFile(join(root, "mac-glide"), "synthetic Glide helper");
+      await writeFile(join(root, "mac-glide-tray"), "synthetic computer-use status");
       await writeFile(join(root, "mac-keep-awake"), "synthetic keep-awake helper");
       for (const locale of ["en", "ja", "ko"]) {
         await mkdir(join(root, `${locale}.lproj`));
@@ -55,9 +55,9 @@ describe("DesktopArtifactAudit", () => {
       await rm(join(root, "mac-keep-awake"));
       assert.isFalse(await auditPackagedDesktopArtifact(root, "darwin"));
       await writeFile(join(root, "mac-keep-awake"), "synthetic keep-awake helper");
-      await rm(join(root, "mac-glide"));
+      await rm(join(root, "mac-glide-tray"));
       assert.isFalse(await auditPackagedDesktopArtifact(root, "darwin"));
-      await writeFile(join(root, "mac-glide"), "synthetic Glide helper");
+      await writeFile(join(root, "mac-glide-tray"), "synthetic computer-use status");
       assert.isFalse(await auditPackagedDesktopArtifact(root, "linux"));
       await writeFile(join(root, "extra-resource.txt"), "unexpected");
       assert.isFalse(await auditPackagedDesktopArtifact(root, "darwin"));

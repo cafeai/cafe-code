@@ -199,6 +199,35 @@ describe("buildCodexAppServerArgs", () => {
 });
 describe("buildTurnStartParams", () => {
   it.each(["default", "plan"] as const)(
+    "refreshes the session's current secret runner in %s developer context without changing the user's send",
+    (interactionMode) => {
+      const input = {
+        threadId: "native-secret-resume",
+        runtimeMode: "approval-required" as const,
+        prompt: "Continue with [CAFE_SECRET_0123456789abcdef0123456789abcdef]",
+        model: "gpt-6.1-sol",
+        effort: "high" as const,
+        interactionMode,
+      };
+      const baseline = Effect.runSync(buildTurnStartParams(input));
+      const guidance = "\n\nCurrent private runner: /synthetic/current/connection.json";
+      const refreshed = Effect.runSync(
+        buildTurnStartParams({ ...input, secretRunnerInstructions: guidance }),
+      );
+      assert.deepEqual(refreshed, {
+        ...baseline,
+        collaborationMode: {
+          ...baseline.collaborationMode,
+          settings: {
+            ...baseline.collaborationMode!.settings,
+            developer_instructions:
+              baseline.collaborationMode!.settings.developer_instructions + guidance,
+          },
+        },
+      });
+    },
+  );
+  it.each(["default", "plan"] as const)(
     "appends conditional visualization discovery without replacing %s mode or turn authority",
     (interactionMode) => {
       const input = {
@@ -266,6 +295,12 @@ describe("buildTurnStartParams", () => {
     assert.equal(baseline.collaborationMode, undefined);
     assert.deepEqual(
       Effect.runSync(buildTurnStartParams({ ...input, visualizationInstructions: true })),
+      baseline,
+    );
+    assert.deepEqual(
+      Effect.runSync(
+        buildTurnStartParams({ ...input, secretRunnerInstructions: "Current helper" }),
+      ),
       baseline,
     );
   });

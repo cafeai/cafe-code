@@ -149,7 +149,7 @@ describe("getComposerProviderState", () => {
         prompt: "",
         modelOptions,
       });
-      expect(state.traitsTriggerLabel).toBe("Standard");
+      expect(state.traitsTriggerLabel).toBeNull();
       expect(state.modelOptionsForDispatch).toEqual(selections(["serviceTier", "default"]));
     }
     // A saved choice, rather than the catalogue's order/current value, grants
@@ -178,7 +178,7 @@ describe("getComposerProviderState", () => {
     ]);
     const enabled = getComposerProviderState({ ...input, models: modelWith([descriptor]) });
     expect(enabled.modelOptionsForDispatch).toEqual(input.modelOptions);
-    expect(enabled.traitsTriggerLabel).toBe("Daybreak Blue");
+    expect(enabled.traitsTriggerLabel).toBeNull();
     const lost = getComposerProviderState({ ...input, models: modelWith([]) });
     expect(lost.modelOptionsForDispatch).toEqual(input.modelOptions);
     expect(lost.traitsTriggerLabel).toBeNull();
@@ -230,7 +230,7 @@ describe("getComposerProviderState", () => {
     expect(state).toEqual({
       provider: PROVIDER,
       promptEffort: "low",
-      traitsTriggerLabel: "Low · Fast",
+      traitsTriggerLabel: "Low",
       modelOptionsForDispatch: selections(["effort", "low"], ["fastMode", true]),
     });
   });
@@ -289,7 +289,7 @@ describe("getComposerProviderState", () => {
     });
 
     expect(state.promptEffort).toBe("high");
-    expect(state.traitsTriggerLabel).toBe("High · 200k · Plan");
+    expect(state.traitsTriggerLabel).toBe("High");
     expect(state.modelOptionsForDispatch).toEqual(
       selections(["effort", "high"], ["contextWindow", "200k"], ["agent", "plan"]),
     );

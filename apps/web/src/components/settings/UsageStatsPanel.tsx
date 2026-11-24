@@ -22,34 +22,22 @@ import { formatGeneratingTime } from "./usageStatsPresentation";
 
 const integerFormat = new Intl.NumberFormat("en-US");
 
-/**
- * Between detailed server snapshots, project the generating-time counter forward
- * at `activeSessionCount` seconds per second (three concurrent sessions tick
- * 3x). Token/chat counters hold the same atomic detail as the cost panels.
- * Within a period time never runs backwards: a projection overshoot is absorbed
- * by holding the counter until the true total catches up.
- */
+/** Combine a selected range with the latest server observation of today's time. */
 function useLiveTotals(
   snapshot: UsageStatsSnapshot | null,
   live: UsageStatsSnapshot | null,
   range: UsageRangeKey,
 ) {
-  const [nowMs, setNowMs] = useState(() => Date.now());
   const displayedTimeFloor = useRef({ scope: "", value: 0 });
   const displayedTodayFloor = useRef({ day: "", value: 0 });
-
-  useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 250);
-    return () => clearInterval(id);
-  }, []);
 
   if (snapshot === null) {
     return null;
   }
   // Counts and attribution must come from one detailed response. The fast
   // stream has no model/day ledger, so using its token counts would mix newer
-  // aggregate totals with older costs. It supplies only current activity;
-  // a fresher detailed response always wins over a stale live event.
+  // aggregate totals with older costs. A newer live event can update today's
+  // generating time and active status independently of those counts.
   const activity = live !== null && live.asOfMs > snapshot.asOfMs ? live : snapshot;
   const scope = `${range}:${snapshot.today.day}`;
   if (displayedTimeFloor.current.scope !== scope) {
@@ -63,27 +51,21 @@ function useLiveTotals(
   if (displayedTodayFloor.current.day !== snapshot.today.day) {
     displayedTodayFloor.current = { day: snapshot.today.day, value: 0 };
   }
-  // Apply observed same-day generation before projecting from the live event's
-  // own timestamp. Projecting a newly increased session count all the way from
-  // an older detail read would retroactively charge those sessions for time
-  // when they were not running. Across server midnight, wait for the next
-  // detailed calendar anchor rather than charging the new day to the old cell.
-  const sameDay = activity.today.day === snapshot.today.day;
-  const observedMs = sameDay
-    ? Math.max(0, activity.today.generatingMs - snapshot.today.generatingMs)
-    : 0;
-  const extrapolatedMs =
-    sameDay && activity.collectionEnabled && activity.activeSessionCount > 0
-      ? Math.max(0, nowMs - activity.asOfMs) * activity.activeSessionCount
+  // The server already includes time from active turns in each observation.
+  // Add only the change to the current day already included in the range.
+  // At midnight the new day's activity waits for the detailed calendar anchor.
+  const observedMs =
+    activity.today.day === snapshot.today.day
+      ? Math.max(0, activity.today.generatingMs - snapshot.today.generatingMs)
       : 0;
   const todayGeneratingMs = Math.max(
     displayedTodayFloor.current.value,
-    snapshot.today.generatingMs + observedMs + extrapolatedMs,
+    snapshot.today.generatingMs + observedMs,
   );
   displayedTodayFloor.current.value = todayGeneratingMs;
   const generatingMs = Math.max(
     displayedTimeFloor.current.value,
-    snapshot.totals.generatingMs + observedMs + extrapolatedMs,
+    snapshot.totals.generatingMs + observedMs,
   );
   displayedTimeFloor.current.value = generatingMs;
   return {
@@ -255,9 +237,7 @@ export function UsageStatsPanel() {
                 bounds={activityBounds}
                 layout="responsive"
                 today={
-                  totals
-                    ? { ...initial.today, generatingMs: Math.round(totals.todayGeneratingMs) }
-                    : undefined
+                  totals ? { ...initial.today, generatingMs: totals.todayGeneratingMs } : undefined
                 }
               />
             ) : (

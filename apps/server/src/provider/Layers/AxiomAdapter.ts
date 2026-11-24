@@ -401,9 +401,15 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* <Browser
         !ctx.replyFailed &&
         ctx.replyRequests.size > 0 &&
         [...ctx.replyRequests.values()].every(Boolean);
+      // A legacy native process may return end_turn after emitting only an
+      // uncorrelated error notice. Successful model work always has authenticated
+      // terminal request receipts; absence/failure is a failed turn, never a
+      // successful empty answer. Explicit local commands have no inference
+      // receipts and cancellation retains its distinct incomplete outcome.
+      const outcome = state === "completed" && !ctx.localCommand && !verified ? "failed" : state;
       yield* updateReport(ctx, {
         reply: {
-          state: verified ? "verified" : state === "failed" ? "failed" : "incomplete",
+          state: verified ? "verified" : outcome === "failed" ? "failed" : "incomplete",
           turnId: turn,
           modelId: ctx.session.model,
         },
@@ -413,7 +419,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* <Browser
       ctx.nativeTurn = undefined;
       ctx.session = {
         ...ctx.session,
-        status: state === "failed" || !ctx.accountValid ? "error" : "ready",
+        status: outcome === "failed" || !ctx.accountValid ? "error" : "ready",
         activeTurnId: undefined,
         updatedAt: yield* now,
       };
@@ -424,10 +430,10 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* <Browser
         threadId: ctx.session.threadId,
         turnId: turn,
         payload: {
-          state,
+          state: outcome,
           resumeCursor: ctx.session.resumeCursor,
           ...(stopReason ? { stopReason } : {}),
-          ...(state === "failed"
+          ...(outcome === "failed"
             ? { errorMessage: "Axiom could not complete this response." }
             : {}),
         },
@@ -1502,12 +1508,26 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* <Browser
               "sendTurn",
               "The selected Axiom account does not own this session.",
             );
-          const command = /^\s*\/([^\s]+)/u.exec(input.input ?? "")?.[1];
-          if (command && OWNED_COMMANDS.has(command))
-            return yield* invalid(
-              "sendTurn",
-              "Use Cafe's provider, model or verification controls for this native command.",
-            );
+          // Only an explicitly selected composer command can enter native
+          // application control. Ordinary pasted slash text stays model input.
+          const command = input.axiomCommand?.name;
+          if (command !== undefined) {
+            const advertised = yield* ctx.runtime.getAvailableCommands;
+            if (OWNED_COMMANDS.has(command))
+              return yield* invalid(
+                "sendTurn",
+                "Use Cafe's provider, model or verification controls for this native command.",
+              );
+            if (
+              /^\s*\/([^\s]+)/u.exec(input.input ?? "")?.[1] !== command ||
+              !advertised.some((entry) => entry.name === command) ||
+              input.attachments?.length
+            )
+              return yield* invalid(
+                "sendTurn",
+                "Select an available Axiom command without attachments before running it.",
+              );
+          }
           const selection = input.modelSelection ?? ctx.session.modelSelection;
           const modelId = selection?.model ?? ctx.session.model!;
           const model = ctx.models.find((entry) => entry.id === modelId);
@@ -1611,6 +1631,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* <Browser
           ctx.session = { ...ctx.session, resumeCursor: resumeCursor(ctx) };
           const mcp = yield* native(ctx, "desktop/mcp", readMcpState(ctx.runtime, ctx.nativeId));
           if (
+            command === undefined &&
             (input.interactionMode ?? ctx.session.interactionMode) !== "plan" &&
             (mcp.revision !== (input.axiomMcpRevision ?? ctx.mcp.revision) ||
               (input.axiomMcpRevision === undefined && mcp.selectedTools.length > 0))
@@ -1627,7 +1648,7 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* <Browser
           ctx.completion = yield* Deferred.make<void>();
           ctx.pendingItems.clear();
           ctx.admittedItems.clear();
-          ctx.localCommand = input.input?.trimStart().startsWith("/") ?? false;
+          ctx.localCommand = command !== undefined;
           ctx.turn = turn;
           ctx.nativeTurn = undefined;
           ctx.replyChecked = false;
@@ -1674,21 +1695,28 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* <Browser
             }
             const result = yield* native(
               ctx,
-              "session/prompt",
-              ctx.runtime.prompt({
-                prompt: input.input ? [{ type: "text", text: input.input }] : [],
-                _meta: {
-                  axiom: {
-                    clientItemId,
-                    attachments,
-                    webEnabled,
-                    agentRevision: ctx.agentRevision,
-                    ...(ctx.session.interactionMode !== "plan"
-                      ? { mcpRevision: ctx.mcp.revision }
-                      : {}),
-                  },
-                },
-              }),
+              command === undefined ? "session/prompt" : "_axiom/session/command",
+              command !== undefined
+                ? ctx.runtime
+                    .request("_axiom/session/command", {
+                      sessionId: ctx.nativeId,
+                      command: input.input!,
+                    })
+                    .pipe(Effect.flatMap((value) => decodeAxiom(AcpSchema.PromptResponse, value)))
+                : ctx.runtime.prompt({
+                    prompt: input.input ? [{ type: "text", text: input.input }] : [],
+                    _meta: {
+                      axiom: {
+                        clientItemId,
+                        attachments,
+                        webEnabled,
+                        agentRevision: ctx.agentRevision,
+                        ...(ctx.session.interactionMode !== "plan"
+                          ? { mcpRevision: ctx.mcp.revision }
+                          : {}),
+                      },
+                    },
+                  }),
             );
             yield* ctx.runtime.finishPromptEvents;
             yield* lock(
@@ -1704,7 +1732,14 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* <Browser
             Effect.catchCause((cause) =>
               Cause.hasInterruptsOnly(cause)
                 ? Effect.void
-                : lock(input.threadId, settle(ctx, turn, "failed")),
+                : ctx.runtime.finishPromptEvents.pipe(
+                    Effect.andThen(
+                      lock(
+                        input.threadId,
+                        settle(ctx, turn, ctx.cancelRequested ? "cancelled" : "failed"),
+                      ),
+                    ),
+                  ),
             ),
             Effect.onInterrupt(() => Effect.void),
             Effect.ensuring(reconcileCosts(ctx)),
@@ -1718,6 +1753,11 @@ export const makeAxiomAdapter = Effect.fn("makeAxiomAdapter")(function* <Browser
     steerTurn: (input) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
+        if (input.axiomCommand)
+          return yield* invalid(
+            "steerTurn",
+            "Axiom commands require an idle conversation and cannot steer model work.",
+          );
         if (
           ctx.turn !== input.expectedTurnId ||
           !ctx.nativeTurn ||

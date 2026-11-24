@@ -17,7 +17,10 @@ import * as Layer from "effect/Layer";
 import { makeGlidePolicyStore } from "./policyStore.ts";
 import { ServerConfig } from "../config.ts";
 import { makeSessionMcpFiles, type SessionMcpFiles } from "../mcp/sessionFiles.ts";
-import { createGlideNativePeer, GlideNativeHost } from "./nativeHost.ts";
+import {
+  resolveOpenAiComputerInstallation,
+  type OpenAiComputerInstallation,
+} from "./openAiInstallation.ts";
 import { GlideActivity } from "./activity.ts";
 import { recordGlideTrayFailure } from "./diagnostics.ts";
 import { GlideCatalogueCapacityError, makeGlideCatalogueBudget } from "./catalogueBudget.ts";
@@ -29,14 +32,10 @@ import {
   glideExecutionFailure,
   GlideRuntime,
   validateGlideHelper,
-  glideChildEnvironment,
+  makeGlideExecutionLane,
+  type GlideRuntimeAuthority,
 } from "./runtime.ts";
-import {
-  installedAppSchema,
-  jsInputSchema,
-  GLIDE_FRAME_BYTES,
-  type CellResult,
-} from "./protocol.ts";
+import { jsInputSchema, GLIDE_FRAME_BYTES, type CellResult } from "./protocol.ts";
 
 export const GLIDE_OWNER_PATH = "/glide/session/operation";
 export interface GlideSessionBinding {
@@ -167,12 +166,12 @@ export async function dispatchGlideOwnerOperation(
 export async function resolveGlideHelper(): Promise<string | undefined> {
   if (process.platform !== "darwin") return undefined;
   const candidates = [
-    resolve(dirname(process.execPath), "../Resources/mac-glide"),
+    resolve(dirname(process.execPath), "../Resources/mac-glide-tray"),
     fileURLToPath(
       new URL(
         import.meta.url.endsWith(".ts")
-          ? `../../../desktop/native/build/${process.arch}/mac-glide`
-          : `../../desktop/native/build/${process.arch}/mac-glide`,
+          ? `../../../desktop/native/build/${process.arch}/mac-glide-tray`
+          : `../../desktop/native/build/${process.arch}/mac-glide-tray`,
         import.meta.url,
       ),
     ),
@@ -199,6 +198,7 @@ const hostAppSchema = z
 export type GlideHostApp = z.infer<typeof hostAppSchema>;
 const statusSchema = z
   .object({
+    permissionsManagedBy: z.literal("openai").optional(),
     accessibility: z.boolean(),
     screenRecording: z.boolean(),
     osMajorVersion: z.number().int().positive().max(1000).optional(),
@@ -218,14 +218,10 @@ const statusSchema = z
   })
   .strict();
 export type GlideNativeStatus = z.infer<typeof statusSchema>;
-export async function readGlideStatus(helperPath: string): Promise<GlideNativeStatus> {
-  try {
-    return await readGlideStatusMode(helperPath, ["--status", "--with-host"]);
-  } catch {
-    // A helper built before host identity rejects the additive flag; its
-    // original permission/inventory report remains authoritative.
-    return readGlideStatusMode(helperPath, ["--status"]);
-  }
+export async function readGlideStatus(_helperPath: string): Promise<GlideNativeStatus> {
+  // OpenAI owns OS permission setup. Unknown permissions remain false; this
+  // declaration selects its native setup flow, never attests a TCC grant.
+  return { permissionsManagedBy: "openai", accessibility: false, screenRecording: false, apps: [] };
 }
 
 /** The outermost `.app` bundle containing an executable, or undefined for a
@@ -243,70 +239,11 @@ export function glideHostAppFromExecutable(executablePath: string): GlideHostApp
   return parsed.success ? parsed.data : undefined;
 }
 
-function readGlideStatusMode(helperPath: string, args: readonly string[]) {
-  return new Promise<GlideNativeStatus>((yes, no) => {
-    execFile(
-      helperPath,
-      [...args],
-      {
-        timeout: 5000,
-        maxBuffer: 256 * 1024,
-        encoding: "utf8",
-        shell: false,
-        env: glideChildEnvironment(process.env),
-      },
-      (error, stdout) => {
-        if (error) {
-          no(new Error("Glide permission status is unavailable."));
-          return;
-        }
-        try {
-          yes(statusSchema.parse(JSON.parse(stdout)));
-        } catch {
-          no(new Error("Glide permission status is unavailable."));
-        }
-      },
-    );
-  });
-}
-
-export async function resolveGlideInstalledApp(helperPath: string, selector: string) {
-  return new Promise<z.infer<typeof installedAppSchema>>((yes, no) => {
-    // Fixed read-only helper mode and structured argv: resolving an installation
-    // neither launches an app nor expands any session's desktop/app grant.
-    execFile(
-      helperPath,
-      ["--resolve-app", selector],
-      {
-        timeout: 5000,
-        maxBuffer: 4096,
-        encoding: "utf8",
-        shell: false,
-        env: glideChildEnvironment(process.env),
-      },
-      (error, stdout) => {
-        if (error) {
-          no(
-            new Error(
-              "Installed application could not be resolved. Use its exact bundle ID or .app path.",
-            ),
-          );
-          return;
-        }
-        try {
-          yes(installedAppSchema.parse(JSON.parse(stdout)));
-        } catch {
-          no(new Error("Installed application metadata is unavailable."));
-        }
-      },
-    );
-  });
-}
-
 /** Provider-owner authority. Tokens and session IDs are server minted; model
  * calls never accept a chat ID, app grant, helper path or foreground switch. */
 export function makeGlideSessionRuntime(options: {
   helperPath?: string;
+  installation?: OpenAiComputerInstallation;
   bridgeSource: string;
   mcpPort: number;
   readPolicy(threadId: string): Promise<Policy>;
@@ -326,24 +263,18 @@ export function makeGlideSessionRuntime(options: {
   ) => GlideTrayHost;
   openCafe?: () => Promise<void>;
   applicationName?: string;
-  nativeHost?: GlideNativeHost;
   status?: (helperPath: string) => Promise<GlideNativeStatus>;
   /** Fallback host executable; defaults to this process's executable. */
   hostExecutablePath?: string;
   /** Reveals a server-derived bundle path; tests replace the native opener. */
   reveal?: (path: string) => Promise<void>;
   runtimeFactory?: (
-    bridge: ReturnType<GlideNativeHost["attach"]>,
+    authority: GlideRuntimeAuthority,
     apps: readonly string[],
-  ) => Pick<GlideRuntime, "execute" | "reset" | "close">;
+  ) => Pick<GlideRuntime, "execute" | "reset" | "close"> & Partial<Pick<GlideRuntime, "endTurn">>;
 }) {
-  const host =
-    options.nativeHost ??
-    new GlideNativeHost(
-      (apps, installations) => createGlideNativePeer(options.helperPath!, apps, installations),
-      async () => (await (options.status ?? readGlideStatus)(options.helperPath!)).apps,
-      (selector) => resolveGlideInstalledApp(options.helperPath!, selector),
-    );
+  const available = !!options.helperPath && (!!options.installation || !!options.runtimeFactory);
+  const withLane = makeGlideExecutionLane();
   interface Binding {
     id: string;
     tokenDigest: string;
@@ -360,8 +291,8 @@ export function makeGlideSessionRuntime(options: {
     runningTurn?: string;
     disposal?: Promise<void>;
     retirement?: Promise<void>;
-    runtime?: Pick<GlideRuntime, "execute" | "reset" | "close">;
-    bridge?: ReturnType<GlideNativeHost["attach"]>;
+    runtime?: Pick<GlideRuntime, "execute" | "reset" | "close"> &
+      Partial<Pick<GlideRuntime, "endTurn">>;
   }
   const bindings = new Map<string, Binding>();
   const current = new Map<string, Binding>();
@@ -541,18 +472,12 @@ export function makeGlideSessionRuntime(options: {
     await binding.runtime?.reset();
   };
   const discardKernel = (binding: Binding): Promise<void> => {
-    const kernel = binding.runtime,
-      bridge = binding.bridge;
-    if (!kernel && !bridge) return binding.retirement ?? Promise.resolve();
+    const kernel = binding.runtime;
+    if (!kernel) return binding.retirement ?? Promise.resolve();
     delete binding.runtime;
-    delete binding.bridge;
     binding.retiring = true;
     binding.retirement = (async () => {
-      const results = await Promise.allSettled([
-        binding.retirement,
-        kernel?.close(),
-        bridge?.close(),
-      ]);
+      const results = await Promise.allSettled([binding.retirement, kernel?.close()]);
       if (results.some((result) => result.status === "rejected")) {
         retirementFailed = true;
         blocked = true;
@@ -605,7 +530,7 @@ export function makeGlideSessionRuntime(options: {
     close(): Promise<void>;
   } = {
     async bind(input) {
-      if (closed || !options.helperPath) return undefined;
+      if (closed || !available) return undefined;
       // Reserve publication ownership synchronously before reading the bridge.
       // At most thirty-two bounded source reads may overlap, while idle
       // catalogues are charged to their separate retained resource budget.
@@ -719,6 +644,13 @@ export function makeGlideSessionRuntime(options: {
                 event.turnId !== undefined &&
                 event.turnId === binding.runningTurn)
             ) {
+              const turn = binding.runningTurn;
+              const native = binding.runtime;
+              if (turn && native?.endTurn)
+                void native.endTurn(turn).catch(() => {
+                  if (binding.runtime === native)
+                    void discardKernel(binding).catch(() => undefined);
+                });
               binding.revision++;
               delete binding.runningTurn;
               if (binding.busy) activity.stop(binding.id);
@@ -761,7 +693,7 @@ export function makeGlideSessionRuntime(options: {
       if (closed) throw denied();
       if (operation.kind === "initialize-thread") {
         if (
-          !options.helperPath ||
+          !available ||
           !options.initializePolicy ||
           stopping ||
           retirementFailed ||
@@ -871,13 +803,17 @@ export function makeGlideSessionRuntime(options: {
               if (
                 input.enabled &&
                 (!policy.fullAccess ||
-                  !options.helperPath ||
+                  !available ||
                   (input.action === "configure" && !input.apps.length))
               )
                 throw denied();
               if (input.action === "set-enabled" && input.enabled) {
                 const permissions = await (options.status ?? readGlideStatus)(options.helperPath!);
-                if (!permissions.accessibility || !permissions.screenRecording) throw denied();
+                if (
+                  permissions.permissionsManagedBy !== "openai" &&
+                  (!permissions.accessibility || !permissions.screenRecording)
+                )
+                  throw denied();
               }
               if (generation !== epoch || stopping) throw denied();
               await options.writePolicy(
@@ -964,7 +900,8 @@ export function makeGlideSessionRuntime(options: {
           ...(status?.osMajorVersion !== undefined
             ? { osMajorVersion: status.osMajorVersion }
             : {}),
-          available: !!options.helperPath,
+          available,
+          permissionsManagedBy: status?.permissionsManagedBy ?? "openai",
           connected: !!binding?.active && !binding.revoked,
           enabled: policy.enabled,
           fullAccess: policy.fullAccess,
@@ -977,8 +914,8 @@ export function makeGlideSessionRuntime(options: {
             name: app.name,
             bundleId: app.bundleId,
           })),
-          message: !options.helperPath
-            ? "Glide requires the macOS desktop helper."
+          message: !available
+            ? "Install a supported OpenAI desktop runtime and its Computer Use component."
             : !policy.fullAccess
               ? "Select Full access to use Glide."
               : !binding?.active
@@ -1007,16 +944,16 @@ export function makeGlideSessionRuntime(options: {
         } satisfies CellResult;
       }
       if (!binding.runtime) {
-        // Four bounded 256 MiB workers per provider owner. Explicit permission
-        // changes/disposal free a slot; never silently evict another chat's state.
+        // Four runtime owners, each with bounded Node heaps. An OpenAI owner
+        // can contain several processes; this is not an aggregate RAM limit.
         if ([...bindings.values()].filter((item) => item.runtime || item.retiring).length >= 4)
           throw new GlideError({
             message:
               "Four Glide kernels are already open. Disable Glide in another chat to free one.",
           });
-        binding.bridge = host.attach(
-          binding.id,
-          async () => {
+        let latestOperation = 0;
+        const authority: GlideRuntimeAuthority = {
+          authorize: async () => {
             const authorized = await requireBinding(operation.token, true);
             return {
               apps: authorized.policy.apps,
@@ -1024,20 +961,29 @@ export function makeGlideSessionRuntime(options: {
               current: authorized.live,
             };
           },
-          async (event) => {
-            if (event.phase !== "end") await requireBinding(operation.token, true);
-            if (event.phase === "start" && threadOwners.get(binding.threadId) !== binding.id)
-              await grant(binding.threadId, binding);
-            activity.event(binding.id, event);
+          activity: async (event) => {
+            if (event) {
+              await requireBinding(operation.token, true);
+              if (threadOwners.get(binding.threadId) !== binding.id)
+                await grant(binding.threadId, binding);
+              latestOperation = event.operation;
+              activity.event(binding.id, {
+                phase: "start",
+                ...event,
+              });
+            } else if (latestOperation)
+              activity.event(binding.id, { phase: "end", operation: latestOperation });
             if (!closed) await publish();
           },
-        );
+        };
         binding.runtime =
-          options.runtimeFactory?.(binding.bridge, policy.apps) ??
+          options.runtimeFactory?.(authority, policy.apps) ??
           new GlideRuntime({
-            helperPath: options.helperPath!,
-            allowedApps: policy.apps,
-            nativeBridge: binding.bridge,
+            installation: options.installation!,
+            authority,
+            sessionId: binding.id,
+            turnId: () => binding.runningTurn,
+            withLane,
           });
       }
       if (!live() || signal?.aborted) throw denied();
@@ -1046,8 +992,8 @@ export function makeGlideSessionRuntime(options: {
         try {
           return await binding.runtime.execute(operation.input, signal);
         } catch (error) {
-          // Keep bounded owned receipts inside the authenticated result body so
-          // daemon/supervisor JSON transports do not erase them as opaque errors.
+          // Keep bounded failure guidance in the authenticated result body;
+          // no synthetic native action or application-result receipts.
           if (error instanceof GlideExecutionError) return glideExecutionFailure(error);
           throw error;
         }
@@ -1072,7 +1018,7 @@ export function makeGlideSessionRuntime(options: {
           if (closed.some((result) => result.status === "rejected")) throw denied();
         }),
       );
-      const nativeClosures = await Promise.allSettled([host.close(), tray?.close()]);
+      const nativeClosures = await Promise.allSettled([tray?.close()]);
       bindings.clear();
       current.clear();
       if (
@@ -1148,8 +1094,10 @@ export const GlideSessionRuntimeLive = Layer.effectDiscard(
     const context = yield* Effect.context<never>();
     const run = Effect.runPromiseWith(context);
     const helperPath = yield* Effect.promise(resolveGlideHelper);
+    const installation = yield* Effect.promise(resolveOpenAiComputerInstallation);
     const runtime = makeGlideSessionRuntime({
       ...(helperPath ? { helperPath } : {}),
+      ...(installation ? { installation } : {}),
       mcpPort: config.cafeMcpPort ?? config.port,
       bridgeSource: fileURLToPath(
         new URL(

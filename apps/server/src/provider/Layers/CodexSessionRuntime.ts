@@ -82,6 +82,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -496,6 +497,9 @@ export function buildCodexAppServerArgs(
 
 export interface CodexSessionRuntimeOptions {
   readonly customInstructions?: string | undefined;
+  /** Current private binding only; refreshes native context on resume without
+   * changing user input or conferring execution/approval authority. */
+  readonly secretRunnerInstructions?: string | undefined;
   readonly visualizationMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   readonly glideMcp?: Pick<SchedulingSessionBinding, "name" | "launch"> | undefined;
   /** Exact Cafe chat/account-bound durable guard; never a native history writer. */
@@ -1745,6 +1749,7 @@ function runtimeModeToTurnSandboxPolicy(
 }
 
 function buildCodexCollaborationMode(input: {
+  readonly secretRunnerInstructions?: string | undefined;
   readonly visualizationInstructions?: boolean;
   readonly interactionMode?: ProviderInteractionMode;
   readonly model?: string;
@@ -1771,12 +1776,14 @@ function buildCodexCollaborationMode(input: {
           : CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS) +
         (input.visualizationInstructions
           ? `\n\n${CODEX_VISUALIZATION_DISCOVERY_INSTRUCTIONS}`
-          : ""),
+          : "") +
+        (input.secretRunnerInstructions ?? ""),
     },
   };
 }
 
 export function buildTurnStartParams(input: {
+  readonly secretRunnerInstructions?: string | undefined;
   readonly visualizationInstructions?: boolean;
   readonly cyberAccessProgram?: EffectCodexSchema.V2TurnStartParams__CyberAccessProgram;
   readonly threadId: string;
@@ -1822,6 +1829,7 @@ export function buildTurnStartParams(input: {
     );
   }
   const collaborationMode = buildCodexCollaborationMode({
+    secretRunnerInstructions: input.secretRunnerInstructions,
     ...(input.visualizationInstructions ? { visualizationInstructions: true } : {}),
     ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
     ...(input.model ? { model: input.model } : {}),
@@ -9473,6 +9481,49 @@ export const makeCodexSessionRuntime = (
       // before any caller can submit into it. The resume preflight remains the
       // required gate before an existing native thread is materialized.
       const historyBlocked = yield* historySafety.isBlocked(providerThreadId);
+      if (
+        !historyBlocked &&
+        resumeThreadId === providerThreadId &&
+        options.secretRunnerInstructions
+      ) {
+        // Codex 0.169.0 thread_processor.rs ignores developerInstructions on
+        // an already-loaded resume. Its turn_processor.rs thread/inject_items
+        // appends a developer item to the exact thread without starting work.
+        // Refresh once before ready, including resumed active turns; never
+        // replay an uncertain acknowledgement or revive an old connection.
+        if (yield* Ref.get(closedRef))
+          return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+            "The Codex session retired before its Secrets context could be refreshed.",
+          );
+        yield* client
+          .request("thread/inject_items", {
+            threadId: providerThreadId,
+            items: [
+              {
+                type: "message",
+                role: "developer",
+                content: [{ type: "input_text", text: options.secretRunnerInstructions }],
+              },
+            ],
+          })
+          .pipe(
+            // Older/declining native runtimes must keep reference-free work
+            // available. Normal explicitly selected modes also carry current
+            // guidance below; this warning grants no adoption or retry proof.
+            Effect.catch(() =>
+              Effect.logWarning("Cafe Secrets resume guidance could not be confirmed."),
+            ),
+            // The protocol reader's scope alone does not own an external
+            // caller awaiting an RPC reply. Stop must cancel and join this
+            // exact refresh, including a peer that never acknowledges it.
+            Effect.forkIn(runtimeScope),
+            Effect.flatMap(Fiber.join),
+          );
+        if (yield* Ref.get(closedRef))
+          return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+            "The Codex session retired while refreshing its Secrets context.",
+          );
+      }
       yield* Ref.update(reasoningEffortSnapshotRef, (current) =>
         observeCodexThreadOpenReasoningEffort({ current, opened }),
       );
@@ -9902,6 +9953,7 @@ export const makeCodexSessionRuntime = (
               | undefined,
           ) =>
             buildTurnStartParams({
+              secretRunnerInstructions: options.secretRunnerInstructions,
               ...(options.visualizationMcp ? { visualizationInstructions: true } : {}),
               threadId: providerThreadId,
               cwd: options.cwd,

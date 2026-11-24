@@ -32,6 +32,14 @@ export function glidePermissionsGranted(
   return status?.accessibility === true && status.screenRecording === true;
 }
 
+/** The native OpenAI component presents its own OS setup. This never attests
+ * an Accessibility or Screen Recording grant to Cafe. */
+export function glideUsesNativePermissionSetup(
+  status: Pick<GlideControlResult, "permissionsManagedBy"> | undefined,
+): boolean {
+  return status?.permissionsManagedBy === "openai";
+}
+
 export type GlideClickIntent = "refresh" | "setup" | "toggle";
 
 /**
@@ -47,7 +55,9 @@ export function glideClickIntent(input: {
 }): GlideClickIntent {
   if (input.enabled) return "toggle";
   if (input.error) return "refresh";
-  return glidePermissionsGranted(input.status) ? "toggle" : "setup";
+  return glideUsesNativePermissionSetup(input.status) || glidePermissionsGranted(input.status)
+    ? "toggle"
+    : "setup";
 }
 
 export function glideButtonDisabled(input: {

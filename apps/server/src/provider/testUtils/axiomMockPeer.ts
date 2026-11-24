@@ -1,4 +1,5 @@
 import * as ProviderDateTime from "effect/DateTime";
+import { axiomContractInitializeResponse } from "./axiomAcpContractFixture.ts";
 // Test-only ACP peer. Desktop state stays in its fixture-owned temporary root;
 // it never reads provider configuration, credentials or user files.
 import { createInterface } from "node:readline";
@@ -44,6 +45,7 @@ let mcp = {
     name: string;
     command: string;
     args: string[];
+    remote?: { url: string; auth: "none" | "bearer" | "oauth" };
     enabled: boolean;
     environmentKeys: string[];
     credentialId: string | null;
@@ -53,6 +55,36 @@ let mcp = {
   }>,
   selectedTools: [] as string[],
 };
+if (scenario === "remote-mcp") {
+  mcp.servers.push({
+    name: "fixture_remote",
+    command: "",
+    args: [],
+    remote: { url: "https://example.invalid/mcp", auth: "none" },
+    enabled: false,
+    environmentKeys: [],
+    credentialId: null,
+    tools: [],
+    status: "untested",
+    error: null,
+  });
+}
+if (scenario === "selected-mcp") {
+  const name = "mcp__fixture__example";
+  mcp.revision = 2;
+  mcp.servers.push({
+    name: "fixture",
+    command: "fixture-command",
+    args: [],
+    enabled: true,
+    environmentKeys: [],
+    credentialId: null,
+    tools: [{ name, description: "Fixture tool", schemaHash: "c".repeat(64) }],
+    status: "tested",
+    error: null,
+  });
+  mcp.selectedTools.push(name);
+}
 let sequence = 0;
 let model = "test-model";
 let thinking = "medium";
@@ -214,35 +246,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   }
   switch (method) {
     case "initialize":
-      result(id, {
-        protocolVersion: 1,
-        agentInfo: { name: "axiomcli", version: "0.1.13" },
-        agentCapabilities: {
-          loadSession: true,
-          promptCapabilities: { image: true },
-          _meta: {
-            axiom: {
-              protocolVersion: "0.2",
-              runtimeInstanceId,
-              features: {
-                desktopChat: desktop ? 1 : 0,
-                desktopAgent: desktop ? 1 : 0,
-                desktopMcp: desktop ? 1 : 0,
-                webConsent: desktop ? 1 : 0,
-                account: 2,
-                modelCatalog: 1,
-                securityEvidence: 4,
-                activity: 1,
-                timeline: 2,
-                threadCatalog: 1,
-                attachments: 2,
-                steering: 1,
-                compaction: 1,
-              },
-            },
-          },
-        },
-      });
+      result(
+        id,
+        axiomContractInitializeResponse(runtimeInstanceId, desktop ? "desktop-chat" : "cli"),
+      );
       break;
     case "_axiom/desktop/bootstrap":
       if (!desktop) {
@@ -344,6 +351,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
           sessionUpdate: "available_commands_update",
           availableCommands: [
             { name: "help", description: "Fixture help" },
+            { name: "compact", description: "Compact the fixture context" },
             { name: "update", description: "Native update" },
           ],
         },
@@ -440,6 +448,25 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     case "_axiom/security/verify":
       result(id, { status: { state: "verified" }, evidence: evidence() });
       break;
+    case "_axiom/session/command": {
+      if (
+        params.sessionId !== sessionId ||
+        pending ||
+        !/^\s*\/(help|compact)(?:\s|$)/u.test(params.command)
+      ) {
+        reject(id, "Only exact idle advertised fixture commands are supported");
+        break;
+      }
+      notify("session/update", {
+        sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: `Native command: ${params.command}` },
+        },
+      });
+      result(id, { stopReason: "end_turn" });
+      break;
+    }
     case "session/prompt": {
       if (
         desktop &&
@@ -456,6 +483,19 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       lastNativeTurn = nativeTurn;
       pending = { id, prompt, nativeTurn, webEnabled: params._meta?.axiom?.webEnabled === true };
       activity({ kind: "active_turn_changed", turnId: nativeTurn });
+      if (prompt.includes("legacy native failure")) {
+        notify("session/update", {
+          sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "AxiomCLI error: private fixture failure" },
+          },
+        });
+        activity({ kind: "active_turn_changed", turnId: null });
+        result(id, { stopReason: "end_turn" });
+        pending = undefined;
+        break;
+      }
       notify("session/update", {
         sessionId,
         update: {
@@ -480,10 +520,18 @@ createInterface({ input: process.stdin }).on("line", (line) => {
                       agentRevision: params._meta.axiom.agentRevision,
                       mcpRevision: params._meta.axiom.mcpRevision,
                     })
-                  : "Fixture reply",
+                  : prompt.startsWith("/")
+                    ? `Literal prompt: ${prompt}`
+                    : "Fixture reply",
           },
         },
       });
+      if (prompt.includes("structured native failure")) {
+        activity({ kind: "active_turn_changed", turnId: null });
+        write({ jsonrpc: "2.0", id, error: { code: -32603, message: "private fixture failure" } });
+        pending = undefined;
+        break;
+      }
       if (prompt.includes("native web tools")) {
         for (const [name, rawInput] of [
           ["web_search", { query: "fixture web query" }],

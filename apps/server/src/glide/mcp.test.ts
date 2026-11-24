@@ -5,46 +5,30 @@ import { createGlideMcpServer } from "./mcp.ts";
 import { glideChildEnvironment } from "./runtime.ts";
 
 describe("Glide MCP boundary", () => {
-  it.each([undefined, "background", "foreground"] as const)(
-    "advertises the selected connection mode through MCP tool discovery (%s)",
-    async (inputMode) => {
-      const runtime = {
-        execute: vi.fn(async () => ({ content: [] })),
-        reset: vi.fn(async () => undefined),
-      };
-      const server =
-        inputMode === undefined
-          ? createGlideMcpServer(runtime)
-          : createGlideMcpServer(runtime, inputMode);
-      const client = new Client({ name: "glide-mode-fixture", version: "1" });
-      const [a, b] = InMemoryTransport.createLinkedPair();
-      await server.connect(b);
-      await client.connect(a);
-      try {
-        expect(client.getServerVersion()?.name).toBe("cafe-glide");
-        const description = (await client.listTools()).tools.find(
-          (tool) => tool.name === "js",
-        )?.description;
-        if (inputMode === "foreground") {
-          expect(description).toContain("This connection explicitly uses foreground control");
-          expect(description).toContain(
-            "observations and input may activate and raise the target app",
-          );
-          expect(description).not.toContain("This connection uses background control");
-        } else {
-          expect(description).toContain("This connection uses background control");
-          expect(description).toContain("observations do not activate or raise apps");
-          expect(description).toContain("no foreground fallback");
-          expect(description).not.toContain("This connection explicitly uses foreground control");
-        }
-        expect(runtime.execute).not.toHaveBeenCalled();
-        expect(runtime.reset).not.toHaveBeenCalled();
-      } finally {
-        await client.close();
-        await server.close();
-      }
-    },
-  );
+  it("advertises OpenAI's native interface without starting an execution runtime", async () => {
+    const runtime = {
+      execute: vi.fn(async () => ({ content: [] })),
+      reset: vi.fn(async () => undefined),
+    };
+    const server = createGlideMcpServer(runtime),
+      client = new Client({ name: "computer-catalogue-fixture", version: "1" });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await server.connect(b);
+    await client.connect(a);
+    try {
+      const description = (await client.listTools()).tools.find(
+        (tool) => tool.name === "js",
+      )?.description;
+      expect(description).toContain("OpenAI");
+      expect(description).toContain("@oai/sky");
+      expect(description).toContain("Full access");
+      expect(runtime.execute).not.toHaveBeenCalled();
+      expect(runtime.reset).not.toHaveBeenCalled();
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
 
   it("uses strict cells, returns text/images and resets through the actual MCP protocol", async () => {
     const runtime = {
@@ -64,7 +48,7 @@ describe("Glide MCP boundary", () => {
     try {
       const result = await client.callTool({
         name: "js",
-        arguments: { code: "await glide.listApps()", title: "Inspect apps" },
+        arguments: { code: "await cua.listApps()", title: "Inspect apps" },
       });
       expect(result.content).toEqual([
         { type: "text", text: "observed" },

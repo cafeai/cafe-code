@@ -49,13 +49,6 @@ type TraitsPersistence =
 
 const ULTRATHINK_PROMPT_PREFIX = "Ultrathink:\n";
 
-/**
- * Provider-wide Claude preferences are intentionally menu-only. They are still
- * fully configurable, but repeating their long values in the composer footer
- * crowds the primary reasoning and context-window summary.
- */
-const MENU_ONLY_TRIGGER_DESCRIPTOR_IDS = new Set(["outputStyle", "agentProgressSummaries"]);
-
 function replaceDescriptorCurrentValue(
   descriptors: ReadonlyArray<ProviderOptionDescriptor>,
   descriptorId: string,
@@ -230,54 +223,13 @@ export function shouldRenderTraitsControls(input: {
   return getTraitsSectionVisibility(input).hasAnyControls;
 }
 
-export function getTraitsTriggerLabel(
-  descriptors: ReadonlyArray<ProviderOptionDescriptor>,
-  primarySelectDescriptor: Extract<ProviderOptionDescriptor, { type: "select" }> | null,
-  ultrathinkPromptControlled: boolean,
-): string {
-  return descriptors
-    .filter((descriptor) => !MENU_ONLY_TRIGGER_DESCRIPTOR_IDS.has(descriptor.id))
-    .map((descriptor) => {
-      if (ultrathinkPromptControlled && descriptor.id === primarySelectDescriptor?.id) {
-        return uiText("Ultrathink");
-      }
-      if (descriptor.id === "cyberAccessProgram") {
-        return descriptor.currentValue === "daybreakBlue"
-          ? uiText("Daybreak Blue")
-          : descriptor.currentValue === "daybreakRed"
-            ? uiText("Daybreak Red")
-            : undefined;
-      }
-      if (descriptor.type === "boolean") {
-        if (descriptor.id === "ultracode") {
-          // This summarizes the requested flag, not native account eligibility.
-          // Absence must not be mislabeled Off when upstream settings apply.
-          return descriptor.currentValue === true
-            ? uiText("Ultracode")
-            : descriptor.currentValue === false
-              ? uiText("Ultracode Off")
-              : undefined;
-        }
-        if (descriptor.id === "fastMode") {
-          return descriptor.currentValue === true ? uiText("Fast") : uiText("Normal");
-        }
-        return uiText("{label} {state, select, on {On} other {Off}}", {
-          label: descriptor.label,
-          state: descriptor.currentValue === true ? "on" : "off",
-        });
-      }
-      return getProviderOptionCurrentLabel(descriptor);
-    })
-    .filter((label): label is string => typeof label === "string" && label.length > 0)
-    .join(" · ");
-}
-
 /** Select options that are never the thinking level, even when listed first. */
 const NON_EFFORT_SELECT_DESCRIPTOR_IDS = new Set([
   "contextWindow",
   "agent",
   "outputStyle",
   "cyberAccessProgram",
+  "serviceTier",
 ]);
 
 /**

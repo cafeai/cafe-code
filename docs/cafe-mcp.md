@@ -21,7 +21,10 @@ only deliver text to the model. Public failures contain a finite `error` object
 with `code`, `message`, `nextAction` and `mayHaveApplied`; native/SQL errors and
 submitted settings are not echoed.
 
-Start with `get_cafe_context({})` on a Cafe-issued connection. It returns the
+For account quotas, call `get_provider_usage({})` directly. It returns provider
+accounts together without chat discovery or a preceding context call. For chat
+work, start with `get_cafe_context({})` once per connection and reuse known IDs.
+It returns the
 signed launch Cafe chat's metadata, project/workspace and separate configured
 and projected-session provider IDs without loading transcripts, enumerating
 providers or opening a native session. Manual/legacy connections pass an
@@ -67,13 +70,18 @@ pages/options when a complete response cannot fit.
 ### Thread groups and origin
 
 Coordinators can keep worker chats out of the top-level sidebar by creating a
-named group beneath a parent Cafe chat and creating workers in it:
+named group beneath a parent Cafe chat and creating or moving workers into it:
 
 1. `create_thread_group({ title, description? })` — the owner defaults to the
    signed launch chat; manual connections pass `ownerThreadId`. A parent may
    own up to 128 live groups; membership is unlimited and there is no worker or
    concurrency cap.
-2. `create_thread({ ..., groupId, description? })` for each worker.
+2. `create_thread({ ..., groupId, description? })` for a new worker, or
+   `update_thread({ threadId, groupId, requestId })` for an existing chat.
+   `update_thread({ threadId, groupId: null, requestId })` returns a chat to top
+   level. Omit `groupId` to keep membership. Moves preserve the exact chat ID,
+   transcript, project/worktree, provider/model/modes, active root and live child
+   work; owned groups move with the chat. They issue no start, stop or resume.
 3. `list_threads({ groupId })` to find members, then `get_thread_status` /
    `wait_for_thread` on exact IDs. `get_cafe_context.ownedGroups` returns the
    first page of the launch chat's groups; continue with
@@ -88,9 +96,26 @@ Unknown and whether a person set it), the separate recorded `provenance`
 (`creationPath`, `originThreadId`, `recordedAt`; `null` when unrecorded) and an
 optional `description`. Callers cannot set provenance. A signed launch claim
 records the Cafe chat that made the call, not a native subagent; a manual owner
-client records `mcp-owner-client`. `update_thread({ description })` edits the
-description; only people change the origin label. None of these fields grants
-permission, native ownership or retry authority.
+client records `mcp-owner-client`. `update_thread({ threadId, description })`
+edits the description; `update_thread({ threadId, originClassification })`
+sets `human`, `agent` or `unknown` with `origin.source: "user"` (an explicit
+correction, including through an owner-authorized MCP call). It never changes
+provenance; moving alone never changes classification. These fields grant no
+permission, native ownership or retry authority. A grouped chat remains an
+ordinary Cafe chat, not a native provider subagent.
+
+The source and destination ancestry must be live and unarchived when the engine
+decides a move. Self/descendant containment and nesting beyond 16 groups are
+refused, including the height of retained descendants that could be restored.
+Membership, classification and description supplied together share one journaled
+command; other `update_thread` settings retain their separate command behavior.
+Use `requestId` and `get_operation` for the ordinary `recorded` receipt. Receipt
+re-reads never replay a move; a failure or lost acknowledgement never authorizes
+automatic repetition. Delete/archive ordering follows current membership.
+
+This capability requires a backend running the updated source and an MCP
+connection that has discovered the updated `update_thread` schema. Building
+alone does not update a running backend or prove runtime adoption.
 
 For a tracked `create_thread`/`create_thread_group`, `get_operation` returns
 `plannedTargets` naming the exact ID the reserved action creates. Finding it
@@ -199,7 +224,64 @@ rather than being reconstructed as successful or automatically resubmitted.
 
 ## Context and quota status
 
-Use `get_thread_usage` to check remaining context and provider quota without
+Use `get_provider_usage` for account usage limits across providers in one call,
+independent of any chat, including accounts with no chats:
+
+```json
+{}
+```
+
+Optionally pass an exact `instanceId`, or a case-insensitive `query` matching
+provider name, driver or instance ID. The response includes `instanceId`, driver,
+display name, enabled/authentication state and two explicitly separate readings
+per provider:
+
+- `cachedRateLimits` contains the same cached primary/secondary windows as the
+  chat usage tool, plus plan type, limit/spend-control reasons and individual
+  spend limits when reported. `availableResetCount` is the provider's aggregate;
+  `resetCredits.credits` includes reported reset-credit IDs, statuses, types,
+  grant/expiry times, titles and descriptions. Credit rows do not replace the
+  aggregate available count. It does not redeem resets. Reset timestamps ending
+  in `EpochSeconds` are seconds, not milliseconds. Credit and spend amounts keep
+  provider strings without an inferred currency.
+- `accountQuota` contains Claude's complete bounded account-usage report from
+  the existing native account reader used by Settings. It preserves the native
+  meter order, normal/session/weekly allowances, model-scoped allowances such as
+  **Fable**, surface labels, exact utilization and remaining percentages, ISO
+  reset times, severity and active flags. It does not filter by a chat's selected
+  model, merge duplicate labels, or substitute the general weekly allowance for
+  Fable. Reported `extraUsage` includes enabled state, monthly limit, spent minor
+  currency units, utilization and currency when known. `amountsUnit` explicitly
+  identifies minor currency units; missing currency does not mean USD. Missing
+  extra usage is omitted, explicitly unavailable extra usage is `null`, and a
+  reported disabled allowance remains `enabled: false`.
+
+This direct tool can perform Claude's existing bounded **control-only** account
+read with the configured native login. It creates no chat, prompt, inference,
+session inventory, ownership renewal, full provider refresh or configuration
+change. The exact provider-instance reader retains its replacement fence and
+60-second single-flight cache, including unavailable results. At most two account
+readers run concurrently under one 15-second budget; timeout/cancellation joins
+their existing cleanup and completed accounts remain available on timeout.
+Disabled, unavailable and unauthenticated accounts are not read. An unavailable
+report stays unknown; other providers without this capability are labelled
+unsupported for `accountQuota` and may still have cached rate limits.
+
+`cachedRateLimits.checkedAt` and `accountQuota.report.observedAt` date separate
+observations. The latter is Cafe's receipt time, not proof of a new upstream
+fetch. Neither timestamp guarantees every window is fresh. Returned snapshots
+are advisory account-shared metadata, not account identity, per-chat allocation,
+send permission or reset-redemption authority. A failed full account read never
+relabels a legacy sparse window as the missing Fable/extra-usage report.
+
+Provider pages default to 20 entries, support 1–100 and retain the existing
+query-bound `nextCursor`/`hasMore`/`totalMatches` contract. Follow pagination when
+needed. Each account's cached limit buckets and reset-credit rows are separately
+bounded to 128 with explicit truncation flags. Native Claude report admission
+keeps its existing 128-meter bound. Public failures contain fixed text and no
+native/authentication errors, paths or raw report fields.
+
+Use `get_thread_usage` to check a chat's remaining context and cached provider quota without
 loading messages or starting a provider request:
 
 ```json
@@ -242,7 +324,7 @@ selection; a legacy session without that instance is labelled `configured`.
 Providers without cached account quota return unknown rather than triggering
 a native probe or borrowing another chat's passive report.
 
-These are passive reads of projection metadata and the provider registry.
+The `get_thread_usage` readings are passive reads of projection metadata and the provider registry.
 They do not refresh account state, enumerate native sessions, renew runtime
 ownership, run inference, or return authentication details or transcripts.
 The context lookup uses a dedicated partial ordering index and hydrates one

@@ -118,7 +118,6 @@ export default defineConfig([
   // kernel remains a separate disposable process owned by the chat broker.
   ...Object.entries({
     "glide-mcp": "src/glide/entry.ts",
-    "glide-worker": "src/glide/worker.ts",
   }).map(([name, entry]) => ({
     entry: { [name]: entry },
     outDir: "dist",

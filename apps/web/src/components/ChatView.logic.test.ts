@@ -29,6 +29,7 @@ it("retains bounded exact-account web consent in received queued-steer recovery 
       retryableFollowUp: true,
       axiomWebConsent: { instanceId: "axiom-personal", enabled: true },
       axiomMcpSelection: { instanceId: "axiom-personal", revision: 7 },
+      axiomCommandSelection: { instanceId: "axiom-personal", command: { name: "help" } },
     },
   };
   expect(readRetryableSteerFailure(activity)?.axiomWebConsent).toEqual({
@@ -39,6 +40,20 @@ it("retains bounded exact-account web consent in received queued-steer recovery 
     instanceId: "axiom-personal",
     revision: 7,
   });
+  expect(readRetryableSteerFailure(activity)?.axiomCommandSelection).toEqual({
+    instanceId: "axiom-personal",
+    command: { name: "help" },
+  });
+  for (const command of [{ name: "help\nlogout" }, { name: "/help" }, {}, { name: 1 }])
+    expect(
+      readRetryableSteerFailure({
+        ...activity,
+        payload: {
+          ...(activity.payload as object),
+          axiomCommandSelection: { instanceId: "axiom-personal", command },
+        },
+      })?.axiomCommandSelection,
+    ).toBeUndefined();
   for (const revision of [-1, Number.MAX_SAFE_INTEGER + 1, "7", null])
     expect(
       readRetryableSteerFailure({

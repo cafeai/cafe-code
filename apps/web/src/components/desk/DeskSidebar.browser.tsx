@@ -1,6 +1,6 @@
 import "../../index.css";
 
-import { EnvironmentId, ThreadId } from "@cafecode/contracts";
+import { EnvironmentId, ProviderDriverKind, ThreadGroupId, ThreadId } from "@cafecode/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { render } from "vitest-browser-react";
 import { page, userEvent } from "vitest/browser";
@@ -10,7 +10,12 @@ import { useThreadSecretsDialogStore } from "../../cafeSecrets/threadSecretsDial
 import { useThreadMoveDialogStore } from "../../threadMoveDialogStore";
 import { createDeskState, deskTabKey, hydrateDesk } from "../../deskModel";
 import { useDeskStore } from "../../deskStore";
+import { selectEnvironmentState, selectSidebarThreadSummaryByRef, useStore } from "../../store";
 import type { ThreadRouteTarget } from "../../threadRoutes";
+import type { SidebarThreadSummary } from "../../types";
+import { useUiStateStore } from "../../uiStateStore";
+import { SidebarThreadGroupContext } from "../sidebar/SidebarThreadGroups";
+import { buildSidebarThreadGroupIndex } from "../sidebar/threadGroups.logic";
 import { DeskSidebar } from "./DeskSidebar";
 import {
   collectDeskSidebarFailureDiagnostics,
@@ -26,11 +31,13 @@ const mocks = vi.hoisted(() => ({
   hardDelete: vi.fn(),
   duplicate: vi.fn(),
   showMenu: vi.fn(),
+  copyText: vi.fn<(value: string) => Promise<void>>(),
   confirm: vi.fn(),
   working: false,
   duplicateSupported: true,
 }));
 vi.mock("../../threadRename", () => ({ renameThread: mocks.rename }));
+vi.mock("../../lib/copyToClipboard", () => ({ copyTextToClipboard: mocks.copyText }));
 vi.mock("../ui/toast", () => ({
   toastManager: { add: vi.fn() },
   stackedThreadToast: (value: unknown) => value,
@@ -67,7 +74,11 @@ vi.mock("../../localApi", () => ({
 // actions; it must never infer either identity from its display title.
 vi.mock("./useDeskTabMetadata", () => {
   const metadata = (target: ThreadRouteTarget) => ({
-    title: target.kind === "draft" ? "New chat" : `Chat ${target.threadRef.environmentId}`,
+    title:
+      target.kind === "draft"
+        ? "New chat"
+        : (selectSidebarThreadSummaryByRef(useStore.getState(), target.threadRef)?.title ??
+          `Chat ${target.threadRef.environmentId}`),
     projectName: "Fixture project",
     activityAt: new Date(Date.now() - (2 * 24 * 60 + 5) * 60_000).toISOString(),
     threadRef: target.kind === "server" ? target.threadRef : null,
@@ -88,17 +99,72 @@ const chat: ThreadRouteTarget = {
 };
 const draft: ThreadRouteTarget = { kind: "draft", draftId: "draft-1" as DraftId };
 let diagnosticPointer: ReturnType<typeof trackDeskDiagnosticPointer> | null = null;
-let clearActionCleanup: (() => Promise<void>) | null = null;
+let deskActionCleanup: (() => Promise<void>) | null = null;
+
+const createdAt = "2026-11-10T00:00:00.000Z";
+const readySession: NonNullable<SidebarThreadSummary["session"]> = {
+  provider: ProviderDriverKind.make("codex"),
+  status: "ready",
+  orchestrationStatus: "ready",
+  createdAt,
+  updatedAt: createdAt,
+  subagentRuntimeId: "runtime",
+};
+
+function summary(title: string, fields: Partial<SidebarThreadSummary> = {}): SidebarThreadSummary {
+  return {
+    id: ThreadId.make(title),
+    environmentId,
+    projectId: null,
+    title,
+    interactionMode: "default",
+    session: null,
+    createdAt,
+    archivedAt: null,
+    latestTurn: null,
+    branch: null,
+    worktreePath: null,
+    latestUserMessageAt: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+    ...fields,
+  };
+}
+
+function targetFor(thread: SidebarThreadSummary): ThreadRouteTarget {
+  return {
+    kind: "server",
+    threadRef: { environmentId: thread.environmentId, threadId: thread.id },
+  };
+}
 
 /** Join the exact render and native input before shared store/DOM cleanup,
  * including when the public test signal retires an in-flight operation. */
-function createClearActionFixture(context: TestContext) {
+function createDeskActionFixture(context: TestContext) {
   let retired = false;
   let rendering: ReturnType<typeof render> | undefined;
   let completion: Promise<void> | undefined;
   const pending = new Set<Promise<unknown>>();
+  const originalEnvironments = useStore.getState().environmentStateById;
+  const originalExpandedGroups = useUiStateStore.getState().expandedThreadGroupKeys;
   const assertActive = () => {
-    if (retired) throw new Error("Clear desk fixture has retired.");
+    if (retired) throw new Error("Desk action fixture has retired.");
+  };
+  const setThreads = (threads: readonly SidebarThreadSummary[]) => {
+    assertActive();
+    useStore.setState((state) => ({
+      environmentStateById: {
+        ...state.environmentStateById,
+        [environmentId]: {
+          ...selectEnvironmentState(state, environmentId),
+          threadIds: threads.map((thread) => thread.id),
+          sidebarThreadSummaryById: Object.fromEntries(
+            threads.map((thread) => [thread.id, thread]),
+          ),
+        },
+      },
+    }));
   };
   const cleanup = () => {
     retired = true;
@@ -106,6 +172,8 @@ function createClearActionFixture(context: TestContext) {
       await Promise.allSettled([...pending]);
       const screen = await rendering?.catch(() => null);
       await screen?.unmount();
+      useStore.setState({ environmentStateById: originalEnvironments });
+      useUiStateStore.setState({ expandedThreadGroupKeys: originalExpandedGroups });
       context.signal.removeEventListener("abort", retire);
     }));
   };
@@ -114,16 +182,22 @@ function createClearActionFixture(context: TestContext) {
   };
   context.signal.addEventListener("abort", retire, { once: true });
   context.onTestFinished(cleanup);
-  clearActionCleanup = cleanup;
+  deskActionCleanup = cleanup;
   return {
-    async mount() {
+    async mount(threads: readonly SidebarThreadSummary[] = []) {
       assertActive();
+      setThreads(threads);
+      useUiStateStore.setState({ expandedThreadGroupKeys: [] });
       const onNavigate = vi.fn();
       const onNewChat = vi.fn();
       rendering = render(
         <>
           <button type="button">Before Desk</button>
-          <DeskSidebar onNavigate={onNavigate} onNewChat={onNewChat} newChatDisabled />
+          <SidebarThreadGroupContext.Provider
+            value={{ index: buildSidebarThreadGroupIndex(threads), activeThreadKey: null }}
+          >
+            <DeskSidebar onNavigate={onNavigate} onNewChat={onNewChat} newChatDisabled />
+          </SidebarThreadGroupContext.Provider>
         </>,
       );
       const screen = await rendering;
@@ -141,6 +215,7 @@ function createClearActionFixture(context: TestContext) {
         pending.delete(admitted);
       }
     },
+    setThreads,
     cleanup,
   };
 }
@@ -181,13 +256,14 @@ beforeEach(async () => {
   ])
     action.mockReset().mockResolvedValue(undefined);
   mocks.showMenu.mockReset().mockResolvedValue(null);
+  mocks.copyText.mockReset().mockResolvedValue(undefined);
   mocks.confirm.mockReset().mockResolvedValue(true);
   mocks.working = false;
   mocks.duplicateSupported = true;
 });
 afterEach(async () => {
-  await clearActionCleanup?.();
-  clearActionCleanup = null;
+  await deskActionCleanup?.();
+  deskActionCleanup = null;
   const moveTarget = useThreadMoveDialogStore.getState().target;
   if (moveTarget) useThreadMoveDialogStore.getState().close(moveTarget);
   useThreadSecretsDialogStore.getState().close();
@@ -228,8 +304,8 @@ function openRowMenu(element: Element) {
 }
 
 describe("Desk sidebar", () => {
-  it("clears every split group's kept and preview views without mutating chats", async (context) => {
-    const fixture = createClearActionFixture(context);
+  it("clears idle kept and preview views across splits without mutating chats", async (context) => {
+    const fixture = createDeskActionFixture(context);
     const dispatch = useDeskStore.getState().dispatch;
     dispatch({ type: "open", target: chat });
     dispatch({ type: "open", target: draft });
@@ -276,8 +352,108 @@ describe("Desk sidebar", () => {
     }
   });
 
+  it("keeps a starting preview, background work, and unanswered input open across splits", async (context) => {
+    const fixture = createDeskActionFixture(context);
+    const idle = summary("Idle chat");
+    const starting = summary("Starting chat", {
+      session: { ...readySession, status: "connecting", orchestrationStatus: "starting" },
+    });
+    const background = summary("Background chat", {
+      session: readySession,
+      liveWork: { runtimeId: "runtime", taskCount: 0, agentCount: 1 },
+    });
+    const awaiting = summary("Unanswered chat", { hasPendingUserInput: true });
+    const { dispatch } = useDeskStore.getState();
+    dispatch({ type: "open", target: targetFor(idle) });
+    dispatch({ type: "open", target: targetFor(background) });
+    const backgroundKey = deskTabKey(targetFor(background));
+    dispatch({ type: "split", tabKey: backgroundKey, targetGroupId: "g1", edge: "right" });
+    const otherPane = useDeskStore.getState().desk.activeGroupId;
+    const awaitingKey = deskTabKey(targetFor(awaiting));
+    dispatch({ type: "open", target: targetFor(awaiting), groupId: otherPane });
+    dispatch({ type: "open", target: targetFor(starting), groupId: "g1", preview: true });
+    const startingKey = deskTabKey(targetFor(starting));
+    const { screen } = await fixture.mount([idle, starting, background, awaiting]);
+    const clear = screen.getByRole("button", { name: "Clear desk", exact: true });
+    try {
+      await fixture.input(() => clear.click());
+      const cleared = useDeskStore.getState().desk;
+      expect(cleared.groups.g1).toMatchObject({ tabs: [startingKey], previewTabKey: startingKey });
+      expect(cleared.groups[otherPane]?.tabs).toEqual([backgroundKey, awaitingKey]);
+      expect(cleared.closed.map((entry) => entry.tabKey)).toEqual([deskTabKey(targetFor(idle))]);
+      await expect.element(clear).toBeDisabled();
+
+      fixture.setThreads([
+        idle,
+        starting,
+        { ...background, session: { ...readySession, subagentRuntimeId: "replacement" } },
+        awaiting,
+      ]);
+      await expect.element(clear).not.toBeDisabled();
+      await fixture.input(() => clear.click());
+      expect(useDeskStore.getState().desk.groups[otherPane]?.tabs).toEqual([awaitingKey]);
+      await expect.element(clear).toBeDisabled();
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("keeps grouped tabs under their thread groups after clearing an idle owner", async (context) => {
+    const fixture = createDeskActionFixture(context);
+    const waveId = ThreadGroupId.make("wave");
+    const reviewId = ThreadGroupId.make("review");
+    const coordinator = summary("Coordinator", {
+      ownedGroups: [{ id: waveId, title: "Wave", createdAt }],
+    });
+    const runningSession = { ...readySession, status: "running" as const };
+    const worker = summary("Worker", { groupId: waveId, session: runningSession });
+    const lead = summary("Lead without a tab", {
+      groupId: waveId,
+      ownedGroups: [{ id: reviewId, title: "Review", createdAt }],
+    });
+    const reviewer = summary("Reviewer", { groupId: reviewId, session: runningSession });
+    const { dispatch } = useDeskStore.getState();
+    for (const thread of [worker, reviewer, coordinator]) {
+      dispatch({ type: "open", target: targetFor(thread) });
+    }
+    const { screen, onNavigate } = await fixture.mount([coordinator, worker, lead, reviewer]);
+    const wave = screen.getByRole("button", { name: "Wave 2 chats", exact: true });
+    const review = screen.getByRole("button", { name: "Review 1 chat", exact: true });
+    const workerRow = screen.getByRole("button", { name: "Worker", exact: true });
+    const reviewerRow = screen.getByRole("button", { name: "Reviewer", exact: true });
+    try {
+      await expect.element(wave).toHaveAttribute("aria-expanded", "false");
+      await expect.element(workerRow).not.toBeInTheDocument();
+      await expect.element(reviewerRow).not.toBeInTheDocument();
+      await fixture.input(() => wave.click());
+      await expect.element(workerRow).toBeVisible();
+      await expect.element(review).toBeVisible();
+      await expect
+        .element(screen.getByRole("button", { name: lead.title, exact: true }))
+        .not.toBeInTheDocument();
+      await fixture.input(() => review.click());
+      await fixture.input(() => reviewerRow.click());
+      expect(onNavigate).toHaveBeenCalledExactlyOnceWith(targetFor(reviewer));
+      await fixture.input(() => wave.click());
+      await expect.element(reviewerRow).toHaveAttribute("aria-current", "page");
+      await expect.element(workerRow).not.toBeInTheDocument();
+
+      const clear = screen.getByRole("button", { name: "Clear desk", exact: true });
+      await fixture.input(() => clear.click());
+      expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([
+        deskTabKey(targetFor(worker)),
+        deskTabKey(targetFor(reviewer)),
+      ]);
+      await expect.element(wave).toHaveAttribute("aria-expanded", "false");
+      await expect.element(reviewerRow).toHaveAttribute("aria-current", "page");
+      await expect.element(clear).toBeDisabled();
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("clears an unsent editor through native keyboard input and disables the empty desk action", async (context) => {
-    const fixture = createClearActionFixture(context);
+    const fixture = createDeskActionFixture(context);
     const draftId = "pending-editor" as DraftId;
     useDeskStore.getState().showDraftEditor(draftId);
     const editors = useDeskStore.getState().draftEditors;
@@ -422,7 +598,7 @@ describe("Desk sidebar", () => {
   });
 
   it("offers exact-chat actions and opens Secrets on right-click without activating the row", async (context) => {
-    const fixture = createClearActionFixture(context);
+    const fixture = createDeskActionFixture(context);
     useDeskStore.getState().dispatch({ type: "open", target: chat });
     useDeskStore.getState().dispatch({ type: "open", target: draft });
     const { screen, onNavigate } = await fixture.mount();
@@ -434,6 +610,7 @@ describe("Desk sidebar", () => {
       "rename",
       "duplicate",
       "move",
+      "copy-thread-id",
       "secrets",
       "archive",
       "delete",
@@ -472,6 +649,28 @@ describe("Desk sidebar", () => {
     await expect.element(screen.getByRole("textbox", { name: "Chat title" })).toBeVisible();
     expect(onNavigate).not.toHaveBeenCalled();
     await userEvent.keyboard("{Escape}");
+  });
+
+  it("copies a running chat's ID from its inactive Desk row", async (context) => {
+    const fixture = createDeskActionFixture(context);
+    useDeskStore.getState().dispatch({ type: "open", target: chat });
+    useDeskStore.getState().dispatch({ type: "open", target: draft });
+    mocks.working = true;
+    const { screen, onNavigate } = await fixture.mount();
+    const before = useDeskStore.getState().desk;
+    mocks.showMenu.mockResolvedValueOnce("copy-thread-id");
+    await fixture.input(() =>
+      screen.getByRole("button", { name: "Chat fixture", exact: true }).click({ button: "right" }),
+    );
+    await fixture.input(() =>
+      expect.poll(() => mocks.copyText.mock.calls).toEqual([[chat.threadRef.threadId]]),
+    );
+    expect(mocks.showMenu.mock.calls[0]?.[0]).toContainEqual({
+      id: "copy-thread-id",
+      label: "Copy chat ID",
+    });
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(useDeskStore.getState().desk).toBe(before);
   });
 
   it.each(["pointer", "keyboard"] as const)(

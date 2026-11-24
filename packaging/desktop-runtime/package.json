@@ -12,6 +12,7 @@
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@napi-rs/canvas": "1.0.8",
     "@opencode-ai/sdk": "^1.17.18",
+    "@peculiar/x509": "1.14.3",
     "acorn": "8.18.0",
     "effect": "catalog:",
     "electron-updater": "^6.6.2",

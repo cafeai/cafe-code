@@ -9,6 +9,7 @@ import { deskTabKey } from "../../deskModel";
 import { useDeskStore } from "../../deskStore";
 import { isThreadDuplicationPending } from "../../lib/threadDuplication";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { copyThreadIdToClipboard } from "../threadClipboard";
 import { openThreadSecretsDialog } from "../../cafeSecrets/threadSecretsDialogStore";
 import { openThreadMoveDialog } from "../../threadMoveDialogStore";
 import { readDeskTabMetadata } from "./useDeskTabMetadata";
@@ -31,6 +32,7 @@ function items(target: ThreadRouteTarget): ContextMenuItem[] {
       disabled: pending || isThreadDuplicationPending(metadata.threadRef) || !metadata.canDuplicate,
     },
     { id: "move", label: uiText("Move to project…"), disabled: pending || !metadata.canMove },
+    { id: "copy-thread-id", label: uiText("Copy chat ID") },
     { id: "secrets", label: uiText("Secrets…") },
     { id: "archive", label: uiText("Archive chat"), disabled: pending || metadata.working },
     { id: "delete", label: uiText("Move to Recycle Bin"), destructive: true, disabled: pending },
@@ -62,6 +64,13 @@ export function useDeskChatActions() {
       const metadata = readDeskTabMetadata(target);
       if (metadata.threadRef && metadata.exists)
         openThreadSecretsDialog(metadata.threadRef, metadata.title);
+      return true;
+    }
+    if (action === "copy-thread-id") {
+      const metadata = readDeskTabMetadata(target);
+      if (metadata.threadRef && metadata.exists) {
+        await copyThreadIdToClipboard(metadata.threadRef.threadId, uiLocale);
+      }
       return true;
     }
     if (

@@ -2552,14 +2552,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       });
       const hasImages = input.attachments.some((attachment) => attachment.type === "image");
       if (
-        (input.axiomWebEnabled === true || input.axiomMcpRevision !== undefined) &&
+        (input.axiomWebEnabled === true ||
+          input.axiomMcpRevision !== undefined ||
+          input.axiomCommand !== undefined) &&
         routed.adapter.provider !== "axiom"
       )
         return yield* toValidationError(
           "ProviderService.sendTurn",
-          "Web consent belongs to the selected Axiom provider.",
+          "Axiom message options belong to the selected Axiom provider.",
+        );
+      if (input.axiomCommand !== undefined && input.inputOrigin === "scheduled")
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "Native Axiom commands require explicit user input.",
         );
       const inspectLiveSession =
+        input.axiomCommand !== undefined ||
         hasImages ||
         input.expectedSubagentPolicySession !== undefined ||
         routed.adapter.provider === "codex" ||
@@ -2570,6 +2578,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             (session) => session.threadId === input.threadId,
           )
         : undefined;
+      // An explicitly selected native command is idle-only. Reconciliation
+      // must never reinterpret it as ordinary steering text on a live turn.
+      if (input.axiomCommand !== undefined && activeSession?.activeTurnId !== undefined)
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "Native Axiom commands require an idle conversation.",
+        );
       if (input.expectedSubagentPolicySession !== undefined) {
         if (
           input.codexReview !== undefined ||
@@ -2669,6 +2684,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             );
           const turn = yield* routed.adapter.steerTurn({
             threadId: input.threadId,
+            ...(input.axiomCommand !== undefined ? { axiomCommand: input.axiomCommand } : {}),
             ...(input.axiomWebEnabled !== undefined
               ? { axiomWebEnabled: input.axiomWebEnabled }
               : {}),
@@ -2895,6 +2911,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
     let metricProvider = "unknown";
     return yield* Effect.gen(function* () {
+      if (input.axiomCommand !== undefined)
+        return yield* toValidationError(
+          "ProviderService.steerTurn",
+          "Native Axiom commands cannot steer an active turn.",
+        );
       const routed = yield* resolveRoutableSession({
         threadId: input.threadId,
         operation: "ProviderService.steerTurn",

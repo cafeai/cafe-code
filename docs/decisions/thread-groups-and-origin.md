@@ -22,9 +22,15 @@ chat or why.
   an AI: manual owner clients may call the tool. No human/agent security or
   ownership gate exists.
 - **A thread may own several named groups** (recommended default). Titles are
-  unique among an owner's live groups. A thread belongs to at most one group,
-  fixed at creation (`thread.create.groupId`); a brand-new thread has no
-  descendants, so no cycle can form. There is no move-into-group command.
+  unique among an owner's live groups. A thread belongs to at most one group.
+  `thread.create.groupId` sets initial membership; `thread.metadata.update.groupId`
+  moves an existing chat, and explicit `null` returns it to top level. Its owned
+  groups and descendants stay attached, with their exact owners and memberships.
+  The serialized decider validates the destination's live, unarchived ancestry,
+  rejects self/descendant cycles and checks depth 16 against the whole retained
+  subtree, including archived/deleted descendants that might later be restored.
+  Restore and unarchive the moving chat first; detaching needs no old-parent
+  authority. No project or worktree is changed by a group move.
 - **People browse and delete.** Groups start collapsed (expansion is a bounded
   client-local preference) and the path to the open chat is always shown.
   Delete group moves the whole subtree to the Recycle Bin and keeps the parent.
@@ -45,7 +51,7 @@ chat or why.
   connection is attributed to that chat. A manual/external owner bearer records
   `mcp-owner-client` and is deliberately neither human nor agent.
 - `origin.classification` (Human / Agent / Unknown) is an editable label. Its
-  recorded default comes from provenance; a person's correction sets
+  recorded default comes from provenance; an explicit UI or MCP correction sets
   `source: "user"` and never rewrites provenance. Missing provenance (all
   historical chats) is Unknown.
 - `description` is optional untrusted text, multi-line, without other control
@@ -75,8 +81,11 @@ the Recycle Bin snapshot.
 - Each `thread.deleted` keeps the existing `ThreadDeletionReactor` stop
   request. That is a requested native stop, not finished cleanup; tool results
   say `recorded` and count `stopRequested`.
-- Commands are serialized by the engine: a create decided before a delete is in
-  that delete's closure, one decided after is refused. Turn starts and steers
+- Commands are serialized by the engine: a create or move into a group decided
+  before a delete is in that delete's closure; one decided after is refused.
+  A chat moved out before deletion is outside the old group's closure. Archive
+  races use the same current tree: moves after source/destination archive are
+  refused, without implicitly unarchiving anything. Turn starts and steers
   on a chat in the Recycle Bin are refused on every path.
 - Pending approvals/questions are not answered by deletion; stopping retires
   native callbacks and restore does not revive them. Drafts and queued input
@@ -101,9 +110,27 @@ the Recycle Bin snapshot.
 
 `create_thread_group`, `list_thread_groups`, `delete_thread_group`,
 `restore_thread_group`; `create_thread` accepts `groupId` and `description`;
-`update_thread` accepts `description`; `list_threads` filters by `groupId` /
+`update_thread` accepts `description`, nullable `groupId` and
+`originClassification` (`human` / `agent` / `unknown`); omitted fields stay
+unchanged. Membership and label/description changes in one call share one
+`thread.metadata.update` command and `thread.metadata-updated` event, so an
+invalid move cannot partially change the label. Other existing `update_thread`
+settings remain separate commands and can partially apply on failure.
+The event patches the existing metadata sidecar and engine read model,
+refreshes shell and detail subscriptions and changes MCP status observation
+tokens. It emits no provider/work command: chat identity, messages, execution
+context, root turn, session and live child work are preserved. A group move
+alone preserves the label, including unrecorded historical origin.
+`list_threads` filters by `groupId` /
 `topLevelOnly`; `get_cafe_context` returns a bounded first page of
 `ownedGroups` with `hasMore`/`nextCursor`/`totalMatches`.
+
+Organization updates use the ordinary bearer-scoped `requestId` receipts.
+They report `recorded`; a repeated successful request returns its old receipt
+without reapplying a move after a later edit. Failed/unconfirmed receipts never
+authorize retries. This is sidebar containment and classification, not native
+provider subagent conversion or new authority. Source/build qualification does
+not attest adoption by an already-running backend or MCP connection.
 
 A tracked create derives its target ID from the bearer scope, request ID and
 tool, so `get_operation.plannedTargets` can name it and the engine refuses a
@@ -115,7 +142,9 @@ automatic replay or a replacement request.
 
 ## Limits
 
-- Desk tabs and the Desk chat list do not show groups.
+- The Desk sidebar shows groups for each pane's open chats, including nested
+  groups and groups whose owner has no open tab. Each chat has its own tab in
+  the pane's tab bar.
 - Group rename is supported by the server command but has no UI yet.
 - Collapsed project status summaries count only that project's top-level
   chats; group members are summarized on their group row.
