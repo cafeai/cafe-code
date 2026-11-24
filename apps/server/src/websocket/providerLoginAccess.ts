@@ -23,15 +23,16 @@ export function canLoginProvider(input: ProviderLoginAccess): boolean {
   return input.role === "owner" && input.secureSecretTransport && isEnabledProvider(input.instance);
 }
 
-/** Paired clients may explicitly authenticate the selected server-side Codex
- * account through their own private device-code stream. This grants neither
- * settings authority nor access to another connection's pending login. The
- * caller must revalidate its persisted session and exact account throughout. */
+/** Paired clients and owners may explicitly authenticate the selected
+ * server-side Codex or Gemini account through their own private login stream.
+ * This grants neither settings authority nor access to another connection's
+ * pending login. The caller must revalidate its persisted session and exact
+ * account throughout. */
 export function canLoginProviderDeviceCode(input: ProviderLoginAccess): boolean {
   return (
     (input.role === "owner" || input.role === "client") &&
     input.secureSecretTransport &&
-    input.instance?.driver === "codex" &&
+    (input.instance?.driver === "codex" || input.instance?.driver === "gemini") &&
     isEnabledProvider(input.instance)
   );
 }

@@ -1,11 +1,14 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import { fileURLToPath } from "node:url";
 
-import { ProviderInstanceId } from "@cafecode/contracts";
+import { ProviderInstanceId, type ServerProviderDeviceLoginEvent } from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { ServerConfig } from "../../config.ts";
@@ -126,4 +129,89 @@ it.live("preserves historical Gemini quota until fresh usage or a conclusive sig
     assert.deepEqual(unavailable.models, []);
     assert.equal(startedAcp, 5);
   }).pipe(Effect.provide(configLayer)),
+);
+
+it.live(
+  "surfaces Gemini verification-required state without leaking the URL into snapshots and supports headless login",
+  () =>
+    Effect.gen(function* () {
+      const native = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const verificationUrl =
+        "https://accounts.google.com/v3/signin/challenge/verify?continue=https%3A%2F%2Fantigravity.google";
+      let catalogErrorCode: number | undefined = -32000;
+      let catalogErrorMessage: string | undefined =
+        `Verify your account to continue. ${verificationUrl}`;
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (command._tag !== "StandardCommand" || command.command !== process.execPath) {
+          return native.spawn(command);
+        }
+        return native.spawn(
+          ChildProcess.make(command.command, [fixture, ...command.args], {
+            ...command.options,
+            env: {
+              ...command.options.env,
+              ...(catalogErrorCode === undefined
+                ? {}
+                : { CAFE_GEMINI_FIXTURE_CATALOG_ERROR_CODE: String(catalogErrorCode) }),
+              ...(catalogErrorMessage === undefined
+                ? {}
+                : { CAFE_GEMINI_FIXTURE_CATALOG_ERROR_MESSAGE: catalogErrorMessage }),
+            },
+          }),
+        );
+      });
+      const instance = yield* GeminiDriver.create({
+        instanceId: ProviderInstanceId.make("test-antigravity-login"),
+        displayName: undefined,
+        enabled: true,
+        environment: [],
+        processEnvironment: { CAFE_GEMINI_FIXTURE_NATIVE_VERSION: "1.5.16" },
+        config: { ...GeminiDriver.defaultConfig(), binaryPath: process.execPath },
+      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+
+      const needsVerification = yield* instance.snapshot.refresh;
+      assert.equal(needsVerification.auth.status, "unauthenticated");
+      assert.deepEqual(needsVerification.authActions, { login: true, deviceCodeLogin: true });
+      assert.include(needsVerification.message ?? "", "additional verification");
+      assert.notInclude(needsVerification.message ?? "", verificationUrl);
+
+      // Run headless login while post-login catalog check still requires verification.
+      const events: ServerProviderDeviceLoginEvent[] = [];
+      const gotOAuth = yield* Deferred.make<string>();
+      const loginFiber = yield* instance.adapter.loginDeviceCode!(Effect.succeed(false)).pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            events.push(event);
+            if (event.type === "oauth-code") yield* Deferred.succeed(gotOAuth, event.loginId);
+          }),
+        ),
+        Effect.forkChild,
+      );
+      const loginId = yield* Deferred.await(gotOAuth);
+      yield* instance.adapter.submitLoginCode!({ loginId, code: "valid-code" });
+      yield* Fiber.join(loginFiber);
+
+      assert.equal(events.length, 2);
+      assert.equal(events[0]?.type, "oauth-code");
+      assert.deepEqual(events[1], { type: "verification-required", verificationUrl });
+
+      // Once verified, login + refresh completes as authenticated.
+      catalogErrorCode = undefined;
+      catalogErrorMessage = undefined;
+      const verifiedEvents: ServerProviderDeviceLoginEvent[] = [];
+      const gotOAuth2 = yield* Deferred.make<string>();
+      const loginFiber2 = yield* instance.adapter.loginDeviceCode!(Effect.succeed(false)).pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            verifiedEvents.push(event);
+            if (event.type === "oauth-code") yield* Deferred.succeed(gotOAuth2, event.loginId);
+          }),
+        ),
+        Effect.forkChild,
+      );
+      const loginId2 = yield* Deferred.await(gotOAuth2);
+      yield* instance.adapter.submitLoginCode!({ loginId: loginId2, code: "valid-code" });
+      yield* Fiber.join(loginFiber2);
+      assert.equal(verifiedEvents[1]?.type, "authenticated");
+    }).pipe(Effect.provide(configLayer)),
 );

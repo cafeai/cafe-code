@@ -157,6 +157,10 @@ export interface ProviderAdapterShape<TError> {
   readonly loginDeviceCode?: <SessionError>(
     hasOwnedSessions: Effect.Effect<boolean, SessionError>,
   ) => Stream.Stream<ServerProviderDeviceLoginEvent, TError>;
+  readonly submitLoginCode?: (input: {
+    readonly loginId: string;
+    readonly code: string;
+  }) => Effect.Effect<void, TError>;
   readonly manageMcp?: (input: ProviderMcpNativeInput) => Effect.Effect<ProviderMcpResult, TError>;
   readonly readSecurity?: (
     input: ProviderSecurityReadInput,

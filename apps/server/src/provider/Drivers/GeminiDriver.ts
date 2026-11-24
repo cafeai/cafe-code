@@ -21,6 +21,11 @@ import { buildGeminiAcpModels } from "../acp/GeminiAcpSupport.ts";
 import { makeGeminiAcpRuntime, qualifyGeminiCli } from "../acp/GeminiAcpRuntime.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeGeminiAdapter } from "../Layers/GeminiAdapter.ts";
+import {
+  geminiVerificationUrl,
+  geminiVerificationUrlFromJsonRpcLine,
+  makeGeminiLogin,
+} from "../geminiLogin.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import { defaultProviderContinuationIdentity, type ProviderDriver } from "../ProviderDriver.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
@@ -101,19 +106,57 @@ function discoverGeminiModels(input: GeminiProbeOptions) {
     // A catalogue may fail after executable qualification. Retain that
     // observed identity across the native child's joined cleanup, without
     // re-running discovery or inferring the login from its output.
-    const observation: { cli?: QualifiedGeminiCli } = {};
+    const observation: { cli?: QualifiedGeminiCli; verificationUrl: string | null } = {
+      verificationUrl: null,
+    };
     const result = yield* Effect.gen(function* () {
       // No project cwd, workspace material or prompt enters a catalogue
       // discovery session. Register scratch cleanup before the exact child.
       const cwd = yield* input.fs.makeTempDirectoryScoped({ prefix: "cafecode-gemini-catalog-" });
       const cli = yield* qualifyConfiguredGeminiCli(input, cwd);
       observation.cli = cli;
+      // Observe bounded JSON-RPC error lines on the catalog probe's stdout so
+      // Google account verification URLs can be surfaced privately during login
+      // without weakening effect-acp's generic AcpRequestError scrubbing.
+      const observingSpawner = ChildProcessSpawner.make((command) =>
+        input.spawner.spawn(command).pipe(
+          Effect.map((child) => {
+            const decoder = new TextDecoder("utf-8");
+            let pendingLine = "";
+            const observeStdout = (chunk: Uint8Array) =>
+              Effect.sync(() => {
+                if (observation.verificationUrl) return;
+                pendingLine += decoder.decode(chunk, { stream: true });
+                const lines = pendingLine.split(/\r?\n/u);
+                pendingLine = (lines.pop() ?? "").slice(-32_768);
+                for (const line of lines) {
+                  const found = geminiVerificationUrlFromJsonRpcLine(line);
+                  if (found) {
+                    observation.verificationUrl = found;
+                    break;
+                  }
+                }
+              });
+            return {
+              ...child,
+              stdout: Stream.tap(child.stdout, observeStdout),
+            };
+          }),
+        ),
+      );
       const runtime = yield* makeGeminiAcpRuntime({
         binaryPath: cli.binaryPath,
         environment: input.environment,
-        childProcessSpawner: input.spawner,
+        childProcessSpawner: observingSpawner,
         cwd,
         clientInfo: { name: "cafe-code", version: APPLICATION_VERSION },
+        classifyStartupStderr: (boundedStderr) => {
+          if (!observation.verificationUrl) {
+            const found = geminiVerificationUrl(boundedStderr);
+            if (found) observation.verificationUrl = found;
+          }
+          return undefined;
+        },
       });
       const started = yield* runtime.start();
       const capabilities = started.initializeResult.agentCapabilities;
@@ -128,7 +171,11 @@ function discoverGeminiModels(input: GeminiProbeOptions) {
       }
       return { cli, models };
     }).pipe(Effect.scoped, Effect.timeout("20 seconds"), Effect.result);
-    return { result, qualifiedCli: observation.cli };
+    return {
+      result,
+      qualifiedCli: observation.cli,
+      verificationUrl: observation.verificationUrl,
+    };
   });
 }
 
@@ -210,10 +257,12 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
         auth: { status: "unknown" },
         message: "Checking the configured Antigravity CLI.",
       } satisfies ProviderProbeResult;
+      let lastVerificationUrl: string | null = null;
       const checkProvider = Effect.gen(function* () {
+        lastVerificationUrl = null;
         const checkedAt = DateTime.formatIso(yield* DateTime.now);
         if (!input.enabled) return snapshotFor(checkedAt, pending);
-        const { result, qualifiedCli } = yield* discoverGeminiModels(probeOptions);
+        const { result, qualifiedCli, verificationUrl } = yield* discoverGeminiModels(probeOptions);
         if (result._tag === "Success") {
           const accountRateLimits = yield* readQuota(result.success.cli);
           return snapshotFor(
@@ -223,6 +272,7 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
               version: result.success.cli.version,
               status: result.success.models.length ? "ready" : "warning",
               auth: { status: "authenticated" },
+              authActions: { login: true, deviceCodeLogin: true },
               ...(accountRateLimits ? { accountRateLimits } : {}),
               ...(result.success.models.length
                 ? {}
@@ -232,22 +282,29 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
           );
         }
         const error = result.failure;
-        const unauthenticated = error._tag === "AcpRequestError" && error.code === -32000;
+        lastVerificationUrl = verificationUrl;
+        const unauthenticated =
+          (error._tag === "AcpRequestError" && error.code === -32000) || verificationUrl !== null;
+        const installed =
+          error._tag !== "GeminiCliQualificationError" || error.reason !== "missing";
         const historicalSource =
           !unauthenticated && qualifiedCli ? yield* geminiQuotaSource(fs, qualifiedCli) : null;
         const accountRateLimits = historicalQuota(historicalSource);
         return snapshotFor(checkedAt, {
-          installed: error._tag !== "GeminiCliQualificationError" || error.reason !== "missing",
+          installed,
           version: null,
           status: unauthenticated ? "warning" : "error",
           auth: { status: unauthenticated ? "unauthenticated" : "unknown" },
+          ...(installed ? { authActions: { login: true, deviceCodeLogin: true } } : {}),
           ...(accountRateLimits ? { accountRateLimits } : {}),
           message:
             error._tag === "GeminiCliQualificationError"
               ? error.message
-              : unauthenticated
-                ? "Sign in with the configured Antigravity CLI on this machine, then refresh Gemini."
-                : "Cafe Code could not discover Gemini models from the configured Antigravity CLI.",
+              : verificationUrl !== null
+                ? "Google requires additional verification for this account before Gemini can be used. Sign in again to open the verification link, then refresh Gemini."
+                : unauthenticated
+                  ? "Sign in to Gemini from Settings or run agy acp --login, then refresh Gemini."
+                  : "Cafe Code could not discover Gemini models from the configured Antigravity CLI.",
         });
       });
       const refreshAccountUsage = Effect.gen(function* () {
@@ -306,6 +363,19 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
             }),
         ),
       );
+      const geminiLogin = yield* makeGeminiLogin({
+        qualifyCli: (cwd) => qualifyConfiguredGeminiCli(probeOptions, cwd),
+        environment,
+        spawner,
+        fs,
+        hasSessions: adapter.listSessions().pipe(Effect.map((sessions) => sessions.length > 0)),
+        refresh: (snapshot.refreshAfterAccountChange ?? snapshot.refresh).pipe(
+          Effect.map((refreshed) => ({
+            authenticated: refreshed.auth.status === "authenticated",
+            verificationUrl: lastVerificationUrl,
+          })),
+        ),
+      });
       return {
         instanceId: input.instanceId,
         driverKind: DRIVER,
@@ -314,7 +384,7 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
         accentColor: input.accentColor,
         enabled: input.enabled,
         snapshot,
-        adapter,
+        adapter: { ...adapter, ...geminiLogin },
         textGeneration,
       };
     }),

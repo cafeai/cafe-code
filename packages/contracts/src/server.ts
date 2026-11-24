@@ -1123,6 +1123,13 @@ export const ServerProviderLoginInput = Schema.Struct({
 });
 export type ServerProviderLoginInput = typeof ServerProviderLoginInput.Type;
 
+export const ServerProviderLoginCodeInput = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  loginId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  code: TrimmedNonEmptyString.check(Schema.isMaxLength(4096)),
+});
+export type ServerProviderLoginCodeInput = typeof ServerProviderLoginCodeInput.Type;
+
 // Ephemeral, requester-only instructions. Never include these in provider
 // snapshots, persisted settings or a replaying subscription.
 export const ServerProviderDeviceLoginEvent = Schema.Union([
@@ -1130,6 +1137,15 @@ export const ServerProviderDeviceLoginEvent = Schema.Union([
     type: Schema.Literal("device-code"),
     verificationUrl: Schema.Literal("https://auth.openai.com/codex/device"),
     userCode: Schema.String.check(Schema.isPattern(/^[A-Z0-9]{2,16}-[A-Z0-9]{2,16}$/u)),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("oauth-code"),
+    loginId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+    authorizationUrl: TrimmedNonEmptyString.check(Schema.isMaxLength(4096)),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("verification-required"),
+    verificationUrl: TrimmedNonEmptyString.check(Schema.isMaxLength(4096)),
   }),
   Schema.Struct({ type: Schema.Literal("authenticated") }),
 ]);

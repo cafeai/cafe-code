@@ -69,7 +69,7 @@ export const loginBoundProviderDeviceAccount = <SessionError>(input: {
       if (
         !instance?.enabled ||
         instance.instanceId !== input.instanceId ||
-        instance.driverKind !== "codex" ||
+        (instance.driverKind !== "codex" && instance.driverKind !== "gemini") ||
         !instance.adapter.loginDeviceCode
       )
         return yield* ownerChanged();
@@ -95,3 +95,25 @@ export const loginBoundProviderDeviceAccount = <SessionError>(input: {
         );
     }),
   );
+
+export const submitBoundProviderLoginCode = Effect.fn("submitBoundProviderLoginCode")(
+  function* (input: {
+    readonly instanceId: ProviderInstanceId;
+    readonly loginId: string;
+    readonly code: string;
+    readonly getInstance: () => Effect.Effect<ProviderInstance | undefined>;
+  }) {
+    const instance = yield* input.getInstance();
+    if (
+      !instance?.enabled ||
+      instance.instanceId !== input.instanceId ||
+      instance.driverKind !== "gemini" ||
+      !instance.adapter.submitLoginCode
+    )
+      return yield* ownerChanged();
+    yield* instance.adapter.submitLoginCode({
+      loginId: input.loginId,
+      code: input.code,
+    });
+  },
+);

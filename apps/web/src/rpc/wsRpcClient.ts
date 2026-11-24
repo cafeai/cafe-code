@@ -154,6 +154,9 @@ export interface WsRpcClient {
     >;
     readonly loginProvider: RpcUnaryMethod<typeof WS_METHODS.serverLoginProvider>;
     readonly subscribeProviderDeviceLogin: LocalApi["server"]["subscribeProviderDeviceLogin"];
+    readonly submitProviderLoginCode: RpcUnaryMethod<
+      typeof WS_METHODS.serverSubmitProviderLoginCode
+    >;
     readonly updateProvider: RpcUnaryMethod<typeof WS_METHODS.serverUpdateProvider>;
     readonly restartProviderRuntime: RpcUnaryMethod<typeof WS_METHODS.serverRestartProviderRuntime>;
     readonly openSystemPromptFile: RpcUnaryNoArgMethod<
@@ -355,22 +358,28 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
       loginProvider: (input) =>
         transport.request((client) => client[WS_METHODS.serverLoginProvider](input)),
       subscribeProviderDeviceLogin: (input, listener, onError) => {
-        let authenticated = false;
+        let settled = false;
         return transport.subscribeOnce(
           (client) =>
             client[WS_METHODS.serverLoginProviderDeviceCode](input).pipe(
               Stream.provideService(References.TracerEnabled, false),
             ),
           (event) => {
-            authenticated ||= event.type === "authenticated";
+            settled ||= event.type === "authenticated" || event.type === "verification-required";
             listener(event);
           },
           onError,
           () => {
-            if (!authenticated) onError(new Error("Codex sign-in did not complete."));
+            if (!settled) onError(new Error("Provider sign-in did not complete."));
           },
         );
       },
+      submitProviderLoginCode: (input) =>
+        transport.request((client) =>
+          client[WS_METHODS.serverSubmitProviderLoginCode](input).pipe(
+            Effect.withTracerEnabled(false),
+          ),
+        ),
       updateProvider: (input) =>
         transport.request((client) => client[WS_METHODS.serverUpdateProvider](input)),
       restartProviderRuntime: (input) =>

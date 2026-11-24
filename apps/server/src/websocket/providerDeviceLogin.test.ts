@@ -13,7 +13,7 @@ import * as PubSub from "effect/PubSub";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ProviderAdapterValidationError } from "../provider/Errors.ts";
-import { providerDeviceLogin } from "./providerDeviceLogin.ts";
+import { providerDeviceLogin, submitProviderLoginCode } from "./providerDeviceLogin.ts";
 
 const instanceId = ProviderInstanceId.make("codex_work");
 const instructions: ServerProviderDeviceLoginEvent = {
@@ -202,4 +202,101 @@ describe("private device login access", () => {
       }),
     );
   }
+
+  it.effect(
+    "binds Gemini login code submission to the owning connection and validates access",
+    () =>
+      Effect.gen(function* () {
+        const geminiId = ProviderInstanceId.make("gemini_work");
+        const geminiAccount: ProviderInstanceConfig = {
+          driver: ProviderDriverKind.make("gemini"),
+          enabled: true,
+        };
+        const ownedLoginIds = new Set<string>();
+        const gotOAuth = yield* Deferred.make<string>();
+        const codeReceived = yield* Deferred.make<string>();
+        const stream = providerDeviceLogin(
+          { instanceId: geminiId },
+          {
+            role: "client",
+            secureSecretTransport: true,
+            validateSession: Effect.void,
+            getAccount: Effect.succeed(geminiAccount),
+            invalidations: [],
+            ownedLoginIds,
+            listSessions: Effect.succeed([]),
+            login: () =>
+              Stream.concat(
+                Stream.make({
+                  type: "oauth-code" as const,
+                  loginId: "login-uuid-1",
+                  authorizationUrl:
+                    "https://accounts.google.com/o/oauth2/auth?client_id=x&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&response_type=code",
+                }),
+                Stream.fromEffect(
+                  Deferred.await(codeReceived).pipe(Effect.as({ type: "authenticated" as const })),
+                ),
+              ),
+          },
+        );
+
+        const fiber = yield* stream.pipe(
+          Stream.runForEach((event) =>
+            event.type === "oauth-code" ? Deferred.succeed(gotOAuth, event.loginId) : Effect.void,
+          ),
+          Effect.forkChild,
+        );
+
+        const loginId = yield* Deferred.await(gotOAuth);
+        expect(ownedLoginIds.has(loginId)).toBe(true);
+
+        // Another connection without this loginId in its owned set is refused.
+        expect(
+          yield* submitProviderLoginCode(
+            { instanceId: geminiId, loginId, code: "auth-code-1" },
+            {
+              role: "client",
+              secureSecretTransport: true,
+              validateSession: Effect.void,
+              getAccount: Effect.succeed(geminiAccount),
+              ownedLoginIds: new Set(),
+              submit: () => Effect.void,
+            },
+          ).pipe(Effect.flip),
+        ).toMatchObject({ _tag: "ServerProviderLoginError" });
+
+        // Insecure transport or viewer role is refused even with the right loginId.
+        expect(
+          yield* submitProviderLoginCode(
+            { instanceId: geminiId, loginId, code: "auth-code-1" },
+            {
+              role: "viewer",
+              secureSecretTransport: true,
+              validateSession: Effect.void,
+              getAccount: Effect.succeed(geminiAccount),
+              ownedLoginIds,
+              submit: () => Effect.void,
+            },
+          ).pipe(Effect.flip),
+        ).toMatchObject({ _tag: "ServerProviderLoginError" });
+
+        // The owning authenticated connection succeeds and completes the stream.
+        yield* submitProviderLoginCode(
+          { instanceId: geminiId, loginId, code: "auth-code-1" },
+          {
+            role: "client",
+            secureSecretTransport: true,
+            validateSession: Effect.void,
+            getAccount: Effect.succeed(geminiAccount),
+            ownedLoginIds,
+            submit: (submitted) =>
+              Deferred.succeed(codeReceived, submitted.code).pipe(Effect.asVoid),
+          },
+        );
+
+        yield* Fiber.join(fiber);
+        expect(yield* Deferred.await(codeReceived)).toBe("auth-code-1");
+        expect(ownedLoginIds.has(loginId)).toBe(false);
+      }),
+  );
 });

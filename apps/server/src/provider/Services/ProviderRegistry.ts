@@ -18,6 +18,7 @@ import type {
   ProviderUsageResetError,
   ProviderSkillsResult,
   ProviderSession,
+  ServerProviderLoginCodeInput,
   ServerProviderLoginInput,
   ServerProviderLoginResult,
   ServerProviderDeviceLoginEvent,
@@ -37,6 +38,9 @@ export interface ProviderRegistryShape {
     input: ServerProviderLoginInput,
     listSessions: Effect.Effect<ReadonlyArray<ProviderSession>, SessionError>,
   ) => Stream.Stream<ServerProviderDeviceLoginEvent, ProviderAdapterError>;
+  readonly submitProviderLoginCode?: (
+    input: ServerProviderLoginCodeInput,
+  ) => Effect.Effect<void, ProviderAdapterError>;
   readonly loginProvider?: (
     input: ServerProviderLoginInput,
     listSessions: Effect.Effect<ReadonlyArray<ProviderSession>>,

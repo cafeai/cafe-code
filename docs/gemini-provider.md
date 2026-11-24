@@ -1,7 +1,7 @@
 # Gemini in Cafe Code
 
 1. Install the standalone [Google Antigravity CLI](https://antigravity.google/docs/install?tab=cli) on the machine running the Cafe server. Cafe supports ACP in CLI 1.5.9 and newer. Google added Gemini 4 Neon in 1.5.11. [Antigravity changelog](https://antigravity.google/docs/changelog)
-2. Sign in using `agy acp --login` on that machine as the user running the server. For a remote Cafe environment, use the remote host. [Google ACP setup](https://antigravity.google/docs/ide/extensions/acp/)
+2. Sign in from **Settings → Providers** using **Log in** (works for both local and remote Cafe environments: open the Google sign-in link in your browser, paste the authorization code or callback URL, and follow any additional Google account verification link if prompted), or run `agy acp --login` directly on the machine running the server. [Google ACP setup](https://antigravity.google/docs/ide/extensions/acp/)
 3. In Cafe, open **Settings → Providers → Add provider instance** and choose **Gemini (Antigravity CLI)**. Enter the absolute path to the standalone executable if `agy` on PATH opens the IDE. In Debug, choose **Allow shared native provider state** if you want it to use this native sign-in.
 4. Refresh the provider after changing accounts, updating the CLI, or gaining access to models. Choose an available Gemini model in the composer. Atrium can filter by Gemini and shows the model, thinking setting, and permissions recorded for the turn.
 

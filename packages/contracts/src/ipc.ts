@@ -73,6 +73,7 @@ import type {
   ServerProcessDiagnosticsResult,
   ServerProcessResourceHistoryInput,
   ServerProcessResourceHistoryResult,
+  ServerProviderLoginCodeInput,
   ServerProviderLoginInput,
   ServerProviderLoginResult,
   ServerProviderDeviceLoginEvent,
@@ -616,6 +617,7 @@ export interface LocalApi {
       listener: (event: ServerProviderDeviceLoginEvent) => void,
       onError: (error: unknown) => void,
     ) => () => void;
+    submitProviderLoginCode: (input: ServerProviderLoginCodeInput) => Promise<void>;
     updateProvider: (input: ServerProviderUpdateInput) => Promise<ServerProviderUpdatedPayload>;
     restartProviderRuntime: (
       input: ServerProviderRuntimeRestartInput,

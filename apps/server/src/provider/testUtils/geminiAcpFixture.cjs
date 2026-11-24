@@ -69,9 +69,34 @@ if (process.argv.includes("--print")) {
 if (
   process.argv[2] !== "acp" ||
   (process.argv.length !== 3 &&
-    !(process.argv.length === 4 && process.argv[3] === "--dangerously-skip-permissions"))
+    !(process.argv.length === 4 && process.argv[3] === "--dangerously-skip-permissions") &&
+    !(process.argv.length === 4 && process.argv[3] === "--login"))
 ) {
   process.exit(1);
+}
+if (process.argv[3] === "--login") {
+  const oauthUrl =
+    process.env.CAFE_GEMINI_FIXTURE_LOGIN_URL ??
+    "https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=fixture.apps.googleusercontent.com&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&response_type=code&state=fixture-state";
+  process.stdout.write(
+    `Open this link in a browser to log in with Google:\n\n  ${oauthUrl}\n\nThen paste the authorization code:\n`,
+  );
+  createInterface({ input: process.stdin }).once("line", (line) => {
+    const trimmed = line.trim();
+    if (trimmed === "verify-code") {
+      process.stderr.write(
+        "Verify your account to continue. https://accounts.google.com/v3/signin/challenge/verify?continue=https%3A%2F%2Fantigravity.google\n",
+      );
+      process.exit(1);
+    }
+    if (trimmed === "valid-code") {
+      process.stdout.write("Logged in.\n");
+      process.exit(0);
+    }
+    process.stderr.write("couldn't log in: invalid_grant\n");
+    process.exit(1);
+  });
+  return;
 }
 
 const expectManagementMcp = process.env.CAFE_GEMINI_FIXTURE_EXPECT_MANAGEMENT_MCP === "true";
@@ -259,7 +284,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       validateMcpServers(params.mcpServers, 1);
       const errorCode = process.env.CAFE_GEMINI_FIXTURE_CATALOG_ERROR_CODE;
       if (errorCode !== undefined) {
-        write({ id, error: { code: Number(errorCode), message: "Fixture catalog error" } });
+        write({
+          id,
+          error: {
+            code: Number(errorCode),
+            message:
+              process.env.CAFE_GEMINI_FIXTURE_CATALOG_ERROR_MESSAGE ?? "Fixture catalog error",
+          },
+        });
         break;
       }
       result(id, { sessionId, configOptions: config() });

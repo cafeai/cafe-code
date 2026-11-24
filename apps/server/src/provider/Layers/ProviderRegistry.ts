@@ -39,6 +39,7 @@ import { readBoundInstanceQuota } from "../providerQuotaSubscription.ts";
 import {
   loginBoundProviderAccount,
   loginBoundProviderDeviceAccount,
+  submitBoundProviderLoginCode,
 } from "../providerAccountLogin.ts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
@@ -1285,6 +1286,13 @@ const makeProviderRegistry = (options?: ProviderRegistryOptions) =>
           instanceId: input.instanceId,
           getInstance: () => instanceRegistry.getInstance(input.instanceId),
           listSessions,
+        }),
+      submitProviderLoginCode: (input) =>
+        submitBoundProviderLoginCode({
+          instanceId: input.instanceId,
+          loginId: input.loginId,
+          code: input.code,
+          getInstance: () => instanceRegistry.getInstance(input.instanceId),
         }),
       loginProvider: (input, listSessions) =>
         loginBoundProviderAccount({

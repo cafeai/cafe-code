@@ -138,6 +138,7 @@ import {
 import {
   ServerConfigStreamEvent,
   ServerConfig,
+  ServerProviderLoginCodeInput,
   ServerProviderLoginError,
   ServerProviderLoginInput,
   ServerProviderLoginResult,
@@ -246,6 +247,7 @@ export const WS_METHODS = {
   serverUsageReset: "server.usageReset",
   serverLoginProvider: "server.loginProvider",
   serverLoginProviderDeviceCode: "server.loginProviderDeviceCode",
+  serverSubmitProviderLoginCode: "server.submitProviderLoginCode",
   serverUpdateProvider: "server.updateProvider",
   serverRestartProviderRuntime: "server.restartProviderRuntime",
   serverOpenSystemPromptFile: "server.openSystemPromptFile",
@@ -398,6 +400,15 @@ export const WsServerLoginProviderDeviceCodeRpc = Rpc.make(
     success: ServerProviderDeviceLoginEvent,
     error: ServerProviderLoginError,
     stream: true,
+  },
+);
+
+export const WsServerSubmitProviderLoginCodeRpc = Rpc.make(
+  WS_METHODS.serverSubmitProviderLoginCode,
+  {
+    payload: ServerProviderLoginCodeInput,
+    success: Schema.Void,
+    error: ServerProviderLoginError,
   },
 );
 
@@ -917,6 +928,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUsageResetRpc,
   WsServerLoginProviderRpc,
   WsServerLoginProviderDeviceCodeRpc,
+  WsServerSubmitProviderLoginCodeRpc,
   WsServerUpdateProviderRpc,
   WsServerRestartProviderRuntimeRpc,
   WsProviderRespondToInteractionRpc,
