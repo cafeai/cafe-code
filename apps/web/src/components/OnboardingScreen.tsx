@@ -26,11 +26,11 @@ import {
   DEFAULT_BRAND_WORDMARK_PREFIX,
   DEFAULT_SIDEBAR_BRAND_IMAGE,
   MAX_BRAND_WORDMARK_PREFIX_LENGTH,
-  MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
 } from "@cafecode/contracts/settings";
 
 import { APP_BASE_NAME } from "../branding";
-import { uploadSidebarBrandImage } from "../brandingImages";
+import { prepareSidebarBrandImage, uploadSidebarBrandImage } from "../brandingImages";
+import { useWorkspaceEnvironmentId } from "../environments/workspace";
 import { useSidebarImage } from "~/hooks/useSidebarImage";
 import { isElectron } from "~/env";
 import { ensureLocalApi } from "~/localApi";
@@ -55,7 +55,6 @@ import { Spinner } from "./ui/spinner";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 
 const APP_ACCENT_PICKER_FALLBACK = "#2563eb";
-const SIDEBAR_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const THEME_CHOICES = [
   {
     value: "system",
@@ -496,6 +495,7 @@ function CustomizePage() {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
+  const environmentId = useWorkspaceEnvironmentId();
   const { theme, setTheme } = useTheme();
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
@@ -512,20 +512,11 @@ function CustomizePage() {
       const file = event.currentTarget.files?.[0];
       event.currentTarget.value = "";
       if (!file) return;
-      if (!SIDEBAR_IMAGE_MIME_TYPES.has(file.type)) {
-        setImageError(
-          uiText("Choose a PNG, JPEG, GIF, or WebP image.", undefined, undefined, uiLocale),
-        );
-        return;
-      }
-      if (file.size > MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES) {
-        setImageError(uiText("Choose an image under 1 MB.", undefined, undefined, uiLocale));
-        return;
-      }
+      setImageError(null);
       setImageUploading(true);
       try {
-        const sidebarBrandImage = await uploadSidebarBrandImage(file);
-        setImageError(null);
+        const prepared = await prepareSidebarBrandImage(file, uiLocale);
+        const sidebarBrandImage = await uploadSidebarBrandImage(prepared, environmentId);
         updateSettings({
           sidebarBrandImage,
           sidebarBrandImageDataUrl: "",
@@ -541,7 +532,7 @@ function CustomizePage() {
         setImageUploading(false);
       }
     },
-    [updateSettings, uiLocale],
+    [environmentId, updateSettings, uiLocale],
   );
 
   return (
@@ -682,7 +673,7 @@ function CustomizePage() {
                 </Button>
               )}
               <input
-                accept="image/png,image/jpeg,image/gif,image/webp"
+                accept="image/*"
                 className="hidden"
                 onChange={(event) => void handleImageChange(event)}
                 ref={fileInputRef}
@@ -693,7 +684,7 @@ function CustomizePage() {
           }
           description={
             imageError ??
-            uiText("PNG, JPEG, GIF or WebP, under 1 MB.", undefined, undefined, uiLocale)
+            uiText("Images are resized and compressed as needed.", undefined, undefined, uiLocale)
           }
           descriptionError={Boolean(imageError)}
           index={5}

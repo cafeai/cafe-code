@@ -53,6 +53,7 @@ import { normalizeAroundMermaidFences } from "../lib/chatMarkdownMermaid";
 import { remarkChatMath } from "../lib/remarkChatMath";
 import { remarkMermaid } from "../lib/remarkMermaid";
 import { normalizeCodexCitationMarkers } from "../lib/codexCitations";
+import { normalizeCodexFileCitations } from "../lib/codexFileCitations";
 import { MermaidBlock } from "./MermaidBlock";
 import { MarkdownTable } from "./MarkdownTableViewer";
 import { MarkdownImage, type MarkdownImageContext } from "./chat/MarkdownImage";
@@ -85,6 +86,7 @@ interface ChatMarkdownProps {
   additionalWorkspaceRoots?: ReadonlyArray<string>;
   isStreaming?: boolean;
   normalizeCodexCitations?: boolean;
+  renderFileCitations?: boolean;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
 }
 
@@ -865,6 +867,7 @@ function ChatMarkdown({
   additionalWorkspaceRoots = EMPTY_ADDITIONAL_WORKSPACE_ROOTS,
   isStreaming = false,
   normalizeCodexCitations = false,
+  renderFileCitations = false,
   skills = EMPTY_MARKDOWN_SKILLS,
 }: ChatMarkdownProps) {
   const { resolvedTheme } = useTheme();
@@ -873,13 +876,15 @@ function ChatMarkdown({
     // The optional final result footer is scheduler metadata, not transcript
     // prose. Strip only a fully validated marker from this derived rendering;
     // canonical message bytes remain available for exact-run reconciliation.
-    return normalizeAroundMermaidFences(stripScheduledFollowupResultForDisplay(text), (source) => {
+    const source = stripScheduledFollowupResultForDisplay(text);
+    const withFileLinks = renderFileCitations ? normalizeCodexFileCitations(source, cwd) : source;
+    return normalizeAroundMermaidFences(withFileLinks, (source) => {
       const citationNormalizedText = normalizeCodexCitations
         ? normalizeCodexCitationMarkers(source, { mode: "display" })
         : source;
       return normalizeChatMarkdownMath(citationNormalizedText);
     });
-  }, [normalizeCodexCitations, text]);
+  }, [cwd, normalizeCodexCitations, renderFileCitations, text]);
   const markdownFileLinkMetaByHref = useMemo(() => {
     const metaByHref = new Map<
       string,

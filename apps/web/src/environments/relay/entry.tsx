@@ -45,7 +45,7 @@ function readInitialIntent(): Intent | undefined {
 }
 let initial = readInitialIntent();
 
-export function RelayEntry({ ready }: { readonly ready: () => void }) {
+export function RelayEntry({ ready }: { readonly ready: () => void | Promise<void> }) {
   const [busy, setBusy] = useState(false),
     [message, setMessage] = useState(() =>
       initial && "invalid" in initial
@@ -63,20 +63,23 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
   const [needsInvitation, setNeedsInvitation] = useState(
     () => initial === undefined || "invalid" in initial,
   );
-  const [pairing] = useState(() => initial !== undefined && "invitation" in initial);
-  const owner = useRef<Lifetime | undefined>(undefined);
+  const [pairing, setPairing] = useState(() => initial !== undefined && "invitation" in initial);
+  const owner = useRef<{ view: Lifetime; pairing: Lifetime } | undefined>(undefined);
   const connection = useRef<Awaited<ReturnType<typeof connectViewer>> | undefined>(undefined);
   const complete = useRef(false);
   const intent = useRef(initial);
   useEffect(() => {
     const lifetime = new Lifetime();
-    owner.current = lifetime;
+    const pairingLifetime = new Lifetime();
+    const scope = { view: lifetime, pairing: pairingLifetime };
+    owner.current = scope;
     const pending = intent.current;
     if (pending && "invitation" in pending)
       lifetime.later(Math.max(1, pending.invitation.expiresAt - epochNow()), () => {
         if (!complete.current) {
           intent.current = undefined;
           initial = undefined;
+          pairingLifetime.retire();
           void connection.current?.close();
           setNeedsInvitation(true);
           setSecondFactor("");
@@ -107,16 +110,18 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
           }
         });
     return () => {
-      if (owner.current === lifetime) owner.current = undefined;
+      if (owner.current === scope) owner.current = undefined;
+      lifetime.retire();
       if (!complete.current) {
-        lifetime.retire();
+        pairingLifetime.retire();
         void connection.current?.close();
       }
     };
   }, []);
   const connect = async () => {
-    const lifetime = owner.current;
-    if (!lifetime?.active || busy) return;
+    const scope = owner.current;
+    if (!scope?.view.active || busy) return;
+    const { view: lifetime, pairing: pairingLifetime } = scope;
     const submittedSecondFactor = secondFactor;
     setSecondFactor("");
     setBusy(true);
@@ -153,11 +158,11 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
             bootstrapUrls: invitation.bootstrapUrls,
             rootPublicKey: invitation.networkRootPublicKey,
             minimumRevision: invitation.minimumRevision,
-            lifetime,
+            lifetime: pairingLifetime,
           });
           const admission = await createIdentity();
           connection.current = await connectViewer({
-            lifetime,
+            lifetime: pairingLifetime,
             target: {
               network,
               hostPublicKey: invitation.hostPublicKey,
@@ -242,16 +247,29 @@ export function RelayEntry({ ready }: { readonly ready: () => void }) {
           await held.close();
           throw new RelayError("AUTH_INDETERMINATE");
         }
-        if (!lifetime.active) throw new RelayError("UNAVAILABLE");
-        await installPrimaryRelay(new ActiveRelay(target, identity, held, lifetime));
+        if (!lifetime.active || !pairingLifetime.active) throw new RelayError("UNAVAILABLE");
+        await installPrimaryRelay(new ActiveRelay(target, identity, held, pairingLifetime));
       }
       if (!lifetime.active) return;
       complete.current = true;
       intent.current = undefined;
       initial = undefined;
       setSecondFactor("");
+      setSecondFactorRequired(false);
       window.history.replaceState(null, "", "/");
-      ready();
+      try {
+        await ready();
+      } catch (error) {
+        if (!lifetime.active) return;
+        const savedId = sessionStorage.getItem("cafe-relay-active");
+        if (savedId) intent.current = { savedId };
+        setPairing(false);
+        setMessage(
+          error instanceof RelayError && error.code === "NOT_FOUND"
+            ? uiText("Update Cafe Code on the host computer to open its web app.")
+            : uiText("The host connected, but its web app could not be opened."),
+        );
+      }
     } catch (error) {
       if (!lifetime.active) return;
       if (

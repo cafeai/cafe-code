@@ -45,6 +45,31 @@ const makeProvider = (
 });
 
 it.layer(NodeServices.layer)("providerStatusCache", (it) => {
+  it.effect("does not restore Antigravity auth across a private home change", () =>
+    Effect.sync(() => {
+      const driver = ProviderDriverKind.make("gemini");
+      const cached = makeProvider(driver, {
+        continuation: { groupKey: `gemini:instance:gemini:home:${"a".repeat(64)}` },
+      });
+      const pending = makeProvider(driver, {
+        auth: { status: "unknown" },
+        status: "warning",
+        continuation: { groupKey: "gemini:instance:gemini" },
+      });
+      assert.deepEqual(
+        hydrateCachedProvider({ cachedProvider: cached, fallbackProvider: pending }),
+        pending,
+      );
+      const otherPrivateHome = {
+        ...pending,
+        continuation: { groupKey: `gemini:instance:gemini:home:${"b".repeat(64)}` },
+      };
+      assert.deepEqual(
+        hydrateCachedProvider({ cachedProvider: cached, fallbackProvider: otherPrivateHome }),
+        otherPrivateHome,
+      );
+    }),
+  );
   it.effect("writes and reads provider status snapshots", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

@@ -153,7 +153,14 @@ export const mergeProviderSnapshot = (
     );
     if (auth !== nextProvider.auth) nextProvider = { ...nextProvider, auth };
   }
-  if (!previousProvider) {
+  if (
+    !previousProvider ||
+    (nextProvider.driver === "gemini" &&
+      !isCachedProviderCorrelated({
+        cachedProvider: previousProvider,
+        fallbackProvider: nextProvider,
+      }))
+  ) {
     return nextProvider;
   }
 

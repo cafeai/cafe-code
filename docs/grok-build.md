@@ -9,7 +9,7 @@ Grok Build is available as an Early Access first-party provider. Cafe connects t
 3. Run `grok login` in a terminal and complete authentication.
 4. Start Cafe Code and open Settings → Providers → Grok Build. Set a binary path only if `grok` is not on the backend process `PATH`.
 
-An optional Grok home may be configured per provider instance. Leave it blank to reuse the normal Grok home and cached login. Different configured homes are isolated continuation/auth domains and do not share Cafe resume state.
+New Grok instances use a private provider home by default. Find the directory in the account's Settings and run `grok login` with `GROK_HOME` set to that directory on the backend host. To use an existing login or specify a custom Grok home, turn off **Create a private provider home** while adding the instance. The normal Grok home is used when that custom field is blank. Different homes keep their native sign-in and Cafe resume state separate. [Grok settings](https://docs.x.ai/build/settings)
 
 For API-key authentication, add `XAI_API_KEY` as a sensitive environment entry on the Grok provider instance. Cafe selects it only when the connected CLI advertises `xai.api_key`; otherwise it uses an advertised cached noninteractive login method. Secrets remain server-side and redacted from settings responses.
 

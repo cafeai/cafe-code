@@ -47,9 +47,23 @@ export const orderProviderSnapshots = (
 export const isCachedProviderCorrelated = (input: {
   readonly cachedProvider: ServerProvider;
   readonly fallbackProvider: ServerProvider;
-}): boolean =>
-  input.cachedProvider.instanceId === input.fallbackProvider.instanceId &&
-  input.cachedProvider.driver === input.fallbackProvider.driver;
+}): boolean => {
+  const { cachedProvider, fallbackProvider } = input;
+  if (
+    cachedProvider.instanceId !== fallbackProvider.instanceId ||
+    cachedProvider.driver !== fallbackProvider.driver
+  )
+    return false;
+  const cachedGroup = cachedProvider.continuation?.groupKey;
+  const liveGroup = fallbackProvider.continuation?.groupKey;
+  // The shared Gemini entry can reuse its old ID when the user switches to or
+  // from a private home. Only matching private scopes can carry status across.
+  return (
+    fallbackProvider.driver !== "gemini" ||
+    cachedGroup === liveGroup ||
+    (!cachedGroup?.includes(":home:") && !liveGroup?.includes(":home:"))
+  );
+};
 
 export const hydrateCachedProvider = (input: {
   readonly cachedProvider: ServerProvider;

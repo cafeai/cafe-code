@@ -15,6 +15,12 @@ import { relayRpcProtocol } from "@cafecode/relay/rpc";
 import { connectNative } from "@cafecode/relay/nativeWire";
 import { unopaqueBounded } from "@cafecode/relay/bytes";
 import { RelayError } from "@cafecode/relay/errors";
+import {
+  RELAY_VIEWER_PATH,
+  RELAY_VIEWER_PROBE_ACCEPT,
+  RELAY_VIEWER_PROBE_PATH,
+} from "@cafecode/relay/viewerBundle";
+import { openRelayViewerBundle, RELAY_VIEWER_BUILD_DIGEST } from "./viewerBundle.ts";
 import type { RelayStream, SessionAuthResult } from "@cafecode/relay/session";
 import type { RelayDial } from "@cafecode/relay/client";
 import type { RelayNode } from "@cafecode/relay/descriptor";
@@ -170,6 +176,7 @@ export function isRelayAppRoute(method: string, path: string, rpc = false): bool
 
 export const makeRelayRuntime = Effect.gen(function* () {
   const config = yield* ServerConfig;
+  const viewerBundle = openRelayViewerBundle(config.staticDir, RELAY_VIEWER_BUILD_DIGEST);
   const environment = yield* ServerEnvironment;
   const relayAuth = yield* makeRelayAuth;
   const services = yield* Effect.context<never>();
@@ -399,6 +406,7 @@ export const makeRelayRuntime = Effect.gen(function* () {
                       ),
                       stream.signal,
                     );
+                  let releaseViewerBytes: (() => void) | undefined;
                   try {
                     if (stream.kind === "rpc") {
                       const open = readCanonical(HttpOpen, canonicalBytes(metadata));
@@ -423,17 +431,37 @@ export const makeRelayRuntime = Effect.gen(function* () {
                       stream.retire();
                     } else
                       await serveRelayedHttp(stream, metadata, async (request) => {
+                        const url = new URL(request.url);
                         if (
-                          !isRelayAppRoute(
-                            request.method,
-                            new URL(request.url).pathname + new URL(request.url).search,
-                          )
-                        )
+                          request.method === "GET" &&
+                          !url.search &&
+                          url.pathname === RELAY_VIEWER_PROBE_PATH &&
+                          request.headers.get("accept") === RELAY_VIEWER_PROBE_ACCEPT
+                        ) {
+                          await run(validate, stream.signal);
+                          return Response.json({
+                            relayViewerBuildDigest: viewerBundle ? RELAY_VIEWER_BUILD_DIGEST : null,
+                          });
+                        }
+                        if (
+                          request.method === "GET" &&
+                          !url.search &&
+                          url.pathname.startsWith(RELAY_VIEWER_PATH + "/")
+                        ) {
+                          await run(validate, stream.signal);
+                          return viewerBundle
+                            ? viewerBundle(url.pathname, stream.signal, (release) => {
+                                releaseViewerBytes = release;
+                              })
+                            : new Response(null, { status: 404 });
+                        }
+                        if (!isRelayAppRoute(request.method, url.pathname + url.search))
                           throw new RelayError("PROTOCOL_ERROR");
                         const response = await handle(request);
                         return HttpServerResponse.toWeb(response, { context: handlerServices });
                       });
                   } finally {
+                    releaseViewerBytes?.();
                     await run(Scope.close(requestScope, Exit.void));
                   }
                 },

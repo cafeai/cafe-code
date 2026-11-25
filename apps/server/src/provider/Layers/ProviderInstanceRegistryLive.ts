@@ -64,7 +64,7 @@ import {
 } from "../Services/ProviderInstanceRegistryMutator.ts";
 import type { AnyProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import {
-  prepareDebugProviderHome,
+  prepareProviderHome,
   resolveProviderProfileAdmission,
   type ProviderDataProfile,
 } from "../debugProviderProfile.ts";
@@ -151,6 +151,7 @@ const closeUnpublishedScopes = (state: RegistryState) =>
 const runtimeEntryEqual = (a: ProviderInstanceConfig, b: ProviderInstanceConfig): boolean =>
   a.driver === b.driver &&
   a.enabled === b.enabled &&
+  a.nativeHomeMode === b.nativeHomeMode &&
   a.debugStateSharing === b.debugStateSharing &&
   Equal.equals(a.environment, b.environment) &&
   Equal.equals(a.config, b.config);
@@ -321,8 +322,8 @@ const buildEntry = <R>(input: {
     }
     if (admission.nativeHome && input.profile) {
       const prepared = yield* Effect.tryPromise({
-        try: () => prepareDebugProviderHome(input.profile!, admission.nativeHome!),
-        catch: () => "Debug provider home could not be prepared safely. No provider was started.",
+        try: () => prepareProviderHome(input.profile!, admission.nativeHome!),
+        catch: () => "The private provider home could not be prepared safely.",
       }).pipe(Effect.result);
       if (prepared._tag === "Failure") {
         return {
@@ -363,6 +364,7 @@ const buildEntry = <R>(input: {
         accentColor: entry.accentColor,
         environment: entry.environment ?? [],
         processEnvironment: admission.processEnvironment,
+        nativeHome: admission.nativeHome,
         enabled,
         config: admission.config,
       })

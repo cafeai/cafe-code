@@ -20,7 +20,7 @@ import {
   resolveProviderLoginLaunchPlan,
 } from "./providerLoginLauncher.ts";
 import { CAFE_CODE_MANAGED_RUNTIME_ROOT_ENV } from "./managedProviderRuntime.ts";
-import { debugProviderHome, type ProviderDataProfile } from "./debugProviderProfile.ts";
+import { providerHome, type ProviderDataProfile } from "./debugProviderProfile.ts";
 
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
@@ -90,7 +90,7 @@ describe("providerLoginLauncher", () => {
       },
       profile,
     );
-    const home = debugProviderHome(profile, "codex", CODEX_INSTANCE_ID);
+    const home = providerHome(profile, "codex", CODEX_INSTANCE_ID);
     expect(plan.env.CODEX_HOME).toBe(home);
     expect(plan.env.CODEX_SQLITE_HOME).toBe(home);
     expect(plan.env.OPENAI_API_KEY).toBeUndefined();
@@ -119,7 +119,7 @@ describe("providerLoginLauncher", () => {
       },
       profile,
     );
-    const home = debugProviderHome(profile, "claudeAgent", CLAUDE_INSTANCE_ID);
+    const home = providerHome(profile, "claudeAgent", CLAUDE_INSTANCE_ID);
     expect(plan.env.HOME).toBe(home);
     expect(plan.env.CLAUDE_CONFIG_DIR).toBe(NodePath.join(home, ".claude"));
     expect(plan.env.CLAUDE_SECURESTORAGE_CONFIG_DIR).toBeUndefined();

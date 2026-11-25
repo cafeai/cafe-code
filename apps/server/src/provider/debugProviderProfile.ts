@@ -9,7 +9,8 @@ import type {
   ProviderInstanceId,
   ServerProviderDataProfile,
 } from "@cafecode/contracts";
-import { CodexSettings, ClaudeSettings, GrokSettings } from "@cafecode/contracts";
+import { CodexSettings, ClaudeSettings, GeminiSettings, GrokSettings } from "@cafecode/contracts";
+import { supportsPrivateProviderHome } from "@cafecode/shared/serverSettings";
 import * as Schema from "effect/Schema";
 
 import { mergeProviderInstanceEnvironment } from "./ProviderInstanceEnvironment.ts";
@@ -23,6 +24,10 @@ export interface ProviderDataProfile {
 
 const LOCAL_HOME_DRIVERS = new Set(["codex", "claudeAgent", "grok"]);
 const LEGACY_DRIVERS = ["codex", "claudeAgent", "grok", "opencode"] as const;
+const decodeCodexSettings = Schema.decodeUnknownExit(CodexSettings);
+const decodeClaudeSettings = Schema.decodeUnknownExit(ClaudeSettings);
+const decodeGeminiSettings = Schema.decodeUnknownExit(GeminiSettings);
+const decodeGrokSettings = Schema.decodeUnknownExit(GrokSettings);
 
 const record = (value: unknown): Record<string, unknown> | undefined =>
   value !== null && typeof value === "object" && !Array.isArray(value)
@@ -112,6 +117,23 @@ const EXTERNAL_CLAUDE_AUTH_SELECTION_KEYS = new Set([
   "ANTHROPIC_PROFILE",
   "ANTHROPIC_FEDERATION_RULE_ID",
 ]);
+const GEMINI_GOOGLE_SELECTION_KEYS = new Set([
+  "GOOGLE_API_KEY",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "GOOGLE_CLOUD_PROJECT",
+  "GOOGLE_CLOUD_REGION",
+  "GOOGLE_CLOUD_QUOTA_PROJECT",
+  "GOOGLE_CLOUD_LOCATION",
+  "GOOGLE_GEMINI_BASE_URL",
+  "GCLOUD_PROJECT",
+  "CLOUDSDK_CONFIG",
+  "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+]);
+const isGeminiAccountSelector = (key: string) =>
+  GEMINI_GOOGLE_SELECTION_KEYS.has(key) ||
+  /^(?:GEMINI|AGY|ANTIGRAVITY)_(?:[A-Z0-9]+_)*(?:AUTH|TOKEN|STORAGE|PROFILE|HOME|DIR|API_KEY|CREDENTIALS?|PROJECT|LOCATION)(?:_|$)/.test(
+    key,
+  );
 const NATIVE_STATE_ROOT_ENTRIES = [
   "auth.json",
   "config.toml",
@@ -153,19 +175,25 @@ export function describeProviderDataProfiles(
   profile: ProviderDataProfile,
   instances: ProviderInstanceConfigMap,
 ): Record<ProviderInstanceId, ServerProviderDataProfile> | undefined {
-  if (profile.dataProfile !== "debug") return undefined;
+  const debug = profile.dataProfile === "debug";
+  const entries = Object.entries(instances).filter(
+    ([, entry]) => debug || entry.nativeHomeMode === "private",
+  );
+  if (!debug && entries.length === 0) return undefined;
   return Object.fromEntries(
-    Object.entries(instances).map(([id, entry]) => {
+    entries.map(([id, entry]) => {
       const instanceId = id as ProviderInstanceId;
-      if (entry.debugStateSharing === true) return [id, { scope: "shared" }];
+      if (debug && entry.debugStateSharing === true) return [id, { scope: "shared" }];
       const decoded =
         entry.driver === "codex"
-          ? Schema.decodeUnknownExit(CodexSettings)(entry.config ?? {})
+          ? decodeCodexSettings(entry.config ?? {})
           : entry.driver === "claudeAgent"
-            ? Schema.decodeUnknownExit(ClaudeSettings)(entry.config ?? {})
+            ? decodeClaudeSettings(entry.config ?? {})
             : entry.driver === "grok"
-              ? Schema.decodeUnknownExit(GrokSettings)(entry.config ?? {})
-              : undefined;
+              ? decodeGrokSettings(entry.config ?? {})
+              : entry.driver === "gemini"
+                ? decodeGeminiSettings(entry.config ?? {})
+                : undefined;
       if (!decoded || decoded._tag === "Failure") return [id, { scope: "unconfigured" }];
       const config = decoded.value;
       const enabled =
@@ -189,13 +217,15 @@ export function describeProviderDataProfiles(
 }
 
 /** Path spelling is host-native; hashing also prevents Windows case collisions. */
-export function debugProviderHome(
+export function providerHome(
   profile: ProviderDataProfile,
   driver: string,
   instanceId: ProviderInstanceId,
 ): string {
   const identity = createHash("sha256").update(`${driver}\0${instanceId}`).digest("hex");
-  if (!LOCAL_HOME_DRIVERS.has(driver)) throw new Error("Driver has no Debug-local home policy.");
+  if (!LOCAL_HOME_DRIVERS.has(driver) && driver !== "gemini") {
+    throw new Error("Driver has no private native home policy.");
+  }
   return NodePath.join(profile.baseDir, "provider-homes", driver, identity);
 }
 
@@ -214,7 +244,9 @@ export function resolveProviderProfileAdmission(input: {
 }): ProviderProfileAdmission {
   const { profile, entry } = input;
   const baseEnvironment = input.baseEnvironment ?? process.env;
-  if (profile?.dataProfile !== "debug") {
+  const debug = profile?.dataProfile === "debug";
+  const privateHome = entry.nativeHomeMode === "private";
+  if (!debug && !privateHome) {
     return {
       kind: "admitted",
       config: input.config,
@@ -224,10 +256,12 @@ export function resolveProviderProfileAdmission(input: {
   if (!input.enabled) {
     return {
       kind: "refused",
-      reason: "Debug provider is disabled. Configure and enable it explicitly to start it.",
+      reason: debug
+        ? "Debug provider is disabled. Configure and enable it explicitly to start it."
+        : "Provider is disabled. Enable it to start its private home.",
     };
   }
-  if (entry.debugStateSharing === true) {
+  if (debug && entry.debugStateSharing === true) {
     const processEnvironment = mergeProviderInstanceEnvironment(entry.environment, baseEnvironment);
     return {
       kind: "admitted",
@@ -240,32 +274,43 @@ export function resolveProviderProfileAdmission(input: {
           : processEnvironment,
     };
   }
-  if (!LOCAL_HOME_DRIVERS.has(entry.driver)) {
+  const gemini = entry.driver === "gemini";
+  if (
+    !profile ||
+    (privateHome && !debug && !supportsPrivateProviderHome(entry.driver)) ||
+    (!LOCAL_HOME_DRIVERS.has(entry.driver) && !(gemini && privateHome))
+  ) {
     return {
       kind: "refused",
-      reason:
-        "This driver has no qualified Debug-local native home. Explicitly allow shared native provider state in its settings before enabling it.",
+      reason: debug
+        ? "This driver has no qualified Debug-local native home. Explicitly allow shared native provider state in its settings before enabling it."
+        : "This provider has no private native home in the current server environment.",
     };
   }
   const config = record(input.config);
   if (!config) {
-    return { kind: "refused", reason: "Debug provider settings are invalid." };
+    return { kind: "refused", reason: "Private provider settings are invalid." };
   }
-  const home = debugProviderHome(profile, entry.driver, input.instanceId);
-  const homeSelectors: Record<string, string> = {
-    HOME: home,
-    USERPROFILE: home,
-    XDG_CONFIG_HOME: NodePath.join(home, "config"),
-    XDG_DATA_HOME: NodePath.join(home, "data"),
-    XDG_CACHE_HOME: NodePath.join(home, "cache"),
-    XDG_STATE_HOME: NodePath.join(home, "state"),
-    APPDATA: NodePath.join(home, "AppData", "Roaming"),
-    LOCALAPPDATA: NodePath.join(home, "AppData", "Local"),
-    CODEX_HOME: home,
-    CODEX_SQLITE_HOME: home,
-    CLAUDE_CONFIG_DIR: NodePath.join(home, ".claude"),
-    GROK_HOME: home,
-  };
+  const home = providerHome(profile, entry.driver, input.instanceId);
+  // Antigravity has a native directory flag. In Production its tools can keep
+  // their ordinary home. Debug still moves the user and tool home selectors.
+  const relocateToolHome = debug || !gemini;
+  const homeSelectors: Record<string, string> = relocateToolHome
+    ? {
+        HOME: home,
+        USERPROFILE: home,
+        XDG_CONFIG_HOME: NodePath.join(home, "config"),
+        XDG_DATA_HOME: NodePath.join(home, "data"),
+        XDG_CACHE_HOME: NodePath.join(home, "cache"),
+        XDG_STATE_HOME: NodePath.join(home, "state"),
+        APPDATA: NodePath.join(home, "AppData", "Roaming"),
+        LOCALAPPDATA: NodePath.join(home, "AppData", "Local"),
+        CODEX_HOME: home,
+        CODEX_SQLITE_HOME: home,
+        CLAUDE_CONFIG_DIR: NodePath.join(home, ".claude"),
+        GROK_HOME: home,
+      }
+    : {};
   // Never silently reinterpret a saved external native home as private state.
   // The UI exposes the explicit shared-state consent, with its real limits.
   if (
@@ -278,6 +323,7 @@ export function resolveProviderProfileAdmission(input: {
       config.launchArgs.trim() !== "") ||
     (entry.environment ?? []).some((variable) => {
       const key = variable.name.toUpperCase();
+      if (gemini && isGeminiAccountSelector(key) && variable.value.trim() !== "") return true;
       // Native cloud credential chains have additional OS/global selection
       // mechanisms that this local-home policy does not qualify. Do not label
       // those chains private merely because the Claude config directory moved.
@@ -300,8 +346,9 @@ export function resolveProviderProfileAdmission(input: {
   ) {
     return {
       kind: "refused",
-      reason:
-        "External native homes, custom Claude launch arguments and cloud authentication selectors require explicit shared-state consent in Debug. Clear the unsupported overrides to use the private Debug account.",
+      reason: debug
+        ? "External native homes, custom Claude launch arguments and cloud authentication selectors require explicit shared-state consent in Debug. Clear the unsupported overrides to use the private Debug account."
+        : "Clear the external home, launch arguments, or authentication selectors to use this private provider home.",
     };
   }
   const environment: NodeJS.ProcessEnv = {};
@@ -310,12 +357,13 @@ export function resolveProviderProfileAdmission(input: {
   // omissions: the later overlay must not resurrect a shell account. Keep
   // every known fixed selector plus all observed provider-prefixed keys.
   for (const key of AMBIENT_NATIVE_SELECTION_KEYS) environment[key] = undefined;
-  for (const key of HOME_SELECTION_KEYS) environment[key] = undefined;
+  if (relocateToolHome) for (const key of HOME_SELECTION_KEYS) environment[key] = undefined;
   for (const [key, value] of Object.entries(baseEnvironment)) {
     const canonical = key.toUpperCase();
     if (
       AMBIENT_NATIVE_SELECTION_KEYS.has(canonical) ||
-      HOME_SELECTION_KEYS.has(canonical) ||
+      (relocateToolHome && HOME_SELECTION_KEYS.has(canonical)) ||
+      (gemini && isGeminiAccountSelector(canonical)) ||
       /^(?:CODEX|OPENAI|ANTHROPIC|CLAUDE|GROK|XAI)_/.test(canonical)
     ) {
       environment[key] = undefined;
@@ -326,7 +374,12 @@ export function resolveProviderProfileAdmission(input: {
   const explicit = mergeProviderInstanceEnvironment(entry.environment, {});
   for (const [key, value] of Object.entries(explicit)) {
     const canonical = key.toUpperCase();
-    if (HOME_SELECTION_KEYS.has(canonical) || NATIVE_PATH_SELECTION_KEYS.has(canonical)) continue;
+    if (
+      HOME_SELECTION_KEYS.has(canonical) ||
+      NATIVE_PATH_SELECTION_KEYS.has(canonical) ||
+      (gemini && isGeminiAccountSelector(canonical))
+    )
+      continue;
     environment[AMBIENT_NATIVE_SELECTION_KEYS.has(canonical) ? canonical : key] = value;
   }
   Object.assign(environment, homeSelectors);
@@ -350,11 +403,13 @@ export function resolveProviderProfileAdmission(input: {
   environment.CLAUDE_SECURESTORAGE_CONFIG_DIR = undefined;
   return {
     kind: "admitted",
-    config: {
-      ...config,
-      homePath: home,
-      ...(entry.driver === "codex" ? { shadowHomePath: "" } : {}),
-    },
+    config: gemini
+      ? config
+      : {
+          ...config,
+          homePath: home,
+          ...(entry.driver === "codex" ? { shadowHomePath: "" } : {}),
+        },
     processEnvironment: environment,
     nativeHome: home,
   };
@@ -366,24 +421,16 @@ export function resolveProviderProfileAdmission(input: {
  * As elsewhere, this is not a sandbox against another process with the same OS
  * identity changing its own namespace after admission.
  */
-export async function prepareDebugProviderHome(
+export async function prepareProviderHome(
   profile: ProviderDataProfile,
   home: string,
 ): Promise<void> {
-  if (
-    profile.dataProfile !== "debug" ||
-    !NodePath.isAbsolute(profile.baseDir) ||
-    !NodePath.isAbsolute(home)
-  ) {
-    throw new Error("Debug provider home requires an absolute admitted Debug profile.");
+  if (!NodePath.isAbsolute(profile.baseDir) || !NodePath.isAbsolute(home)) {
+    throw new Error("Provider home requires an absolute admitted data profile.");
   }
   const relative = NodePath.relative(profile.baseDir, home);
-  if (
-    relative.startsWith(`..${NodePath.sep}`) ||
-    relative === ".." ||
-    NodePath.isAbsolute(relative)
-  ) {
-    throw new Error("Debug provider home escaped its data profile.");
+  if (!relative.startsWith(`provider-homes${NodePath.sep}`)) {
+    throw new Error("Provider home escaped its data profile.");
   }
   const components = [profile.baseDir];
   let current = profile.baseDir;
@@ -398,21 +445,30 @@ export async function prepareDebugProviderHome(
       });
     const state = await lstat(directory);
     if (!state.isDirectory() || state.isSymbolicLink()) {
-      throw new Error("Debug provider home contains an unsafe directory alias.");
+      throw new Error("Provider home contains an unsafe directory alias.");
     }
     if (
       process.platform !== "win32" &&
-      (state.uid !== process.getuid?.() || (state.mode & 0o077) !== 0)
+      (state.uid !== process.getuid?.() ||
+        (state.mode & (index === 0 && profile.dataProfile !== "debug" ? 0o022 : 0o077)) !== 0)
     ) {
-      throw new Error("Debug provider home must be private to the current user.");
+      throw new Error("Provider home must be private to the current user.");
     }
   }
   // Private parent directories alone do not prove account isolation when an
   // existing native auth/config/history entry points back to another profile.
   // Inspect only fixed account roots; do not enumerate or read transcripts.
+  const antigravityDir = NodePath.join(home, "antigravity-cli");
+  const antigravityToken = NodePath.join(antigravityDir, "antigravity-oauth-token");
   const stateEntries = [
     ...NATIVE_STATE_ROOT_ENTRIES.map((entry) => NodePath.join(home, entry)),
     ...CLAUDE_STATE_ENTRIES.map((entry) => NodePath.join(home, ".claude", entry)),
+    NodePath.join(home, "config"),
+    antigravityDir,
+    antigravityToken,
+    ...["settings.json", "conversations", "conversation_summaries.db", "cache"].map((entry) =>
+      NodePath.join(antigravityDir, entry),
+    ),
   ];
   for (const entry of stateEntries) {
     const state = await lstat(entry).catch((error: unknown) => {
@@ -420,9 +476,16 @@ export async function prepareDebugProviderHome(
       throw error;
     });
     if (state?.isSymbolicLink() || (state?.isFile() && state.nlink !== 1)) {
-      throw new Error(
-        "Debug native account state contains an unsafe alias. Use explicit shared-state consent only if sharing is intentional.",
-      );
+      throw new Error("Private native account state contains an unsafe alias.");
+    }
+    if (
+      entry === antigravityToken &&
+      state &&
+      (!state.isFile() ||
+        (process.platform !== "win32" &&
+          (state.uid !== process.getuid?.() || (state.mode & 0o077) !== 0)))
+    ) {
+      throw new Error("The Antigravity credential file must be private to the current user.");
     }
   }
 }

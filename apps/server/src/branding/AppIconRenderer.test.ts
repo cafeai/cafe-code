@@ -10,7 +10,7 @@ import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { describe, expect, it } from "vitest";
 import { MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES } from "@cafecode/contracts/settings";
 import { WEB_APP_ICON_VARIANTS } from "@cafecode/shared/webAppBranding";
-import { parseImageHeader } from "../rasterImageHeader.ts";
+import { parseImageHeader } from "@cafecode/shared/rasterImageHeader";
 import { AppIconRenderError, AppIconRenderer, renderAppIconSet } from "./AppIconRenderer.ts";
 
 async function sourceImage(color = "#ff0000") {

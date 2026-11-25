@@ -457,6 +457,30 @@ function basenameOfPath(path: string): string {
   return separatorIndex >= 0 ? path.slice(separatorIndex + 1) : path;
 }
 
+/** Encode a literal native citation path for the ordinary Markdown link policy. */
+export function formatMarkdownFileCitation(path: string, cwd?: string): string | null {
+  if (
+    !path.trim() ||
+    /[\p{Cc}\p{Cs}]/u.test(path) ||
+    (!WINDOWS_DRIVE_PATH_PATTERN.test(path) && hasExternalScheme(path))
+  ) {
+    return null;
+  }
+
+  const encoded = encodeURIComponent(path).replaceAll("%2F", "/").replaceAll("%3A", ":");
+  const href = isRelativePath(path) && !isLikelyPathCandidate(path) ? `./${encoded}` : encoded;
+  const target = resolveMarkdownFileLinkTarget(href, cwd);
+  if (!target) return null;
+
+  const basename = basenameOfPath(splitPathAndPosition(target).path);
+  if (!basename) return null;
+  const label = basename.replace(
+    /[\\[\]&<>$*_`~|]/g,
+    (character) => `&#${character.charCodeAt(0)};`,
+  );
+  return `[${label}](<${href}>)`;
+}
+
 export function resolveMarkdownFileLinkMeta(
   href: string | undefined,
   cwd?: string,

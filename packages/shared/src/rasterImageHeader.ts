@@ -1,4 +1,4 @@
-import type { SidebarBrandImageMimeType } from "@cafecode/contracts";
+import type { SidebarBrandImageMimeType } from "@cafecode/contracts/settings";
 
 export interface ParsedImageHeader {
   readonly mimeType: SidebarBrandImageMimeType;

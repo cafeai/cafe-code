@@ -17,6 +17,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   CLAUDE_MAX_OUTPUT_TOKENS,
   ClaudeMaxOutputTokens,
+  defaultInstanceIdForDriver,
   isProviderDriverKind,
   isRetiredProviderDriverKind,
   type ModelSelection,
@@ -50,7 +51,10 @@ import { writeFileStringAtomically } from "./atomicWrite.ts";
 import { ServerConfig } from "./config.ts";
 import { type DeepPartial, deepMerge } from "@cafecode/shared/Struct";
 import { fromJsonStringPretty, fromLenientJson } from "@cafecode/shared/schemaJson";
-import { applyServerSettingsPatch } from "@cafecode/shared/serverSettings";
+import {
+  applyServerSettingsPatch,
+  supportsPrivateProviderHome,
+} from "@cafecode/shared/serverSettings";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { ServerSecretStore } from "./auth/Services/ServerSecretStore.ts";
 import { applyDebugProviderSettingsDefaults } from "./provider/debugProviderProfile.ts";
@@ -63,6 +67,41 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 const isClaudeMaxOutputTokens = Schema.is(ClaudeMaxOutputTokens);
+
+function defaultNewProviderHomes(
+  current: ServerSettings,
+  patch: ServerSettingsPatch,
+): ServerSettingsPatch {
+  if (patch.providerInstances === undefined) return patch;
+  const entries = Object.entries(patch.providerInstances).map(([id, entry]) => {
+    if (entry.nativeHomeMode !== undefined || !supportsPrivateProviderHome(entry.driver)) {
+      return [id, entry] as const;
+    }
+    const previous = current.providerInstances[ProviderInstanceId.make(id)];
+    // Whole-map edits from older clients omit the new field. An existing
+    // account, including a synthesized primary slot, keeps its native home.
+    if (previous?.driver === entry.driver) {
+      return [
+        id,
+        previous.nativeHomeMode ? { ...entry, nativeHomeMode: previous.nativeHomeMode } : entry,
+      ] as const;
+    }
+    const legacySlot =
+      (entry.driver === "claudeAgent" || entry.driver === "grok") &&
+      id === defaultInstanceIdForDriver(entry.driver);
+    const explicitHome =
+      typeof entry.config === "object" &&
+      entry.config !== null &&
+      "homePath" in entry.config &&
+      typeof entry.config.homePath === "string" &&
+      entry.config.homePath.trim().length > 0;
+    return [
+      id,
+      legacySlot || explicitHome ? entry : { ...entry, nativeHomeMode: "private" as const },
+    ] as const;
+  });
+  return { ...patch, providerInstances: Object.fromEntries(entries) };
+}
 
 /**
  * Keep the open driver-config envelope intact while enforcing the one typed
@@ -904,7 +943,9 @@ const makeServerSettings = Effect.gen(function* () {
               }
             : patch;
         const candidate = yield* validateClaudeOutputCaps(
-          stripRetiredProviderInstances(applyServerSettingsPatch(current, profilePatch)),
+          stripRetiredProviderInstances(
+            applyServerSettingsPatch(current, defaultNewProviderHomes(current, profilePatch)),
+          ),
           settingsPath,
         );
         const nextWithProviderSecrets = yield* persistOpenCodeServerPasswords(current, candidate);

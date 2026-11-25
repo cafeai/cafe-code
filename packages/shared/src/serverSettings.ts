@@ -12,6 +12,10 @@ import { createModelSelection } from "./model.ts";
 const ServerSettingsJson = fromLenientJson(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownOption(ServerSettingsJson);
 
+export function supportsPrivateProviderHome(driver: string): boolean {
+  return driver === "gemini" || driver === "claudeAgent" || driver === "grok";
+}
+
 export interface PersistedServerObservabilitySettings {
   readonly otlpTracesUrl: string | undefined;
   readonly otlpMetricsUrl: string | undefined;

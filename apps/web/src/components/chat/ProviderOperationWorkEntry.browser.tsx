@@ -1,9 +1,11 @@
 import "../../index.css";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-react";
 import { ClaudeCommandWorkEntry, ProviderSummaryWorkEntry } from "./ProviderOperationWorkEntry";
-import type { ClaudeCommandInspection } from "./providerOperationVisibility";
+import { ProviderSummaryDialog } from "./ProviderSummaryDialog";
+import type { ClaudeCommandInspection, ProviderPublicSummary } from "./providerOperationVisibility";
 
 async function waitForExpandedPanelGeometry(row: HTMLElement) {
   await vi.waitFor(() => {
@@ -277,5 +279,97 @@ describe("inspectable received Claude operation text", () => {
         fullPage: true,
       });
     }
+  });
+
+  it("caps auto-expanded thinking to the latest lines and pops out a live scrollable dialog", async () => {
+    const lines = Array.from({ length: 30 }, (_, index) => `Thinking line ${index + 1}`);
+    const initialSummary: ProviderPublicSummary = {
+      provider: "gemini",
+      text: lines.join("\n"),
+      truncated: false,
+      status: "inProgress",
+    };
+
+    function Harness(props: { readonly summary: ProviderPublicSummary }) {
+      const [dialogOpen, setDialogOpen] = useState(false);
+      return (
+        <div style={{ width: 460 }}>
+          <ProviderSummaryWorkEntry summary={props.summary} onPopOut={() => setDialogOpen(true)} />
+          <ProviderSummaryDialog
+            open={dialogOpen}
+            summary={props.summary}
+            onOpenChange={setDialogOpen}
+          />
+        </div>
+      );
+    }
+
+    await page.viewport(640, 480);
+    mounted = await render(<Harness summary={initialSummary} />);
+
+    // Auto-expanded inline viewport is height-capped and pinned to the latest lines.
+    await expect
+      .poll(() =>
+        document.querySelector("[data-summary-capped]")?.getAttribute("data-summary-capped"),
+      )
+      .toBe("true");
+    await expect
+      .poll(() =>
+        document.querySelector("[data-summary-clipped]")?.getAttribute("data-summary-clipped"),
+      )
+      .toBe("true");
+    const inlineViewport = document.querySelector<HTMLElement>("[data-summary-capped]")!;
+    expect(inlineViewport.clientHeight).toBeLessThanOrEqual(125);
+    expect(inlineViewport.scrollHeight).toBeGreaterThan(inlineViewport.clientHeight);
+    expect(inlineViewport.scrollTop).toBeGreaterThan(0);
+    expect(inlineViewport.scrollTop + inlineViewport.clientHeight).toBeGreaterThanOrEqual(
+      inlineViewport.scrollHeight - 2,
+    );
+
+    // Pop out the full live scrollable dialog.
+    await page.getByRole("button", { name: "Pop out full thinking", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await expect.element(dialog).toBeVisible();
+    await expect.element(dialog.getByText("Thinking line 1", { exact: false })).toBeInTheDocument();
+    await expect
+      .element(dialog.getByText("Thinking line 30", { exact: false }))
+      .toBeInTheDocument();
+
+    const dialogScroll = document.querySelector<HTMLElement>("[data-summary-dialog-scroll]")!;
+    expect(dialogScroll.scrollHeight).toBeGreaterThan(dialogScroll.clientHeight);
+    await expect
+      .poll(
+        () => dialogScroll.scrollTop + dialogScroll.clientHeight >= dialogScroll.scrollHeight - 2,
+      )
+      .toBe(true);
+
+    // Scrolling up pauses auto-follow and surfaces "Jump to latest".
+    dialogScroll.scrollTop = 0;
+    dialogScroll.dispatchEvent(new Event("scroll"));
+    const jumpButton = dialog.getByRole("button", { name: "Jump to latest", exact: true });
+    await expect.element(jumpButton).toBeVisible();
+
+    // Live updates arrive without yanking the reader back down while scrolled up.
+    const updatedSummary: ProviderPublicSummary = {
+      ...initialSummary,
+      text: [...lines, "Thinking line 31", "Thinking line 32"].join("\n"),
+    };
+    await mounted.rerender(<Harness summary={updatedSummary} />);
+    await expect
+      .element(dialog.getByText("Thinking line 32", { exact: false }))
+      .toBeInTheDocument();
+    expect(dialogScroll.scrollTop).toBe(0);
+
+    // Clicking "Jump to latest" snaps back to the live tail.
+    await jumpButton.click();
+    await expect
+      .poll(
+        () => dialogScroll.scrollTop + dialogScroll.clientHeight >= dialogScroll.scrollHeight - 2,
+      )
+      .toBe(true);
+
+    // Closing returns cleanly.
+    await userEvent.keyboard("{Escape}");
+    await expect.poll(() => document.querySelector("[data-provider-summary-dialog]")).toBeNull();
   });
 });

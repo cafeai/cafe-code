@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { parseImageHeader } from "../rasterImageHeader.ts";
+import { parseImageHeader } from "@cafecode/shared/rasterImageHeader";
 import { OpenAiMcpChild } from "./mcpChild.ts";
 import {
   validateOpenAiComputerInstallation,

@@ -213,7 +213,7 @@ authenticator/recovery code before connecting when enabled. Preauthentication
 channels have short deadlines; an expired/dropped capacity grant needs a fresh
 link even if the application invitation has not been consumed.
 
-The viewer clears the fragment synchronously before discovery. Pairing happens
+The launcher clears the fragment synchronously before discovery. Pairing happens
 inside pinned Noise, then the ordinary Cafe session and exact device binding
 commit together. A lost successful response is indeterminate: obtain a fresh
 invitation; the viewer never automatically resends pairing secrets/passwords/OTP.
@@ -228,6 +228,29 @@ protection against a compromised endpoint/XSS. The application pairing secret is
 not saved. `/relay/connect` lists saved opaque host identifiers; selecting a host
 resumes only when this tab still holds its saved device key and bearer. A bearer alone cannot enroll a new
 device. Closing the browser session or removing its session storage loses that device’s local credentials.
+
+At `relay.cafecode.sh`, the trusted launcher owns discovery, pairing, reconnect
+and that tab’s credentials. After host authentication, it reads the manifest
+from the running backend and fetches that build’s files inside Noise. The
+backend embeds the paired manifest digest at compile time. It serves bounded
+gzip payloads for verified manifest entries. The launcher bounds decompression
+and verifies length and SHA-256 before serving each file to the browser. Local
+rebuilds at the same version cannot change a running backend’s admitted bundle.
+Desktop installers place the paired client files beside the Electron archive so
+the backend can apply the same native file checks as a source build.
+
+The browser gives each opened host app its own randomly labelled origin under
+`*.relay.cafecode.sh`. A trusted worker on that origin serves the approved
+bundle. The isolated app receives the selected host’s HTTP and RPC connection
+through an exact private message channel. The pairing secret, browser device
+key, bearer and reconnect tickets stay in the launcher. The channel has finite
+request and body bounds and retains the server’s existing role and route checks.
+An existing renderer checks the manifest again on a replacement relay session.
+A changed host build returns that tab to the launcher for reconnection with
+the matching UI. Hosts lacking the asset capability show an update message.
+Per-origin browser settings in the isolated app apply to that opening. The
+launcher keeps the existing same-tab pairing and reconnect storage across
+reloads, and Cafe keeps workspace data on the host.
 
 Opening `/relay/connect` with no usable credentials shows host setup instructions,
 including the requirement for a relay-enabled, enrolled Cafe computer. It does
@@ -341,13 +364,23 @@ authority.
 
 `ops/relay/wrangler.json` deploys the separate `cafecode-relay-edge` Worker in
 the account owning `cafecode.sh`. Its custom domains provision DNS and TLS for
-`relay.cafecode.sh` (compiled trusted viewer), `relay-uk.cafecode.sh`,
+`relay.cafecode.sh` (trusted launcher), `relay-uk.cafecode.sh`,
 `relay-ca.cafecode.sh`, and `relay-us-west.cafecode.sh`. The regional names
 forward only the public discovery/health paths and WebSocket upgrade to their
 fixed OVH TLS origins on port 8443. WireGuard mesh traffic remains direct and
 private. The application circuit still uses exactly one OVH relay; Cloudflare
 adds an edge transport proxy. Host latency measurements include that edge path.
 The apex website and unrelated Workers are outside this deployment.
+
+The launcher rollout needs a proxied wildcard DNS record for
+`*.relay.cafecode.sh` and an edge certificate covering that exact wildcard.
+The dedicated `https://*.relay.cafecode.sh/*` Worker route serves only the frame
+bootstrap, its worker and trusted static dependencies. Configure and verify the
+wildcard before switching the public viewer. This is a one-time delivery setup.
+Ordinary Cafe upgrades serve their matching web app through the existing
+regional relay protocol. A launcher or relay protocol change can still require
+its own rollout. Alternative network operators can deploy their independently
+trusted launcher and dedicate an equivalent wildcard below its origin.
 
 All asset requests run through the Worker first. Regional endpoints cannot
 serve viewer JavaScript. Incoming cookies, authorization and caller forwarding

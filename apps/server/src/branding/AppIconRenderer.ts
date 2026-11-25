@@ -16,7 +16,7 @@ import {
   type WebAppIconVariant,
 } from "@cafecode/shared/webAppBranding";
 import type { BrandingImageStoreShape } from "./BrandingImageStore.ts";
-import { parseImageHeader } from "../rasterImageHeader.ts";
+import { parseImageHeader } from "@cafecode/shared/rasterImageHeader";
 
 export type AppIconSet = ReadonlyMap<WebAppIconVariant, Uint8Array>;
 const MAX_ICON_SET_BYTES = 4 * 1024 * 1024;

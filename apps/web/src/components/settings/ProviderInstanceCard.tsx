@@ -934,12 +934,14 @@ const RUNTIME_SOURCE_FIELD_KEYS: ReadonlySet<string> = new Set(["runtimeSource"]
  */
 export function useHiddenProviderSettingsFieldKeys(
   config: unknown,
+  hideHome = false,
 ): ReadonlySet<string> | undefined {
   const serverOs = useServerConfig()?.environment.platform.os;
   const showRuntimeSource =
     serverOs === "windows" ||
     serverOs === "unknown" ||
     readProviderConfigString(config, "runtimeSource") === "bundled";
+  if (hideHome) return new Set(showRuntimeSource ? ["homePath"] : ["homePath", "runtimeSource"]);
   return showRuntimeSource ? undefined : RUNTIME_SOURCE_FIELD_KEYS;
 }
 
@@ -1106,6 +1108,13 @@ export function ProviderInstanceCard({
   const serverConfiguration = useServerConfig();
   const isDebugDataProfile = serverConfiguration?.dataProfile === "debug";
   const providerDataProfile = serverConfiguration?.providerDataProfiles?.[instanceId];
+  const nativeHome = isDebugDataProfile
+    ? instance.debugStateSharing === true
+      ? undefined
+      : providerDataProfile?.nativeHome
+    : instance.nativeHomeMode === "private"
+      ? providerDataProfile?.nativeHome
+      : undefined;
 
   const sessionQuota = useProviderQuota(quotaContext, true, instance.driver === "claudeAgent");
   const enabled = instance.enabled ?? true;
@@ -1254,7 +1263,12 @@ export function ProviderInstanceCard({
     } as ProviderInstanceConfig);
   };
 
-  const hiddenSettingsFieldKeys = useHiddenProviderSettingsFieldKeys(instance.config);
+  const hiddenSettingsFieldKeys = useHiddenProviderSettingsFieldKeys(
+    instance.config,
+    instance.nativeHomeMode === "private" &&
+      !(isDebugDataProfile && instance.debugStateSharing === true) &&
+      !readProviderConfigString(instance.config, "homePath"),
+  );
   const settingsFields = useMemo(
     () => (driverOption ? uiPresentation.deriveProviderSettingsFields(driverOption) : []),
     [driverOption, uiPresentation],
@@ -1711,16 +1725,16 @@ export function ProviderInstanceCard({
           </DialogHeader>
           <DialogPanel className="px-0 pb-4">
             <div>
-              {isDebugDataProfile ? (
+              {nativeHome || isDebugDataProfile ? (
                 <div className={DIALOG_SECTION_CLASS_NAME}>
-                  {instance.debugStateSharing !== true && providerDataProfile?.nativeHome ? (
+                  {nativeHome ? (
                     <div className="mb-3 space-y-1 text-xs">
                       <p className="font-medium">
-                        {uiText("Private Debug native home", undefined, undefined, uiLocale)}
+                        {isDebugDataProfile
+                          ? uiText("Private Debug native home", undefined, undefined, uiLocale)
+                          : uiText("Private provider home", undefined, undefined, uiLocale)}
                       </p>
-                      <code className="block break-all text-muted-foreground">
-                        {providerDataProfile.nativeHome}
-                      </code>
+                      <code className="block break-all text-muted-foreground">{nativeHome}</code>
                       <p className="text-muted-foreground">
                         {driverKind === "codex"
                           ? uiText(
@@ -1736,59 +1750,70 @@ export function ProviderInstanceCard({
                                 undefined,
                                 uiLocale,
                               )
-                            : uiText(
-                                "For manual sign-in, set GROK_HOME to this folder when running grok login. Enable the provider first to create its private home.",
-                                undefined,
-                                undefined,
-                                uiLocale,
-                              )}
+                            : driverKind === "gemini"
+                              ? uiText(
+                                  "Use Log in on this provider to sign in to its private home.",
+                                  undefined,
+                                  undefined,
+                                  uiLocale,
+                                )
+                              : uiText(
+                                  "For manual sign-in, set GROK_HOME to this folder when running grok login. Enable the provider first to create its private home.",
+                                  undefined,
+                                  undefined,
+                                  uiLocale,
+                                )}
                       </p>
                     </div>
                   ) : null}
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="space-y-1">
-                      <label
-                        htmlFor={`provider-instance-${instanceId}-debug-sharing`}
-                        className="text-xs font-medium text-foreground"
-                      >
+                  {isDebugDataProfile ? (
+                    <>
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="space-y-1">
+                          <label
+                            htmlFor={`provider-instance-${instanceId}-debug-sharing`}
+                            className="text-xs font-medium text-foreground"
+                          >
+                            {uiText(
+                              "Allow shared native provider state",
+                              undefined,
+                              undefined,
+                              uiLocale,
+                            )}
+                          </label>
+                          <p className="text-xs text-muted-foreground">
+                            {uiText(
+                              "Debug-only opt-in: this provider may use external or Production sign-in, configuration and history. The same online account still shares quota. Changing this setting reloads the provider and can end its active sessions.",
+                              undefined,
+                              undefined,
+                              uiLocale,
+                            )}
+                          </p>
+                        </div>
+                        <Switch
+                          id={`provider-instance-${instanceId}-debug-sharing`}
+                          aria-label={uiText(
+                            "Allow shared native provider state",
+                            undefined,
+                            undefined,
+                            uiLocale,
+                          )}
+                          checked={instance.debugStateSharing === true}
+                          onCheckedChange={(checked) =>
+                            onUpdate({ ...instance, debugStateSharing: Boolean(checked) })
+                          }
+                        />
+                      </div>
+                      <p className="mt-2 text-xs text-muted-foreground">
                         {uiText(
-                          "Allow shared native provider state",
-                          undefined,
-                          undefined,
-                          uiLocale,
-                        )}
-                      </label>
-                      <p className="text-xs text-muted-foreground">
-                        {uiText(
-                          "Debug-only opt-in: this provider may use external or Production sign-in, configuration and history. The same online account still shares quota. Changing this setting reloads the provider and can end its active sessions.",
+                          "Leave this off to use a private Debug home on supported providers. Provider executable updates can affect installations shared with Production.",
                           undefined,
                           undefined,
                           uiLocale,
                         )}
                       </p>
-                    </div>
-                    <Switch
-                      id={`provider-instance-${instanceId}-debug-sharing`}
-                      aria-label={uiText(
-                        "Allow shared native provider state",
-                        undefined,
-                        undefined,
-                        uiLocale,
-                      )}
-                      checked={instance.debugStateSharing === true}
-                      onCheckedChange={(checked) =>
-                        onUpdate({ ...instance, debugStateSharing: Boolean(checked) })
-                      }
-                    />
-                  </div>
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    {uiText(
-                      "Leave this off for private Debug Codex, Claude and Grok homes. Other drivers require explicit sharing. Provider executable updates can affect installations shared with Production.",
-                      undefined,
-                      undefined,
-                      uiLocale,
-                    )}
-                  </p>
+                    </>
+                  ) : null}
                 </div>
               ) : null}
               <div className={DIALOG_SECTION_CLASS_NAME}>

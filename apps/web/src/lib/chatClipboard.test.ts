@@ -23,6 +23,16 @@ describe("chatClipboard", () => {
     ).toBe("See this.");
   });
 
+  it("copies file citations as ordinary links and preserves math in the same message", () => {
+    const citation = ':codex-file-citation{path="reports/price $5.pdf" purpose="source"}';
+    expect(
+      prepareChatMessageMarkdownCopyText(`See ${citation} for \\(x^2\\).`, {
+        provider: ProviderDriverKind.make("claude"),
+        cwd: "/repo/project",
+      }),
+    ).toBe("See [price &#36;5.pdf](<./reports/price%20%245.pdf>) for $x^2$.");
+  });
+
   it.each(["codex", "claude"])(
     "preserves nested Mermaid DSL in whole-message %s clipboard copy",
     (provider) => {

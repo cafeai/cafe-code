@@ -204,7 +204,7 @@ import {
   deriveClaudePermissionMode,
   getNextClaudePermissionMode,
 } from "./claudePermissionMode";
-import { applyGeminiPermissionMode } from "./geminiPermissionMode";
+import { applyGeminiPermissionMode, deriveGeminiPermissionMode } from "./geminiPermissionMode";
 
 function getIMAGE_SIZE_LIMIT_LABEL() {
   return uiText("{value0}MB", {
@@ -1782,8 +1782,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ],
   );
   const cycleComposerInteractionMode = useCallback(() => {
-    if (selectedProvider === "claudeAgent" || selectedProvider === "grok") {
-      const currentMode = deriveClaudePermissionMode({ interactionMode, runtimeMode });
+    if (
+      selectedProvider === "claudeAgent" ||
+      selectedProvider === "grok" ||
+      selectedProvider === "gemini"
+    ) {
+      const currentMode =
+        selectedProvider === "gemini"
+          ? (deriveGeminiPermissionMode({ interactionMode, runtimeMode }) ?? "default")
+          : deriveClaudePermissionMode({ interactionMode, runtimeMode });
       handleNativePermissionModeChange(getNextClaudePermissionMode(currentMode));
       return;
     }

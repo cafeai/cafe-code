@@ -3,7 +3,7 @@ import { applyInterfaceScalePercent } from "../src/interfaceScale";
 // Opt-in native qualification page. This entry is absent from the app build.
 import ReactDOM from "react-dom/client";
 import { RelayEntry } from "../src/environments/relay/entry";
-import { readPrimaryRelay, fetchAppResource } from "../src/environments/relay/active";
+import { ActiveRelay, readPrimaryRelay, fetchAppResource } from "../src/environments/relay/active";
 import { listRelayTargetIds } from "../src/environments/relay/storage";
 
 let exercised: { readonly active: boolean } | undefined;
@@ -30,6 +30,7 @@ window.relayQualification = {
   read: async () => await (await readPrimaryRelay()!.request("/api/canary")).text(),
   exercise: async () => {
     const relay = readPrimaryRelay()!;
+    if (!(relay instanceof ActiveRelay)) throw new Error("fixture-active-relay-required");
     exercised = await relay.session();
     const text = await (await fetchAppResource(relay.httpBaseUrl + "api/canary")).text();
     const bytes = new Uint8Array(524_309).map((_, index) => index % 251);

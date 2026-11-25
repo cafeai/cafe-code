@@ -80,6 +80,14 @@ deliberately. Supported Codex, Claude and Grok accounts use private Debug-native
 homes, including native history/index state and login helpers. Their account
 settings survive later Debug runs.
 
+New Gemini, Claude and Grok provider instances default to Cafe-owned native
+homes in both data profiles. The Add provider wizard can select an existing
+native home explicitly. Existing instance records retain their saved native
+selection. The server records the default on creation and shows the private
+directory in the account's Settings. Antigravity's private mode is qualified
+for the Apple silicon macOS CLI 1.5.16 personal Google login. See
+[Gemini setup](gemini-provider.md) for the exact launch policy and limits.
+
 Provider account configuration is not wholly inside SQLite: native CLIs also
 have their own homes and authentication stores. A separate Cafe DB alone would
 not separate those. Debug removes inherited provider-home/auth selectors from

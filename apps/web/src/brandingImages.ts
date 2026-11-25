@@ -1,8 +1,11 @@
 import { fetchAppResource, readPrimaryRelay } from "./environments/relay/active";
-import { useUiLocale, useUiPresentation } from "~/i18n";
-import { uiText } from "@cafecode/shared/i18n";
+import { useUiPresentation } from "~/i18n";
+import { uiText, type UiLocale } from "@cafecode/shared/i18n";
+import { parseImageHeader } from "@cafecode/shared/rasterImageHeader";
 import {
+  MAX_SIDEBAR_BRAND_IMAGE_DIMENSION,
   MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
+  MAX_SIDEBAR_BRAND_IMAGE_PIXEL_COUNT,
   type SidebarBrandImageAsset,
 } from "@cafecode/contracts/settings";
 import type { EnvironmentId } from "@cafecode/contracts";
@@ -125,8 +128,60 @@ export function useSidebarBrandImageSrc(asset: SidebarBrandImageAsset | null): s
     : uiPresentation.resolveSidebarBrandImageSrc(asset);
 }
 
+export async function prepareSidebarBrandImage(file: File, locale: UiLocale): Promise<Blob> {
+  // Decode in an image element so browsers can also rasterize vectors with a viewBox.
+  const source =
+    !file.type && /\.svg$/i.test(file.name) ? file.slice(0, file.size, "image/svg+xml") : file;
+  const image = new Image();
+  const url = URL.createObjectURL(source);
+  try {
+    image.src = url;
+    await image.decode();
+
+    // Keep compliant originals, including their animation. Check the same
+    // encoded dimensions and MIME type the upload route will read.
+    if (file.size <= MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES) {
+      const header = parseImageHeader(new Uint8Array(await file.arrayBuffer()));
+      if (
+        header &&
+        Math.max(header.width, header.height) <= MAX_SIDEBAR_BRAND_IMAGE_DIMENSION &&
+        header.width * header.height <= MAX_SIDEBAR_BRAND_IMAGE_PIXEL_COUNT
+      ) {
+        return file.type === header.mimeType ? file : file.slice(0, file.size, header.mimeType);
+      }
+    }
+
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (context) {
+      // The image also feeds web app icons. Start with enough detail for those
+      // and reduce the canvas for high-entropy images or PNG encoder fallback.
+      const longestSide = Math.max(image.naturalWidth, image.naturalHeight);
+      for (const maxSide of [1024, 768, 384]) {
+        const scale = Math.min(1, maxSide / longestSide);
+        canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+        context.imageSmoothingQuality = "high";
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        const encoded = await new Promise<Blob | null>((resolve) =>
+          canvas.toBlob(resolve, "image/webp", 0.9),
+        );
+        if (encoded && encoded.size > 0 && encoded.size <= MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES) {
+          return encoded;
+        }
+      }
+    }
+  } catch {
+    throw new Error(uiText("Could not read that image.", undefined, undefined, locale));
+  } finally {
+    image.removeAttribute("src");
+    URL.revokeObjectURL(url);
+  }
+  throw new Error(uiText("Could not upload that image.", undefined, undefined, locale));
+}
+
 export async function uploadSidebarBrandImage(
-  file: File,
+  file: Blob,
   environmentId = readWorkspaceEnvironmentId(),
 ): Promise<SidebarBrandImageAsset> {
   const remote =

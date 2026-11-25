@@ -5,7 +5,7 @@ import path from "node:path";
 import { normalizeUri } from "micromark-util-sanitize-uri";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { CHAT_IMAGE_MAX_BYTES, CHAT_IMAGE_MAX_PER_MESSAGE } from "@cafecode/contracts";
-import { parseImageHeader } from "../rasterImageHeader.ts";
+import { parseImageHeader } from "@cafecode/shared/rasterImageHeader";
 
 export function markdownImageSources(text: string): Array<{ source: string; path: string }> {
   // Parse only completed, bounded messages, never per-token deltas. A regex

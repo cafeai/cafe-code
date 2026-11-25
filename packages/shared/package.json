@@ -4,6 +4,10 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./rasterImageHeader": {
+      "types": "./src/rasterImageHeader.ts",
+      "import": "./src/rasterImageHeader.ts"
+    },
     "./webAppBranding": {
       "types": "./src/webAppBranding.ts",
       "import": "./src/webAppBranding.ts"

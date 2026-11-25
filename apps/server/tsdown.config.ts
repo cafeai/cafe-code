@@ -3,9 +3,16 @@ import { defineConfig } from "tsdown";
 // to the native host namespace used by the version/ownership receipt writer.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { relative, resolve, sep } from "node:path";
+import { createHash } from "node:crypto";
+import {
+  RELAY_VIEWER_MANIFEST,
+  RELAY_VIEWER_MAX_MANIFEST,
+  readRelayViewerManifest,
+} from "@cafecode/relay/viewerBundle";
 import { publishSourceDebugBuildManifest } from "../../packages/shared/src/sourceDebugBuild.ts";
 import {
   publishApplicationBuildVersionManifest,
+  readApplicationOutputFile,
   resolveApplicationBuildVersion,
 } from "../../packages/shared/src/applicationBuildVersion.ts";
 import packageJson from "./package.json" with { type: "json" };
@@ -16,6 +23,21 @@ const applicationVersion = resolveApplicationBuildVersion(
   process.env.APP_VERSION,
   packageJson.version,
 );
+const relayViewerManifestDigest = (() => {
+  try {
+    const manifest = readApplicationOutputFile(
+      resolve(import.meta.dirname, "../web/dist"),
+      RELAY_VIEWER_MANIFEST,
+      RELAY_VIEWER_MAX_MANIFEST,
+    );
+    if (readRelayViewerManifest(manifest).applicationVersion === applicationVersion)
+      return createHash("sha256").update(manifest).digest("hex");
+    return undefined;
+  } catch {
+    // A standalone server-only build may have no paired browser build.
+    return undefined;
+  }
+})();
 
 export default defineConfig([
   {
@@ -38,6 +60,8 @@ export default defineConfig([
     // with the selected artifact even when source manifests have not been bumped.
     define: {
       __CAFE_CODE_BUILD_VERSION__: JSON.stringify(applicationVersion),
+      __CAFE_RELAY_VIEWER_MANIFEST_DIGEST__:
+        JSON.stringify(relayViewerManifestDigest) ?? "undefined",
     },
     hooks: {
       "build:done": ({ options, chunks }) => {

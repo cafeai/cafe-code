@@ -5,8 +5,11 @@ operator-approved, while the data relay is assumed able to observe, modify,
 replay, omit and truncate forwarded bytes. A malicious relay can deny service
 and correlate addresses, timing, volume and a stable per-network host key learned
 by actively probing it. It cannot authenticate a different pinned host or decrypt
-the application channel without endpoint compromise. Code delivery from the
-trusted viewer origin remains trusted. See [operations and enrollment](../relay.md).
+the application channel without endpoint compromise. The trusted viewer origin
+provides the launcher and isolated frame bootstrap. An authenticated selected
+host supplies its version-bound application code inside Noise. The app runs on
+a separate origin per opening with an exact private HTTP/RPC bridge. Launcher
+credentials remain in the trusted launcher. See [operations and enrollment](../relay.md).
 
 The maintained public `@libp2p/noise` 17.0.7 adapter uses
 Noise_XX_25519_ChaChaPoly_SHA256, its exported pure JS backend, a fresh instance per
@@ -222,10 +225,11 @@ HTTP deadlines are five minutes for relay transfers, distinct from the existing
 direct file budget. Blob uploads slice to 16 KiB; already-buffered application
 responses retain their existing maximum 25 MiB body bound and stream under
 transport credit. Application buffers/decoded state are separate from transport
-retention. The browser uses explicit target HTTP/socket dependencies, not global
-fetch/WebSocket patches or a service-worker proxy. Private media uses inert blob
-URLs with exact abort/revocation ownership. Relays cannot supply viewer HTML,
-scripts, service workers, proxy destinations or navigation redirects.
+retention. Explicit browser target HTTP/socket dependencies carry application
+traffic. The isolated hosted-viewer worker serves verified build assets and
+document navigation. Private media uses inert blob URLs with exact
+abort/revocation ownership. Relays cannot supply viewer HTML, scripts, service
+workers, proxy destinations or navigation redirects.
 
 Host selection smooths measured host-to-relay RTT and uses hysteresis; a primary
 and standby maintain live registrations. Discovery may redirect geographically

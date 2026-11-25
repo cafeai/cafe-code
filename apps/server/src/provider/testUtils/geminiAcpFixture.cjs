@@ -2,14 +2,22 @@
 // native process boundary, with no provider profile or network access.
 const { createInterface } = require("node:readline");
 const version = process.env.CAFE_GEMINI_FIXTURE_NATIVE_VERSION ?? "1.5.11";
+const args = process.argv.slice(2);
+const privateHome = args.indexOf("--gemini_dir");
+if (privateHome >= 0) {
+  if (!args[privateHome + 1] || process.env.AGY_CLI_FORCE_FILE_TOKEN_STORAGE !== "1") {
+    process.exit(1);
+  }
+  args.splice(privateHome, 2);
+}
 
-if (process.argv[2] === "--version") {
+if (args[0] === "--version") {
   console.log(`Antigravity CLI ${version}`);
   process.exit(0);
 }
-if (process.argv.includes("--print")) {
-  const output = process.argv.indexOf("--output-format");
-  if (!process.argv.includes("/usage") || output < 0 || process.argv[output + 1] !== "json") {
+if (args.includes("--print")) {
+  const output = args.indexOf("--output-format");
+  if (!args.includes("/usage") || output < 0 || args[output + 1] !== "json") {
     process.exit(1);
   }
   // A representative native structured slash-command reply. Never read a
@@ -67,14 +75,14 @@ if (process.argv.includes("--print")) {
   process.exit(0);
 }
 if (
-  process.argv[2] !== "acp" ||
-  (process.argv.length !== 3 &&
-    !(process.argv.length === 4 && process.argv[3] === "--dangerously-skip-permissions") &&
-    !(process.argv.length === 4 && process.argv[3] === "--login"))
+  args[0] !== "acp" ||
+  (args.length !== 1 &&
+    !(args.length === 2 && args[1] === "--dangerously-skip-permissions") &&
+    !(args.length === 2 && args[1] === "--login"))
 ) {
   process.exit(1);
 }
-if (process.argv[3] === "--login") {
+if (args[1] === "--login") {
   const oauthUrl =
     process.env.CAFE_GEMINI_FIXTURE_LOGIN_URL ??
     "https://accounts.google.com/o/oauth2/auth?access_type=offline&client_id=fixture.apps.googleusercontent.com&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&response_type=code&state=fixture-state";

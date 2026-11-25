@@ -42,7 +42,7 @@ import { realpath as nativeRealpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { webAppIconUrl, webAppManifestHref } from "@cafecode/shared/webAppBranding";
 import type { ClientSettings, SidebarBrandImageAsset } from "@cafecode/contracts/settings";
-import { parseImageHeader } from "./rasterImageHeader.ts";
+import { parseImageHeader } from "@cafecode/shared/rasterImageHeader";
 import {
   BACKEND_READINESS_CHALLENGE_HEADER,
   BACKEND_READINESS_PROOF_HEADER,

@@ -123,6 +123,8 @@ export interface ProviderDriverCreateInput<Config> {
   readonly environment: ProviderInstanceEnvironment;
   /** Exact child-local environment admitted by the data-profile boundary. */
   readonly processEnvironment?: NodeJS.ProcessEnv | undefined;
+  /** Server-owned native state directory, prepared by the registry. */
+  readonly nativeHome?: string | undefined;
   readonly enabled: boolean;
   readonly config: Config;
 }

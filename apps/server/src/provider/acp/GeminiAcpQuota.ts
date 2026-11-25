@@ -16,7 +16,7 @@ import { join } from "node:path";
 
 import { collectUint8StreamText } from "../../stream/collectUint8StreamText.ts";
 import { terminateProbeChild } from "../providerSnapshot.ts";
-import { geminiCliEnvironment } from "./GeminiAcpRuntime.ts";
+import { geminiCliEnvironment, geminiPrivateHomeArgs } from "./GeminiAcpRuntime.ts";
 
 const OUTPUT_LIMIT_BYTES = 64 * 1024;
 // Native /usage starts a process and reads the account over the network. Its
@@ -139,6 +139,7 @@ function readUsageOutput(
 
 export function readGeminiAccountRateLimits(input: {
   readonly binaryPath: string;
+  readonly nativeHome?: string | undefined;
   readonly environment: NodeJS.ProcessEnv;
   readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly fs: FileSystem.FileSystem;
@@ -152,6 +153,7 @@ export function readGeminiAccountRateLimits(input: {
       ChildProcess.make(
         input.binaryPath,
         [
+          ...geminiPrivateHomeArgs(input.nativeHome),
           "--settings",
           '{"disableSlashCommands":false}',
           "--print",
@@ -161,7 +163,12 @@ export function readGeminiAccountRateLimits(input: {
           "--log-file",
           join(cwd, "usage.log"),
         ],
-        { cwd, env: geminiCliEnvironment(input.environment), extendEnv: false, stdin: "ignore" },
+        {
+          cwd,
+          env: geminiCliEnvironment(input.environment, input.nativeHome),
+          extendEnv: false,
+          stdin: "ignore",
+        },
       ),
     );
     const { stdout, exitCode } = yield* Effect.all(

@@ -1,8 +1,14 @@
 import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import { UiMessage } from "~/i18n";
-import { memo, useEffect, useId, useRef, useState } from "react";
-import { BrainIcon, ChevronRightIcon, MessageSquareTextIcon, TerminalIcon } from "lucide-react";
+import { memo, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import {
+  BrainIcon,
+  ChevronRightIcon,
+  Maximize2Icon,
+  MessageSquareTextIcon,
+  TerminalIcon,
+} from "lucide-react";
 import type { TimestampFormat } from "@cafecode/contracts/settings";
 import { formatElapsed } from "../../session-logic";
 import { formatTimestamp } from "../../timestampFormat";
@@ -22,37 +28,75 @@ const SUMMARY_AUTO_COLLAPSE_DELAY_MS = 450;
 /**
  * Public summaries and thinking stay separate from
  * canonical assistant prose and answers. While a trace is still streaming it
- * is shown expanded so it can be followed live; once it finishes it folds
- * down to a one-line preview with an eased height + fade animation. A trace
- * that is already finished when it mounts (history, remount) starts folded.
- * Any manual toggle while streaming is respected and suppresses the
+ * is shown auto-expanded in a height-capped viewport pinned to the latest
+ * lines so long traces never overtake the chat window; once it finishes it
+ * folds down to a one-line preview with an eased height + fade animation. A
+ * trace that is already finished when it mounts (history, remount) starts
+ * folded. Any manual toggle while streaming is respected and suppresses the
  * automatic collapse. Native thinking reads as secondary, muted text.
  */
 export const ProviderSummaryWorkEntry = memo(function ProviderSummaryWorkEntry(props: {
   readonly summary: ProviderPublicSummary;
+  readonly onPopOut?: (trigger: HTMLButtonElement) => void;
 }) {
   const uiLocale = useUiLocale();
   const panelId = useId();
   const thinking = props.summary.provider !== "claudeAgent";
   const streaming = props.summary.status === "inProgress";
   const [open, setOpen] = useState(streaming);
+  const [autoExpanded, setAutoExpanded] = useState(streaming);
+  const [clipped, setClipped] = useState(false);
   const userToggledRef = useRef(false);
   const wasStreamingRef = useRef(streaming);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const wasStreaming = wasStreamingRef.current;
     wasStreamingRef.current = streaming;
     if (streaming) {
-      // A trace that resumes streaming re-opens unless the reader folded it.
-      if (!wasStreaming && !userToggledRef.current) setOpen(true);
+      // A trace that resumes streaming re-opens capped unless the reader folded it.
+      if (!wasStreaming && !userToggledRef.current) {
+        setOpen(true);
+        setAutoExpanded(true);
+      }
       return;
     }
     if (!wasStreaming || userToggledRef.current) return;
-    const timer = window.setTimeout(() => setOpen(false), SUMMARY_AUTO_COLLAPSE_DELAY_MS);
+    const timer = window.setTimeout(() => {
+      setOpen(false);
+      setAutoExpanded(false);
+    }, SUMMARY_AUTO_COLLAPSE_DELAY_MS);
     return () => window.clearTimeout(timer);
   }, [streaming]);
 
+  const capped = open && autoExpanded;
+
+  useLayoutEffect(() => {
+    const el = viewportRef.current;
+    if (!el || !capped) {
+      setClipped(false);
+      if (el && el.scrollTop !== 0) el.scrollTop = 0;
+      return;
+    }
+    const syncTail = () => {
+      const overflowing = el.scrollHeight > el.clientHeight + 1;
+      setClipped(overflowing);
+      if (overflowing) {
+        el.scrollTop = el.scrollHeight - el.clientHeight;
+      } else if (el.scrollTop !== 0) {
+        el.scrollTop = 0;
+      }
+    };
+    syncTail();
+    const observer = new ResizeObserver(syncTail);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [capped, props.summary.text]);
+
   const label = providerPublicSummaryLabel(props.summary.provider, uiLocale);
+  const popOutLabel = thinking
+    ? uiText("Pop out full thinking", undefined, undefined, uiLocale)
+    : uiText("Pop out full summary", undefined, undefined, uiLocale);
   const preview = props.summary.text.split("\n").find((line) => line.trim().length > 0) ?? "";
 
   return (
@@ -63,66 +107,93 @@ export const ProviderSummaryWorkEntry = memo(function ProviderSummaryWorkEntry(p
       open={open}
       onOpenChange={(next) => {
         userToggledRef.current = true;
+        setAutoExpanded(false);
         setOpen(next);
       }}
     >
-      <CollapsibleTrigger
-        aria-controls={panelId}
-        className="focus-ring group flex min-h-7 w-full min-w-0 items-center gap-2 rounded-lg px-1 py-1 text-left text-xs leading-5 text-muted-foreground transition-colors duration-(--duration-fast) hover:bg-accent"
-      >
-        <span className="flex size-5 shrink-0 items-center justify-center">
-          {thinking ? (
-            <BrainIcon
-              className={cn("size-3", streaming && "animate-pulse motion-reduce:animate-none")}
-              aria-hidden
-            />
+      <div className="flex min-w-0 items-center gap-0.5 rounded-lg transition-colors duration-(--duration-fast) hover:bg-accent">
+        <CollapsibleTrigger
+          aria-controls={panelId}
+          className="focus-ring group flex min-h-7 min-w-0 flex-1 items-center gap-2 rounded-lg px-1 py-1 text-left text-xs leading-5 text-muted-foreground"
+        >
+          <span className="flex size-5 shrink-0 items-center justify-center">
+            {thinking ? (
+              <BrainIcon
+                className={cn("size-3", streaming && "animate-pulse motion-reduce:animate-none")}
+                aria-hidden
+              />
+            ) : (
+              <MessageSquareTextIcon
+                className={cn("size-3", streaming && "animate-pulse motion-reduce:animate-none")}
+                aria-hidden
+              />
+            )}
+          </span>
+          <span className="shrink-0">{label}</span>
+          {streaming ? (
+            <span className="shrink-0 text-subtle-foreground">
+              {uiText("Updating…", undefined, undefined, uiLocale)}
+            </span>
+          ) : props.summary.status === "failed" ? (
+            <span className="shrink-0 text-muted-foreground">
+              {uiText("Partial", undefined, undefined, uiLocale)}
+            </span>
+          ) : null}
+          {/* One-line preview, mounted only while folded; fades in as the body folds away. */}
+          {open ? (
+            <span className="flex-1" />
           ) : (
-            <MessageSquareTextIcon
-              className={cn("size-3", streaming && "animate-pulse motion-reduce:animate-none")}
+            <span
               aria-hidden
-            />
+              className="min-w-0 flex-1 animate-enter-fade truncate text-subtle-foreground [animation-delay:180ms] [animation-duration:320ms] motion-reduce:animate-none"
+            >
+              {preview}
+            </span>
           )}
-        </span>
-        <span className="shrink-0">{label}</span>
-        {streaming ? (
-          <span className="shrink-0 text-subtle-foreground">
-            {uiText("Updating…", undefined, undefined, uiLocale)}
-          </span>
-        ) : props.summary.status === "failed" ? (
-          <span className="shrink-0 text-muted-foreground">
-            {uiText("Partial", undefined, undefined, uiLocale)}
-          </span>
-        ) : null}
-        {/* One-line preview, mounted only while folded; fades in as the body folds away. */}
-        {open ? (
-          <span className="flex-1" />
-        ) : (
-          <span
+          <ChevronRightIcon
+            className="size-3 shrink-0 text-subtle-foreground transition-transform duration-300 ease-(--ease-in-out) group-data-[panel-open]:rotate-90 motion-reduce:transition-none"
             aria-hidden
-            className="min-w-0 flex-1 animate-enter-fade truncate text-subtle-foreground [animation-delay:180ms] [animation-duration:320ms] motion-reduce:animate-none"
+          />
+        </CollapsibleTrigger>
+        {props.onPopOut ? (
+          <button
+            type="button"
+            aria-label={popOutLabel}
+            title={popOutLabel}
+            data-summary-popout="true"
+            onClick={(event) => props.onPopOut?.(event.currentTarget)}
+            className="focus-ring mr-1 flex size-6 shrink-0 items-center justify-center rounded-md text-subtle-foreground transition-colors duration-(--duration-fast) hover:bg-accent-foreground/8 hover:text-foreground"
           >
-            {preview}
-          </span>
-        )}
-        <ChevronRightIcon
-          className="size-3 shrink-0 text-subtle-foreground transition-transform duration-300 ease-(--ease-in-out) group-data-[panel-open]:rotate-90 motion-reduce:transition-none"
-          aria-hidden
-        />
-      </CollapsibleTrigger>
+            <Maximize2Icon className="size-3" aria-hidden />
+          </button>
+        ) : null}
+      </div>
       <CollapsiblePanel
         id={panelId}
         className="group/summary duration-[380ms] ease-(--ease-in-out) motion-reduce:transition-none motion-reduce:duration-0"
       >
         <div className="origin-top pb-1 opacity-100 blur-none transition-[opacity,translate,filter] duration-[380ms] ease-(--ease-in-out) group-data-[ending-style]/summary:-translate-y-1 group-data-[ending-style]/summary:opacity-0 group-data-[ending-style]/summary:blur-[2px] group-data-[starting-style]/summary:-translate-y-1 group-data-[starting-style]/summary:opacity-0 group-data-[starting-style]/summary:blur-[2px] motion-reduce:transition-none">
-          <p
+          <div
+            ref={viewportRef}
+            data-summary-capped={capped ? "true" : "false"}
+            data-summary-clipped={capped && clipped ? "true" : "false"}
             className={cn(
-              "pl-8 text-xs leading-5 whitespace-pre-wrap wrap-break-word",
-              thinking ? "text-muted-foreground" : "text-chat-foreground",
+              capped && "max-h-[7.5rem] overflow-hidden",
+              capped &&
+                clipped &&
+                "[mask-image:linear-gradient(to_bottom,transparent_0%,black_28%)]",
             )}
-            data-summary-text="true"
           >
-            {props.summary.text}
-          </p>
+            <p
+              className={cn(
+                "pl-8 text-xs leading-5 whitespace-pre-wrap wrap-break-word",
+                thinking ? "text-muted-foreground" : "text-chat-foreground",
+              )}
+              data-summary-text="true"
+            >
+              {props.summary.text}
+            </p>
+          </div>
           {props.summary.truncated ? (
             <p className="pl-8 text-2xs text-muted-foreground">
               {thinking

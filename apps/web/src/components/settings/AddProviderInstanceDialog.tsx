@@ -2,6 +2,7 @@ import { useUiLocale, useUiPresentation } from "~/i18n";
 ("use client");
 
 import { uiText } from "@cafecode/shared/i18n";
+import { supportsPrivateProviderHome } from "@cafecode/shared/serverSettings";
 import { UiMessage } from "~/i18n";
 import { CheckIcon } from "lucide-react";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
@@ -17,6 +18,7 @@ import {
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { normalizeProviderAccentColor } from "../../providerInstances";
+import { useServerConfig } from "../../rpc/serverState";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -29,6 +31,7 @@ import {
 import { Badge } from "../ui/badge";
 import { Input } from "../ui/input";
 import { RadioGroup } from "../ui/radio-group";
+import { Switch } from "../ui/switch";
 import { toastManager } from "../ui/toast";
 import { DRIVER_OPTION_BY_VALUE, DRIVER_OPTIONS } from "./providerDriverMeta";
 import {
@@ -112,6 +115,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
 
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
+  const isDebugDataProfile = useServerConfig()?.dataProfile === "debug";
 
   const [wizardStep, setWizardStep] = useState(0);
   const [driver, setDriver] = useState<ProviderDriverKind>(DEFAULT_DRIVER_KIND);
@@ -119,6 +123,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   const [accentColor, setAccentColor] = useState<string>("");
   const [instanceIdDraft, setInstanceIdDraft] = useState("");
   const [instanceIdDirty, setInstanceIdDirty] = useState(false);
+  const [existingHomes, setExistingHomes] = useState<ReadonlySet<ProviderDriverKind>>(new Set());
   const instanceIdInputRef = useRef<HTMLInputElement>(null);
   // Driver-specific config drafts keyed by driver so toggling between drivers
   // during the same dialog session does not lose in-progress input.
@@ -153,6 +158,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
     setWizardStep(0);
     setInstanceIdDirty(false);
     setConfigByDriver({});
+    setExistingHomes(new Set());
     setHasAttemptedSubmit(false);
   }, [open]);
 
@@ -188,7 +194,9 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   const wizardStepSummaries = [driverOption.label, previewLabel, null] as const;
 
   const configDraft = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
-  const hiddenSettingsFieldKeys = useHiddenProviderSettingsFieldKeys(configDraft);
+  const supportsPrivateHome = supportsPrivateProviderHome(driver);
+  const privateHome = supportsPrivateHome && !existingHomes.has(driver);
+  const hiddenSettingsFieldKeys = useHiddenProviderSettingsFieldKeys(configDraft, privateHome);
   const setConfigDraft = useCallback(
     (config: Record<string, unknown> | undefined) => {
       setConfigByDriver((existing) => {
@@ -211,13 +219,18 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
       return;
     }
 
-    const config = configByDriver[driver] ?? {};
+    const config = { ...configByDriver[driver] };
+    if (privateHome) delete config.homePath;
     const hasConfig = Object.keys(config).length > 0;
     const normalizedAccentColor = normalizeProviderAccentColor(accentColor);
 
     const nextInstance: ProviderInstanceConfig = {
       driver,
       enabled: true,
+      ...(supportsPrivateHome ? { nativeHomeMode: privateHome ? "private" : "existing" } : {}),
+      ...(supportsPrivateHome && !privateHome && isDebugDataProfile
+        ? { debugStateSharing: true }
+        : {}),
       ...(label.trim().length > 0 ? { displayName: label.trim() } : {}),
       ...(normalizedAccentColor ? { accentColor: normalizedAccentColor } : {}),
       ...(hasConfig ? { config } : {}),
@@ -249,6 +262,9 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   }, [
     driver,
     configByDriver,
+    isDebugDataProfile,
+    privateHome,
+    supportsPrivateHome,
     instanceId,
     instanceIdError,
     label,
@@ -434,6 +450,52 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
 
               {driverSettingsFields.length > 0 ? (
                 <div className={cn("grid gap-4", wizardStep !== 2 && "hidden")}>
+                  {supportsPrivateHome ? (
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="space-y-1">
+                        <label htmlFor="add-provider-private-home" className="text-xs font-medium">
+                          {uiText("Create a private provider home", undefined, undefined, uiLocale)}
+                        </label>
+                        <p className="text-xs text-muted-foreground">
+                          {privateHome
+                            ? uiText(
+                                "Keep this instance’s sign-in and native history in its own folder.",
+                                undefined,
+                                undefined,
+                                uiLocale,
+                              )
+                            : uiText(
+                                "Use existing native sign-in and history, including any custom home you specify.",
+                                undefined,
+                                undefined,
+                                uiLocale,
+                              )}
+                        </p>
+                        {privateHome && driver === "gemini" ? (
+                          <p className="text-xs text-muted-foreground">
+                            {uiText(
+                              "Private Antigravity homes require CLI 1.5.16 on Apple silicon macOS.",
+                              undefined,
+                              undefined,
+                              uiLocale,
+                            )}
+                          </p>
+                        ) : null}
+                      </div>
+                      <Switch
+                        id="add-provider-private-home"
+                        checked={privateHome}
+                        onCheckedChange={(checked) =>
+                          setExistingHomes((current) => {
+                            const next = new Set(current);
+                            if (checked) next.delete(driver);
+                            else next.add(driver);
+                            return next;
+                          })
+                        }
+                      />
+                    </div>
+                  ) : null}
                   <ProviderSettingsForm
                     definition={driverOption}
                     value={configDraft}

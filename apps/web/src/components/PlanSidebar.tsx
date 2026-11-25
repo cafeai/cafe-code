@@ -197,6 +197,7 @@ const PlanSidebar = memo(function PlanSidebar({
                     text={displayedPlanMarkdown ?? ""}
                     cwd={markdownCwd}
                     isStreaming={false}
+                    renderFileCitations
                   />
                 </div>
               ) : null}

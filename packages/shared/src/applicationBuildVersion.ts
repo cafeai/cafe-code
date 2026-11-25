@@ -104,7 +104,7 @@ function outputRoot(directory: string): string {
   return path.resolve(directory);
 }
 
-function outputFile(root: string, relative: unknown): string {
+function outputFile(root: string, relative: unknown, versionBearing = true): string {
   if (
     typeof relative !== "string" ||
     relative.length === 0 ||
@@ -113,10 +113,25 @@ function outputFile(root: string, relative: unknown): string {
     relative
       .split("/")
       .some((segment) => !OUTPUT_SEGMENT.test(segment) || segment === "." || segment === "..") ||
-    !/\.(?:[cm]?js|html)$/u.test(relative)
+    (versionBearing && !/\.(?:[cm]?js|html)$/u.test(relative))
   )
     refuse();
   return path.join(root, ...relative.split("/"));
+}
+
+/** Native verified-output boundary shared by the release and relay readers. */
+export function readApplicationOutputFile(
+  directory: string,
+  relative: string,
+  maximum: number,
+  expected?: number,
+): Buffer {
+  const root = outputRoot(directory);
+  const filename = outputFile(root, relative, false);
+  observeDirectories(root, filename);
+  const size = Number(inspectFile(filename, Math.min(maximum, MAX_FILE_BYTES)).size);
+  if (expected !== undefined && expected !== size) refuse();
+  return readSidecar(root, filename, size);
 }
 
 type DirectoryObservation = { readonly name: string; readonly metadata: BigIntStats };

@@ -138,7 +138,10 @@ afterEach(async () => {
   await publicSummaryFixtureRetirement.retire();
 });
 
-function createPublicSummaryFixture(context: TestContext, afterUnmount?: () => void) {
+function createPublicSummaryFixture(
+  context: TestContext,
+  afterUnmount?: () => void | Promise<void>,
+) {
   const pending = new Set<Promise<unknown>>();
   const releases = new Set<() => void>();
   let mounted: Awaited<ReturnType<typeof render>> | undefined;
@@ -169,7 +172,7 @@ function createPublicSummaryFixture(context: TestContext, afterUnmount?: () => v
       while (pending.size) await Promise.allSettled([...pending]);
       await mounted?.unmount();
       mounted = undefined;
-      afterUnmount?.();
+      await afterUnmount?.();
     }));
   };
   const onAbort = () => {
@@ -214,6 +217,71 @@ function createPublicSummaryFixture(context: TestContext, afterUnmount?: () => v
 }
 
 const MESSAGE_CREATED_AT = "2026-04-13T12:00:00.000Z";
+
+it("renders complete assistant file citations with the existing file-open consent", async (context) => {
+  const previousApi = window.nativeApi;
+  const fixture = createPublicSummaryFixture(context, async () => {
+    if (previousApi) window.nativeApi = previousApi;
+    else Reflect.deleteProperty(window, "nativeApi");
+    await __resetLocalApiForTests();
+  });
+  const confirm = vi.fn(async () => true).mockResolvedValueOnce(false);
+  const openPath = vi.fn(async () => undefined);
+  const path = "/Users/example/Documents/review (final).pdf";
+  const partial = `Page 4 of :codex-file-citation{path="${path}" purpose="source"`;
+  const completed = `${partial}} explains the review.`;
+  const props = buildProps();
+  const timeline = (provider: ProviderDriverKind, streaming: boolean) => (
+    <MessagesTimeline
+      {...props}
+      activeProvider={provider}
+      markdownCwd="/Users/example/project"
+      timelineEntries={[
+        buildUserTimelineEntry(completed),
+        buildAssistantTimelineEntry({ text: streaming ? partial : completed, streaming }),
+      ]}
+    />
+  );
+
+  await fixture.run(async () => {
+    await fixture.own(__resetLocalApiForTests);
+    window.nativeApi = {
+      dialogs: { confirm },
+      shell: { openPath },
+      persistence: {
+        getClientSettings: async () => null,
+        setClientSettings: async () => undefined,
+      },
+      server: {
+        getConfig: async () => ({
+          availableEditors: [],
+          clientSettings: { defaultEditor: "system-default" },
+        }),
+      },
+    } as unknown as LocalApi;
+    const view = await fixture.render(timeline(ProviderDriverKind.make("codex"), true));
+    const link = page.getByRole("link", { name: "review (final).pdf", exact: true });
+    await fixture.own(() => expect.element(link).not.toBeInTheDocument());
+
+    await fixture.own(() => view.rerender(timeline(ProviderDriverKind.make("codex"), false)));
+    await fixture.own(() => expect.element(link).toBeVisible());
+    expect(link.elements()).toHaveLength(1);
+
+    await fixture.own(() => view.rerender(timeline(ProviderDriverKind.make("claude"), false)));
+    await fixture.own(() => expect.element(link).toHaveAttribute("data-open-policy", "confirm"));
+    expect(openPath).not.toHaveBeenCalled();
+    await fixture.own(() => link.click());
+    await fixture.own(() => vi.waitFor(() => expect(confirm).toHaveBeenCalledTimes(1)));
+    expect(confirm).toHaveBeenLastCalledWith(expect.stringContaining(path));
+    expect(openPath).not.toHaveBeenCalled();
+
+    await fixture.own(() => link.click());
+    await fixture.own(() =>
+      vi.waitFor(() => expect(openPath).toHaveBeenCalledExactlyOnceWith(path)),
+    );
+    expect(confirm).toHaveBeenCalledTimes(2);
+  });
+});
 
 it.for([
   {
@@ -1365,6 +1433,101 @@ it("keeps retained historical Claude prose primary while paging command history 
     ).toBeNull();
     expect(getThreadTurnActivityPage).toHaveBeenCalledTimes(2);
     expect(getThreadTurnActivityPage.mock.calls.every(([input]) => input.limit <= 6)).toBe(true);
+  });
+});
+
+it("keeps a popped-out Gemini thinking dialog live-updating across stream updates and completion", async (context) => {
+  const fixture = createPublicSummaryFixture(context);
+  const turnId = TurnId.make("gemini-popout-turn");
+  const initialLines = Array.from({ length: 24 }, (_, index) => `Step ${index + 1}: checking code`);
+  const streamingActivity = {
+    id: EventId.make("gemini-thought-1"),
+    turnId,
+    createdAt: "2026-04-13T12:00:01.000Z",
+    sequence: 1,
+    kind: "reasoning.summary" as const,
+    tone: "info" as const,
+    summary: "Gemini thinking",
+    payload: {
+      itemId: "thought-0",
+      streamKind: "reasoning_summary_text",
+      summaryVersion: 1,
+      provider: "gemini",
+      detail: initialLines.join("\n"),
+      status: "inProgress",
+      truncated: false,
+    },
+  };
+  const updatedActivity = {
+    ...streamingActivity,
+    id: EventId.make("gemini-thought-2"),
+    sequence: 2,
+    payload: {
+      ...streamingActivity.payload,
+      detail: [...initialLines, "Step 25: verifying final patch"].join("\n"),
+      status: "completed",
+    },
+  };
+
+  await fixture.run(async () => {
+    const screen = await fixture.render(
+      <MessagesTimeline
+        {...buildProps()}
+        activeProvider={ProviderDriverKind.make("gemini")}
+        timelineEntries={deriveTimelineEntries(
+          [],
+          [],
+          deriveWorkLogEntries([streamingActivity], turnId),
+        )}
+      />,
+    );
+
+    const popOutButton = page.getByRole("button", { name: "Pop out full thinking", exact: true });
+    await fixture.own(() => expect.element(popOutButton).toBeVisible());
+    await fixture.own(() => popOutButton.click());
+
+    const dialog = page.getByRole("dialog");
+    await fixture.own(() => expect.element(dialog).toBeVisible());
+    await fixture.own(() =>
+      expect
+        .element(dialog.getByText("Step 1: checking code", { exact: false }))
+        .toBeInTheDocument(),
+    );
+    await fixture.own(() =>
+      expect.element(dialog.getByText("Updating…", { exact: true })).toBeVisible(),
+    );
+
+    // Rerender with the completed update (new activity id, same itemId).
+    // The dialog must stay open, show the new line, and clear "Updating…"
+    // even as the inline thinking row auto-collapses behind it.
+    await fixture.own(() =>
+      screen.rerender(
+        <MessagesTimeline
+          {...buildProps()}
+          activeProvider={ProviderDriverKind.make("gemini")}
+          timelineEntries={deriveTimelineEntries(
+            [],
+            [],
+            deriveWorkLogEntries([streamingActivity, updatedActivity], turnId),
+          )}
+        />,
+      ),
+    );
+    await fixture.own(() =>
+      expect
+        .element(dialog.getByText("Step 25: verifying final patch", { exact: false }))
+        .toBeInTheDocument(),
+    );
+    await fixture.own(() =>
+      expect
+        .poll(() =>
+          document
+            .querySelector('[data-provider-public-summary="gemini"]')
+            ?.getAttribute("data-summary-open"),
+        )
+        .toBe("false"),
+    );
+    await fixture.own(() => expect.element(dialog).toBeVisible());
   });
 });
 

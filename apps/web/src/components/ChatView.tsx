@@ -82,7 +82,10 @@ import { useWorkspaceProjects, useWorkspaceThreads } from "../environments/works
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import { getWsConnectionStatus, useWsConnectionStatus } from "../rpc/wsConnectionState";
 import { providerSkillsScopeRevision } from "./chat/useProviderSkills";
-import { deriveGeminiPermissionMode } from "./chat/geminiPermissionMode";
+import {
+  deriveGeminiPermissionMode,
+  resolvePermissionModeForProviderSwitch,
+} from "./chat/geminiPermissionMode";
 import type { ProviderQuotaContext } from "./chat/useProviderQuota";
 import { claudeChatQuotaScope, selectedQuotaDriver } from "../lib/claudeSessionQuota";
 import { readEnvironmentApi } from "../environmentApi";
@@ -8156,6 +8159,13 @@ export default function ChatView(props: ChatViewProps) {
         },
       ]);
 
+      const effectiveInteractionMode: ProviderInteractionMode =
+        ctxSelectedProvider === "gemini" &&
+        nextInteractionMode === "default" &&
+        runtimeMode === "full-access"
+          ? "gemini-bypass"
+          : nextInteractionMode;
+
       try {
         await persistThreadSettingsForNextTurn({
           thread: activeThread,
@@ -8163,14 +8173,14 @@ export default function ChatView(props: ChatViewProps) {
           createdAt: messageCreatedAt,
           modelSelection: ctxSelectedModelSelection,
           runtimeMode,
-          interactionMode: nextInteractionMode,
+          interactionMode: effectiveInteractionMode,
         });
 
         // Keep the mode toggle and plan-follow-up banner in sync immediately
         // while the same-thread implementation turn is starting.
         setComposerDraftInteractionMode(
           scopeThreadRef(activeThread.environmentId, threadIdForSend),
-          nextInteractionMode,
+          effectiveInteractionMode,
         );
 
         await api.orchestration.dispatchCommand({
@@ -8192,7 +8202,7 @@ export default function ChatView(props: ChatViewProps) {
             ? { subagentLimits: sendCtx.subagentLimits }
             : {}),
           runtimeMode,
-          interactionMode: nextInteractionMode,
+          interactionMode: effectiveInteractionMode,
           ...(nextInteractionMode === "default" && activeProposedPlan
             ? {
                 sourceProposedPlan: {
@@ -8285,6 +8295,10 @@ export default function ChatView(props: ChatViewProps) {
     const nextThreadTitle = truncate(buildPlanImplementationThreadTitle(planMarkdown));
     const nextThreadModelSelection: ModelSelection = ctxSelectedModelSelection;
     const nextRuntimeMode = runtimeMode;
+    const nextInteractionMode: ProviderInteractionMode =
+      ctxSelectedProvider === "gemini" && nextRuntimeMode === "full-access"
+        ? "gemini-bypass"
+        : "default";
 
     setSendInFlight(true);
     beginLocalDispatch({ preparingWorktree: false });
@@ -8303,7 +8317,7 @@ export default function ChatView(props: ChatViewProps) {
         ...(sendCtx.subagentLimits !== undefined ? { subagentLimits: sendCtx.subagentLimits } : {}),
         modelSelection: nextThreadModelSelection,
         runtimeMode: nextRuntimeMode,
-        interactionMode: "default",
+        interactionMode: nextInteractionMode,
         branch: activeThread.projectId === null ? null : activeThreadBranch,
         worktreePath: activeThread.projectId === null ? null : activeThread.worktreePath,
         createdAt,
@@ -8325,7 +8339,7 @@ export default function ChatView(props: ChatViewProps) {
             ? { subagentLimits: sendCtx.subagentLimits }
             : {}),
           runtimeMode: nextRuntimeMode,
-          interactionMode: "default",
+          interactionMode: nextInteractionMode,
           sourceProposedPlan: {
             threadId: activeThread.id,
             planId: activeProposedPlan.id,
@@ -8432,16 +8446,23 @@ export default function ChatView(props: ChatViewProps) {
         return;
       }
       const previous = composerRef.current?.getSendContext();
-      if (
-        (previous?.selectedModelSelection.instanceId !== instanceId &&
-          (previous?.selectedProvider === "gemini" || resolvedDriverKind === "gemini")) ||
-        (interactionMode === "gemini-bypass" &&
-          (resolvedDriverKind !== "gemini" || geminiBypassInstanceId !== instanceId))
-      ) {
-        // Gemini's carrier modes belong to one account. Changing the account
-        // must not transfer an explicit bypass or interpret a carrier as Full access.
-        handleInteractionModeChange("default");
-        handleRuntimeModeChange("approval-required");
+      const nextPermissionState = resolvePermissionModeForProviderSwitch({
+        previousProvider: previous?.selectedProvider,
+        previousInstanceId: previous?.selectedModelSelection.instanceId,
+        nextProvider: resolvedDriverKind,
+        nextInstanceId: instanceId,
+        state: { interactionMode, runtimeMode },
+        geminiBypassInstanceId,
+      });
+      if (nextPermissionState) {
+        handleInteractionModeChange(nextPermissionState.interactionMode);
+        handleRuntimeModeChange(nextPermissionState.runtimeMode);
+        if (
+          nextPermissionState.interactionMode === "gemini-bypass" &&
+          composerInteractionMode !== "gemini-bypass"
+        ) {
+          setComposerDraftInteractionMode(composerDraftTarget, "gemini-bypass");
+        }
       }
       const nextModelSelection: ModelSelection = {
         instanceId,
@@ -8457,13 +8478,17 @@ export default function ChatView(props: ChatViewProps) {
     },
     [
       activeThread,
+      composerDraftTarget,
+      composerInteractionMode,
       composerRef,
       geminiBypassInstanceId,
       handleInteractionModeChange,
       handleRuntimeModeChange,
       interactionMode,
       lockedProvider,
+      runtimeMode,
       scheduleComposerFocus,
+      setComposerDraftInteractionMode,
       setComposerDraftModelSelection,
       setStickyComposerModelSelection,
       providerStatuses,

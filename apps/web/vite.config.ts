@@ -110,6 +110,7 @@ export default defineConfig({
     sourcemap: buildSourcemap,
     chunkSizeWarningLimit: 3500,
     rolldownOptions: {
+      input: ["index.html", "relay-launcher.html", "relay-frame.html"],
       checks: {
         invalidAnnotation: false,
         pluginTimings: false,

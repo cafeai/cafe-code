@@ -7,6 +7,8 @@ import { AcpRequestError } from "effect-acp/errors";
 // Native path boundary: retain the host's absolute path and separator semantics.
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import { isAbsolute } from "node:path";
+// Native storage scope is content-free and must not expose the server home path.
+import { createHash } from "node:crypto";
 
 import type { ManagementMcpBinding } from "../../mcp/sessionConnection.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
@@ -18,20 +20,40 @@ const MINIMUM_VERSION = "1.5.9";
 const VERSION_OUTPUT_BYTES = 4_096;
 const CLI_VERSION_TIMEOUT = "8 seconds";
 const CLI_UPDATE_ENV = "AGY_CLI_DISABLE_AUTO_UPDATE";
+const CLI_FILE_AUTH_ENV = "AGY_CLI_FORCE_FILE_TOKEN_STORAGE";
 
 export class GeminiCliQualificationError extends Data.TaggedError("GeminiCliQualificationError")<{
-  readonly reason: "missing" | "unsupported" | "timeout" | "execution";
+  readonly reason: "missing" | "unsupported" | "timeout" | "execution" | "private-home-unsupported";
   readonly message: string;
 }> {}
 
-export function geminiCliEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function geminiPrivateHomeScope(nativeHome: string | undefined): string | undefined {
+  return nativeHome === undefined
+    ? undefined
+    : createHash("sha256").update(nativeHome).digest("hex");
+}
+
+export function geminiPrivateHomeArgs(nativeHome: string | undefined): ReadonlyArray<string> {
+  // 1.5.16 accepts the underscore spelling for ACP and for headless /usage.
+  // The hyphenated spelling is ACP-only on that build.
+  return nativeHome === undefined ? [] : ["--gemini_dir", nativeHome];
+}
+
+export function geminiCliEnvironment(
+  environment: NodeJS.ProcessEnv,
+  nativeHome?: string,
+): NodeJS.ProcessEnv {
   // Canonicalize case aliases too: Windows may select a duplicate with a
   // different spelling before the canonical key reaches the child.
   return {
     ...Object.fromEntries(
-      Object.entries(environment).filter(([key]) => key.toUpperCase() !== CLI_UPDATE_ENV),
+      Object.entries(environment).filter(([key]) => {
+        const canonical = key.toUpperCase();
+        return canonical !== CLI_UPDATE_ENV && !(nativeHome && canonical === CLI_FILE_AUTH_ENV);
+      }),
     ),
     [CLI_UPDATE_ENV]: "true",
+    ...(nativeHome ? { [CLI_FILE_AUTH_ENV]: "1" } : {}),
   };
 }
 
@@ -39,6 +61,7 @@ export const qualifyGeminiCli = Effect.fn("qualifyGeminiCli")(function* (
   configuredBinary: string,
   cwd: string,
   environment: NodeJS.ProcessEnv,
+  nativeHome?: string,
 ) {
   const selected = expandHomePath(configuredBinary);
   // The standalone distribution uses a native executable. In particular,
@@ -108,7 +131,22 @@ export const qualifyGeminiCli = Effect.fn("qualifyGeminiCli")(function* (
       message: `Select the standalone Antigravity CLI ${MINIMUM_VERSION} or newer. The Antigravity IDE launcher cannot serve this provider.`,
     });
   }
-  return { binaryPath, version };
+  // The file-only switch is undocumented. A CLI that ignores it can silently
+  // select the OS Keychain. Admit only the release and host qualified with
+  // distinct native stores, including an empty-profile refusal. Google 1.5.16
+  // changed SSH Keychain behavior, so SSH detection is not a substitute.
+  // https://antigravity.google/docs/changelog#v1516
+  if (
+    nativeHome &&
+    (version !== "1.5.16" || process.platform !== "darwin" || process.arch !== "arm64")
+  ) {
+    return yield* new GeminiCliQualificationError({
+      reason: "private-home-unsupported",
+      message:
+        "Private Antigravity homes require CLI 1.5.16 on Apple silicon macOS. To use a different runtime, add an instance that uses the existing native home.",
+    });
+  }
+  return { binaryPath, version, nativeHome };
 });
 
 type GeminiRuntimeOptions = Omit<
@@ -116,6 +154,7 @@ type GeminiRuntimeOptions = Omit<
   "spawn" | "authMethodId" | "beforeSession" | "mcpServers"
 > & {
   readonly binaryPath: string;
+  readonly nativeHome?: string | undefined;
   readonly bypassPermissions?: boolean;
   readonly environment: NodeJS.ProcessEnv;
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
@@ -124,6 +163,7 @@ type GeminiRuntimeOptions = Omit<
 
 export function makeGeminiAcpRuntime({
   binaryPath,
+  nativeHome,
   bypassPermissions,
   environment,
   childProcessSpawner,
@@ -154,9 +194,13 @@ export function makeGeminiAcpRuntime({
       command: binaryPath,
       // This is a process startup setting. The native mode selector exposes
       // Default in both processes and cannot establish or change Bypass.
-      args: bypassPermissions === true ? ["acp", "--dangerously-skip-permissions"] : ["acp"],
+      args: [
+        "acp",
+        ...geminiPrivateHomeArgs(nativeHome),
+        ...(bypassPermissions === true ? ["--dangerously-skip-permissions"] : []),
+      ],
       cwd: options.cwd,
-      env: geminiCliEnvironment(environment),
+      env: geminiCliEnvironment(environment, nativeHome),
       extendEnv: false,
     },
     // Account setup is external. Background discovery must never launch a

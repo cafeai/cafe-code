@@ -77,7 +77,11 @@ import {
   type GeminiElicitationPlan,
   type GeminiElicitationResolved,
 } from "../acp/GeminiAcpElicitation.ts";
-import { makeGeminiAcpRuntime, qualifyGeminiCli } from "../acp/GeminiAcpRuntime.ts";
+import {
+  geminiPrivateHomeScope,
+  makeGeminiAcpRuntime,
+  qualifyGeminiCli,
+} from "../acp/GeminiAcpRuntime.ts";
 import {
   applyGeminiAcpSelection,
   GeminiAcpSelectionError,
@@ -114,6 +118,7 @@ const decodeResume = Schema.decodeUnknownEffect(
     threadId: Schema.String,
     cwd: Schema.String,
     sessionId: NativeSessionId,
+    nativeHomeScope: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/u))),
   }),
 );
 type Runtime = AcpSessionRuntime["Service"];
@@ -202,6 +207,7 @@ interface SessionOwner {
 export interface GeminiAdapterOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly nativeHome?: string | undefined;
 }
 
 function invalid(operation: string, issue: string) {
@@ -335,6 +341,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
   const config = yield* ServerConfig;
   const instanceId = options.instanceId ?? ProviderInstanceId.make("gemini");
   const environment = options.environment ?? {};
+  const nativeHomeScope = geminiPrivateHomeScope(options.nativeHome);
   const events = yield* PubSub.bounded<ProviderRuntimeEvent>(2048);
   const sessions = new Map<ThreadId, SessionOwner>();
   const locks = new Map<ThreadId, { semaphore: Semaphore.Semaphore; users: number }>();
@@ -972,6 +979,11 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
             "startSession",
             "The Gemini resume cursor belongs to another chat or workspace.",
           );
+        if (resume && resume.nativeHomeScope !== nativeHomeScope)
+          return yield* invalid(
+            "startSession",
+            "The Gemini conversation belongs to another native provider home.",
+          );
         const previous = sessions.get(input.threadId);
         if (previous) {
           if (
@@ -997,7 +1009,12 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
               "Changing Gemini permissions requires the exact resumable conversation.",
             );
         }
-        const qualified = yield* qualifyGeminiCli(settings.binaryPath, cwd, environment).pipe(
+        const qualified = yield* qualifyGeminiCli(
+          settings.binaryPath,
+          cwd,
+          environment,
+          options.nativeHome,
+        ).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
           Effect.mapError((error) => invalid("startSession", error.message)),
         );
@@ -1048,6 +1065,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
           "process/spawn",
           makeGeminiAcpRuntime({
             binaryPath: qualified.binaryPath,
+            nativeHome: qualified.nativeHome,
             bypassPermissions,
             cwd,
             environment,
@@ -1285,6 +1303,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
                   threadId: input.threadId,
                   cwd,
                   sessionId: nativeId,
+                  ...(nativeHomeScope ? { nativeHomeScope } : {}),
                 },
               }
             : {}),

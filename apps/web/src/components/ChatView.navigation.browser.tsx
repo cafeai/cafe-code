@@ -40,6 +40,7 @@ import {
   getCommandPaletteLegendEntries,
   dispatchInputKey,
   createDesktopBridgeForChatViewTests,
+  NOW_ISO,
   mountChatView,
   createSnapshotWithActiveSubagent,
   createSnapshotWithSecondaryProject,
@@ -48,12 +49,13 @@ import {
   MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   SourceControlRepositoryError,
   ThreadId,
   WS_METHODS,
 } from "@cafecode/contracts";
-import { createModelSelection } from "@cafecode/shared/model";
+import { createModelCapabilities, createModelSelection } from "@cafecode/shared/model";
 import * as Option from "effect/Option";
 import { describe, expect, it, vi } from "vitest";
 import { page } from "vitest/browser";
@@ -892,6 +894,125 @@ describe("ChatView full app (navigation)", () => {
     } finally {
       await mounted.cleanup();
     }
+  });
+
+  it("defaults new Gemini drafts and Full-access provider switches to Bypass permissions while keeping legacy threads in Ask permissions", async (context) => {
+    const geminiInstanceId = ProviderInstanceId.make("gemini");
+    const geminiDriver = ProviderDriverKind.make("gemini");
+    const geminiModel = createModelSelection(geminiInstanceId, "gemini-4-neon", [
+      { id: "reasoningEffort", value: "high" },
+    ]);
+    useComposerDraftStore.setState({
+      stickyModelSelectionByProvider: {
+        [geminiInstanceId]: geminiModel,
+      },
+      stickyActiveProvider: geminiInstanceId,
+    });
+
+    const owner = createChatViewCallerOwner(context, mountChatView, {
+      label: "navigation-gemini-bypass-default",
+    });
+    await owner.run(async () => {
+      const baseSnapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-user-gemini-bypass-default" as MessageId,
+        targetText: "legacy gemini thread target",
+        history: "essential",
+        runtimeMode: "full-access",
+      });
+      const legacySnapshot = {
+        ...baseSnapshot,
+        threads: baseSnapshot.threads.map((thread, index) =>
+          index === 0
+            ? {
+                ...thread,
+                modelSelection: geminiModel,
+                runtimeMode: "full-access" as const,
+                interactionMode: "default" as const,
+                session: thread.session
+                  ? {
+                      ...thread.session,
+                      provider: geminiDriver,
+                      providerInstanceId: geminiInstanceId,
+                    }
+                  : null,
+              }
+            : thread,
+        ),
+      };
+      const mounted = await owner.mount({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: legacySnapshot,
+        configureFixture: (nextFixture) => {
+          nextFixture.serverConfig = {
+            ...nextFixture.serverConfig,
+            providers: [
+              ...nextFixture.serverConfig.providers,
+              {
+                driver: geminiDriver,
+                instanceId: geminiInstanceId,
+                displayName: "Gemini (Antigravity CLI)",
+                enabled: true,
+                installed: true,
+                version: "1.5.13",
+                status: "ready",
+                auth: { status: "authenticated" },
+                checkedAt: NOW_ISO,
+                models: [
+                  {
+                    slug: "gemini-4-neon",
+                    name: "Gemini 4 Neon",
+                    isCustom: false,
+                    capabilities: createModelCapabilities({ optionDescriptors: [] }),
+                  },
+                ],
+                slashCommands: [],
+                skills: [],
+              },
+            ],
+          };
+        },
+      });
+
+      // Legacy persisted Gemini thread with default + full-access remains Ask permissions.
+      await owner.own("controls", () =>
+        page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+      );
+      const legacyAskItem = await waitForMenuRadioItemContainingText("Ask permissions");
+      expect(legacyAskItem.getAttribute("aria-checked")).toBe("true");
+      await owner.own("close", () =>
+        page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+      );
+
+      // Creating a brand-new draft when Gemini is sticky initializes Bypass permissions.
+      const newThreadButton = page.getByTestId("new-thread-button");
+      await expect.element(newThreadButton).toBeInTheDocument();
+      await revealProjectThreadAction();
+      await owner.own("route", () => newThreadButton.click());
+
+      const newThreadPath = await owner.own("route", () =>
+        waitForURL(
+          mounted.router,
+          (path) => UUID_ROUTE_RE.test(path),
+          "Route should have changed to a new sticky Gemini draft thread UUID.",
+        ),
+      );
+      const newDraftId = draftIdFromPath(newThreadPath);
+      expect(useComposerDraftStore.getState().getDraftSession(newDraftId)).toMatchObject({
+        runtimeMode: "full-access",
+        interactionMode: "gemini-bypass",
+      });
+      expect(composerDraftFor(newDraftId)).toMatchObject({
+        activeProvider: geminiInstanceId,
+        runtimeMode: "full-access",
+        interactionMode: "gemini-bypass",
+      });
+
+      await owner.own("controls", () =>
+        page.getByRole("button", { name: "More composer controls", exact: true }).click(),
+      );
+      const bypassItem = await waitForMenuRadioItemContainingText("Bypass permissions");
+      expect(bypassItem.getAttribute("aria-checked")).toBe("true");
+    });
   });
 
   it("prefers draft state over sticky composer settings and defaults", async () => {

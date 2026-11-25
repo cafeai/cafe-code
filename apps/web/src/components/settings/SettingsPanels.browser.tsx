@@ -23,6 +23,7 @@ import {
   type SourceControlDiscoveryResult,
 } from "@cafecode/contracts";
 import { MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES } from "@cafecode/contracts/settings";
+import { parseImageHeader } from "@cafecode/shared/rasterImageHeader";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { page } from "vitest/browser";
@@ -2204,24 +2205,16 @@ describe("settings panels", () => {
     const uploadFetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
       const url = String(input);
       if (url.endsWith("/api/branding/sidebar-image") && init?.method === "POST") {
-        expect(init.body).toBeInstanceOf(File);
-        expect(init.headers).toMatchObject({ "content-type": "image/png" });
-        return new Response(
-          JSON.stringify({
-            sidebarBrandImage: {
-              id: "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
-              url: "/api/branding/sidebar-image/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
-              mimeType: "image/png",
-              width: 128,
-              height: 160,
-              sizeBytes: 1234,
-            },
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
+        return Response.json({
+          sidebarBrandImage: {
+            id: "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.webp",
+            url: "/api/branding/sidebar-image/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.webp",
+            mimeType: "image/webp",
+            width: 1024,
+            height: 512,
+            sizeBytes: 1234,
           },
-        );
+        });
       }
 
       throw new Error(`Unhandled fetch ${url}`);
@@ -2258,25 +2251,37 @@ describe("settings panels", () => {
     await page.screenshot({
       path: "../../../../../.explorations/settings-reorganization/appearance.png",
     });
-    const imageInput = document.querySelector(
-      'input[aria-label="Sidebar image file"]',
-    ) as HTMLInputElement | null;
-    expect(imageInput).not.toBeNull();
-    Object.defineProperty(imageInput, "files", {
-      configurable: true,
-      value: [new File(["image"], "brand.png", { type: "image/png" })],
-    });
-    imageInput!.dispatchEvent(new Event("change", { bubbles: true }));
+    const imageInput = page.getByLabelText("Sidebar image file");
+    await expect.element(imageInput).toHaveAttribute("accept", "image/*");
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 1280;
+    canvas.height = 640;
+    const context = canvas.getContext("2d")!;
+    const pixels = context.createImageData(canvas.width, canvas.height);
+    const rgba = new Uint32Array(pixels.data.buffer);
+    // Deterministic noise produces a real PNG above the upload limit.
+    let noise = 1;
+    for (let index = 0; index < rgba.length; index++) {
+      noise ^= noise << 13;
+      noise ^= noise >>> 17;
+      noise ^= noise << 5;
+      rgba[index] = noise;
+    }
+    context.putImageData(pixels, 0, 0);
+    const png = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve));
+    expect(png!.size).toBeGreaterThan(MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES);
+    await imageInput.upload(new File([png!], "brand.png", { type: "image/png" }));
 
     await vi.waitFor(() => {
       expect(updateClientSettings).toHaveBeenCalledWith(
         expect.objectContaining({
           sidebarBrandImage: {
-            id: "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
-            url: "/api/branding/sidebar-image/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
-            mimeType: "image/png",
-            width: 128,
-            height: 160,
+            id: "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.webp",
+            url: "/api/branding/sidebar-image/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.webp",
+            mimeType: "image/webp",
+            width: 1024,
+            height: 512,
             sizeBytes: 1234,
           },
           sidebarBrandImageDataUrl: "",
@@ -2286,32 +2291,37 @@ describe("settings panels", () => {
       );
     });
     expect(uploadFetch).toHaveBeenCalledTimes(1);
+    const request = uploadFetch.mock.calls[0]![1]!;
+    expect(request.headers).toMatchObject({ "content-type": "image/webp" });
+    const uploadedImage = request.body as Blob;
+    expect(uploadedImage.size).toBeLessThanOrEqual(MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES);
+    const header = parseImageHeader(new Uint8Array(await uploadedImage.arrayBuffer()));
+    expect(header?.mimeType).toBe("image/webp");
+    expect(header!.width).toBeLessThan(canvas.width);
+    expect(header!.width / header!.height).toBe(canvas.width / canvas.height);
 
-    const callsBeforeUnsupportedImage = updateClientSettings.mock.calls.length;
-    Object.defineProperty(imageInput, "files", {
-      configurable: true,
-      value: [new File(["<svg />"], "brand.svg", { type: "image/svg+xml" })],
-    });
-    imageInput!.dispatchEvent(new Event("change", { bubbles: true }));
+    await expect.element(page.getByRole("button", { name: "Choose image" })).toBeEnabled();
+    await imageInput.upload(
+      new File(
+        [
+          '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2 1"><rect width="1" height="1"/></svg>',
+        ],
+        "brand.svg",
+      ),
+    );
+    await vi.waitFor(() => expect(uploadFetch).toHaveBeenCalledTimes(2));
+    const convertedImage = uploadFetch.mock.calls[1]![1]!.body as Blob;
+    expect(convertedImage.type).toBe("image/webp");
+    expect(parseImageHeader(new Uint8Array(await convertedImage.arrayBuffer()))?.mimeType).toBe(
+      "image/webp",
+    );
 
-    await expect
-      .element(page.getByText("Choose a PNG, JPEG, GIF, or WebP image."))
-      .toBeInTheDocument();
-    expect(updateClientSettings).toHaveBeenCalledTimes(callsBeforeUnsupportedImage);
-
-    const callsBeforeOversizedImage = updateClientSettings.mock.calls.length;
-    Object.defineProperty(imageInput, "files", {
-      configurable: true,
-      value: [
-        new File([new Uint8Array(MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES + 1)], "brand.png", {
-          type: "image/png",
-        }),
-      ],
-    });
-    imageInput!.dispatchEvent(new Event("change", { bubbles: true }));
-
-    await expect.element(page.getByText("Choose an image under 1 MB.")).toBeInTheDocument();
-    expect(updateClientSettings).toHaveBeenCalledTimes(callsBeforeOversizedImage);
+    await expect.element(page.getByRole("button", { name: "Choose image" })).toBeEnabled();
+    const callsBeforeInvalidImage = updateClientSettings.mock.calls.length;
+    await imageInput.upload(new File(["invalid"], "brand.png", { type: "image/png" }));
+    await expect.element(page.getByText("Could not read that image.")).toBeInTheDocument();
+    expect(uploadFetch).toHaveBeenCalledTimes(2);
+    expect(updateClientSettings).toHaveBeenCalledTimes(callsBeforeInvalidImage);
 
     await expect
       .element(page.getByRole("heading", { name: "Accent color", exact: true }))
@@ -3493,6 +3503,45 @@ describe("settings panels", () => {
         },
       });
       await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    { name: "Gemini", driver: "gemini" },
+    { name: "Claude", driver: "claudeAgent" },
+    { name: "Grok Build", driver: "grok" },
+  ])(
+    "creates a private native home for a new $name account by default",
+    async ({ name, driver }) => {
+      const config = createBaseServerConfig();
+      const updateSettings = installProviderAccountSettings(config);
+      mounted = await render(
+        <AppAtomRegistryProvider>
+          <ProviderSettingsPanel />
+        </AppAtomRegistryProvider>,
+      );
+
+      await page.getByRole("button", { name: "Add provider instance", exact: true }).click();
+      await page.getByRole("radio", { name }).click();
+      await page.getByRole("button", { name: "Next", exact: true }).click();
+      await page.getByLabelText(/Display name/).fill("Personal");
+      await page.getByRole("button", { name: "Next", exact: true }).click();
+      await expect
+        .element(page.getByRole("switch", { name: "Create a private provider home" }))
+        .toBeChecked();
+      await page.getByRole("button", { name: "Add provider", exact: true }).click();
+
+      expect(updateSettings).toHaveBeenCalledExactlyOnceWith({
+        providerInstances: {
+          ...config.settings.providerInstances,
+          [`${driver}_personal`]: {
+            driver,
+            enabled: true,
+            displayName: "Personal",
+            nativeHomeMode: "private",
+          },
+        },
+      });
     },
   );
 

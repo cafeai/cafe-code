@@ -1,4 +1,4 @@
-import { parseImageHeader, type ParsedImageHeader } from "../rasterImageHeader.ts";
+import { parseImageHeader, type ParsedImageHeader } from "@cafecode/shared/rasterImageHeader";
 import { createHash } from "node:crypto";
 
 import {

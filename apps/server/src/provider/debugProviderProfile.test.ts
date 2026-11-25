@@ -18,9 +18,9 @@ import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 
 import {
   applyDebugProviderSettingsDefaults,
-  debugProviderHome,
+  providerHome,
   describeProviderDataProfiles,
-  prepareDebugProviderHome,
+  prepareProviderHome,
   resolveProviderProfileAdmission,
 } from "./debugProviderProfile.ts";
 
@@ -83,7 +83,7 @@ describe("Debug provider profile admission", () => {
     });
     expect(profiles?.[instanceId]).toEqual({
       scope: "unconfigured",
-      nativeHome: debugProviderHome(profile, "codex", instanceId),
+      nativeHome: providerHome(profile, "codex", instanceId),
     });
     expect(profiles?.[ProviderInstanceId.make("shared")]).toEqual({ scope: "shared" });
     expect(profiles?.[ProviderInstanceId.make("unknown")]).toEqual({ scope: "unconfigured" });
@@ -130,7 +130,7 @@ describe("Debug provider profile admission", () => {
       const result = admission(driver);
       expect(result.kind).toBe("admitted");
       if (result.kind !== "admitted") throw new Error("Expected private admission");
-      const home = debugProviderHome(profile, driver, instanceId);
+      const home = providerHome(profile, driver, instanceId);
       expect(result.nativeHome).toBe(home);
       expect(result.config).toMatchObject({ homePath: home });
       expect(result.processEnvironment).toMatchObject({
@@ -252,9 +252,71 @@ describe("Debug provider profile admission", () => {
     expect(result).toEqual({ kind: "admitted", config, processEnvironment: environment });
   });
 
+  it("admits distinct new native homes and scrubs ambient credential selectors", () => {
+    const production = { ...profile, dataProfile: "production" as const };
+    const environment = {
+      HOME: "ordinary-tools-home",
+      AGY_ADC_AUTH: "true",
+      GEMINI_API_KEY: "ambient-key",
+      XAI_API_KEY: "ambient-key",
+      CLAUDE_CONFIG_DIR: "ambient-config",
+    };
+    for (const driver of ["claudeAgent", "grok", "gemini"]) {
+      const entry = { driver: ProviderDriverKind.make(driver), nativeHomeMode: "private" as const };
+      const options = {
+        profile: production,
+        instanceId,
+        entry,
+        config: {},
+        enabled: true,
+        baseEnvironment: environment,
+      };
+      const result = resolveProviderProfileAdmission(options);
+      if (result.kind !== "admitted") throw new Error(result.reason);
+      const home = providerHome(production, driver, instanceId);
+      expect(result.nativeHome).toBe(home);
+      const sibling = resolveProviderProfileAdmission({
+        ...options,
+        instanceId: ProviderInstanceId.make("sibling"),
+      });
+      expect(sibling).toMatchObject({
+        kind: "admitted",
+        nativeHome: providerHome(production, driver, ProviderInstanceId.make("sibling")),
+      });
+      expect(result.processEnvironment.XAI_API_KEY).toBeUndefined();
+      expect(
+        describeProviderDataProfiles(production, { [instanceId]: entry })?.[instanceId],
+      ).toEqual({ scope: "profile-local", nativeHome: home });
+      if (driver === "gemini") {
+        expect(result.processEnvironment).toMatchObject({
+          HOME: environment.HOME,
+          AGY_ADC_AUTH: undefined,
+          GEMINI_API_KEY: undefined,
+        });
+        expect(result.config).toEqual({});
+        expect(resolveProviderProfileAdmission({ ...options, profile })).toMatchObject({
+          kind: "admitted",
+          processEnvironment: { HOME: providerHome(profile, driver, instanceId) },
+        });
+        expect(
+          resolveProviderProfileAdmission({
+            ...options,
+            entry: {
+              ...entry,
+              environment: [{ name: "agy_adc_auth", value: "true", sensitive: false }],
+            },
+          }).kind,
+        ).toBe("refused");
+      } else {
+        expect(result.processEnvironment.HOME).toBe(home);
+        expect(result.config).toMatchObject({ homePath: home });
+      }
+    }
+  });
+
   it("does not alias case-distinct account ids on Windows", () => {
-    expect(debugProviderHome(profile, "codex", ProviderInstanceId.make("Personal"))).not.toBe(
-      debugProviderHome(profile, "codex", ProviderInstanceId.make("personal")),
+    expect(providerHome(profile, "codex", ProviderInstanceId.make("Personal"))).not.toBe(
+      providerHome(profile, "codex", ProviderInstanceId.make("personal")),
     );
   });
 
@@ -263,11 +325,11 @@ describe("Debug provider profile admission", () => {
     const outside = await mkdtemp(NodePath.join(tmpdir(), "cafe-debug-provider-outside-"));
     try {
       const localProfile = { dataProfile: "debug" as const, baseDir: temporary };
-      const home = debugProviderHome(localProfile, "codex", instanceId);
-      await prepareDebugProviderHome(localProfile, home);
+      const home = providerHome(localProfile, "codex", instanceId);
+      await prepareProviderHome(localProfile, home);
       await writeFile(NodePath.join(outside, "sentinel"), "unchanged", { mode: 0o600 });
       await link(NodePath.join(outside, "sentinel"), NodePath.join(home, "auth.json"));
-      await expect(prepareDebugProviderHome(localProfile, home)).rejects.toThrow(
+      await expect(prepareProviderHome(localProfile, home)).rejects.toThrow(
         "native account state contains an unsafe alias",
       );
       expect(await readFile(NodePath.join(outside, "sentinel"), "utf8")).toBe("unchanged");
@@ -278,12 +340,12 @@ describe("Debug provider profile admission", () => {
         NodePath.join(temporary, "provider-homes"),
         process.platform === "win32" ? "junction" : "dir",
       );
-      await expect(prepareDebugProviderHome(localProfile, home)).rejects.toThrow(
+      await expect(prepareProviderHome(localProfile, home)).rejects.toThrow(
         "unsafe directory alias",
       );
       expect(await readFile(NodePath.join(outside, "sentinel"), "utf8")).toBe("unchanged");
       await expect(
-        prepareDebugProviderHome(localProfile, NodePath.join(outside, "outside")),
+        prepareProviderHome(localProfile, NodePath.join(outside, "outside")),
       ).rejects.toThrow("escaped its data profile");
     } finally {
       await rm(temporary, { recursive: true, force: true });

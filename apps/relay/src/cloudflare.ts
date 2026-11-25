@@ -2,7 +2,14 @@
 // Native edge boundary: each timer belongs to one bounded origin handshake or
 // metadata exchange, and is cleared before returning the upgraded connection.
 
+import {
+  RELAY_VIEWER_FRAME_PATH,
+  RELAY_VIEWER_WORKER_PATH,
+  relayViewerLauncherOrigin,
+} from "@cafecode/relay/viewerOrigins";
+
 const VIEWER = "relay.cafecode.sh";
+const VIEWER_ORIGIN = "https://" + VIEWER;
 const SUBPROTOCOL = "cafe-relay.v1";
 const ORIGINS: Readonly<Record<string, string>> = {
   "relay-uk.cafecode.sh": "https://vps-692e150f.vps.ovh.net:8443",
@@ -77,11 +84,15 @@ async function viewer(request: Request, env: RelayEdgeEnvironment, url: URL) {
       headers: { ...security, location: "/relay/connect" },
     });
   }
-  if (/(?:^|\/)\./.test(url.pathname) || /^\/(?:api|attachments|ws)(?:\/|$)/.test(url.pathname))
+  if (
+    /(?:^|\/)\./.test(url.pathname) ||
+    /^\/(?:api|attachments|ws|_relay)(?:\/|$)/.test(url.pathname) ||
+    ["/index.html", "/relay-frame.html", "/relay-viewer-sw.js"].includes(url.pathname)
+  )
     return refusal();
   const asset = new URL(url.origin);
   asset.pathname = ["/relay/connect", "/relay/pair"].includes(url.pathname)
-    ? "/index.html"
+    ? "/relay-launcher.html"
     : url.pathname;
   // Never send domain-wide cookies, bearer credentials, invitation fragments,
   // arbitrary proxy headers or query strings to the asset service.
@@ -93,7 +104,7 @@ async function viewer(request: Request, env: RelayEdgeEnvironment, url: URL) {
   const response = await env.ASSETS.fetch(new Request(asset, { method: request.method, headers }));
   if (
     response.status === 404 &&
-    asset.pathname !== "/index.html" &&
+    asset.pathname !== "/relay-launcher.html" &&
     request.headers.get("accept")?.includes("text/html") &&
     !url.pathname.startsWith("/assets/") &&
     !url.pathname.split("/").at(-1)?.includes(".")
@@ -107,10 +118,39 @@ async function viewer(request: Request, env: RelayEdgeEnvironment, url: URL) {
   const result = new Headers(response.headers);
   result.delete("set-cookie");
   for (const [name, value] of Object.entries(security)) result.set(name, value);
+  result.set("origin-agent-cluster", "?1");
   if (response.status === 200 && asset.pathname.startsWith("/assets/")) {
     result.set("cache-control", "public, max-age=31536000, immutable");
   }
   return new Response(response.body, { status: response.status, headers: result });
+}
+
+async function isolatedViewer(request: Request, env: RelayEdgeEnvironment, url: URL) {
+  if (request.method !== "GET" && request.method !== "HEAD") return refusal(405);
+  const file =
+    url.pathname === RELAY_VIEWER_FRAME_PATH
+      ? "/relay-frame.html"
+      : url.pathname === RELAY_VIEWER_WORKER_PATH
+        ? "/relay-viewer-sw.js"
+        : /^\/assets\/[a-zA-Z0-9_.-]+$/.test(url.pathname)
+          ? url.pathname
+          : undefined;
+  if (!file || url.search) return refusal();
+  const response = await env.ASSETS.fetch(
+    new Request(new URL(file, VIEWER_ORIGIN), {
+      method: request.method,
+    }),
+  );
+  const headers = new Headers(response.headers);
+  headers.delete("set-cookie");
+  headers.delete("x-frame-options");
+  headers.set("cache-control", "no-store");
+  headers.set("referrer-policy", "no-referrer");
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("origin-agent-cluster", "?1");
+  headers.set("content-security-policy", "frame-ancestors " + VIEWER_ORIGIN);
+  if (url.pathname === RELAY_VIEWER_WORKER_PATH) headers.set("service-worker-allowed", "/");
+  return new Response(response.body, { status: response.status, headers });
 }
 
 export async function relayEdgeFetch(
@@ -121,6 +161,7 @@ export async function relayEdgeFetch(
   const url = new URL(request.url);
   if (url.protocol !== "https:") return refusal(400);
   if (url.hostname === VIEWER) return viewer(request, env, url);
+  if (relayViewerLauncherOrigin(url) === VIEWER_ORIGIN) return isolatedViewer(request, env, url);
   const origin = ORIGINS[url.hostname];
   if (!origin || url.search || url.hash) return refusal();
   if (url.pathname === "/v1/lookup" && request.method === "OPTIONS") {

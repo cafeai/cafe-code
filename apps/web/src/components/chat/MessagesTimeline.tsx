@@ -8,6 +8,8 @@ import { UiMessage } from "~/i18n";
 import { FileAttachmentPill } from "./FileAttachmentPill";
 import { TurnConfigurationWorkEntry } from "./TurnConfigurationWorkEntry";
 import { ClaudeCommandWorkEntry, ProviderSummaryWorkEntry } from "./ProviderOperationWorkEntry";
+import { ProviderSummaryDialog } from "./ProviderSummaryDialog";
+import type { ProviderPublicSummary } from "./providerOperationVisibility";
 import { ProviderDiagnosticWorkEntry } from "./ProviderDiagnosticWorkEntry";
 import type { ProviderDiagnosticAction } from "../../providerDiagnostic";
 import {
@@ -191,6 +193,7 @@ interface TimelineRowSharedState {
   onForkMessage?: ((messageId: MessageId) => void) | undefined;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenSubagentDetail: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
+  onOpenPublicSummary: (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => void;
   /** Opens this chat's own composer controls; absent where none exist. */
   onProviderDiagnosticAction?: ((action: ProviderDiagnosticAction) => void) | undefined;
   /** Stable, mutable tracker of rows appended live after first ready. */
@@ -547,6 +550,39 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       if (trigger?.isConnected) trigger.focus();
     });
   }, [controlledCloseSubagentDetail]);
+  const [selectedPublicSummary, setSelectedPublicSummary] = useState<{
+    readonly environmentId: EnvironmentId;
+    readonly threadId: ThreadId | null;
+    readonly entryId: string;
+    readonly turnId: string | null;
+    readonly toolCallId: string | null;
+    readonly summary: ProviderPublicSummary;
+  } | null>(null);
+  const selectedPublicSummaryTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const openPublicSummary = useCallback(
+    (workEntry: WorkLogEntry, trigger: HTMLButtonElement) => {
+      if (!workEntry.publicSummary) return;
+      selectedPublicSummaryTriggerRef.current = trigger;
+      setSelectedPublicSummary({
+        environmentId: activeThreadEnvironmentId,
+        threadId: activeThreadId,
+        entryId: workEntry.id,
+        turnId: workEntry.turnId ?? null,
+        toolCallId: workEntry.toolCallId ?? null,
+        summary: workEntry.publicSummary,
+      });
+    },
+    [activeThreadEnvironmentId, activeThreadId],
+  );
+  const handlePublicSummaryDialogOpenChange = useCallback((open: boolean) => {
+    if (open) return;
+    const trigger = selectedPublicSummaryTriggerRef.current;
+    setSelectedPublicSummary(null);
+    selectedPublicSummaryTriggerRef.current = null;
+    window.requestAnimationFrame(() => {
+      if (trigger?.isConnected) trigger.focus();
+    });
+  }, []);
   useEffect(() => {
     // A timeline instance can survive navigation while its thread/environment
     // props change. Never carry a child selection into a different Cafe scope:
@@ -554,7 +590,32 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     // using the new thread id and the prior turn/child identity.
     setInternalSelectedSubagent(null);
     selectedSubagentTriggerRef.current = null;
+    setSelectedPublicSummary(null);
+    selectedPublicSummaryTriggerRef.current = null;
   }, [activeThreadEnvironmentId, activeThreadId]);
+  const resolvedSelectedPublicSummary = useMemo<ProviderPublicSummary | null>(() => {
+    if (!selectedPublicSummary) return null;
+    if (
+      selectedPublicSummary.environmentId !== activeThreadEnvironmentId ||
+      selectedPublicSummary.threadId !== activeThreadId
+    ) {
+      return null;
+    }
+    for (const row of rows) {
+      if (row.kind !== "work") continue;
+      const current = row.groupedEntries.find(
+        (entry) =>
+          entry.publicSummary !== undefined &&
+          (entry.id === selectedPublicSummary.entryId ||
+            (selectedPublicSummary.toolCallId !== null &&
+              entry.toolCallId === selectedPublicSummary.toolCallId &&
+              (entry.turnId ?? null) === selectedPublicSummary.turnId &&
+              entry.publicSummary.provider === selectedPublicSummary.summary.provider)),
+      );
+      if (current?.publicSummary) return current.publicSummary;
+    }
+    return selectedPublicSummary.summary;
+  }, [activeThreadEnvironmentId, activeThreadId, rows, selectedPublicSummary]);
   const resolvedSelectedSubagent = useMemo(() => {
     if (!selectedSubagent) return null;
     if (
@@ -781,11 +842,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         row.message.id,
         prepareChatMessageMarkdownCopyText(row.message.text ?? "", {
           provider: activeProvider,
+          cwd: markdownCwd,
         }),
       );
     }
     return values;
-  }, [activeProvider, rows]);
+  }, [activeProvider, markdownCwd, rows]);
   const markdownSelectionCopyStateRef = useRef<{
     format: ChatCopyFormat;
     assistantMarkdownCopyTextByMessageId: Map<string, string>;
@@ -1455,6 +1517,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onForkMessage,
       onImageExpand,
       onOpenSubagentDetail: openSubagentDetail,
+      onOpenPublicSummary: openPublicSummary,
       ...(onProviderDiagnosticAction ? { onProviderDiagnosticAction } : {}),
       rowEntrances,
     }),
@@ -1481,6 +1544,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onForkMessage,
       onImageExpand,
       openSubagentDetail,
+      openPublicSummary,
       onProviderDiagnosticAction,
       rowEntrances,
     ],
@@ -1638,6 +1702,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           onBack={closeSubagentDetail}
         />
       ) : null}
+      <ProviderSummaryDialog
+        open={resolvedSelectedPublicSummary !== null}
+        summary={resolvedSelectedPublicSummary}
+        onOpenChange={handlePublicSummaryDialogOpenChange}
+      />
     </div>
   );
 });
@@ -2396,6 +2465,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
       if (clicked === "copy-message") {
         const copyText = prepareChatMessageMarkdownCopyText(row.message.text ?? "", {
           provider: ctx.activeProvider,
+          cwd: ctx.markdownCwd,
         });
         try {
           await copyTextToClipboard(copyText);
@@ -2415,7 +2485,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         return;
       }
     },
-    [ctx.activeProvider, row.message.text, uiLocale],
+    [ctx.activeProvider, ctx.markdownCwd, row.message.text, uiLocale],
   );
 
   return (
@@ -2428,6 +2498,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           additionalWorkspaceRoots={ctx.additionalWorkspaceRoots}
           isStreaming={Boolean(row.message.streaming || isAnimating)}
           normalizeCodexCitations={normalizeCodexCitations}
+          renderFileCitations
           skills={ctx.skills}
         />
       </div>
@@ -2502,6 +2573,7 @@ function AssistantCopyButton({ row }: { row: Extract<TimelineRow, { kind: "messa
       <MessageCopyButton
         text={prepareChatMessageMarkdownCopyText(assistantCopyState.text ?? "", {
           provider: ctx.activeProvider,
+          cwd: ctx.markdownCwd,
         })}
         size="icon-xs"
         variant="outline"
@@ -4118,8 +4190,13 @@ const OrdinaryWorkEntryRow = memo(function OrdinaryWorkEntryRow(props: {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
 }) {
-  const { activeThreadEnvironmentId, activeThreadId, timestampFormat, onProviderDiagnosticAction } =
-    use(TimelineRowCtx);
+  const {
+    activeThreadEnvironmentId,
+    activeThreadId,
+    timestampFormat,
+    onProviderDiagnosticAction,
+    onOpenPublicSummary,
+  } = use(TimelineRowCtx);
   if (props.workEntry.providerDiagnostic)
     return (
       <ProviderDiagnosticWorkEntry
@@ -4135,8 +4212,16 @@ const OrdinaryWorkEntryRow = memo(function OrdinaryWorkEntryRow(props: {
     );
   if (props.workEntry.turnConfiguration)
     return <TurnConfigurationWorkEntry configuration={props.workEntry.turnConfiguration} />;
-  if (props.workEntry.publicSummary)
-    return <ProviderSummaryWorkEntry summary={props.workEntry.publicSummary} />;
+  const publicSummary = props.workEntry.publicSummary;
+  if (publicSummary) {
+    const workEntry = props.workEntry;
+    return (
+      <ProviderSummaryWorkEntry
+        summary={publicSummary}
+        onPopOut={(trigger) => onOpenPublicSummary(workEntry, trigger)}
+      />
+    );
+  }
   return <OrdinaryWorkEntryContent {...props} />;
 });
 

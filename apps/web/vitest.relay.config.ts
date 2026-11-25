@@ -5,7 +5,7 @@ export default mergeConfig(
   base,
   defineConfig({
     test: {
-      include: ["test/Relay.e2e.test.ts"],
+      include: ["test/Relay.e2e.test.ts", "test/RelayViewer.e2e.test.ts"],
       exclude: configDefaults.exclude,
       fileParallelism: false,
       maxWorkers: 1,

@@ -8,7 +8,7 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import { ChildProcess, type ChildProcessSpawner } from "effect/unstable/process";
 
-import { geminiCliEnvironment } from "./acp/GeminiAcpRuntime.ts";
+import { geminiCliEnvironment, geminiPrivateHomeArgs } from "./acp/GeminiAcpRuntime.ts";
 import { ProviderAdapterValidationError } from "./Errors.ts";
 import { terminateProbeChild } from "./providerSnapshot.ts";
 
@@ -187,7 +187,10 @@ export interface GeminiLoginRefreshResult {
 export const makeGeminiLogin = Effect.fn("makeGeminiLogin")(function* <QualifyError>(options: {
   readonly qualifyCli: (
     cwd: string,
-  ) => Effect.Effect<{ readonly binaryPath: string }, QualifyError>;
+  ) => Effect.Effect<
+    { readonly binaryPath: string; readonly nativeHome?: string | undefined },
+    QualifyError
+  >;
   readonly environment: NodeJS.ProcessEnv;
   readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly fs: FileSystem.FileSystem;
@@ -252,12 +255,16 @@ export const makeGeminiLogin = Effect.fn("makeGeminiLogin")(function* <QualifyEr
 
               const child = yield* options.spawner
                 .spawn(
-                  ChildProcess.make(cli.binaryPath, ["acp", "--login"], {
-                    cwd,
-                    env: geminiCliEnvironment(options.environment),
-                    extendEnv: false,
-                    stdin: "pipe",
-                  }),
+                  ChildProcess.make(
+                    cli.binaryPath,
+                    ["acp", ...geminiPrivateHomeArgs(cli.nativeHome), "--login"],
+                    {
+                      cwd,
+                      env: geminiCliEnvironment(options.environment, cli.nativeHome),
+                      extendEnv: false,
+                      stdin: "pipe",
+                    },
+                  ),
                 )
                 .pipe(Effect.mapError(() => invalid(GEMINI_LOGIN_ERRORS.start)));
 

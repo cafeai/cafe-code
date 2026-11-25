@@ -56,6 +56,49 @@ const makeServerSettingsLayer = (dataProfile?: "production" | "debug") =>
   );
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("defaults new Gemini, Claude and Grok instances to private native homes", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsService;
+      const { settingsPath } = yield* ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const existingGemini = ProviderInstanceId.make("gemini-existing");
+      const newGemini = ProviderInstanceId.make("gemini-personal");
+      const newClaude = ProviderInstanceId.make("claude-personal");
+      const newGrok = ProviderInstanceId.make("grok-personal");
+      const customGrok = ProviderInstanceId.make("grok-custom");
+      const primaryClaude = ProviderInstanceId.make("claudeAgent");
+      const sharedGemini = ProviderInstanceId.make("gemini-shared");
+      const gemini = { driver: ProviderDriverKind.make("gemini"), enabled: true };
+      const claude = { driver: ProviderDriverKind.make("claudeAgent"), enabled: true };
+      const grok = { driver: ProviderDriverKind.make("grok"), enabled: true };
+      yield* fs.writeFileString(
+        settingsPath,
+        encodeJsonText({ providerInstances: { [existingGemini]: gemini } }),
+      );
+      const entries = {
+        [existingGemini]: gemini,
+        [newGemini]: gemini,
+        [newClaude]: claude,
+        [newGrok]: grok,
+        [primaryClaude]: claude,
+        [customGrok]: { ...grok, config: { homePath: "fixture-native-home" } },
+        [sharedGemini]: { ...gemini, nativeHomeMode: "existing" as const },
+      };
+      yield* service.updateSettings({ providerInstances: entries });
+      // A subsequent whole-map update from an older client drops the field.
+      yield* service.updateSettings({ providerInstances: entries });
+      yield* service.start;
+      const { providerInstances } = yield* service.getSettings;
+      for (const id of [newGemini, newClaude, newGrok]) {
+        assert.strictEqual(providerInstances[id]?.nativeHomeMode, "private");
+      }
+      for (const id of [existingGemini, primaryClaude, customGrok]) {
+        assert.isUndefined(providerInstances[id]?.nativeHomeMode);
+      }
+      assert.strictEqual(providerInstances[sharedGemini]?.nativeHomeMode, "existing");
+      assert.isUndefined(providerInstances[newGemini]?.config);
+    }).pipe(Effect.provide(makeServerSettingsLayer("production"))),
+  );
   it.effect(
     "refuses malformed existing Debug settings without fallback, overwrite or received-content disclosure",
     () =>

@@ -662,6 +662,7 @@ function BoundSubagentDetailView({
                       normalizeCodexCitations={
                         loadState.status === "loaded" && loadState.detail.provider === "codex"
                       }
+                      renderFileCitations={message.role === "assistant"}
                       skills={skills}
                     />
                     {message.omission ? (
@@ -688,6 +689,7 @@ function BoundSubagentDetailView({
                           normalizeCodexCitations={
                             loadState.status === "loaded" && loadState.detail.provider === "codex"
                           }
+                          renderFileCitations={message.role === "assistant"}
                           skills={skills}
                         />
                       </>

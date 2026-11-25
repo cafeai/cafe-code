@@ -1094,6 +1094,8 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     productName: resolveDesktopProductName(version),
     artifactName: "Cafe-Code-${version}-${arch}.${ext}",
     files: DESKTOP_RUNTIME_FILES,
+    // Relayed web assets use native no-follow and per-file identity checks.
+    asarUnpack: ["apps/server/dist/client/**/*"],
     electronLanguages: DESKTOP_ELECTRON_LANGUAGES,
     directories: {
       buildResources: "apps/desktop/resources",

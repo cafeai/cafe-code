@@ -54,7 +54,11 @@ export function savedTransportTickets(
     };
   });
 }
-let primary: ActiveRelay | undefined;
+export type BrowserRelay = Pick<
+  ActiveRelay,
+  "environmentId" | "httpBaseUrl" | "wsBaseUrl" | "request" | "socket" | "close"
+>;
+let primary: BrowserRelay | undefined;
 const saved = new Map<string, ActiveRelay>();
 const suffix = ".cafecode-relay.invalid";
 export function savedRelayUrls(id: string) {
@@ -207,15 +211,15 @@ export function installSavedRelay(relay: ActiveRelay): void {
   if (saved.has(hostname) || saved.size >= 64) throw new RelayError("BUSY");
   saved.set(hostname, relay);
 }
-export async function installPrimaryRelay(relay: ActiveRelay): Promise<void> {
+export async function installPrimaryRelay(relay: BrowserRelay): Promise<void> {
   const previous = primary;
   primary = relay;
   if (previous && previous !== relay) await previous.close();
 }
-export function readPrimaryRelay(): ActiveRelay | undefined {
+export function readPrimaryRelay(): BrowserRelay | undefined {
   return primary;
 }
-export function relayForUrl(input: string | URL): ActiveRelay | undefined {
+export function relayForUrl(input: string | URL): BrowserRelay | undefined {
   const url = new URL(input);
   if (!url.hostname.endsWith(suffix)) return undefined;
   const relay =

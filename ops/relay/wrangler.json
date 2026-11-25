@@ -15,6 +15,7 @@
   },
   "routes": [
     { "pattern": "relay.cafecode.sh", "custom_domain": true },
+    { "pattern": "https://*.relay.cafecode.sh/*", "zone_name": "cafecode.sh" },
     { "pattern": "relay-uk.cafecode.sh", "custom_domain": true },
     { "pattern": "relay-ca.cafecode.sh", "custom_domain": true },
     { "pattern": "relay-us-west.cafecode.sh", "custom_domain": true }

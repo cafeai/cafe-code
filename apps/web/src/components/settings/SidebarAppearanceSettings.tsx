@@ -8,16 +8,15 @@ import {
   DEFAULT_SIDEBAR_IMAGE_SOURCE,
   DEFAULT_UNIFIED_SETTINGS,
   MAX_BRAND_WORDMARK_PREFIX_LENGTH,
-  MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES,
 } from "@cafecode/contracts/settings";
-import type { DesktopAppIconVariant } from "@cafecode/contracts";
+import type { DesktopAppIconVariant, EnvironmentId } from "@cafecode/contracts";
 import { uiText, type UiLocale } from "@cafecode/shared/i18n";
 import { PlusIcon } from "lucide-react";
 import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useUiLocale } from "~/i18n";
 import { APP_STAGE_LABEL } from "../../branding";
-import { uploadSidebarBrandImage } from "../../brandingImages";
+import { prepareSidebarBrandImage, uploadSidebarBrandImage } from "../../brandingImages";
 import { useWorkspaceEnvironmentId } from "../../environments/workspace";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { useSidebarImage, type SidebarImageMode } from "../../hooks/useSidebarImage";
@@ -45,8 +44,6 @@ import { Switch } from "../ui/switch";
 import { registerSecretIconTap } from "./secretIconTaps";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
 
-const SIDEBAR_IMAGE_ACCEPT = "image/png,image/jpeg,image/gif,image/webp";
-const SIDEBAR_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const APP_ICON_ACCEPT = "image/png,image/jpeg,image/webp";
 const APP_ICON_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const MAX_APP_ICON_SOURCE_BYTES = 16 * 1024 * 1024;
@@ -116,7 +113,11 @@ export function SidebarSettingsSection() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const previewUrlRef = useRef<string | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{
+    environmentId: EnvironmentId | null;
+    url: string;
+  } | null>(null);
+  const previewUrl = preview?.environmentId === environmentId ? preview.url : null;
   const [uploading, setUploading] = useState(false);
   // DraftInput commits on blur; this mirrors keystrokes for the live wordmark.
   // A draft typed against an older saved value is ignored once the saved value changes.
@@ -132,7 +133,7 @@ export function SidebarSettingsSection() {
   const clearPreviewUrl = useCallback(() => {
     if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
     previewUrlRef.current = null;
-    setPreviewUrl(null);
+    setPreview(null);
   }, []);
   useEffect(() => clearPreviewUrl, [clearPreviewUrl]);
 
@@ -152,27 +153,20 @@ export function SidebarSettingsSection() {
 
   const handleImageChange = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
-      const file = event.currentTarget.files?.[0];
-      event.currentTarget.value = "";
+      const input = event.currentTarget;
+      const file = input.files?.[0];
+      input.value = "";
       if (!file) return;
-      if (!SIDEBAR_IMAGE_MIME_TYPES.has(file.type)) {
-        setImageError(
-          uiText("Choose a PNG, JPEG, GIF, or WebP image.", undefined, undefined, uiLocale),
-        );
-        return;
-      }
-      if (file.size > MAX_SIDEBAR_BRAND_IMAGE_FILE_BYTES) {
-        setImageError(uiText("Choose an image under 1 MB.", undefined, undefined, uiLocale));
-        return;
-      }
-      clearPreviewUrl();
-      const url = URL.createObjectURL(file);
-      previewUrlRef.current = url;
-      setPreviewUrl(url);
+      setImageError(null);
       setUploading(true);
       try {
-        const sidebarBrandImage = await uploadSidebarBrandImage(file, environmentId);
-        setImageError(null);
+        const prepared = await prepareSidebarBrandImage(file, uiLocale);
+        if (fileInputRef.current === input) {
+          const url = URL.createObjectURL(prepared);
+          previewUrlRef.current = url;
+          setPreview({ environmentId, url });
+        }
+        const sidebarBrandImage = await uploadSidebarBrandImage(prepared, environmentId);
         updateSettings({
           sidebarBrandImage,
           sidebarBrandImageDataUrl: "",
@@ -269,7 +263,7 @@ export function SidebarSettingsSection() {
             <input
               ref={fileInputRef}
               type="file"
-              accept={SIDEBAR_IMAGE_ACCEPT}
+              accept="image/*"
               aria-label={uiText("Sidebar image file", undefined, undefined, uiLocale)}
               className="sr-only"
               disabled={uploading}

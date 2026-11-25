@@ -148,7 +148,7 @@ describe("Cloudflare relay gateway policy", () => {
       f.origin,
     );
     expect(await response.text()).toBe("viewer");
-    expect(assetRequest?.url).toBe("https://relay.cafecode.sh/index.html");
+    expect(assetRequest?.url).toBe("https://relay.cafecode.sh/relay-launcher.html");
     expect([...assetRequest!.headers]).toEqual([]);
     expect(response.headers.get("set-cookie")).toBeNull();
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
@@ -160,6 +160,37 @@ describe("Cloudflare relay gateway policy", () => {
       ).toBe(404);
     }
     expect(f.assets).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves only trusted bootstrap files on an exact isolated renderer origin", async () => {
+    const f = fixture();
+    const origin = "https://00112233445566778899aabbccddeeff.relay.cafecode.sh";
+    for (const [path, asset] of [
+      ["/_relay/frame", "/relay-frame.html"],
+      ["/_relay/worker.js", "/relay-viewer-sw.js"],
+      ["/assets/frame-fixture.js", "/assets/frame-fixture.js"],
+    ]) {
+      const reply = await relayEdgeFetch(
+        new Request(origin + path, {
+          headers: { cookie: "private=1", authorization: "Bearer private" },
+        }),
+        f.env,
+        f.origin,
+      );
+      expect(reply.status).toBe(200);
+      expect(reply.headers.get("set-cookie")).toBeNull();
+      expect(reply.headers.get("origin-agent-cluster")).toBe("?1");
+      expect(reply.headers.get("content-security-policy")).toBe(
+        "frame-ancestors https://relay.cafecode.sh",
+      );
+      const request = f.assets.mock.calls.at(-1)![0];
+      expect(request.url).toBe("https://relay.cafecode.sh" + asset);
+      expect([...request.headers]).toEqual([]);
+    }
+    for (const path of ["/", "/api/auth/session", "/_relay/frame?other=1", "/relay-launcher.html"])
+      expect((await relayEdgeFetch(new Request(origin + path), f.env, f.origin)).status).toBe(404);
+    expect(f.assets).toHaveBeenCalledTimes(3);
+    expect(f.origin).not.toHaveBeenCalled();
   });
 
   it("forwards only fixed public relay routes and preserves signed bytes", async () => {

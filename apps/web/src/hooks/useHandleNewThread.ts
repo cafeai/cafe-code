@@ -1,16 +1,32 @@
 import { useUiLocale } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import { scopedProjectKey, scopeProjectRef, scopeThreadRef } from "@cafecode/client-runtime";
-import { DEFAULT_RUNTIME_MODE, type ScopedProjectRef } from "@cafecode/contracts";
+import {
+  DEFAULT_RUNTIME_MODE,
+  ProviderDriverKind,
+  type EnvironmentId,
+  type ModelSelection,
+  type ScopedProjectRef,
+} from "@cafecode/contracts";
+import { createModelSelection } from "@cafecode/shared/model";
 import { useParams, useRouter } from "@tanstack/react-router";
 import { useCallback, useMemo } from "react";
+import { DEFAULT_GEMINI_PERMISSION_STATE } from "../components/chat/geminiPermissionMode";
 import {
   deriveNewChatComposerDefaults,
   selectStandaloneDraftSessions,
+  type DraftId,
   type DraftThreadEnvMode,
   type DraftThreadState,
   useComposerDraftStore,
 } from "../composerDraftStore";
+import { getWorkspaceServerConfig } from "../environments/workspaceApi";
+import {
+  deriveProviderInstanceEntries,
+  resolveComposerProviderInstance,
+  resolveProviderDriverKindForInstanceSelection,
+  sortProviderInstanceEntries,
+} from "../providerInstances";
 import { newDraftId, newThreadId } from "../lib/utils";
 import { orderItemsByPreferredIds } from "../components/Sidebar.logic";
 import {
@@ -31,6 +47,80 @@ import {
 import { useDeskStore } from "../deskStore";
 import { toastManager } from "../components/ui/toast";
 import { isChatSendInFlight } from "../chatPaneContext";
+
+/**
+ * Match the Full access / Bypass default used by other providers when a brand-new
+ * draft resolves to a Gemini account. Existing persisted threads using legacy
+ * `default` + `full-access` remain Ask permissions; only newly created drafts
+ * receive `gemini-bypass`, bound to that exact Gemini account.
+ */
+function applyDefaultGeminiPermissionModeForNewDraft(input: {
+  readonly draftId: DraftId;
+  readonly environmentId: EnvironmentId;
+  readonly projectDefaultModelSelection: ModelSelection | null | undefined;
+}): void {
+  const serverConfig = getWorkspaceServerConfig(input.environmentId);
+  const providers = serverConfig?.providers ?? [];
+  const entries = sortProviderInstanceEntries(deriveProviderInstanceEntries(providers));
+  const drafts = useComposerDraftStore.getState();
+  const draft = drafts.getComposerDraft(input.draftId);
+  const initialInstanceId =
+    draft?.activeProvider ??
+    input.projectDefaultModelSelection?.instanceId ??
+    serverConfig?.settings.defaultProviderInstanceId ??
+    null;
+  const resolvedDriver = initialInstanceId
+    ? (resolveProviderDriverKindForInstanceSelection(entries, providers, initialInstanceId) ??
+      serverConfig?.settings.providerInstances[initialInstanceId]?.driver ??
+      (initialInstanceId === "gemini" ? ProviderDriverKind.make("gemini") : undefined))
+    : undefined;
+  const selectedProvider = resolvedDriver ?? ProviderDriverKind.make("codex");
+  const selectedInstanceId =
+    entries.length > 0
+      ? resolveComposerProviderInstance({
+          entries,
+          activeProvider: draft?.activeProvider,
+          sessionInstanceId: null,
+          threadInstanceId: input.projectDefaultModelSelection?.instanceId,
+          defaultInstanceId: serverConfig?.settings.defaultProviderInstanceId,
+          projectInstanceId: input.projectDefaultModelSelection?.instanceId,
+          selectedProvider,
+          lockedProvider: null,
+          lockedContinuationGroupKey: null,
+        })
+      : initialInstanceId;
+  if (!selectedInstanceId) return;
+  const effectiveDriver =
+    resolveProviderDriverKindForInstanceSelection(entries, providers, selectedInstanceId) ??
+    serverConfig?.settings.providerInstances[selectedInstanceId]?.driver ??
+    (selectedInstanceId === "gemini" ? ProviderDriverKind.make("gemini") : undefined);
+  if (effectiveDriver !== "gemini") return;
+
+  if (draft?.activeProvider === selectedInstanceId) {
+    drafts.setDraftThreadContext(input.draftId, DEFAULT_GEMINI_PERMISSION_STATE);
+    drafts.setRuntimeMode(input.draftId, DEFAULT_GEMINI_PERMISSION_STATE.runtimeMode);
+    drafts.setInteractionMode(input.draftId, DEFAULT_GEMINI_PERMISSION_STATE.interactionMode);
+    return;
+  }
+
+  if (input.projectDefaultModelSelection?.instanceId === selectedInstanceId) {
+    // `activeThread.modelSelection.instanceId` already matches this Gemini
+    // account, so updating the draft thread keeps `geminiBypassInstanceId`
+    // aligned without materializing an otherwise empty composer draft.
+    drafts.setDraftThreadContext(input.draftId, DEFAULT_GEMINI_PERMISSION_STATE);
+    return;
+  }
+
+  const matchedEntry = entries.find((entry) => entry.instanceId === selectedInstanceId);
+  const fallbackModel =
+    serverConfig?.settings.providerInstances[selectedInstanceId]?.defaultModel ??
+    matchedEntry?.models[0]?.slug;
+  if (!fallbackModel) return;
+  drafts.setModelSelection(input.draftId, createModelSelection(selectedInstanceId, fallbackModel));
+  drafts.setDraftThreadContext(input.draftId, DEFAULT_GEMINI_PERMISSION_STATE);
+  drafts.setRuntimeMode(input.draftId, DEFAULT_GEMINI_PERMISSION_STATE.runtimeMode);
+  drafts.setInteractionMode(input.draftId, DEFAULT_GEMINI_PERMISSION_STATE.interactionMode);
+}
 
 /**
  * Global creation captures its environment and Desk destination synchronously.
@@ -89,6 +179,11 @@ function useNewStandaloneChatHandler() {
     if (!reusable) {
       drafts.createStandaloneDraftSession(draftId, environmentId, newThreadId());
       drafts.applyStickyState(draftId, newChatDefaults);
+      applyDefaultGeminiPermissionModeForNewDraft({
+        draftId,
+        environmentId,
+        projectDefaultModelSelection: null,
+      });
     }
     // This is an editor destination, not an open-chat tab. Keep the sidebar
     // mode and existing saved tabs until the first send materializes a thread.
@@ -214,6 +309,11 @@ function useNewThreadState() {
         // Concurrency remains inherited from the selected account at send time,
         // not copied into a permanent per-chat override during draft creation.
         applyStickyState(draftId, newChatDefaults);
+        applyDefaultGeminiPermissionModeForNewDraft({
+          draftId,
+          environmentId: projectRef.environmentId,
+          projectDefaultModelSelection: project?.defaultModelSelection ?? null,
+        });
 
         await router.navigate({
           to: "/draft/$draftId",

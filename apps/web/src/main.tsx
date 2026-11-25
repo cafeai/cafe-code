@@ -15,6 +15,11 @@ import { initializeApplicationLanguage } from "./uiLocaleStartup";
 import { installWebPushLocaleSynchronization } from "./lib/webPushNotifications";
 import { initializeWebAppBranding } from "./webAppBranding";
 import { hasRelayEntry } from "./environments/relay/intent";
+import { installPrimaryRelay } from "./environments/relay/active";
+import { readEmbeddedViewer } from "./environments/relay/viewerFrame";
+
+const embeddedViewer = readEmbeddedViewer();
+if (embeddedViewer) void installPrimaryRelay(embeddedViewer.relay);
 
 // Mobile DOM debugging — no-op unless enabled; see lib/mobileDebugLog.ts.
 installMobileDebugLogging();
@@ -26,6 +31,7 @@ installMobileDebugLogging();
 // older worker script while users are validating PWA installability.
 if (
   !isElectron &&
+  !embeddedViewer &&
   typeof navigator !== "undefined" &&
   "serviceWorker" in navigator &&
   window.isSecureContext
@@ -88,6 +94,7 @@ if (recordingOverlay) {
             <RouterProvider router={router} />
           </React.StrictMode>,
         );
+        embeddedViewer?.started();
       });
   };
   if (hasRelayEntry)

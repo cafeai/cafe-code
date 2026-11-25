@@ -1,5 +1,11 @@
 # Claude authentication selection
 
+New Claude instances added in Settings default to a Cafe-owned home. Find that
+directory in the account's Settings. For manual login, run `claude auth login`
+with `HOME` set to the shown directory and `CLAUDE_CONFIG_DIR` set to its
+`.claude` subdirectory. The existing-home option preserves access to a custom
+home or the normal Claude home. [Claude settings files](https://code.claude.com/docs/en/settings#find-or-create-your-settings-files)
+
 On macOS, Claude Code can select different Keychain entries depending on whether `CLAUDE_CONFIG_DIR` is explicitly set, even when its value equals the default `~/.claude` directory. Cafe previously always set that variable, so an ordinary terminal login could work while Cafe reported "Not logged in". The discrepancy was reproduced locally with Claude Code 2.1.291 and is also reported in [upstream issue 92252](https://github.com/anthropics/claude-code/issues/92252). See [Claude's credential management](https://code.claude.com/docs/en/authentication#credential-management).
 
 For an enabled default macOS Claude account with no explicit authentication overrides, Cafe uses the configured Claude executable's structured `auth status` command to select its environment:

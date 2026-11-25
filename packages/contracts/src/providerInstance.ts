@@ -161,6 +161,8 @@ export const ProviderInstanceConfig = Schema.Struct({
   accentColor: Schema.optional(TrimmedNonEmptyString),
   environment: Schema.optionalKey(ProviderInstanceEnvironment),
   enabled: Schema.optionalKey(Schema.Boolean),
+  // An omitted mode retains the account selection saved by older versions.
+  nativeHomeMode: Schema.optionalKey(Schema.Literals(["private", "existing"])),
   // Debug never assumes that an arbitrary native provider supports relocating
   // auth/history. This opt-in is a deliberate sharing choice, not isolation
   // proof; it is ignored for Production's existing account behavior.

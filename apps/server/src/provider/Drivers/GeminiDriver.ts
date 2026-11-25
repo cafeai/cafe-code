@@ -18,7 +18,11 @@ import { ServerConfig } from "../../config.ts";
 import type { TextGenerationShape } from "../../textGeneration/TextGeneration.ts";
 import { readGeminiAccountRateLimits } from "../acp/GeminiAcpQuota.ts";
 import { buildGeminiAcpModels } from "../acp/GeminiAcpSupport.ts";
-import { makeGeminiAcpRuntime, qualifyGeminiCli } from "../acp/GeminiAcpRuntime.ts";
+import {
+  geminiPrivateHomeScope,
+  makeGeminiAcpRuntime,
+  qualifyGeminiCli,
+} from "../acp/GeminiAcpRuntime.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeGeminiAdapter } from "../Layers/GeminiAdapter.ts";
 import {
@@ -62,6 +66,7 @@ const textGeneration = {
 
 interface GeminiProbeOptions {
   readonly settings: GeminiSettings;
+  readonly nativeHome?: string | undefined;
   readonly environment: NodeJS.ProcessEnv;
   readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly fs: FileSystem.FileSystem;
@@ -70,7 +75,7 @@ interface GeminiProbeOptions {
 type QualifiedGeminiCli = Effect.Success<ReturnType<typeof qualifyGeminiCli>>;
 
 function qualifyConfiguredGeminiCli(input: GeminiProbeOptions, cwd: string) {
-  return qualifyGeminiCli(input.settings.binaryPath, cwd, input.environment).pipe(
+  return qualifyGeminiCli(input.settings.binaryPath, cwd, input.environment, input.nativeHome).pipe(
     Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, input.spawner),
   );
 }
@@ -146,6 +151,7 @@ function discoverGeminiModels(input: GeminiProbeOptions) {
       );
       const runtime = yield* makeGeminiAcpRuntime({
         binaryPath: cli.binaryPath,
+        nativeHome: cli.nativeHome,
         environment: input.environment,
         childProcessSpawner: observingSpawner,
         cwd,
@@ -191,7 +197,7 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
       const settings = { ...input.config, enabled: input.enabled };
       const environment =
         input.processEnvironment ?? mergeProviderInstanceEnvironment(input.environment);
-      const probeOptions = { settings, environment, spawner, fs };
+      const probeOptions = { settings, nativeHome: input.nativeHome, environment, spawner, fs };
       // Both probe paths run under this exact managed owner's snapshot
       // mutation permit. Keep only one observed report in memory. A rebuilt
       // owner cannot borrow it, even when it reuses the configured id.
@@ -212,6 +218,7 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
         const source = yield* geminiQuotaSource(fs, cli);
         const report = yield* readGeminiAccountRateLimits({
           binaryPath: cli.binaryPath,
+          nativeHome: cli.nativeHome,
           environment,
           spawner,
           fs,
@@ -227,10 +234,17 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
         }
         return historicalQuota(source);
       });
-      const continuationIdentity = defaultProviderContinuationIdentity({
+      const instanceIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER,
         instanceId: input.instanceId,
       });
+      const privateHomeScope = geminiPrivateHomeScope(input.nativeHome);
+      const continuationIdentity = privateHomeScope
+        ? {
+            ...instanceIdentity,
+            continuationKey: `${instanceIdentity.continuationKey}:home:${privateHomeScope}`,
+          }
+        : instanceIdentity;
       const snapshotFor = (
         checkedAt: string,
         probe: ProviderProbeResult,
@@ -287,6 +301,10 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
           (error._tag === "AcpRequestError" && error.code === -32000) || verificationUrl !== null;
         const installed =
           error._tag !== "GeminiCliQualificationError" || error.reason !== "missing";
+        const canLogIn =
+          installed &&
+          (error._tag !== "GeminiCliQualificationError" ||
+            error.reason !== "private-home-unsupported");
         const historicalSource =
           !unauthenticated && qualifiedCli ? yield* geminiQuotaSource(fs, qualifiedCli) : null;
         const accountRateLimits = historicalQuota(historicalSource);
@@ -295,7 +313,7 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
           version: null,
           status: unauthenticated ? "warning" : "error",
           auth: { status: unauthenticated ? "unauthenticated" : "unknown" },
-          ...(installed ? { authActions: { login: true, deviceCodeLogin: true } } : {}),
+          ...(canLogIn ? { authActions: { login: true, deviceCodeLogin: true } } : {}),
           ...(accountRateLimits ? { accountRateLimits } : {}),
           message:
             error._tag === "GeminiCliQualificationError"
@@ -303,7 +321,9 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
               : verificationUrl !== null
                 ? "Google requires additional verification for this account before Gemini can be used. Sign in again to open the verification link, then refresh Gemini."
                 : unauthenticated
-                  ? "Sign in to Gemini from Settings or run agy acp --login, then refresh Gemini."
+                  ? input.nativeHome
+                    ? "Sign in to this Gemini account from Settings, then refresh Gemini."
+                    : "Sign in to Gemini from Settings or run agy acp --login, then refresh Gemini."
                   : "Cafe Code could not discover Gemini models from the configured Antigravity CLI.",
         });
       });
@@ -325,6 +345,7 @@ export const GeminiDriver: ProviderDriver<GeminiSettings, GeminiDriverEnv> = {
       const adapter = yield* makeGeminiAdapter(settings, {
         instanceId: input.instanceId,
         environment,
+        nativeHome: input.nativeHome,
       });
       const snapshot = yield* makeManagedServerProvider({
         maintenanceCapabilities: makeManualOnlyProviderMaintenanceCapabilities({

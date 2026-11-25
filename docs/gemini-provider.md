@@ -2,8 +2,27 @@
 
 1. Install the standalone [Google Antigravity CLI](https://antigravity.google/docs/install?tab=cli) on the machine running the Cafe server. Cafe supports ACP in CLI 1.5.9 and newer. Google added Gemini 4 Neon in 1.5.11. [Antigravity changelog](https://antigravity.google/docs/changelog)
 2. Sign in from **Settings → Providers** using **Log in** (works for both local and remote Cafe environments: open the Google sign-in link in your browser, paste the authorization code or callback URL, and follow any additional Google account verification link if prompted), or run `agy acp --login` directly on the machine running the server. [Google ACP setup](https://antigravity.google/docs/ide/extensions/acp/)
-3. In Cafe, open **Settings → Providers → Add provider instance** and choose **Gemini (Antigravity CLI)**. Enter the absolute path to the standalone executable if `agy` on PATH opens the IDE. In Debug, choose **Allow shared native provider state** if you want it to use this native sign-in.
+3. In Cafe, open **Settings → Providers → Add provider instance** and choose **Gemini**. Enter the absolute path to the standalone executable if `agy` on PATH opens the IDE. Leave **Create a private provider home** on to sign in to a new personal Google profile. Use **Log in** on that instance after adding it.
 4. Refresh the provider after changing accounts, updating the CLI, or gaining access to models. Choose an available Gemini model in the composer. Atrium can filter by Gemini and shows the model, thinking setting, and permissions recorded for the turn.
+
+### Private Google sign-in
+
+Cafe gives each new private instance a backend-owned directory. Google sign-in,
+ACP model discovery, chat and headless `/usage` use that directory through
+`--gemini_dir` and request file-only storage with
+`AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1`. Cafe leaves the credential file to `agy`.
+The file-storage switch is undocumented and currently qualified on Antigravity
+CLI 1.5.16 on Apple silicon macOS. Other CLI versions and hosts can use the
+explicit existing-home choice in Add provider. Debug requires explicit
+**Allow shared native provider state** for that choice.
+
+Native resume receipts retain the private home's scope. Existing accounts use
+their saved native selection and resumable history. Resume under a different
+home is refused. The local qualification used synthetic credentials and an
+empty-profile control, with external network access blocked. Live two-account
+OAuth, other hosts and shared-history resume are separate qualification.
+[Google CLI changelog](https://antigravity.google/docs/changelog#v1516) ·
+[Independent macOS sign-in verification](https://github.com/pingdotgg/t3code/pull/41982#issue-)
 
 The model picker uses the current account’s ACP model list. Cafe confirms a switch with the CLI and checks the new model’s native effort selector before sending a selected effort. When the selected model exposes that control, Cafe shows the choices and default reported by the CLI. These are the documented choices for the Gemini 4 family. [Google’s Antigravity model guide](https://antigravity.google/docs/models) · [Gemini thinking levels](https://aistudio.google.com/docs/thinking#thinking-levels)
 
@@ -26,7 +45,7 @@ With Antigravity CLI 1.5.10 or newer, Cafe shows **Gemini background reply** ent
 
 When the configured Antigravity CLI returns a matching built-in `/usage` report, the chat’s **Usage** popover, docked session sidebar, and **Settings → Providers** show account quota for the selected Gemini provider instance. Cafe reads `/usage` with the configured CLI and its native sign-in, without pinning a single CLI version. It allows up to 15 seconds for a read and refreshes after turns at most once per minute per provider instance. **Refresh provider status** in Settings also requests a fresh reading. Each model group shows the reported five-hour and weekly percentages and reset times when available. A reset time alone leaves the percentage unknown. Disabled windows are hidden. If a quota refresh cannot get a new report, Cafe shows the last reading from the same running provider instance and uses its original observation time to label its age. The CLI report does not identify its login, so the older reading describes historical usage. Cafe clears it on sign-in refusal, an explicit empty report, or replacement of the provider instance or qualified executable. This history lives in memory. CLI versions without a matching report can still chat. [Antigravity model quotas](https://antigravity.google/docs/cli/commands/usage) · [Antigravity CLI changelog](https://antigravity.google/docs/changelog#v1111)
 
-The composer offers **Ask permissions**, **Accept edits**, **Plan**, **Auto**, and **Bypass permissions** for Gemini. Existing chats keep Antigravity’s Default policy unless you select another mode. Cafe checks that the CLI advertises and acknowledges Accept edits, Plan, or Auto before sending.
+The composer offers **Ask permissions**, **Accept edits**, **Plan**, **Auto**, and **Bypass permissions** for Gemini. New Gemini chats default to **Bypass permissions** to match other providers, while existing chats saved with Antigravity’s legacy Default policy keep **Ask permissions** unless you select another mode. Cafe checks that the CLI advertises and acknowledges Accept edits, Plan, or Auto before sending.
 
 Bypass permissions starts a separate Antigravity process with its native tool-approval bypass flag. It applies to the selected chat and lets that process run tools without asking. Use it only in a workspace you trust. Changing modes takes effect with the next idle session, using the same native conversation when the CLI supports resume. [Antigravity execution modes](https://antigravity.google/docs/cli/modes/) · [ACP launch flags](https://antigravity.google/docs/ide/extensions/acp/)
 

@@ -28,6 +28,7 @@ const labels = [
   "navigation-atrium",
   "navigation-hidden-projects",
   "navigation-project-search",
+  "navigation-gemini-bypass-default",
   "continuation-preparation",
   "live-account-preparation",
   "live-account-queue",

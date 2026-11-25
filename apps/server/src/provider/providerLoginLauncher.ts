@@ -23,7 +23,7 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { ServerConfig } from "../config.ts";
 import { CLAUDE_PROVIDER_MAINTENANCE } from "./claudeMaintenance.ts";
 import {
-  prepareDebugProviderHome,
+  prepareProviderHome,
   resolveProviderProfileAdmission,
   type ProviderDataProfile,
 } from "./debugProviderProfile.ts";
@@ -444,12 +444,9 @@ export const resolveProviderLoginLaunchPlan = Effect.fn(
   if (admission.kind === "refused") return yield* loginError(instanceId, admission.reason);
   if (admission.nativeHome && options.profile) {
     yield* Effect.tryPromise({
-      try: () => prepareDebugProviderHome(options.profile!, admission.nativeHome!),
+      try: () => prepareProviderHome(options.profile!, admission.nativeHome!),
       catch: () =>
-        loginError(
-          instanceId,
-          "Debug provider home could not be prepared safely. No login was started.",
-        ),
+        loginError(instanceId, "The private provider home could not be prepared safely."),
     });
   }
   const environment = admission.processEnvironment;

@@ -1,12 +1,17 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import { fileURLToPath } from "node:url";
 
-import { ProviderInstanceId, type ServerProviderDeviceLoginEvent } from "@cafecode/contracts";
+import {
+  ProviderInstanceId,
+  ThreadId,
+  type ServerProviderDeviceLoginEvent,
+} from "@cafecode/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
@@ -18,6 +23,102 @@ const configLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "cafecode-gemini-driver-test-",
 }).pipe(Layer.provideMerge(NodeServices.layer));
 const fixture = fileURLToPath(new URL("../testUtils/geminiAcpFixture.cjs", import.meta.url));
+
+it.live(
+  "uses its admitted private home for every Gemini command and refuses a foreign resume",
+  () =>
+    Effect.gen(function* () {
+      const native = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fs = yield* FileSystem.FileSystem;
+      const { cwd } = yield* ServerConfig;
+      const nativeHome = yield* fs.makeTempDirectoryScoped({
+        prefix: "cafe-gemini-private-fixture-",
+      });
+      const launches: Array<{ args: ReadonlyArray<string>; forceFile: string | undefined }> = [];
+      let version = "1.5.15";
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (command._tag !== "StandardCommand" || command.command !== process.execPath) {
+          return native.spawn(command);
+        }
+        if (!command.args.includes("--version")) {
+          launches.push({
+            args: command.args,
+            forceFile: command.options.env?.AGY_CLI_FORCE_FILE_TOKEN_STORAGE,
+          });
+        }
+        return native.spawn(
+          ChildProcess.make(command.command, [fixture, ...command.args], {
+            ...command.options,
+            env: { ...command.options.env, CAFE_GEMINI_FIXTURE_NATIVE_VERSION: version },
+          }),
+        );
+      });
+      const instanceId = ProviderInstanceId.make("private-gemini");
+      const instance = yield* GeminiDriver.create({
+        instanceId,
+        displayName: undefined,
+        nativeHome,
+        enabled: true,
+        environment: [],
+        config: { ...GeminiDriver.defaultConfig(), binaryPath: process.execPath },
+      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+      const unqualified = yield* instance.snapshot.refresh;
+      assert.include(unqualified.message ?? "", "Private Antigravity homes require");
+      assert.isUndefined(unqualified.authActions);
+      assert.deepEqual(launches, []);
+
+      const threadId = ThreadId.make("private-gemini-thread");
+      const start = {
+        threadId,
+        cwd,
+        runtimeMode: "full-access",
+        modelSelection: { instanceId, model: "gemini-4-neon" },
+      } as const;
+      const foreignResume = yield* instance.adapter
+        .startSession({
+          ...start,
+          resumeCursor: { version: 1, instanceId, threadId, cwd, sessionId: "unscoped-native-id" },
+        })
+        .pipe(Effect.flip);
+      assert.include(foreignResume.message, "another native provider home");
+      assert.deepEqual(launches, []);
+
+      version = "1.5.16";
+      const ready = yield* instance.snapshot.refresh;
+      if (process.platform !== "darwin" || process.arch !== "arm64") {
+        assert.include(ready.message ?? "", "Private Antigravity homes require");
+        assert.deepEqual(launches, []);
+        return;
+      }
+      assert.equal(ready.auth.status, "authenticated");
+      assert.isDefined(ready.accountRateLimits);
+      const gotOAuth = yield* Deferred.make<string>();
+      const login = yield* instance.adapter.loginDeviceCode!(Effect.succeed(false)).pipe(
+        Stream.runForEach((event) =>
+          event.type === "oauth-code" ? Deferred.succeed(gotOAuth, event.loginId) : Effect.void,
+        ),
+        Effect.forkChild,
+      );
+      yield* instance.adapter.submitLoginCode!({
+        loginId: yield* Deferred.await(gotOAuth),
+        code: "valid-code",
+      });
+      yield* Fiber.join(login);
+      const opened = yield* instance.adapter.startSession(start);
+      assert.property(opened.resumeCursor, "nativeHomeScope");
+      yield* instance.adapter.stopSession(threadId);
+      yield* instance.adapter.startSession({ ...start, resumeCursor: opened.resumeCursor });
+      yield* instance.adapter.stopSession(threadId);
+      assert.isTrue(launches.some(({ args }) => args.includes("--login")));
+      assert.isTrue(launches.some(({ args }) => args.includes("--print")));
+      for (const { args, forceFile } of launches) {
+        const homeIndex = args.indexOf("--gemini_dir");
+        assert.isAtLeast(homeIndex, 0);
+        assert.equal(args[homeIndex + 1], nativeHome);
+        assert.equal(forceFile, "1");
+      }
+    }).pipe(Effect.provide(configLayer)),
+);
 
 it.live("preserves historical Gemini quota until fresh usage or a conclusive sign-in refusal", () =>
   Effect.gen(function* () {
