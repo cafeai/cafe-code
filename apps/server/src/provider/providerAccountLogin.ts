@@ -69,7 +69,9 @@ export const loginBoundProviderDeviceAccount = <SessionError>(input: {
       if (
         !instance?.enabled ||
         instance.instanceId !== input.instanceId ||
-        (instance.driverKind !== "codex" && instance.driverKind !== "gemini") ||
+        (instance.driverKind !== "codex" &&
+          instance.driverKind !== "gemini" &&
+          instance.driverKind !== "grok") ||
         !instance.adapter.loginDeviceCode
       )
         return yield* ownerChanged();

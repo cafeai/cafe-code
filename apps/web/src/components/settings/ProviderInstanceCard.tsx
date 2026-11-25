@@ -1758,7 +1758,7 @@ export function ProviderInstanceCard({
                                   uiLocale,
                                 )
                               : uiText(
-                                  "For manual sign-in, set GROK_HOME to this folder when running grok login. Enable the provider first to create its private home.",
+                                  "Use Log in on this provider, or set GROK_HOME to this folder when running grok login. Enable the provider first to create its private home.",
                                   undefined,
                                   undefined,
                                   uiLocale,

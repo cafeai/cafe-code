@@ -274,7 +274,82 @@ interface GrokAcpRuntimeInput extends Omit<
   readonly sandboxProfile: GrokSandboxProfile;
   readonly permissionMode?: GrokPermissionMode;
   readonly reasoningEffort?: string;
+  readonly additionalDirectories?: ReadonlyArray<string>;
   readonly environment?: NodeJS.ProcessEnv;
+}
+
+export interface GrokAuthenticateMetadata {
+  readonly email?: string;
+  readonly subscriptionTier?: string;
+  readonly authMode?: string;
+}
+
+function boundedSafeDisplayText(value: unknown, maxLength = 128): string | undefined {
+  const trimmed = trimmedString(value);
+  if (!trimmed || trimmed.length > maxLength || /[\p{Cc}\p{Bidi_Control}]/u.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+/**
+ * Decode only bounded displayable account metadata returned by Grok's ACP
+ * `authenticate` response. Tokens, ids, and arbitrary provider keys are ignored.
+ */
+export function readGrokAuthenticateMetadata(
+  authenticateResult: EffectAcpSchema.AuthenticateResponse | null | undefined,
+): GrokAuthenticateMetadata {
+  const meta = isRecord(authenticateResult?._meta) ? authenticateResult._meta : undefined;
+  if (!meta) return {};
+  const email = boundedSafeDisplayText(meta.email, 254);
+  const subscriptionTier = boundedSafeDisplayText(meta.subscription_tier, 96);
+  const authMode = boundedSafeDisplayText(meta.auth_mode, 64);
+  return {
+    ...(email ? { email } : {}),
+    ...(subscriptionTier ? { subscriptionTier } : {}),
+    ...(authMode ? { authMode } : {}),
+  };
+}
+
+/**
+ * Locate Grok's negotiated reasoning-effort session config option when the CLI
+ * exposes live in-session effort switching through `session/set_config_option`.
+ */
+export function findGrokReasoningEffortConfigOption(
+  configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption> | null | undefined,
+): Extract<EffectAcpSchema.SessionConfigOption, { readonly type: "select" }> | undefined {
+  if (!configOptions) return undefined;
+  const option = configOptions.find(
+    (candidate) =>
+      candidate.type === "select" &&
+      (candidate.category === "thought_level" || candidate.id.trim() === "reasoning_effort"),
+  );
+  return option?.type === "select" ? option : undefined;
+}
+
+/**
+ * Grok 1.0.92+ registers private xAI ACP extensions with a leading underscore
+ * (`_x.ai/...`), while some builds and mock fixtures expose the unprefixed
+ * spelling (`x.ai/...`). Prefer the underscored spelling and fall back only on
+ * JSON-RPC method-not-found (`-32601`).
+ */
+export function requestGrokExtension(
+  runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "request">,
+  method: string,
+  params: unknown,
+): Effect.Effect<unknown, EffectAcpErrors.AcpError> {
+  const bare = method.replace(/^_?x\.ai\//, "");
+  // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+  // @effect-diagnostics-next-line instanceOfSchema:off
+  return runtime
+    .request(`_x.ai/${bare}`, params)
+    .pipe(
+      Effect.catch((error) =>
+        error instanceof EffectAcpErrors.AcpRequestError && error.code === -32601
+          ? runtime.request(`x.ai/${bare}`, params)
+          : Effect.fail(error),
+      ),
+    );
 }
 
 export function buildGrokAcpSpawnInput(
@@ -284,9 +359,13 @@ export function buildGrokAcpSpawnInput(
   sandboxProfile: GrokSandboxProfile = GrokSandboxProfile.ReadOnly,
   permissionMode: GrokPermissionMode = GrokPermissionMode.Ask,
   reasoningEffort?: string,
+  additionalDirectories?: ReadonlyArray<string>,
 ): AcpSessionRuntime.AcpSpawnInput {
   const homePath = grokSettings?.homePath?.trim();
   const selectedReasoningEffort = reasoningEffort?.trim();
+  const normalizedDirs = (additionalDirectories ?? [])
+    .map((dir) => dir.trim())
+    .filter((dir) => dir.length > 0);
   return {
     command: grokSettings?.binaryPath || "grok",
     // The global flags must precede the subcommand. --no-leader prevents
@@ -298,6 +377,7 @@ export function buildGrokAcpSpawnInput(
       "--permission-mode",
       permissionMode,
       ...(selectedReasoningEffort ? ["--reasoning-effort", selectedReasoningEffort] : []),
+      ...normalizedDirs.flatMap((dir) => ["--add-dir", dir]),
       "agent",
       "--no-leader",
       "stdio",
@@ -357,6 +437,8 @@ export const makeGrokAcpRuntime = (
     const acpContext = yield* Layer.build(
       AcpSessionRuntime.layer({
         ...input,
+        observeToolLifecycle: input.observeToolLifecycle ?? true,
+        observeSessionConfigUpdates: input.observeSessionConfigUpdates ?? true,
         spawn: buildGrokAcpSpawnInput(
           input.grokSettings,
           input.cwd,
@@ -364,6 +446,7 @@ export const makeGrokAcpRuntime = (
           input.sandboxProfile,
           input.permissionMode,
           input.reasoningEffort,
+          input.additionalDirectories,
         ),
         authMethodId: (initializeResult) =>
           resolveGrokAuthMethodId(initializeResult, input.environment),
@@ -404,8 +487,22 @@ export function applyGrokAcpModelSelection<E>(input: {
   readonly runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "setSessionModel">;
   readonly currentModelId: string | undefined;
   readonly requestedModelId: string | undefined;
+  readonly availableModelIds?: ReadonlyArray<string>;
   readonly mapError: (cause: EffectAcpErrors.AcpError) => E;
 }): Effect.Effect<string | undefined, E> {
+  // Legacy threads and default text-generation settings can carry the generic
+  // `"grok-build"` placeholder. When the connected CLI advertises concrete
+  // model slugs (e.g. `grok-4.7`) and does not include `"grok-build"`, keep
+  // the session's active default model instead of failing `session/set_model`.
+  if (
+    input.requestedModelId === "grok-build" &&
+    input.currentModelId !== undefined &&
+    input.availableModelIds !== undefined &&
+    input.availableModelIds.length > 0 &&
+    !input.availableModelIds.includes("grok-build")
+  ) {
+    return Effect.succeed(input.currentModelId);
+  }
   const shouldSwitchModel =
     input.requestedModelId !== undefined && input.requestedModelId !== input.currentModelId;
   if (!shouldSwitchModel) {

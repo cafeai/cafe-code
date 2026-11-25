@@ -68,9 +68,6 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     label: "Grok Build",
     icon: GrokIcon,
     settingsSchema: GrokSettings,
-    get badgeLabel() {
-      return uiText("Early Access");
-    },
   },
   {
     value: ProviderDriverKind.make("opencode"),

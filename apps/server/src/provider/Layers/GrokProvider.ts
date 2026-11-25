@@ -36,13 +36,14 @@ import {
   GrokSandboxStartupError,
   makeGrokAcpRuntime,
   readGrokAcpModelMetadata,
+  readGrokAuthenticateMetadata,
+  requestGrokExtension,
   resolveGrokAcpBaseModelId,
 } from "../acp/GrokAcpSupport.ts";
 
 const PROVIDER = ProviderDriverKind.make("grok");
 const GROK_PRESENTATION = {
   displayName: "Grok Build",
-  badgeLabel: "Early Access",
   showInteractionModeToggle: true,
 } as const;
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({ optionDescriptors: [] });
@@ -73,11 +74,20 @@ export function grokSlashCommandsFromAcp(
     readonly description?: string;
     readonly input?: { readonly hint: string };
   }>,
+  excludedSkillNames?: ReadonlySet<string>,
 ): ReadonlyArray<ServerProviderSlashCommand> {
   const seen = new Set<string>();
   return commands.flatMap((command) => {
     const name = command.name.trim().replace(/^\/+/, "");
-    if (!name || seen.has(name) || GROK_OWNERSHIP_COMMANDS.has(name.toLowerCase())) return [];
+    const lower = name.toLowerCase();
+    if (
+      !name ||
+      seen.has(name) ||
+      GROK_OWNERSHIP_COMMANDS.has(lower) ||
+      excludedSkillNames?.has(lower)
+    ) {
+      return [];
+    }
     seen.add(name);
     return [
       {
@@ -156,9 +166,14 @@ const discoverGrokSkills = (settings: GrokSettings, cwd: string, environment: No
     return exitCode === 0 && !stdout.truncated ? parseGrokInspectSkills(stdout.text, cwd) : [];
   }).pipe(Effect.scoped);
 
-function buildGrokModelCapabilities(model: EffectAcpSchema.ModelInfo): ModelCapabilities {
+function buildGrokModelCapabilities(
+  model: EffectAcpSchema.ModelInfo,
+  promptCapabilities?: EffectAcpSchema.PromptCapabilities | null,
+): ModelCapabilities {
   const metadata = readGrokAcpModelMetadata(model);
   return createModelCapabilities({
+    inputModalities: promptCapabilities?.image === true ? ["text", "image"] : ["text"],
+    supportsAutoMode: true,
     optionDescriptors:
       metadata.reasoningEfforts.length > 0
         ? [
@@ -202,10 +217,12 @@ function grokModelsFromSettings(
 
 function buildDiscoveredModels(
   modelState: EffectAcpSchema.SessionModelState | null | undefined,
+  promptCapabilities?: EffectAcpSchema.PromptCapabilities | null,
 ): ReadonlyArray<ServerProviderModel> {
   if (!modelState || modelState.availableModels.length === 0) return [];
   const seen = new Set<string>();
-  return modelState.availableModels.flatMap((model) => {
+  const currentModelId = modelState.currentModelId?.trim();
+  const discovered = modelState.availableModels.flatMap((model) => {
     const slug = resolveGrokAcpBaseModelId(model.modelId);
     if (!slug || seen.has(slug)) return [];
     seen.add(slug);
@@ -214,10 +231,19 @@ function buildDiscoveredModels(
         slug,
         name: model.name.trim() || slug,
         isCustom: false,
-        capabilities: buildGrokModelCapabilities(model),
+        capabilities: buildGrokModelCapabilities(model, promptCapabilities),
       },
     ];
   });
+  if (!currentModelId) return discovered;
+  const normalizedCurrent = resolveGrokAcpBaseModelId(currentModelId);
+  const currentIndex = discovered.findIndex((model) => model.slug === normalizedCurrent);
+  if (currentIndex <= 0) return discovered;
+  return [
+    discovered[currentIndex]!,
+    ...discovered.slice(0, currentIndex),
+    ...discovered.slice(currentIndex + 1),
+  ];
 }
 
 export const buildInitialGrokProviderSnapshot = (
@@ -315,41 +341,48 @@ const discoverViaAcp = (
     );
     const started = yield* runtime.start();
     observePhase("capabilities");
-    // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
-    // @effect-diagnostics-next-line instanceOfSchema:off
     const [liveSteer, accountRateLimits] = yield* Effect.all(
       [
-        runtime
-          .request("x.ai/interject", {
-            sessionId: "cafe-code-capability-probe-no-session",
-            text: "",
-            interjectionId: "cafe-code-capability-probe",
-          })
-          .pipe(
-            Effect.as(true),
-            Effect.catch((error) =>
-              error instanceof EffectAcpErrors.AcpRequestError
-                ? Effect.succeed(error.code !== -32601)
-                : Effect.fail(error),
-            ),
+        requestGrokExtension(runtime, "interject", {
+          sessionId: "cafe-code-capability-probe-no-session",
+          text: "",
+          interjectionId: "cafe-code-capability-probe",
+        }).pipe(
+          Effect.as(true),
+          // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+          // @effect-diagnostics-next-line instanceOfSchema:off
+          Effect.catch((error) =>
+            error instanceof EffectAcpErrors.AcpRequestError
+              ? Effect.succeed(error.code !== -32601)
+              : Effect.fail(error),
           ),
-        // Grok upstream routes this extension in newer builds, while stable
-        // 1.0.4 returns -32601 from agent stdio. Feature-detect it before the
-        // auth-file/CLI-proxy fallback so Cafe automatically moves back onto
-        // the provider-owned protocol as soon as the installed CLI exposes it.
-        runtime.request("x.ai/billing", {}).pipe(
+        ),
+        // Feature-detect Grok's native ACP billing extension (preferring
+        // `_x.ai/billing` with fallback to `x.ai/billing`) before the
+        // auth-file/CLI-proxy fallback.
+        requestGrokExtension(runtime, "billing", {}).pipe(
           Effect.map((payload) => parseGrokAccountRateLimitsPayload(payload, checkedAt)),
           Effect.catch(() => Effect.succeed(undefined)),
         ),
       ],
       { concurrency: "unbounded" },
     );
+    const availableCommands = yield* runtime.getAvailableCommands;
+    if (started.initializeResult.agentCapabilities?.sessionCapabilities?.close != null) {
+      yield* runtime
+        .request("session/close", { sessionId: started.sessionId })
+        .pipe(Effect.timeoutOption("1 second"), Effect.ignore);
+    }
     yield* runtime.drainEvents;
     yield* Fiber.interrupt(eventFiber);
     return {
-      models: buildDiscoveredModels(started.sessionSetupResult.models),
+      models: buildDiscoveredModels(
+        started.sessionSetupResult.models,
+        started.initializeResult.agentCapabilities?.promptCapabilities,
+      ),
+      authenticateMetadata: readGrokAuthenticateMetadata(started.authenticateResult),
       liveSteer,
-      slashCommands: grokSlashCommandsFromAcp(yield* runtime.getAvailableCommands),
+      availableCommands,
       ...(accountRateLimits ? { accountRateLimits } : {}),
     };
   }).pipe(Effect.scoped);
@@ -493,13 +526,14 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       version,
       status: unauthenticated ? "warning" : "error",
       auth: { status: unauthenticated ? "unauthenticated" : "unknown" },
+      authActions: { login: true, deviceCodeLogin: true },
       ...(sandboxFailure
         ? { sandbox: { status: "unavailable" as const, reason: sandboxFailure.reason } }
         : {}),
       message: sandboxFailure
         ? sandboxFailure.message
         : unauthenticated
-          ? "Grok Build is not authenticated. Run `grok login` in a terminal."
+          ? "Grok Build is not authenticated. Sign in from Settings or run `grok login` in a terminal."
           : `Grok CLI is installed but ACP startup failed during ${acpPhase}. Check server logs for details.`,
     });
   }
@@ -509,6 +543,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       version,
       status: "error",
       auth: { status: "unknown" },
+      authActions: { login: true, deviceCodeLogin: true },
       message: `Grok CLI is installed but ACP startup timed out during ${acpPhase} after ${GROK_ACP_PROBE_TIMEOUT_MS}ms.`,
     });
   }
@@ -519,12 +554,28 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
     Effect.map(Option.getOrElse(() => [] as ReadonlyArray<ServerProviderSkill>)),
     Effect.catch(() => Effect.succeed([] as ReadonlyArray<ServerProviderSkill>)),
   );
+  const skillNames = new Set(skills.map((skill) => skill.name.toLowerCase()));
+  const slashCommands = grokSlashCommandsFromAcp(discovered.availableCommands, skillNames);
+  const authLabel =
+    discovered.authenticateMetadata.subscriptionTier ??
+    discovered.accountRateLimits?.rateLimits.planType ??
+    (discovered.authenticateMetadata.authMode?.toLowerCase().includes("api")
+      ? "API key"
+      : undefined);
   return build(
     {
       installed: true,
       version,
       status: "ready",
-      auth: { status: "authenticated", type: "cached-token" },
+      auth: {
+        status: "authenticated",
+        type: "cached-token",
+        ...(authLabel ? { label: authLabel } : {}),
+        ...(discovered.authenticateMetadata.email
+          ? { email: discovered.authenticateMetadata.email }
+          : {}),
+      },
+      authActions: { login: true, deviceCodeLogin: true },
       sandbox: {
         status: settings.allowUnsandboxedProbe === true ? "not-checked" : "available",
       },
@@ -540,7 +591,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       ? grokModelsFromSettings(settings.customModels, discovered.models)
       : fallbackModels,
     discovered.liveSteer,
-    discovered.slashCommands,
+    slashCommands,
     skills,
   );
 });

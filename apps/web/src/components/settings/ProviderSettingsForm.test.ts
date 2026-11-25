@@ -248,9 +248,10 @@ describe("ProviderSettingsForm helpers", () => {
     ).toBe(false);
   });
 
-  it("exposes Grok Build as Early Access with only structured launch settings", () => {
+  it("exposes Grok Build with only structured launch settings", () => {
     const grok = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("grok")];
-    expect(grok).toMatchObject({ label: "Grok Build", badgeLabel: "Early Access" });
+    expect(grok).toMatchObject({ label: "Grok Build" });
+    expect(grok?.badgeLabel).toBeUndefined();
     expect(deriveProviderSettingsFields(grok!).map((field) => field.key)).toEqual([
       "binaryPath",
       "homePath",

@@ -149,6 +149,16 @@ function readUsagePercent(config: Record<string, unknown>): number | undefined {
   return clampPercentage((totalUsed / monthlyLimit) * 100);
 }
 
+function readPlanType(response: Record<string, unknown>): string | undefined {
+  const candidate = response.subscription_tier ?? response.subscriptionTier;
+  if (typeof candidate !== "string") return undefined;
+  const trimmed = candidate.trim();
+  if (trimmed.length === 0 || trimmed.length > 96 || /[\p{Cc}\p{Bidi_Control}]/u.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed;
+}
+
 /** Decode both the CLI-proxy response and the future ACP extension response. */
 export function parseGrokAccountRateLimitsPayload(
   payload: unknown,
@@ -165,6 +175,7 @@ export function parseGrokAccountRateLimitsPayload(
   const usedPercent = readUsagePercent(config);
   if (usedPercent === undefined && resetsAtMs === undefined) return undefined;
 
+  const planType = response ? readPlanType(response) : undefined;
   const windowDurationMins =
     startsAtMs !== undefined && resetsAtMs !== undefined && resetsAtMs > startsAtMs
       ? Math.ceil((resetsAtMs - startsAtMs) / 60_000)
@@ -177,6 +188,7 @@ export function parseGrokAccountRateLimitsPayload(
   const snapshot = {
     limitId: "grok",
     limitName: "Grok usage",
+    ...(planType ? { planType } : {}),
     primary,
   } satisfies ServerProviderAccountRateLimitSnapshot;
 

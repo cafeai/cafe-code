@@ -46,6 +46,7 @@ import {
 } from "@cafecode/contracts";
 import { CodexDeviceLoginDialog } from "./CodexDeviceLoginDialog";
 import { GeminiRemoteLoginDialog } from "./GeminiRemoteLoginDialog";
+import { GrokDeviceLoginDialog } from "./GrokDeviceLoginDialog";
 import { scopeThreadRef } from "@cafecode/client-runtime";
 import { copyTextToClipboard } from "../../lib/copyToClipboard";
 import {
@@ -1776,7 +1777,7 @@ export function ProviderSettingsPanel() {
   >(() => new Set());
   const [openInstanceDetails, setOpenInstanceDetails] = useState<Record<string, boolean>>({});
   const [deviceLogin, setDeviceLogin] = useState<{
-    readonly driver: "codex" | "gemini";
+    readonly driver: "codex" | "gemini" | "grok";
     readonly environmentId: EnvironmentId | null;
     readonly instanceId: ProviderInstanceId;
     readonly displayName: string;
@@ -2434,19 +2435,27 @@ export function ProviderSettingsPanel() {
                             displayName: providerDisplayName,
                             api: ensureWorkspaceApi(environmentId),
                           })
-                        : row.driver === "codex" && remote && remoteRole === "client"
+                        : row.driver === "grok"
                           ? setDeviceLogin({
-                              driver: "codex",
+                              driver: "grok",
                               environmentId,
                               instanceId: row.instanceId,
                               displayName: providerDisplayName,
                               api: ensureWorkspaceApi(environmentId),
                             })
-                          : void logInProvider({
-                              instanceId: row.instanceId,
-                              displayName: providerDisplayName,
-                              browser: row.driver === "axiom" || row.driver === "codex",
-                            })
+                          : row.driver === "codex" && remote && remoteRole === "client"
+                            ? setDeviceLogin({
+                                driver: "codex",
+                                environmentId,
+                                instanceId: row.instanceId,
+                                displayName: providerDisplayName,
+                                api: ensureWorkspaceApi(environmentId),
+                              })
+                            : void logInProvider({
+                                instanceId: row.instanceId,
+                                displayName: providerDisplayName,
+                                browser: row.driver === "axiom" || row.driver === "codex",
+                              })
                   : undefined
               }
               loginDisabledReason={
@@ -2466,7 +2475,7 @@ export function ProviderSettingsPanel() {
                           uiLocale,
                         )
                       : undefined
-                  : canLogInProvider && row.driver === "codex" && remote
+                  : canLogInProvider && row.driver === "grok" && remote
                     ? remoteRole !== "owner" && remoteRole !== "client"
                       ? uiText(
                           "Connect to this server before signing in.",
@@ -2474,15 +2483,31 @@ export function ProviderSettingsPanel() {
                           undefined,
                           uiLocale,
                         )
-                      : remoteRole === "client" && !liveProvider?.authActions?.deviceCodeLogin
+                      : !liveProvider?.authActions?.deviceCodeLogin
                         ? uiText(
-                            "Update Cafe and Codex on the server to use device-code sign-in.",
+                            "Update Cafe on the server to use remote Grok sign-in.",
                             undefined,
                             undefined,
                             uiLocale,
                           )
                         : undefined
-                    : undefined
+                    : canLogInProvider && row.driver === "codex" && remote
+                      ? remoteRole !== "owner" && remoteRole !== "client"
+                        ? uiText(
+                            "Connect to this server before signing in.",
+                            undefined,
+                            undefined,
+                            uiLocale,
+                          )
+                        : remoteRole === "client" && !liveProvider?.authActions?.deviceCodeLogin
+                          ? uiText(
+                              "Update Cafe and Codex on the server to use device-code sign-in.",
+                              undefined,
+                              undefined,
+                              uiLocale,
+                            )
+                          : undefined
+                      : undefined
               }
               isLoggingIn={loggingInProviderInstanceIds.has(row.instanceId)}
               onRestartRuntime={
@@ -2504,6 +2529,13 @@ export function ProviderSettingsPanel() {
         deviceLogin.environmentId === environmentId &&
         (deviceLogin.driver === "gemini" ? (
           <GeminiRemoteLoginDialog
+            api={deviceLogin.api}
+            instanceId={deviceLogin.instanceId}
+            displayName={deviceLogin.displayName}
+            onClose={() => setDeviceLogin(null)}
+          />
+        ) : deviceLogin.driver === "grok" ? (
+          <GrokDeviceLoginDialog
             api={deviceLogin.api}
             instanceId={deviceLogin.instanceId}
             displayName={deviceLogin.displayName}

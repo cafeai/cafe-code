@@ -863,7 +863,7 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
     }),
   );
 
-  it.effect("requires orchestration to restart before a changed reasoning turn", () =>
+  it.effect("applies a changed reasoning effort turn seamlessly on an idle session", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("grok-reasoning-change");
       const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
@@ -880,20 +880,51 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         },
       });
 
-      const error = yield* adapter
-        .sendTurn({
-          threadId,
-          input: "use less reasoning",
-          attachments: [],
-          modelSelection: {
-            instanceId: ProviderInstanceId.make("grok"),
-            model: "grok-build",
-            options: [{ id: "reasoningEffort", value: "low" }],
-          },
-        })
-        .pipe(Effect.flip);
-      assert.equal(error._tag, "ProviderAdapterValidationError");
-      assert.include(error.message, "restarted and resumed");
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "use less reasoning",
+        attachments: [],
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("grok"),
+          model: "grok-build",
+          options: [{ id: "reasoningEffort", value: "low" }],
+        },
+      });
+      assert.equal(turn.threadId, threadId);
+      assert.deepInclude(turn.resumeCursor as Record<string, unknown>, {
+        reasoningEffort: "low",
+      });
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("passes additionalDirectories via --add-dir and records them on the session", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-add-dir");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-add-dir-")),
+      );
+      const extraDir = NodePath.join(tempDir, "extra-workspace");
+      yield* Effect.promise(() => NodeFSP.mkdir(extraDir, { recursive: true }));
+      const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ CAFE_CODE_ACP_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        additionalDirectories: [extraDir],
+        runtimeMode: "full-access",
+      });
+      assert.deepEqual(session.additionalDirectories, [NodePath.resolve(extraDir)]);
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const argvEntry = requests.find((entry) => entry.method === "process/argv");
+      const argv = (argvEntry?.params as Array<string> | undefined) ?? [];
+      const addDirIndex = argv.indexOf("--add-dir");
+      assert.isAtLeast(addDirIndex, 0);
+      assert.equal(argv[addDirIndex + 1], NodePath.resolve(extraDir));
       yield* adapter.stopSession(threadId);
     }),
   );

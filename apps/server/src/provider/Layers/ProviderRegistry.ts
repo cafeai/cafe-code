@@ -191,6 +191,9 @@ export const mergeProviderSnapshot = (
     // after failed discovery). Other snapshots retain sparse merging.
     models:
       catalogueProvider.driver === "gemini" ||
+      (catalogueProvider.driver === "grok" &&
+        catalogueProvider.status === "ready" &&
+        catalogueProvider.models.length > 0) ||
       (catalogueProvider.driver === "codex" &&
         catalogueProvider.codexModelCatalogSource !== undefined)
         ? catalogueProvider.models

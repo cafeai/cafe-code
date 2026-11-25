@@ -14,29 +14,133 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { ServerConfig } from "../../config.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { makeGrokTextGeneration } from "../../textGeneration/GrokTextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { readGrokAccountRateLimits } from "../grokAccountUsage.ts";
+import { makeGrokLogin } from "../grokLogin.ts";
 import { makeGrokAdapter } from "../Layers/GrokAdapter.ts";
 import { checkGrokProviderStatus, makePendingGrokProvider } from "../Layers/GrokProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
-import type { ServerProviderDraft } from "../providerSnapshot.ts";
+import {
+  parseGenericCliVersion,
+  spawnAndCollect,
+  type ServerProviderDraft,
+} from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import {
+  createProviderVersionAdvisory,
+  hasPathSeparator,
+  makeManualOnlyProviderMaintenanceCapabilities,
+  makeProviderMaintenanceCapabilities,
+  normalizeCommandPath,
+  type ProviderMaintenanceCapabilities,
+} from "../providerMaintenance.ts";
 
 const DRIVER_KIND = ProviderDriverKind.make("grok");
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
+const UPDATE_CHECK_CACHE_TTL_MS = 60 * 60 * 1_000;
+const UPDATE_CHECK_TIMEOUT_MS = 4_000;
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
+const GrokUpdateCheckPayload = Schema.Struct({
+  latestVersion: Schema.optional(Schema.NullOr(Schema.String)),
+});
+const decodeGrokUpdateCheck = Schema.decodeUnknownOption(
+  Schema.fromJsonString(GrokUpdateCheckPayload),
+);
+
+const latestGrokVersionCache = new Map<
+  string,
+  { readonly expiresAt: number; readonly version: string | null }
+>();
+
+export function isGrokNativeUpdatePath(binaryPath: string): boolean {
+  const trimmed = binaryPath.trim();
+  if (!trimmed || trimmed === "grok") return true;
+  if (!hasPathSeparator(trimmed)) return false;
+  const normalized = normalizeCommandPath(trimmed);
+  return (
+    normalized.endsWith("/.local/bin/grok") ||
+    normalized.endsWith("/.local/bin/grok.exe") ||
+    normalized.includes("/.grok/bin/")
+  );
+}
+
+export function resolveGrokMaintenanceCapabilities(
+  binaryPath: string,
+): ProviderMaintenanceCapabilities {
+  const trimmed = binaryPath.trim();
+  if (!isGrokNativeUpdatePath(trimmed)) {
+    return makeManualOnlyProviderMaintenanceCapabilities({
+      provider: DRIVER_KIND,
+      packageName: null,
+    });
+  }
+  return makeProviderMaintenanceCapabilities({
+    provider: DRIVER_KIND,
+    packageName: null,
+    updateExecutable: trimmed || "grok",
+    updateArgs: ["update"],
+    updateLockKey: "grok-native",
+  });
+}
+
+export function parseGrokLatestVersionFromUpdateCheck(stdout: string): string | null {
+  const decoded = decodeGrokUpdateCheck(stdout.trim());
+  if (Option.isNone(decoded)) return null;
+  const candidate = decoded.value.latestVersion?.trim();
+  return candidate ? parseGenericCliVersion(candidate) : null;
+}
+
+const resolveGrokLatestVersion = Effect.fn("resolveGrokLatestVersion")(function* (input: {
+  readonly settings: GrokSettings;
+  readonly environment: NodeJS.ProcessEnv;
+}) {
+  const command = input.settings.binaryPath.trim() || "grok";
+  const now = DateTime.toEpochMillis(yield* DateTime.now);
+  const cached = latestGrokVersionCache.get(command);
+  if (cached && cached.expiresAt > now) {
+    return cached.version;
+  }
+  const homePath = input.settings.homePath.trim();
+  const result = yield* spawnAndCollect(
+    command,
+    ChildProcess.make(command, ["--no-auto-update", "update", "--check", "--json"], {
+      env: {
+        ...input.environment,
+        ...(homePath ? { GROK_HOME: homePath } : {}),
+      },
+      extendEnv: true,
+      shell: false,
+    }),
+    { terminationGrace: "1 second" },
+  ).pipe(
+    Effect.timeoutOption(UPDATE_CHECK_TIMEOUT_MS),
+    Effect.map((maybeResult) =>
+      Option.match(maybeResult, {
+        onNone: () => null,
+        onSome: (collected) =>
+          collected.code === 0 ? parseGrokLatestVersionFromUpdateCheck(collected.stdout) : null,
+      }),
+    ),
+    Effect.catch(() => Effect.succeed(null)),
+  );
+  latestGrokVersionCache.set(command, {
+    expiresAt: now + UPDATE_CHECK_CACHE_TTL_MS,
+    version: result,
+  });
+  return result;
+});
 
 export type GrokDriverEnv =
   | ChildProcessSpawner.ChildProcessSpawner
@@ -104,10 +208,9 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
         accentColor,
         continuationGroupKey: continuationKey,
       });
-      const maintenanceCapabilities = makeManualOnlyProviderMaintenanceCapabilities({
-        provider: DRIVER_KIND,
-        packageName: null,
-      });
+      const maintenanceCapabilities = resolveGrokMaintenanceCapabilities(
+        effectiveConfig.binaryPath,
+      );
       const lastHealthySnapshot = yield* Ref.make<ServerProvider | undefined>(undefined);
 
       const adapter = yield* makeGrokAdapter(effectiveConfig, {
@@ -134,7 +237,20 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
             clientVersion: checked.version,
           }).pipe(
             Effect.map((accountRateLimits) =>
-              accountRateLimits ? { ...checked, accountRateLimits } : checked,
+              accountRateLimits
+                ? {
+                    ...checked,
+                    accountRateLimits,
+                    ...(accountRateLimits.rateLimits.planType && !checked.auth.label
+                      ? {
+                          auth: {
+                            ...checked.auth,
+                            label: accountRateLimits.rateLimits.planType,
+                          },
+                        }
+                      : {}),
+                  }
+                : checked,
             ),
           );
         }),
@@ -171,10 +287,37 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
         initialSnapshot: (settings) =>
           makePendingGrokProvider(settings).pipe(Effect.map(stampIdentity)),
         checkProvider,
+        enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
+          Effect.gen(function* () {
+            if (
+              !currentSnapshot.enabled ||
+              !currentSnapshot.installed ||
+              !currentSnapshot.version
+            ) {
+              return;
+            }
+            const latestVersion = yield* resolveGrokLatestVersion({
+              settings,
+              environment: processEnvironment,
+            }).pipe(
+              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+            );
+            const checkedAt = DateTime.formatIso(yield* DateTime.now);
+            yield* publishSnapshot({
+              ...currentSnapshot,
+              versionAdvisory: createProviderVersionAdvisory({
+                driver: DRIVER_KIND,
+                currentVersion: currentSnapshot.version,
+                latestVersion,
+                checkedAt,
+                maintenanceCapabilities,
+              }),
+            });
+          }),
         // Terminal turn events refresh this lightweight usage path without
         // starting a second Grok process. The full five-minute probe still
-        // feature-detects `x.ai/billing`; stable 1.0.4 uses this same bounded
-        // CLI-proxy fallback until the extension is externally routed.
+        // feature-detects `_x.ai/billing`; this bounded CLI-proxy fallback
+        // covers builds that do not route the extension.
         refreshAccountUsage: ({ settings, snapshot }) => {
           if (snapshot.auth.status !== "authenticated") {
             return Effect.succeed(undefined);
@@ -202,6 +345,14 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
             }),
         ),
       );
+      const grokLogin = yield* makeGrokLogin({
+        binaryPath: effectiveConfig.binaryPath,
+        homePath: effectiveConfig.homePath,
+        environment: processEnvironment,
+        spawner: childProcessSpawner,
+        hasSessions: adapter.listSessions().pipe(Effect.map((sessions) => sessions.length > 0)),
+        refresh: snapshot.refreshAfterAccountChange ?? snapshot.refresh,
+      });
 
       return {
         instanceId,
@@ -211,7 +362,7 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
-        adapter,
+        adapter: { ...adapter, ...grokLogin },
         textGeneration,
       } satisfies ProviderInstance;
     }),

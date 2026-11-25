@@ -724,7 +724,9 @@ function runtimeEventToActivities(
             ? "Claude summary"
             : provider === "gemini"
               ? "Gemini thinking"
-              : "OpenCode thinking",
+              : provider === "grok"
+                ? "Grok thinking"
+                : "OpenCode thinking",
         payload: {
           summaryVersion: PUBLIC_REASONING_SUMMARY_VERSION,
           provider,

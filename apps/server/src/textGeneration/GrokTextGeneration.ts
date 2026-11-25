@@ -89,6 +89,8 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
           runtime,
           currentModelId: currentGrokModelIdFromSessionSetup(started.sessionSetupResult),
           requestedModelId: resolvedModel,
+          availableModelIds:
+            started.sessionSetupResult.models?.availableModels.map((model) => model.modelId) ?? [],
           mapError: (cause) =>
             new TextGenerationError({
               operation,
@@ -97,9 +99,15 @@ export const makeGrokTextGeneration = Effect.fn("makeGrokTextGeneration")(functi
             }),
         });
 
-        return yield* runtime.prompt({
+        const response = yield* runtime.prompt({
           prompt: [{ type: "text", text: prompt }],
         });
+        if (started.initializeResult.agentCapabilities?.sessionCapabilities?.close != null) {
+          yield* runtime
+            .request("session/close", { sessionId: started.sessionId })
+            .pipe(Effect.timeoutOption("1 second"), Effect.ignore);
+        }
+        return response;
       }).pipe(
         Effect.timeoutOption(GROK_TIMEOUT_MS),
         Effect.flatMap(

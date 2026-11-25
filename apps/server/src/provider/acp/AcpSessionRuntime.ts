@@ -140,6 +140,7 @@ export interface AcpSessionRequestLogEvent {
 export interface AcpSessionRuntimeStartResult {
   readonly sessionId: string;
   readonly initializeResult: EffectAcpSchema.InitializeResponse;
+  readonly authenticateResult?: EffectAcpSchema.AuthenticateResponse | undefined;
   readonly sessionSetupResult:
     | EffectAcpSchema.LoadSessionResponse
     | EffectAcpSchema.NewSessionResponse
@@ -698,12 +699,13 @@ export const make = (
           ? options.authMethodId
           : yield* options.authMethodId(initializeResult);
 
+      let authenticateResult: EffectAcpSchema.AuthenticateResponse | undefined;
       if (authMethodId !== undefined) {
         const authenticatePayload = {
           methodId: authMethodId,
         } satisfies EffectAcpSchema.AuthenticateRequest;
 
-        yield* runLoggedRequest(
+        authenticateResult = yield* runLoggedRequest(
           "authenticate",
           authenticatePayload,
           acp.agent.authenticate(authenticatePayload),
@@ -748,6 +750,21 @@ export const make = (
             "The ACP provider cannot resume this conversation.",
           );
         }
+      } else if (
+        options.resumeSessionId &&
+        initializeResult.agentCapabilities?.sessionCapabilities?.resume != null
+      ) {
+        sessionId = options.resumeSessionId;
+        const resumePayload = {
+          sessionId,
+          cwd: sessionCwd,
+          mcpServers: options.mcpServers ?? [],
+        } satisfies EffectAcpSchema.ResumeSessionRequest;
+        sessionSetupResult = yield* runLoggedRequest(
+          "session/resume",
+          resumePayload,
+          acp.agent.resumeSession(resumePayload),
+        );
       } else if (options.resumeSessionId) {
         const loadPayload = {
           sessionId: options.resumeSessionId,
@@ -842,6 +859,7 @@ export const make = (
       const nextState = {
         sessionId,
         initializeResult,
+        ...(authenticateResult !== undefined ? { authenticateResult } : {}),
         sessionSetupResult,
         modelConfigId: extractModelConfigId(sessionSetupResult),
       } satisfies AcpStartedState;

@@ -102,6 +102,18 @@ describe("parseGrokAccountRateLimitsPayload", () => {
     ).toBeUndefined();
   });
 
+  it("maps subscription_tier into planType without leaking unrelated fields", () => {
+    const parsed = parseGrokAccountRateLimitsPayload(
+      {
+        ...currentBillingPayload(9),
+        subscription_tier: "SuperGrok Lite",
+      },
+      CHECKED_AT,
+    );
+    expect(parsed?.rateLimits.planType).toBe("SuperGrok Lite");
+    expect(parsed?.rateLimits.primary?.usedPercent).toBe(9);
+  });
+
   it("clamps malformed upstream percentages to the displayable quota range", () => {
     expect(
       parseGrokAccountRateLimitsPayload(currentBillingPayload(104.5), CHECKED_AT)?.rateLimits

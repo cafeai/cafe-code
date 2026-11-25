@@ -88,9 +88,14 @@ export const hydrateCachedProvider = (input: {
     // granted. Keep only the model catalog while this scope's bounded initial
     // qualification establishes fresh readiness and sandbox evidence. Other
     // providers retain their existing cached-status and probe-history policy.
+    const cachedHasDiscoveredGrokModels = input.cachedProvider.models.some(
+      (model) => !model.isCustom && model.slug !== "grok-build",
+    );
     return {
       ...input.fallbackProvider,
-      models: mergeProviderModels(input.fallbackProvider.models, input.cachedProvider.models),
+      models: cachedHasDiscoveredGrokModels
+        ? input.cachedProvider.models
+        : mergeProviderModels(input.fallbackProvider.models, input.cachedProvider.models),
     };
   }
 

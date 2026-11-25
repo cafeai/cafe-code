@@ -415,7 +415,7 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
             });
             assert.deepStrictEqual(hydrated, {
               ...fallback,
-              models: [...fallback.models, cachedModel],
+              models: [cachedModel],
             });
             assert.strictEqual(hydrated.status, "warning");
             assert.deepStrictEqual(hydrated.auth, { status: "unknown" });

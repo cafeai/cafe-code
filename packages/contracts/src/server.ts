@@ -1130,12 +1130,20 @@ export const ServerProviderLoginCodeInput = Schema.Struct({
 });
 export type ServerProviderLoginCodeInput = typeof ServerProviderLoginCodeInput.Type;
 
+const DeviceLoginVerificationUrl = Schema.Union([
+  Schema.Literal("https://auth.openai.com/codex/device"),
+  Schema.String.check(
+    Schema.isMaxLength(4096),
+    Schema.isPattern(/^https:\/\/(?:accounts|auth)\.x\.ai\/oauth2\/device(?:\?[^\s#]*)?$/u),
+  ),
+]);
+
 // Ephemeral, requester-only instructions. Never include these in provider
 // snapshots, persisted settings or a replaying subscription.
 export const ServerProviderDeviceLoginEvent = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("device-code"),
-    verificationUrl: Schema.Literal("https://auth.openai.com/codex/device"),
+    verificationUrl: DeviceLoginVerificationUrl,
     userCode: Schema.String.check(Schema.isPattern(/^[A-Z0-9]{2,16}-[A-Z0-9]{2,16}$/u)),
   }),
   Schema.Struct({

@@ -98,6 +98,22 @@ describe("admitted Claude operation presentation", () => {
       truncated: false,
       status: "inProgress",
     });
+    expect(
+      readProviderPublicSummary({
+        streamKind: "reasoning_summary_text",
+        summaryVersion: 1,
+        provider: "grok",
+        itemId: "grok-thought-1",
+        status: "inProgress",
+        truncated: false,
+        detail: "Inspecting Grok ACP updates.",
+      }),
+    ).toEqual({
+      provider: "grok",
+      text: "Inspecting Grok ACP updates.",
+      truncated: false,
+      status: "inProgress",
+    });
     const valid = {
       itemId: "block-0",
       summaryVersion: 1,

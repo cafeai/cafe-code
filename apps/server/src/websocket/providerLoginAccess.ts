@@ -24,15 +24,17 @@ export function canLoginProvider(input: ProviderLoginAccess): boolean {
 }
 
 /** Paired clients and owners may explicitly authenticate the selected
- * server-side Codex or Gemini account through their own private login stream.
- * This grants neither settings authority nor access to another connection's
- * pending login. The caller must revalidate its persisted session and exact
- * account throughout. */
+ * server-side Codex, Gemini, or Grok account through their own private login
+ * stream. This grants neither settings authority nor access to another
+ * connection's pending login. The caller must revalidate its persisted session
+ * and exact account throughout. */
 export function canLoginProviderDeviceCode(input: ProviderLoginAccess): boolean {
   return (
     (input.role === "owner" || input.role === "client") &&
     input.secureSecretTransport &&
-    (input.instance?.driver === "codex" || input.instance?.driver === "gemini") &&
+    (input.instance?.driver === "codex" ||
+      input.instance?.driver === "gemini" ||
+      input.instance?.driver === "grok") &&
     isEnabledProvider(input.instance)
   );
 }

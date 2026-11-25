@@ -28,6 +28,7 @@ import {
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   ProviderDriverKind,
   ProviderInstanceId,
+  RuntimeItemId,
   RuntimeRequestId,
   type ThreadId,
   TurnId,
@@ -82,18 +83,34 @@ import {
   makeAcpRequestResolvedEvent,
   makeAcpToolCallEvent,
 } from "../acp/AcpCoreRuntimeEvents.ts";
-import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
+import {
+  collectSessionConfigOptionValues,
+  parsePermissionRequest,
+} from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
   applyGrokAcpModelSelection,
   currentGrokModelIdFromSessionSetup,
+  findGrokReasoningEffortConfigOption,
   grokPermissionModeForRuntimeMode,
   grokSandboxProfileForRuntimeMode,
+  GrokSandboxStartupError,
   makeGrokAcpRuntime,
+  readGrokAcpModelMetadata,
   readGrokAcpSessionModelMetadata,
+  requestGrokExtension,
   resolveGrokAcpBaseModelId,
   type GrokSandboxProfile,
 } from "../acp/GrokAcpSupport.ts";
+import {
+  PUBLIC_REASONING_SUMMARY_BLOCKS,
+  PUBLIC_REASONING_SUMMARY_CHARS,
+  PUBLIC_REASONING_SUMMARY_INTERVAL_MS,
+  PUBLIC_REASONING_SUMMARY_STREAM_KIND,
+  PUBLIC_REASONING_SUMMARY_VERSION,
+  publicReasoningSummaryDisplayText,
+  publicReasoningSummaryTail,
+} from "../publicReasoningSummary.ts";
 import {
   extractXAiExitPlanModeParams,
   extractXAiAskUserQuestions,
@@ -170,6 +187,18 @@ interface PendingUserInput {
   readonly resolution: Deferred.Deferred<PendingUserInputResolution>;
 }
 
+interface GrokPublicThought {
+  readonly sourceItemId: string;
+  readonly itemId: RuntimeItemId;
+  readonly turnId: TurnId;
+  readonly startedAt: string;
+  text: string;
+  publishedText: string | undefined;
+  publishedTruncated: boolean;
+  truncated: boolean;
+  flush: Fiber.Fiber<void> | undefined;
+}
+
 interface GrokSessionContext {
   readonly threadId: ThreadId;
   readonly acpSessionId: string;
@@ -193,8 +222,11 @@ interface GrokSessionContext {
    * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
   currentModelId: string | undefined;
-  readonly reasoningEffort: string | undefined;
-  readonly maxTokens: number | undefined;
+  reasoningEffort: string | undefined;
+  maxTokens: number | undefined;
+  readonly availableModels: ReadonlyArray<EffectAcpSchema.ModelInfo>;
+  publicThought: GrokPublicThought | undefined;
+  publicThoughtCount: number;
   readonly goalStatePath: string;
   readonly unifiedLogPath: string;
   /** Last provider-reported current-context occupancy. Unlike session usage,
@@ -640,7 +672,128 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     const nextEventId = Effect.map(randomUUIDv4, (id) => EventId.make(id));
     const makeEventStamp = () => Effect.all({ eventId: nextEventId, createdAt: nowIso });
     const offerRuntimeEvent = (event: ProviderRuntimeEvent) =>
-      PubSub.publish(runtimeEventPubSub, event).pipe(Effect.asVoid);
+      PubSub.publish(runtimeEventPubSub, {
+        ...event,
+        providerInstanceId: boundInstanceId,
+      }).pipe(Effect.asVoid);
+
+    const publishThought = (
+      ctx: GrokSessionContext,
+      block: GrokPublicThought,
+      terminal?: "completed" | "failed",
+    ) =>
+      Effect.gen(function* () {
+        if (ctx.stopped || sessions.get(ctx.threadId) !== ctx) return;
+        const text = block.text.trim() || block.publishedText;
+        if (
+          !text ||
+          (!terminal &&
+            text === block.publishedText &&
+            block.truncated === block.publishedTruncated)
+        )
+          return;
+        block.publishedText = text;
+        block.publishedTruncated = block.truncated;
+        yield* offerRuntimeEvent({
+          ...(yield* makeEventStamp()),
+          createdAt: block.startedAt,
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          type: terminal ? "item.completed" : "item.updated",
+          turnId: block.turnId,
+          itemId: block.itemId,
+          payload: {
+            itemType: "reasoning",
+            title: "Grok thinking",
+            detail: text,
+            status: terminal ?? "inProgress",
+            data: {
+              summaryVersion: PUBLIC_REASONING_SUMMARY_VERSION,
+              streamKind: PUBLIC_REASONING_SUMMARY_STREAM_KIND,
+              truncated: block.truncated,
+            },
+          },
+        });
+      });
+
+    const finishThought = (
+      ctx: GrokSessionContext,
+      turnId: TurnId,
+      status: "completed" | "failed",
+    ) =>
+      Effect.gen(function* () {
+        const block = ctx.publicThought;
+        if (!block || block.turnId !== turnId) return;
+        ctx.publicThought = undefined;
+        if (block.flush) yield* Fiber.interrupt(block.flush);
+        yield* publishThought(ctx, block, status);
+      });
+
+    const observeThought = (
+      ctx: GrokSessionContext,
+      turnId: TurnId,
+      itemId: string,
+      text: string,
+      createdAt: string,
+    ) =>
+      Effect.gen(function* () {
+        let block = ctx.publicThought;
+        if (block && (block.turnId !== turnId || block.sourceItemId !== itemId)) {
+          yield* finishThought(ctx, block.turnId, "completed");
+          block = undefined;
+        }
+        if (ctx.stopped || sessions.get(ctx.threadId) !== ctx || ctx.activeTurnId !== turnId) {
+          return;
+        }
+        const tail = publicReasoningSummaryDisplayText(publicReasoningSummaryTail(text));
+        if (!block) {
+          if (!tail.trim() || ctx.publicThoughtCount >= PUBLIC_REASONING_SUMMARY_BLOCKS) return;
+          ctx.publicThoughtCount += 1;
+          block = {
+            sourceItemId: itemId,
+            itemId: RuntimeItemId.make(`${itemId}:thought:${ctx.publicThoughtCount}`),
+            turnId,
+            startedAt: createdAt,
+            text: "",
+            publishedText: undefined,
+            publishedTruncated: false,
+            truncated: false,
+            flush: undefined,
+          };
+          ctx.publicThought = block;
+        }
+        block.truncated ||= block.text.length + text.length > PUBLIC_REASONING_SUMMARY_CHARS;
+        block.text = publicReasoningSummaryTail(block.text + tail);
+        if (block.publishedText === undefined) {
+          yield* publishThought(ctx, block);
+          return;
+        }
+        if (!block.flush) {
+          const observed = block;
+          block.flush = yield* Effect.sleep(PUBLIC_REASONING_SUMMARY_INTERVAL_MS).pipe(
+            Effect.andThen(
+              Effect.suspend(() => {
+                if (
+                  ctx.stopped ||
+                  sessions.get(ctx.threadId) !== ctx ||
+                  ctx.publicThought !== observed ||
+                  ctx.activeTurnId !== turnId
+                ) {
+                  return Effect.void;
+                }
+                return publishThought(ctx, observed);
+              }),
+            ),
+            Effect.ensuring(
+              Effect.sync(() => {
+                observed.flush = undefined;
+              }),
+            ),
+            Effect.interruptible,
+            Effect.forkIn(ctx.scope),
+          );
+        }
+      });
 
     const getThreadSemaphore = (threadId: string) =>
       SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
@@ -764,6 +917,13 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         const shouldEmitFailedTurn = options?.errorMessage !== undefined && canEmitTurnCompletion;
         const shouldEmitCompletedTurn =
           options?.completedStopReason !== undefined && canEmitTurnCompletion;
+        yield* finishThought(
+          liveCtx,
+          settleTurnId,
+          shouldEmitFailedTurn || options?.completedStopReason === "cancelled"
+            ? "failed"
+            : "completed",
+        );
         const { activeTurnId: _activeTurnId, ...readySession } = liveCtx.session;
         liveCtx.activeTurnId = undefined;
         liveCtx.session = {
@@ -1030,17 +1190,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         // so feature-detect both and fall back only on method-not-found.
         const usageParams = { sessionId: ctx.acpSessionId };
         const response = yield* Effect.gen(function* () {
-          // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
-          // @effect-diagnostics-next-line instanceOfSchema:off
-          const raw = yield* ctx.acp
-            .request("_x.ai/session/usage", usageParams)
-            .pipe(
-              Effect.catch((error) =>
-                error instanceof EffectAcpErrors.AcpRequestError && error.code === -32601
-                  ? ctx.acp.request("x.ai/session/usage", usageParams)
-                  : Effect.fail(error),
-              ),
-            );
+          const raw = yield* requestGrokExtension(ctx.acp, "session/usage", usageParams);
           return yield* decodeXAiSessionUsageResponse(raw);
         }).pipe(
           Effect.map(Option.some),
@@ -1297,15 +1447,12 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               issue: "cwd is required and must be non-empty.",
             });
           }
-          if ((input.additionalDirectories?.length ?? 0) > 0) {
-            return yield* new ProviderAdapterValidationError({
-              provider: PROVIDER,
-              operation: "startSession",
-              issue: "Grok ACP does not yet support additional workspace directories.",
-            });
-          }
 
           const cwd = path.resolve(input.cwd.trim());
+          const additionalDirectories = (input.additionalDirectories ?? [])
+            .map((dir) => dir.trim())
+            .filter((dir) => dir.length > 0)
+            .map((dir) => path.resolve(dir));
           const interactionMode = input.interactionMode ?? "default";
           if (interactionMode === "gemini-bypass") {
             return yield* new ProviderAdapterValidationError({
@@ -1450,6 +1597,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             sandboxProfile,
             permissionMode,
             ...(requestedReasoningEffort ? { reasoningEffort: requestedReasoningEffort } : {}),
+            ...(additionalDirectories.length > 0 ? { additionalDirectories } : {}),
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientInfo: { name: "cafe-code", version: "0.0.0" },
             mcpServers: [
@@ -1502,15 +1650,24 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             ...acpNativeLoggers,
           }).pipe(
             Effect.provideService(Scope.Scope, sessionScope),
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapterProcessError({
+            Effect.mapError((cause) => {
+              // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
+              // @effect-diagnostics-next-line instanceOfSchema:off
+              if (cause instanceof GrokSandboxStartupError) {
+                return new ProviderAdapterProcessError({
                   provider: PROVIDER,
                   threadId: input.threadId,
-                  detail: "Failed to start the Grok ACP runtime.",
-                  cause: { _tag: cause._tag },
-                }),
-            ),
+                  detail: cause.message,
+                  cause: { _tag: cause._tag, reason: cause.reason },
+                });
+              }
+              return new ProviderAdapterProcessError({
+                provider: PROVIDER,
+                threadId: input.threadId,
+                detail: "Failed to start the Grok ACP runtime.",
+                cause: { _tag: cause._tag },
+              });
+            }),
           );
           const started = yield* Effect.gen(function* () {
             yield* Effect.forEach(
@@ -1718,6 +1875,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             ),
           );
 
+          const availableModels = started.sessionSetupResult.models?.availableModels ?? [];
           const requestedStartModelId = grokModelSelection?.model
             ? resolveGrokAcpBaseModelId(grokModelSelection.model)
             : undefined;
@@ -1725,6 +1883,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             runtime: acp,
             currentModelId: currentGrokModelIdFromSessionSetup(started.sessionSetupResult),
             requestedModelId: requestedStartModelId,
+            availableModelIds: availableModels.map((model) => model.modelId),
             mapError: (cause) =>
               mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
           });
@@ -1771,6 +1930,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             runtimeMode: input.runtimeMode,
             interactionMode,
             cwd,
+            ...(additionalDirectories.length > 0 ? { additionalDirectories } : {}),
             ...(displayModelId
               ? {
                   model: displayModelId,
@@ -1818,6 +1978,9 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             currentModelId: boundModelId,
             reasoningEffort: boundReasoningEffort,
             maxTokens: modelMetadata.totalContextTokens,
+            availableModels,
+            publicThought: undefined,
+            publicThoughtCount: 0,
             goalStatePath,
             unifiedLogPath,
             usageOffset: resumedUsage,
@@ -1850,7 +2013,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                 }
 
-                if (event._tag === "ModeChanged") {
+                if (event._tag === "ModeChanged" || event._tag === "SessionConfigurationChanged") {
                   return;
                 }
 
@@ -1864,7 +2027,59 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 const stamp = yield* makeEventStamp();
 
                 switch (event._tag) {
+                  case "ContextUsageUpdated": {
+                    const usedTokens = Math.floor(event.usedTokens);
+                    const maxTokens = Math.floor(event.maxTokens);
+                    if (maxTokens > 0) {
+                      ctx.maxTokens = maxTokens;
+                    }
+                    const previousContextTokens = ctx.lastContextTokens;
+                    const contextCompacted = didGrokContextCompact({
+                      previousContextTokens,
+                      currentContextTokens: usedTokens,
+                      previousProcessedTokens: ctx.lastUsage.totalTokens,
+                      currentProcessedTokens: ctx.lastUsage.totalTokens + usedTokens,
+                    });
+                    ctx.lastContextTokens = usedTokens;
+                    if (contextCompacted) {
+                      yield* offerRuntimeEvent({
+                        type: "thread.state.changed",
+                        ...(yield* makeEventStamp()),
+                        provider: PROVIDER,
+                        threadId: ctx.threadId,
+                        turnId: notificationTurnId,
+                        payload: {
+                          state: "compacted",
+                          detail: {
+                            detection: "provider-context-token-drop",
+                            previousUsedTokens: Math.floor(previousContextTokens ?? 0),
+                            usedTokens,
+                          },
+                        },
+                      });
+                    }
+                    yield* offerRuntimeEvent({
+                      type: "thread.token-usage.updated",
+                      ...stamp,
+                      provider: PROVIDER,
+                      threadId: ctx.threadId,
+                      turnId: notificationTurnId,
+                      payload: {
+                        usage: {
+                          usedTokens,
+                          ...(maxTokens > 0
+                            ? { maxTokens }
+                            : ctx.maxTokens
+                              ? { maxTokens: Math.floor(ctx.maxTokens) }
+                              : {}),
+                          lastUsedTokens: usedTokens,
+                        },
+                      },
+                    });
+                    return;
+                  }
                   case "AssistantItemStarted":
+                    yield* finishThought(ctx, notificationTurnId, "completed");
                     yield* offerRuntimeEvent(
                       makeAcpAssistantItemEvent({
                         stamp,
@@ -1899,6 +2114,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                     );
                     return;
                   case "ToolCallUpdated":
+                    yield* finishThought(ctx, notificationTurnId, "completed");
                     yield* offerRuntimeEvent(
                       makeAcpToolCallEvent({
                         stamp,
@@ -1907,6 +2123,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                         turnId: notificationTurnId,
                         toolCall: event.toolCall,
                         rawPayload: event.rawPayload,
+                        ...(event.started ? { started: true } : {}),
                       }),
                     );
                     return;
@@ -1916,6 +2133,17 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                     // chat does not mutate the provider catalog per session.
                     return;
                   case "ContentDelta":
+                    if (event.streamKind === "reasoning_text") {
+                      yield* observeThought(
+                        ctx,
+                        notificationTurnId,
+                        event.itemId ?? String(notificationTurnId),
+                        event.text,
+                        stamp.createdAt,
+                      );
+                    } else {
+                      yield* finishThought(ctx, notificationTurnId, "completed");
+                    }
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({
                         stamp,
@@ -1994,6 +2222,62 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
 
     const sendTurn: GrokAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
+        // Older Grok CLIs (e.g. 1.0.4) do not expose `reasoning_effort` as a
+        // live ACP session config option and require a restart-resume with
+        // `--reasoning-effort`. Detect that before claiming the turn slot so
+        // restart-resume can run outside the per-thread lock without deadlock.
+        const preCheckRestartInput = yield* withThreadLock(
+          input.threadId,
+          Effect.gen(function* () {
+            const ctx = yield* requireSession(input.threadId);
+            if (ctx.promptsInFlight > 0 || ctx.activeTurnId !== undefined) {
+              return undefined;
+            }
+            const turnModelSelection =
+              input.modelSelection?.instanceId === boundInstanceId
+                ? input.modelSelection
+                : undefined;
+            const requestedTurnReasoningEffort = getModelSelectionStringOptionValue(
+              turnModelSelection,
+              "reasoningEffort",
+            )?.trim();
+            if (
+              requestedTurnReasoningEffort === undefined ||
+              requestedTurnReasoningEffort === ctx.reasoningEffort
+            ) {
+              return undefined;
+            }
+            const configOptions = yield* ctx.acp.getConfigOptions;
+            const reasoningOption = findGrokReasoningEffortConfigOption(configOptions);
+            if (reasoningOption) {
+              return undefined;
+            }
+            const cwd = ctx.session.cwd;
+            const resumeCursor = parseGrokResume(ctx.session.resumeCursor);
+            if (!cwd || !resumeCursor || resumeCursor.sessionId !== ctx.acpSessionId) {
+              return undefined;
+            }
+            return {
+              threadId: ctx.threadId,
+              provider: PROVIDER,
+              providerInstanceId: boundInstanceId,
+              cwd,
+              ...(ctx.session.additionalDirectories
+                ? { additionalDirectories: ctx.session.additionalDirectories }
+                : {}),
+              runtimeMode: ctx.session.runtimeMode,
+              ...(ctx.session.interactionMode
+                ? { interactionMode: ctx.session.interactionMode }
+                : {}),
+              ...(turnModelSelection ? { modelSelection: turnModelSelection } : {}),
+              resumeCursor,
+            } satisfies ProviderSessionStartInput;
+          }),
+        );
+        if (preCheckRestartInput !== undefined) {
+          yield* startSession(preCheckRestartInput);
+        }
+
         const prepared = yield* withThreadLock(
           input.threadId,
           Effect.gen(function* () {
@@ -2008,6 +2292,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             const turnId = TurnId.make(yield* randomUUIDv4);
             ctx.glideBinding?.resume();
             ctx.promptsInFlight += 1;
+            ctx.publicThoughtCount = 0;
             // Bind the turn id before cooperative yields so interruptTurn can
             // settle this prompt even if stop arrives during preparation.
             ctx.activeTurnId = turnId;
@@ -2041,29 +2326,83 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                     "The Grok session must be restarted and resumed before changing Plan or Auto mode.",
                 });
               }
-              if (
-                requestedTurnModelId !== undefined &&
-                requestedTurnModelId !== ctx.currentModelId
-              ) {
-                return yield* new ProviderAdapterValidationError({
-                  provider: PROVIDER,
-                  operation: "sendTurn",
-                  issue:
-                    "The Grok session must be restarted and resumed before sending with a different model.",
+
+              let currentModelId = ctx.currentModelId;
+              if (requestedTurnModelId !== undefined && requestedTurnModelId !== currentModelId) {
+                currentModelId = yield* applyGrokAcpModelSelection({
+                  runtime: ctx.acp,
+                  currentModelId,
+                  requestedModelId: requestedTurnModelId,
+                  availableModelIds: ctx.availableModels.map((model) => model.modelId),
+                  mapError: (cause) =>
+                    mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
                 });
+                ctx.currentModelId = currentModelId;
+                const nextModelInfo = ctx.availableModels.find(
+                  (candidate) => candidate.modelId === currentModelId,
+                );
+                const nextModelMetadata = readGrokAcpModelMetadata(nextModelInfo);
+                if (nextModelMetadata.totalContextTokens) {
+                  ctx.maxTokens = nextModelMetadata.totalContextTokens;
+                }
               }
+
               if (
                 requestedTurnReasoningEffort !== undefined &&
                 requestedTurnReasoningEffort !== ctx.reasoningEffort
               ) {
-                return yield* new ProviderAdapterValidationError({
-                  provider: PROVIDER,
-                  operation: "sendTurn",
-                  issue:
-                    "The Grok session must be restarted and resumed before sending with a different reasoning level.",
-                });
+                const activeModelInfo = ctx.availableModels.find(
+                  (candidate) => candidate.modelId === currentModelId,
+                );
+                const activeModelMetadata = readGrokAcpModelMetadata(activeModelInfo);
+                if (
+                  activeModelMetadata.reasoningEfforts.length > 0 &&
+                  !activeModelMetadata.reasoningEfforts.some(
+                    (candidate) => candidate.value === requestedTurnReasoningEffort,
+                  )
+                ) {
+                  return yield* new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "sendTurn",
+                    issue: `Grok model '${currentModelId ?? "default"}' does not advertise reasoning level '${requestedTurnReasoningEffort}'.`,
+                  });
+                }
+                const reasoningOption = findGrokReasoningEffortConfigOption(
+                  yield* ctx.acp.getConfigOptions,
+                );
+                if (!reasoningOption) {
+                  return yield* new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "sendTurn",
+                    issue:
+                      "The Grok session must be restarted and resumed before sending with a different reasoning level.",
+                  });
+                }
+                const allowedValues = collectSessionConfigOptionValues(reasoningOption);
+                if (
+                  allowedValues.length > 0 &&
+                  !allowedValues.includes(requestedTurnReasoningEffort)
+                ) {
+                  return yield* new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "sendTurn",
+                    issue: `Grok model '${currentModelId ?? "default"}' does not advertise reasoning level '${requestedTurnReasoningEffort}'.`,
+                  });
+                }
+                yield* ctx.acp
+                  .setConfigOption(reasoningOption.id, requestedTurnReasoningEffort)
+                  .pipe(
+                    Effect.mapError((cause) =>
+                      mapAcpToAdapterError(
+                        PROVIDER,
+                        input.threadId,
+                        "session/set_config_option",
+                        cause,
+                      ),
+                    ),
+                  );
+                ctx.reasoningEffort = requestedTurnReasoningEffort;
               }
-              const currentModelId = ctx.currentModelId;
 
               const promptParts = yield* buildPromptParts(input, "session/prompt");
 
@@ -2092,7 +2431,27 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 status: "running",
                 activeTurnId: turnId,
                 updatedAt: yield* nowIso,
-                ...(displayModel ? { model: displayModel } : {}),
+                ...(displayModel
+                  ? {
+                      model: displayModel,
+                      modelSelection: makeGrokEffectiveModelSelection({
+                        instanceId: boundInstanceId,
+                        model: displayModel,
+                        ...(ctx.reasoningEffort ? { reasoningEffort: ctx.reasoningEffort } : {}),
+                      }),
+                    }
+                  : {}),
+                resumeCursor: {
+                  schemaVersion: GROK_RESUME_VERSION,
+                  sessionId: ctx.acpSessionId,
+                  sandboxProfile: ctx.sandboxProfile,
+                  ...(currentModelId ? { model: currentModelId } : {}),
+                  ...(ctx.reasoningEffort ? { reasoningEffort: ctx.reasoningEffort } : {}),
+                  usage: ctx.lastUsage,
+                  ...(ctx.lastContextTokens !== undefined
+                    ? { lastContextTokens: ctx.lastContextTokens }
+                    : {}),
+                },
               };
               ctx.glideBinding?.observeTurn?.({
                 type: "turn.started",
@@ -2313,6 +2672,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   };
                 }
                 const completedAt = yield* nowIso;
+                yield* finishThought(
+                  ctx,
+                  prepared.turnId,
+                  result.stopReason === "cancelled" ? "failed" : "completed",
+                );
                 const { activeTurnId: _completedTurnId, ...readySession } = ctx.session;
                 ctx.activeTurnId = undefined;
                 ctx.session = {
@@ -2417,23 +2781,19 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           }),
         );
 
-        const rawResponse = yield* prepared.acp
-          .request("x.ai/interject", {
-            sessionId: prepared.acpSessionId,
-            text: prepared.text,
-            interjectionId: yield* randomUUIDv4,
-            // Grok's own 1.0.4 client intentionally omits `content` for a
-            // text-only interjection so the legacy extension wire shape stays
-            // byte-compatible. Structured content is needed only when Cafe is
-            // carrying images; sending a redundant text block is rejected as
-            // an internal extension error by the qualified stable binary.
-            ...((input.attachments?.length ?? 0) > 0 ? { content: prepared.promptParts } : {}),
-          })
-          .pipe(
-            Effect.mapError((cause) =>
-              mapAcpToAdapterError(PROVIDER, input.threadId, "x.ai/interject", cause),
-            ),
-          );
+        const rawResponse = yield* requestGrokExtension(prepared.acp, "interject", {
+          sessionId: prepared.acpSessionId,
+          text: prepared.text,
+          interjectionId: yield* randomUUIDv4,
+          // Grok's own client intentionally omits `content` for a text-only
+          // interjection so the extension wire shape stays byte-compatible.
+          // Structured content is needed only when Cafe is carrying images.
+          ...((input.attachments?.length ?? 0) > 0 ? { content: prepared.promptParts } : {}),
+        }).pipe(
+          Effect.mapError((cause) =>
+            mapAcpToAdapterError(PROVIDER, input.threadId, "x.ai/interject", cause),
+          ),
+        );
         yield* decodeXAiInterjectResponse(rawResponse).pipe(
           Effect.mapError(
             (cause) =>
@@ -2818,19 +3178,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             });
           }
 
-          // Preserve nominal local error classification here; structural wire lookalikes must not acquire this control/recovery outcome.
-          // @effect-diagnostics-next-line instanceOfSchema:off
-          const requestWithPrefixFallback = (method: string, params: unknown) =>
-            ctx.acp
-              .request(`_x.ai/${method}`, params)
-              .pipe(
-                Effect.catch((error) =>
-                  error instanceof EffectAcpErrors.AcpRequestError && error.code === -32601
-                    ? ctx.acp.request(`x.ai/${method}`, params)
-                    : Effect.fail(error),
-                ),
-              );
-          const pointsRaw = yield* requestWithPrefixFallback("rewind/points", {
+          const pointsRaw = yield* requestGrokExtension(ctx.acp, "rewind/points", {
             sessionId: ctx.acpSessionId,
           }).pipe(
             Effect.mapError((cause) =>
@@ -2866,7 +3214,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               detail: "Grok could not resolve a rewind target.",
             });
           }
-          const executeRaw = yield* requestWithPrefixFallback("rewind/execute", {
+          const executeRaw = yield* requestGrokExtension(ctx.acp, "rewind/execute", {
             sessionId: ctx.acpSessionId,
             targetPromptIndex: target.prompt_index,
             mode: "conversation_only",
@@ -2936,7 +3284,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
     return {
       provider: PROVIDER,
       capabilities: {
-        sessionModelSwitch: "restart-resume",
+        sessionModelSwitch: "in-session",
         liveSteer: "supported",
         threadGoals: "supported",
       },

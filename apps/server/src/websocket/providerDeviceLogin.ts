@@ -14,13 +14,16 @@ import * as References from "effect/References";
 import * as Stream from "effect/Stream";
 import { codexLoginFailureMessage } from "../provider/codexLogin.ts";
 import { GEMINI_LOGIN_ERRORS, geminiLoginFailureMessage } from "../provider/geminiLogin.ts";
+import { grokLoginFailureMessage } from "../provider/grokLogin.ts";
 import type { ProviderAdapterError } from "../provider/Errors.ts";
 import { canLoginProviderDeviceCode } from "./providerLoginAccess.ts";
 
 function deniedReasonForDriver(driver: string | undefined): string {
   return driver === "gemini"
     ? "Provider sign-in requires the enabled Gemini account and a current authenticated connection over HTTPS or the same machine."
-    : "Provider sign-in requires the enabled Codex account and a current authenticated connection over HTTPS or the same machine.";
+    : driver === "grok"
+      ? "Provider sign-in requires the enabled Grok account and a current authenticated connection over HTTPS or the same machine."
+      : "Provider sign-in requires the enabled Codex account and a current authenticated connection over HTTPS or the same machine.";
 }
 
 /** Private, non-replaying RPC. No device code, OAuth link, or verification link
@@ -103,7 +106,9 @@ export function providerDeviceLogin<AccountError, SessionError>(
           reason:
             account?.driver === "gemini"
               ? "Update the Cafe server to use remote Gemini sign-in."
-              : "Update the Cafe server to use Codex device-code sign-in.",
+              : account?.driver === "grok"
+                ? "Update the Cafe server to use Grok device-code sign-in."
+                : "Update the Cafe server to use Codex device-code sign-in.",
         });
       const inventory = Effect.gen(function* () {
         yield* validate;
@@ -123,7 +128,9 @@ export function providerDeviceLogin<AccountError, SessionError>(
               reason:
                 account?.driver === "gemini"
                   ? geminiLoginFailureMessage(error)
-                  : codexLoginFailureMessage(error),
+                  : account?.driver === "grok"
+                    ? grokLoginFailureMessage(error)
+                    : codexLoginFailureMessage(error),
             }),
         ),
         Stream.mapEffect((event) =>

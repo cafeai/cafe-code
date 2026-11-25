@@ -29,6 +29,8 @@ export function providerPublicSummaryLabel(
       return uiText("OpenCode thinking", undefined, undefined, locale);
     case "gemini":
       return uiText("Gemini thinking", undefined, undefined, locale);
+    case "grok":
+      return uiText("Grok thinking", undefined, undefined, locale);
   }
 }
 
