@@ -41,6 +41,7 @@ import {
   type ProviderInstanceConfig,
   type ProviderInstanceId,
   type ScopedThreadRef,
+  type ServerProvider,
   type EnvironmentId,
   type LocalApi,
 } from "@cafecode/contracts";
@@ -115,7 +116,7 @@ import { Switch } from "../ui/switch";
 import { MacKeepAwakeSettings } from "./MacKeepAwakeSettings";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
+import { AddProviderInstanceDialog, type AddedProviderAccount } from "./AddProviderInstanceDialog";
 import {
   canOneClickUpdateProviderCandidate,
   collectProviderUpdateCandidates,
@@ -1765,7 +1766,16 @@ export function ProviderSettingsPanel() {
   const { updateSettings } = useUpdateSettings();
   const serverProviders = useServerProviders();
   const [isRefreshingProviders, setIsRefreshingProviders] = useState(false);
-  const [isAddInstanceDialogOpen, setIsAddInstanceDialogOpen] = useState(false);
+  const [addInstanceDialog, setAddInstanceDialog] = useState<{
+    readonly open: boolean;
+    readonly initialDriver?: ProviderDriverKind | undefined;
+  }>({ open: false });
+  const [pendingAutoLogin, setPendingAutoLogin] = useState<{
+    readonly environmentId: EnvironmentId | null;
+    readonly instanceId: ProviderInstanceId;
+    readonly driver: ProviderDriverKind;
+    readonly displayName: string;
+  } | null>(null);
   const [updatingProviderDrivers, setUpdatingProviderDrivers] = useState<
     ReadonlySet<ProviderDriverKind>
   >(() => new Set());
@@ -1785,7 +1795,11 @@ export function ProviderSettingsPanel() {
   } | null>(null);
   useEffect(() => {
     setDeviceLogin(null);
+    setPendingAutoLogin(null);
   }, [environmentId]);
+  const openAddAccountDialog = useCallback((initialDriver?: ProviderDriverKind) => {
+    setAddInstanceDialog({ open: true, initialDriver });
+  }, []);
   const refreshingRef = useRef(false);
 
   const providerUpdateCandidates = useMemo(
@@ -2059,6 +2073,176 @@ export function ProviderSettingsPanel() {
     [remote, uiLocale],
   );
 
+  const getProviderLoginDisabledReason = useCallback(
+    (driver: ProviderDriverKind, liveProvider: ServerProvider | undefined): string | undefined => {
+      if (!remote) return undefined;
+      if (driver === "gemini") {
+        if (remoteRole !== "owner" && remoteRole !== "client") {
+          return uiText(
+            "Connect to this server before signing in.",
+            undefined,
+            undefined,
+            uiLocale,
+          );
+        }
+        return !liveProvider?.authActions?.deviceCodeLogin
+          ? uiText(
+              "Update Cafe on the server to use remote Gemini sign-in.",
+              undefined,
+              undefined,
+              uiLocale,
+            )
+          : undefined;
+      }
+      if (driver === "grok") {
+        if (remoteRole !== "owner" && remoteRole !== "client") {
+          return uiText(
+            "Connect to this server before signing in.",
+            undefined,
+            undefined,
+            uiLocale,
+          );
+        }
+        return !liveProvider?.authActions?.deviceCodeLogin
+          ? uiText(
+              "Update Cafe on the server to use remote Grok sign-in.",
+              undefined,
+              undefined,
+              uiLocale,
+            )
+          : undefined;
+      }
+      if (driver === "codex") {
+        if (remoteRole !== "owner" && remoteRole !== "client") {
+          return uiText(
+            "Connect to this server before signing in.",
+            undefined,
+            undefined,
+            uiLocale,
+          );
+        }
+        return remoteRole === "client" && !liveProvider?.authActions?.deviceCodeLogin
+          ? uiText(
+              "Update Cafe and Codex on the server to use device-code sign-in.",
+              undefined,
+              undefined,
+              uiLocale,
+            )
+          : undefined;
+      }
+      return undefined;
+    },
+    [remote, remoteRole, uiLocale],
+  );
+
+  const startProviderLogin = useCallback(
+    (input: {
+      readonly driver: ProviderDriverKind;
+      readonly instanceId: ProviderInstanceId;
+      readonly displayName: string;
+    }) => {
+      if (input.driver === "gemini") {
+        setDeviceLogin({
+          driver: "gemini",
+          environmentId,
+          instanceId: input.instanceId,
+          displayName: input.displayName,
+          api: ensureWorkspaceApi(environmentId),
+        });
+        return;
+      }
+      if (input.driver === "grok") {
+        setDeviceLogin({
+          driver: "grok",
+          environmentId,
+          instanceId: input.instanceId,
+          displayName: input.displayName,
+          api: ensureWorkspaceApi(environmentId),
+        });
+        return;
+      }
+      if (input.driver === "codex" && remote && remoteRole === "client") {
+        setDeviceLogin({
+          driver: "codex",
+          environmentId,
+          instanceId: input.instanceId,
+          displayName: input.displayName,
+          api: ensureWorkspaceApi(environmentId),
+        });
+        return;
+      }
+      void logInProvider({
+        instanceId: input.instanceId,
+        displayName: input.displayName,
+        browser: input.driver === "axiom" || input.driver === "codex",
+      });
+    },
+    [environmentId, logInProvider, remote, remoteRole],
+  );
+
+  useEffect(() => {
+    if (!pendingAutoLogin) return;
+    if (pendingAutoLogin.environmentId !== environmentId) {
+      setPendingAutoLogin(null);
+      return;
+    }
+    const configured = settings.providerInstances?.[pendingAutoLogin.instanceId];
+    if (configured?.enabled === false) {
+      setPendingAutoLogin(null);
+      return;
+    }
+    const liveProvider = serverProviders.find(
+      (candidate) => candidate.instanceId === pendingAutoLogin.instanceId,
+    );
+    if (!liveProvider) return;
+    const canLogIn =
+      liveProvider.authActions?.login === true &&
+      liveProvider.installed &&
+      liveProvider.auth.status !== "authenticated";
+    if (canLogIn) {
+      const disabledReason = getProviderLoginDisabledReason(pendingAutoLogin.driver, liveProvider);
+      setPendingAutoLogin(null);
+      if (disabledReason === undefined) {
+        startProviderLogin({
+          driver: pendingAutoLogin.driver,
+          instanceId: pendingAutoLogin.instanceId,
+          displayName: pendingAutoLogin.displayName,
+        });
+      }
+      return;
+    }
+    // Clear once the initial probe finishes in a state where login is not needed
+    // or cannot run (already authenticated, missing CLI, or unsupported runtime).
+    if (
+      liveProvider.auth.status === "authenticated" ||
+      liveProvider.status === "ready" ||
+      liveProvider.status === "error" ||
+      liveProvider.status === "disabled"
+    ) {
+      setPendingAutoLogin(null);
+    }
+  }, [
+    environmentId,
+    getProviderLoginDisabledReason,
+    pendingAutoLogin,
+    serverProviders,
+    settings.providerInstances,
+    startProviderLogin,
+  ]);
+
+  const handleAccountCreated = useCallback(
+    (created: AddedProviderAccount) => {
+      if (!created.startLogin) return;
+      setPendingAutoLogin({
+        environmentId,
+        instanceId: created.instanceId,
+        driver: created.driver,
+        displayName: created.displayName,
+      });
+    },
+    [environmentId],
+  );
+
   interface InstanceRow {
     readonly instanceId: ProviderInstanceId;
     readonly instance: ProviderInstanceConfig;
@@ -2163,6 +2347,7 @@ export function ProviderSettingsPanel() {
   };
 
   const deleteProviderInstance = (id: ProviderInstanceId) => {
+    setPendingAutoLogin((current) => (current?.instanceId === id ? null : current));
     updateSettings({
       providerInstances: withoutProviderInstanceKey(settings.providerInstances, id),
       providerModelPreferences: withoutProviderInstanceKey(settings.providerModelPreferences, id),
@@ -2251,24 +2436,15 @@ export function ProviderSettingsPanel() {
         headerAction={
           <div className="flex items-center gap-1.5">
             <ProviderLastChecked lastCheckedAt={lastCheckedAt} />
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    size="icon-xs"
-                    variant="ghost"
-                    className="size-5 rounded-sm p-0 text-muted-foreground hover:text-foreground"
-                    onClick={() => setIsAddInstanceDialogOpen(true)}
-                    aria-label={uiText("Add provider instance", undefined, undefined, uiLocale)}
-                  >
-                    <PlusIcon className="size-3" />
-                  </Button>
-                }
-              />
-              <TooltipPopup side="top">
-                {uiText("Add provider instance", undefined, undefined, uiLocale)}
-              </TooltipPopup>
-            </Tooltip>
+            <Button
+              size="xs"
+              variant="outline"
+              className="h-6 gap-1 px-2 text-xs"
+              onClick={() => openAddAccountDialog()}
+            >
+              <PlusIcon className="size-3" />
+              {uiText("Add account", undefined, undefined, uiLocale)}
+            </Button>
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -2295,7 +2471,9 @@ export function ProviderSettingsPanel() {
           </div>
         }
       >
-        {rows.map((row) => {
+        {rows.map((row, rowIndex) => {
+          const isFirstRowForDriver =
+            rows.findIndex((candidate) => candidate.driver === row.driver) === rowIndex;
           const driverOption = uiPresentation.getDriverOption(row.driver);
           const liveProvider = serverProviders.find(
             (candidate) => candidate.instanceId === row.instanceId,
@@ -2427,89 +2605,27 @@ export function ProviderSettingsPanel() {
               onLogIn={
                 canLogInProvider
                   ? () =>
-                      row.driver === "gemini"
-                        ? setDeviceLogin({
-                            driver: "gemini",
-                            environmentId,
-                            instanceId: row.instanceId,
-                            displayName: providerDisplayName,
-                            api: ensureWorkspaceApi(environmentId),
-                          })
-                        : row.driver === "grok"
-                          ? setDeviceLogin({
-                              driver: "grok",
-                              environmentId,
-                              instanceId: row.instanceId,
-                              displayName: providerDisplayName,
-                              api: ensureWorkspaceApi(environmentId),
-                            })
-                          : row.driver === "codex" && remote && remoteRole === "client"
-                            ? setDeviceLogin({
-                                driver: "codex",
-                                environmentId,
-                                instanceId: row.instanceId,
-                                displayName: providerDisplayName,
-                                api: ensureWorkspaceApi(environmentId),
-                              })
-                            : void logInProvider({
-                                instanceId: row.instanceId,
-                                displayName: providerDisplayName,
-                                browser: row.driver === "axiom" || row.driver === "codex",
-                              })
+                      startProviderLogin({
+                        driver: row.driver,
+                        instanceId: row.instanceId,
+                        displayName: providerDisplayName,
+                      })
                   : undefined
               }
               loginDisabledReason={
-                canLogInProvider && row.driver === "gemini" && remote
-                  ? remoteRole !== "owner" && remoteRole !== "client"
-                    ? uiText(
-                        "Connect to this server before signing in.",
-                        undefined,
-                        undefined,
-                        uiLocale,
-                      )
-                    : !liveProvider?.authActions?.deviceCodeLogin
-                      ? uiText(
-                          "Update Cafe on the server to use remote Gemini sign-in.",
-                          undefined,
-                          undefined,
-                          uiLocale,
-                        )
-                      : undefined
-                  : canLogInProvider && row.driver === "grok" && remote
-                    ? remoteRole !== "owner" && remoteRole !== "client"
-                      ? uiText(
-                          "Connect to this server before signing in.",
-                          undefined,
-                          undefined,
-                          uiLocale,
-                        )
-                      : !liveProvider?.authActions?.deviceCodeLogin
-                        ? uiText(
-                            "Update Cafe on the server to use remote Grok sign-in.",
-                            undefined,
-                            undefined,
-                            uiLocale,
-                          )
-                        : undefined
-                    : canLogInProvider && row.driver === "codex" && remote
-                      ? remoteRole !== "owner" && remoteRole !== "client"
-                        ? uiText(
-                            "Connect to this server before signing in.",
-                            undefined,
-                            undefined,
-                            uiLocale,
-                          )
-                        : remoteRole === "client" && !liveProvider?.authActions?.deviceCodeLogin
-                          ? uiText(
-                              "Update Cafe and Codex on the server to use device-code sign-in.",
-                              undefined,
-                              undefined,
-                              uiLocale,
-                            )
-                          : undefined
-                      : undefined
+                canLogInProvider
+                  ? getProviderLoginDisabledReason(row.driver, liveProvider)
+                  : undefined
               }
-              isLoggingIn={loggingInProviderInstanceIds.has(row.instanceId)}
+              isLoggingIn={
+                loggingInProviderInstanceIds.has(row.instanceId) ||
+                pendingAutoLogin?.instanceId === row.instanceId
+              }
+              onAddAccount={
+                isFirstRowForDriver && driverOption
+                  ? () => openAddAccountDialog(row.driver)
+                  : undefined
+              }
               onRestartRuntime={
                 canRestartProviderRuntime(row.driver)
                   ? () =>
@@ -2550,8 +2666,12 @@ export function ProviderSettingsPanel() {
           />
         ))}
       <AddProviderInstanceDialog
-        open={isAddInstanceDialogOpen}
-        onOpenChange={setIsAddInstanceDialogOpen}
+        open={addInstanceDialog.open}
+        initialDriver={addInstanceDialog.initialDriver}
+        onOpenChange={(open) =>
+          setAddInstanceDialog((current) => (open ? { ...current, open: true } : { open: false }))
+        }
+        onCreated={handleAccountCreated}
       />
     </SettingsPageContainer>
   );

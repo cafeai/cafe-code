@@ -63,7 +63,10 @@ it.live(
         config: { ...GeminiDriver.defaultConfig(), binaryPath: process.execPath },
       }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
       const unqualified = yield* instance.snapshot.refresh;
-      assert.include(unqualified.message ?? "", "Private Antigravity homes require");
+      assert.include(
+        unqualified.message ?? "",
+        "Private Antigravity homes require Antigravity CLI 1.5.16 or newer",
+      );
       assert.isUndefined(unqualified.authActions);
       assert.deepEqual(launches, []);
 
@@ -85,13 +88,14 @@ it.live(
 
       version = "1.5.16";
       const ready = yield* instance.snapshot.refresh;
-      if (process.platform !== "darwin" || process.arch !== "arm64") {
-        assert.include(ready.message ?? "", "Private Antigravity homes require");
-        assert.deepEqual(launches, []);
-        return;
-      }
       assert.equal(ready.auth.status, "authenticated");
       assert.isDefined(ready.accountRateLimits);
+
+      version = "1.5.17";
+      const newerReady = yield* instance.snapshot.refresh;
+      assert.equal(newerReady.version, "1.5.17");
+      assert.equal(newerReady.auth.status, "authenticated");
+      assert.isDefined(newerReady.accountRateLimits);
       const gotOAuth = yield* Deferred.make<string>();
       const login = yield* instance.adapter.loginDeviceCode!(Effect.succeed(false)).pipe(
         Stream.runForEach((event) =>

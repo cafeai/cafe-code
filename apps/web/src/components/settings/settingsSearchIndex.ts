@@ -517,9 +517,14 @@ const SETTINGS_SEARCH_INDEX: readonly IndexedEntry[] = [
     id: "providers.accounts",
     path: "/settings/providers",
     kind: "setting",
-    title: (locale) => uiText("Add provider instance", undefined, undefined, locale),
+    title: (locale) => uiText("Add account", undefined, undefined, locale),
     keywords: (locale) =>
-      uiText("new account, add account", undefined, "settings search keywords", locale),
+      uiText(
+        "new account, add account, add provider instance",
+        undefined,
+        "settings search keywords",
+        locale,
+      ),
   },
 
   // Cafe tools

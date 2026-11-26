@@ -2,7 +2,7 @@
 
 1. Install the standalone [Google Antigravity CLI](https://antigravity.google/docs/install?tab=cli) on the machine running the Cafe server. Cafe supports ACP in CLI 1.5.9 and newer. Google added Gemini 4 Neon in 1.5.11. [Antigravity changelog](https://antigravity.google/docs/changelog)
 2. Sign in from **Settings → Providers** using **Log in** (works for both local and remote Cafe environments: open the Google sign-in link in your browser, paste the authorization code or callback URL, and follow any additional Google account verification link if prompted), or run `agy acp --login` directly on the machine running the server. [Google ACP setup](https://antigravity.google/docs/ide/extensions/acp/)
-3. In Cafe, open **Settings → Providers → Add provider instance** and choose **Gemini**. Enter the absolute path to the standalone executable if `agy` on PATH opens the IDE. Leave **Create a private provider home** on to sign in to a new personal Google profile. Use **Log in** on that instance after adding it.
+3. To add a second Gemini account, open **Settings → Providers** and click **Add account** (or click the **Add another Gemini account** button on your existing Gemini card). Enter the absolute path to the standalone executable if `agy` on PATH opens the IDE. Leave **Create a private provider home** on to keep its sign-in, history, and usage limits isolated, then click **Add & log in** (or use **Log in** on the new card).
 4. Refresh the provider after changing accounts, updating the CLI, or gaining access to models. Choose an available Gemini model in the composer. Atrium can filter by Gemini and shows the model, thinking setting, and permissions recorded for the turn.
 
 ### Private Google sign-in
@@ -10,11 +10,12 @@
 Cafe gives each new private instance a backend-owned directory. Google sign-in,
 ACP model discovery, chat and headless `/usage` use that directory through
 `--gemini_dir` and request file-only storage with
-`AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1`. Cafe leaves the credential file to `agy`.
-The file-storage switch is undocumented and currently qualified on Antigravity
-CLI 1.5.16 on Apple silicon macOS. Other CLI versions and hosts can use the
-explicit existing-home choice in Add provider. Debug requires explicit
-**Allow shared native provider state** for that choice.
+`AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1` instead of the OS keychain or credential
+store. Cafe leaves the credential file to `agy`. Private Antigravity homes
+require Antigravity CLI 1.5.16 or newer and work across macOS, Linux, and
+Windows. Older CLI versions can use the explicit existing-home choice in Add
+account. Debug requires explicit **Allow shared native provider state** for
+that choice.
 
 Native resume receipts retain the private home's scope. Existing accounts use
 their saved native selection and resumable history. Resume under a different

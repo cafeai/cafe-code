@@ -15,6 +15,7 @@ import {
   RotateCcwIcon,
   Settings2Icon,
   Trash2Icon,
+  UserPlusIcon,
   XIcon,
 } from "lucide-react";
 import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
@@ -1050,6 +1051,7 @@ interface ProviderInstanceCardProps {
   readonly isLoggingIn?: boolean | undefined;
   readonly onRestartRuntime?: (() => void) | undefined;
   readonly isRestartingRuntime?: boolean | undefined;
+  readonly onAddAccount?: (() => void) | undefined;
 }
 
 /**
@@ -1102,6 +1104,7 @@ export function ProviderInstanceCard({
   isLoggingIn = false,
   onRestartRuntime,
   isRestartingRuntime = false,
+  onAddAccount,
 }: ProviderInstanceCardProps) {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
@@ -1554,6 +1557,37 @@ export function ProviderInstanceCard({
                 provider={liveProvider}
                 request={(input) => ensureWorkspaceApi().server.usageReset(input)}
               />
+            ) : null}
+            {onAddAccount ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="icon-xs"
+                      variant="ghost"
+                      className="size-7 rounded-sm p-0 text-muted-foreground hover:text-foreground"
+                      onClick={onAddAccount}
+                      aria-label={uiText(
+                        "Add another {value0} account",
+                        { value0: driverOption?.label ?? displayName },
+                        undefined,
+                        uiLocale,
+                      )}
+                    >
+                      <UserPlusIcon className="size-3.5" />
+                    </Button>
+                  }
+                />
+                <TooltipPopup side="top">
+                  {uiText(
+                    "Add another {value0} account",
+                    { value0: driverOption?.label ?? displayName },
+                    undefined,
+                    uiLocale,
+                  )}
+                </TooltipPopup>
+              </Tooltip>
             ) : null}
             {onRestartRuntime ? (
               <Tooltip>

@@ -4,7 +4,7 @@ import { useUiLocale, useUiPresentation } from "~/i18n";
 import { uiText } from "@cafecode/shared/i18n";
 import { supportsPrivateProviderHome } from "@cafecode/shared/serverSettings";
 import { UiMessage } from "~/i18n";
-import { CheckIcon } from "lucide-react";
+import { CheckIcon, ChevronRightIcon } from "lucide-react";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -20,6 +20,7 @@ import { cn } from "../../lib/utils";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { useServerConfig } from "../../rpc/serverState";
 import { Button } from "../ui/button";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import {
   Dialog,
   DialogDescription,
@@ -104,12 +105,30 @@ function validateInstanceId(id: string, existing: ReadonlySet<string>): string |
   return null;
 }
 
+export interface AddedProviderAccount {
+  readonly instanceId: ProviderInstanceId;
+  readonly driver: ProviderDriverKind;
+  readonly displayName: string;
+  readonly startLogin: boolean;
+}
+
+function supportsInAppAccountLogin(driver: ProviderDriverKind): boolean {
+  return driver === "gemini" || driver === "grok" || driver === "codex";
+}
+
 interface AddProviderInstanceDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  initialDriver?: ProviderDriverKind | undefined;
+  onCreated?: ((created: AddedProviderAccount) => void) | undefined;
 }
 
-export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderInstanceDialogProps) {
+export function AddProviderInstanceDialog({
+  open,
+  onOpenChange,
+  initialDriver,
+  onCreated,
+}: AddProviderInstanceDialogProps) {
   const uiLocale = useUiLocale();
   const uiPresentation = useUiPresentation(UI_PRESENTATION_SOURCES);
 
@@ -123,6 +142,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   const [accentColor, setAccentColor] = useState<string>("");
   const [instanceIdDraft, setInstanceIdDraft] = useState("");
   const [instanceIdDirty, setInstanceIdDirty] = useState(false);
+  const [isAdvancedIdOpen, setIsAdvancedIdOpen] = useState(false);
   const [existingHomes, setExistingHomes] = useState<ReadonlySet<ProviderDriverKind>>(new Set());
   const instanceIdInputRef = useRef<HTMLInputElement>(null);
   // Driver-specific config drafts keyed by driver so toggling between drivers
@@ -148,19 +168,21 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
     : deriveInstanceId(driver, label, existingIds);
 
   // Reset the form every time the dialog opens so each creation starts
-  // from a clean slate.
+  // from a clean slate. When opened from a specific provider card, jump
+  // directly to the Identity step with that provider preselected.
   useEffect(() => {
     if (!open) return;
-    setDriver(DEFAULT_DRIVER_KIND);
+    setDriver(initialDriver ?? DEFAULT_DRIVER_KIND);
     setLabel("");
     setAccentColor("");
     setInstanceIdDraft("");
-    setWizardStep(0);
+    setWizardStep(initialDriver ? 1 : 0);
     setInstanceIdDirty(false);
+    setIsAdvancedIdOpen(false);
     setConfigByDriver({});
     setExistingHomes(new Set());
     setHasAttemptedSubmit(false);
-  }, [open]);
+  }, [initialDriver, open]);
 
   const driverOption =
     uiPresentation.DRIVER_OPTION_BY_VALUE[driver] ?? uiPresentation.DEFAULT_DRIVER_OPTION;
@@ -171,14 +193,18 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   const instanceIdError = uiPresentation.validateInstanceId(instanceId, existingIds);
   const showInstanceIdError = hasAttemptedSubmit && instanceIdError !== null;
   useEffect(() => {
-    if (showInstanceIdError && wizardStep === 1) instanceIdInputRef.current?.focus();
+    if (showInstanceIdError && wizardStep === 1) {
+      setIsAdvancedIdOpen(true);
+      queueMicrotask(() => instanceIdInputRef.current?.focus());
+    }
   }, [showInstanceIdError, wizardStep]);
 
   const goToStep = (step: number) => {
     if (step > 1 && instanceIdError !== null) {
       setHasAttemptedSubmit(true);
+      setIsAdvancedIdOpen(true);
       setWizardStep(1);
-      instanceIdInputRef.current?.focus();
+      queueMicrotask(() => instanceIdInputRef.current?.focus());
       return;
     }
     setWizardStep(step);
@@ -196,6 +222,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   const configDraft = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
   const supportsPrivateHome = supportsPrivateProviderHome(driver);
   const privateHome = supportsPrivateHome && !existingHomes.has(driver);
+  const canAddAndLogIn = privateHome && supportsInAppAccountLogin(driver);
   const hiddenSettingsFieldKeys = useHiddenProviderSettingsFieldKeys(configDraft, privateHome);
   const setConfigDraft = useCallback(
     (config: Record<string, unknown> | undefined) => {
@@ -212,82 +239,114 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
     [driver],
   );
 
-  const handleSave = useCallback(() => {
-    setHasAttemptedSubmit(true);
-    if (instanceIdError !== null) {
-      setWizardStep(1);
-      return;
-    }
+  const handleSave = useCallback(
+    (startLogin: boolean) => {
+      setHasAttemptedSubmit(true);
+      if (instanceIdError !== null) {
+        setIsAdvancedIdOpen(true);
+        setWizardStep(1);
+        return;
+      }
 
-    const config = { ...configByDriver[driver] };
-    if (privateHome) delete config.homePath;
-    const hasConfig = Object.keys(config).length > 0;
-    const normalizedAccentColor = normalizeProviderAccentColor(accentColor);
+      const config = { ...configByDriver[driver] };
+      if (privateHome) delete config.homePath;
+      const hasConfig = Object.keys(config).length > 0;
+      const normalizedAccentColor = normalizeProviderAccentColor(accentColor);
+      const trimmedLabel = label.trim();
 
-    const nextInstance: ProviderInstanceConfig = {
+      const nextInstance: ProviderInstanceConfig = {
+        driver,
+        enabled: true,
+        ...(supportsPrivateHome ? { nativeHomeMode: privateHome ? "private" : "existing" } : {}),
+        ...(supportsPrivateHome && !privateHome && isDebugDataProfile
+          ? { debugStateSharing: true }
+          : {}),
+        ...(trimmedLabel.length > 0 ? { displayName: trimmedLabel } : {}),
+        ...(normalizedAccentColor ? { accentColor: normalizedAccentColor } : {}),
+        ...(hasConfig ? { config } : {}),
+      };
+      // `ProviderInstanceId.make` revalidates the slug; we've already checked
+      // it via `validateInstanceId`, but going through the brand constructor
+      // keeps the type boundary honest and guards against any future drift in
+      // the slug rules.
+      const brandedId = ProviderInstanceId.make(instanceId);
+      const nextMap = {
+        ...settings.providerInstances,
+        [brandedId]: nextInstance,
+      };
+      try {
+        updateSettings({ providerInstances: nextMap });
+        onCreated?.({
+          instanceId: brandedId,
+          driver,
+          displayName: trimmedLabel || driverOption.label,
+          startLogin: startLogin && canAddAndLogIn,
+        });
+        // The new card appearing in the list confirms the addition; toasts are
+        // reserved for failures (docs/style-guide.md §10).
+        onOpenChange(false);
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: uiText("Could not add provider", undefined, undefined, uiLocale),
+          description:
+            error instanceof Error
+              ? error.message
+              : uiText("Update failed.", undefined, undefined, uiLocale),
+        });
+      }
+    },
+    [
       driver,
-      enabled: true,
-      ...(supportsPrivateHome ? { nativeHomeMode: privateHome ? "private" : "existing" } : {}),
-      ...(supportsPrivateHome && !privateHome && isDebugDataProfile
-        ? { debugStateSharing: true }
-        : {}),
-      ...(label.trim().length > 0 ? { displayName: label.trim() } : {}),
-      ...(normalizedAccentColor ? { accentColor: normalizedAccentColor } : {}),
-      ...(hasConfig ? { config } : {}),
-    };
-    // `ProviderInstanceId.make` revalidates the slug; we've already checked
-    // it via `validateInstanceId`, but going through the brand constructor
-    // keeps the type boundary honest and guards against any future drift in
-    // the slug rules.
-    const brandedId = ProviderInstanceId.make(instanceId);
-    const nextMap = {
-      ...settings.providerInstances,
-      [brandedId]: nextInstance,
-    };
-    try {
-      updateSettings({ providerInstances: nextMap });
-      // The new card appearing in the list confirms the addition; toasts are
-      // reserved for failures (docs/style-guide.md §10).
-      onOpenChange(false);
-    } catch (error) {
-      toastManager.add({
-        type: "error",
-        title: uiText("Could not add provider", undefined, undefined, uiLocale),
-        description:
-          error instanceof Error
-            ? error.message
-            : uiText("Update failed.", undefined, undefined, uiLocale),
-      });
-    }
-  }, [
-    driver,
-    configByDriver,
-    isDebugDataProfile,
-    privateHome,
-    supportsPrivateHome,
-    instanceId,
-    instanceIdError,
-    label,
-    accentColor,
-    onOpenChange,
-    settings.providerInstances,
-    updateSettings,
-    uiLocale,
-  ]);
+      driverOption.label,
+      configByDriver,
+      isDebugDataProfile,
+      privateHome,
+      supportsPrivateHome,
+      canAddAndLogIn,
+      instanceId,
+      instanceIdError,
+      label,
+      accentColor,
+      onCreated,
+      onOpenChange,
+      settings.providerInstances,
+      updateSettings,
+      uiLocale,
+    ],
+  );
+
+  const isDriverPreselected = initialDriver !== undefined && initialDriver === driver;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogPopup className="max-w-xl overflow-hidden">
         <div className="flex min-h-0 flex-col overflow-hidden">
           <DialogHeader className="border-b border-border-subtle">
-            <DialogTitle>{uiText("Add provider", undefined, undefined, uiLocale)}</DialogTitle>
+            <DialogTitle>
+              {isDriverPreselected
+                ? uiText(
+                    "Add {provider} account",
+                    { provider: driverOption.label },
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText("Add account", undefined, undefined, uiLocale)}
+            </DialogTitle>
             <DialogDescription>
-              {uiText(
-                "Add another account or install of a provider.",
-                undefined,
-                undefined,
-                uiLocale,
-              )}
+              {isDriverPreselected
+                ? uiText(
+                    "Sign in to another {provider} account alongside your existing one.",
+                    { provider: driverOption.label },
+                    undefined,
+                    uiLocale,
+                  )
+                : uiText(
+                    "Add another account or install of a provider.",
+                    undefined,
+                    undefined,
+                    uiLocale,
+                  )}
             </DialogDescription>
             <div className="grid grid-cols-3 gap-2">
               {wizardSteps.map((step, index) => (
@@ -385,48 +444,20 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                 </span>
                 <Input
                   className="bg-background"
-                  placeholder={uiText("e.g. Work", undefined, undefined, uiLocale)}
+                  placeholder={uiText("e.g. Work or Personal", undefined, undefined, uiLocale)}
                   value={label}
                   onChange={(event) => setLabel(event.target.value)}
                 />
-              </label>
-
-              <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
-                <span className="text-xs font-medium text-foreground">
-                  {uiText("Instance ID", undefined, undefined, uiLocale)}
-                </span>
-                <Input
-                  ref={instanceIdInputRef}
-                  className="bg-background"
-                  placeholder={uiText("{value0}_work", { value0: driver }, undefined, uiLocale)}
-                  value={instanceId}
-                  onChange={(event) => {
-                    setInstanceIdDirty(true);
-                    setInstanceIdDraft(event.target.value);
-                  }}
-                  aria-invalid={showInstanceIdError}
-                  aria-describedby={
-                    showInstanceIdError ? "add-provider-instance-id-error" : undefined
-                  }
-                />
-                {showInstanceIdError ? (
-                  <span
-                    id="add-provider-instance-id-error"
-                    role="alert"
-                    className="text-xs text-destructive-foreground"
-                  >
-                    {instanceIdError}
-                  </span>
-                ) : (
+                {driver === "gemini" ? (
                   <span className="text-xs text-muted-foreground">
                     {uiText(
-                      "Internal ID: letters, digits, - or _.",
+                      "Antigravity CLI doesn’t show account emails, so a display name and color help tell Gemini accounts apart.",
                       undefined,
                       undefined,
                       uiLocale,
                     )}
                   </span>
-                )}
+                ) : null}
               </label>
 
               <div className={cn(wizardStep !== 1 && "hidden")}>
@@ -448,6 +479,68 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                 />
               </div>
 
+              <div className={cn(wizardStep !== 1 && "hidden")}>
+                <Collapsible
+                  open={isAdvancedIdOpen || showInstanceIdError}
+                  onOpenChange={setIsAdvancedIdOpen}
+                >
+                  <CollapsibleTrigger className="group focus-ring -mx-1 flex items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-xs font-medium text-muted-foreground transition-colors duration-(--duration-fast) hover:bg-accent hover:text-foreground">
+                    <ChevronRightIcon
+                      aria-hidden="true"
+                      className="size-3.5 transition-transform duration-(--duration-fast) ease-out group-data-[panel-open]:rotate-90"
+                    />
+                    {uiText("Advanced", undefined, undefined, uiLocale)}
+                    <code className="font-mono text-2xs font-normal text-subtle-foreground">
+                      · {instanceId}
+                    </code>
+                  </CollapsibleTrigger>
+                  <CollapsiblePanel className="-mx-1 px-1">
+                    <label className="grid gap-2 pt-3 pb-1">
+                      <span className="text-xs font-medium text-foreground">
+                        {uiText("Instance ID", undefined, undefined, uiLocale)}
+                      </span>
+                      <Input
+                        ref={instanceIdInputRef}
+                        className="bg-background"
+                        placeholder={uiText(
+                          "{value0}_work",
+                          { value0: driver },
+                          undefined,
+                          uiLocale,
+                        )}
+                        value={instanceId}
+                        onChange={(event) => {
+                          setInstanceIdDirty(true);
+                          setInstanceIdDraft(event.target.value);
+                        }}
+                        aria-invalid={showInstanceIdError}
+                        aria-describedby={
+                          showInstanceIdError ? "add-provider-instance-id-error" : undefined
+                        }
+                      />
+                      {showInstanceIdError ? (
+                        <span
+                          id="add-provider-instance-id-error"
+                          role="alert"
+                          className="text-xs text-destructive-foreground"
+                        >
+                          {instanceIdError}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">
+                          {uiText(
+                            "Internal ID: letters, digits, - or _.",
+                            undefined,
+                            undefined,
+                            uiLocale,
+                          )}
+                        </span>
+                      )}
+                    </label>
+                  </CollapsiblePanel>
+                </Collapsible>
+              </div>
+
               {driverSettingsFields.length > 0 ? (
                 <div className={cn("grid gap-4", wizardStep !== 2 && "hidden")}>
                   {supportsPrivateHome ? (
@@ -459,7 +552,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                         <p className="text-xs text-muted-foreground">
                           {privateHome
                             ? uiText(
-                                "Keep this instance’s sign-in and native history in its own folder.",
+                                "Keep this account’s sign-in, history, and usage limits separate from your other accounts.",
                                 undefined,
                                 undefined,
                                 uiLocale,
@@ -474,7 +567,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
                         {privateHome && driver === "gemini" ? (
                           <p className="text-xs text-muted-foreground">
                             {uiText(
-                              "Private Antigravity homes require CLI 1.5.16 on Apple silicon macOS.",
+                              "Uses an isolated Antigravity folder and file-based sign-in so multiple Gemini accounts stay logged in at once. Requires Antigravity CLI 1.5.16 or newer.",
                               undefined,
                               undefined,
                               uiLocale,
@@ -535,9 +628,18 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
               <Button size="sm" onClick={() => goToStep(Math.min(2, wizardStep + 1))}>
                 {uiText("Next", undefined, undefined, uiLocale)}
               </Button>
+            ) : canAddAndLogIn ? (
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => handleSave(false)}>
+                  {uiText("Add account", undefined, undefined, uiLocale)}
+                </Button>
+                <Button size="sm" onClick={() => handleSave(true)}>
+                  {uiText("Add & log in", undefined, undefined, uiLocale)}
+                </Button>
+              </div>
             ) : (
-              <Button size="sm" onClick={handleSave}>
-                {uiText("Add provider", undefined, undefined, uiLocale)}
+              <Button size="sm" onClick={() => handleSave(false)}>
+                {uiText("Add account", undefined, undefined, uiLocale)}
               </Button>
             )}
           </DialogFooter>

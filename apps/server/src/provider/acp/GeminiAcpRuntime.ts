@@ -17,6 +17,7 @@ import { terminateProbeChild } from "../providerSnapshot.ts";
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 
 const MINIMUM_VERSION = "1.5.9";
+const MINIMUM_PRIVATE_HOME_VERSION = "1.5.16";
 const VERSION_OUTPUT_BYTES = 4_096;
 const CLI_VERSION_TIMEOUT = "8 seconds";
 const CLI_UPDATE_ENV = "AGY_CLI_DISABLE_AUTO_UPDATE";
@@ -131,19 +132,16 @@ export const qualifyGeminiCli = Effect.fn("qualifyGeminiCli")(function* (
       message: `Select the standalone Antigravity CLI ${MINIMUM_VERSION} or newer. The Antigravity IDE launcher cannot serve this provider.`,
     });
   }
-  // The file-only switch is undocumented. A CLI that ignores it can silently
-  // select the OS Keychain. Admit only the release and host qualified with
-  // distinct native stores, including an empty-profile refusal. Google 1.5.16
-  // changed SSH Keychain behavior, so SSH detection is not a substitute.
+  // Private homes use `--gemini_dir` together with
+  // `AGY_CLI_FORCE_FILE_TOKEN_STORAGE=1`, which forces file-based OAuth token
+  // storage inside that directory instead of the OS keychain/credential store
+  // across macOS, Linux, and Windows. Google 1.5.16 updated SSH/keychain
+  // handling and accepts `--gemini_dir` for ACP, `--login`, and `/usage`.
   // https://antigravity.google/docs/changelog#v1516
-  if (
-    nativeHome &&
-    (version !== "1.5.16" || process.platform !== "darwin" || process.arch !== "arm64")
-  ) {
+  if (nativeHome && compareSemverVersions(version, MINIMUM_PRIVATE_HOME_VERSION) < 0) {
     return yield* new GeminiCliQualificationError({
       reason: "private-home-unsupported",
-      message:
-        "Private Antigravity homes require CLI 1.5.16 on Apple silicon macOS. To use a different runtime, add an instance that uses the existing native home.",
+      message: `Private Antigravity homes require Antigravity CLI ${MINIMUM_PRIVATE_HOME_VERSION} or newer. Update the CLI, or add an instance that uses the existing native home.`,
     });
   }
   return { binaryPath, version, nativeHome };

@@ -3482,15 +3482,16 @@ describe("settings panels", () => {
         </AppAtomRegistryProvider>,
       );
 
-      await page.getByRole("button", { name: "Add provider instance", exact: true }).click();
+      await page.getByRole("button", { name: "Add account", exact: true }).click();
       await page.getByRole("radio", { name: "Axiom", exact: true }).click();
       await page.getByRole("button", { name: "Next", exact: true }).click();
       await page.getByLabelText(/Display name/).fill(displayName);
+      await page.getByRole("button", { name: /^Advanced/ }).click();
       await expect
         .element(page.getByRole("textbox", { name: /^Instance ID/ }))
         .toHaveValue("axiom_2");
       await page.getByRole("button", { name: "Next", exact: true }).click();
-      await page.getByRole("button", { name: "Add provider", exact: true }).click();
+      await page.getByRole("button", { name: "Add account", exact: true }).click();
 
       expect(updateSettings).toHaveBeenCalledExactlyOnceWith({
         providerInstances: {
@@ -3521,7 +3522,7 @@ describe("settings panels", () => {
         </AppAtomRegistryProvider>,
       );
 
-      await page.getByRole("button", { name: "Add provider instance", exact: true }).click();
+      await page.getByRole("button", { name: "Add account", exact: true }).click();
       await page.getByRole("radio", { name }).click();
       await page.getByRole("button", { name: "Next", exact: true }).click();
       await page.getByLabelText(/Display name/).fill("Personal");
@@ -3529,7 +3530,7 @@ describe("settings panels", () => {
       await expect
         .element(page.getByRole("switch", { name: "Create a private provider home" }))
         .toBeChecked();
-      await page.getByRole("button", { name: "Add provider", exact: true }).click();
+      await page.getByRole("button", { name: "Add account", exact: true }).click();
 
       expect(updateSettings).toHaveBeenCalledExactlyOnceWith({
         providerInstances: {
@@ -3565,8 +3566,9 @@ describe("settings panels", () => {
       </AppAtomRegistryProvider>,
     );
 
-    await page.getByRole("button", { name: "Add provider instance", exact: true }).click();
+    await page.getByRole("button", { name: "Add account", exact: true }).click();
     await page.getByRole("button", { name: "Next", exact: true }).click();
+    await page.getByRole("button", { name: /^Advanced/ }).click();
     await expect
       .element(page.getByRole("textbox", { name: /^Instance ID/ }))
       .toHaveValue("codex_2");
@@ -3577,13 +3579,92 @@ describe("settings panels", () => {
       .element(page.getByRole("textbox", { name: /^Instance ID/ }))
       .toHaveValue("axiom_3");
     await page.getByRole("button", { name: "Next", exact: true }).click();
-    await page.getByRole("button", { name: "Add provider", exact: true }).click();
+    await page.getByRole("button", { name: "Add account", exact: true }).click();
     expect(updateSettings).toHaveBeenCalledExactlyOnceWith({
       providerInstances: {
         ...config.settings.providerInstances,
         axiom_3: axiom,
       },
     });
+  });
+
+  it("opens directly to Identity from a Gemini card and launches login after Add & log in", async () => {
+    const base = createBaseServerConfig();
+    const existingGemini = {
+      driver: ProviderDriverKind.make("gemini"),
+      enabled: true,
+    };
+    const config = {
+      ...base,
+      settings: {
+        ...base.settings,
+        providerInstances: {
+          ...base.settings.providerInstances,
+          [ProviderInstanceId.make("gemini")]: existingGemini,
+        },
+      },
+    };
+    const updateSettings = installProviderAccountSettings(config);
+    const subscribeProviderDeviceLogin = vi.fn<LocalApi["server"]["subscribeProviderDeviceLogin"]>(
+      () => () => {},
+    );
+    window.nativeApi!.server.subscribeProviderDeviceLogin = subscribeProviderDeviceLogin;
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ProviderSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByRole("button", { name: "Add another Gemini account", exact: true }).click();
+    await expect
+      .element(page.getByRole("heading", { name: "Add Gemini account", exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByText(/Antigravity CLI doesn’t show account emails/))
+      .toBeVisible();
+    await page.getByLabelText(/Display name/).fill("Gemini Work");
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+    await page.getByRole("button", { name: "Add & log in", exact: true }).click();
+
+    const expectedId = ProviderInstanceId.make("gemini_gemini_work");
+    expect(updateSettings).toHaveBeenCalledExactlyOnceWith({
+      providerInstances: {
+        ...config.settings.providerInstances,
+        [expectedId]: {
+          driver: ProviderDriverKind.make("gemini"),
+          enabled: true,
+          displayName: "Gemini Work",
+          nativeHomeMode: "private",
+        },
+      },
+    });
+    expect(subscribeProviderDeviceLogin).not.toHaveBeenCalled();
+
+    setServerConfigSnapshot({
+      ...getServerConfig()!,
+      providers: [
+        {
+          instanceId: expectedId,
+          driver: ProviderDriverKind.make("gemini"),
+          enabled: true,
+          installed: true,
+          version: "1.5.16",
+          status: "warning",
+          auth: { status: "unauthenticated" },
+          authActions: { login: true, deviceCodeLogin: true },
+          checkedAt: "2026-05-04T10:00:00.000Z",
+          models: [],
+          slashCommands: [],
+          skills: [],
+        },
+      ],
+    });
+
+    await expect
+      .element(page.getByRole("heading", { name: /Sign in to Gemini Work/ }))
+      .toBeVisible();
+    expect(subscribeProviderDeviceLogin).toHaveBeenCalledTimes(1);
+    expect(subscribeProviderDeviceLogin.mock.calls[0]?.[0]).toEqual({ instanceId: expectedId });
   });
 
   it.each(["", "invalid id", "codex", "axiom"])(
@@ -3595,9 +3676,10 @@ describe("settings panels", () => {
           <ProviderSettingsPanel />
         </AppAtomRegistryProvider>,
       );
-      await page.getByRole("button", { name: "Add provider instance", exact: true }).click();
+      await page.getByRole("button", { name: "Add account", exact: true }).click();
       await page.getByRole("radio", { name: "Axiom", exact: true }).click();
       await page.getByRole("button", { name: "Next", exact: true }).click();
+      await page.getByRole("button", { name: /^Advanced/ }).click();
       const input = page.getByRole("textbox", { name: /^Instance ID/ });
       await input.fill(invalidId);
       await page.getByRole("button", { name: "Next", exact: true }).click();
@@ -3605,7 +3687,7 @@ describe("settings panels", () => {
       await expect.element(input).toHaveFocus();
       await expect.element(input).toHaveAttribute("aria-invalid", "true");
       await expect
-        .element(page.getByRole("button", { name: "Add provider", exact: true }))
+        .element(page.getByRole("button", { name: "Add account", exact: true }))
         .not.toBeInTheDocument();
       expect(updateSettings).not.toHaveBeenCalled();
     },
@@ -3619,9 +3701,10 @@ describe("settings panels", () => {
         <ProviderSettingsPanel />
       </AppAtomRegistryProvider>,
     );
-    await page.getByRole("button", { name: "Add provider instance", exact: true }).click();
+    await page.getByRole("button", { name: "Add account", exact: true }).click();
     await page.getByRole("radio", { name: "Axiom", exact: true }).click();
     await page.getByRole("button", { name: "Next", exact: true }).click();
+    await page.getByRole("button", { name: /^Advanced/ }).click();
     await page.getByRole("textbox", { name: /^Instance ID/ }).fill("axiom_custom");
     await page.getByLabelText(/Display name/).fill("Work Axiom");
     await expect
@@ -3639,7 +3722,7 @@ describe("settings panels", () => {
         },
       },
     });
-    await page.getByRole("button", { name: "Add provider", exact: true }).click();
+    await page.getByRole("button", { name: "Add account", exact: true }).click();
     await expect
       .element(page.getByRole("alert"))
       .toHaveTextContent("An instance named 'axiom_custom' already exists.");
@@ -3648,7 +3731,7 @@ describe("settings panels", () => {
     await page.getByRole("textbox", { name: /^Instance ID/ }).fill("axiom_work");
     await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
     await page.getByRole("button", { name: "Next", exact: true }).click();
-    await page.getByRole("button", { name: "Add provider", exact: true }).click();
+    await page.getByRole("button", { name: "Add account", exact: true }).click();
     expect(updateSettings).toHaveBeenCalledExactlyOnceWith({
       providerInstances: {
         ...config.settings.providerInstances,
@@ -3789,14 +3872,15 @@ describe("settings panels", () => {
 
       await expect.element(page.getByRole("heading", { name: "Axiom", exact: true })).toBeVisible();
       expect(updateSettings).not.toHaveBeenCalled();
-      await page.getByRole("button", { name: "Add provider instance", exact: true }).click();
+      await page.getByRole("button", { name: "Add account", exact: true }).click();
       await page.getByRole("radio", { name: "Axiom", exact: true }).click();
       await page.getByRole("button", { name: "Next", exact: true }).click();
       await page.getByLabelText(/Display name/).fill("Personal Axiom");
+      await page.getByRole("button", { name: /^Advanced/ }).click();
       await page.getByRole("textbox", { name: /^Instance ID/ }).fill(instanceId);
       await page.getByRole("button", { name: "Next", exact: true }).click();
       await page.getByLabelText("Binary path").fill("axiomcli");
-      await page.getByRole("button", { name: "Add provider", exact: true }).click();
+      await page.getByRole("button", { name: "Add account", exact: true }).click();
 
       const axiomInstance = {
         driver: ProviderDriverKind.make("axiom"),

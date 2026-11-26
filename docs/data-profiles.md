@@ -81,11 +81,11 @@ homes, including native history/index state and login helpers. Their account
 settings survive later Debug runs.
 
 New Gemini, Claude and Grok provider instances default to Cafe-owned native
-homes in both data profiles. The Add provider wizard can select an existing
+homes in both data profiles. The Add account wizard can select an existing
 native home explicitly. Existing instance records retain their saved native
 selection. The server records the default on creation and shows the private
-directory in the account's Settings. Antigravity's private mode is qualified
-for the Apple silicon macOS CLI 1.5.16 personal Google login. See
+directory in the account's Settings. Antigravity's private mode requires
+Antigravity CLI 1.5.16 or newer and works across macOS, Linux, and Windows. See
 [Gemini setup](gemini-provider.md) for the exact launch policy and limits.
 
 Provider account configuration is not wholly inside SQLite: native CLIs also
