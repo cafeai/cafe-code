@@ -210,7 +210,11 @@ describe("OpenAI computer-use runtime adapter", () => {
     await runtime.execute({ code: "ready" });
     await runtime.close();
     expect(await readFile(f.receipt + ".eof", "utf8")).toBe("eof");
-    expect(await readFile(f.receipt + ".term", "utf8")).toBe("term");
+    // Node terminates Windows children abruptly on SIGTERM, so only a POSIX
+    // child can write the receipt from its signal handler before escalation.
+    if (process.platform !== "win32") {
+      expect(await readFile(f.receipt + ".term", "utf8")).toBe("term");
+    }
     await expect(stat(f.homes[0]!)).rejects.toMatchObject({ code: "ENOENT" });
   });
   it("retires a crashed native child and never replays its request", async (context) => {
