@@ -1,4 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import { readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -20,6 +22,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { ServerConfig } from "../../config.ts";
+import { fileAttachmentStoragePaths, storeFileAttachment } from "../../fileAttachmentStore.ts";
 import * as ManagementMcp from "../../mcp/sessionConnection.ts";
 import { makeGeminiAdapter } from "./GeminiAdapter.ts";
 
@@ -27,6 +30,7 @@ const configLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "cafecode-gemini-adapter-test-",
 }).pipe(Layer.provideMerge(NodeServices.layer));
 const fixtureFile = fileURLToPath(new URL("../testUtils/geminiAcpFixture.cjs", import.meta.url));
+const decodeJsonText = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
 const makeFixtureAdapter = Effect.fnUntraced(function* (environment: NodeJS.ProcessEnv = {}) {
   const config = yield* ServerConfig;
@@ -199,6 +203,84 @@ it.live(
       assert.isTrue(yield* adapter.hasSession(threadId));
       yield* adapter.interruptTurn(threadId, resumed.turnId);
       assert.isFalse(yield* adapter.hasSession(threadId));
+    }).pipe(Effect.provide(configLayer)),
+);
+
+it.live(
+  "delivers attachment-only Markdown as validated text context without native image support",
+  () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig;
+      const { adapter, threadId, start } = yield* makeFixtureAdapter({
+        CAFE_GEMINI_FIXTURE_ECHO_PROMPT: "true",
+      });
+      const source = Buffer.from(
+        "# Private reference\r\n\r\nMarkdown attachment café 日本語 😀\r\n",
+      );
+      const attachment = yield* Effect.promise(() =>
+        storeFileAttachment({
+          attachmentsDir: config.attachmentsDir,
+          threadId,
+          name: "reference.md",
+          mimeType: "text/markdown",
+          bytes: source,
+        }),
+      );
+      const completed = yield* Deferred.make<void>();
+      const replies: string[] = [];
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          if (event.type === "content.delta") replies.push(event.payload.delta);
+          if (event.type === "turn.completed" && event.payload.state === "completed") {
+            yield* Deferred.succeed(completed, undefined);
+          }
+        }),
+      ).pipe(Effect.forkScoped({ startImmediately: true }));
+
+      // The synthetic native peer deliberately advertises no image capability.
+      // Echoing the actual transported prompt keeps this assertion outside the
+      // adapter: a valid file-only send must reach ACP as metadata-only text,
+      // without inlining private bytes or requiring optional image support.
+      yield* adapter.startSession(start);
+      yield* adapter.sendTurn({ threadId, attachments: [attachment] });
+      yield* Deferred.await(completed);
+      const blocks = decodeJsonText(replies.join("")) as Array<{ type: string; text: string }>;
+      assert.lengthOf(blocks, 1);
+      const block = blocks[0]!;
+      assert.deepEqual(Object.keys(block).sort(), ["text", "type"]);
+      assert.equal(block.type, "text");
+      assert.notInclude(block.text, source.toString("utf8"));
+      // The manifest's JSON inventory is the attachment contract. Surrounding
+      // guidance can evolve without changing the file's identity or transport.
+      const inventoryLine = block.text.split("\n").find((line) => /^\[.*\]$/u.test(line));
+      assert.isDefined(inventoryLine);
+      const inventory = decodeJsonText(inventoryLine!) as Array<Record<string, unknown>>;
+      assert.lengthOf(inventory, 1);
+      const entry = inventory[0]!;
+      assert.deepInclude(entry, {
+        name: "reference.md",
+        mimeType: "text/markdown",
+        sizeBytes: source.byteLength,
+      });
+      const providerPath = entry.path;
+      assert.isString(providerPath);
+      assert.equal(path.dirname(providerPath as string), config.attachmentsDir);
+      assert.equal(path.extname(providerPath as string), ".md");
+      assert.deepEqual(yield* Effect.promise(() => readFile(providerPath as string)), source);
+
+      // A successful first delivery must not turn its derivative into authority
+      // for later sends. Same-size replacement leaves all renderer metadata
+      // intact, so only the stored content commitment can reject this change.
+      const storage = fileAttachmentStoragePaths(config.attachmentsDir, attachment.id);
+      yield* Effect.promise(() => writeFile(storage.data, Buffer.alloc(source.byteLength, 0x78)));
+      const failure = yield* adapter
+        .sendTurn({ threadId, attachments: [attachment] })
+        .pipe(Effect.flip);
+      assert.equal(failure._tag, "ProviderAdapterValidationError");
+      if (failure._tag === "ProviderAdapterValidationError") {
+        assert.equal(failure.issue, "A Gemini file attachment could not be prepared.");
+      }
+      yield* adapter.stopSession(threadId);
     }).pipe(Effect.provide(configLayer)),
 );
 

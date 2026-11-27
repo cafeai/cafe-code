@@ -334,6 +334,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         return;
       }
       const input = params.prompt[0]?.text;
+      if (process.env.CAFE_GEMINI_FIXTURE_ECHO_PROMPT === "true") {
+        // Return the actual native request so the adapter regression observes
+        // the real stdio boundary, including every content block. The fixture
+        // has no image capability and never opens a provider profile or model.
+        text(JSON.stringify(params.prompt));
+        result(id, { stopReason: "end_turn" });
+        return;
+      }
       if (input === "Start the steering fixture" && steeringRootId === undefined) {
         steeringRootId = id;
         text("Initial foreground output.");

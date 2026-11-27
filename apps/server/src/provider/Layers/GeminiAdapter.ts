@@ -1,6 +1,8 @@
 import {
   ApprovalRequestId,
   EventId,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  PROVIDER_SEND_TURN_MAX_TOTAL_ATTACHMENT_BYTES,
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeItemId,
@@ -88,6 +90,7 @@ import {
   readGeminiAcpSelection,
 } from "../acp/GeminiAcpSupport.ts";
 import { readGeminiPromptUsage } from "../acp/GeminiAcpUsage.ts";
+import { prepareFileAttachmentPrompt } from "../fileAttachmentPrompt.ts";
 import {
   PUBLIC_REASONING_SUMMARY_BLOCKS,
   PUBLIC_REASONING_SUMMARY_CHARS,
@@ -1521,18 +1524,42 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
       return yield* invalid(operation, "Native Gemini slash commands are not supported in Cafe.");
     const attachments = input.attachments ?? [];
     if (
-      attachments.length > 8 ||
-      (attachments.length > 0 && !ctx.supportsImages) ||
+      attachments.length > PROVIDER_SEND_TURN_MAX_ATTACHMENTS ||
       attachments.reduce((size, attachment) => size + attachment.sizeBytes, 0) >
+        PROVIDER_SEND_TURN_MAX_TOTAL_ATTACHMENT_BYTES
+    )
+      return yield* invalid(operation, "The Gemini prompt exceeds the attachment limits.");
+    if (!text && attachments.length === 0)
+      return yield* invalid(operation, "A Gemini prompt or attachment is required.");
+
+    // Image capability and inline byte limits apply only to native image blocks.
+    const imageAttachments = attachments.filter((attachment) => attachment.type === "image");
+    if (
+      (imageAttachments.length > 0 && !ctx.supportsImages) ||
+      imageAttachments.reduce((size, attachment) => size + attachment.sizeBytes, 0) >
         MAX_TURN_IMAGE_BYTES
     )
       return yield* invalid(operation, "The Gemini session cannot accept these image attachments.");
-    if (!text && attachments.length === 0)
-      return yield* invalid(operation, "A Gemini prompt or image attachment is required.");
-    const images = yield* Effect.forEach(attachments, (attachment) =>
+
+    // Reuse the chat-owned file inventory so Gemini reads validated local snapshots
+    // with its current tool permissions. The prompt contains metadata and paths only.
+    const fileManifest = yield* Effect.tryPromise({
+      try: () =>
+        prepareFileAttachmentPrompt({
+          attachmentsDir: config.attachmentsDir,
+          threadId: ctx.session.threadId,
+          attachments,
+        }),
+      catch: () => invalid(operation, "A Gemini file attachment could not be prepared."),
+    });
+    const images = yield* Effect.forEach(imageAttachments, (attachment) =>
       imageBlock(ctx.session.threadId, attachment),
     );
-    return text ? [{ type: "text" as const, text }, ...images] : images;
+    return [
+      ...(text ? [{ type: "text" as const, text }] : []),
+      ...(fileManifest ? [{ type: "text" as const, text: fileManifest }] : []),
+      ...images,
+    ];
   });
 
   const deferSteer = () =>
