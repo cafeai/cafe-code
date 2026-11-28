@@ -4,7 +4,7 @@ Last updated: 2026-11-06 03:37:30 PST (UTC-0800)
 
 Use **Projects** to browse the saved project/chat catalog, including the separate
 **Chats** section for conversations without a project. Use **Desk** to
-show only your open chats, grouped the way you are working. Atrium, Settings,
+show your open chats and browse their chat groups. Atrium, Settings,
 project actions and the chat composer stay in their usual places.
 
 In Projects, click the **Chats** heading to collapse that section; the chat you
@@ -103,8 +103,10 @@ remains a separate desktop smoke check.
   Draft input and queued messages are retained. The button is disabled when
   nothing is idle. **Reopen closed tab** restores recent kept tabs.
 - Agent-created thread groups appear as expandable rows in each pane's Desk
-  list. They contain only that pane's open chats, even if the parent chat has
-  no open tab. Collapsing a group keeps the selected chat and its group path visible.
+  list while the parent or a member is open there. Expand a group to browse its
+  full membership, including nested groups. Click a member to switch to its
+  open tab or open it in that pane using your Preview or Open preference.
+  Collapsing a group keeps the selected chat and its group path visible.
 - Choose **Open** in that menu to open the clicked chat's project/worktree in
   an installed editor, the file manager, or a terminal. The existing favorite-editor
   keyboard shortcut still acts on the focused chat pane. These actions are

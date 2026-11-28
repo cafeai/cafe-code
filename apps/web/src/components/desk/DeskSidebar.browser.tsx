@@ -1,11 +1,21 @@
 import "../../index.css";
 
-import { EnvironmentId, ProviderDriverKind, ThreadGroupId, ThreadId } from "@cafecode/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ProviderDriverKind,
+  ThreadGroupId,
+  ThreadId,
+} from "@cafecode/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
 import { render } from "vitest-browser-react";
 import { page, userEvent } from "vitest/browser";
 
-import type { DraftId } from "../../composerDraftStore";
+import {
+  useComposerDraftStore,
+  type DraftId,
+  type DraftSessionState,
+} from "../../composerDraftStore";
 import { useThreadSecretsDialogStore } from "../../cafeSecrets/threadSecretsDialogStore";
 import { useThreadMoveDialogStore } from "../../threadMoveDialogStore";
 import { createDeskState, deskTabKey, hydrateDesk } from "../../deskModel";
@@ -148,6 +158,7 @@ function createDeskActionFixture(context: TestContext) {
   const pending = new Set<Promise<unknown>>();
   const originalEnvironments = useStore.getState().environmentStateById;
   const originalExpandedGroups = useUiStateStore.getState().expandedThreadGroupKeys;
+  const originalDrafts = useComposerDraftStore.getState().draftThreadsByThreadKey;
   const assertActive = () => {
     if (retired) throw new Error("Desk action fixture has retired.");
   };
@@ -174,6 +185,9 @@ function createDeskActionFixture(context: TestContext) {
       await screen?.unmount();
       useStore.setState({ environmentStateById: originalEnvironments });
       useUiStateStore.setState({ expandedThreadGroupKeys: originalExpandedGroups });
+      if (useComposerDraftStore.getState().draftThreadsByThreadKey !== originalDrafts) {
+        useComposerDraftStore.setState({ draftThreadsByThreadKey: originalDrafts });
+      }
       context.signal.removeEventListener("abort", retire);
     }));
   };
@@ -184,9 +198,17 @@ function createDeskActionFixture(context: TestContext) {
   context.onTestFinished(cleanup);
   deskActionCleanup = cleanup;
   return {
-    async mount(threads: readonly SidebarThreadSummary[] = []) {
+    async mount(
+      threads: readonly SidebarThreadSummary[] = [],
+      drafts?: Readonly<Record<string, DraftSessionState>>,
+    ) {
       assertActive();
       setThreads(threads);
+      if (drafts) {
+        useComposerDraftStore.setState({
+          draftThreadsByThreadKey: { ...originalDrafts, ...drafts },
+        });
+      }
       useUiStateStore.setState({ expandedThreadGroupKeys: [] });
       const onNavigate = vi.fn();
       const onNewChat = vi.fn();
@@ -398,7 +420,7 @@ describe("Desk sidebar", () => {
     }
   });
 
-  it("keeps grouped tabs under their thread groups after clearing an idle owner", async (context) => {
+  it("opens catalog members in their Desk pane and keeps the selected path after clearing its owner", async (context) => {
     const fixture = createDeskActionFixture(context);
     const waveId = ThreadGroupId.make("wave");
     const reviewId = ThreadGroupId.make("review");
@@ -406,44 +428,101 @@ describe("Desk sidebar", () => {
       ownedGroups: [{ id: waveId, title: "Wave", createdAt }],
     });
     const runningSession = { ...readySession, status: "running" as const };
-    const worker = summary("Worker", { groupId: waveId, session: runningSession });
+    const workerProjectId = ProjectId.make("worker-project");
+    const worker = summary("Worker", { groupId: waveId, projectId: workerProjectId });
     const lead = summary("Lead without a tab", {
       groupId: waveId,
       ownedGroups: [{ id: reviewId, title: "Review", createdAt }],
     });
     const reviewer = summary("Reviewer", { groupId: reviewId, session: runningSession });
+    const mainChat = summary("Main chat", { session: runningSession });
+    const workerDraftId = "pending-worker" as DraftId;
+    const workerDraft = { kind: "draft", draftId: workerDraftId } as const;
+    const workerDraftKey = deskTabKey(workerDraft);
+    const coordinatorKey = deskTabKey(targetFor(coordinator));
+    const reviewerKey = deskTabKey(targetFor(reviewer));
+    const mainKey = deskTabKey(targetFor(mainChat));
     const { dispatch } = useDeskStore.getState();
-    for (const thread of [worker, reviewer, coordinator]) {
-      dispatch({ type: "open", target: targetFor(thread) });
-    }
-    const { screen, onNavigate } = await fixture.mount([coordinator, worker, lead, reviewer]);
-    const wave = screen.getByRole("button", { name: "Wave 2 chats", exact: true });
-    const review = screen.getByRole("button", { name: "Review 1 chat", exact: true });
-    const workerRow = screen.getByRole("button", { name: "Worker", exact: true });
-    const reviewerRow = screen.getByRole("button", { name: "Reviewer", exact: true });
+    dispatch({ type: "open", target: targetFor(mainChat) });
+    dispatch({ type: "open", target: workerDraft });
+    dispatch({ type: "open", target: targetFor(coordinator) });
+    dispatch({ type: "split", tabKey: coordinatorKey, targetGroupId: "g1", edge: "right" });
+    const ownerPane = useDeskStore.getState().desk.activeGroupId;
+    dispatch({ type: "select", tabKey: mainKey });
+    const { screen, onNavigate } = await fixture.mount(
+      [mainChat, coordinator, worker, lead, reviewer],
+      {
+        [workerDraftId]: {
+          threadId: worker.id,
+          environmentId,
+          projectId: workerProjectId,
+          logicalProjectKey: null,
+          createdAt,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          envMode: "local",
+          promotedTo: { environmentId, threadId: worker.id },
+        },
+      },
+    );
+    const pane = screen.getByRole("region", { name: "Group 2 tab group", exact: true });
+    const wave = pane.getByRole("button", { name: "Wave 2 chats", exact: true });
+    const review = pane.getByRole("button", { name: "Review 1 chat", exact: true });
+    const workerRow = pane.getByRole("button", { name: "Worker", exact: true });
+    const leadRow = pane.getByRole("button", { name: lead.title, exact: true });
+    const reviewerRow = pane.getByRole("button", { name: "Reviewer", exact: true });
     try {
-      await expect.element(wave).toHaveAttribute("aria-expanded", "false");
+      // The owner is the only open tab in this pane. Its catalog group and
+      // closed descendants are discoverable without opening any views.
+      expect(wave.element().getAttribute("aria-expanded")).toBe("false");
       await expect.element(workerRow).not.toBeInTheDocument();
-      await expect.element(reviewerRow).not.toBeInTheDocument();
       await fixture.input(() => wave.click());
       await expect.element(workerRow).toBeVisible();
-      await expect.element(review).toBeVisible();
-      await expect
-        .element(screen.getByRole("button", { name: lead.title, exact: true }))
-        .not.toBeInTheDocument();
+      await expect.element(leadRow).toBeVisible();
+      await expect.element(reviewerRow).not.toBeInTheDocument();
       await fixture.input(() => review.click());
+      await expect.element(reviewerRow).toBeVisible();
+      expect(useDeskStore.getState().desk.groups[ownerPane]?.tabs).toEqual([coordinatorKey]);
+      expect(onNavigate).not.toHaveBeenCalled();
+
+      // The provider has materialized Worker's shell, while its draft still
+      // owns first-send initialization in Main. The catalog link selects it.
+      await fixture.input(() => workerRow.click());
+      const selectedDraft = useDeskStore.getState().desk;
+      expect(selectedDraft).toMatchObject({
+        activeGroupId: "g1",
+        groups: {
+          g1: { tabs: [mainKey, workerDraftKey], activeTabKey: workerDraftKey },
+          [ownerPane]: { tabs: [coordinatorKey] },
+        },
+      });
+
       await fixture.input(() => reviewerRow.click());
-      expect(onNavigate).toHaveBeenCalledExactlyOnceWith(targetFor(reviewer));
+      expect(onNavigate).toHaveBeenLastCalledWith(targetFor(reviewer));
+      expect(useDeskStore.getState().desk).toMatchObject({
+        activeGroupId: ownerPane,
+        groups: {
+          g1: { tabs: [mainKey, workerDraftKey] },
+          [ownerPane]: { tabs: [coordinatorKey, reviewerKey], previewTabKey: reviewerKey },
+        },
+      });
+      const activateMain = screen.getByRole("button", { name: "Activate group Main", exact: true });
+      await fixture.input(() => activateMain.click());
+      await fixture.input(() => reviewerRow.click());
+      await expect.element(reviewerRow).toHaveAttribute("aria-current", "page");
+      expect(useDeskStore.getState().desk.groups[ownerPane]?.tabs).toEqual([
+        coordinatorKey,
+        reviewerKey,
+      ]);
       await fixture.input(() => wave.click());
       await expect.element(reviewerRow).toHaveAttribute("aria-current", "page");
       await expect.element(workerRow).not.toBeInTheDocument();
 
       const clear = screen.getByRole("button", { name: "Clear desk", exact: true });
       await fixture.input(() => clear.click());
-      expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([
-        deskTabKey(targetFor(worker)),
-        deskTabKey(targetFor(reviewer)),
-      ]);
+      expect(useDeskStore.getState().desk.groups[ownerPane]?.tabs).toEqual([reviewerKey]);
       await expect.element(wave).toHaveAttribute("aria-expanded", "false");
       await expect.element(reviewerRow).toHaveAttribute("aria-current", "page");
       await expect.element(clear).toBeDisabled();

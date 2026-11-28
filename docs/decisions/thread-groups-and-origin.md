@@ -142,9 +142,11 @@ automatic replay or a replacement request.
 
 ## Limits
 
-- The Desk sidebar shows groups for each pane's open chats, including nested
-  groups and groups whose owner has no open tab. Each chat has its own tab in
-  the pane's tab bar.
+- Each Desk pane anchors groups to its open chats. The sidebar uses the
+  catalog tree for the entire group, including unopened members and nested
+  groups. An open member also anchors its group when the owner has no tab.
+  Browsing the tree uses shell summaries. Clicking a member uses Desk's
+  normal selection or Preview/Open action.
 - Group rename is supported by the server command but has no UI yet.
 - Collapsed project status summaries count only that project's top-level
   chats; group members are summarized on their group row.

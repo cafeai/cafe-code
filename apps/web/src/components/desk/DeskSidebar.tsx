@@ -1,4 +1,5 @@
 import { useUiLocale } from "~/i18n";
+import { scopedThreadKey, scopeThreadRef } from "@cafecode/client-runtime";
 import { uiText } from "@cafecode/shared/i18n";
 import type { EnvironmentId, ScopedThreadRef } from "@cafecode/contracts";
 import { autoAnimate } from "@formkit/auto-animate";
@@ -19,15 +20,22 @@ import { useShallow } from "zustand/react/shallow";
 
 import { isChatSendInFlight } from "../../chatPaneContext";
 import { useComposerDraftStore } from "../../composerDraftStore";
-import { DESK_LIMITS, deskGroupIds, type DeskGroup, type DeskState } from "../../deskModel";
+import {
+  DESK_LIMITS,
+  deskGroupForTab,
+  deskGroupIds,
+  deskTabKey,
+  type DeskGroup,
+  type DeskState,
+} from "../../deskModel";
 import { useDeskStore } from "../../deskStore";
 import { renameThread } from "../../threadRename";
 import { readLocalApi } from "../../localApi";
-import { useStore } from "../../store";
+import { selectSidebarThreadSummaryByRef, useStore } from "../../store";
 import type { ThreadRouteTarget } from "../../threadRoutes";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { useUiStateStore } from "../../uiStateStore";
-import { resolveThreadRowClassName } from "../Sidebar.logic";
+import { resolveThreadRowClassName, resolveThreadStatusPill } from "../Sidebar.logic";
 import { ThreadStatusLabel } from "../ThreadStatusLabel";
 import { SidebarNewChatButton } from "../sidebar/SidebarNewChatButton";
 import {
@@ -35,16 +43,19 @@ import {
   SidebarThreadGroupContext,
   sidebarNestingIndentStyle,
 } from "../sidebar/SidebarThreadGroups";
+import {
+  collectSidebarGroupDescendants,
+  sidebarCollapsedGroupVisibleMembers,
+  sidebarGroupKeysContaining,
+  type SidebarThreadGroupNode,
+} from "../sidebar/threadGroups.logic";
 import { Button } from "../ui/button";
 import { SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import {
-  buildDeskSidebarEntries,
-  hasDeskTargetWork,
-  type DeskSidebarEntry,
-} from "./deskSidebar.logic";
+import { buildDeskSidebarEntries, hasDeskTargetWork } from "./deskSidebar.logic";
 import { useDeskTabMetadata } from "./useDeskTabMetadata";
 import { useDeskChatActions } from "./useDeskChatActions";
+import { useOpenDeskSidebarChat } from "./useOpenDeskSidebarChat";
 
 /** Matches the Projects lists so open, close and reorder move the same way. */
 const DESK_LIST_ANIMATION_OPTIONS = { duration: 180, easing: "ease-out" } as const;
@@ -76,7 +87,7 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
   preview: boolean;
   onActivate: () => void;
   onKeepOpen: () => void;
-  onClose: () => void;
+  onClose?: () => void;
   chatActions: ReturnType<typeof useDeskChatActions>;
   deskSnapshot: DeskState;
   menuOwnership: SidebarMenuOwnership;
@@ -199,7 +210,9 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
           ? [{ id: "rename", label: uiText("Rename chat…", undefined, undefined, uiLocale) }]
           : []),
         ...chatActions.items(target),
-        { id: "close", label: uiText("Close tab", undefined, undefined, uiLocale) },
+        ...(onClose
+          ? [{ id: "close", label: uiText("Close tab", undefined, undefined, uiLocale) }]
+          : []),
       ],
       position,
     );
@@ -210,7 +223,7 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
       // Local intent belongs to this immutable snapshot, not its successor.
       if (useDeskStore.getState().desk !== deskSnapshot) return;
       if (action === "rename") beginRename();
-      else onClose();
+      else onClose?.();
     } else if (action) {
       // Server actions retain the exact captured chat and the existing
       // confirmation/admission boundary, independent of current selection.
@@ -352,28 +365,30 @@ const DeskSidebarRow = memo(function DeskSidebarRow({
               </TooltipPopup>
             </Tooltip>
           ) : null}
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <button
-                  type="button"
-                  aria-label={uiText(
-                    "Close tab {value0}",
-                    { value0: metadata.title },
-                    undefined,
-                    uiLocale,
-                  )}
-                  className={DESK_ROW_ACTION_CLASS_NAME}
-                  onClick={onClose}
-                >
-                  <XIcon className="size-3" />
-                </button>
-              }
-            />
-            <TooltipPopup side="top">
-              {uiText("Close tab (chat keeps running)", undefined, undefined, uiLocale)}
-            </TooltipPopup>
-          </Tooltip>
+          {onClose ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    aria-label={uiText(
+                      "Close tab {value0}",
+                      { value0: metadata.title },
+                      undefined,
+                      uiLocale,
+                    )}
+                    className={DESK_ROW_ACTION_CLASS_NAME}
+                    onClick={onClose}
+                  >
+                    <XIcon className="size-3" />
+                  </button>
+                }
+              />
+              <TooltipPopup side="top">
+                {uiText("Close tab (chat keeps running)", undefined, undefined, uiLocale)}
+              </TooltipPopup>
+            </Tooltip>
+          ) : null}
         </div>
       ) : null}
       {error ? (
@@ -560,6 +575,7 @@ export function DeskSidebar({
   const desk = useDeskStore((state) => state.desk);
   const activeDraftId = useDeskStore((state) => state.activeDraftId);
   const dispatch = useDeskStore((state) => state.dispatch);
+  const openChat = useOpenDeskSidebarChat(onNavigate);
   const drafts = useComposerDraftStore((state) => state.draftThreadsByThreadKey);
   const { index: threadGroupIndex } = useContext(SidebarThreadGroupContext);
   const expandedGroupKeys = useUiStateStore((state) => state.expandedThreadGroupKeys);
@@ -571,7 +587,6 @@ export function DeskSidebar({
       tabKeys.filter((key) => hasDeskTargetWork(state, drafts, desk.targets[key])),
     ),
   );
-  const busyTabKeys = new Set(busyTabs);
   const editor = activeDraftId ? { kind: "draft" as const, draftId: activeDraftId } : undefined;
   const editorHasWork = useStore((state) => hasDeskTargetWork(state, drafts, editor));
   const hasIdleViews = busyTabs.length < tabKeys.length || (editor !== undefined && !editorHasWork);
@@ -677,65 +692,129 @@ export function DeskSidebar({
       {paneIds.map((groupId) => {
         const group = desk.groups[groupId];
         if (!group) return null;
-        const containsActiveTab = (keys: readonly string[]) =>
-          group.activeTabKey !== null && keys.includes(group.activeTabKey);
-        const renderEntries = (
-          entries: readonly DeskSidebarEntry[],
+        const { roots, tabsByThreadKey, activeThreadKey } = buildDeskSidebarEntries(
+          group,
+          desk.targets,
+          drafts,
+          threadGroupIndex,
+        );
+        const activeGroupKeys = sidebarGroupKeysContaining(threadGroupIndex, activeThreadKey);
+        const openMember = (target: ThreadRouteTarget, preview: boolean) => {
+          // A closed row is a catalog link. Check that its captured pane and
+          // chat still exist before admitting a tab into the current layout.
+          if (
+            useDeskStore.getState().desk !== desk ||
+            target.kind !== "server" ||
+            !selectSidebarThreadSummaryByRef(useStore.getState(), target.threadRef)
+          ) {
+            return;
+          }
+          // A project draft can still own the chat after its catalog row
+          // appears. Find that exact open tab before admitting its server alias.
+          const currentDrafts = useComposerDraftStore.getState().draftThreadsByThreadKey;
+          const memberKey = scopedThreadKey(target.threadRef);
+          const draftTabKey = tabKeys.find((key) => {
+            const openTarget = desk.targets[key];
+            const promoted =
+              openTarget?.kind === "draft"
+                ? currentDrafts[openTarget.draftId]?.promotedTo
+                : undefined;
+            return promoted ? scopedThreadKey(promoted) === memberKey : false;
+          });
+          const tabKey = draftTabKey ?? deskTabKey(target);
+          const openTarget = desk.targets[tabKey];
+          if (openTarget && deskGroupForTab(desk, tabKey)) {
+            if (!preview) dispatch({ type: "keepOpen", tabKey });
+            dispatch({ type: "select", tabKey });
+            onNavigate(openTarget);
+          } else {
+            openChat(target, preview, groupId);
+          }
+        };
+
+        const renderChat = (
+          entry: {
+            target: ThreadRouteTarget;
+            threadKey: string | undefined;
+            tabKey?: string;
+          },
           depth: number,
-          activePathOnly = false,
-        ): ReactNode =>
-          entries.map((entry) => {
-            if (entry.kind === "group") {
-              const onActivePath = containsActiveTab(entry.tabKeys);
-              if (activePathOnly && !onActivePath) return null;
-              const { key, title } = entry.node;
-              const expanded = expandedGroupKeys.includes(key);
-              return (
-                <Fragment key={key}>
-                  <SidebarMenuSubItem className="w-full" style={sidebarNestingIndentStyle(depth)}>
-                    <SidebarThreadGroupButton
-                      title={title}
-                      count={entry.tabKeys.length}
-                      expanded={expanded}
-                      working={entry.tabKeys.some((tabKey) => busyTabKeys.has(tabKey))}
-                      onToggle={() => setThreadGroupExpanded(key, !expanded)}
-                    />
-                  </SidebarMenuSubItem>
-                  {(expanded || onActivePath) && renderEntries(entry.entries, depth + 1, !expanded)}
-                </Fragment>
-              );
-            }
-            const { tabKey, groups } = entry;
-            if (
-              activePathOnly &&
-              group.activeTabKey !== tabKey &&
-              !groups.some((child) => containsActiveTab(child.tabKeys))
-            ) {
-              return null;
-            }
-            const target = desk.targets[tabKey];
-            if (!target) return null;
-            return (
-              <Fragment key={tabKey}>
-                <DeskSidebarRow
-                  target={target}
-                  depth={depth}
-                  chatActions={chatActions}
-                  deskSnapshot={desk}
-                  menuOwnership={menuOwnership}
-                  selected={desk.activeGroupId === groupId && group.activeTabKey === tabKey}
-                  preview={group.previewTabKey === tabKey}
-                  onActivate={() => {
+          activePathOnly: boolean,
+        ): ReactNode => {
+          const { target, threadKey, tabKey } = entry;
+          const groups = threadKey ? threadGroupIndex.groupsByOwnerKey.get(threadKey) : undefined;
+          return (
+            <Fragment key={threadKey ?? tabKey}>
+              <DeskSidebarRow
+                target={target}
+                depth={depth}
+                chatActions={chatActions}
+                deskSnapshot={desk}
+                menuOwnership={menuOwnership}
+                selected={desk.activeGroupId === groupId && group.activeTabKey === tabKey}
+                preview={tabKey !== undefined && group.previewTabKey === tabKey}
+                onActivate={() => {
+                  if (tabKey) {
                     dispatch({ type: "select", tabKey });
                     onNavigate(target);
-                  }}
-                  onClose={() => dispatch({ type: "close", tabKey })}
-                  onKeepOpen={() => dispatch({ type: "keepOpen", tabKey })}
+                  } else {
+                    openMember(target, true);
+                  }
+                }}
+                {...(tabKey ? { onClose: () => dispatch({ type: "close", tabKey }) } : {})}
+                onKeepOpen={() => {
+                  if (tabKey) dispatch({ type: "keepOpen", tabKey });
+                  else openMember(target, false);
+                }}
+              />
+              {groups?.map((node) => renderGroup(node, depth + 1, activePathOnly))}
+            </Fragment>
+          );
+        };
+
+        function renderGroup(
+          node: SidebarThreadGroupNode,
+          depth: number,
+          activePathOnly: boolean,
+        ): ReactNode {
+          if (activePathOnly && !activeGroupKeys.has(node.key)) return null;
+          const expanded = expandedGroupKeys.includes(node.key);
+          const visibleMembers = expanded
+            ? node.members
+            : sidebarCollapsedGroupVisibleMembers(
+                threadGroupIndex,
+                node,
+                activeThreadKey,
+                activeGroupKeys,
+              );
+          return (
+            <Fragment key={node.key}>
+              <SidebarMenuSubItem className="w-full" style={sidebarNestingIndentStyle(depth)}>
+                <SidebarThreadGroupButton
+                  title={node.title}
+                  count={node.members.length}
+                  expanded={expanded}
+                  working={collectSidebarGroupDescendants(threadGroupIndex, node).some(
+                    (thread) => resolveThreadStatusPill({ thread })?.pulse,
+                  )}
+                  onToggle={() => setThreadGroupExpanded(node.key, !expanded)}
                 />
-                {renderEntries(groups, depth + 1, activePathOnly)}
-              </Fragment>
-            );
-          });
+              </SidebarMenuSubItem>
+              {visibleMembers.map((member) => {
+                const threadRef = scopeThreadRef(member.environmentId, member.id);
+                const threadKey = scopedThreadKey(threadRef);
+                return renderChat(
+                  tabsByThreadKey.get(threadKey) ?? {
+                    target: { kind: "server", threadRef },
+                    threadKey,
+                  },
+                  depth + 1,
+                  !expanded,
+                );
+              })}
+            </Fragment>
+          );
+        }
         return (
           <section
             // Group IDs repeat across local environment layouts. Remount the
@@ -765,9 +844,10 @@ export function DeskSidebar({
               ref={attachListAutoAnimate}
               className="mx-1 my-0 w-full translate-x-0 gap-0.5 overflow-hidden px-1.5 py-0"
             >
-              {renderEntries(
-                buildDeskSidebarEntries(group, desk.targets, drafts, threadGroupIndex),
-                0,
+              {roots.map((entry) =>
+                entry.kind === "group"
+                  ? renderGroup(entry.node, 0, false)
+                  : renderChat(entry, 0, false),
               )}
             </SidebarMenuSub>
             {group.tabs.length === 0 ? (

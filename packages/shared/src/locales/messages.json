@@ -90,7 +90,7 @@
   "\"{title}\"": {
     "message": "\"{title}\"",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:483",
+      "apps/web/src/components/Sidebar.tsx:484",
       "apps/web/src/components/ThreadMetadataDialog.tsx:189"
     ]
   },
@@ -240,7 +240,7 @@
   },
   "<slot1></slot1> projects": {
     "message": "<slot1></slot1> projects",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3174"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3175"]
   },
   "<slot1></slot1> · <slot3></slot3> · runs without approval prompts": {
     "message": "<slot1></slot1> · <slot3></slot3> · runs without approval prompts",
@@ -461,7 +461,7 @@
   },
   "Absolute path": {
     "message": "Absolute path",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3395"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3396"]
   },
   "Accent color": {
     "message": "Accent color",
@@ -578,7 +578,7 @@
   },
   "Activate group {value0}": {
     "message": "Activate group {value0}",
-    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:496"]
+    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:511"]
   },
   "Active": {
     "message": "Active",
@@ -637,7 +637,7 @@
     "message": "Add",
     "locations": [
       "apps/web/src/components/CommandPalette.tsx:1414",
-      "apps/web/src/components/Sidebar.tsx:3411",
+      "apps/web/src/components/Sidebar.tsx:3412",
       "apps/web/src/components/settings/ProviderInstanceCard.tsx:396",
       "apps/web/src/components/settings/ProviderModelsSection.tsx:471"
     ]
@@ -714,8 +714,8 @@
     "message": "Add project",
     "locations": [
       "apps/web/src/components/CommandPalette.tsx:993",
-      "apps/web/src/components/Sidebar.tsx:4201",
-      "apps/web/src/components/Sidebar.tsx:4211"
+      "apps/web/src/components/Sidebar.tsx:4202",
+      "apps/web/src/components/Sidebar.tsx:4212"
     ]
   },
   "Add project base directory": {
@@ -749,13 +749,13 @@
   "Additional directories": {
     "message": "Additional directories",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:3326",
-      "apps/web/src/components/Sidebar.tsx:3358"
+      "apps/web/src/components/Sidebar.tsx:3327",
+      "apps/web/src/components/Sidebar.tsx:3359"
     ]
   },
   "Additional directory path": {
     "message": "Additional directory path",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3393"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3394"]
   },
   "Additional permissions requested": {
     "message": "Additional permissions requested",
@@ -918,7 +918,7 @@
   },
   "Already complete": {
     "message": "Already complete",
-    "locations": ["apps/web/src/components/Sidebar.tsx:515"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:516"]
   },
   "Alt": {
     "message": "Alt",
@@ -972,7 +972,7 @@
       "apps/web/src/components/ChatMarkdown.tsx:696",
       "apps/web/src/components/ChatMarkdown.tsx:744",
       "apps/web/src/components/PlanSidebar.tsx:95",
-      "apps/web/src/components/Sidebar.tsx:2919",
+      "apps/web/src/components/Sidebar.tsx:2920",
       "apps/web/src/components/settings/SettingsPanels.tsx:2807",
       "apps/web/src/components/settings/SettingsPanels.tsx:2901",
       "apps/web/src/components/settings/SettingsPanels.tsx:2951",
@@ -991,8 +991,8 @@
   "An unexpected error occurred.": {
     "message": "An unexpected error occurred.",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:5242",
-      "apps/web/src/components/Sidebar.tsx:5276"
+      "apps/web/src/components/Sidebar.tsx:5219",
+      "apps/web/src/components/Sidebar.tsx:5253"
     ]
   },
   "An unexpected router error occurred.": {
@@ -1151,8 +1151,8 @@
   "Archive": {
     "message": "Archive",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:1253",
-      "apps/web/src/components/Sidebar.tsx:976",
+      "apps/web/src/components/Sidebar.tsx:1254",
+      "apps/web/src/components/Sidebar.tsx:977",
       "apps/web/src/components/settings/SettingsPanels.tsx:2746",
       "apps/web/src/components/settings/settingsSearchIndex.ts:732"
     ]
@@ -1176,8 +1176,8 @@
   "Archive {value0}": {
     "message": "Archive {value0}",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:937",
-      "apps/web/src/components/Sidebar.tsx:960"
+      "apps/web/src/components/Sidebar.tsx:938",
+      "apps/web/src/components/Sidebar.tsx:961"
     ]
   },
   "Archived {archived} · Created {created}": {
@@ -1614,7 +1614,7 @@
   },
   "Browse": {
     "message": "Browse",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3419"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3420"]
   },
   "Browse a folder on disk": {
     "message": "Browse a folder on disk",
@@ -1767,7 +1767,7 @@
   },
   "Cafe Code on GitHub": {
     "message": "Cafe Code on GitHub",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4340"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:4341"]
   },
   "Cafe Code splash screen": {
     "message": "Cafe Code splash screen",
@@ -1942,9 +1942,9 @@
       "apps/web/src/components/ProjectScriptsControl.tsx:531",
       "apps/web/src/components/ProviderUsageResetButton.tsx:308",
       "apps/web/src/components/PullRequestThreadDialog.tsx:324",
-      "apps/web/src/components/Sidebar.tsx:3306",
-      "apps/web/src/components/Sidebar.tsx:3450",
-      "apps/web/src/components/Sidebar.tsx:3555",
+      "apps/web/src/components/Sidebar.tsx:3307",
+      "apps/web/src/components/Sidebar.tsx:3451",
+      "apps/web/src/components/Sidebar.tsx:3556",
       "apps/web/src/components/ThreadMetadataDialog.tsx:304",
       "apps/web/src/components/ThreadMoveDialog.tsx:227",
       "apps/web/src/components/ThreadSecretsDialog.tsx:683",
@@ -2130,13 +2130,13 @@
   "Chat title": {
     "message": "Chat title",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:850",
-      "apps/web/src/components/desk/DeskSidebar.tsx:272"
+      "apps/web/src/components/Sidebar.tsx:851",
+      "apps/web/src/components/desk/DeskSidebar.tsx:285"
     ]
   },
   "Chat title can''t be empty": {
     "message": "Chat title can''t be empty",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2753"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2754"]
   },
   "Chat title can't be empty.": {
     "message": "Chat title can't be empty.",
@@ -2171,8 +2171,8 @@
     "locations": [
       "apps/web/src/components/CommandPalette.logic.ts:162",
       "apps/web/src/components/CommandPalette.logic.ts:271",
-      "apps/web/src/components/Sidebar.tsx:1427",
-      "apps/web/src/components/Sidebar.tsx:1435",
+      "apps/web/src/components/Sidebar.tsx:1428",
+      "apps/web/src/components/Sidebar.tsx:1436",
       "apps/web/src/components/settings/SettingsPanels.tsx:1233",
       "apps/web/src/components/settings/SettingsPanels.tsx:2845",
       "apps/web/src/components/settings/SettingsPanels.tsx:3281",
@@ -2224,12 +2224,12 @@
   },
   "Check the chat title and reconnect to its environment before trying again.": {
     "message": "Check the chat title and reconnect to its environment before trying again.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:1144"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:1145"]
   },
   "Check the chat's connection and current activity before trying again.": {
     "message": "Check the chat's connection and current activity before trying again.",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:1168",
+      "apps/web/src/components/Sidebar.tsx:1169",
       "apps/web/src/components/desk/useDeskChatActions.ts:176"
     ]
   },
@@ -2302,7 +2302,7 @@
   },
   "Checking saved and provider history…": {
     "message": "Checking saved and provider history…",
-    "locations": ["apps/web/src/components/Sidebar.tsx:498"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:499"]
   },
   "Checking sign-in status…": {
     "message": "Checking sign-in status…",
@@ -2389,11 +2389,11 @@
   },
   "Choose how this project should be grouped in the sidebar.": {
     "message": "Choose how this project should be grouped in the sidebar.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3483"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3484"]
   },
   "Choose how {value0} should be grouped in the sidebar.": {
     "message": "Choose how {value0} should be grouped in the sidebar.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3475"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3476"]
   },
   "Choose icon": {
     "message": "Choose icon",
@@ -2488,7 +2488,7 @@
     "locations": [
       "apps/web/src/components/chat/ChatComposer.tsx:630",
       "apps/web/src/components/chat/ThreadGoalControl.tsx:433",
-      "apps/web/src/components/desk/DeskSidebar.tsx:668",
+      "apps/web/src/components/desk/DeskSidebar.tsx:683",
       "apps/web/src/components/settings/ProviderInstanceCard.tsx:310"
     ]
   },
@@ -2502,7 +2502,7 @@
   },
   "Clear desk": {
     "message": "Clear desk",
-    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:664"]
+    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:679"]
   },
   "Clear saved end date": {
     "message": "Clear saved end date",
@@ -2611,7 +2611,7 @@
     "message": "Close",
     "locations": [
       "apps/web/src/components/CommandPalette.tsx:1829",
-      "apps/web/src/components/Sidebar.tsx:556",
+      "apps/web/src/components/Sidebar.tsx:557",
       "apps/web/src/components/chat/GlideSetupDialog.tsx:294",
       "apps/web/src/components/settings/CodexDeviceLoginDialog.tsx:277",
       "apps/web/src/components/settings/GeminiRemoteLoginDialog.tsx:447",
@@ -2638,7 +2638,7 @@
   },
   "Close an open tab and try again.": {
     "message": "Close an open tab and try again.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4659"]
+    "locations": ["apps/web/src/components/desk/useOpenDeskSidebarChat.ts:29"]
   },
   "Close dictation": {
     "message": "Close dictation",
@@ -2650,7 +2650,7 @@
   },
   "Close idle chats": {
     "message": "Close idle chats",
-    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:673"]
+    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:688"]
   },
   "Close image preview": {
     "message": "Close image preview",
@@ -2670,21 +2670,21 @@
   "Close tab": {
     "message": "Close tab",
     "locations": [
-      "apps/web/src/components/desk/DeskSidebar.tsx:202",
+      "apps/web/src/components/desk/DeskSidebar.tsx:214",
       "apps/web/src/components/desk/DeskWorkspace.tsx:1072"
     ]
   },
   "Close tab (chat keeps running)": {
     "message": "Close tab (chat keeps running)",
     "locations": [
-      "apps/web/src/components/desk/DeskSidebar.tsx:374",
+      "apps/web/src/components/desk/DeskSidebar.tsx:388",
       "apps/web/src/components/desk/DeskWorkspace.tsx:473"
     ]
   },
   "Close tab {value0}": {
     "message": "Close tab {value0}",
     "locations": [
-      "apps/web/src/components/desk/DeskSidebar.tsx:360",
+      "apps/web/src/components/desk/DeskSidebar.tsx:374",
       "apps/web/src/components/desk/DeskWorkspace.tsx:465"
     ]
   },
@@ -3073,15 +3073,15 @@
   },
   "Configure additional directories…": {
     "message": "Configure additional directories…",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2443"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2444"]
   },
   "Configure directories available to agents for {value0}.": {
     "message": "Configure directories available to agents for {value0}.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3330"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3331"]
   },
   "Configure directories available to agents.": {
     "message": "Configure directories available to agents.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3338"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3339"]
   },
   "Configured": {
     "message": "Configured",
@@ -3089,11 +3089,11 @@
   },
   "Confirm": {
     "message": "Confirm",
-    "locations": ["apps/web/src/components/Sidebar.tsx:929"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:930"]
   },
   "Confirm archive {value0}": {
     "message": "Confirm archive {value0}",
-    "locations": ["apps/web/src/components/Sidebar.tsx:919"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:920"]
   },
   "Confirm chat archiving": {
     "message": "Confirm chat archiving",
@@ -3436,7 +3436,7 @@
   },
   "Copy Project Path": {
     "message": "Copy Project Path",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2451"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2452"]
   },
   "Copy a file from this command": {
     "message": "Copy a file from this command",
@@ -3446,7 +3446,7 @@
     "message": "Copy chat ID",
     "locations": [
       "apps/web/src/components/Sidebar.logic.ts:75",
-      "apps/web/src/components/Sidebar.tsx:1250",
+      "apps/web/src/components/Sidebar.tsx:1251",
       "apps/web/src/components/desk/useDeskChatActions.ts:35"
     ]
   },
@@ -3642,8 +3642,8 @@
   "Could not archive chat": {
     "message": "Could not archive chat",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:1167",
-      "apps/web/src/components/Sidebar.tsx:2719",
+      "apps/web/src/components/Sidebar.tsx:1168",
+      "apps/web/src/components/Sidebar.tsx:2720",
       "apps/web/src/hooks/useThreadActions.ts:388"
     ]
   },
@@ -3696,7 +3696,7 @@
   },
   "Could not copy path": {
     "message": "Could not copy path",
-    "locations": ["apps/web/src/components/Sidebar.tsx:1741"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:1742"]
   },
   "Could not copy plan": {
     "message": "Could not copy plan",
@@ -3725,7 +3725,7 @@
     "message": "Could not create chat",
     "locations": [
       "apps/web/src/components/NoActiveThreadState.tsx:36",
-      "apps/web/src/components/Sidebar.tsx:4625",
+      "apps/web/src/components/Sidebar.tsx:4626",
       "apps/web/src/components/sidebar/ContentSidebarNewChatButton.tsx:29"
     ]
   },
@@ -3736,7 +3736,7 @@
   "Could not delete chat": {
     "message": "Could not delete chat",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:1195",
+      "apps/web/src/components/Sidebar.tsx:1196",
       "apps/web/src/components/settings/SettingsPanels.tsx:3147"
     ]
   },
@@ -3749,7 +3749,7 @@
   },
   "Could not delete selected chats": {
     "message": "Could not delete selected chats",
-    "locations": ["apps/web/src/components/Sidebar.tsx:1353"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:1354"]
   },
   "Could not disable password authentication": {
     "message": "Could not disable password authentication",
@@ -3758,7 +3758,7 @@
   "Could not download update": {
     "message": "Could not download update",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:5229",
+      "apps/web/src/components/Sidebar.tsx:5206",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:107"
     ]
   },
@@ -3789,8 +3789,8 @@
   "Could not install update": {
     "message": "Could not install update",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:5263",
-      "apps/web/src/components/Sidebar.tsx:5272",
+      "apps/web/src/components/Sidebar.tsx:5240",
+      "apps/web/src/components/Sidebar.tsx:5249",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:140",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:149"
     ]
@@ -3832,17 +3832,17 @@
   },
   "Could not open chat": {
     "message": "Could not open chat",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4658"]
+    "locations": ["apps/web/src/components/desk/useOpenDeskSidebarChat.ts:28"]
   },
   "Could not open pull request link": {
     "message": "Could not open pull request link",
-    "locations": ["apps/web/src/components/Sidebar.tsx:1765"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:1766"]
   },
   "Could not open release": {
     "message": "Could not open release",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:5183",
-      "apps/web/src/components/Sidebar.tsx:5195",
+      "apps/web/src/components/Sidebar.tsx:5160",
+      "apps/web/src/components/Sidebar.tsx:5172",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:70",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:82"
     ]
@@ -3902,7 +3902,7 @@
   },
   "Could not remove \"{value0}\"": {
     "message": "Could not remove \"{value0}\"",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2179"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2180"]
   },
   "Could not remove this saved environment. Try again.": {
     "message": "Could not remove this saved environment. Try again.",
@@ -3915,15 +3915,15 @@
   "Could not rename chat": {
     "message": "Could not rename chat",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:1143",
-      "apps/web/src/components/Sidebar.tsx:2769"
+      "apps/web/src/components/Sidebar.tsx:1144",
+      "apps/web/src/components/Sidebar.tsx:2770"
     ]
   },
   "Could not rename project": {
     "message": "Could not rename project",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:2807",
-      "apps/web/src/components/Sidebar.tsx:2832"
+      "apps/web/src/components/Sidebar.tsx:2808",
+      "apps/web/src/components/Sidebar.tsx:2833"
     ]
   },
   "Could not rename this chat.": {
@@ -3932,13 +3932,13 @@
   },
   "Could not rename this chat. Check the connection and press Enter to retry.": {
     "message": "Could not rename this chat. Check the connection and press Enter to retry.",
-    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:179"]
+    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:190"]
   },
   "Could not repair chat": {
     "message": "Could not repair chat",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:2963",
-      "apps/web/src/components/Sidebar.tsx:548"
+      "apps/web/src/components/Sidebar.tsx:2964",
+      "apps/web/src/components/Sidebar.tsx:549"
     ]
   },
   "Could not resolve {ref}.": {
@@ -4058,7 +4058,7 @@
   "Could not start update download": {
     "message": "Could not start update download",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:5238",
+      "apps/web/src/components/Sidebar.tsx:5215",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:116"
     ]
   },
@@ -4280,8 +4280,8 @@
   "Created at": {
     "message": "Created at",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:276",
-      "apps/web/src/components/Sidebar.tsx:287"
+      "apps/web/src/components/Sidebar.tsx:277",
+      "apps/web/src/components/Sidebar.tsx:288"
     ]
   },
   "Created by": {
@@ -4568,7 +4568,7 @@
   },
   "Decrease visible chat count": {
     "message": "Decrease visible chat count",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3690"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3691"]
   },
   "Default": {
     "message": "Default",
@@ -4678,7 +4678,7 @@
   },
   "Delete anyway": {
     "message": "Delete anyway",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2253"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2254"]
   },
   "Delete chat \"{title}\" permanently?": {
     "message": "Delete chat \"{title}\" permanently?",
@@ -4705,7 +4705,7 @@
   },
   "Delete its chats first, or delete the project anyway.": {
     "message": "Delete its chats first, or delete the project anyway.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2245"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2246"]
   },
   "Delete permanently…": {
     "message": "Delete permanently…",
@@ -4791,7 +4791,7 @@
   "Desk": {
     "message": "Desk",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:3964",
+      "apps/web/src/components/Sidebar.tsx:3965",
       "apps/web/src/components/settings/SidebarAppearanceSettings.tsx:320",
       "apps/web/src/components/settings/SidebarAppearanceSettings.tsx:330",
       "apps/web/src/components/settings/settingsReset.ts:31",
@@ -4800,7 +4800,7 @@
   },
   "Desk open chats": {
     "message": "Desk open chats",
-    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:627"]
+    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:642"]
   },
   "Desktop": {
     "message": "Desktop",
@@ -4834,7 +4834,7 @@
   "Details": {
     "message": "Details",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:528",
+      "apps/web/src/components/Sidebar.tsx:529",
       "apps/web/src/components/chat/ScheduledFollowupNotices.tsx:316"
     ]
   },
@@ -5135,7 +5135,7 @@
   },
   "Download ARM build": {
     "message": "Download ARM build",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4159"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:4160"]
   },
   "Download HTML": {
     "message": "Download HTML",
@@ -5203,7 +5203,7 @@
     "message": "Duplicate chat",
     "locations": [
       "apps/web/src/components/Sidebar.logic.ts:72",
-      "apps/web/src/components/Sidebar.tsx:1242",
+      "apps/web/src/components/Sidebar.tsx:1243",
       "apps/web/src/components/desk/useDeskChatActions.ts:31"
     ]
   },
@@ -5265,7 +5265,7 @@
     "message": "Edit metadata…",
     "locations": [
       "apps/web/src/components/Sidebar.logic.ts:71",
-      "apps/web/src/components/Sidebar.tsx:1238"
+      "apps/web/src/components/Sidebar.tsx:1239"
     ]
   },
   "Edit queued message": {
@@ -5665,7 +5665,7 @@
   },
   "Environment: <slot1></slot1>": {
     "message": "Environment: <slot1></slot1>",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3297"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3298"]
   },
   "Error": {
     "message": "Error",
@@ -5730,7 +5730,7 @@
   },
   "Every project path gets its own sidebar row.": {
     "message": "Every project path gets its own sidebar row.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:348"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:349"]
   },
   "Every run": {
     "message": "Every run",
@@ -5968,7 +5968,7 @@
   },
   "Failed to force remove \"{value0}\"": {
     "message": "Failed to force remove \"{value0}\"",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2214"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2215"]
   },
   "Failed to interrupt active turn.": {
     "message": "Failed to interrupt active turn.",
@@ -6024,8 +6024,8 @@
   "Failed to remove \"{value0}\"": {
     "message": "Failed to remove \"{value0}\"",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:2274",
-      "apps/web/src/components/Sidebar.tsx:2339"
+      "apps/web/src/components/Sidebar.tsx:2275",
+      "apps/web/src/components/Sidebar.tsx:2340"
     ]
   },
   "Failed to resend message.": {
@@ -6386,11 +6386,11 @@
   },
   "Force remove": {
     "message": "Force remove",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2188"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2189"]
   },
   "Force remove project \"{name}\"?\nPath: {path}\n{hasEnvironment, select, yes {Environment: {environment}\n} other {}}This project still has hidden or stale chats attached to it.\nThis removes the project entry and any chats still attached to it.\nThis action cannot be undone.": {
     "message": "Force remove project \"{name}\"?\nPath: {path}\n{hasEnvironment, select, yes {Environment: {environment}\n} other {}}This project still has hidden or stale chats attached to it.\nThis removes the project entry and any chats still attached to it.\nThis action cannot be undone.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2153"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2154"]
   },
   "Fork from this message": {
     "message": "Fork from this message",
@@ -6540,7 +6540,7 @@
   },
   "Go to chats": {
     "message": "Go to chats",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3822"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3823"]
   },
   "Goal": {
     "message": "Goal",
@@ -6638,26 +6638,26 @@
   },
   "Group by repository": {
     "message": "Group by repository",
-    "locations": ["apps/web/src/components/Sidebar.tsx:308"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:309"]
   },
   "Group by repository path": {
     "message": "Group by repository path",
-    "locations": ["apps/web/src/components/Sidebar.tsx:311"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:312"]
   },
   "Group name": {
     "message": "Group name",
     "locations": [
-      "apps/web/src/components/desk/DeskSidebar.tsx:472",
+      "apps/web/src/components/desk/DeskSidebar.tsx:487",
       "apps/web/src/components/desk/DeskWorkspace.tsx:1563"
     ]
   },
   "Group projects": {
     "message": "Group projects",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3712"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3713"]
   },
   "Grouping rule": {
     "message": "Grouping rule",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3494"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3495"]
   },
   "Groups": {
     "message": "Groups",
@@ -6727,7 +6727,7 @@
   },
   "Hide project": {
     "message": "Hide project",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2459"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2460"]
   },
   "Hide runs": {
     "message": "Hide runs",
@@ -6919,7 +6919,7 @@
   },
   "Increase visible chat count": {
     "message": "Increase visible chat count",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3702"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3703"]
   },
   "Individual spend limit": {
     "message": "Individual spend limit",
@@ -6966,7 +6966,7 @@
   },
   "Install ARM build": {
     "message": "Install ARM build",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4162"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:4163"]
   },
   "Install Git on the server, then rescan.": {
     "message": "Install Git on the server, then rescan.",
@@ -7031,7 +7031,7 @@
   "Intel build on Apple Silicon": {
     "message": "Intel build on Apple Silicon",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:4147",
+      "apps/web/src/components/Sidebar.tsx:4148",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:168"
     ]
   },
@@ -7194,7 +7194,7 @@
   },
   "Keep separate": {
     "message": "Keep separate",
-    "locations": ["apps/web/src/components/Sidebar.tsx:314"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:315"]
   },
   "Keep this Mac awake while local chats or background agents work, including with the lid closed. The screen can sleep. Pauses at 20% battery or below.": {
     "message": "Keep this Mac awake while local chats or background agents work, including with the lid closed. The screen can sleep. Pauses at 20% battery or below.",
@@ -7323,8 +7323,8 @@
   "Last user message": {
     "message": "Last user message",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:273",
-      "apps/web/src/components/Sidebar.tsx:284"
+      "apps/web/src/components/Sidebar.tsx:274",
+      "apps/web/src/components/Sidebar.tsx:285"
     ]
   },
   "Later": {
@@ -7442,7 +7442,7 @@
   },
   "Links can''t be opened here": {
     "message": "Links can''t be opened here",
-    "locations": ["apps/web/src/components/Sidebar.tsx:1755"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:1756"]
   },
   "Lint": {
     "message": "Lint",
@@ -7574,7 +7574,7 @@
   },
   "Local checks": {
     "message": "Local checks",
-    "locations": ["apps/web/src/components/Sidebar.tsx:532"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:533"]
   },
   "Local environment": {
     "message": "Local environment",
@@ -7666,7 +7666,7 @@
     "message": "Manual",
     "locations": [
       "apps/desktop/src/backend/DesktopServerExposure.ts:74",
-      "apps/web/src/components/Sidebar.tsx:279"
+      "apps/web/src/components/Sidebar.tsx:280"
     ]
   },
   "Manual setup key": {
@@ -7799,7 +7799,7 @@
   },
   "Messages": {
     "message": "Messages",
-    "locations": ["apps/web/src/components/Sidebar.tsx:507"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:508"]
   },
   "Meta": {
     "message": "Meta",
@@ -7960,7 +7960,7 @@
   },
   "Move \"{title}\" to the Recycle Bin?\nYou can review it later in Settings '>' Recently Deleted.": {
     "message": "Move \"{title}\" to the Recycle Bin?\nYou can review it later in Settings '>' Recently Deleted.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3082"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3083"]
   },
   "Move chat": {
     "message": "Move chat",
@@ -7982,7 +7982,7 @@
     "message": "Move to Recycle Bin",
     "locations": [
       "apps/web/src/components/Sidebar.logic.ts:87",
-      "apps/web/src/components/Sidebar.tsx:1259",
+      "apps/web/src/components/Sidebar.tsx:1260",
       "apps/web/src/components/desk/useDeskChatActions.ts:38",
       "apps/web/src/components/settings/SettingsPanels.tsx:2788"
     ]
@@ -7990,15 +7990,15 @@
   "Move to Recycle Bin ({value0})": {
     "message": "Move to Recycle Bin ({value0})",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:1315",
-      "apps/web/src/components/Sidebar.tsx:2575"
+      "apps/web/src/components/Sidebar.tsx:1316",
+      "apps/web/src/components/Sidebar.tsx:2576"
     ]
   },
   "Move to project…": {
     "message": "Move to project…",
     "locations": [
       "apps/web/src/components/Sidebar.logic.ts:73",
-      "apps/web/src/components/Sidebar.tsx:1247",
+      "apps/web/src/components/Sidebar.tsx:1248",
       "apps/web/src/components/desk/useDeskChatActions.ts:34"
     ]
   },
@@ -8009,8 +8009,8 @@
   "Move {count} {count, plural, one {chat} other {chats}} to the Recycle Bin?\nYou can review them later in Settings '>' Recently Deleted.": {
     "message": "Move {count} {count, plural, one {chat} other {chats}} to the Recycle Bin?\nYou can review them later in Settings '>' Recently Deleted.",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:1330",
-      "apps/web/src/components/Sidebar.tsx:2586"
+      "apps/web/src/components/Sidebar.tsx:1331",
+      "apps/web/src/components/Sidebar.tsx:2587"
     ]
   },
   "Move {value0} down": {
@@ -8169,7 +8169,7 @@
       "apps/web/src/components/ChatView.tsx:6527",
       "apps/web/src/components/CommandPalette.tsx:920",
       "apps/web/src/components/NoActiveThreadState.tsx:75",
-      "apps/web/src/components/Sidebar.tsx:3211",
+      "apps/web/src/components/Sidebar.tsx:3212",
       "apps/web/src/components/desk/useDeskTabMetadata.ts:26",
       "apps/web/src/components/sidebar/ContentSidebarNewChatButton.tsx:43",
       "apps/web/src/components/sidebar/SidebarNewChatButton.tsx:17",
@@ -8178,7 +8178,7 @@
   },
   "New chat ({value0})": {
     "message": "New chat ({value0})",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3205"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3206"]
   },
   "New chat defaults": {
     "message": "New chat defaults",
@@ -8190,11 +8190,11 @@
   },
   "New chat in active tab group": {
     "message": "New chat in active tab group",
-    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:653"]
+    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:668"]
   },
   "New chat in {value0}": {
     "message": "New chat in {value0}",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3188"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3189"]
   },
   "New chat in…": {
     "message": "New chat in…",
@@ -8346,7 +8346,7 @@
   },
   "No additional directories configured.": {
     "message": "No additional directories configured.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3386"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3387"]
   },
   "No additional error details are available.": {
     "message": "No additional error details are available.",
@@ -8379,8 +8379,8 @@
   "No chats yet": {
     "message": "No chats yet",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:1466",
-      "apps/web/src/components/Sidebar.tsx:1612"
+      "apps/web/src/components/Sidebar.tsx:1467",
+      "apps/web/src/components/Sidebar.tsx:1613"
     ]
   },
   "No child processes running.": {
@@ -8425,7 +8425,7 @@
   },
   "No folder to copy": {
     "message": "No folder to copy",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3053"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3054"]
   },
   "No generating time": {
     "message": "No generating time",
@@ -8498,7 +8498,7 @@
   },
   "No open chats": {
     "message": "No open chats",
-    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:775"]
+    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:855"]
   },
   "No orchestrator data.": {
     "message": "No orchestrator data.",
@@ -8530,7 +8530,7 @@
   },
   "No projects yet": {
     "message": "No projects yet",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4317"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:4318"]
   },
   "No provider daemon data.": {
     "message": "No provider daemon data.",
@@ -9020,8 +9020,8 @@
   "Open chats": {
     "message": "Open chats",
     "locations": [
-      "apps/web/src/components/desk/DeskSidebar.tsx:638",
-      "apps/web/src/components/desk/DeskSidebar.tsx:647"
+      "apps/web/src/components/desk/DeskSidebar.tsx:653",
+      "apps/web/src/components/desk/DeskSidebar.tsx:662"
     ]
   },
   "Open file": {
@@ -9089,8 +9089,8 @@
   "Open the Cafe Code releases page in your browser to install the DMG.": {
     "message": "Open the Cafe Code releases page in your browser to install the DMG.",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:5184",
-      "apps/web/src/components/Sidebar.tsx:5196",
+      "apps/web/src/components/Sidebar.tsx:5161",
+      "apps/web/src/components/Sidebar.tsx:5173",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:71",
       "apps/web/src/components/sidebar/SidebarUpdatePill.tsx:83"
     ]
@@ -9797,7 +9797,7 @@
   },
   "Primary directory": {
     "message": "Primary directory",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3349"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3350"]
   },
   "Primary window": {
     "message": "Primary window",
@@ -9881,23 +9881,23 @@
   },
   "Project API unavailable.": {
     "message": "Project API unavailable.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2898"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2899"]
   },
   "Project grouping": {
     "message": "Project grouping",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3472"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3473"]
   },
   "Project grouping rule": {
     "message": "Project grouping rule",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3511"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3512"]
   },
   "Project grouping…": {
     "message": "Project grouping…",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2447"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2448"]
   },
   "Project is not empty": {
     "message": "Project is not empty",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2244"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2245"]
   },
   "Project metadata is not loaded yet.": {
     "message": "Project metadata is not loaded yet.",
@@ -9910,13 +9910,13 @@
   "Project title": {
     "message": "Project title",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:3281",
-      "apps/web/src/components/Sidebar.tsx:3284"
+      "apps/web/src/components/Sidebar.tsx:3282",
+      "apps/web/src/components/Sidebar.tsx:3285"
     ]
   },
   "Project title cannot be empty": {
     "message": "Project title cannot be empty",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2792"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2793"]
   },
   "Projection sequence": {
     "message": "Projection sequence",
@@ -9931,8 +9931,8 @@
     "locations": [
       "apps/web/src/components/CommandPalette.logic.ts:264",
       "apps/web/src/components/CommandPalette.tsx:965",
-      "apps/web/src/components/Sidebar.tsx:3970",
-      "apps/web/src/components/Sidebar.tsx:4177"
+      "apps/web/src/components/Sidebar.tsx:3971",
+      "apps/web/src/components/Sidebar.tsx:4178"
     ]
   },
   "Projects & workspaces": {
@@ -9944,11 +9944,11 @@
   },
   "Projects from the same repository share one sidebar row.": {
     "message": "Projects from the same repository share one sidebar row.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:344"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:345"]
   },
   "Projects group only when both the repository and repo-relative path match.": {
     "message": "Projects group only when both the repository and repo-relative path match.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:346"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:347"]
   },
   "Proposed by an agent — review before enabling.": {
     "message": "Proposed by an agent — review before enabling.",
@@ -10386,26 +10386,26 @@
   },
   "Reconnect to a compatible Cafe server before trying again.": {
     "message": "Reconnect to a compatible Cafe server before trying again.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4627"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:4628"]
   },
   "Reconnect to a compatible local Cafe environment before trying again.": {
     "message": "Reconnect to a compatible local Cafe environment before trying again.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4633"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:4634"]
   },
   "Reconnect to the chat''s environment and try again.": {
     "message": "Reconnect to the chat''s environment and try again.",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:2964",
+      "apps/web/src/components/Sidebar.tsx:2965",
       "apps/web/src/hooks/useThreadActions.ts:127"
     ]
   },
   "Reconnect to the chat''s environment before trying again.": {
     "message": "Reconnect to the chat''s environment before trying again.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:1196"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:1197"]
   },
   "Reconnect to the project''s environment and try again.": {
     "message": "Reconnect to the project''s environment and try again.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2808"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2809"]
   },
   "Reconnect to the selected Cafe server before trying again.": {
     "message": "Reconnect to the selected Cafe server before trying again.",
@@ -10520,7 +10520,7 @@
   },
   "Redundant directories": {
     "message": "Redundant directories",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3428"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3429"]
   },
   "Refine": {
     "message": "Refine",
@@ -10729,15 +10729,15 @@
   },
   "Remove project": {
     "message": "Remove project",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2461"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2462"]
   },
   "Remove project \"{name}\" and delete its {count} {count, plural, one {chat} other {chats}}?\nPath: {path}\n{hasEnvironment, select, yes {Environment: {environment}\n} other {}}This permanently clears conversation history for those chats.\nThis removes only this project entry.\nThis action cannot be undone.": {
     "message": "Remove project \"{name}\" and delete its {count} {count, plural, one {chat} other {chats}}?\nPath: {path}\n{hasEnvironment, select, yes {Environment: {environment}\n} other {}}This permanently clears conversation history for those chats.\nThis removes only this project entry.\nThis action cannot be undone.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2141"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2142"]
   },
   "Remove project \"{name}\"?\nPath: {path}\n{hasEnvironment, select, yes {Environment: {environment}\n} other {}}This removes only this project entry.": {
     "message": "Remove project \"{name}\"?\nPath: {path}\n{hasEnvironment, select, yes {Environment: {environment}\n} other {}}This removes only this project entry.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2291"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2292"]
   },
   "Remove queued message": {
     "message": "Remove queued message",
@@ -10762,7 +10762,7 @@
   "Remove {value0}": {
     "message": "Remove {value0}",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:3371",
+      "apps/web/src/components/Sidebar.tsx:3372",
       "apps/web/src/components/chat/ChatComposer.tsx:4466",
       "apps/web/src/components/chat/FileAttachmentPill.tsx:115",
       "apps/web/src/components/chat/FileAttachmentPill.tsx:215",
@@ -10771,13 +10771,13 @@
   },
   "Rename": {
     "message": "Rename",
-    "locations": ["apps/web/src/components/Sidebar.tsx:1235"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:1236"]
   },
   "Rename (F2)": {
     "message": "Rename (F2)",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:909",
-      "apps/web/src/components/desk/DeskSidebar.tsx:351"
+      "apps/web/src/components/Sidebar.tsx:910",
+      "apps/web/src/components/desk/DeskSidebar.tsx:364"
     ]
   },
   "Rename chat": {
@@ -10790,7 +10790,7 @@
   "Rename chat…": {
     "message": "Rename chat…",
     "locations": [
-      "apps/web/src/components/desk/DeskSidebar.tsx:199",
+      "apps/web/src/components/desk/DeskSidebar.tsx:210",
       "apps/web/src/components/desk/DeskWorkspace.tsx:1068"
     ]
   },
@@ -10800,11 +10800,11 @@
   },
   "Rename group (F2)": {
     "message": "Rename group (F2)",
-    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:537"]
+    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:552"]
   },
   "Rename group {value0}": {
     "message": "Rename group {value0}",
-    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:523"]
+    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:538"]
   },
   "Rename group…": {
     "message": "Rename group…",
@@ -10813,8 +10813,8 @@
   "Rename project": {
     "message": "Rename project",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:2440",
-      "apps/web/src/components/Sidebar.tsx:3266"
+      "apps/web/src/components/Sidebar.tsx:2441",
+      "apps/web/src/components/Sidebar.tsx:3267"
     ]
   },
   "Rename tab group": {
@@ -10824,8 +10824,8 @@
   "Rename {value0}": {
     "message": "Rename {value0}",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:890",
-      "apps/web/src/components/desk/DeskSidebar.tsx:337"
+      "apps/web/src/components/Sidebar.tsx:891",
+      "apps/web/src/components/desk/DeskSidebar.tsx:350"
     ]
   },
   "Rendering diagram": {
@@ -10845,19 +10845,19 @@
   },
   "Repair chat messages": {
     "message": "Repair chat messages",
-    "locations": ["apps/web/src/components/Sidebar.tsx:479"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:480"]
   },
   "Repair progress": {
     "message": "Repair progress",
-    "locations": ["apps/web/src/components/Sidebar.tsx:492"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:493"]
   },
   "Repaired": {
     "message": "Repaired",
-    "locations": ["apps/web/src/components/Sidebar.tsx:511"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:512"]
   },
   "Repairing the selected chat.": {
     "message": "Repairing the selected chat.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:484"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:485"]
   },
   "Repeat": {
     "message": "Repeat",
@@ -11090,7 +11090,7 @@
   },
   "Restart the app from the update button to install it.": {
     "message": "Restart the app from the update button to install it.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:5215"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:5192"]
   },
   "Restart the server so other devices on your network can reach it.": {
     "message": "Restart the server so other devices on your network can reach it.",
@@ -11504,9 +11504,9 @@
   "Save": {
     "message": "Save",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:3309",
-      "apps/web/src/components/Sidebar.tsx:3456",
-      "apps/web/src/components/Sidebar.tsx:3558",
+      "apps/web/src/components/Sidebar.tsx:3310",
+      "apps/web/src/components/Sidebar.tsx:3457",
+      "apps/web/src/components/Sidebar.tsx:3559",
       "apps/web/src/components/ThreadMetadataDialog.tsx:311",
       "apps/web/src/components/ThreadSecretsDialog.tsx:687",
       "apps/web/src/components/chat/CodexContextWindowControl.tsx:238",
@@ -11803,7 +11803,7 @@
   },
   "Search": {
     "message": "Search",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4130"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:4131"]
   },
   "Search commands, projects and chats…": {
     "message": "Search commands, projects and chats…",
@@ -11888,7 +11888,7 @@
     "message": "Secrets…",
     "locations": [
       "apps/web/src/components/Sidebar.logic.ts:76",
-      "apps/web/src/components/Sidebar.tsx:1256",
+      "apps/web/src/components/Sidebar.tsx:1257",
       "apps/web/src/components/desk/useDeskChatActions.ts:36"
     ]
   },
@@ -12324,7 +12324,7 @@
   },
   "Show project": {
     "message": "Show project",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2458"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2459"]
   },
   "Show replies while they are being written.": {
     "message": "Show replies while they are being written.",
@@ -12422,7 +12422,7 @@
   },
   "Sidebar options": {
     "message": "Sidebar options",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3627"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3628"]
   },
   "Sidebar search": {
     "message": "Sidebar search",
@@ -12446,7 +12446,7 @@
   },
   "Sidebar view": {
     "message": "Sidebar view",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4106"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:4107"]
   },
   "Sign in to Codex on this server using a browser on your device.": {
     "message": "Sign in to Codex on this server using a browser on your device.",
@@ -12560,7 +12560,7 @@
   "Skipped": {
     "message": "Skipped",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:519",
+      "apps/web/src/components/Sidebar.tsx:520",
       "apps/web/src/components/chat/ComposerPendingUserInputPanel.tsx:322",
       "apps/web/src/components/chat/ScheduledFollowups.tsx:130"
     ]
@@ -12595,7 +12595,7 @@
   },
   "Some chats may remain. Reconnect before trying again.": {
     "message": "Some chats may remain. Reconnect before trying again.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:1354"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:1355"]
   },
   "Some messages couldn’t be loaded.": {
     "message": "Some messages couldn’t be loaded.",
@@ -12623,11 +12623,11 @@
   },
   "Sort chats": {
     "message": "Sort chats",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3654"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3655"]
   },
   "Sort projects": {
     "message": "Sort projects",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3633"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3634"]
   },
   "Source": {
     "message": "Source",
@@ -12732,7 +12732,7 @@
   },
   "Standalone chats": {
     "message": "Standalone chats",
-    "locations": ["apps/web/src/components/Sidebar.tsx:1419"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:1420"]
   },
   "Standard": {
     "message": "Standard",
@@ -12763,7 +12763,7 @@
   },
   "Start by adding your first project": {
     "message": "Start by adding your first project",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4216"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:4217"]
   },
   "Start dictation": {
     "message": "Start dictation",
@@ -13667,7 +13667,7 @@
   },
   "The repair request failed.": {
     "message": "The repair request failed.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2989"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2990"]
   },
   "The report describes the provider checks shown above. Local chat storage and external tools are outside inference encryption.": {
     "message": "The report describes the provider checks shown above. Local chat storage and external tools are outside inference encryption.",
@@ -13987,7 +13987,7 @@
   },
   "This chat has no workspace folder.": {
     "message": "This chat has no workspace folder.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3054"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3055"]
   },
   "This chat is the only one using this worktree:": {
     "message": "This chat is the only one using this worktree:",
@@ -14105,7 +14105,7 @@
   },
   "This project still has hidden or stale chats. Force remove clears them too.": {
     "message": "This project still has hidden or stale chats. Force remove clears them too.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2322"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2323"]
   },
   "This provider (<slot1></slot1>) isn''t in this version of Cafe Code. Its settings are kept but can''t be edited here.": {
     "message": "This provider (<slot1></slot1>) isn''t in this version of Cafe Code. Its settings are kept but can''t be edited here.",
@@ -14677,7 +14677,7 @@
   },
   "Unable to save directories": {
     "message": "Unable to save directories",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3438"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3439"]
   },
   "Unable to save keybinding": {
     "message": "Unable to save keybinding",
@@ -14760,7 +14760,7 @@
   },
   "Unknown error force-removing project.": {
     "message": "Unknown error force-removing project.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:2200"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:2201"]
   },
   "Unknown error opening file.": {
     "message": "Unknown error opening file.",
@@ -14769,8 +14769,8 @@
   "Unknown error removing project.": {
     "message": "Unknown error removing project.",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:2265",
-      "apps/web/src/components/Sidebar.tsx:2313"
+      "apps/web/src/components/Sidebar.tsx:2266",
+      "apps/web/src/components/Sidebar.tsx:2314"
     ]
   },
   "Unknown error removing worktree.": {
@@ -14907,7 +14907,7 @@
   },
   "Update downloaded": {
     "message": "Update downloaded",
-    "locations": ["apps/web/src/components/Sidebar.tsx:5214"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:5191"]
   },
   "Update failed": {
     "message": "Update failed",
@@ -14939,7 +14939,7 @@
   },
   "Update the project title.": {
     "message": "Update the project title.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3275"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3276"]
   },
   "Update the server to create a standalone chat": {
     "message": "Update the server to create a standalone chat",
@@ -14954,7 +14954,7 @@
   },
   "Update the title for {value0}.": {
     "message": "Update the title for {value0}.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3269"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3270"]
   },
   "Update this environment to move standalone chats into projects.": {
     "message": "Update this environment to move standalone chats into projects.",
@@ -15062,7 +15062,7 @@
   },
   "Upstream checks": {
     "message": "Upstream checks",
-    "locations": ["apps/web/src/components/Sidebar.tsx:536"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:537"]
   },
   "Uptime": {
     "message": "Uptime",
@@ -15185,11 +15185,11 @@
   },
   "Use global default": {
     "message": "Use global default",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3531"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3532"]
   },
   "Use global default ({value0})": {
     "message": "Use global default ({value0})",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3515"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3516"]
   },
   "Use numbers from {minimum} to {maximum}.": {
     "message": "Use numbers from {minimum} to {maximum}.",
@@ -15354,7 +15354,7 @@
   },
   "Version <slot1></slot1>": {
     "message": "Version <slot1></slot1>",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3833"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3834"]
   },
   "Version control": {
     "message": "Version control",
@@ -15382,7 +15382,7 @@
   },
   "View ARM build": {
     "message": "View ARM build",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4161"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:4162"]
   },
   "View diagnostics": {
     "message": "View diagnostics",
@@ -15407,13 +15407,13 @@
   "Visible chat count": {
     "message": "Visible chat count",
     "locations": [
-      "apps/web/src/components/Sidebar.tsx:3679",
-      "apps/web/src/components/Sidebar.tsx:3694"
+      "apps/web/src/components/Sidebar.tsx:3680",
+      "apps/web/src/components/Sidebar.tsx:3695"
     ]
   },
   "Visible chats": {
     "message": "Visible chats",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3675"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3676"]
   },
   "Visualization actions": {
     "message": "Visualization actions",
@@ -16098,7 +16098,7 @@
   },
   "by cafeai ": {
     "message": "by cafeai ",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4346"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:4347"]
   },
   "change request": {
     "message": "change request",
@@ -17161,7 +17161,7 @@
   },
   "{environment} — {path}": {
     "message": "{environment} — {path}",
-    "locations": ["apps/web/src/components/Sidebar.tsx:334"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:335"]
   },
   "{expired, select, yes {Reset passed} other {Resets}}: {time}": {
     "message": "{expired, select, yes {Reset passed} other {Resets}}: {time}",
@@ -17312,7 +17312,7 @@
   },
   "{path} is inside another configured directory.": {
     "message": "{path} is inside another configured directory.",
-    "locations": ["apps/web/src/components/Sidebar.tsx:3117"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:3118"]
   },
   "{percent} left": {
     "message": "{percent} left",
@@ -17797,7 +17797,7 @@
   },
   "{value0} tab group": {
     "message": "{value0} tab group",
-    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:744"]
+    "locations": ["apps/web/src/components/desk/DeskSidebar.tsx:823"]
   },
   "{value0} tabs": {
     "message": "{value0} tabs",
@@ -17955,7 +17955,7 @@
   },
   "♡": {
     "message": "♡",
-    "locations": ["apps/web/src/components/Sidebar.tsx:4347"]
+    "locations": ["apps/web/src/components/Sidebar.tsx:4348"]
   },
   "💙": {
     "message": "💙",

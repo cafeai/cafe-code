@@ -255,6 +255,7 @@ import {
 } from "../sidebarHiddenProjects";
 import { SidebarTriggerWithUnreadDot } from "./sidebar/unseenCompletions";
 import { DeskSidebar } from "./desk/DeskSidebar";
+import { useOpenDeskSidebarChat } from "./desk/useOpenDeskSidebarChat";
 import { useDeskStore } from "../deskStore";
 import { deskTabKey } from "../deskModel";
 import { renameThread } from "../threadRename";
@@ -4640,31 +4641,7 @@ export default function Sidebar() {
         );
       });
   }, [clearSelection, handleNewStandaloneChat, isMobile, setOpenMobile, remoteWorkspace, uiLocale]);
-  const openStandaloneTarget = useCallback(
-    (target: ThreadRouteTarget, preview = true) => {
-      deskDispatch({
-        type: "open",
-        target,
-        preview: preview && getClientSettings().chatClickBehavior === "preview",
-      });
-      const currentDesk = useDeskStore.getState().desk;
-      const openedGroup = currentDesk.groups[currentDesk.activeGroupId];
-      if (openedGroup?.activeTabKey !== deskTabKey(target)) {
-        // A capped/invalid open is view-only and must not falsely update selection
-        // or bypass the Desk route owner by navigating to an unadmitted target.
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: uiText("Could not open chat", undefined, undefined, uiLocale),
-            description: uiText("Close an open tab and try again.", undefined, undefined, uiLocale),
-          }),
-        );
-        return;
-      }
-      navigateToDeskTarget(target);
-    },
-    [deskDispatch, navigateToDeskTarget, uiLocale],
-  );
+  const openStandaloneTarget = useOpenDeskSidebarChat(navigateToDeskTarget);
 
   const projectDnDSensors = useSensors(
     useSensor(PointerSensor, {

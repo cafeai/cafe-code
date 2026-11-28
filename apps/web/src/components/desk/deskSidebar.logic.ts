@@ -1,5 +1,5 @@
 import { scopedThreadKey } from "@cafecode/client-runtime";
-import type { EnvironmentId } from "@cafecode/contracts";
+import { MAX_THREAD_GROUP_DEPTH } from "@cafecode/contracts";
 
 import type { DraftSessionState } from "../../composerDraftStore";
 import type { DeskGroup, DeskState } from "../../deskModel";
@@ -30,61 +30,64 @@ export function hasDeskTargetWork(
 type DeskSidebarTab = {
   readonly kind: "tab";
   readonly tabKey: string;
-  readonly groups: DeskSidebarThreadGroup[];
+  readonly target: ThreadRouteTarget;
+  readonly threadKey: string | undefined;
 };
 
 type DeskSidebarThreadGroup = {
   readonly kind: "group";
   readonly node: SidebarThreadGroupNode;
-  readonly entries: DeskSidebarEntry[];
-  readonly tabKeys: string[];
 };
 
 export type DeskSidebarEntry = DeskSidebarTab | DeskSidebarThreadGroup;
 
-/** Project one pane's open tabs onto the catalog's validated group tree. A
- * group with open descendants survives even when its owner has no tab here. */
+/** Open tabs anchor the catalog tree in each pane. Only find the roots here;
+ * the renderer can expand catalog members without creating tabs for them. */
 export function buildDeskSidebarEntries(
   pane: DeskGroup,
   targets: DeskState["targets"],
   drafts: DraftSessions,
   index: SidebarThreadGroupIndex,
-): DeskSidebarEntry[] {
-  const roots: DeskSidebarEntry[] = [];
+): {
+  readonly roots: readonly DeskSidebarEntry[];
+  readonly tabsByThreadKey: ReadonlyMap<string, DeskSidebarTab>;
+  readonly activeThreadKey: string | null;
+} {
   const tabsByThreadKey = new Map<string, DeskSidebarTab>();
+  let activeThreadKey: string | null = null;
   const tabs = pane.tabs.flatMap((tabKey) => {
     const target = targets[tabKey];
     if (!target) return [];
     const ref = target.kind === "server" ? target.threadRef : drafts[target.draftId]?.promotedTo;
     const threadKey = ref ? scopedThreadKey(ref) : undefined;
-    const tab: DeskSidebarTab = { kind: "tab", tabKey, groups: [] };
+    const tab: DeskSidebarTab = { kind: "tab", tabKey, target, threadKey };
     if (threadKey) tabsByThreadKey.set(threadKey, tab);
-    return [{ tab, threadKey, environmentId: ref?.environmentId }];
+    if (pane.activeTabKey === tabKey) activeThreadKey = threadKey ?? null;
+    return [tab];
   });
-  const groupsByKey = new Map<string, DeskSidebarThreadGroup>();
-  const parentGroup = (
-    threadKey: string,
-    environmentId: EnvironmentId,
-  ): DeskSidebarThreadGroup | undefined => {
-    const node = index.parentGroupByMemberKey.get(threadKey);
-    if (!node || node.environmentId !== environmentId) return undefined;
-    const existing = groupsByKey.get(node.key);
-    if (existing) return existing;
-    const group: DeskSidebarThreadGroup = { kind: "group", node, entries: [], tabKeys: [] };
-    groupsByKey.set(node.key, group);
-    const owner = tabsByThreadKey.get(node.ownerKey);
-    if (owner) owner.groups.push(group);
-    else (parentGroup(node.ownerKey, environmentId)?.entries ?? roots).push(group);
-    return group;
-  };
 
-  for (const { tab, threadKey, environmentId } of tabs) {
-    let group = threadKey && environmentId ? parentGroup(threadKey, environmentId) : undefined;
-    (group?.entries ?? roots).push(tab);
-    while (group) {
-      group.tabKeys.push(tab.tabKey);
-      group = parentGroup(group.node.ownerKey, group.node.environmentId);
+  const roots: DeskSidebarEntry[] = [];
+  const detachedGroupKeys = new Set<string>();
+  for (const tab of tabs) {
+    let group = tab.threadKey ? index.parentGroupByMemberKey.get(tab.threadKey) : undefined;
+    if (!group) {
+      roots.push(tab);
+      continue;
+    }
+    // An open ancestor exposes this group beneath its own row. Otherwise
+    // retain one detached heading at the first open member's position.
+    for (let depth = 0; group && depth < MAX_THREAD_GROUP_DEPTH; depth += 1) {
+      if (tabsByThreadKey.has(group.ownerKey)) break;
+      const parent = index.parentGroupByMemberKey.get(group.ownerKey);
+      if (!parent) {
+        if (!detachedGroupKeys.has(group.key)) {
+          detachedGroupKeys.add(group.key);
+          roots.push({ kind: "group", node: group });
+        }
+        break;
+      }
+      group = parent;
     }
   }
-  return roots;
+  return { roots, tabsByThreadKey, activeThreadKey };
 }
