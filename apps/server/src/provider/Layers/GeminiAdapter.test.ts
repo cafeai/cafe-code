@@ -383,6 +383,97 @@ it.live(
 );
 
 it.live(
+  "retains only an exact running workflow across root completion until its own terminal update",
+  () =>
+    Effect.gen(function* () {
+      const { adapter, threadId, start } = yield* makeFixtureAdapter({
+        CAFE_GEMINI_FIXTURE_BACKGROUND_WORKFLOW: "true",
+      });
+      const completed = yield* Deferred.make<void>();
+      const nextCompleted = yield* Deferred.make<void>();
+      const events: ProviderRuntimeEvent[] = [];
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          events.push(event);
+          if (event.type === "turn.completed") {
+            const target = (yield* Deferred.isDone(completed)) ? nextCompleted : completed;
+            yield* Deferred.succeed(target, undefined);
+          }
+        }),
+      ).pipe(Effect.forkScoped({ startImmediately: true }));
+
+      yield* adapter.startSession(start);
+      const root = yield* adapter.sendTurn({ threadId, input: "Start the background workflow" });
+      yield* Deferred.await(completed);
+      type ToolEvent = Extract<
+        ProviderRuntimeEvent,
+        { readonly type: "item.started" | "item.updated" | "item.completed" }
+      >;
+      const workflowEvents = () =>
+        events.filter(
+          (event): event is ToolEvent =>
+            (event.type === "item.started" ||
+              event.type === "item.updated" ||
+              event.type === "item.completed") &&
+            event.itemId?.startsWith("fixture-workflow-") === true,
+        );
+
+      // ACP pending and running statuses share Cafe's inProgress display
+      // status. Only the independently observed native running status grants
+      // the detached-work marker when this exact root normally completes.
+      const initial = workflowEvents();
+      assert.deepEqual(
+        initial.map((event) => [event.type, String(event.itemId), event.payload.status]),
+        [
+          ["item.started", "fixture-workflow-running", "inProgress"],
+          ["item.started", "fixture-workflow-pending", "inProgress"],
+          ["item.started", "fixture-workflow-finished", "inProgress"],
+          ["item.completed", "fixture-workflow-finished", "completed"],
+          ["item.updated", "fixture-workflow-running", "inProgress"],
+        ],
+      );
+      const started = initial[0]!;
+      const promoted = initial.at(-1)!;
+      assert.isDefined(started.subagentRuntimeId);
+      assert.equal(promoted.subagentRuntimeId, started.subagentRuntimeId);
+      assert.equal(promoted.turnId, root.turnId);
+      assert.deepInclude(promoted.payload.data, { geminiDetachedToolVersion: 1 });
+      for (const event of initial.slice(0, -1)) {
+        assert.equal(event.turnId, root.turnId);
+        assert.notProperty(event.payload.data ?? {}, "geminiDetachedToolVersion");
+      }
+      const rootCompleted = events.find(
+        (event) => event.type === "turn.completed" && event.turnId === root.turnId,
+      )!;
+      assert.isBelow(events.indexOf(promoted), events.indexOf(rootCompleted));
+
+      const next = yield* adapter.sendTurn({ threadId, input: "Continue the foreground" });
+      yield* Deferred.await(nextCompleted);
+      assert.notEqual(next.turnId, root.turnId);
+      const terminals = workflowEvents().filter(
+        (event) => event.type === "item.completed" && event.itemId === "fixture-workflow-running",
+      );
+      assert.lengthOf(terminals, 1);
+      const terminal = terminals[0]!;
+      assert.equal(terminal.turnId, root.turnId);
+      assert.equal(terminal.subagentRuntimeId, started.subagentRuntimeId);
+      assert.equal(terminal.payload.status, "completed");
+      assert.deepInclude(terminal.payload.data, { geminiDetachedToolVersion: 1 });
+      assert.lengthOf(
+        workflowEvents().filter((event) => event.type === "item.updated"),
+        1,
+      );
+
+      // The exact terminal must retire its binding once. Neither the already
+      // completed tool nor the merely pending control can keep old-turn Stop
+      // authority after that retirement or close the newer idle native owner.
+      yield* adapter.interruptTurn(threadId, root.turnId);
+      assert.isTrue(yield* adapter.hasSession(threadId));
+      yield* adapter.stopSession(threadId);
+    }).pipe(Effect.provide(configLayer)),
+);
+
+it.live(
   "handles native ACP form elicitation questions in bypass mode and routes custom and multi-select answers",
   () =>
     Effect.gen(function* () {

@@ -136,6 +136,7 @@ let questionPromptId;
 let steeringRootId;
 let steeringFollowUpId;
 let steeringCompleted = false;
+let backgroundWorkflowPromptCount = 0;
 let clientAdvertisedFormElicitation = false;
 const initialUsage = {
   inputTokens: 9_230,
@@ -341,6 +342,49 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         text(JSON.stringify(params.prompt));
         result(id, { stopReason: "end_turn" });
         return;
+      }
+      if (process.env.CAFE_GEMINI_FIXTURE_BACKGROUND_WORKFLOW === "true") {
+        backgroundWorkflowPromptCount += 1;
+        if (backgroundWorkflowPromptCount === 1) {
+          // The observed native failure leaves a workflow in progress when
+          // the root prompt ends, without a subsequent idle tool update. The
+          // pending and already-finished controls cannot establish live work.
+          for (const [toolCallId, status] of [
+            ["fixture-workflow-running", "in_progress"],
+            ["fixture-workflow-pending", "pending"],
+            ["fixture-workflow-finished", "in_progress"],
+          ]) {
+            update({
+              sessionUpdate: "tool_call",
+              toolCallId,
+              title: "Run workflow",
+              kind: "other",
+              status,
+            });
+          }
+          update({
+            sessionUpdate: "tool_call_update",
+            toolCallId: "fixture-workflow-finished",
+            status: "completed",
+          });
+          result(id, { stopReason: "end_turn" });
+          return;
+        }
+        if (backgroundWorkflowPromptCount === 2) {
+          // Its next explicit terminal still names the old tool while a new
+          // foreground prompt owns the conversation. A duplicate cannot mint a
+          // second terminal or attach this old work to the new turn.
+          for (let repeat = 0; repeat < 2; repeat += 1) {
+            update({
+              sessionUpdate: "tool_call_update",
+              toolCallId: "fixture-workflow-running",
+              status: "completed",
+            });
+          }
+          result(id, { stopReason: "end_turn" });
+          return;
+        }
+        process.exit(1);
       }
       if (input === "Start the steering fixture" && steeringRootId === undefined) {
         steeringRootId = id;

@@ -70,6 +70,7 @@ import {
   collectSessionConfigOptionValues,
   parsePermissionRequest,
   type AcpPermissionRequest,
+  type AcpToolCallState,
 } from "../acp/AcpRuntimeModel.ts";
 import type { AcpSessionRuntime, AcpSessionRuntimeEvent } from "../acp/AcpSessionRuntime.ts";
 import {
@@ -158,6 +159,7 @@ interface PublicThought {
 interface GeminiToolBinding {
   readonly turnId: TurnId;
   detached: boolean;
+  runningTool: AcpToolCallState | undefined;
 }
 
 interface GeminiBackgroundReply {
@@ -195,6 +197,7 @@ interface SessionOwner {
   readonly approvals: Map<ApprovalRequestId, PendingApproval>;
   readonly questions: Map<ApprovalRequestId, PendingQuestion>;
   readonly toolBindings: Map<string, GeminiToolBinding>;
+  readonly toolLifecycle: Semaphore.Semaphore;
   readonly retiredToolIds: Set<string>;
   readonly detachedMessages: Map<string, GeminiBackgroundReply>;
   session: ProviderSession;
@@ -615,6 +618,8 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
     event: Extract<AcpSessionRuntimeEvent, { readonly _tag: "ToolCallUpdated" }>,
   ) =>
     Effect.gen(function* () {
+      // Waiting for the foreground handoff may have retired this exact owner.
+      if (!owns(ctx) || ctx.permissionModeRevoked) return;
       const id = event.toolCall.toolCallId;
       if (!NATIVE_ID_PATTERN.test(id) || ctx.retiredToolIds.has(id)) return;
       const foregroundTurn = foregroundTurnFor(ctx);
@@ -628,13 +633,32 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
         observedTurn &&
         ctx.toolBindings.size < MAX_OPEN_TOOL_CALLS
       ) {
-        binding = { turnId: observedTurn, detached: detachedTurn !== undefined };
+        binding = {
+          turnId: observedTurn,
+          detached: detachedTurn !== undefined,
+          runningTool: undefined,
+        };
         ctx.toolBindings.set(id, binding);
       }
       const turnId = binding?.turnId ?? foregroundTurn;
       if (!turnId) return;
       const terminal = event.toolCall.status === "completed" || event.toolCall.status === "failed";
       if (binding && detachedTurn && !terminal) binding.detached = true;
+      if (binding && ctx.supportsDetachedWake) {
+        const { kind, title, status } = event.toolCall;
+        // Carry only an explicit running observation. Keep the bounded card
+        // label and status, without retaining command arguments or results.
+        binding.runningTool =
+          !binding.detached && status === "inProgress"
+            ? {
+                toolCallId: id,
+                status,
+                ...(kind ? { kind } : {}),
+                ...(title ? { title: title.slice(0, 300) } : {}),
+                data: {},
+              }
+            : undefined;
+      }
       if (binding && terminal) {
         ctx.toolBindings.delete(id);
         ctx.retiredToolIds.add(id);
@@ -720,31 +744,65 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
     state: "completed" | "failed" | "cancelled",
     stopReason?: AcpSchema.StopReason,
   ) =>
-    Effect.gen(function* () {
-      if (ctx.session.activeTurnId !== turnId) return;
-      yield* finishThought(ctx, turnId, state === "completed" ? "completed" : "failed");
-      ctx.lastSettledTurnId = state === "completed" ? turnId : undefined;
-      ctx.session = {
-        ...ctx.session,
-        activeTurnId: undefined,
-        status: state === "failed" ? "error" : "ready",
-        updatedAt: yield* now,
-      };
-      yield* emit(
-        {
-          ...(yield* base(ctx.session.threadId)),
-          type: "turn.completed",
-          turnId,
-          payload: {
-            state,
-            ...(stopReason ? { stopReason } : {}),
-            resumeCursor: ctx.session.resumeCursor,
-            ...(state === "failed" ? { errorMessage: "The Gemini ACP turn failed." } : {}),
+    ctx.toolLifecycle.withPermits(1)(
+      Effect.gen(function* () {
+        if (ctx.session.activeTurnId !== turnId) return;
+        yield* finishThought(ctx, turnId, state === "completed" ? "completed" : "failed");
+        const updatedAt = yield* now;
+        const carriedTools: AcpToolCallState[] = [];
+        if (state === "completed" && owns(ctx) && !ctx.permissionModeRevoked) {
+          // Antigravity can end the prompt while an already running tool is
+          // quiet until completion. Reserve its original binding before
+          // clearing the foreground, so a native permission-mode change
+          // always observes a live owner across that boundary.
+          for (const binding of ctx.toolBindings.values()) {
+            if (binding.turnId !== turnId || binding.detached || !binding.runningTool) continue;
+            carriedTools.push(binding.runningTool);
+            binding.detached = true;
+            binding.runningTool = undefined;
+          }
+        }
+        ctx.lastSettledTurnId = state === "completed" ? turnId : undefined;
+        ctx.session = {
+          ...ctx.session,
+          activeTurnId: undefined,
+          status: state === "failed" ? "error" : "ready",
+          updatedAt,
+        };
+        // Publish before foreground completion. Native tool updates share
+        // this permit, so a terminal edge cannot overtake the carried state.
+        for (const toolCall of carriedTools) {
+          const eventStamp = yield* stamp;
+          if (!owns(ctx) || ctx.permissionModeRevoked) break;
+          yield* emit(
+            makeAcpToolCallEvent({
+              stamp: eventStamp,
+              provider: PROVIDER,
+              threadId: ctx.session.threadId,
+              turnId,
+              toolCall,
+              rawPayload: undefined,
+              geminiDetachedTool: true,
+            }),
+            ctx,
+          );
+        }
+        yield* emit(
+          {
+            ...(yield* base(ctx.session.threadId)),
+            type: "turn.completed",
+            turnId,
+            payload: {
+              state,
+              ...(stopReason ? { stopReason } : {}),
+              resumeCursor: ctx.session.resumeCursor,
+              ...(state === "failed" ? { errorMessage: "The Gemini ACP turn failed." } : {}),
+            },
           },
-        },
-        ctx,
-      );
-    });
+          ctx,
+        );
+      }),
+    );
 
   const retire = (
     ctx: SessionOwner,
@@ -816,7 +874,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
       }
       if (!owns(ctx) || ctx.permissionModeRevoked) return;
       if (event._tag === "ToolCallUpdated") {
-        yield* projectTool(ctx, event);
+        yield* ctx.toolLifecycle.withPermits(1)(projectTool(ctx, event));
         return;
       }
       if (
@@ -1326,6 +1384,7 @@ export const makeGeminiAdapter = Effect.fn("makeGeminiAdapter")(function* (
           approvals: new Map(),
           questions: new Map(),
           toolBindings: new Map(),
+          toolLifecycle: Semaphore.makeUnsafe(1),
           retiredToolIds: new Set(),
           detachedMessages: new Map(),
           session,
